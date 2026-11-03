@@ -88,7 +88,7 @@ final class GmailBackend: MailBackend {
 
     func envelopes(mailbox: String, cursor: String?, pageSize: Int, priority: RequestPriority) async throws -> EnvelopePage {
         var query = Self.scope(mailbox) + [("maxResults", "\(min(max(pageSize, 1), 500))"),
-                                           ("fields", "messages(id),nextPageToken")]
+                                           ("fields", Self.listFields)]
         if let cursor { query.append(("pageToken", cursor)) }
         let (envelopes, next) = try await listing(Self.url("messages", query), priority: priority)
         return EnvelopePage(envelopes: envelopes, next: next)
@@ -96,9 +96,13 @@ final class GmailBackend: MailBackend {
 
     func search(mailbox: String, query: String, pageSize: Int) async throws -> [Envelope] {
         let parameters = Self.scope(mailbox) + [("q", query), ("maxResults", "\(min(max(pageSize, 1), 500))"),
-                                                ("fields", "messages(id),nextPageToken")]
+                                                ("fields", Self.listFields)]
         return try await listing(Self.url("messages", parameters), priority: .interactive).envelopes
     }
+
+    /// `resultSizeEstimate` is always present, so a list with no matches still answers `{…}`;
+    /// with only `messages` and `nextPageToken` Gmail sends an empty body, which is not JSON.
+    private static let listFields = "messages(id),nextPageToken,resultSizeEstimate"
 
     /// Lists, brings cached labels up to date meanwhile, then fills in the envelopes.
     private func listing(_ url: URL, priority: RequestPriority) async throws -> (envelopes: [Envelope], next: String?) {
