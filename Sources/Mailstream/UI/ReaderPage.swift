@@ -32,8 +32,9 @@ enum ReaderPage {
     }
 
     /// The column's content for one conversation: header, remote banner, thread and reply dock.
+    /// `chat` lays the thread out as a conversation: every message open, grouped by sender and day.
     static func thread(conversation: Conversation, cards: [Card], own: Set<String>, accountLabel: String,
-                       accountColor: String, mailboxLabels: [String], tag: ConversationTag?) -> String {
+                       accountColor: String, mailboxLabels: [String], tag: ConversationTag?, chat: Bool) -> String {
         var meta: [String] = []
         if tag?.toRespond == true { meta.append(Self.meta("Waiting on you", tint: "#F59E0B", mark: "dot")) }
         if let tag, tag.category != .people { meta.append(Self.meta(tag.category.title, tint: nil)) }
@@ -55,9 +56,13 @@ enum ReaderPage {
           <span>Remote images are blocked to protect your privacy.</span>
           <button data-action="load-remote">Load Images</button>
         </div>
-        <main id="thread">
+        <main id="thread"\(chat ? " class=\"chat\"" : "")>
         """
-        for (position, card) in cards.enumerated() { html += article(card, own: own, position: position, total: cards.count) }
+        if chat {
+            html += chatMessages(cards, own: own)
+        } else {
+            for (position, card) in cards.enumerated() { html += article(card, own: own, position: position, total: cards.count) }
+        }
         html += """
         </main>
         <footer class="reply-dock" id="dock">
@@ -113,6 +118,91 @@ enum ReaderPage {
         let style = tint.map { " style=\"--tint:\(HTMLText.escape($0))\"" } ?? ""
         let markup = mark.map { "<i class=\"mark \($0)\"></i>" } ?? ""
         return "<span class=\"meta-item\"\(style)>\(markup)\(HTMLText.escape(text))</span>"
+    }
+
+    /// A sender's next message within this window, on the same day, joins their previous one.
+    private static let groupWindow: TimeInterval = 3600
+
+    /// Messages as a chat log: a divider per day, and runs from one sender under one name.
+    private static func chatMessages(_ cards: [Card], own: Set<String>) -> String {
+        let calendar = Calendar.current
+        var html = ""
+        var previous: Card?
+        for (position, card) in cards.enumerated() {
+            let date = card.message.envelope.date
+            let last = previous?.message.envelope.date
+            let sameDay = date.flatMap { date in last.map { calendar.isDate($0, inSameDayAs: date) } } ?? false
+            if let date, !sameDay { html += dayDivider(date) }
+            let continued = sameDay && previous?.sender.normalizedEmail == card.sender.normalizedEmail
+                && date.flatMap { date in last.map { date.timeIntervalSince($0) < groupWindow } } == true
+            html += chatArticle(card, own: own, continued: continued, position: position, total: cards.count)
+            previous = card
+        }
+        return html
+    }
+
+    private static func dayDivider(_ date: Date) -> String {
+        let calendar = Calendar.current
+        let label: String
+        if calendar.isDateInToday(date) {
+            label = "Today"
+        } else if calendar.isDateInYesterday(date) {
+            label = "Yesterday"
+        } else if calendar.isDate(date, equalTo: Date(), toGranularity: .year) {
+            label = date.formatted(.dateTime.weekday(.wide).month(.wide).day())
+        } else {
+            label = date.formatted(.dateTime.month(.wide).day().year())
+        }
+        return "<div class=\"day\"><span>\(HTMLText.escape(label))</span></div>"
+    }
+
+    /// One message in a chat log; a `continued` one drops the avatar and name, showing its time on hover.
+    private static func chatArticle(_ card: Card, own: Set<String>, continued: Bool, position: Int, total: Int) -> String {
+        let envelope = card.message.envelope
+        let sender = card.sender
+        let isOwn = own.contains(sender.normalizedEmail)
+        let name = HTMLText.escape(isOwn ? "\(sender.displayName) (me)" : sender.displayName)
+        let email = HTMLText.escape(sender.email)
+        let color = Avatar.color(for: sender.email).cssHex
+        let time = HTMLText.escape(envelope.date?.formatted(.dateTime.hour().minute()) ?? "")
+        let full = HTMLText.escape(envelope.date?.formatted(date: .complete, time: .shortened) ?? "")
+        let i = card.index
+        let gutter: String
+        let head: String
+        if continued {
+            gutter = "<span class=\"chat-time\" title=\"\(full)\">\(time)</span>"
+            head = ""
+        } else {
+            let key = HTMLText.escape(sender.normalizedEmail)
+            gutter = card.avatar.map {
+                "<div class=\"avatar photo\" data-action=\"avatar\" data-avatar=\"\(key)\" style=\"background-image:url('\($0)')\"></div>"
+            } ?? "<div class=\"avatar\" data-avatar=\"\(key)\">\(HTMLText.escape(Avatar.initials(for: sender)))</div>"
+            head = """
+            <div class="chat-head">
+              <span class="name" title="\(email)">\(name)</span>
+              <span class="date" title="\(full)">\(time)</span>
+              \(envelope.isFlagged ? Icon.star : "")
+              <span class="recipients" id="rcpt-\(i)">\(recipients(envelope.to, cc: [], own: own))</span>
+            </div>
+            """
+        }
+        let unread = envelope.isSeen ? "" : " unread"
+        let delay = max(0, position - max(0, total - 6)) * 30
+        return """
+        <article id="msg-\(i)" class="msg chat expanded\(continued ? " continued" : "")\(unread)" style="--avatar:\(color); animation-delay:\(delay)ms">
+          <div class="chat-gutter">\(gutter)</div>
+          <div class="chat-main">
+            \(head)
+            <div class="msg-body" id="body-\(i)"><div class="skeleton"><i></i><i></i><i class="short"></i></div></div>
+            <div class="attachments" id="att-\(i)"></div>
+          </div>
+          <div class="actions">
+            <button title="Reply" data-action="reply" data-index="\(i)">\(Icon.reply)</button>
+            <button title="Reply All" data-action="replyAll" data-index="\(i)">\(Icon.replyAll)</button>
+            <button title="Forward" data-action="forward" data-index="\(i)">\(Icon.forward)</button>
+          </div>
+        </article>
+        """
     }
 
     private static func article(_ card: Card, own: Set<String>, position: Int, total: Int) -> String {
@@ -281,6 +371,7 @@ enum ReaderPage {
       border-radius: 9px; font-size: 12px; letter-spacing: 1px; color: var(--muted); background: var(--chip);
       transition: background-color .15s var(--ease); }
     .ms-fold-toggle:hover { background: var(--line); }
+    .ms-fold-toggle.block { display: flex; width: fit-content; }
     .ms-folded { display: none !important; }
     .error { color: #d70015; font-size: 13px; padding: 8px 0; }
     .skeleton i { display: block; height: 9px; border-radius: 5px; margin: 10px 0; background: var(--chip);
@@ -301,6 +392,31 @@ enum ReaderPage {
     .att .fname { font-size: 12.5px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .att .fsize { font-size: 11px; color: var(--muted); }
     .att .save { margin-left: 2px; padding: 2px 7px; color: var(--muted); }
+    /* Chat layout: a flat log, one row per message, no cards or folds. */
+    main.chat { border-top: 0; }
+    .day { display: flex; align-items: center; gap: 12px; margin: 16px 0 6px; font-size: 11.5px; font-weight: 600;
+      color: var(--muted); user-select: none; -webkit-user-select: none; }
+    .day::before, .day::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+    .msg.chat { position: relative; display: flex; gap: 12px; margin: 0 -10px; padding: 8px 10px 6px;
+      border: 0; border-radius: 10px; scroll-margin-top: 14px; transition: background-color .15s var(--ease); }
+    .msg.chat.continued { padding-top: 2px; }
+    .msg.chat:hover { background: var(--hover); }
+    .chat-gutter { flex: none; width: 34px; display: flex; justify-content: center; }
+    .chat-time { font-size: 10.5px; line-height: 22px; color: var(--faint); white-space: nowrap;
+      font-variant-numeric: tabular-nums; opacity: 0; transition: opacity .15s var(--ease); }
+    .msg.chat.continued:hover .chat-time, .msg.chat.continued.unread .chat-time { opacity: 1; }
+    .msg.chat.continued.unread .chat-time { color: var(--accent); font-weight: 600; }
+    .chat-main { flex: 1; min-width: 0; }
+    .chat-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; margin-bottom: 1px; }
+    .chat-head .name { max-width: 60%; overflow: hidden; text-overflow: ellipsis; }
+    .chat-head .icon.star { align-self: center; }
+    .chat-head .recipients { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--faint); }
+    .msg.chat .msg-body { padding: 0 0 2px; }
+    .msg.chat .plain { font-size: 14px; line-height: 1.55; }
+    .msg.chat .attachments { padding: 8px 0 4px; margin: 0; }
+    .msg.chat .actions { position: absolute; top: -10px; right: 10px; padding: 1px; border-radius: 8px;
+      border: 1px solid var(--line); background: var(--bg); box-shadow: 0 2px 10px rgba(0,0,0,.08); pointer-events: none; }
+    .msg.chat:hover .actions, .msg.chat .actions:focus-within { opacity: 1; transform: none; pointer-events: auto; }
     .reply-dock { position: sticky; bottom: 0; margin-top: auto; padding: 28px 0 20px;
       background: linear-gradient(to bottom, transparent, var(--bg) 38%); animation: rise .5s var(--ease) .08s both; }
     /* The pill bar folds away as the composer unfolds in its place, both on the same curve. */
@@ -388,6 +504,7 @@ enum ReaderPage {
       border-radius: 9px; font: 13px -apple-system; letter-spacing: 1px; color: #6e6e73; background: #f0f0f2;
       border: 1px solid #e0e0e4; cursor: default; }
     .ms-folded { display: none !important; }
+    .ms-fold-toggle.block { display: block; width: fit-content; }
     .ms-attached-message { margin-top: 14px; padding: 10px 12px; border: 1px solid #e0e0e4; border-radius: 8px; }
     .ms-attached-headline { font-size: 12px; color: #6e6e73; margin-bottom: 8px; }
     """
@@ -400,6 +517,38 @@ enum ReaderPage {
       let generation = 0;
       const post = (msg) => window.webkit.messageHandlers.ms.postMessage(Object.assign(msg, { generation }));
       const FRAME_CSS = \(jsString(frameCSS));
+      // Chat threads fold signatures along with quotes.
+      let chatMode = false;
+      const SIGNATURES = ['.gmail_signature', '.gmail_signature_prefix', '[data-smartmail="gmail_signature"]',
+                          '.moz-signature', '#Signature', '#AppleMailSignature', '#ms-outlook-mobile-signature',
+                          '.ms-signature'].join(', ');
+
+      // A chat thread opens on one message and keeps it in place while bodies above it load and
+      // grow, until the user scrolls, clicks or types. WebKit may still move the page on its own
+      // (restoring a position after the shell loads); any such scroll is put back.
+      let followed = null, followObserver = null, pinned = 0;
+      function unfollow() {
+        followed = null;
+        if (followObserver) followObserver.disconnect();
+        followObserver = null;
+      }
+      function place() {
+        if (!followed) return;
+        followed.scrollIntoView({ block: 'start' });
+        pinned = window.scrollY;
+      }
+      function follow(index) {
+        unfollow();
+        followed = document.getElementById('msg-' + index);
+        if (!followed) return;
+        followObserver = new ResizeObserver(place);
+        followObserver.observe($('thread'));
+        place();
+      }
+      for (const type of ['wheel', 'mousedown', 'keydown']) {
+        window.addEventListener(type, unfollow, { capture: true, passive: true });
+      }
+      window.addEventListener('scroll', () => { if (followed && Math.abs(window.scrollY - pinned) > 1) place(); });
 
       document.addEventListener('click', (event) => {
         const link = event.target.closest('a[href]');
@@ -478,6 +627,14 @@ enum ReaderPage {
             if (node.nodeType === 8 || (node.nodeType === 1 && node.tagName === 'BR')
                 || (node.nodeType === 3 && !node.textContent.trim())) { nodes.push(node); continue; }
             if (node.nodeType === 1 && node.querySelector('img')) break;
+            if (node.nodeType === 3) {
+              // Plain text runs the reply into its "On … wrote:" line (sometimes wrapped before
+              // "wrote:"): only that tail is the attribution, split off so the reply stays.
+              const body = node.textContent.replace(/\\s+$/, '');
+              let cut = body.lastIndexOf('\\n');
+              if (cut >= 0 && body.length - cut < 12) cut = body.lastIndexOf('\\n', cut - 1);
+              if (cut >= 0 && pattern.test(body.slice(cut + 1).trim())) node = node.splitText(cut + 1);
+            }
             if (node.nodeType === 1 || node.nodeType === 3) { nodes.push(node); text = node.textContent || ''; }
             break;
           }
@@ -501,7 +658,6 @@ enum ReaderPage {
             }
           });
         }
-        if (!found.length) return;
         const folded = new Set();
         // "On …, X wrote:" just above a quote belongs to it, so it folds away too.
         const attribution = /(wrote|写道|écrit|schrieb)\\s*[:：]\\s*$/i;
@@ -515,15 +671,32 @@ enum ReaderPage {
             while (next) { folded.add(next); next = next.nextElementSibling; }
           }
         }
-        const text = (container.textContent || '').replace(/\\s+/g, '').length;
-        const hidden = visibleTextLength([...folded]);
-        if (text - hidden < 8) return;
-        const first = [...folded].filter((el) => el.isConnected)
+        const earliest = () => [...folded].filter((el) => el.isConnected)
           .sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1)[0];
-        if (!first || /Forwarded message|转发的邮件/.test((first.textContent || '').slice(0, 300))) return;
+        const text = (container.textContent || '').replace(/\\s+/g, '').length;
+        if (folded.size) {
+          if (text - visibleTextLength([...folded]) < 8) return;
+          if (/Forwarded message|转发的邮件/.test((earliest().textContent || '').slice(0, 300))) return;
+        }
+        // In a chat log signatures fold too, each only while real text stays visible.
+        if (chatMode) {
+          for (const el of container.querySelectorAll(SIGNATURES)) {
+            if ([...folded].some((other) => other.contains(el))) continue;
+            if (text - visibleTextLength([...folded, el]) < 8) continue;
+            folded.add(el);
+          }
+        }
+        const first = earliest();
+        if (!first) return;
+        if (chatMode) {
+          blankTail(doc, first).forEach((node) => folded.add(node));
+          // Breaks between and after folded blocks (Gmail puts the signature below the quote).
+          for (const el of [...folded]) blankAfter(doc, el, folded).forEach((node) => folded.add(node));
+        }
         folded.forEach((el) => el.classList.add('ms-folded'));
         const toggleButton = doc.createElement('span');
-        toggleButton.className = 'ms-fold-toggle';
+        // In a chat log the blank lines above it fold away, so it starts its own line.
+        toggleButton.className = chatMode ? 'ms-fold-toggle block' : 'ms-fold-toggle';
         toggleButton.title = 'Show quoted text';
         toggleButton.textContent = '•••';
         toggleButton.addEventListener('click', (event) => {
@@ -533,6 +706,60 @@ enum ReaderPage {
           onToggle();
         });
         first.parentNode.insertBefore(toggleButton, first);
+      }
+
+      // Blank lines, breaks and empty blocks just before `el` (or the block it starts), reaching into
+      // the last element with text, whose trailing whitespace is trimmed; text nodes come back
+      // wrapped so they can hide.
+      function blankTail(doc, el) {
+        const nodes = [];
+        let anchor = el;
+        while (!anchor.previousSibling && anchor.parentNode && anchor.parentNode !== doc.body
+               && anchor.parentNode.nodeType === 1) anchor = anchor.parentNode;
+        let node = anchor.previousSibling;
+        while (node) {
+          const previous = node.previousSibling;
+          if (node.nodeType === 3) {
+            if (node.textContent.trim()) {
+              node.textContent = node.textContent.replace(/\\s+$/, '');
+              break;
+            }
+            nodes.push(wrapText(doc, node));
+          } else if (node.nodeType === 1) {
+            if (!isEmptyElement(node)) { node = node.lastChild; continue; }
+            nodes.push(node);
+          }
+          node = previous;
+        }
+        return nodes;
+      }
+
+      // Blank siblings after `el`, skipping ones already in `folded`, up to the next real content.
+      function blankAfter(doc, el, folded) {
+        const nodes = [];
+        for (let node = el.nextSibling; node; node = node.nextSibling) {
+          if (node.nodeType === 8 || folded.has(node)) continue;
+          if (node.nodeType === 3) {
+            if (node.textContent.trim()) break;
+            node = wrapText(doc, node);
+          } else if (node.nodeType !== 1 || !isEmptyElement(node)) {
+            break;
+          }
+          nodes.push(node);
+        }
+        return nodes;
+      }
+
+      function isEmptyElement(node) {
+        return node.tagName === 'BR'
+          || (!node.textContent.trim() && !node.querySelector('img, video, iframe, table, hr'));
+      }
+
+      function wrapText(doc, node) {
+        const span = doc.createElement('span');
+        node.parentNode.insertBefore(span, node);
+        span.appendChild(node);
+        return span;
       }
 
       function prepareFrame(frame) {
@@ -649,18 +876,22 @@ enum ReaderPage {
 
       window.MS = {
         // Replaces the whole column, so bodies, frames, folds, the composer and the banner all
-        // start fresh, scrolled to the top.
+        // start fresh, scrolled to the top (a chat thread: to its focus message).
         render(state) {
           generation = state.generation;
+          chatMode = !!state.chat;
           clearTimeout(sentTimer);
           document.documentElement.style.setProperty('--accent', state.accent);
           $('column').innerHTML = state.html;
           bindComposer();
+          unfollow();
           window.scrollTo(0, 0);
+          if (chatMode && state.focus > 0) follow(state.focus);
         },
         clear(next) {
           generation = next;
           clearTimeout(sentTimer);
+          unfollow();
           $('column').innerHTML = '';
           window.scrollTo(0, 0);
         },

@@ -82,6 +82,18 @@ messages separated by hairlines, collapsed messages as one-line previews, quoted
 history and its "On …, X wrote:" line folded behind `•••`, and a reply pill
 docked at the bottom.
 
+Conversations between people (anything not tagged as a service category) with
+more than one message read as a chat log instead, like Slack without bubbles:
+every message open, a divider per day, and each message under its sender's
+avatar, name and time. A sender's next message within an hour on the same day
+drops the avatar and name and shows its time on hover. Reply and Forward float
+over a message on hover. Signatures (Gmail, Outlook, Apple Mail and Thunderbird
+markup, a `-- ` line or a "Sent from my iPhone" footer) fold behind `•••` along
+with the quoted history, and so do the blank lines around them. The thread opens
+on the first unread message, else the latest, and stays there while bodies
+above it load, until you scroll, click or type. Service mail keeps the cards
+above.
+
 Reply and Reply All (pill, per-message buttons, toolbar, menu and list keys)
 open an inline composer: the pill unfolds into a card with the recipients, a
 text field, and the quoted message hidden behind `•••`. Expanding it shows the

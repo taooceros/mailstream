@@ -37,10 +37,12 @@ enum HTMLText {
     }
 
     /// Plain text to HTML: linkified, whitespace preserved, `>` quote runs wrapped in blockquotes
-    /// the reader can fold.
+    /// and signatures (after a `-- ` line, or a lone mobile footer) in `.ms-signature`, for the
+    /// reader to fold.
     static func plainToHTML(_ text: String) -> String {
         var html = "<div class=\"ms-plain\">"
         var quoteDepth = 0
+        var inSignature = false
         for rawLine in text.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false) {
             var line = Substring(rawLine)
             var depth = 0
@@ -49,12 +51,28 @@ enum HTMLText {
                 line = line.dropFirst()
                 if line.first == " " { line = line.dropFirst() }
             }
+            if inSignature, depth > 0 { html += "</div>"; inSignature = false }
             while quoteDepth < depth { html += "<blockquote class=\"ms-quote\">"; quoteDepth += 1 }
             while quoteDepth > depth { html += "</blockquote>"; quoteDepth -= 1 }
-            html += linkify(String(line)) + "\n"
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if depth == 0, !inSignature, trimmed == "--" {
+                html += "<div class=\"ms-signature\">"
+                inSignature = true
+            }
+            if depth == 0, !inSignature, isMobileFooter(trimmed) {
+                html += "<span class=\"ms-signature\">" + escape(String(line)) + "</span>\n"
+            } else {
+                html += linkify(String(line)) + "\n"
+            }
         }
+        if inSignature { html += "</div>" }
         while quoteDepth > 0 { html += "</blockquote>"; quoteDepth -= 1 }
         return html + "</div>"
+    }
+
+    /// "Sent from my iPhone" and the like, which mail apps append on their own.
+    private static func isMobileFooter(_ line: String) -> Bool {
+        line.count < 40 && line.range(of: #"^(Sent from my |Get Outlook for |发自我的)"#, options: .regularExpression) != nil
     }
 
     /// Visible text of an HTML document, for snippets.

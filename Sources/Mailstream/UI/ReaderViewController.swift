@@ -216,10 +216,12 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
 
         let lastIndex = messages.count - 1
         let automated = store.tag(for: conversation).map { $0.category != .people } ?? false
+        // Back-and-forth between people reads as a chat; mail from services keeps the card stack.
+        let chat = !automated && messages.count > 1
         let cards = messages.enumerated().map { index, message in
             let sender = store.withIdentityName(message.envelope.from.first ?? Address(name: nil, email: "unknown"))
             return ReaderPage.Card(index: index, message: message,
-                                   expanded: index == lastIndex || !message.envelope.isSeen || messages.count == 1,
+                                   expanded: chat || index == lastIndex || !message.envelope.isSeen || messages.count == 1,
                                    snippet: store.snippet(for: message.ref),
                                    sender: sender,
                                    avatar: store.avatars.dataURL(for: sender.email, automated: automated))
@@ -230,8 +232,11 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         let html = ReaderPage.thread(conversation: conversation, cards: cards, own: store.ownAddresses,
                                      accountLabel: conversation.account,
                                      accountColor: AccountStyle.hex(for: conversation.account, in: store),
-                                     mailboxLabels: labels, tag: store.tag(for: conversation))
-        staged = ["generation": generation, "accent": NSColor.controlAccentColor.cssHex, "html": html]
+                                     mailboxLabels: labels, tag: store.tag(for: conversation), chat: chat)
+        // A chat opens on the first unread message, else the latest.
+        let focus = messages.firstIndex { !$0.envelope.isSeen } ?? lastIndex
+        staged = ["generation": generation, "accent": NSColor.controlAccentColor.cssHex, "html": html,
+                  "chat": chat, "focus": focus]
         // A thread only ever renders into a shell whose CSP matches what the user allowed for it.
         if shellRemote != allowRemote {
             loadShell(remote: allowRemote)
