@@ -1,0 +1,13 @@
+//! # Microsoft Graph mail folders
+//!
+//! The `msgraph mail-folders` command family, covering `me.mailFolders`.
+
+pub mod child_folders;
+pub mod cli;
+pub mod copy;
+pub mod create;
+pub mod delete;
+pub mod get;
+pub mod list;
+pub mod r#move;
+pub mod rename;

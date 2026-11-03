@@ -1,0 +1,84 @@
+//! # JMAP identity get
+//!
+//! The `jmap identity get` command, RFC 8621 `Identity/get`.
+
+use std::fmt;
+
+use anyhow::Result;
+use clap::Parser;
+use io_jmap::rfc8621::identity::{JmapIdentity, get::JmapIdentityGetOptions};
+use log::warn;
+use pimalaya_cli::printer::Printer;
+use pimalaya_cli::table::{Cell, Row, Table};
+use schemars::JsonSchema;
+use serde::Serialize;
+
+use crate::{
+    account::context::Account, jmap::client::JmapClient, shared::table::style_from_preset,
+};
+
+/// Get JMAP identities (Identity/get).
+///
+/// Lists sender identities available for sending email. Pass no IDs to
+/// list all identities.
+#[derive(Debug, Parser)]
+pub struct JmapIdentityGetCommand {
+    /// Identity ID(s) to retrieve (omit to get all).
+    #[arg(value_name = "ID")]
+    pub ids: Option<Vec<String>>,
+}
+
+impl JmapIdentityGetCommand {
+    /// Fetches the identities and tables them.
+    pub fn execute(
+        self,
+        printer: &mut impl Printer,
+        account: &mut Account,
+        client: &mut JmapClient,
+    ) -> Result<()> {
+        let output = client.identity_get(JmapIdentityGetOptions { ids: self.ids })?;
+
+        for id in output.not_found {
+            warn!("identity `{id}` not found");
+        }
+
+        let table = IdentitiesTable {
+            preset: account.table_preset().to_string(),
+            identities: output.identities,
+        };
+
+        printer.out(table)
+    }
+}
+
+/// The identities rendered as a table.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct IdentitiesTable {
+    /// The `comfy_table` preset string the table renders with.
+    #[serde(skip)]
+    pub preset: String,
+    /// The identities, in the order the server returned them.
+    pub identities: Vec<JmapIdentity>,
+}
+
+impl fmt::Display for IdentitiesTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut table = Table::new();
+
+        table
+            .load_style(style_from_preset(&self.preset))
+            .set_header(Row::from([
+                Cell::new("ID"),
+                Cell::new("NAME"),
+                Cell::new("EMAIL"),
+            ]))
+            .add_rows(
+                self.identities.iter().map(|i| {
+                    Row::from([Cell::new(&i.id), Cell::new(&i.name), Cell::new(&i.email)])
+                }),
+            );
+
+        writeln!(f)?;
+        writeln!(f, "{table}")
+    }
+}

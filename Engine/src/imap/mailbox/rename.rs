@@ -1,0 +1,32 @@
+//! # IMAP rename
+//!
+//! The `imap rename` command, RFC 3501 `RENAME`.
+
+use anyhow::Result;
+use clap::Parser;
+use io_imap::client::ImapClient as _;
+use pimalaya_cli::printer::{Message, Printer};
+
+use crate::imap::{
+    client::ImapClient,
+    mailbox::arg::{MailboxNameArg, TargetMailboxNameArg},
+};
+
+/// Rename the given mailbox (RENAME, RFC 3501).
+#[derive(Debug, Parser)]
+pub struct ImapMailboxRenameCommand {
+    #[command(flatten)]
+    pub mailbox_source_name: MailboxNameArg,
+    #[command(flatten)]
+    pub mailbox_dest_name: TargetMailboxNameArg,
+}
+
+impl ImapMailboxRenameCommand {
+    /// Renames the mailbox.
+    pub fn execute(self, printer: &mut impl Printer, client: &mut ImapClient) -> Result<()> {
+        let from = self.mailbox_source_name.inner.try_into()?;
+        let to = self.mailbox_dest_name.inner.try_into()?;
+        client.rename(from, to)?;
+        printer.out(Message::new("Mailbox successfully renamed"))
+    }
+}
