@@ -185,8 +185,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         window?.toolbar?.validateVisibleItems()
     }
 
-    /// The reader is an opaque layer above the list: it fades in spreading out from the middle on
-    /// open, and fades out shrinking back toward it on close, so the list is never blanked mid-transition.
+    /// The reader is an opaque layer above the list, which stays shown beneath it so leaving never
+    /// waits on the list redrawing: it fades in spreading out from the middle on open, and fades out
+    /// shrinking back toward it on close.
     private func swap(forward: Bool, completion: (() -> Void)? = nil) {
         transitions += 1
         let current = transitions
@@ -195,8 +196,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         page.layer?.removeAnimation(forKey: "swipe")
         list.view.layer?.removeAnimation(forKey: "swipe")
         dragging = false
-        list.view.isHidden = false
-        list.view.alphaValue = 1
         page.isHidden = false
         if forward {
             page.alphaValue = 0
@@ -216,9 +215,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         }, completion: { [weak self] in
             guard let self, self.transitions == current else { return }
             page.layer?.removeAnimation(forKey: "fold")
-            if forward {
-                self.list.view.isHidden = true
-            } else {
+            if !forward {
                 page.isHidden = true
                 page.alphaValue = 1
                 // The reader covered the list, so the row under the pointer only now gets its hover.
@@ -270,13 +267,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         guard opened != nil, let page = reader.view.layer, let below = list.view.layer else { return }
         if !dragging {
             dragging = true
-            // An open still settling must neither hide the list nor keep animating under the fingers.
+            // An open still settling must not keep animating under the fingers.
             transitions += 1
             for key in ["unfold", "fold", "opacity", "swipe"] { page.removeAnimation(forKey: key) }
             below.removeAnimation(forKey: "unfold")
             reader.view.alphaValue = 1
-            list.view.alphaValue = 1
-            list.view.isHidden = false
         }
         let progress = min(offset / max(reader.view.bounds.width, 1), 1)
         Motion.hold(page, "transform", at: CATransform3DMakeTranslation(offset, 0, 0), key: "swipe")
@@ -313,8 +308,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
                 self.reader.view.isHidden = true
                 (self.list.tableView as? ConversationTableView)?.refreshHover()
                 self.reader.show(nil)
-            } else {
-                self.list.view.isHidden = true
             }
         })
         if back { leaveReader {} }
