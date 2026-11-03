@@ -21,7 +21,7 @@ jobs:
       # Swift 6.3, the toolchain the app is developed with.
       DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Toolchain
         run: swift --version
@@ -35,20 +35,25 @@ jobs:
       - name: Bundle (release)
         run: ./scripts/bundle.sh
 
-      - name: Archive
-        run: ditto -c -k --keepParent build/Mailstream.app Mailstream.zip
+      # A disk image holding the app beside an Applications link, to drag it across.
+      - name: Disk image
+        run: |
+          mkdir -p build/dmg
+          cp -R build/Mailstream.app build/dmg/
+          ln -s /Applications build/dmg/Applications
+          hdiutil create -volname Mailstream -srcfolder build/dmg -fs HFS+ -format UDZO -ov Mailstream.dmg
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Mailstream-${{ github.sha }}
-          path: Mailstream.zip
+          path: Mailstream.dmg
           retention-days: 14
 
   # One rolling prerelease, "nightly", replaced by every build of main.
   prerelease:
     needs: build
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
     concurrency:
@@ -59,7 +64,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       TAG: nightly
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: Mailstream-${{ github.sha }}
 
@@ -68,9 +73,9 @@ jobs:
           SHORT=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
           NOTES="Built from $GITHUB_SHA by run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID.
 
-          Signed ad hoc and built without OAuth clients or push settings: it opens, but signing in needs a build from \`scripts/bundle.sh\` on a set-up Mac. After unzipping, run \`xattr -dr com.apple.quarantine Mailstream.app\` before the first launch."
+          Signed ad hoc and built without OAuth clients or push settings: it opens, but signing in needs a build from \`scripts/bundle.sh\` on a set-up Mac. After dragging the app to Applications, run \`xattr -dr com.apple.quarantine /Applications/Mailstream.app\` before the first launch."
           # Delete the old release and tag, then publish again at this commit, so the tag,
           # the date and the asset all match the newest build.
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$TAG" Mailstream.zip --prerelease --target "$GITHUB_SHA" \
+          gh release create "$TAG" Mailstream.dmg --prerelease --target "$GITHUB_SHA" \
             --title "Nightly ($SHORT)" --notes "$NOTES"

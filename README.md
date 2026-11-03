@@ -81,11 +81,11 @@ ad-hoc build cannot read the previous build's Keychain item, so sign-ins are los
 every rebuild). `scripts/make-icon.swift` regenerates `Resources/AppIcon.png`.
 
 GitHub Actions (`.github/workflows/build.yml`) builds every push and pull request on
-macOS 26 with Xcode 26.4 (Swift 6.3), with warnings as errors, and keeps the zipped app
-as a run artifact. Each build of `main` replaces the `nightly` prerelease. CI has no
+macOS 26 with Xcode 26.4 (Swift 6.3), with warnings as errors, and keeps the app as a
+disk image (`Mailstream.dmg`) in the run's artifacts. Each build of `main` replaces the `nightly` prerelease. CI has no
 OAuth clients, push settings or signing identity, so that app is signed ad hoc and
-cannot sign in; it is for checking the build, not daily use. Unzipped, it needs
-`xattr -dr com.apple.quarantine Mailstream.app` before the first launch.
+cannot sign in; it is for checking the build, not daily use. Dragged to Applications, it needs
+`xattr -dr com.apple.quarantine /Applications/Mailstream.app` before the first launch.
 
 ## Architecture
 
