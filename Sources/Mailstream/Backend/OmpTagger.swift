@@ -1,7 +1,7 @@
 import Foundation
 
-/// Classifies conversations into Smart Inbox categories with the user's `omp` CLI, using its
-/// "smol" model role in a one-shot, tool-less run.
+/// Classifies conversations into Smart Inbox categories with the user's `omp` CLI, in a one-shot,
+/// tool-less run of the model the `aiTagging.model` setting names.
 actor OmpTagger {
     /// One conversation as the model sees it.
     struct Item: Sendable {
@@ -24,12 +24,21 @@ actor OmpTagger {
         var errorDescription: String? { message }
     }
 
+    /// The `aiTagging.*` settings a run uses.
+    struct Options: Sendable, Equatable {
+        /// `--model` value.
+        var model: String
+        /// The omp to run; empty picks the newest on PATH.
+        var executable: String
+    }
+
     static let maxSnippet = 200
     static let maxLabelLength = 16
 
     private let tools: ToolEnvironment
     private let workingDirectory: URL
-    private var executable: URL?
+    /// The omp found for an `Options.executable`, so PATH is searched once per choice.
+    private var executables: [String: URL] = [:]
 
     init(tools: ToolEnvironment, workingDirectory: URL) {
         self.tools = tools
@@ -37,11 +46,11 @@ actor OmpTagger {
     }
 
     /// Tags keyed by `Item.id`. Items the model skipped or answered invalidly are absent.
-    func tag(_ items: [Item]) async throws -> [String: ConversationTag] {
+    func tag(_ items: [Item], options: Options) async throws -> [String: ConversationTag] {
         guard !items.isEmpty else { return [:] }
-        let executable = try await resolvedExecutable()
+        let executable = try await resolvedExecutable(options.executable)
         let output = try await ProcessRunner.run(executable: executable,
-                                                 arguments: Self.arguments(prompt: Self.prompt(items)),
+                                                 arguments: Self.arguments(prompt: Self.prompt(items), model: options.model),
                                                  environment: tools.environment,
                                                  currentDirectory: workingDirectory)
         guard output.status == 0 else {
@@ -56,25 +65,30 @@ actor OmpTagger {
 
     // MARK: Executable
 
-    private func resolvedExecutable() async throws -> URL {
-        if let executable { return executable }
+    private func resolvedExecutable(_ configured: String) async throws -> URL {
+        if let known = executables[configured] { return known }
+        if !configured.isEmpty {
+            let path = (configured as NSString).expandingTildeInPath
+            guard FileManager.default.isExecutableFile(atPath: path) else {
+                throw Failure(message: "aiTagging.ompPath \(configured) is not an executable")
+            }
+            let url = URL(fileURLWithPath: path)
+            executables[configured] = url
+            return url
+        }
         let tools = tools
         let found = await withCheckedContinuation { (continuation: CheckedContinuation<URL?, Never>) in
             DispatchQueue.global(qos: .utility).async {
                 continuation.resume(returning: Self.locate(tools: tools))
             }
         }
-        guard let found else { throw Failure(message: "omp not found") }
-        executable = found
+        guard let found else { throw Failure(message: "omp not found on PATH; set aiTagging.ompPath") }
+        executables[configured] = found
         return found
     }
 
-    /// `MAILSTREAM_OMP`, else the PATH candidate reporting the highest `--version`.
+    /// The PATH candidate reporting the highest `--version`.
     private static func locate(tools: ToolEnvironment) -> URL? {
-        let fm = FileManager.default
-        if let override = tools.environment["MAILSTREAM_OMP"], fm.isExecutableFile(atPath: override) {
-            return URL(fileURLWithPath: override)
-        }
         let candidates = tools.executables(named: "omp")
         guard !candidates.isEmpty else { return nil }
         let versions = VersionTable(count: candidates.count)
@@ -97,9 +111,9 @@ actor OmpTagger {
 
     // MARK: Prompt
 
-    static func arguments(prompt: String) -> [String] {
+    static func arguments(prompt: String, model: String) -> [String] {
         ["-p", "--no-session", "--no-tools", "--no-skills", "--no-rules", "--no-context-files",
-         "--no-extensions", "--no-lsp", "--no-title", "--thinking", "off", "--model", "smol",
+         "--no-extensions", "--no-lsp", "--no-title", "--thinking", "off", "--model", model.isEmpty ? "smol" : model,
          "--max-time", "120", "--system-prompt", systemPrompt, prompt]
     }
 

@@ -5,15 +5,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let accounts = AccountStore()
     private var store: MailStore!
     private var mainWindow: MainWindowController!
+    private var control: ControlService!
+    private var controlServer: ControlServer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = Self.buildMenu()
+        Settings.shared.startWatching()
         store = MailStore(accounts: accounts, tools: ToolEnvironment.resolve())
         mainWindow = MainWindowController(store: store)
         mainWindow.showWindow(nil)
         NSApp.activate()
         store.start()
+        startControl()
         if accounts.records.isEmpty { AccountsWindowController.show(accounts: accounts) }
+    }
+
+    /// The socket `mailstream` commands reach the app through.
+    private func startControl() {
+        let service = ControlService(accounts: accounts, store: store)
+        control = service
+        do {
+            controlServer = try ControlServer.start { data in await service.handle(data) }
+        } catch {
+            NSLog("Mailstream control socket: %@", error.localizedDescription)
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        controlServer?.stop()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

@@ -60,9 +60,10 @@ struct StoreError: LocalizedError, Sendable {
 final class MailStore {
     nonisolated static let pageSize = 50
     static let prefetchCount = 40
-    /// Polling while push is down, and as a safety net while it is up.
-    static let pollInterval: TimeInterval = 90
-    static let pushPollInterval: TimeInterval = 15 * 60
+    /// Polling while push is down, and as a safety net while it is up (`sync.*` settings).
+    private var pollInterval: TimeInterval {
+        TimeInterval(Settings.shared.int(push.isConnected ? .pushPollSeconds : .pollSeconds))
+    }
 
     /// Signed-in accounts, their tokens and backends.
     let accountStore: AccountStore
@@ -72,6 +73,7 @@ final class MailStore {
     /// Google Chat accounts, spaces and messages; selected through `Selection.chat`.
     private(set) lazy var chat = ChatStore(cache: cache, accounts: accountStore)
     private lazy var push = PushService(accounts: accountStore) { [weak self] id in self?.refresh(account: id) }
+    var isPushConnected: Bool { push.isConnected }
 
     private(set) var accounts: [Account] = []
     private(set) var mailboxes: [String: [Mailbox]] = [:]
@@ -131,7 +133,7 @@ final class MailStore {
     init(accounts: AccountStore, tools: ToolEnvironment) {
         self.accountStore = accounts
         self.tools = tools
-        taggingEnabled = UserDefaults.standard.object(forKey: Self.taggingDefaultsKey) as? Bool ?? true
+        taggingEnabled = Settings.shared.bool(.aiTaggingEnabled)
     }
 
     // MARK: - Startup
@@ -150,15 +152,20 @@ final class MailStore {
         observers.append(center.addObserver(forName: PushService.connectionChanged, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.pushConnectionChanged() }
         })
+        observers.append(center.addObserver(forName: Settings.didChange, object: nil, queue: .main) { [weak self] note in
+            let changed = note.changedSettings
+            MainActor.assumeIsolated { self?.settingsDidChange(changed) }
+        })
         schedulePolling()
         countsTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshCounts() }
         }
     }
 
-    /// Polls every 90 s while push is down, every 15 min while it delivers changes.
+    /// Polls every `sync.pollSeconds` while push is down, every `sync.pushPollSeconds` while it
+    /// delivers changes.
     private func schedulePolling() {
-        let interval = push.isConnected ? Self.pushPollInterval : Self.pollInterval
+        let interval = pollInterval
         if let pollTimer, pollTimer.timeInterval == interval { return }
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
@@ -380,7 +387,11 @@ final class MailStore {
         searchQuery == nil && primaryKeys.contains { listings[$0]?.next != nil }
     }
 
-    private var primaryKeys: [MailboxKey] {
+    /// The envelopes listed for `key` so far (memory or disk cache); empty when none are loaded.
+    func loadedEnvelopes(_ key: MailboxKey) -> [Envelope] { listings[key]?.envelopes ?? [] }
+
+    /// The mailboxes the list on screen shows.
+    var primaryKeys: [MailboxKey] {
         switch selection {
         case .unified(let role): unifiedMailboxes(role).map(\.key)
         case .mailbox(let key): [key]
@@ -796,33 +807,50 @@ final class MailStore {
 
     // MARK: - AI tagging
 
-    private static let taggingDefaultsKey = "AITaggingEnabled"
-    static let taggingPassLimit = 150
-    static let taggingBatchSize = 20
-    static let taggingBackoff: TimeInterval = 300
-
     /// Short user-facing progress or failure text; nil when idle.
     private(set) var aiTaggingStatus: String? {
         didSet { if aiTaggingStatus != oldValue { post(.storeTagsChanged) } }
     }
 
+    /// The `aiTagging.enabled` setting; setting it writes settings.json, and the change applies
+    /// through `settingsDidChange` like any other edit of the file.
     var aiTaggingEnabled: Bool {
         get { taggingEnabled }
         set {
-            taggingEnabled = newValue
-            UserDefaults.standard.set(newValue, forKey: Self.taggingDefaultsKey)
+            do {
+                try Settings.shared.set(.aiTaggingEnabled, .bool(newValue))
+            } catch {
+                report(error, alert: true)
+            }
+        }
+    }
+
+    private func settingsDidChange(_ changed: Set<Setting>) {
+        if !changed.isDisjoint(with: [.pollSeconds, .pushPollSeconds]) { schedulePolling() }
+        if changed.contains(.aiTaggingEnabled) {
+            applyTaggingEnabled(Settings.shared.bool(.aiTaggingEnabled))
+        } else if !changed.isDisjoint(with: [.aiTaggingModel, .aiTaggingOmpPath, .aiTaggingPassLimit, .aiTaggingBackoffSeconds]) {
+            // A fixed omp or model deserves another try at once.
             tagAttempted = []
             taggingBackoffUntil = nil
-            if newValue {
-                startTaggingPass()
-            } else {
-                taggingDebounce?.cancel()
-                taggingTask?.cancel()
-                taggingRerun = false
-                aiTaggingStatus = nil
-            }
-            post(.storeTagsChanged)
+            startTaggingPass()
         }
+    }
+
+    private func applyTaggingEnabled(_ enabled: Bool) {
+        guard enabled != taggingEnabled else { return }
+        taggingEnabled = enabled
+        tagAttempted = []
+        taggingBackoffUntil = nil
+        if enabled {
+            startTaggingPass()
+        } else {
+            taggingDebounce?.cancel()
+            taggingTask?.cancel()
+            taggingRerun = false
+            aiTaggingStatus = nil
+        }
+        post(.storeTagsChanged)
     }
 
     func tag(for conversation: Conversation) -> ConversationTag? {
@@ -844,6 +872,32 @@ final class MailStore {
         tags[key] = tag
         cache.saveTags(tags)
         post(.storeTagsChanged)
+    }
+
+    /// Corrects the conversation's AI tag; nil leaves a part as it is. A conversation the tagger has
+    /// not judged needs a category. Only people conversations can wait on a reply.
+    func editTag(_ conversation: Conversation, category: MailCategory?, waiting: Bool?,
+                 labels: [String]?) throws -> ConversationTag {
+        guard taggingEnabled else { throw StoreError(message: "AI tagging is off (aiTagging.enabled).") }
+        let key = Self.tagKey(conversation)
+        guard var tag = tags[key] ?? category.map({ ConversationTag(category: $0, toRespond: false, labels: []) }) else {
+            throw StoreError(message: "\(conversation.id) has no AI tag yet; give a category.")
+        }
+        if let category { tag.category = category }
+        if let waiting { tag.toRespond = waiting }
+        if tag.category != .people { tag.toRespond = false }
+        if waiting == true, tag.category != .people {
+            throw StoreError(message: "Only people conversations can wait on a reply.")
+        }
+        if let labels {
+            tag.labels = Array(labels.map { String($0.trimmingCharacters(in: .whitespaces).prefix(OmpTagger.maxLabelLength)) }
+                .filter { !$0.isEmpty }.prefix(2))
+        }
+        tags[key] = tag
+        tagAttempted.insert(key)
+        cache.saveTags(tags)
+        post(.storeTagsChanged)
+        return tag
     }
 
     /// Forgets every tag and tags the current list again, ignoring any failure backoff.
@@ -898,15 +952,18 @@ final class MailStore {
         }
     }
 
-    /// Tags `items` in batches, one omp process at a time.
+    /// Tags `items` in batches of `aiTagging.batchSize`, one omp process at a time.
     private func runTagging(_ items: [OmpTagger.Item]) async {
         let tagger = tagger
+        let settings = Settings.shared
+        let batchSize = settings.int(.aiTaggingBatchSize)
+        let options = OmpTagger.Options(model: settings.string(.aiTaggingModel), executable: settings.string(.aiTaggingOmpPath))
         var remaining = items.count
-        for start in stride(from: 0, to: items.count, by: Self.taggingBatchSize) {
-            let batch = Array(items[start..<min(start + Self.taggingBatchSize, items.count)])
+        for start in stride(from: 0, to: items.count, by: batchSize) {
+            let batch = Array(items[start..<min(start + batchSize, items.count)])
             aiTaggingStatus = "Tagging \(remaining) conversation\(remaining == 1 ? "" : "s")…"
             do {
-                let result = try await tagger.tag(batch)
+                let result = try await tagger.tag(batch, options: options)
                 try Task.checkCancellation()
                 tags.merge(result) { _, new in new }
                 tagAttempted.formUnion(batch.map(\.id))
@@ -918,7 +975,7 @@ final class MailStore {
                     aiTaggingStatus = nil
                 } else {
                     aiTaggingStatus = "AI tagging failed: \(error.localizedDescription)"
-                    taggingBackoffUntil = Date().addingTimeInterval(Self.taggingBackoff)
+                    taggingBackoffUntil = Date().addingTimeInterval(TimeInterval(settings.int(.aiTaggingBackoffSeconds)))
                 }
                 return
             }
@@ -932,7 +989,8 @@ final class MailStore {
         let own = ownAddresses
         var keys = Set<String>()
         var items: [OmpTagger.Item] = []
-        for conversation in conversations where items.count < Self.taggingPassLimit {
+        let limit = Settings.shared.int(.aiTaggingPassLimit)
+        for conversation in conversations where items.count < limit {
             guard conversation.messages.contains(where: { $0.role == .inbox && primary.contains($0.ref.mailboxKey) })
             else { continue }
             let key = Self.tagKey(conversation)
@@ -964,28 +1022,33 @@ final class MailStore {
 
     // MARK: - Mutations
 
-    func setRead(_ conversation: Conversation, read: Bool) {
+    /// Applies at once; the returned task finishes when the provider confirmed (and throws after
+    /// rolling back and reporting if it refused).
+    @discardableResult
+    func setRead(_ conversation: Conversation, read: Bool) -> Task<Void, Error> {
         let targets = read
             ? conversation.messages.filter { !$0.envelope.isSeen }
             : [conversation.messages.last(where: { $0.role != .sent }) ?? conversation.latest]
-        guard !targets.isEmpty else { return }
-        mutateFlags(targets, flag: .seen, add: read)
+        guard !targets.isEmpty else { return Task {} }
+        let task = mutateFlags(targets, flag: .seen, add: read)
         adjustUnread(targets, delta: read ? -1 : 1)
+        return task
     }
 
-    func setFlagged(_ conversation: Conversation, flagged: Bool) {
+    @discardableResult
+    func setFlagged(_ conversation: Conversation, flagged: Bool) -> Task<Void, Error> {
         let targets = flagged ? [conversation.latest] : conversation.messages.filter(\.envelope.isFlagged)
-        mutateFlags(targets, flag: .flagged, add: flagged)
+        return mutateFlags(targets, flag: .flagged, add: flagged)
     }
 
-    private func mutateFlags(_ targets: [MailMessage], flag: MessageFlag, add: Bool) {
+    private func mutateFlags(_ targets: [MailMessage], flag: MessageFlag, add: Bool) -> Task<Void, Error> {
         let refs = Set(targets.map(\.ref))
         updateEnvelopes(refs) { envelope in
             if add { envelope.flags.insert(flag.rawValue) } else { envelope.flags.remove(flag.rawValue) }
         }
-        for (key, messages) in Dictionary(grouping: targets, by: \.ref.mailboxKey) {
+        let requests = Dictionary(grouping: targets, by: \.ref.mailboxKey).map { key, messages in
             let ids = messages.map(\.ref.id)
-            Task {
+            return Task {
                 do {
                     try await backend(for: key.account).setFlag(flag, add, ids: ids, mailbox: key.mailbox)
                 } catch {
@@ -993,8 +1056,21 @@ final class MailStore {
                         if add { envelope.flags.remove(flag.rawValue) } else { envelope.flags.insert(flag.rawValue) }
                     }
                     report(error, context: key.account, alert: true)
+                    throw error
                 }
             }
+        }
+        return Self.all(requests)
+    }
+
+    /// Finishes when every request has; throws the first failure.
+    private static func all(_ requests: [Task<Void, Error>]) -> Task<Void, Error> {
+        Task {
+            var failure: Error?
+            for request in requests {
+                do { try await request.value } catch { failure = failure ?? error }
+            }
+            if let failure { throw failure }
         }
     }
 
@@ -1022,53 +1098,70 @@ final class MailStore {
         archiveMailbox(account: conversation.account) != nil && !archivable(conversation).isEmpty
     }
 
-    private func archivable(_ conversation: Conversation) -> [MailMessage] {
-        let primary = Set(primaryKeys)
+    /// Messages "Archive" moves: those in `primary` (default: the list on screen) that sit in an
+    /// inbox-like mailbox.
+    private func archivable(_ conversation: Conversation, primary: Set<MailboxKey>? = nil) -> [MailMessage] {
+        let primary = primary ?? Set(primaryKeys)
         return conversation.messages.filter {
             primary.contains($0.ref.mailboxKey) && ![.sent, .all, .archive, .trash, .drafts].contains($0.role)
         }
     }
 
-    func archive(_ conversation: Conversation) {
-        guard let target = archiveMailbox(account: conversation.account) else { return }
-        move(archivable(conversation), to: target)
+    /// `primary` names the mailboxes the conversation was listed from, when not the screen's.
+    @discardableResult
+    func archive(_ conversation: Conversation, from primary: Set<MailboxKey>? = nil) -> Task<Void, Error> {
+        guard let target = archiveMailbox(account: conversation.account) else {
+            return Task { throw StoreError(message: "\(conversation.account) has no archive mailbox.") }
+        }
+        let targets = archivable(conversation, primary: primary)
+        guard !targets.isEmpty else {
+            return Task { throw StoreError(message: "Nothing in \(conversation.id) is in a mailbox Archive moves from.") }
+        }
+        return move(targets, to: target)
     }
 
     /// Moves the conversation to the trash; messages already there are deleted for good.
-    func trash(_ conversation: Conversation) {
+    @discardableResult
+    func trash(_ conversation: Conversation) -> Task<Void, Error> {
         guard let trash = mailbox(account: conversation.account, role: .trash) else {
-            report(StoreError(message: "No trash mailbox found."), context: conversation.account, alert: true)
-            return
+            let error = StoreError(message: "No trash mailbox found.")
+            report(error, context: conversation.account, alert: true)
+            return Task { throw error }
         }
         let inTrash = conversation.messages.filter { $0.ref.mailbox == trash.id }
         let elsewhere = conversation.messages.filter { $0.ref.mailbox != trash.id && $0.role != .drafts }
-        move(elsewhere, to: trash)
-        guard !inTrash.isEmpty else { return }
-        removeEnvelopes(Set(inTrash.map(\.ref)))
-        Task {
-            do {
-                try await backend(for: trash.account).delete(ids: inTrash.map(\.ref.id), mailbox: trash.id)
-            } catch {
-                report(error, context: trash.account, alert: true)
-                refresh()
-            }
+        var requests = [move(elsewhere, to: trash)]
+        if !inTrash.isEmpty {
+            removeEnvelopes(Set(inTrash.map(\.ref)))
+            requests.append(Task {
+                do {
+                    try await backend(for: trash.account).delete(ids: inTrash.map(\.ref.id), mailbox: trash.id)
+                } catch {
+                    report(error, context: trash.account, alert: true)
+                    refresh()
+                    throw error
+                }
+            })
         }
+        return Self.all(requests)
     }
 
-    private func move(_ targets: [MailMessage], to destination: Mailbox) {
+    private func move(_ targets: [MailMessage], to destination: Mailbox) -> Task<Void, Error> {
         let targets = targets.filter { $0.ref.mailbox != destination.id }
-        guard !targets.isEmpty else { return }
+        guard !targets.isEmpty else { return Task {} }
         removeEnvelopes(Set(targets.map(\.ref)))
-        for (key, messages) in Dictionary(grouping: targets, by: \.ref.mailboxKey) {
+        let requests = Dictionary(grouping: targets, by: \.ref.mailboxKey).map { key, messages in
             Task {
                 do {
                     try await backend(for: key.account).move(ids: messages.map(\.ref.id), from: key.mailbox, to: destination.id)
                 } catch {
                     report(error, context: key.account, alert: true)
                     refresh()
+                    throw error
                 }
             }
         }
+        return Self.all(requests)
     }
 
     /// Sends from `account`, then picks up the sent copy.

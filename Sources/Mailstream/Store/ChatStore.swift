@@ -44,14 +44,13 @@ struct ChatThread: Sendable {
 /// requests, JSON decoding, row formatting and the disk cache run off the main actor, like
 /// `MailStore`'s.
 ///
-/// Spaces are polled every 20 s (`Chat` refetches only spaces whose activity changed). Reading
+/// Spaces are polled every `chat.pollSeconds` (`Chat` refetches only spaces whose activity changed). Reading
 /// and sending are optimistic: opening a space clears its unread count at once, and a sent message
 /// shows as pending until Google returns it. A failed send is marked failed, never retried.
 @MainActor
 final class ChatStore {
     nonisolated static let spacesPage = 60
     nonisolated static let messagesPage = 100
-    static let pollInterval: TimeInterval = 20
     /// Spaces whose messages stay on disk, most recently opened first.
     static let recentLimit = 20
     /// Messages kept on disk per recent space.
@@ -126,7 +125,16 @@ final class ChatStore {
                 }
             }
         }
-        timer = Timer.scheduledTimer(withTimeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
+        schedulePolling()
+        NotificationCenter.default.addObserver(forName: Settings.didChange, object: nil, queue: .main) { [weak self] note in
+            let changed = note.changedSettings
+            MainActor.assumeIsolated { if changed.contains(.chatPollSeconds) { self?.schedulePolling() } }
+        }
+    }
+
+    private func schedulePolling() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: TimeInterval(Settings.shared.int(.chatPollSeconds)), repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll(quiet: true) }
         }
     }

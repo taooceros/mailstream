@@ -5,8 +5,6 @@ import Foundation
 /// sender they chose to always trust loads remote content; junk never does; everything else waits
 /// for a click on the banner.
 extension MailStore {
-    private static let trustedSendersKey = "remoteContentSenders"
-
     func loadsRemoteContent(for conversation: Conversation) -> Bool {
         !conversation.messages.contains { $0.role == .junk } && untrustedSenders(in: conversation).isEmpty
     }
@@ -28,13 +26,16 @@ extension MailStore {
         }
     }
 
-    /// Always loads remote content from `senders` from now on.
+    /// Always loads remote content from `senders` from now on (`remoteContent.trustedSenders`).
     func trustRemoteContent(from senders: [Address]) {
         let updated = trustedSenders.union(senders.map(\.normalizedEmail))
-        UserDefaults.standard.set(updated.sorted(), forKey: Self.trustedSendersKey)
+        do {
+            try Settings.shared.set(.trustedSenders, .strings(updated.sorted()))
+        } catch {
+            NotificationCenter.default.post(name: .storeError, object: self,
+                                            userInfo: ["message": error.localizedDescription, "alert": true])
+        }
     }
 
-    private var trustedSenders: Set<String> {
-        Set(UserDefaults.standard.stringArray(forKey: Self.trustedSendersKey) ?? [])
-    }
+    private var trustedSenders: Set<String> { Set(Settings.shared.strings(.trustedSenders)) }
 }
