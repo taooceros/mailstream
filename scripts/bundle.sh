@@ -6,7 +6,6 @@ cd "$(dirname "$0")/.."
 CONFIG="${CONFIG:-release}"
 VERSION="0.1.0"
 SERVICE="dev.mailstream.build"
-LOCAL_IDENTITY="Mailstream Local Signing"
 
 swift build -c "$CONFIG"
 BIN="$(swift build -c "$CONFIG" --show-bin-path)/Mailstream"
@@ -68,19 +67,15 @@ $CONFIG_KEYS</dict>
 </plist>
 PLIST
 
-# The Keychain item of OAuth tokens stays readable across rebuilds only for a stable signature,
-# and without prompting only when it carries a Team ID: macOS also pins the item to the signer's
-# partition, which is the team for an Apple Development certificate (a free Personal Team in
-# Xcode makes one) but the build's own cdhash for a self-signed one.
-IDENTITIES=$(security find-identity -v -p codesigning)
-IDENTITY=$(printf '%s\n' "$IDENTITIES" | sed -n 's/^ *[0-9]*) \([0-9A-F]*\) "Apple Development: .*"$/\1/p' | sed -n 1p)
+# macOS pins the app's Keychain item (OAuth tokens) to its signer: with an Apple Development
+# certificate (free with any Apple ID in Xcode) that is the team, so rebuilds read it silently;
+# signed ad hoc, each new build is a new signer and macOS asks once to allow it.
+IDENTITY=$(security find-identity -v -p codesigning |
+  sed -n 's/^ *[0-9]*) \([0-9A-F]*\) "Apple Development: .*"$/\1/p' | sed -n 1p)
 if [ -n "$IDENTITY" ]; then
   codesign --force --sign "$IDENTITY" "$APP" >/dev/null
-elif printf '%s\n' "$IDENTITIES" | grep -q "\"$LOCAL_IDENTITY\""; then
-  echo "warning: no Apple Development certificate; signing with \"$LOCAL_IDENTITY\", so each rebuild asks once for the Keychain item" >&2
-  codesign --force --sign "$LOCAL_IDENTITY" "$APP" >/dev/null
 else
-  echo "warning: no signing identity; signing ad hoc, so every rebuild loses access to saved sign-ins (add an Apple ID in Xcode, or run scripts/signing.sh)" >&2
+  echo "note: signed ad hoc; macOS asks once after each rebuild to let it read saved sign-ins" >&2
   codesign --force --sign - "$APP" >/dev/null
 fi
 echo "Built $APP"

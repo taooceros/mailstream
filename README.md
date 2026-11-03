@@ -25,47 +25,32 @@ version on `PATH`, or `MAILSTREAM_OMP=/path/to/omp`.
 
 ## First-time setup
 
-1. A signing identity, so the Keychain item the app creates stays readable across
-   rebuilds. Best: add any Apple ID in Xcode → Settings → Accounts (a free
-   Personal Team is enough) and create an "Apple Development" certificate under
-   Manage Certificates; its Team ID lets rebuilds read the item without asking.
-   Otherwise `scripts/signing.sh` installs a self-signed "Mailstream Local
-   Signing" identity; macOS then asks once after each rebuild.
-2. Google Cloud project:
-   - enable the Gmail API, Cloud Pub/Sub API, Google Chat API (configured under
-     Google Chat API ▸ Configuration: a name, an avatar and a description;
-     interactive features can stay off) and People API;
-   - create an OAuth client of type Desktop app (published, so tokens do not expire
-     after a week);
-   - create the Pub/Sub topic `gmail-push` and grant
-     `gmail-api-push@system.gserviceaccount.com` the Pub/Sub Publisher role on it.
-3. Microsoft Entra app registration: accounts in any organizational directory and
-   personal Microsoft accounts, a Web redirect URI `http://localhost:49152`, a
-   client secret, and the delegated Graph permissions `User.Read`,
-   `Mail.ReadWrite`, `Mail.Send` and `Contacts.Read`.
-4. Build secrets go into the login keychain, service `dev.mailstream.build`, one
-   generic password per item (`security add-generic-password -U -s
-   dev.mailstream.build -a <item> -w <value>`):
+Run `scripts/setup.sh` (needs `gcloud` and `npx`). It skips whatever is already
+done, so it can be re-run safely, and asks only for what it cannot do itself:
 
-   | Item | Value |
-   | --- | --- |
-   | `google-client-id`, `google-client-secret` | the Google OAuth client |
-   | `microsoft-client-id`, `microsoft-client-secret` | the Entra app registration |
-   | `gmail-topic` | `projects/<project>/topics/gmail-push` |
-   | `push-token` | a random string the app authenticates its socket with |
-   | `graph-client-state` | a random string Graph echoes in every notification |
-   | `pubsub-token` | a random string Pub/Sub's push endpoint carries |
-   | `push-url` | written by `Push/deploy.sh` |
+1. **Google Cloud:** it signs in to `gcloud` if needed, asks for a project id (new
+   or existing), enables the Gmail, Pub/Sub, Chat and People APIs, and creates the
+   `gmail-push` topic that Gmail publishes to. Then it opens the console twice:
+   - name the Google Chat app;
+   - create an OAuth client of type **Desktop app**, then publish it so its tokens
+     do not expire after a week. Paste the client id and secret back.
+2. **Microsoft:** it opens Entra app registrations. Register an app for "accounts in
+   any organizational directory and personal Microsoft accounts" with Web redirect
+   URI `http://localhost:49152`. Add the delegated Graph permissions `User.Read`,
+   `Mail.ReadWrite`, `Mail.Send` and `Contacts.Read`, plus a client secret. Paste
+   the client id and secret back.
+3. **Relay secrets:** it generates `push-token`, `graph-client-state` and
+   `pubsub-token`.
+4. **Push relay:** it signs in to Cloudflare if needed and runs `Push/deploy.sh`.
+   That deploys the relay, sets its secrets, stores its URL as `push-url` and points
+   the `mailstream-push` Pub/Sub subscription at it. Run `Push/deploy.sh` again after
+   changing `Push/worker.js`.
 
-5. `npx wrangler login` and `gcloud auth login` (an account that owns the
-   project), then `Push/deploy.sh`: it deploys the relay, sets its secrets, stores
-   its URL as `push-url` and creates (or repoints) the `mailstream-push` Pub/Sub
-   subscription that delivers Gmail's notifications to it.
-
-`scripts/bundle.sh` copies these items into the app's `Info.plist` (`MSGoogleClientID`,
+Everything is kept in the login keychain, service `dev.mailstream.build`.
+`scripts/bundle.sh` copies the items into the app's `Info.plist` (`MSGoogleClientID`,
 `MSGoogleClientSecret`, `MSMicrosoftClientID`, `MSMicrosoftClientSecret`, `MSPushURL`,
-`MSPushToken`, `MSGraphClientState`, `MSGmailTopic`); a missing item is left out with a
-warning. Without the push items the app polls instead.
+`MSPushToken`, `MSGraphClientState`, `MSGmailTopic`). A missing item is left out with
+a warning; without the push items the app polls instead.
 
 ## Build and run
 
@@ -76,10 +61,11 @@ CONFIG=debug ./scripts/run.sh       # bundle, quit the running copy, launch
 swift build                         # compile check only
 ```
 
-The bundle is signed with the first "Apple Development" identity, else "Mailstream
-Local Signing", else ad hoc with a warning (an ad-hoc build cannot read the previous
-build's Keychain item, so sign-ins are lost on every rebuild). `scripts/make-icon.swift`
-regenerates `Resources/AppIcon.png`.
+The bundle is signed with an "Apple Development" certificate when there is one, else
+ad hoc. Nothing else is needed. Signed ad hoc, each new build is a new app to macOS,
+which asks once whether it may read the saved sign-ins. A free certificate stops that
+prompt: add any Apple ID in Xcode ▸ Settings ▸ Accounts, then Manage Certificates ▸ +
+▸ Apple Development. `scripts/make-icon.swift` regenerates `Resources/AppIcon.png`.
 
 GitHub Actions (`.github/workflows/build.yml`) builds every push and pull request on
 macOS 26 with Xcode 26.4 (Swift 6.3), with warnings as errors, and keeps the app as a
