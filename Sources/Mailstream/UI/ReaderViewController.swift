@@ -113,6 +113,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         loadShell(remote: false)
         NotificationCenter.default.addObserver(self, selector: #selector(avatarResolved(_:)), name: .avatarResolved,
                                                object: store.avatars)
+        NotificationCenter.default.addObserver(self, selector: #selector(tagsChanged), name: .storeTagsChanged, object: store)
     }
 
     @objc private func avatarResolved(_ note: Notification) {
@@ -120,6 +121,13 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
               messages.contains(where: { $0.envelope.from.first?.normalizedEmail == email })
         else { return }
         pushAvatars(only: email)
+    }
+
+    /// Resolving from the list or the menu flips the header's "Waiting on you" chip in place.
+    @objc private func tagsChanged() {
+        guard let conversation else { return }
+        call("const chip = document.getElementById('waiting'); if (chip) chip.hidden = !waiting;",
+             ["waiting": store.tag(for: conversation)?.toRespond == true])
     }
 
     /// Sends known pictures into the page; `only` limits it to one sender.
@@ -393,6 +401,8 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
             store.trustRemoteContent(from: store.untrustedSenders(in: conversation))
             allowRemote = true
             render(conversation)
+        case "resolve":
+            if let conversation { store.setWaiting(conversation, waiting: false) }
         case "avatar":
             guard let target, let rect = body["rect"] as? [Double], rect.count == 4 else { return }
             showAvatar(of: target, at: rect)

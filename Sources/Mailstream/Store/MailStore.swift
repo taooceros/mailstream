@@ -705,6 +705,23 @@ final class MailStore {
         taggingEnabled ? tags[Self.tagKey(conversation)] : nil
     }
 
+    /// Whether `conversation` can be resolved or put back on "Waiting on you": only people
+    /// conversations the tagger has judged carry the flag.
+    func canMarkWaiting(_ conversation: Conversation) -> Bool {
+        tag(for: conversation)?.category == .people
+    }
+
+    /// Resolves the conversation (`waiting: false`) or puts it back on "Waiting on you". The flag
+    /// belongs to the latest message, so a new incoming one is judged afresh.
+    func setWaiting(_ conversation: Conversation, waiting: Bool) {
+        let key = Self.tagKey(conversation)
+        guard taggingEnabled, var tag = tags[key], tag.category == .people, tag.toRespond != waiting else { return }
+        tag.toRespond = waiting
+        tags[key] = tag
+        cache.saveTags(tags)
+        post(.storeTagsChanged)
+    }
+
     /// Forgets every tag and tags the current list again, ignoring any failure backoff.
     func retagAll() {
         tags = [:]

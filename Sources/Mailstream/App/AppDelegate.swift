@@ -86,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         message.addItem(.separator())
         message.addItem(item("Mark as Unread", #selector(MainWindowController.toggleRead(_:)), "u", [.command, .shift]))
         message.addItem(item("Star", #selector(MainWindowController.toggleStar(_:)), "l", [.command, .shift]))
+        message.addItem(item("Resolve", #selector(MainWindowController.toggleWaiting(_:)), "d", [.command, .shift]))
         add(message, title: "Message", to: main)
 
         let window = NSMenu(title: "Window")

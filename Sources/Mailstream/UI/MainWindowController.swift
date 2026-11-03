@@ -307,6 +307,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             }
         case .toggleRead: store.setRead(conversation, read: conversation.isUnread)
         case .toggleStar: store.setFlagged(conversation, flagged: !conversation.isFlagged)
+        case .toggleWaiting: store.setWaiting(conversation, waiting: store.tag(for: conversation)?.toRespond != true)
         case .reply: replyInline(all: false, conversation)
         case .replyAll: replyInline(all: true, conversation)
         case .forward: composeForward(conversation)
@@ -363,6 +364,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     @objc func trash(_ sender: Any?) { if let selected { perform(.trash, on: selected) } }
     @objc func toggleRead(_ sender: Any?) { if let selected { perform(.toggleRead, on: selected) } }
     @objc func toggleStar(_ sender: Any?) { if let selected { perform(.toggleStar, on: selected) } }
+    @objc func toggleWaiting(_ sender: Any?) { if let selected { perform(.toggleWaiting, on: selected) } }
     @objc func reply(_ sender: Any?) { if let selected { perform(.reply, on: selected) } }
     @objc func replyAll(_ sender: Any?) { if let selected { perform(.replyAll, on: selected) } }
     @objc func forward(_ sender: Any?) { if let selected { perform(.forward, on: selected) } }
@@ -372,6 +374,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         case #selector(goBack(_:)): return canGoBack
         case #selector(retagAll(_:)): return store.aiTaggingEnabled
         case #selector(archive(_:)): return selected.map(store.canArchive) ?? false
+        case #selector(toggleWaiting(_:)): return selected.map(store.canMarkWaiting) ?? false
         case #selector(trash(_:)), #selector(toggleRead(_:)), #selector(toggleStar(_:)),
              #selector(reply(_:)), #selector(replyAll(_:)), #selector(forward(_:)):
             return selected != nil
@@ -385,6 +388,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             menuItem.title = selected?.isUnread == true ? "Mark as Read" : "Mark as Unread"
         } else if action == #selector(toggleStar(_:)) {
             menuItem.title = selected?.isFlagged == true ? "Unstar" : "Star"
+        } else if action == #selector(toggleWaiting(_:)) {
+            let waiting = selected.flatMap(store.tag(for:))?.toRespond ?? true
+            menuItem.title = waiting ? "Resolve" : "Mark as Waiting on You"
         } else if action == #selector(toggleAITagging(_:)) {
             menuItem.state = store.aiTaggingEnabled ? .on : .off
         }

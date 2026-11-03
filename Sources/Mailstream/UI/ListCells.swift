@@ -317,6 +317,8 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
     private var readButton: HoverActionButton!
     private var starButton: HoverActionButton!
     private var archiveButton: HoverActionButton!
+    /// Only on conversations waiting on the user's reply.
+    private var resolveButton: HoverActionButton!
     private var hovering = false
 
     init() {
@@ -341,9 +343,10 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
         readButton = HoverActionButton(symbol: "envelope.badge", label: "Mark as Unread")
         starButton = HoverActionButton(symbol: "star", label: "Star")
         archiveButton = HoverActionButton(symbol: "archivebox", label: "Archive")
+        resolveButton = HoverActionButton(symbol: "checkmark.circle", label: "Resolve")
         let trashButton = HoverActionButton(symbol: "trash", label: "Move to Trash")
-        for (button, action) in [(archiveButton!, ConversationAction.archive), (trashButton, .trash),
-                                 (readButton!, .toggleRead), (starButton!, .toggleStar)] {
+        for (button, action) in [(resolveButton!, ConversationAction.toggleWaiting), (archiveButton!, .archive),
+                                 (trashButton, .trash), (readButton!, .toggleRead), (starButton!, .toggleStar)] {
             button.handler = { [weak self] in self?.onAction?(action) }
             pill.add(button)
         }
@@ -414,6 +417,7 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
         starButton.image = row.isFlagged ? Self.unstarImage : Self.starImage
         starButton.toolTip = row.isFlagged ? "Unstar" : "Star"
         archiveButton.isHidden = !archivable
+        resolveButton.isHidden = tag?.toRespond != true
         needsLayout = true
     }
 

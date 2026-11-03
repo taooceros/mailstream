@@ -39,7 +39,13 @@ enum ReaderPage {
                        accountColor: String, mailboxLabels: [String], tag: ConversationTag?, chat: Bool,
                        trustLabel: String?) -> String {
         var meta: [String] = []
-        if tag?.toRespond == true { meta.append(Self.meta("Waiting on you", tint: "#F59E0B", mark: "dot")) }
+        // People threads always carry the chip, hidden once resolved, so the reader can flip it in place.
+        var waiting = ""
+        if let tag, tag.category == .people {
+            let chip = "<span class=\"meta-item\" style=\"--tint:#F59E0B\"><i class=\"mark dot\"></i>Waiting on you"
+                + "<button class=\"meta-resolve\" data-action=\"resolve\">Resolve</button></span>"
+            waiting = "<span id=\"waiting\" class=\"meta-wait\"\(tag.toRespond ? "" : " hidden")>\(chip)<i class=\"sep\">·</i></span>"
+        }
         if let tag, tag.category != .people { meta.append(Self.meta(tag.category.title, tint: nil)) }
         for label in tag?.labels ?? [] { meta.append(Self.meta(label, tint: TagPalette.hex(for: label), mark: "dot")) }
         meta.append(Self.meta(accountLabel, tint: accountColor, mark: "bar"))
@@ -53,7 +59,7 @@ enum ReaderPage {
         var html = """
         <header class="thread-header">
           <h1>\(HTMLText.escape(SubjectStyle.split(conversation.subject).title))</h1>
-          <div class="thread-meta">\(meta.joined(separator: "<i class=\"sep\">·</i>"))</div>
+          <div class="thread-meta">\(waiting)\(meta.joined(separator: "<i class=\"sep\">·</i>"))</div>
         </header>
         <div id="remote-banner" class="banner" hidden>
           <span>\(trustLabel == nil ? "Remote images are blocked in junk mail." : "Remote images are blocked to protect your privacy.")</span>
@@ -310,6 +316,10 @@ enum ReaderPage {
     .mark { display: inline-block; background: var(--tint); }
     .mark.dot { width: 6px; height: 6px; border-radius: 50%; }
     .mark.bar { width: 2.5px; height: 11px; border-radius: 2px; }
+    .meta-wait:not([hidden]) { display: contents; }
+    .meta-resolve { padding: 1px 8px; margin-left: 2px; font-size: 11.5px; font-weight: 550; color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 11%, transparent); }
+    .meta-resolve:hover { background: color-mix(in srgb, var(--accent) 19%, transparent); }
     .banner { display: flex; align-items: center; gap: 12px; margin: 0 0 14px; padding: 7px 8px 7px 14px;
       border-radius: 10px; font-size: 12px; color: var(--muted); background: var(--chip);
       animation: rise .3s var(--ease) both; }

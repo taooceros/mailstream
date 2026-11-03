@@ -1,7 +1,7 @@
 import AppKit
 
 enum ConversationAction {
-    case archive, trash, toggleRead, toggleStar, reply, replyAll, forward
+    case archive, trash, toggleRead, toggleStar, toggleWaiting, reply, replyAll, forward
 }
 
 @MainActor
@@ -643,6 +643,9 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         menu.addItem(.separator())
         add(conversation.isUnread ? "Mark as Read" : "Mark as Unread", conversation.isUnread ? "envelope.open" : "envelope.badge", .toggleRead)
         add(conversation.isFlagged ? "Unstar" : "Star", conversation.isFlagged ? "star.slash" : "star", .toggleStar)
+        if let tag = store.tag(for: conversation), tag.category == .people {
+            add(tag.toRespond ? "Resolve" : "Mark as Waiting on You", tag.toRespond ? "checkmark.circle" : "clock.badge", .toggleWaiting)
+        }
         menu.addItem(.separator())
         if store.canArchive(conversation) { add("Archive", "archivebox", .archive) }
         add("Move to Trash", "trash", .trash)
@@ -787,6 +790,7 @@ final class ConversationTableView: NSTableView {
             case "e": onKey?(.archive); return
             case "s": onKey?(.toggleStar); return
             case "u": onKey?(.toggleRead); return
+            case "d": onKey?(.toggleWaiting); return
             case "r": onKey?(.reply); return
             case "a": onKey?(.replyAll); return
             case "f": onKey?(.forward); return
