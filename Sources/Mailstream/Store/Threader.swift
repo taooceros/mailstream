@@ -1,7 +1,8 @@
 import Foundation
 
-/// Groups messages into conversations from `Message-ID` / `In-Reply-To` links, falling back to the
-/// normalized subject for replies whose parent was not loaded.
+/// Groups messages into conversations from the provider's thread (Gmail thread, Graph
+/// conversation) and `Message-ID` / `In-Reply-To` links, falling back to the normalized subject
+/// for replies whose parent was not loaded.
 ///
 /// `primary` messages decide which conversations exist (the selected mailbox); `context` messages
 /// (the account's inbox and sent mail) only join conversations a primary message already started,
@@ -48,6 +49,14 @@ enum Threader {
             }
         }
 
+        // The provider's own threads, scoped per account.
+        var byThread: [String: Int] = [:]
+        for (index, message) in messages.enumerated() {
+            guard let thread = message.envelope.thread else { continue }
+            let key = message.ref.account + "\u{1}" + thread
+            if let existing = byThread[key] { union(existing, index) } else { byThread[key] = index }
+        }
+
         // Subject fallback, oldest first so a reply joins the latest earlier message on that subject.
         let order = messages.indices.sorted { (messages[$0].envelope.date ?? .distantPast) < (messages[$1].envelope.date ?? .distantPast) }
         var lastBySubject: [String: Int] = [:]
@@ -68,21 +77,21 @@ enum Threader {
 
         var conversations: [Conversation] = []
         for members in groups.values where members.contains(where: { isPrimary[$0] }) {
-            // Collapse copies of one message living in several mailboxes, preferring the primary copy.
-            var chosen: [String: Int] = [:]
+            // Collapse copies of one message living in several mailboxes (Gmail labels share the
+            // provider id), preferring the primary copy.
+            var chosen = Set<String>()
             var unique: [Int] = []
             for index in members.sorted(by: { isPrimary[$0] && !isPrimary[$1] }) {
-                if let id = messages[index].envelope.messageID {
-                    if chosen[id] != nil { continue }
-                    chosen[id] = index
-                }
+                let envelope = messages[index].envelope
+                guard chosen.insert("id\u{1}" + envelope.id).inserted else { continue }
+                if let id = envelope.messageID, !chosen.insert(id).inserted { continue }
                 unique.append(index)
             }
             let sorted = unique.map { messages[$0] }.sorted {
                 ($0.envelope.date ?? .distantPast, $0.ref.id) < ($1.envelope.date ?? .distantPast, $1.ref.id)
             }
             let first = sorted[0]
-            let id = first.ref.account + "|" + (first.envelope.messageID ?? "\(first.ref.mailbox)/\(first.ref.id)")
+            let id = first.ref.account + "|" + (first.envelope.messageID ?? first.ref.id)
             conversations.append(Conversation(id: id, account: first.ref.account, messages: sorted))
         }
         conversations.sort { ($0.latestDate ?? .distantPast) > ($1.latestDate ?? .distantPast) }

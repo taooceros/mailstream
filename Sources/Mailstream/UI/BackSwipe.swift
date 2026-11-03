@@ -1,14 +1,14 @@
 import AppKit
 
-/// Reads a two-finger trackpad swipe out of scroll events: fingers moving right drag the reader
-/// back. Gestures that start vertical or leftward pass through untouched, so the page scrolls.
+/// Reads a two-finger trackpad swipe out of scroll events: fingers moving sideways, either way,
+/// drag the reader back. Gestures that start vertical pass through untouched, so the page scrolls.
 struct BackSwipe {
     enum Step {
         /// Not a back swipe: deliver the event as usual.
         case pass
         /// Part of a back swipe with nothing to show (the momentum after release).
         case consume
-        /// The reader follows the fingers, `offset` points to the right.
+        /// The reader follows the fingers, `offset` points to the right (negative: left).
         case drag(CGFloat)
         /// Fingers lifted; `velocity` in points per second, positive to the right.
         case release(offset: CGFloat, velocity: CGFloat)
@@ -17,6 +17,8 @@ struct BackSwipe {
     private enum State { case idle, undecided, ignoring, tracking, coasting }
     private var state = State.idle
     private var offset: CGFloat = 0
+    /// The side the swipe set off to (1 right, -1 left); the reader never crosses back past 0.
+    private var direction: CGFloat = 1
     private var travel = CGVector.zero
     private var velocity: CGFloat = 0
     private var lastTime: TimeInterval = 0
@@ -59,11 +61,12 @@ struct BackSwipe {
             travel.dx += dx
             travel.dy += dy
             guard hypot(travel.dx, travel.dy) >= Self.decisionDistance else { return .pass }
-            guard travel.dx > abs(travel.dy) * 1.5 else {
+            guard abs(travel.dx) > abs(travel.dy) * 1.5 else {
                 state = .ignoring
                 return .pass
             }
             state = .tracking
+            direction = travel.dx > 0 ? 1 : -1
             offset = travel.dx
             lastTime = event.timestamp
             return .drag(offset)
@@ -76,7 +79,7 @@ struct BackSwipe {
             let dt = event.timestamp - lastTime
             lastTime = event.timestamp
             if dt > 0 { velocity = velocity * 0.5 + dx / CGFloat(dt) * 0.5 }
-            offset = max(0, offset + dx)
+            offset = direction * max(0, direction * (offset + dx))
             return .drag(offset)
         }
     }

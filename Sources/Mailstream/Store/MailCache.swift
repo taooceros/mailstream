@@ -8,7 +8,7 @@ import Foundation
 /// caller's (main) thread. Writes go through one serial queue, which also encodes, so the last
 /// write for a file always wins and callers never wait.
 final class MailCache: Sendable {
-    static let contentVersion = 2
+    static let contentVersion = 3
     static let scheme = "mscid"
 
     let root: URL
@@ -19,11 +19,17 @@ final class MailCache: Sendable {
         root = caches.appendingPathComponent("dev.mailstream.Mailstream", isDirectory: true)
         let root = root
         writer.async {
-            for sub in ["envelopes", "messages", "mailboxes", "chat"] {
-                try? FileManager.default.createDirectory(at: root.appendingPathComponent(sub), withIntermediateDirectories: true)
+            let fm = FileManager.default
+            for legacy in Self.legacy { try? fm.removeItem(at: root.appendingPathComponent(legacy)) }
+            for sub in ["envelopes-v2", "messages-v2", "mailboxes-v2", "chat-v2"] {
+                try? fm.createDirectory(at: root.appendingPathComponent(sub), withIntermediateDirectories: true)
             }
         }
     }
+
+    /// Layouts from before the provider APIs, keyed by account, mailbox and chat account names
+    /// that no provider id matches.
+    private static let legacy = ["envelopes", "messages", "mailboxes", "chat", "accounts-v1.json", "chat-accounts-v1.json"]
 
     static func hash(_ parts: String...) -> String {
         let digest = SHA256.hash(data: Data(parts.joined(separator: "\u{1F}").utf8))
@@ -47,7 +53,7 @@ final class MailCache: Sendable {
 
     // MARK: Accounts
 
-    private var accountsURL: URL { root.appendingPathComponent("accounts-v1.json") }
+    private var accountsURL: URL { root.appendingPathComponent("accounts-v2.json") }
 
     func loadAccounts() async -> [Account]? { await read([Account].self, at: accountsURL) }
 
@@ -64,7 +70,7 @@ final class MailCache: Sendable {
     // MARK: Envelopes
 
     private func envelopesURL(_ key: MailboxKey) -> URL {
-        root.appendingPathComponent("envelopes/\(Self.hash(key.account, key.mailbox)).json")
+        root.appendingPathComponent("envelopes-v2/\(Self.hash(key.account, key.mailbox)).json")
     }
 
     func loadEnvelopes(_ key: MailboxKey) async -> [Envelope]? { await read([Envelope].self, at: envelopesURL(key)) }
@@ -74,7 +80,7 @@ final class MailCache: Sendable {
     // MARK: Mailboxes
 
     private func mailboxesURL(_ account: String) -> URL {
-        root.appendingPathComponent("mailboxes/\(Self.hash(account)).json")
+        root.appendingPathComponent("mailboxes-v2/\(Self.hash(account)).json")
     }
 
     func loadMailboxes(_ account: String) async -> [Mailbox]? { await read([Mailbox].self, at: mailboxesURL(account)) }
@@ -90,7 +96,7 @@ final class MailCache: Sendable {
     }
 
     func messageDirectory(key: String) -> URL {
-        root.appendingPathComponent("messages/\(key)", isDirectory: true)
+        root.appendingPathComponent("messages-v2/\(key)", isDirectory: true)
     }
 
     /// Base URL inline parts of `ref` are served from by the reader's scheme handler.
@@ -112,21 +118,21 @@ final class MailCache: Sendable {
 
     // MARK: Chat
 
-    private var chatAccountsURL: URL { root.appendingPathComponent("chat-accounts-v1.json") }
+    private var chatAccountsURL: URL { root.appendingPathComponent("chat-accounts-v2.json") }
 
     func loadChatAccounts() async -> [ChatAccount]? { await read([ChatAccount].self, at: chatAccountsURL) }
 
     func saveChatAccounts(_ accounts: [ChatAccount]) { write(accounts, to: chatAccountsURL) }
 
     private func chatSpacesURL(_ account: String) -> URL {
-        root.appendingPathComponent("chat/spaces-\(Self.hash(account)).json")
+        root.appendingPathComponent("chat-v2/spaces-\(Self.hash(account)).json")
     }
 
     func loadChatSpaces(_ account: String) async -> ChatSpaceList? { await read(ChatSpaceList.self, at: chatSpacesURL(account)) }
 
     func saveChatSpaces(_ list: ChatSpaceList, for account: String) { write(list, to: chatSpacesURL(account)) }
 
-    private var chatRecentURL: URL { root.appendingPathComponent("chat/recent-v1.json") }
+    private var chatRecentURL: URL { root.appendingPathComponent("chat-v2/recent-v1.json") }
 
     /// Spaces whose messages are kept on disk, most recently opened first.
     func loadChatRecent() async -> [ChatSpaceKey]? { await read([ChatSpaceKey].self, at: chatRecentURL) }
@@ -134,7 +140,7 @@ final class MailCache: Sendable {
     func saveChatRecent(_ keys: [ChatSpaceKey]) { write(keys, to: chatRecentURL) }
 
     private func chatMessagesURL(_ key: ChatSpaceKey) -> URL {
-        root.appendingPathComponent("chat/messages-\(Self.hash(key.account, key.space)).json")
+        root.appendingPathComponent("chat-v2/messages-\(Self.hash(key.account, key.space)).json")
     }
 
     func loadChatMessages(_ key: ChatSpaceKey) async -> ChatMessagePage? {

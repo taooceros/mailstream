@@ -2,17 +2,18 @@ import AppKit
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let accounts = AccountStore()
     private var store: MailStore!
     private var mainWindow: MainWindowController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = Self.buildMenu()
-        let tools = ToolEnvironment.resolve()
-        store = MailStore(himalaya: Himalaya(tools: tools), tools: tools)
+        store = MailStore(accounts: accounts, tools: ToolEnvironment.resolve())
         mainWindow = MainWindowController(store: store)
         mainWindow.showWindow(nil)
         NSApp.activate()
         store.start()
+        if accounts.records.isEmpty { AccountsWindowController.show(accounts: accounts) }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -26,6 +27,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ComposeWindowController.open(store: store, mode: .new, account: mainWindow.preferredAccount)
     }
 
+    @objc func showSettings(_ sender: Any?) {
+        AccountsWindowController.show(accounts: accounts)
+    }
+
     // MARK: - Menu
 
     private static func buildMenu() -> NSMenu {
@@ -33,6 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Mailstream", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(item("Settings…", #selector(AppDelegate.showSettings(_:)), ","))
         appMenu.addItem(.separator())
         let services = NSMenu()
         let servicesItem = appMenu.addItem(withTitle: "Services", action: nil, keyEquivalent: "")

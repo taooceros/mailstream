@@ -41,24 +41,37 @@ extension Notification.Name {
     static let storeError = Notification.Name("MailStore.error")
 }
 
+/// A failure of the store itself rather than of a provider.
+struct StoreError: LocalizedError, Sendable {
+    let message: String
+    var errorDescription: String? { message }
+
+    static let signedOut = StoreError(message: "The account is no longer signed in.")
+}
+
 /// Single source of truth for the UI, and the only main-actor part of the data layer.
 ///
-/// The main actor only holds state and applies small changes: disk reads, process I/O, parsing,
+/// The main actor only holds state and applies small changes: disk reads, network I/O, parsing,
 /// threading and row formatting all run on the concurrent executor, and their results land here
-/// as finished values. Lists paint from the disk cache before any process starts, then refresh
-/// from himalaya. Mutations apply optimistically to the visible list at once (no rethreading) and
-/// roll back on failure.
+/// as finished values. Lists paint from the disk cache before any request starts, then refresh
+/// from the providers. Mutations apply optimistically to the visible list at once (no rethreading)
+/// and roll back on failure.
 @MainActor
 final class MailStore {
     nonisolated static let pageSize = 50
     static let prefetchCount = 40
+    /// Polling while push is down, and as a safety net while it is up.
+    static let pollInterval: TimeInterval = 90
+    static let pushPollInterval: TimeInterval = 15 * 60
 
-    let himalaya: Himalaya
+    /// Signed-in accounts, their tokens and backends.
+    let accountStore: AccountStore
     private let tools: ToolEnvironment
     let cache = MailCache()
-    private(set) lazy var avatars = AvatarStore(tools: tools, root: cache.root)
+    private(set) lazy var avatars = AvatarStore(accounts: accountStore, root: cache.root)
     /// Google Chat accounts, spaces and messages; selected through `Selection.chat`.
-    private(set) lazy var chat = ChatStore(cache: cache)
+    private(set) lazy var chat = ChatStore(cache: cache, accounts: accountStore)
+    private lazy var push = PushService(accounts: accountStore) { [weak self] id in self?.refresh(account: id) }
 
     private(set) var accounts: [Account] = []
     private(set) var mailboxes: [String: [Mailbox]] = [:]
@@ -72,8 +85,9 @@ final class MailStore {
 
     private struct Listing {
         var envelopes: [Envelope]
-        var pages: Int
-        var reachedEnd: Bool
+        /// Cursor of the page after `envelopes`; nil at the end, or when the listing came from
+        /// disk and no first page arrived yet.
+        var next: String?
     }
 
     private var listings: [MailboxKey: Listing] = [:]
@@ -91,9 +105,15 @@ final class MailStore {
     private var rebuildTask: Task<Void, Never>?
     private var needsRebuild = false
     private var refreshTask: Task<Void, Never>?
+    /// Pushed changes waiting out their coalescing delay, by account.
+    private var accountRefreshes: [String: Task<Void, Never>] = [:]
+    /// First-page requests made per mailbox; only the latest one's answer is applied.
+    private var firstPageRequests: [MailboxKey: Int] = [:]
     private var searchTask: Task<Void, Never>?
     private var loadMoreTask: Task<Void, Never>?
-    private var timers: [Timer] = []
+    private var pollTimer: Timer?
+    private var countsTimer: Timer?
+    private var observers: [NSObjectProtocol] = []
 
     private lazy var tagger = OmpTagger(tools: tools, workingDirectory: cache.root)
     /// Keyed by `tagKey(_:)`, so a new message in a conversation re-tags it.
@@ -108,8 +128,8 @@ final class MailStore {
     private var taggingRerun = false
     private var taggingBackoffUntil: Date?
 
-    init(himalaya: Himalaya, tools: ToolEnvironment) {
-        self.himalaya = himalaya
+    init(accounts: AccountStore, tools: ToolEnvironment) {
+        self.accountStore = accounts
         self.tools = tools
         taggingEnabled = UserDefaults.standard.object(forKey: Self.taggingDefaultsKey) as? Bool ?? true
     }
@@ -122,57 +142,110 @@ final class MailStore {
             await connect()
         }
         chat.start()
-        timers.append(Timer.scheduledTimer(withTimeInterval: 90, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { if self?.isLoading == false { self?.refresh() } }
+        push.start()
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: AccountStore.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.accountsDidChange() }
         })
-        timers.append(Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+        observers.append(center.addObserver(forName: PushService.connectionChanged, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pushConnectionChanged() }
+        })
+        schedulePolling()
+        countsTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshCounts() }
-        })
+        }
     }
 
-    /// Paints the last known accounts, mailboxes, tags and lists, and starts fetching mail for
-    /// them, before himalaya has listed a single account.
+    /// Polls every 90 s while push is down, every 15 min while it delivers changes.
+    private func schedulePolling() {
+        let interval = push.isConnected ? Self.pushPollInterval : Self.pollInterval
+        if let pollTimer, pollTimer.timeInterval == interval { return }
+        pollTimer?.invalidate()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { if self?.isLoading == false { self?.refresh() } }
+        }
+    }
+
+    /// A socket that just connected catches up on whatever changed while it was down.
+    private func pushConnectionChanged() {
+        schedulePolling()
+        if push.isConnected, taggingReady, !isLoading { refresh() }
+    }
+
+    /// Paints the signed-in accounts with their last known identities, mailboxes, tags and lists,
+    /// and starts fetching mail for them, before any provider has answered.
     private func restoreFromCache() async {
         let cache = cache
         async let savedTags = cache.loadTags()
         async let savedAccounts = cache.loadAccounts()
         if let saved = await savedTags { tags.merge(saved) { current, _ in current } }
-        guard let saved = await savedAccounts, !saved.isEmpty else { return }
-        accounts = saved
-        await loadCachedMailboxes(saved.map(\.name))
+        let restored = signedInAccounts(keeping: await savedAccounts ?? [])
+        guard !restored.isEmpty else { return }
+        accounts = restored
+        await loadCachedMailboxes(restored.map(\.name))
         post(.storeAccountsChanged)
         setNeedsRebuild()
         refresh()
     }
 
     private func connect() async {
-        do {
-            let dtos = try await himalaya.accounts()
-            let previous = Dictionary(accounts.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
-            let names = dtos.map(\.name)
-            let changed = names != accounts.map(\.name)
-            accounts = dtos.map { dto in
-                Account(name: dto.name, isDefault: dto.default, backends: dto.backends,
-                        identity: previous[dto.name]?.identity,
-                        kind: dto.backends.contains("msgraph") ? .outlook : previous[dto.name]?.kind ?? .generic)
-            }
-            if changed {
-                mailboxes = mailboxes.filter { names.contains($0.key) }
-                await loadCachedMailboxes(names.filter { mailboxes[$0] == nil })
-                post(.storeAccountsChanged)
-                setNeedsRebuild()
-                refresh()
-            }
+        await withTaskGroup(of: Void.self) { group in
+            for account in accounts { group.addTask { await self.loadAccount(account.name) } }
+        }
+        cache.saveAccounts(accounts)
+        taggingReady = true
+        refresh()
+        scheduleTagging()
+        refreshCounts()
+    }
+
+    /// The signed-in accounts in sidebar order, with the identities `known` already has, else
+    /// the name and address the sign-in reported.
+    private func signedInAccounts(keeping known: [Account]) -> [Account] {
+        let identities = Dictionary(known.compactMap { account in account.identity.map { (account.name, $0) } },
+                                    uniquingKeysWith: { a, _ in a })
+        return accountStore.records.map { record in
+            Account(name: record.id, label: record.label, provider: record.provider,
+                    identity: identities[record.id] ?? Address(name: record.displayName, email: record.id))
+        }
+    }
+
+    /// Follows sign-ins, removals and renames: added accounts load, removed ones drop their
+    /// mailboxes, listings and selection. An account without mailboxes (its last load failed,
+    /// e.g. before signing in again) loads again.
+    private func accountsDidChange() {
+        let next = signedInAccounts(keeping: accounts)
+        let before = Set(accounts.map(\.name))
+        let load = next.map(\.name).filter { !before.contains($0) || mailboxes[$0]?.isEmpty != false }
+        if next != accounts {
+            let removed = before.subtracting(next.map(\.name))
+            accounts = next
+            cache.saveAccounts(next)
+            if !removed.isEmpty { forget(removed) }
+            post(.storeAccountsChanged)
+            setNeedsRebuild()
+        }
+        guard !load.isEmpty else { return }
+        Task {
+            await loadCachedMailboxes(load)
             await withTaskGroup(of: Void.self) { group in
-                for account in accounts { group.addTask { await self.loadAccount(account.name) } }
+                for name in load { group.addTask { await self.loadAccount(name) } }
             }
             cache.saveAccounts(accounts)
-            taggingReady = true
             refresh()
-            scheduleTagging()
             refreshCounts()
-        } catch {
-            report(error)
+        }
+    }
+
+    private func forget(_ removed: Set<String>) {
+        mailboxes = mailboxes.filter { !removed.contains($0.key) }
+        listings = listings.filter { !removed.contains($0.key.account) }
+        searchResults = searchResults.filter { !removed.contains($0.key.account) }
+        cacheRead = cacheRead.filter { !removed.contains($0.account) }
+        switch selection {
+        case .mailbox(let key) where removed.contains(key.account): select(.allInboxes)
+        case .chat(let account?) where removed.contains(account): select(.allChats)
+        default: break
         }
     }
 
@@ -187,25 +260,17 @@ final class MailStore {
     }
 
     private func loadAccount(_ name: String) async {
-        let himalaya = himalaya
-        guard let account = accounts.first(where: { $0.name == name }) else { return }
-        async let identity = try? himalaya.identity(account: name)
+        guard let backend = accountStore.backend(for: name) else { return }
+        async let identity = try? backend.identity()
         do {
-            let dtos = try await himalaya.mailboxes(account: name, counts: false)
-            var attributes: [String: [String]] = [:]
-            if account.backends.contains("imap") {
-                for mailbox in (try? await himalaya.imapMailboxes(account: name)) ?? [] {
-                    attributes[mailbox.name] = mailbox.attributes
-                }
-            }
+            let fresh = try await backend.mailboxes(counts: false)
+            guard account(named: name) != nil else { return }
             let previous = Dictionary((mailboxes[name] ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-            let built = dtos.compactMap { dto -> Mailbox? in
-                let attrs = attributes[dto.name] ?? []
-                if attrs.contains(where: { $0.caseInsensitiveCompare("\\Noselect") == .orderedSame }) { return nil }
-                return Mailbox(account: name, id: dto.id, name: dto.name,
-                               role: Self.role(himalaya: dto.role, attributes: attrs, name: dto.name),
-                               unread: dto.unread ?? previous[dto.id]?.unread,
-                               total: dto.total ?? previous[dto.id]?.total)
+            let built = fresh.map { mailbox in
+                var mailbox = mailbox
+                mailbox.unread = mailbox.unread ?? previous[mailbox.id]?.unread
+                mailbox.total = mailbox.total ?? previous[mailbox.id]?.total
+                return mailbox
             }
             applyMailboxes(built, account: name)
             cache.saveMailboxes(built, for: name)
@@ -225,54 +290,37 @@ final class MailStore {
         mailboxes[account] = list.sorted {
             ($0.role.sortOrder, $0.displayName.localizedLowercase) < ($1.role.sortOrder, $1.displayName.localizedLowercase)
         }
-        if let index = accounts.firstIndex(where: { $0.name == account }), accounts[index].kind != .outlook {
-            accounts[index].kind = list.contains { $0.name.hasPrefix("[Gmail]") } ? .gmail : .generic
-        }
-    }
-
-    static func role(himalaya role: String?, attributes: [String], name: String) -> MailboxRole {
-        let candidates = [role?.lowercased()].compactMap { $0 } + attributes.map { $0.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "\\")) }
-        for candidate in candidates {
-            switch candidate {
-            case "inbox": return .inbox
-            case "sent": return .sent
-            case "drafts", "draft": return .drafts
-            case "trash": return .trash
-            case "junk", "spam": return .junk
-            case "archive": return .archive
-            case "all": return .all
-            case "flagged", "starred": return .starred
-            case "important": return .important
-            default: continue
-            }
-        }
-        return name.caseInsensitiveCompare("INBOX") == .orderedSame ? .inbox : .other
     }
 
     func refreshCounts() {
-        let himalaya = himalaya
-        for account in accounts {
-            Task {
-                guard let dtos = try? await himalaya.mailboxes(account: account.name, counts: true) else { return }
-                let counts = Dictionary(dtos.map { ($0.id, ($0.unread, $0.total)) }, uniquingKeysWith: { a, _ in a })
-                guard var list = mailboxes[account.name] else { return }
-                for index in list.indices {
-                    if let (unread, total) = counts[list[index].id] {
-                        list[index].unread = unread ?? list[index].unread
-                        list[index].total = total ?? list[index].total
-                    }
+        for account in accounts { refreshCounts(account: account.name) }
+    }
+
+    private func refreshCounts(account name: String) {
+        guard let backend = accountStore.backend(for: name) else { return }
+        Task {
+            guard let fresh = try? await backend.mailboxes(counts: true) else { return }
+            let counts = Dictionary(fresh.map { ($0.id, ($0.unread, $0.total)) }, uniquingKeysWith: { a, _ in a })
+            guard var list = mailboxes[name] else { return }
+            for index in list.indices {
+                if let (unread, total) = counts[list[index].id] {
+                    list[index].unread = unread ?? list[index].unread
+                    list[index].total = total ?? list[index].total
                 }
-                guard list != mailboxes[account.name] else { return }
-                mailboxes[account.name] = list
-                cache.saveMailboxes(list, for: account.name)
-                post(.storeAccountsChanged)
             }
+            guard list != mailboxes[name] else { return }
+            mailboxes[name] = list
+            cache.saveMailboxes(list, for: name)
+            post(.storeAccountsChanged)
         }
     }
 
     // MARK: - Lookup
 
     func account(named name: String) -> Account? { accounts.first { $0.name == name } }
+
+    /// The account's sidebar label; its id (the address) while unknown.
+    func label(account name: String) -> String { account(named: name)?.label ?? name }
 
     func mailbox(_ key: MailboxKey) -> Mailbox? {
         mailboxes[key.account]?.first { $0.id == key.mailbox }
@@ -283,12 +331,12 @@ final class MailStore {
     }
 
     /// Lowercased addresses of every configured account, to render "me".
-    var ownAddresses: Set<String> { Set(accounts.compactMap { $0.email?.lowercased() }) }
+    var ownAddresses: Set<String> { Set(accounts.flatMap { [$0.name, $0.email.lowercased()] }) }
 
     /// `address` with the owning account's display name when the header carried none.
     func withIdentityName(_ address: Address) -> Address {
         guard address.displayName == address.email,
-              let identity = accounts.first(where: { $0.email?.lowercased() == address.normalizedEmail })?.identity
+              let identity = accounts.first(where: { $0.email.lowercased() == address.normalizedEmail })?.identity
         else { return address }
         return Address(name: identity.name, email: address.email)
     }
@@ -297,7 +345,7 @@ final class MailStore {
         switch selection {
         case .unified(let role): role == .inbox ? "All Inboxes" : role.title
         case .mailbox(let key): mailbox(key)?.displayName ?? key.mailbox
-        case .chat(let account): account.map { chat.account(named: $0)?.email ?? $0 } ?? "Chat"
+        case .chat(let account): account.map { label(account: $0) } ?? "Chat"
         }
     }
 
@@ -329,7 +377,7 @@ final class MailStore {
     }
 
     var canLoadMore: Bool {
-        searchQuery == nil && primaryKeys.contains { !(listings[$0]?.reachedEnd ?? false) }
+        searchQuery == nil && primaryKeys.contains { listings[$0]?.next != nil }
     }
 
     private var primaryKeys: [MailboxKey] {
@@ -379,7 +427,7 @@ final class MailStore {
             for key in missing { group.addTask { (key, await cache.loadEnvelopes(key)) } }
             for await (key, cached) in group {
                 guard let cached, listings[key] == nil else { continue }
-                listings[key] = Listing(envelopes: cached, pages: 1, reachedEnd: cached.count < Self.pageSize)
+                listings[key] = Listing(envelopes: cached, next: nil)
             }
         }
     }
@@ -428,30 +476,9 @@ final class MailStore {
         isLoading = true
         lastError = nil
         post(.storeListChanged)
-        let himalaya = himalaya
         refreshTask = Task {
             await loadCachedListings(keys)
-            await withTaskGroup(of: (MailboxKey, Result<[Envelope], Error>).self) { group in
-                for key in keys {
-                    group.addTask {
-                        do {
-                            let list = try await himalaya.envelopes(account: key.account, mailbox: key.mailbox,
-                                                                    page: 1, pageSize: Self.pageSize)
-                            return (key, .success(list))
-                        } catch {
-                            return (key, .failure(error))
-                        }
-                    }
-                }
-                for await (key, result) in group {
-                    guard !Task.isCancelled else { continue }
-                    switch result {
-                    case .success(let list):
-                        if merge(firstPage: list, into: key) { setNeedsRebuild() }
-                    case .failure(let error): report(error, context: key.account)
-                    }
-                }
-            }
+            await fetchFirstPages(keys)
             guard !Task.isCancelled else { return }
             isLoading = false
             lastRefresh = Date()
@@ -459,20 +486,69 @@ final class MailStore {
         }
     }
 
-    /// Returns whether anything changed, so an unchanged mailbox costs no rebuild.
-    private func merge(firstPage: [Envelope], into key: MailboxKey) -> Bool {
-        let before = listings[key]
-        var listing = before ?? Listing(envelopes: [], pages: 0, reachedEnd: false)
-        if firstPage.count < Self.pageSize {
-            listing = Listing(envelopes: firstPage, pages: 1, reachedEnd: true)
-        } else {
-            let oldest = firstPage.compactMap(\.date).min() ?? .distantPast
-            let ids = Set(firstPage.map(\.id))
-            let older = listing.envelopes.filter { !ids.contains($0.id) && ($0.date ?? .distantPast) < oldest }
-            listing.envelopes = firstPage + older
-            listing.pages = max(listing.pages, 1)
+    /// Picks up a change push reported for `account`: its mailboxes in view and its counts.
+    /// Bursts (a sync touching many messages) coalesce into one pass.
+    func refresh(account: String) {
+        guard accountRefreshes[account] == nil else { return }
+        accountRefreshes[account] = Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            accountRefreshes[account] = nil
+            refreshCounts(account: account)
+            await fetchFirstPages((primaryKeys + contextKeys).filter { $0.account == account })
         }
-        guard listing.envelopes != before?.envelopes || listing.reachedEnd != before?.reachedEnd else { return false }
+    }
+
+    /// `keys` paired with their account's backend; keys of signed-out accounts drop out.
+    private func backends(_ keys: [MailboxKey]) -> [(MailboxKey, any MailBackend)] {
+        keys.compactMap { key in accountStore.backend(for: key.account).map { (key, $0) } }
+    }
+
+    /// First pages of `keys`. A key's answer counts only if no later request for it was made,
+    /// so a slow older pass never overwrites a newer one.
+    private func fetchFirstPages(_ keys: [MailboxKey]) async {
+        var tickets: [MailboxKey: Int] = [:]
+        for key in keys {
+            firstPageRequests[key, default: 0] += 1
+            tickets[key] = firstPageRequests[key]
+        }
+        await withTaskGroup(of: (MailboxKey, Result<EnvelopePage, Error>).self) { group in
+            for (key, backend) in backends(keys) {
+                group.addTask {
+                    do {
+                        let page = try await backend.envelopes(mailbox: key.mailbox, cursor: nil,
+                                                               pageSize: Self.pageSize, priority: .interactive)
+                        return (key, .success(page))
+                    } catch {
+                        return (key, .failure(error))
+                    }
+                }
+            }
+            for await (key, result) in group {
+                guard !Task.isCancelled, account(named: key.account) != nil,
+                      firstPageRequests[key] == tickets[key] else { continue }
+                switch result {
+                case .success(let page):
+                    if merge(firstPage: page, into: key) { setNeedsRebuild() }
+                case .failure(let error): report(error, context: key.account)
+                }
+            }
+        }
+    }
+
+    /// Returns whether anything changed, so an unchanged mailbox costs no rebuild.
+    private func merge(firstPage page: EnvelopePage, into key: MailboxKey) -> Bool {
+        let before = listings[key]
+        var listing = Listing(envelopes: page.envelopes, next: page.next)
+        if page.next != nil, let before {
+            let oldest = page.envelopes.compactMap(\.date).min() ?? .distantPast
+            let ids = Set(page.envelopes.map(\.id))
+            let older = before.envelopes.filter { !ids.contains($0.id) && ($0.date ?? .distantPast) < oldest }
+            listing.envelopes += older
+            // Pages loaded past the first keep their cursor; older mail only from disk is
+            // reached again through the first page's.
+            if !older.isEmpty, let next = before.next { listing.next = next }
+        }
+        guard listing.envelopes != before?.envelopes || listing.next != before?.next else { return false }
         listings[key] = listing
         persist(key)
         return true
@@ -485,22 +561,20 @@ final class MailStore {
 
     func loadMore() {
         guard loadMoreTask == nil, canLoadMore else { return }
-        let keys = primaryKeys.filter { !(listings[$0]?.reachedEnd ?? false) }
-        let himalaya = himalaya
+        let jobs = backends(primaryKeys.filter { listings[$0]?.next != nil })
         isLoading = true
         post(.storeListChanged)
         loadMoreTask = Task {
             defer { loadMoreTask = nil }
-            for key in keys {
-                let page = (listings[key]?.pages ?? 0) + 1
+            for (key, backend) in jobs {
+                guard let cursor = listings[key]?.next else { continue }
                 do {
-                    let list = try await himalaya.envelopes(account: key.account, mailbox: key.mailbox,
-                                                            page: page, pageSize: Self.pageSize)
+                    let page = try await backend.envelopes(mailbox: key.mailbox, cursor: cursor,
+                                                           pageSize: Self.pageSize, priority: .interactive)
                     guard !Task.isCancelled, var listing = listings[key] else { return }
                     let known = Set(listing.envelopes.map(\.id))
-                    listing.envelopes += list.filter { !known.contains($0.id) }
-                    listing.pages = page
-                    listing.reachedEnd = list.count < Self.pageSize
+                    listing.envelopes += page.envelopes.filter { !known.contains($0.id) }
+                    listing.next = page.next
                     listings[key] = listing
                 } catch {
                     if Task.isCancelled { return }
@@ -517,7 +591,7 @@ final class MailStore {
 
     func search(_ text: String) {
         searchTask?.cancel()
-        let query = text.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\"", with: "")
+        let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
             if searchQuery != nil {
                 searchQuery = nil
@@ -531,20 +605,17 @@ final class MailStore {
         searchResults = [:]
         isLoading = true
         setNeedsRebuild()
-        let keys = primaryKeys
-        let himalaya = himalaya
-        let expression = ["subject", "from", "to", "body"].map { "\($0) \"\(query)\"" }.joined(separator: " or ")
+        let jobs = backends(primaryKeys)
         searchTask = Task {
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled else { return }
             await withTaskGroup(of: (MailboxKey, Result<[Envelope], Error>).self) { group in
-                for key in keys {
+                for (key, backend) in jobs {
                     group.addTask {
                         // Bound before the tuple is built: Swift 6.3 at -O drops `key` from
                         // `(key, .success(try await …))` on success, so the list got garbage keys.
                         do {
-                            let list = try await himalaya.search(account: key.account, mailbox: key.mailbox,
-                                                                 query: expression, pageSize: Self.pageSize)
+                            let list = try await backend.search(mailbox: key.mailbox, query: query, pageSize: Self.pageSize)
                             return (key, .success(list))
                         } catch {
                             return (key, .failure(error))
@@ -654,19 +725,17 @@ final class MailStore {
     /// Messages `preload` brings in per conversation: enough for the thread's visible end.
     private static let preloadCount = 10
 
-    /// One shared load per message: disk cache first, else himalaya, parsed and cached off the main actor.
+    /// One shared load per message: disk cache first, else the provider, assembled and cached off
+    /// the main actor.
     private func loadTask(_ ref: MessageRef, priority: RequestPriority) -> Task<LoadedContent, Error> {
         if let task = contentTasks[ref] { return task }
-        let himalaya = himalaya, cache = cache
+        let backend = accountStore.backend(for: ref.account), cache = cache
         let task = Task.detached(priority: priority == .interactive ? .userInitiated : .utility) {
-            let content: MessageContent
-            if let cached = await cache.loadContent(ref) {
-                content = cached
-            } else {
-                let data = try await himalaya.readMessage(ref, priority: priority)
-                content = try MessageParser.parse(data, directory: cache.messageDirectory(ref), urlBase: cache.partURLBase(ref))
-                cache.saveContent(content, for: ref)
-            }
+            if let cached = await cache.loadContent(ref) { return LoadedContent(cached) }
+            guard let backend else { throw StoreError.signedOut }
+            let content = try await backend.content(id: ref.id, mailbox: ref.mailbox, directory: cache.messageDirectory(ref),
+                                                    urlBase: cache.partURLBase(ref), priority: priority)
+            cache.saveContent(content, for: ref)
             return LoadedContent(content)
         }
         contentTasks[ref] = task
@@ -900,38 +969,38 @@ final class MailStore {
             ? conversation.messages.filter { !$0.envelope.isSeen }
             : [conversation.messages.last(where: { $0.role != .sent }) ?? conversation.latest]
         guard !targets.isEmpty else { return }
-        mutateFlags(targets, flag: "seen", add: read)
+        mutateFlags(targets, flag: .seen, add: read)
         adjustUnread(targets, delta: read ? -1 : 1)
     }
 
     func setFlagged(_ conversation: Conversation, flagged: Bool) {
         let targets = flagged ? [conversation.latest] : conversation.messages.filter(\.envelope.isFlagged)
-        mutateFlags(targets, flag: "flagged", add: flagged)
+        mutateFlags(targets, flag: .flagged, add: flagged)
     }
 
-    private func mutateFlags(_ targets: [MailMessage], flag: String, add: Bool) {
+    private func mutateFlags(_ targets: [MailMessage], flag: MessageFlag, add: Bool) {
         let refs = Set(targets.map(\.ref))
         updateEnvelopes(refs) { envelope in
-            if add { envelope.flags.insert(flag) } else { envelope.flags.remove(flag) }
+            if add { envelope.flags.insert(flag.rawValue) } else { envelope.flags.remove(flag.rawValue) }
         }
-        let himalaya = himalaya
         for (key, messages) in Dictionary(grouping: targets, by: \.ref.mailboxKey) {
             let ids = messages.map(\.ref.id)
             Task {
                 do {
-                    if add {
-                        try await himalaya.addFlags([flag], ids: ids, account: key.account, mailbox: key.mailbox)
-                    } else {
-                        try await himalaya.removeFlags([flag], ids: ids, account: key.account, mailbox: key.mailbox)
-                    }
+                    try await backend(for: key.account).setFlag(flag, add, ids: ids, mailbox: key.mailbox)
                 } catch {
                     updateEnvelopes(Set(messages.map(\.ref))) { envelope in
-                        if add { envelope.flags.remove(flag) } else { envelope.flags.insert(flag) }
+                        if add { envelope.flags.remove(flag.rawValue) } else { envelope.flags.insert(flag.rawValue) }
                     }
                     report(error, context: key.account, alert: true)
                 }
             }
         }
+    }
+
+    private func backend(for account: String) throws -> any MailBackend {
+        guard let backend = accountStore.backend(for: account) else { throw StoreError.signedOut }
+        return backend
     }
 
     private func adjustUnread(_ targets: [MailMessage], delta: Int) {
@@ -968,7 +1037,7 @@ final class MailStore {
     /// Moves the conversation to the trash; messages already there are deleted for good.
     func trash(_ conversation: Conversation) {
         guard let trash = mailbox(account: conversation.account, role: .trash) else {
-            report(HimalayaError(message: "No trash mailbox found."), context: conversation.account, alert: true)
+            report(StoreError(message: "No trash mailbox found."), context: conversation.account, alert: true)
             return
         }
         let inTrash = conversation.messages.filter { $0.ref.mailbox == trash.id }
@@ -976,10 +1045,9 @@ final class MailStore {
         move(elsewhere, to: trash)
         guard !inTrash.isEmpty else { return }
         removeEnvelopes(Set(inTrash.map(\.ref)))
-        let himalaya = himalaya
         Task {
             do {
-                try await himalaya.delete(ids: inTrash.map(\.ref.id), account: trash.account, mailbox: trash.id)
+                try await backend(for: trash.account).delete(ids: inTrash.map(\.ref.id), mailbox: trash.id)
             } catch {
                 report(error, context: trash.account, alert: true)
                 refresh()
@@ -991,12 +1059,10 @@ final class MailStore {
         let targets = targets.filter { $0.ref.mailbox != destination.id }
         guard !targets.isEmpty else { return }
         removeEnvelopes(Set(targets.map(\.ref)))
-        let himalaya = himalaya
         for (key, messages) in Dictionary(grouping: targets, by: \.ref.mailboxKey) {
             Task {
                 do {
-                    try await himalaya.move(ids: messages.map(\.ref.id), account: key.account,
-                                            from: key.mailbox, to: destination.id)
+                    try await backend(for: key.account).move(ids: messages.map(\.ref.id), from: key.mailbox, to: destination.id)
                 } catch {
                     report(error, context: key.account, alert: true)
                     refresh()
@@ -1005,18 +1071,13 @@ final class MailStore {
         }
     }
 
-    func send(_ fields: Himalaya.ComposeFields, mode: Himalaya.ComposeMode, account: String) async throws {
-        try await himalaya.send(fields, mode: mode, account: account)
-        await didSend(mode)
-    }
-
-    /// Marks the source answered and picks up the sent copy.
-    func didSend(_ mode: Himalaya.ComposeMode) async {
-        if case .reply(let ref) = mode {
-            updateEnvelopes([ref]) { $0.flags.insert("answered") }
+    /// Sends from `account`, then picks up the sent copy.
+    func send(_ message: OutgoingMessage, account: String) async throws {
+        try await backend(for: account).send(message)
+        Task {
+            try? await Task.sleep(for: .seconds(1))
+            refresh(account: account)
         }
-        try? await Task.sleep(for: .seconds(1))
-        refresh()
     }
 
     /// Flags never change threading, so the visible list is patched in place instead of rebuilt.

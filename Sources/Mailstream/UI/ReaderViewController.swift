@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 @MainActor
 protocol ReaderDelegate: AnyObject {
-    func reader(_ reader: ReaderViewController, compose mode: Himalaya.ComposeMode, replyAll: Bool, message: MailMessage,
+    func reader(_ reader: ReaderViewController, compose mode: ComposeMode, replyAll: Bool, message: MailMessage,
                 text: String, plan: ReplyPlan?)
     func reader(_ reader: ReaderViewController, composeTo address: Address)
 }
@@ -36,7 +36,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
     /// `MS.render` state of the current thread, waiting for the shell to finish loading.
     private var staged: [String: Any]?
 
-    /// An inline reply in progress; `plan` arrives from a himalaya dry run shortly after opening.
+    /// An inline reply in progress; `plan` arrives once the source's content is loaded.
     private struct Reply {
         let conversation: String
         var source: MailMessage
@@ -288,7 +288,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         let untrusted = store.untrustedSenders(in: conversation)
         let trustLabel = junk || untrusted.isEmpty ? nil : untrusted.count == 1 ? untrusted[0].shortName : "These Senders"
         let html = ReaderPage.thread(conversation: conversation, cards: cards, own: store.ownAddresses,
-                                     accountLabel: conversation.account,
+                                     accountLabel: store.label(account: conversation.account),
                                      accountColor: AccountStyle.hex(for: conversation.account, in: store),
                                      mailboxLabels: labels, tag: store.tag(for: conversation), chat: chat,
                                      trustLabel: trustLabel)
@@ -475,7 +475,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
     }
 
     private func compose(_ action: String, message: MailMessage) {
-        let mode: Himalaya.ComposeMode = action == "forward" ? .forward(message.ref) : .reply(message.ref)
+        let mode: ComposeMode = action == "forward" ? .forward(message.ref) : .reply(message.ref)
         delegate?.reader(self, compose: mode, replyAll: action == "replyAll", message: message, text: "", plan: nil)
     }
 
@@ -505,7 +505,9 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         if let plan = reply.plan {
             pushReplyInfo(to: plan.to, cc: plan.cc)
         } else {
-            let guess = guessRecipients(for: reply.source, all: reply.all)
+            // From what is loaded already, shown at once until the plan replaces it.
+            let guess = MailStore.replyRecipients(for: reply.source, content: store.loadedContent(for: reply.source.ref),
+                                                  own: store.ownAddresses, all: reply.all)
             pushReplyInfo(to: guess.to, cc: guess.cc)
         }
         pushReplyQuote()
@@ -552,20 +554,6 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
                      ["state": "error", "message": "\(wasSending ? "Not sent" : "Could not prepare the reply"): \(error.localizedDescription)"])
             }
         }
-    }
-
-    /// Recipients from local data, shown at once until himalaya's answer replaces them: `Reply-To`
-    /// or `From`, or, for one of your own messages, its recipients.
-    private func guessRecipients(for source: MailMessage, all: Bool) -> (to: [Address], cc: [Address]) {
-        let own = store.ownAddresses
-        let content = store.loadedContent(for: source.ref)
-        let fromMe = source.envelope.from.contains { own.contains($0.normalizedEmail) }
-        let replyTo = content?.replyTo ?? []
-        let to = fromMe ? source.envelope.to : (replyTo.isEmpty ? source.envelope.from : replyTo)
-        guard all else { return (to, []) }
-        var seen = Set(to.map(\.normalizedEmail)).union(own)
-        let cc = (source.envelope.to + source.envelope.from + (content?.cc ?? [])).filter { seen.insert($0.normalizedEmail).inserted }
-        return (to, cc)
     }
 
     private func pushReplyInfo(to: [Address], cc: [Address]) {

@@ -15,7 +15,7 @@ extension Notification.Name {
     static let chatMessagesChanged = Notification.Name("ChatStore.messagesChanged")
 }
 
-/// A message sent from here that the engine has not confirmed yet, or that failed to send.
+/// A message sent from here that Google has not confirmed yet, or that failed to send.
 struct ChatPending: Hashable, Sendable {
     let id: String
     let text: String
@@ -32,20 +32,21 @@ struct ChatThread: Sendable {
     /// Older messages exist beyond the first one here.
     var more = false
     var lastRead: Date?
-    /// Answered by the engine this session (not only read from disk).
+    /// Answered by Google this session (not only read from disk).
     var loaded = false
     /// Why the last fetch failed, while there is nothing to show.
     var failure: String?
     var pending: [ChatPending] = []
 }
 
-/// Google Chat state: chat accounts, each account's most recently active spaces, and the messages
-/// of spaces the user opened. Main-actor state only; the engine call, its JSON decoding, row
-/// formatting and the disk cache run off the main actor, like `MailStore`'s.
+/// Google Chat state: chat accounts (Google accounts granted Chat access), each account's most
+/// recently active spaces, and the messages of spaces the user opened. Main-actor state only;
+/// requests, JSON decoding, row formatting and the disk cache run off the main actor, like
+/// `MailStore`'s.
 ///
-/// Spaces are polled every 20 s (the engine refetches only spaces whose activity changed). Reading
+/// Spaces are polled every 20 s (`Chat` refetches only spaces whose activity changed). Reading
 /// and sending are optimistic: opening a space clears its unread count at once, and a sent message
-/// shows as pending until the engine returns it. A failed send is marked failed, never retried.
+/// shows as pending until Google returns it. A failed send is marked failed, never retried.
 @MainActor
 final class ChatStore {
     nonisolated static let spacesPage = 60
@@ -56,8 +57,12 @@ final class ChatStore {
     /// Messages kept on disk per recent space.
     static let cachedMessages = 150
 
-    private let engine = Chat()
+    /// The scope that makes a Google account a chat account.
+    static let chatScope = "https://www.googleapis.com/auth/chat.messages.readonly"
+
+    private let chat: Chat
     private let cache: MailCache
+    private let accountStore: AccountStore
 
     private(set) var accounts: [ChatAccount] = []
     /// Every account's spaces as list rows, newest first.
@@ -76,11 +81,10 @@ final class ChatStore {
     private var listings: [String: Listing] = [:]
     private var threads: [ChatSpaceKey: ChatThread] = [:]
     private var recent: [ChatSpaceKey] = []
-    /// When the user last read a space here; polls answered before the engine saw it keep it read.
+    /// When the user last read a space here; polls answered before Google saw it keep it read.
     private var readMarks: [ChatSpaceKey: Date] = [:]
     /// Bumped by each mark-read, so only the latest one may roll its optimistic mark back.
     private var readRevisions: [ChatSpaceKey: Int] = [:]
-    private var connected = false
     private var pollTask: Task<Void, Never>?
     private var loadMoreTask: Task<Void, Never>?
     private var fetches: [ChatSpaceKey: Task<Void, Never>] = [:]
@@ -90,8 +94,19 @@ final class ChatStore {
     private var needsRebuild = false
     private var timer: Timer?
 
-    init(cache: MailCache) {
+    init(cache: MailCache, accounts: AccountStore) {
         self.cache = cache
+        accountStore = accounts
+        chat = Chat { id in
+            await MainActor.run {
+                guard accounts.record(id).map(ChatStore.isChat) == true else { return nil }
+                return accounts.api(for: id)
+            }
+        }
+    }
+
+    private static func isChat(_ record: AccountRecord) -> Bool {
+        record.provider == .google && record.scopes.contains(chatScope)
     }
 
     // MARK: - Startup and polling
@@ -99,14 +114,24 @@ final class ChatStore {
     func start() {
         Task {
             await restoreFromCache()
-            await connect(reporting: true)
+            await syncAccounts()
+            poll(quiet: false)
+        }
+        NotificationCenter.default.addObserver(forName: AccountStore.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                Task {
+                    await self.syncAccounts()
+                    self.poll(quiet: false)
+                }
+            }
         }
         timer = Timer.scheduledTimer(withTimeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll(quiet: true) }
         }
     }
 
-    /// Paints the last known accounts and spaces before the engine answers.
+    /// Paints the last known accounts and spaces before Google answers.
     private func restoreFromCache() async {
         let cache = cache
         let savedRecent = await cache.loadChatRecent() ?? []
@@ -129,25 +154,23 @@ final class ChatStore {
         }
     }
 
-    /// Lists chat accounts, then polls them. Without chat set up (or with an engine that refuses),
-    /// only the first failure is shown; later polls retry quietly.
-    private func connect(reporting: Bool) async {
-        do {
-            let fresh = try await engine.accounts()
-            connected = true
-            if fresh != accounts {
-                let names = Set(fresh.map(\.name))
-                accounts = fresh
-                listings = listings.filter { names.contains($0.key) }
-                await loadCachedSpaces(fresh.map(\.name).filter { listings[$0] == nil })
-                cache.saveChatAccounts(fresh)
-                post(.chatSpacesChanged)
-                setNeedsRebuild()
-            }
-            poll(quiet: false)
-        } catch {
-            if reporting { report(error) }
+    /// Takes the chat accounts from `AccountStore`; removed accounts' spaces disappear.
+    private func syncAccounts() async {
+        let fresh = accountStore.records.filter(Self.isChat).map { ChatAccount(name: $0.id, email: $0.id) }
+        guard fresh != accounts else { return }
+        let names = Set(fresh.map(\.name))
+        for gone in accounts.map(\.name) where !names.contains(gone) {
+            let chat = chat
+            Task { await chat.forget(account: gone) }
         }
+        accounts = fresh
+        listings = listings.filter { names.contains($0.key) }
+        threads = threads.filter { names.contains($0.key.account) }
+        if let openSpace, !names.contains(openSpace.account) { self.openSpace = nil }
+        await loadCachedSpaces(fresh.map(\.name).filter { listings[$0] == nil })
+        cache.saveChatAccounts(fresh)
+        post(.chatSpacesChanged)
+        setNeedsRebuild()
     }
 
     /// Fetches every account's spaces now (toolbar refresh, selecting Chat).
@@ -155,10 +178,6 @@ final class ChatStore {
 
     /// `quiet` polls (the timer) show no progress.
     private func poll(quiet: Bool) {
-        guard connected else {
-            if !quiet || !accounts.isEmpty { Task { await connect(reporting: !quiet) } }
-            return
-        }
         let names = accounts.map(\.name)
         guard !names.isEmpty else { return }
         if !quiet && !isLoading {
@@ -166,7 +185,7 @@ final class ChatStore {
             post(.chatSpacesChanged)
         }
         guard pollTask == nil else { return }
-        let engine = engine
+        let chat = chat
         let limits = Dictionary(names.map { ($0, listings[$0]?.limit ?? Self.spacesPage) }, uniquingKeysWith: { a, _ in a })
         pollTask = Task {
             var failed = false
@@ -175,7 +194,7 @@ final class ChatStore {
                     let limit = limits[name] ?? Self.spacesPage
                     group.addTask {
                         do {
-                            let list = try await engine.spaces(account: name, limit: limit)
+                            let list = try await chat.spaces(account: name, limit: limit)
                             return (name, limit, .success(list))
                         } catch {
                             return (name, limit, .failure(error))
@@ -200,6 +219,8 @@ final class ChatStore {
 
     /// Takes in one account's spaces; returns early when nothing changed, so an idle poll costs nothing.
     private func apply(_ fresh: ChatSpaceList, account: String, limit: Int) {
+        // A poll that outlived its account's sign-out.
+        guard accounts.contains(where: { $0.name == account }) else { return }
         // A poll started before the limit was raised would shrink the list back.
         if let current = listings[account]?.limit, current != limit { return }
         let previous = Dictionary((listings[account]?.list.spaces ?? []).map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
@@ -275,14 +296,14 @@ final class ChatStore {
     func loadMore(account: String?) {
         guard canLoadMore(account: account) else { return }
         let names = accounts.map(\.name).filter { (account == nil || $0 == account) && listings[$0]?.list.more == true }
-        let engine = engine
+        let chat = chat
         isLoading = true
         post(.chatSpacesChanged)
         loadMoreTask = Task {
             for name in names {
                 let limit = (listings[name]?.limit ?? Self.spacesPage) + Self.spacesPage
                 do {
-                    let list = try await engine.spaces(account: name, limit: limit)
+                    let list = try await chat.spaces(account: name, limit: limit)
                     listings[name]?.limit = limit
                     apply(list, account: name, limit: limit)
                 } catch {
@@ -321,7 +342,7 @@ final class ChatStore {
         }
     }
 
-    /// The reader shows `key`: its cached messages at once, the newest from the engine when they
+    /// The reader shows `key`: its cached messages at once, the newest from Google when they
     /// arrive, and it is marked read.
     func open(_ key: ChatSpaceKey) {
         openSpace = key
@@ -338,10 +359,10 @@ final class ChatStore {
             fetchAgain.insert(key)
             return
         }
-        let engine = engine
+        let chat = chat
         fetches[key] = Task {
             do {
-                let page = try await engine.messages(account: key.account, space: key.space, limit: Self.messagesPage)
+                let page = try await chat.messages(account: key.account, space: key.space, limit: Self.messagesPage)
                 fetches[key] = nil
                 merge(latest: page, into: key)
             } catch {
@@ -357,6 +378,7 @@ final class ChatStore {
 
     /// The newest page replaces what it covers; older loaded messages stay below it.
     private func merge(latest page: ChatMessagePage, into key: ChatSpaceKey) {
+        guard accounts.contains(where: { $0.name == key.account }) else { return }
         var thread = threads[key] ?? ChatThread()
         // Messages newer than the page's newest were confirmed (sent from here) after this fetch
         // left; the page can't have them, so they stay.
@@ -388,10 +410,10 @@ final class ChatStore {
     func loadEarlier(_ key: ChatSpaceKey) {
         guard earlier[key] == nil, let thread = threads[key], thread.more,
               let oldest = thread.messages.first?.created else { return }
-        let engine = engine
+        let chat = chat
         earlier[key] = Task {
             do {
-                let page = try await engine.messages(account: key.account, space: key.space, limit: Self.messagesPage,
+                let page = try await chat.messages(account: key.account, space: key.space, limit: Self.messagesPage,
                                                      before: oldest)
                 earlier[key] = nil
                 guard var thread = threads[key] else { return }
@@ -411,17 +433,17 @@ final class ChatStore {
 
     // MARK: - Reading and sending
 
-    /// Clears the unread count at once; restores it if the engine refuses.
+    /// Clears the unread count at once; restores it if Google refuses.
     func markRead(_ key: ChatSpaceKey) {
         readMarks[key] = max(readMarks[key] ?? .distantPast, Date())
         let revision = (readRevisions[key] ?? 0) + 1
         readRevisions[key] = revision
         let previous = space(key)
         if let previous, previous.unread != 0 { updateSpace(key) { $0.unread = 0 } }
-        let engine = engine
+        let chat = chat
         Task {
             do {
-                let lastRead = try await engine.markRead(account: key.account, space: key.space)
+                let lastRead = try await chat.markRead(account: key.account, space: key.space)
                 guard let lastRead else { return }
                 readMarks[key] = max(readMarks[key] ?? lastRead, lastRead)
                 threads[key]?.lastRead = lastRead
@@ -443,10 +465,10 @@ final class ChatStore {
         let pending = ChatPending(id: "pending-" + UUID().uuidString, text: trimmed, thread: thread, created: Date())
         threads[key, default: ChatThread()].pending.append(pending)
         postMessages(key)
-        let engine = engine
+        let chat = chat
         Task {
             do {
-                let message = try await engine.send(account: key.account, space: key.space, text: pending.text,
+                let message = try await chat.send(account: key.account, space: key.space, text: pending.text,
                                                     thread: pending.thread)
                 var thread = threads[key] ?? ChatThread()
                 thread.pending.removeAll { $0.id == pending.id }

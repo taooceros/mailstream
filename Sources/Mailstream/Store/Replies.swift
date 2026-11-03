@@ -1,11 +1,18 @@
 import Foundation
 
+/// What a composer writes: a new message, or a reply to or forward of a message.
+enum ComposeMode: Sendable {
+    case new
+    case reply(MessageRef)
+    case forward(MessageRef)
+}
+
 /// What a reply goes out with, worked out before the user hits Send so the recipients can be shown.
 struct ReplyPlan: Sendable {
     var to: [Address]
     var cc: [Address]
     var subject: String
-    /// himalaya's `> `-quoted text of the source, without the attribution line.
+    /// The source's text with every line `> `-quoted, without the attribution line.
     var quotedText: String
     /// "On Mon, Nov 2, 2026 at 11:41 AM, Josh Patrick wrote:"
     var attribution: String
@@ -16,44 +23,107 @@ struct ReplyPlan: Sendable {
     }
 }
 
+/// A forward's prefilled subject and body: the source under a forwarded-message header.
+struct ForwardDraft: Sendable {
+    var subject: String
+    var body: String
+}
+
 extension MailStore {
-    /// Recipients the way mail clients derive them: himalaya answers `Reply-To` or `From`; reply-all
-    /// adds everyone else on the source except the user's own addresses.
+    /// Recipients the way mail clients derive them: `Reply-To`, else `From`, or for one of the
+    /// user's own messages its recipients; reply-all copies everyone else on the source except
+    /// the user's own addresses.
+    nonisolated static func replyRecipients(for source: MailMessage, content: MessageContent?, own: Set<String>,
+                                            all: Bool) -> (to: [Address], cc: [Address]) {
+        let envelope = source.envelope
+        let fromMe = envelope.from.contains { own.contains($0.normalizedEmail) }
+        let replyTo = content?.replyTo ?? []
+        var to = fromMe ? envelope.to : (replyTo.isEmpty ? envelope.from : replyTo)
+        guard all else { return (to, []) }
+        var seen = Set(to.map(\.normalizedEmail)).union(own)
+        var cc = (envelope.to + (content?.cc ?? [])).filter { seen.insert($0.normalizedEmail).inserted }
+        if to.isEmpty, !cc.isEmpty { to = [cc.removeFirst()] }
+        return (to, cc)
+    }
+
     func replyPlan(for source: MailMessage, all: Bool) async throws -> ReplyPlan {
-        let draft = try await himalaya.draft(mode: .reply(source.ref), account: source.ref.account)
-        var to = draft?.to.compactMap(Address.parse) ?? []
-        var cc: [Address] = []
-        if all {
-            let content = try? await content(for: source.ref).content
-            var seen = Set(to.map(\.normalizedEmail)).union(ownAddresses)
-            for address in source.envelope.to + source.envelope.from + (content?.cc ?? [])
-                where seen.insert(address.normalizedEmail).inserted {
-                cc.append(address)
-            }
-            if to.isEmpty, let first = cc.first { to = [first]; cc.removeFirst() }
-        }
-        let quoted = (draft?.body ?? "").replacingOccurrences(of: "\r\n", with: "\n").trimmingCharacters(in: .newlines)
-        return ReplyPlan(to: to, cc: cc, subject: draft?.subject ?? source.envelope.subject,
-                         quotedText: quoted, attribution: Self.attribution(for: source))
+        let content = try await content(for: source.ref).content
+        let recipients = Self.replyRecipients(for: source, content: content, own: ownAddresses, all: all)
+        return ReplyPlan(to: recipients.to, cc: recipients.cc,
+                         subject: Self.prefixed(source.envelope.subject, "Re:", unless: ["re:", "aw:"]),
+                         quotedText: Self.quote(content.text ?? ""), attribution: Self.attribution(for: source))
+    }
+
+    func forwardDraft(for source: MailMessage) async throws -> ForwardDraft {
+        let content = try await content(for: source.ref).content
+        let envelope = source.envelope
+        var header = ["---------- Forwarded message ---------",
+                      "From: " + envelope.from.map(Self.headerForm).joined(separator: ", ")]
+        if let date = envelope.date { header.append("Date: " + Self.attributionDate(date)) }
+        header.append("Subject: " + envelope.subject)
+        header.append("To: " + envelope.to.map(Self.headerForm).joined(separator: ", "))
+        if !content.cc.isEmpty { header.append("Cc: " + content.cc.map(Self.headerForm).joined(separator: ", ")) }
+        let text = (content.text ?? "").replacingOccurrences(of: "\r\n", with: "\n")
+        return ForwardDraft(subject: Self.prefixed(envelope.subject, "Fwd:", unless: ["fwd:", "fw:"]),
+                            body: header.joined(separator: "\n") + "\n\n" + text)
     }
 
     static func attribution(for source: MailMessage) -> String {
         let sender = source.envelope.from.first.map { $0.name ?? $0.email } ?? "Someone"
-        let when = source.envelope.date.map {
-            $0.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().year().hour().minute())
-        }
+        let when = source.envelope.date.map(attributionDate)
         return "On \(when.map { "\($0), " } ?? "")\(sender) wrote:"
+    }
+
+    private nonisolated static func attributionDate(_ date: Date) -> String {
+        date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().year().hour().minute())
+    }
+
+    /// `Name <address>`, or the bare address.
+    private nonisolated static func headerForm(_ address: Address) -> String {
+        address.displayName == address.email ? address.email : "\(address.displayName) <\(address.email)>"
+    }
+
+    /// `subject` with `prefix` in front, unless it already starts with one of `existing` (lowercased).
+    private nonisolated static func prefixed(_ subject: String, _ prefix: String, unless existing: [String]) -> String {
+        let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        return existing.contains { lower.hasPrefix($0) } ? trimmed : prefix + " " + trimmed
+    }
+
+    private nonisolated static func quote(_ text: String) -> String {
+        let body = text.replacingOccurrences(of: "\r\n", with: "\n").trimmingCharacters(in: .newlines)
+        guard !body.isEmpty else { return "" }
+        return body.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.hasPrefix(">") ? ">" + $0 : "> " + $0 }
+            .joined(separator: "\n")
+    }
+
+    /// The message `account` sends, from its identity; a reply or forward of `source` is threaded
+    /// under it.
+    func outgoing(account: String, source: MailMessage?, to: [Address], cc: [Address], bcc: [Address],
+                  subject: String, text: String, html: String? = nil, attachments: [URL] = []) async -> OutgoingMessage {
+        var message = OutgoingMessage(from: self.account(named: account)?.identity ?? Address(name: nil, email: account),
+                                      to: to, cc: cc, bcc: bcc, subject: subject, text: text, html: html,
+                                      attachments: attachments, inReplyTo: nil, references: [], thread: nil)
+        guard let source else { return message }
+        let references = (try? await content(for: source.ref).content.references) ?? []
+        message.thread = source.envelope.thread
+        if let id = source.envelope.messageID {
+            message.inReplyTo = id
+            message.references = references.filter { $0 != id } + [id]
+        } else {
+            message.references = references
+        }
+        return message
     }
 
     /// Sends an inline reply as plain text plus HTML, the HTML quoting the source's own HTML body.
     func sendReply(_ text: String, plan: ReplyPlan, source: MailMessage) async throws {
         let content = try? await content(for: source.ref).content
-        let fields = Himalaya.ComposeFields(from: account(named: source.ref.account)?.identity?.rfc5322,
-                                            to: plan.to.map(\.rfc5322), cc: plan.cc.map(\.rfc5322), bcc: [],
-                                            subject: plan.subject, body: plan.plainBody(text), attachments: [])
         let html = ReplyHTML.document(reply: text, attribution: plan.attribution, source: content)
-        try await himalaya.sendReply(fields, html: html, to: source.ref, account: source.ref.account)
-        Task { await didSend(.reply(source.ref)) }
+        let message = await outgoing(account: source.ref.account, source: source, to: plan.to, cc: plan.cc, bcc: [],
+                                     subject: plan.subject, text: plan.plainBody(text), html: html)
+        try await send(message, account: source.ref.account)
     }
 }
 

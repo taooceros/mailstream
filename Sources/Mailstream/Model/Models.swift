@@ -22,7 +22,7 @@ struct Address: Codable, Hashable, Sendable {
         return first
     }
 
-    /// RFC 5322 mailbox form, suitable for himalaya's recipient flags.
+    /// RFC 5322 mailbox form, as recipient tokens hold it.
     var rfc5322: String {
         guard let name = name?.trimmingCharacters(in: .whitespaces), !name.isEmpty, name != email else { return email }
         let escaped = name.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
@@ -99,27 +99,17 @@ enum MailboxRole: String, Codable, Sendable, CaseIterable {
     var showsRecipients: Bool { self == .sent || self == .drafts }
 }
 
-enum AccountKind: String, Codable, Sendable {
-    case gmail, outlook, generic
-
-    var symbol: String {
-        switch self {
-        case .gmail: "envelope.circle.fill"
-        case .outlook: "envelope.badge.shield.half.filled"
-        case .generic: "at.circle.fill"
-        }
-    }
-}
-
 struct Account: Hashable, Sendable, Identifiable, Codable {
+    /// `AccountRecord.id`: the lowercased address.
     let name: String
-    var isDefault: Bool
-    var backends: [String]
+    /// Shown in the sidebar and on threads.
+    var label: String
+    var provider: Provider
+    /// The address and the name the account sends as.
     var identity: Address?
-    var kind: AccountKind
 
     var id: String { name }
-    var email: String? { identity?.email }
+    var email: String { identity?.email ?? name }
 }
 
 struct Mailbox: Hashable, Sendable, Identifiable, Codable {
@@ -132,12 +122,7 @@ struct Mailbox: Hashable, Sendable, Identifiable, Codable {
 
     var key: MailboxKey { MailboxKey(account: account, mailbox: id) }
 
-    var displayName: String {
-        if role != .other { return role.title }
-        var name = name
-        if name.hasPrefix("[Gmail]/") { name.removeFirst("[Gmail]/".count) }
-        return name
-    }
+    var displayName: String { role == .other ? name : role.title }
 }
 
 struct MailboxKey: Hashable, Sendable, Codable {
@@ -147,6 +132,8 @@ struct MailboxKey: Hashable, Sendable, Codable {
 
 struct Envelope: Codable, Hashable, Sendable {
     let id: String
+    /// The provider's thread (Gmail thread id, Graph conversation id).
+    let thread: String?
     let messageID: String?
     let inReplyTo: [String]
     var flags: Set<String>
@@ -248,5 +235,4 @@ struct MessageContent: Codable, Sendable {
     var references: [String]
     var attachments: [Attachment]
     var snippet: String
-    var listUnsubscribe: String?
 }

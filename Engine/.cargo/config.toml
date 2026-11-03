@@ -1,3 +1,0 @@
-# The app's minimum macOS (Package.swift), for Rust and the C sources built by dependencies.
-[env]
-MACOSX_DEPLOYMENT_TARGET = "15.0"

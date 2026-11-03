@@ -130,6 +130,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         center.addObserver(self, selector: #selector(accountsChanged), name: .storeAccountsChanged, object: store)
         center.addObserver(self, selector: #selector(chatChanged), name: .chatSpacesChanged, object: store.chat)
         center.addObserver(self, selector: #selector(storeError(_:)), name: .storeError, object: store)
+        center.addObserver(self, selector: #selector(storeError(_:)), name: .storeError, object: store.accountStore)
         updateTitle()
     }
 
@@ -144,7 +145,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     var preferredAccount: String? {
         if let selected { return selected.account }
         if case .mailbox(let key) = store.selection { return key.account }
-        return store.accounts.first(where: \.isDefault)?.name ?? store.accounts.first?.name
+        return store.accounts.first?.name
     }
 
     // MARK: - Navigation
@@ -299,7 +300,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         }
     }
 
-    /// The reader follows the fingers to the right, uncovering the list, which settles from slightly
+    /// The reader follows the fingers sideways, uncovering the list, which settles from slightly
     /// enlarged as it does on close.
     private func dragReader(to offset: CGFloat) {
         guard readerOpen, let page = reader.view.layer, let below = list.view.layer else { return }
@@ -311,26 +312,29 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             below.removeAnimation(forKey: "unfold")
             reader.view.alphaValue = 1
         }
-        let progress = min(offset / max(reader.view.bounds.width, 1), 1)
+        let progress = min(abs(offset) / max(reader.view.bounds.width, 1), 1)
         Motion.hold(page, "transform", at: CATransform3DMakeTranslation(offset, 0, 0), key: "swipe")
         Motion.hold(below, "transform", at: Motion.centered(1 + 0.03 * (1 - progress), in: below), key: "swipe")
     }
 
-    /// Past a third of the width, or flicked right, the reader slides off and the list stays; otherwise
-    /// it slides back into place.
+    /// Past a third of the width, or flicked onward, the reader slides off the side it was swiped
+    /// toward and the list stays; otherwise it slides back into place.
     private func releaseReader(at offset: CGFloat, velocity: CGFloat) {
         guard dragging, let page = reader.view.layer, let below = list.view.layer else { return }
         dragging = false
         let width = max(reader.view.bounds.width, 1)
-        let back = readerOpen && (offset > width / 3 || (velocity > 400 && offset > 20))
-        let remaining = back ? width - offset : offset
+        let distance = abs(offset)
+        let onward = offset < 0 ? -velocity : velocity
+        let back = readerOpen && (distance > width / 3 || (onward > 400 && distance > 20))
+        let remaining = back ? width - distance : distance
         let duration = min(0.3, max(0.16, Double(remaining / max(abs(velocity), 1500))))
-        let progress = min(offset / width, 1)
+        let progress = min(distance / width, 1)
+        let away = offset < 0 ? -width : width
         transitions += 1
         let current = transitions
         Motion.group({
             for (layer, from, to) in [
-                (page, CATransform3DMakeTranslation(offset, 0, 0), back ? CATransform3DMakeTranslation(width, 0, 0) : CATransform3DIdentity),
+                (page, CATransform3DMakeTranslation(offset, 0, 0), back ? CATransform3DMakeTranslation(away, 0, 0) : CATransform3DIdentity),
                 (below, Motion.centered(1 + 0.03 * (1 - progress), in: below), back ? CATransform3DIdentity : Motion.centered(1.03, in: below)),
             ] {
                 let slide = Motion.basic("transform", from: from, to: to, duration: duration)
@@ -434,7 +438,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         window?.toolbar?.validateVisibleItems()
     }
 
-    func reader(_ reader: ReaderViewController, compose mode: Himalaya.ComposeMode, replyAll: Bool, message: MailMessage,
+    func reader(_ reader: ReaderViewController, compose mode: ComposeMode, replyAll: Bool, message: MailMessage,
                 text: String, plan: ReplyPlan?) {
         ComposeWindowController.open(store: store, mode: mode, account: message.ref.account, source: message,
                                      replyAll: replyAll, text: text, plan: plan)

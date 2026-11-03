@@ -76,7 +76,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     private var lastContext: ListContext?
     /// Waits out the pointer's or keyboard highlight's dwell before preloading a conversation.
     private var preloadTask: Task<Void, Never>?
-    /// Account order the visible cells' account bars were colored with.
+    /// Account order and labels the visible cells' account bars were drawn with.
     private var accountNames: [String] = []
     private var savedScroll: [String: CGFloat] = [:]
     /// Pages fetched without the user scrolling, to fill a Smart Inbox whose rows were mostly bundled.
@@ -483,10 +483,10 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         reloadChanged(changed)
     }
 
-    /// Cells read the account bar's color from the account order, so only a different set of
-    /// accounts redraws rows; unread-count changes don't.
+    /// Cells read the account bar's color from the account order and its label, so only a
+    /// different set or naming of accounts redraws rows; unread-count changes don't.
     @objc private func accountsChanged() {
-        let names = store.accounts.map(\.name)
+        let names = store.accounts.flatMap { [$0.name, $0.label] }
         guard names != accountNames else { return }
         accountNames = names
         guard !rows.isEmpty else { return }
@@ -699,7 +699,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             cell.configure(row, snippet: store.snippet(for: conversation.latest.ref),
                            archivable: ![.archive, .all, .trash].contains(context.role),
                            account: context.selection.isUnified
-                               ? (conversation.account, AccountStyle.color(for: conversation.account, in: store)) : nil,
+                               ? (store.label(account: conversation.account),
+                                  AccountStyle.color(for: conversation.account, in: store)) : nil,
                            tag: tag,
                            photo: store.avatars.image(for: row.avatarKey, automated: automated))
             let id = conversation.id
@@ -716,7 +717,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
                 ?? ConversationRowCell()
             let photo = space.avatarKey.isEmpty ? nil : store.avatars.image(for: space.avatarKey, automated: false)
             cell.configure(space, account: store.listContext.selection == .allChats
-                               ? (store.chat.account(named: space.key.account)?.email ?? space.key.account,
+                               ? (store.label(account: space.key.account),
                                   AccountStyle.chatColor(for: space.key.account, in: store)) : nil,
                            photo: photo)
             cell.onAction = nil
@@ -730,37 +731,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         }
     }
 
-    func tableView(_ tableView: NSTableView, rowActionsForRow row: Int, edge: NSTableView.RowActionEdge) -> [NSTableViewRowAction] {
-        guard row < rows.count, let conversation = rows[row].conversation else { return [] }
-        let id = conversation.id
-        switch edge {
-        case .leading:
-            let read = NSTableViewRowAction(style: .regular, title: conversation.isUnread ? "Read" : "Unread") { [weak self] _, _ in
-                self?.perform(.toggleRead, id: id)
-            }
-            read.backgroundColor = .controlAccentColor
-            read.image = NSImage(systemSymbolName: conversation.isUnread ? "envelope.open" : "envelope.badge", accessibilityDescription: nil)
-            return [read]
-        case .trailing:
-            let trash = NSTableViewRowAction(style: .destructive, title: "Trash") { [weak self] _, _ in
-                self?.perform(.trash, id: id)
-            }
-            trash.image = NSImage(systemSymbolName: "trash", accessibilityDescription: nil)
-            guard store.canArchive(conversation) else { return [trash] }
-            let archive = NSTableViewRowAction(style: .regular, title: "Archive") { [weak self] _, _ in
-                self?.perform(.archive, id: id)
-            }
-            archive.backgroundColor = .systemPurple
-            archive.image = NSImage(systemSymbolName: "archivebox", accessibilityDescription: nil)
-            return [trash, archive]
-        @unknown default:
-            return []
-        }
-    }
-
     private func perform(_ action: ConversationAction, id: String) {
         guard let conversation = rows.lazy.compactMap(\.conversation).first(where: { $0.id == id }) else { return }
-        table.rowActionsVisible = false
         delegate?.conversationList(self, perform: action, on: conversation)
     }
 

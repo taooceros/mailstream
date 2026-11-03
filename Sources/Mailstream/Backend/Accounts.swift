@@ -1,0 +1,119 @@
+import Foundation
+
+enum Provider: String, Codable, Sendable {
+    case google, microsoft
+}
+
+struct AccountRecord: Codable, Hashable, Sendable, Identifiable {
+    /// Lowercased address. The key of everything: Account.name, MailboxKey.account, MessageRef.account, cache paths.
+    let id: String
+    let provider: Provider
+    /// Shown in the sidebar; user-editable (defaults to the address).
+    var label: String
+    /// The person's name from the provider (sender display name).
+    var displayName: String?
+    /// Scopes the provider granted.
+    var scopes: [String]
+}
+
+/// The signed-in accounts, in the order they were added, persisted in
+/// `~/Library/Application Support/Mailstream/accounts.json`; refresh tokens live in the Keychain.
+@MainActor
+final class AccountStore {
+    /// Posted after add, remove and rename.
+    static let didChange = Notification.Name("AccountStore.didChange")
+
+    private(set) var records: [AccountRecord]
+    let tokens: Tokens
+    private var apis: [String: API] = [:]
+    private var backends: [String: any MailBackend] = [:]
+
+    private static let file = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appending(path: "Mailstream/accounts.json")
+
+    init() {
+        let records = (try? Data(contentsOf: Self.file)).flatMap { try? JSONDecoder().decode([AccountRecord].self, from: $0) } ?? []
+        self.records = records
+        tokens = Tokens(providers: Dictionary(records.map { ($0.id, $0.provider) }) { first, _ in first })
+    }
+
+    func record(_ id: String) -> AccountRecord? {
+        records.first { $0.id == id }
+    }
+
+    func api(for id: String) -> API? {
+        if let api = apis[id] { return api }
+        guard let record = record(id) else { return nil }
+        let api = API(account: id, tokens: tokens, budget: record.provider == .google ? .gmail() : nil)
+        apis[id] = api
+        return api
+    }
+
+    func backend(for id: String) -> (any MailBackend)? {
+        if let backend = backends[id] { return backend }
+        guard let record = record(id), let api = api(for: id) else { return nil }
+        let backend: any MailBackend = switch record.provider {
+        case .google: GmailBackend(api: api)
+        case .microsoft: GraphBackend(api: api)
+        }
+        backends[id] = backend
+        return backend
+    }
+
+    /// Browser OAuth. Signing in to an account already here replaces its token, name and scopes
+    /// and keeps its label.
+    func signIn(_ provider: Provider) async throws -> AccountRecord {
+        let grant = try await OAuth.signIn(provider)
+        try await tokens.install(account: grant.id, provider: provider, refreshToken: grant.refreshToken,
+                                 accessToken: grant.accessToken, expiresIn: TimeInterval(grant.expiresIn))
+        var record = AccountRecord(id: grant.id, provider: provider, label: grant.id, displayName: grant.name,
+                                   scopes: grant.scopes)
+        if let index = records.firstIndex(where: { $0.id == record.id }) {
+            record.label = records[index].label
+            if records[index].provider != provider { backends[record.id] = nil }
+            records[index] = record
+        } else {
+            records.append(record)
+        }
+        try persist()
+        NotificationCenter.default.post(name: Self.didChange, object: self)
+        return record
+    }
+
+    /// Signs out: deletes the Keychain item and the record.
+    func remove(_ id: String) {
+        tokens.forget(id)
+        apis[id] = nil
+        backends[id] = nil
+        records.removeAll { $0.id == id }
+        save()
+    }
+
+    /// An empty label shows the address again.
+    func rename(_ id: String, label: String) {
+        guard let index = records.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        records[index].label = trimmed.isEmpty ? id : trimmed
+        save()
+    }
+
+    /// Persists and posts `didChange`; a failed write is reported on `.storeError` (from this store).
+    private func save() {
+        do {
+            try persist()
+        } catch {
+            NotificationCenter.default.post(name: .storeError, object: self, userInfo: [
+                "message": "Could not save the account list: \(error.localizedDescription)", "alert": true,
+            ])
+        }
+        NotificationCenter.default.post(name: Self.didChange, object: self)
+    }
+
+    private func persist() throws {
+        try FileManager.default.createDirectory(at: Self.file.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(records).write(to: Self.file, options: .atomic)
+    }
+}

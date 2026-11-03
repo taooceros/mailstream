@@ -5,8 +5,9 @@ set -eu
 cd "$(dirname "$0")/.."
 CONFIG="${CONFIG:-release}"
 VERSION="0.1.0"
+SERVICE="dev.mailstream.build"
+LOCAL_IDENTITY="Mailstream Local Signing"
 
-./scripts/engine.sh
 swift build -c "$CONFIG"
 BIN="$(swift build -c "$CONFIG" --show-bin-path)/Mailstream"
 
@@ -27,6 +28,24 @@ if [ ! -f build/AppIcon.icns ] || [ Resources/AppIcon.png -nt build/AppIcon.icns
 fi
 cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
+# OAuth clients and the push relay, read from the login keychain so they are never committed.
+# A missing item leaves its key out (the feature it enables stays off).
+CONFIG_KEYS=""
+for pair in MSGoogleClientID=google-client-id MSGoogleClientSecret=google-client-secret \
+            MSMicrosoftClientID=microsoft-client-id MSMicrosoftClientSecret=microsoft-client-secret \
+            MSPushURL=push-url MSPushToken=push-token MSGraphClientState=graph-client-state \
+            MSGmailTopic=gmail-topic; do
+  key="${pair%%=*}"
+  item="${pair#*=}"
+  if value=$(security find-generic-password -s "$SERVICE" -a "$item" -w 2>/dev/null); then
+    value=$(printf '%s' "$value" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+    CONFIG_KEYS="$CONFIG_KEYS  <key>$key</key><string>$value</string>
+"
+  else
+    echo "warning: no \"$item\" item in Keychain service $SERVICE; $key left out" >&2
+  fi
+done
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -45,9 +64,23 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticTermination</key><false/>
-</dict>
+$CONFIG_KEYS</dict>
 </plist>
 PLIST
 
-codesign --force --sign - "$APP" >/dev/null
+# The Keychain item of OAuth tokens stays readable across rebuilds only for a stable signature,
+# and without prompting only when it carries a Team ID: macOS also pins the item to the signer's
+# partition, which is the team for an Apple Development certificate (a free Personal Team in
+# Xcode makes one) but the build's own cdhash for a self-signed one.
+IDENTITIES=$(security find-identity -v -p codesigning)
+IDENTITY=$(printf '%s\n' "$IDENTITIES" | sed -n 's/^ *[0-9]*) \([0-9A-F]*\) "Apple Development: .*"$/\1/p' | sed -n 1p)
+if [ -n "$IDENTITY" ]; then
+  codesign --force --sign "$IDENTITY" "$APP" >/dev/null
+elif printf '%s\n' "$IDENTITIES" | grep -q "\"$LOCAL_IDENTITY\""; then
+  echo "warning: no Apple Development certificate; signing with \"$LOCAL_IDENTITY\", so each rebuild asks once for the Keychain item" >&2
+  codesign --force --sign "$LOCAL_IDENTITY" "$APP" >/dev/null
+else
+  echo "warning: no signing identity; signing ad hoc, so every rebuild loses access to saved sign-ins (add an Apple ID in Xcode, or run scripts/signing.sh)" >&2
+  codesign --force --sign - "$APP" >/dev/null
+fi
 echo "Built $APP"

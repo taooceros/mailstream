@@ -6,21 +6,22 @@ enum AccountStyle {
     private static let palette = ["#007AFF", "#FF9500", "#AF52DE", "#34C759", "#FF2D55", "#30B0C7"]
 
     static func hex(for account: String, in store: MailStore) -> String {
-        let index = store.accounts.firstIndex { $0.name == account } ?? 0
-        return palette[index % palette.count]
+        hex(at: store.accounts.firstIndex { $0.name == account } ?? 0)
+    }
+
+    /// The color of the account at `index` in sidebar order.
+    static func hex(at index: Int) -> String {
+        palette[index % palette.count]
     }
 
     static func color(for account: String, in store: MailStore) -> NSColor {
         NSColor(hex: hex(for: account, in: store))
     }
 
-    /// A chat account takes the color of the mail account with the same address, else the next
-    /// color after the mail accounts'.
+    /// A chat account takes the color of its mail account, else the next color after the mail
+    /// accounts'.
     static func chatHex(for chatAccount: String, in store: MailStore) -> String {
-        if let email = store.chat.account(named: chatAccount)?.email?.lowercased(),
-           let mail = store.accounts.first(where: { $0.email?.lowercased() == email }) {
-            return hex(for: mail.name, in: store)
-        }
+        if store.account(named: chatAccount) != nil { return hex(for: chatAccount, in: store) }
         let index = store.chat.accounts.firstIndex { $0.name == chatAccount } ?? 0
         return palette[(store.accounts.count + index) % palette.count]
     }
@@ -159,7 +160,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             var children = all.filter { $0.role != .other }.map { Node(.mailbox($0)) }
             let others = all.filter { $0.role == .other }
             if !others.isEmpty {
-                let title = account.kind == .gmail ? "Labels" : "Folders"
+                let title = account.provider == .google ? "Labels" : "Folders"
                 children.append(Node(.folders(account: account.name, title: title), children: others.map { Node(.mailbox($0)) }))
             }
             accounts.append(Node(.account(account), children: children))
@@ -261,7 +262,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             let title = role == .inbox ? "Inbox" : role.title
             cell.configure(title: title, leading: .symbol(role.symbol), badge: badge(.unified(role), role: role))
         case .accountInbox(let mailbox):
-            cell.configure(title: mailbox.account,
+            cell.configure(title: store.label(account: mailbox.account),
                            leading: .dot(AccountStyle.color(for: mailbox.account, in: store)),
                            badge: mailbox.unread ?? 0, secondary: true)
             cell.toolTip = store.account(named: mailbox.account)?.email
@@ -269,13 +270,13 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             cell.configure(title: "Chat", leading: .symbol("bubble.left.and.bubble.right"),
                            badge: store.badgeCount(.allChats))
         case .chatAccount(let account):
-            cell.configure(title: account.email ?? account.name,
+            cell.configure(title: store.label(account: account.name),
                            leading: .dot(AccountStyle.chatColor(for: account.name, in: store)),
                            badge: store.badgeCount(.chat(account.name)), secondary: true)
             cell.toolTip = account.name
         case .account(let account):
-            cell.configure(title: account.name,
-                           leading: .avatar(Address(name: account.name, email: account.email ?? account.name),
+            cell.configure(title: account.label,
+                           leading: .avatar(Address(name: account.identity?.name ?? account.label, email: account.email),
                                             AccountStyle.color(for: account.name, in: store)),
                            badge: 0)
             cell.toolTip = account.email

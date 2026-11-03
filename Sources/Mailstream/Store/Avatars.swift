@@ -9,8 +9,8 @@ extension Notification.Name {
 
 /// Sender pictures for the list and the reader, looked up lazily for what is on screen.
 ///
-/// Sources, best first: the photo of a Google or Outlook contact (ortie accounts named
-/// `<name>-contacts`), the sender domain's BIMI logo, Gravatar, and for automated mail the
+/// Sources, best first: the photo of a Google or Outlook contact (accounts granted contacts
+/// access), the sender domain's BIMI logo, Gravatar, and for automated mail the
 /// domain's site icon. Anything without a picture keeps its initials.
 @MainActor
 final class AvatarStore {
@@ -21,11 +21,39 @@ final class AvatarStore {
     private var missing = Set<String>()
     private var pending = Set<String>()
 
-    init(tools: ToolEnvironment, root: URL) {
-        resolver = AvatarResolver(tools: tools, root: root.appendingPathComponent("avatars", isDirectory: true))
+    init(accounts: AccountStore, root: URL) {
+        resolver = AvatarResolver(accounts: Self.photoAccounts(accounts),
+                                  root: root.appendingPathComponent("avatars", isDirectory: true))
         images.countLimit = 400
         pngs.countLimit = 400
         large.countLimit = 12
+        NotificationCenter.default.addObserver(forName: AccountStore.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let fresh = Self.photoAccounts(accounts)
+                let resolver = self.resolver
+                Task { await resolver.use(fresh) }
+            }
+        }
+    }
+
+    /// Google accounts with `contacts.readonly` (and the domain directory with `directory.readonly`)
+    /// and Microsoft accounts with `Contacts.Read`.
+    private static func photoAccounts(_ accounts: AccountStore) -> [PhotoAccount] {
+        accounts.records.compactMap { record -> PhotoAccount? in
+            let scopes = Set(record.scopes)
+            switch record.provider {
+            case .google where scopes.contains("https://www.googleapis.com/auth/contacts.readonly"):
+                return accounts.api(for: record.id).map {
+                    PhotoAccount(api: $0, provider: .google,
+                                 directory: scopes.contains("https://www.googleapis.com/auth/directory.readonly"))
+                }
+            case .microsoft where scopes.contains("https://graph.microsoft.com/Contacts.Read"):
+                return accounts.api(for: record.id).map { PhotoAccount(api: $0, provider: .microsoft, directory: false) }
+            default:
+                return nil
+            }
+        }
     }
 
     /// The picture for `email` when it is already known; otherwise starts looking and returns nil,
@@ -84,27 +112,26 @@ actor AvatarResolver {
     private static let miss: TimeInterval = 3 * 86_400
     private static let directoryAge: TimeInterval = 86_400
 
-    private let tools: ToolEnvironment
+    private var accounts: [PhotoAccount]
     private let root: URL
     private let session: URLSession
     private let permits = AsyncSemaphore(6)
     private var directory: Task<Directory, Never>?
     private var domains: [String: Task<Data?, Never>] = [:]
-    private var tokens: [String: (token: String, until: Date)] = [:]
 
     /// Contact address → where its photo is: an image URL, or `graph:<account>/<contact id>`.
     private struct Directory: Codable {
         var built: Date
-        /// The ortie accounts it loaded; a configured account missing here (new, or failed last
-        /// time) rebuilds it at once.
+        /// The accounts it loaded; any difference from the current photo accounts (one added,
+        /// removed, or failed last time) rebuilds it at once.
         var accounts: [String]
         var photos: [String: String]
         /// Changes whenever the set of contact photos does, retiring cached misses.
         var stamp: String { String(photos.count) }
     }
 
-    init(tools: ToolEnvironment, root: URL) {
-        self.tools = tools
+    init(accounts: [PhotoAccount], root: URL) {
+        self.accounts = accounts
         self.root = root
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 10
@@ -177,6 +204,13 @@ actor AvatarResolver {
 
     // MARK: - Contacts
 
+    /// Takes the current photo accounts; a different set reloads the directory.
+    func use(_ fresh: [PhotoAccount]) {
+        guard fresh.map(\.name) != accounts.map(\.name) || fresh.map(\.directory) != accounts.map(\.directory) else { return }
+        accounts = fresh
+        directory = nil
+    }
+
     private func contacts() async -> Directory {
         if let directory { return await directory.value }
         let task = Task { await loadDirectory() }
@@ -186,18 +220,17 @@ actor AvatarResolver {
 
     private func loadDirectory() async -> Directory {
         let url = root.appendingPathComponent("directory.json")
-        let accounts = Self.photoAccounts()
+        let accounts = accounts
         if let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(Directory.self, from: data),
-           Set(accounts.map(\.name)).isSubset(of: saved.accounts), Date().timeIntervalSince(saved.built) < Self.directoryAge {
+           Set(accounts.map(\.name)) == Set(saved.accounts), Date().timeIntervalSince(saved.built) < Self.directoryAge {
             return saved
         }
         var photos: [String: String] = [:]
         var loaded: [String] = []
         for account in accounts {
-            guard let token = await token(account.name) else { continue }
             let found = switch account.provider {
-            case .google: await googlePhotos(token: token)
-            case .microsoft: await graphPhotos(token: token, account: account.name)
+            case .google: await googlePhotos(api: account.api, directory: account.directory)
+            case .microsoft: await graphPhotos(api: account.api)
             }
             guard let found else { continue }
             loaded.append(account.name)
@@ -209,22 +242,24 @@ actor AvatarResolver {
     }
 
     /// Saved contacts, "other contacts" (people the user has written with) and, on Workspace
-    /// accounts, the organization's directory. Nil when the token is refused for all of them.
-    private func googlePhotos(token: String) async -> [String: String]? {
+    /// accounts, the organization's directory. Nil when every one of them is refused.
+    private func googlePhotos(api: API, directory: Bool) async -> [String: String]? {
         let base = "https://people.googleapis.com/v1/"
-        let lists = [
+        var lists = [
             ("people/me/connections?personFields=emailAddresses,photos&pageSize=1000", "connections"),
             ("otherContacts?readMask=emailAddresses,photos&pageSize=1000", "otherContacts"),
-            ("people:listDirectoryPeople?readMask=emailAddresses,photos&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE&pageSize=1000",
-             "people"),
         ]
+        if directory {
+            lists.append(("people:listDirectoryPeople?readMask=emailAddresses,photos&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE&pageSize=1000",
+                          "people"))
+        }
         var photos: [String: String] = [:]
         var answered = false
         for (path, field) in lists {
             var pageToken: String?
             for _ in 0..<30 {
                 let page = pageToken.map { "&pageToken=" + ($0.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0) } ?? ""
-                guard let url = URL(string: base + path + page), let json = await getJSON(url, token: token) else { break }
+                guard let url = URL(string: base + path + page), let json = await getJSON(url, api: api) else { break }
                 answered = true
                 for person in json[field] as? [[String: Any]] ?? [] {
                     let photo = (person["photos"] as? [[String: Any]] ?? []).first { $0["default"] as? Bool != true }
@@ -241,19 +276,19 @@ actor AvatarResolver {
     }
 
     /// Outlook contacts; whether one has a photo is only known when it is fetched. Nil when the
-    /// token is refused.
-    private func graphPhotos(token: String, account: String) async -> [String: String]? {
+    /// request is refused.
+    private func graphPhotos(api: API) async -> [String: String]? {
         var photos: [String: String] = [:]
         var answered = false
         var next = URL(string: "https://graph.microsoft.com/v1.0/me/contacts?$select=emailAddresses&$top=999")
         for _ in 0..<30 {
-            guard let url = next, let json = await getJSON(url, token: token) else { break }
+            guard let url = next, let json = await getJSON(url, api: api) else { break }
             answered = true
             for contact in json["value"] as? [[String: Any]] ?? [] {
                 guard let id = contact["id"] as? String else { continue }
                 for address in contact["emailAddresses"] as? [[String: Any]] ?? [] {
                     if let email = (address["address"] as? String)?.lowercased(), photos[email] == nil {
-                        photos[email] = "graph:\(account)/\(id)"
+                        photos[email] = "graph:\(api.account)/\(id)"
                     }
                 }
             }
@@ -267,10 +302,10 @@ actor AvatarResolver {
             let rest = source.dropFirst("graph:".count)
             guard let slash = rest.firstIndex(of: "/") else { return nil }
             let account = String(rest[..<slash]), id = String(rest[rest.index(after: slash)...])
-            guard let token = await token(account),
+            guard let api = accounts.first(where: { $0.name == account })?.api,
                   let url = URL(string: "https://graph.microsoft.com/v1.0/me/contacts/\(id)/photo/$value")
             else { return nil }
-            return await fetch(url, token: token).flatMap { Self.normalize($0, style: .photo, side: side) }
+            return await fetch(url, api: api).flatMap { Self.normalize($0, style: .photo, side: side) }
         }
         // Google serves any size; ask for the one drawn.
         var link = source
@@ -373,33 +408,23 @@ actor AvatarResolver {
 
     // MARK: - Network
 
-    private func token(_ account: String) async -> String? {
-        if let cached = tokens[account], cached.until > Date() { return cached.token }
-        guard let ortie = tools.executables(named: "ortie").first,
-              let output = try? await ProcessRunner.run(executable: URL(fileURLWithPath: ortie),
-                                                        arguments: ["-a", account, "token", "show"],
-                                                        environment: tools.environment),
-              output.status == 0
-        else { return nil }
-        let token = String(decoding: output.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty else { return nil }
-        // ortie refreshes on read; reuse a token well inside its hour.
-        tokens[account] = (token, Date().addingTimeInterval(40 * 60))
-        return token
-    }
-
-    private func getJSON(_ url: URL, token: String) async -> [String: Any]? {
-        guard let data = await fetch(url, token: token, limit: 16 * 1024 * 1024) else { return nil }
+    private func getJSON(_ url: URL, api: API) async -> [String: Any]? {
+        guard let data = await fetch(url, api: api, limit: 16 * 1024 * 1024) else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
-    /// The body of a successful GET, or nil on any failure or past `limit` bytes.
-    private func fetch(_ url: URL, token: String? = nil, limit: Int = 2 * 1024 * 1024) async -> Data? {
-        var request = URLRequest(url: url)
-        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        guard let (data, response) = try? await session.data(for: request),
-              let http = response as? HTTPURLResponse, http.statusCode == 200, data.count <= limit
+    /// The body of a successful GET, as the account's user when `api` is given; nil on any failure
+    /// or past `limit` bytes.
+    private func fetch(_ url: URL, api: API? = nil, limit: Int = 2 * 1024 * 1024) async -> Data? {
+        let answer: (data: Data, response: HTTPURLResponse?)?
+        if let api {
+            answer = (try? await api.send(API.request(url), priority: .background)).map { ($0.0, $0.1) }
+        } else {
+            answer = (try? await session.data(for: URLRequest(url: url))).map { ($0.0, $0.1 as? HTTPURLResponse) }
+        }
+        guard let answer, let http = answer.response, http.statusCode == 200, answer.data.count <= limit
         else { return nil }
+        let data = answer.data
         return data
     }
 
@@ -411,29 +436,6 @@ actor AvatarResolver {
     }
 
     // MARK: - Helpers
-
-    private enum Provider { case google, microsoft }
-
-    /// ortie accounts named `*-contacts`, by the provider their authorization endpoint belongs to.
-    private static func photoAccounts() -> [(name: String, provider: Provider)] {
-        let env = ProcessInfo.processInfo.environment["ORTIE_CONFIG"]?.split(separator: ":").first.map(String.init)
-        let path = env.map { ($0 as NSString).expandingTildeInPath }
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/ortie/config.toml").path
-        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
-        var accounts: [(String, Provider)] = []
-        var current: String?
-        for line in text.split(separator: "\n").map({ $0.trimmingCharacters(in: .whitespaces) }) {
-            if line.hasPrefix("[accounts."), line.hasSuffix("]") {
-                let name = String(line.dropFirst("[accounts.".count).dropLast())
-                current = name.hasSuffix("-contacts") ? name : nil
-            } else if let name = current, line.hasPrefix("endpoints.authorization") {
-                if line.contains("accounts.google.com") { accounts.append((name, .google)) }
-                if line.contains("login.microsoftonline.com") { accounts.append((name, .microsoft)) }
-                current = nil
-            }
-        }
-        return accounts
-    }
 
     private static let freemail: Set<String> = [
         "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com", "yahoo.com", "ymail.com",
@@ -578,4 +580,14 @@ private final class TXTQuery: @unchecked Sendable {
         }
         continuation.resume(returning: records)
     }
+}
+
+/// An account whose contacts give sender photos.
+struct PhotoAccount: Sendable {
+    let api: API
+    let provider: Provider
+    /// Also read the Workspace domain's directory (Google).
+    let directory: Bool
+
+    var name: String { api.account }
 }

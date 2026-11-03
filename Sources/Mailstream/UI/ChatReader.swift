@@ -156,7 +156,7 @@ final class ChatReader {
             state["accent"] = NSColor.controlAccentColor.cssHex
             state["html"] = ChatPage.page(title: title.isEmpty ? "Chat" : title, kind: space?.kind ?? .space,
                                           memberCount: space?.members.count ?? 0,
-                                          accountLabel: store.chat.account(named: key.account)?.email ?? key.account,
+                                          accountLabel: store.label(account: key.account),
                                           accountColor: AccountStyle.chatHex(for: key.account, in: store))
             state["log"] = items.map(\.html).joined()
             state["draft"] = ["text": draft.text, "thread": draft.thread ?? "", "who": draft.who ?? ""]

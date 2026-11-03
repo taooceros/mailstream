@@ -1,5 +1,0 @@
-module CMailstreamEngine {
-    header "mailstream_engine.h"
-    link "mailstream_engine"
-    export *
-}

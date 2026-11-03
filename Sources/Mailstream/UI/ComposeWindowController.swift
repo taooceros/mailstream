@@ -1,14 +1,14 @@
 import AppKit
 
-/// New message, reply and forward. Reply and forward prefill from a himalaya dry run so the quoted
-/// original is visible and editable; the send then uses `--posting-style none`.
+/// New message, reply and forward. Reply and forward prefill the recipients, subject and quoted
+/// original so they are visible and editable; what the window shows is what is sent.
 @MainActor
 final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTokenFieldDelegate, NSTextViewDelegate {
     private static var open: Set<ComposeWindowController> = []
 
     /// `text` starts the body, above any quote (an inline reply moved into a window keeps its text,
-    /// and its `plan` when himalaya already worked one out).
-    static func open(store: MailStore, mode: Himalaya.ComposeMode, account: String?, source: MailMessage? = nil,
+    /// and its `plan` when one was already worked out).
+    static func open(store: MailStore, mode: ComposeMode, account: String?, source: MailMessage? = nil,
                      replyAll: Bool = false, to: [Address] = [], text: String = "", plan: ReplyPlan? = nil) {
         guard let account = account ?? store.accounts.first?.name else { return }
         let controller = ComposeWindowController(store: store, mode: mode, account: account, source: source,
@@ -19,7 +19,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
     }
 
     private let store: MailStore
-    private let mode: Himalaya.ComposeMode
+    private let mode: ComposeMode
     private var account: String
     private let source: MailMessage?
     private let replyAll: Bool
@@ -40,7 +40,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
     private var edited = false
     private var sending = false
 
-    private init(store: MailStore, mode: Himalaya.ComposeMode, account: String, source: MailMessage?,
+    private init(store: MailStore, mode: ComposeMode, account: String, source: MailMessage?,
                  replyAll: Bool, to: [Address], text: String, plan: ReplyPlan?) {
         self.store = store
         self.mode = mode
@@ -272,9 +272,9 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
                     ccField.objectValue = plan.cc.map(\.rfc5322)
                     quote = plan.quotedText.hasPrefix(">") ? plan.attribution + "\n" + plan.quotedText : plan.quotedText
                 } else {
-                    guard let draft = try await store.himalaya.draft(mode: mode, account: account) else { return }
-                    subjectField.stringValue = draft.subject ?? ""
-                    quote = draft.body.replacingOccurrences(of: "\r\n", with: "\n").trimmingCharacters(in: .newlines)
+                    let draft = try await store.forwardDraft(for: source)
+                    subjectField.stringValue = draft.subject
+                    quote = draft.body
                 }
                 bodyView.string = initialText + "\n\n" + quote
                 let caret = NSRange(location: (initialText as NSString).length, length: 0)
@@ -345,15 +345,17 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
             presentError(message: "Invalid address: \(invalid.joined(separator: ", "))", error: nil)
             return
         }
-        let from = store.account(named: account)?.identity?.rfc5322
-        let fields = Himalaya.ComposeFields(from: from, to: to, cc: cc, bcc: bcc, subject: subjectField.stringValue,
-                                            body: bodyView.string, attachments: attachments)
+        let subject = subjectField.stringValue, text = bodyView.string, files = attachments
         sending = true
         setControlsEnabled(false)
         progress.startAnimation(nil)
         Task {
             do {
-                try await store.send(fields, mode: mode, account: account)
+                let message = await store.outgoing(account: account, source: source,
+                                                   to: to.compactMap(Address.parse), cc: cc.compactMap(Address.parse),
+                                                   bcc: bcc.compactMap(Address.parse), subject: subject, text: text,
+                                                   attachments: files)
+                try await store.send(message, account: account)
                 edited = false
                 close()
             } catch {

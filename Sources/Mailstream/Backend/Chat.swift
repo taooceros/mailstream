@@ -1,14 +1,14 @@
 import Foundation
 
-/// A Google Chat request the engine refused, or an answer it could not be read from.
+/// A Google Chat request that could not be made, or an answer that could not be read.
 struct ChatError: LocalizedError, Sendable {
     let message: String
     var errorDescription: String? { message }
 }
 
-// MARK: - JSON shapes of the engine's `chat` commands
+// MARK: - Chat values (also the disk cache's JSON)
 
-/// An ortie account named `*-chat`; `email` is its login hint, matched to a mail account's address.
+/// A Google account with Chat access; `name` and `email` are both its address (the account id).
 struct ChatAccount: Codable, Hashable, Sendable {
     let name: String
     let email: String?
@@ -115,7 +115,7 @@ struct ChatSpace: Codable, Hashable, Sendable {
     let members: [ChatUser]
     var lastActive: Date?
     var lastRead: Date?
-    /// Messages after `lastRead` not sent by the user, capped at 25 by the engine.
+    /// Messages after `lastRead` not sent by the user, capped at `Chat.summaryMessages`.
     var unread: Int
     var latest: ChatMessage?
 
@@ -135,7 +135,7 @@ struct ChatSpace: Codable, Hashable, Sendable {
     var activity: Date? { lastActive ?? latest?.created }
 }
 
-/// One `chat spaces` answer; also the disk cache of an account's space list.
+/// One `Chat.spaces` answer; also the disk cache of an account's space list.
 struct ChatSpaceList: Codable, Sendable {
     /// The user's `users/<id>`.
     var me: String?
@@ -143,17 +143,12 @@ struct ChatSpaceList: Codable, Sendable {
     var spaces: [ChatSpace]
 }
 
-/// One `chat messages` answer: ascending, the newest `limit` before `--before`.
+/// One `Chat.messages` answer: ascending, the newest `limit` before `before`.
 struct ChatMessagePage: Codable, Sendable {
     var messages: [ChatMessage]
     var more: Bool
     var lastRead: Date?
 }
-
-private struct ChatAccountsDTO: Decodable { let accounts: [ChatAccount] }
-private struct ChatReadDTO: Decodable { let lastRead: Date? }
-private struct ChatSentDTO: Decodable { let message: ChatMessage }
-private struct ChatErrorDTO: Decodable { let error: String }
 
 /// RFC 3339 with or without fractional seconds; fractional first, so microseconds survive.
 func parseChatDate(_ raw: String) -> Date? {
@@ -161,7 +156,7 @@ func parseChatDate(_ raw: String) -> Date? {
     return try? Date(raw, strategy: .iso8601)
 }
 
-/// RFC 3339 in UTC with microseconds, the precision the engine reports, for `--before`.
+/// RFC 3339 in UTC with microseconds, the precision Google reports, for the `createTime` filter.
 func formatChatDate(_ date: Date) -> String {
     let seconds = date.timeIntervalSince1970.rounded(.down)
     var micros = Int(((date.timeIntervalSince1970 - seconds) * 1_000_000).rounded())
@@ -175,61 +170,290 @@ func formatChatDate(_ date: Date) -> String {
     return base + String(format: ".%06dZ", micros)
 }
 
-/// Typed wrapper over the engine's `chat` commands. The engine does all network IO, token
-/// handling and caching; a call is one command line run in-process, like a himalaya one.
-final class Chat: Sendable {
-    func accounts() async throws -> [ChatAccount] {
-        try await decode(ChatAccountsDTO.self, ["accounts"]).accounts
+
+// MARK: - From the API
+
+extension ChatUser {
+    init(_ user: ChatAPI.User?) {
+        name = user?.name ?? ""
+        displayName = user?.displayName.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
+        email = user?.email.flatMap { $0.isEmpty ? nil : $0 }
+        avatarUrl = user?.avatarUrl.flatMap { $0.isEmpty ? nil : $0 }
+        bot = user?.type == "BOT"
+    }
+}
+
+extension ChatMessage {
+    /// `mine` overrides the comparison of the sender with `me`.
+    init(_ message: ChatAPI.Message, me: String?, mine: Bool? = nil) {
+        let sender = ChatUser(message.sender)
+        // `text` has the markup stripped; `formattedText` keeps it (`*bold*`, `<url|label>`,
+        // `<users/…>` mentions), with a trailing newline.
+        let formatted = message.formattedText.map { String($0.reversed().drop { $0 == "\n" }.reversed()) }
+        text = [formatted, message.text].compactMap { $0 }.first { !$0.isEmpty } ?? message.fallbackText ?? ""
+        let createdRaw = message.createTime.flatMap(parseChatDate)
+        created = createdRaw ?? .distantPast
+        // The API sets `lastUpdateTime` on every message; only a later one is an edit.
+        edited = message.lastUpdateTime.flatMap(parseChatDate).flatMap { updated in
+            createdRaw.map { updated > $0 } ?? true ? updated : nil
+        }
+        name = message.name
+        self.sender = sender
+        thread = message.thread?.name
+        threadReply = message.threadReply
+        self.mine = mine ?? me.map { sender.name == $0 } ?? false
+        card = message.cardsV2 != nil || message.cards != nil
+        attachments = message.attachment.map { attachment in
+            let download = attachment.downloadUri.flatMap { $0.isEmpty ? nil : $0 }
+            let drive = attachment.driveDataRef?.driveFileId.map { "https://drive.google.com/open?id=\($0)" }
+            return ChatAttachment(name: attachment.contentName ?? "Attachment", contentType: attachment.contentType ?? "",
+                                  url: download ?? drive)
+        }
+    }
+}
+
+extension ChatSpace {
+    init(name: String, kind: ChatSpaceKind, title: String, members: [ChatUser], lastActive: Date?, lastRead: Date?,
+         unread: Int, latest: ChatMessage?) {
+        self.name = name
+        self.kind = kind
+        self.title = title
+        self.members = members
+        self.lastActive = lastActive
+        self.lastRead = lastRead
+        self.unread = unread
+        self.latest = latest
+    }
+}
+
+// MARK: - Chat
+
+/// Google Chat over its REST API, for the accounts `api` resolves.
+///
+/// The space list is polled, so it is kept cheap: each account's space summaries stay in memory
+/// keyed by the space's last activity, and a poll only refetches the spaces whose activity
+/// changed (plus the read state of the ones still unread, which another client may have read).
+actor Chat {
+    /// Messages read per space for its summary: the latest one, and enough to count what is unread.
+    static let summaryMessages = 25
+    /// Space summaries fetched at once.
+    static let fanOut = 6
+
+    private struct Summary {
+        var space: ChatSpace
+        /// `lastActiveTime` as Google sent it; a different one means the space changed.
+        let lastActiveRaw: String
+        /// Its unread count went out of date; the next poll recounts it.
+        var stale = false
+    }
+
+    private struct Memory {
+        /// The user's own `users/{id}`, learned from a read state.
+        var me: String?
+        var summaries: [String: Summary] = [:]
+        /// Members of DMs and unnamed group chats, which name them.
+        var members: [String: [ChatAPI.User]] = [:]
+    }
+
+    private let api: @Sendable (String) async -> API?
+    private var memory: [String: Memory] = [:]
+
+    /// `api` resolves an account id to its requests, or nil when it has no Chat access.
+    init(api: @escaping @Sendable (String) async -> API?) {
+        self.api = api
     }
 
     /// The `limit` most recently active spaces, newest first.
     func spaces(account: String, limit: Int) async throws -> ChatSpaceList {
-        try await decode(ChatSpaceList.self, ["spaces", account, "--limit", String(limit)])
+        let api = try await resolve(account)
+        let limit = max(limit, 1)
+        var all = try await ChatAPI.spaces(api)
+        all.sort { (parseChatDate($0.lastActiveTime ?? "") ?? .distantPast) > (parseChatDate($1.lastActiveTime ?? "") ?? .distantPast) }
+        let more = all.count > limit
+        all = Array(all.prefix(limit))
+
+        // What memory can't answer: spaces new or active since, and unread ones (read elsewhere?).
+        var stale: [ChatAPI.Space] = [], recheck: [ChatAPI.Space] = []
+        for space in all {
+            if let known = memory[account]?.summaries[space.name], !known.stale, known.lastActiveRaw == space.lastActiveTime {
+                if known.space.unread > 0 { recheck.append(space) }
+            } else {
+                stale.append(space)
+            }
+        }
+
+        async let freshResults = Self.bounded(stale) { space in try await self.summarize(api, account: account, space: space) }
+        async let recheckResults = Self.bounded(recheck) { space in try await ChatAPI.readState(api, space: space.name) }
+        let fresh = await freshResults, rechecked = await recheckResults
+
+        var failures: [Error] = []
+        for result in fresh {
+            switch result {
+            case .success(let summary): memory[account, default: Memory()].summaries[summary.space.name] = summary
+            case .failure(let error): failures.append(error)
+            }
+        }
+        for (space, result) in zip(recheck, rechecked) {
+            guard case .success(let state) = result, let raw = state.lastReadTime,
+                  var summary = memory[account]?.summaries[space.name] else { continue }
+            let lastRead = parseChatDate(raw)
+            guard lastRead != summary.space.lastRead else { continue }
+            if let lastRead, lastRead >= (parseChatDate(summary.lastActiveRaw) ?? .distantPast) {
+                summary.space.unread = 0
+                summary.space.lastRead = lastRead
+            } else {
+                // Read part of the way elsewhere: shown as it was until the next poll recounts it.
+                summary.stale = true
+            }
+            memory[account]?.summaries[space.name] = summary
+        }
+        let summaries = all.compactMap { memory[account]?.summaries[$0.name]?.space }
+        // A partial list is better than none, unless nothing at all could be read.
+        if summaries.isEmpty, let failure = failures.first { throw failure }
+        return ChatSpaceList(me: memory[account]?.me, more: more, spaces: summaries)
     }
 
     /// The newest `limit` messages created before `before` (default: now), ascending.
     func messages(account: String, space: String, limit: Int, before: Date? = nil) async throws -> ChatMessagePage {
-        var args = ["messages", account, space, "--limit", String(limit)]
-        if let before { args += ["--before", formatChatDate(before)] }
-        return try await decode(ChatMessagePage.self, args)
+        try ChatAPI.check(space, shape: ["spaces"])
+        let api = try await resolve(account)
+        async let readState = ChatAPI.readState(api, space: space)
+        let page = try await ChatAPI.messages(api, space: space, limit: limit, before: before.map(formatChatDate))
+        let state = try? await readState
+        let me = learnMe(state?.user, account: account)
+        return ChatMessagePage(messages: (page.messages ?? []).reversed().map { ChatMessage($0, me: me) },
+                               more: !(page.nextPageToken ?? "").isEmpty,
+                               lastRead: state?.lastReadTime.flatMap(parseChatDate))
     }
 
     /// Marks the space read up to now; returns the new read time.
     func markRead(account: String, space: String) async throws -> Date? {
-        try await decode(ChatReadDTO.self, ["read", account, space]).lastRead
+        try ChatAPI.check(space, shape: ["spaces"])
+        let api = try await resolve(account)
+        let now = Date()
+        let state = try await ChatAPI.markRead(api, space: space, time: formatChatDate(now))
+        let lastRead = state.lastReadTime.flatMap(parseChatDate) ?? now
+        if var summary = memory[account]?.summaries[space] {
+            summary.space.unread = 0
+            summary.space.lastRead = lastRead
+            memory[account]?.summaries[space] = summary
+        }
+        return lastRead
     }
 
     /// Sends as the user, in `thread` when given. Not idempotent: never retried here.
     func send(account: String, space: String, text: String, thread: String?) async throws -> ChatMessage {
-        var args = ["send", account, space, "--text", text]
-        if let thread { args += ["--thread", thread] }
-        return try await decode(ChatSentDTO.self, args).message
+        try ChatAPI.check(space, shape: ["spaces"])
+        if let thread {
+            try ChatAPI.check(thread, shape: ["spaces", "threads"])
+            guard thread.hasPrefix(space + "/") else { throw ChatError(message: "Thread \(thread) is not in \(space)") }
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ChatError(message: "Message is empty") }
+        let api = try await resolve(account)
+        let message = try await ChatAPI.createMessage(api, space: space, text: text, thread: thread)
+        let me = message.sender?.name
+        // The space's activity moved: its summary is refetched on the next poll.
+        memory[account]?.summaries[space]?.stale = true
+        if memory[account, default: Memory()].me == nil { memory[account, default: Memory()].me = me }
+        return ChatMessage(message, me: me, mine: true)
+    }
+
+    /// Forgets an account's summaries (it was removed).
+    func forget(account: String) {
+        memory[account] = nil
+    }
+
+    // MARK: Summaries
+
+    private func summarize(_ api: API, account: String, space: ChatAPI.Space) async throws -> Summary {
+        let state = try await ChatAPI.readState(api, space: space.name)
+        let me = learnMe(state.user, account: account)
+        let page = try await ChatAPI.messages(api, space: space.name, limit: Self.summaryMessages, before: nil)
+        let messages = page.messages ?? []
+        let lastRead = state.lastReadTime.flatMap(parseChatDate)
+        let unread = messages.filter { message in
+            guard message.sender?.name != me else { return false }
+            guard let lastRead else { return true }
+            return (message.createTime.flatMap(parseChatDate) ?? .distantPast) > lastRead
+        }.count
+
+        let kind: ChatSpaceKind = switch space.spaceType {
+        case "DIRECT_MESSAGE" where space.singleUserBotDm: .bot
+        case "DIRECT_MESSAGE": .dm
+        case "GROUP_CHAT": .group
+        default: .space
+        }
+        let displayName = space.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let named = !displayName.isEmpty
+        var members: [ChatAPI.User] = []
+        if !named {
+            if let known = memory[account]?.members[space.name] {
+                members = known
+            } else {
+                members = try await ChatAPI.members(api, space: space.name).filter { $0.name != me }
+                memory[account, default: Memory()].members[space.name] = members
+            }
+        }
+        // Google withholds names of some members (apps, people without "affinity"), but not of a
+        // message's sender: fill them in from the messages at hand.
+        members = members.map { member in
+            guard member.displayName == nil else { return member }
+            return messages.lazy.compactMap(\.sender).first { $0.name == member.name && $0.displayName != nil } ?? member
+        }
+        let title = named ? displayName : Self.title(members, kind: kind)
+        let summary = ChatSpace(name: space.name, kind: kind, title: title, members: members.map { ChatUser($0) },
+                                lastActive: space.lastActiveTime.flatMap(parseChatDate), lastRead: lastRead,
+                                unread: unread, latest: messages.first.map { ChatMessage($0, me: me) })
+        return Summary(space: summary, lastActiveRaw: space.lastActiveTime ?? "")
+    }
+
+    /// Records the user's id when a read state names it; returns the best known one.
+    private func learnMe(_ user: String?, account: String) -> String? {
+        if let user { memory[account, default: Memory()].me = user }
+        return memory[account]?.me
+    }
+
+    /// An unnamed space is named after the people in it.
+    private static func title(_ members: [ChatAPI.User], kind: ChatSpaceKind) -> String {
+        let names = members.compactMap { $0.displayName ?? $0.email }.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        switch (names.count, kind) {
+        case (0, .bot): return "App"
+        case (0, .dm): return "Direct message"
+        case (0, _): return "Group chat"
+        case (1...4, _): return names.joined(separator: ", ")
+        default: return names.prefix(3).joined(separator: ", ") + ", +\(names.count - 3)"
+        }
     }
 
     // MARK: Plumbing
 
-    private func decode<T: Decodable>(_ type: T.Type, _ args: [String]) async throws -> T {
-        let output = try await MailEngine.run(["chat"] + args)
-        guard output.status == 0 else {
-            if let dto = try? JSONDecoder().decode(ChatErrorDTO.self, from: output.data) {
-                throw ChatError(message: dto.error)
+    private func resolve(_ account: String) async throws -> API {
+        guard let api = await api(account) else { throw ChatError(message: "No Google Chat account named \(account)") }
+        return api
+    }
+
+    /// Runs `work` over `items`, at most `fanOut` at once; results keep `items`' order.
+    private static func bounded<T: Sendable, R: Sendable>(_ items: [T], _ work: @escaping @Sendable (T) async throws -> R)
+        async -> [Result<R, Error>] {
+        var results = [Result<R, Error>?](repeating: nil, count: items.count)
+        await withTaskGroup(of: (Int, Result<R, Error>).self) { group in
+            let run: @Sendable (Int, T) async -> (Int, Result<R, Error>) = { index, item in
+                do { return (index, .success(try await work(item))) } catch { return (index, .failure(error)) }
             }
-            let text = String(decoding: output.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            throw ChatError(message: text.isEmpty ? "chat failed with status \(output.status)" : text)
-        }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .custom { decoder in
-            let container = try decoder.singleValueContainer()
-            let raw = try container.decode(String.self)
-            guard let date = parseChatDate(raw) else {
-                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Not an RFC 3339 date: \(raw)")
+            var next = 0
+            while next < min(items.count, fanOut) {
+                let index = next, item = items[index]
+                group.addTask { await run(index, item) }
+                next += 1
             }
-            return date
+            for await (index, result) in group {
+                results[index] = result
+                guard next < items.count else { continue }
+                let index = next, item = items[index]
+                group.addTask { await run(index, item) }
+                next += 1
+            }
         }
-        do {
-            return try decoder.decode(T.self, from: output.data)
-        } catch {
-            throw ChatError(message: "Unexpected engine output for `chat \(args.first ?? "")`: \(error)")
-        }
+        return results.map { $0 ?? .failure(ChatError(message: "Space summary did not run")) }
     }
 }
