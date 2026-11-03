@@ -107,8 +107,8 @@ enum Motion {
     /// Runs `animations`, then `completion` once everything they added has finished or been replaced.
     static func group(_ animations: () -> Void, completion: @escaping @MainActor () -> Void) {
         CATransaction.begin()
-        let handler: @Sendable () -> Void = { MainActor.assumeIsolated { completion() } }
-        CATransaction.setCompletionBlock(handler)
+        // Called on the main thread: the transaction is the main thread's.
+        CATransaction.setCompletionBlock { completion() }
         animations()
         CATransaction.commit()
     }
@@ -224,7 +224,7 @@ final class ListRowView: NSTableRowView {
 
     /// Forwarded even when unchanged: a cell reloaded in place resets itself and must be re-told.
     func setHovering(_ value: Bool) {
-        (view(atColumn: 0) as? HoverableCell)?.setHovering(value, animated: true)
+        (view(atColumn: 0) as? any HoverableCell)?.setHovering(value, animated: true)
         guard value != hovering else { return }
         hovering = value
         Motion.fade(wash, to: washAlpha)
@@ -240,7 +240,7 @@ final class ListRowView: NSTableRowView {
     /// A cell swapped in by a reload takes on the row's current hover state at once.
     override func didAddSubview(_ subview: NSView) {
         super.didAddSubview(subview)
-        (subview as? HoverableCell)?.setHovering(hovering, animated: false)
+        (subview as? any HoverableCell)?.setHovering(hovering, animated: false)
     }
 
     override func prepareForReuse() {
@@ -466,6 +466,9 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
         ])
         needsLayout = true
     }
+
+    /// The address whose picture the row waits for, while it shows initials.
+    var missingPhoto: String? { avatar.photo == nil && !avatarKey.isEmpty ? avatarKey : nil }
 
     /// A picture that arrived after the row was configured.
     func showPhoto(_ photo: NSImage, for key: String) {
@@ -1067,7 +1070,7 @@ final class AvatarView: NSView {
 
 /// A sender's letter and a stable per-address color, shared by the sidebar and the reader.
 enum Avatar {
-    static func color(for email: String) -> NSColor {
+    nonisolated static func color(for email: String) -> NSColor {
         let palette: [NSColor] = [.systemBlue, .systemPurple, .systemPink, .systemRed, .systemOrange,
                                   .systemGreen, .systemTeal, .systemIndigo, .systemBrown, .systemMint, .systemCyan]
         var hash: UInt64 = 1469598103934665603
@@ -1076,7 +1079,7 @@ enum Avatar {
     }
 
     /// The first letter of the name (or the address), uppercased; "?" when there is none.
-    static func initials(for address: Address) -> String {
+    nonisolated static func initials(for address: Address) -> String {
         let name = address.displayName.trimmingCharacters(in: .whitespaces)
         guard let first = name.first(where: { $0.isLetter || $0.isNumber }) else { return "?" }
         return String(first).uppercased()

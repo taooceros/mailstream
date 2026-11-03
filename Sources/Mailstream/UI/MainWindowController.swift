@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 
 private extension NSToolbarItem.Identifier {
     static let back = Self("back")
@@ -41,6 +42,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     /// Bumped per open/close so a late "page ready" callback cannot re-present a stale reader.
     private var navigation = 0
     private var transitions = 0
+    /// The published list, the title's inputs and alerts.
+    private var storeWatches: [Task<Void, Never>] = []
 
     init(store: MailStore) {
         self.store = store
@@ -88,7 +91,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         split.splitView.autosaveName = "ContentSplit"
         window.contentViewController = split
         if firstRun {
-            DispatchQueue.main.async { [split] in split.splitView.setPosition(230, ofDividerAt: 0) }
+            Task { [split] in split.splitView.setPosition(230, ofDividerAt: 0) }
         }
         if !window.setFrameUsingName("MainWindow") {
             window.setContentSize(NSSize(width: 1280, height: 820))
@@ -107,31 +110,45 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         window.toolbar = toolbar
 
         // Escape goes back from the reader or a bundle, wherever focus is (web content included).
+        // Event monitors call back on the main thread.
         escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard event.keyCode == 53 else { return event }
-            let handled = MainActor.assumeIsolated { () -> Bool in
-                guard let self, let window = self.window, event.window === window, window.attachedSheet == nil,
-                      self.canGoBack, !(window.firstResponder is NSTextView) else { return false }
-                if self.opened != nil || self.openedSpace != nil, self.reader.handleEscape() { return true }
-                self.goBack(nil)
-                return true
-            }
-            return handled ? nil : event
+            self?.handleEscape(event) == true ? nil : event
         }
         // A two-finger swipe right drags the reader away (when "Swipe between pages" uses two
         // fingers), and a mouse's Back button goes back like Escape.
         backMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .otherMouseDown]) { [weak self] event in
-            let handled = MainActor.assumeIsolated { self?.handleBackInput(event) ?? false }
-            return handled ? nil : event
+            self?.handleBackInput(event) == true ? nil : event
         }
 
-        let center = NotificationCenter.default
-        center.addObserver(self, selector: #selector(listChanged), name: .storeListChanged, object: store)
-        center.addObserver(self, selector: #selector(accountsChanged), name: .storeAccountsChanged, object: store)
-        center.addObserver(self, selector: #selector(chatChanged), name: .chatSpacesChanged, object: store.chat)
-        center.addObserver(self, selector: #selector(storeError(_:)), name: .storeError, object: store)
-        center.addObserver(self, selector: #selector(storeError(_:)), name: .storeError, object: store.accountStore)
-        updateTitle()
+        let problems = store.problems
+        storeWatches = [
+            Task.immediate(name: "Window list") { [weak self, store] in
+                for await _ in Observations({ _ = (store.listContext, store.conversations, store.searchQuery) }) {
+                    self?.listChanged()
+                }
+            },
+            Task.immediate(name: "Window title") { [weak self] in
+                for await titles in Observations({ [weak self] in self?.titles() }) {
+                    if let titles { self?.show(titles) }
+                }
+            },
+            Task.immediate(name: "Window alerts") { [weak self] in
+                for await problem in Observations({ problems.alert }).dropFirst() {
+                    if let problem { self?.presentAlert(problem) }
+                }
+            },
+        ]
+    }
+
+    isolated deinit { storeWatches.forEach { $0.cancel() } }
+
+    /// Escape goes back from the reader or a bundle, wherever focus is (web content included).
+    private func handleEscape(_ event: NSEvent) -> Bool {
+        guard event.keyCode == 53, let window, event.window === window, window.attachedSheet == nil,
+              canGoBack, !(window.firstResponder is NSTextView) else { return false }
+        if opened != nil || openedSpace != nil, reader.handleEscape() { return true }
+        goBack(nil)
+        return true
     }
 
     @available(*, unavailable)
@@ -168,7 +185,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         // still loading (cold start, web process restart) gets a short fallback; a warm shell gets a
         // longer one that only matters when the web process stalls.
         reader.show(conversation, onReady: present)
-        DispatchQueue.main.asyncAfter(deadline: .now() + (reader.awaitsShell ? 0.12 : 0.4)) { present() }
+        let fallback: Duration = reader.awaitsShell ? .milliseconds(120) : .milliseconds(400)
+        Task {
+            try? await Task.sleep(for: fallback)
+            present()
+        }
         if conversation.isUnread { store.setRead(conversation, read: true) }
         updateTitle()
         window?.toolbar?.validateVisibleItems()
@@ -191,7 +212,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         }
         // The reader captures the unread state before opening marks the space read.
         reader.showChat(key, onReady: present)
-        DispatchQueue.main.asyncAfter(deadline: .now() + (reader.awaitsShell ? 0.12 : 0.4)) { present() }
+        let fallback: Duration = reader.awaitsShell ? .milliseconds(120) : .milliseconds(400)
+        Task {
+            try? await Task.sleep(for: fallback)
+            present()
+        }
         store.chat.open(key)
         updateTitle()
         window?.toolbar?.validateVisibleItems()
@@ -357,7 +382,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     // MARK: - Store observation
 
-    @objc private func listChanged() {
+    /// The store published a list: the open conversation follows it, or the reader closes.
+    private func listChanged() {
         // Another selection replaced the chat list the open space came from: return to the list.
         if let openedSpace, store.listContext.selection != .allChats, store.listContext.selection != .chat(openedSpace.account) {
             closeReader()
@@ -375,42 +401,41 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         if let highlighted, let fresh = store.conversations.first(where: { $0.id == highlighted.id }) {
             self.highlighted = fresh
         }
-        updateTitle()
         window?.toolbar?.validateVisibleItems()
     }
 
-    @objc private func accountsChanged() { updateTitle() }
-
-    @objc private func chatChanged() {
-        guard store.selection.isChat else { return }
-        updateTitle()
-    }
-
-    @objc private func storeError(_ note: Notification) {
-        guard note.userInfo?["alert"] as? Bool == true, let message = note.userInfo?["message"] as? String,
-              let window, window.attachedSheet == nil else { return }
+    private func presentAlert(_ problem: StoreProblem) {
+        guard let window, window.attachedSheet == nil else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "The action could not be completed"
-        alert.informativeText = message
+        alert.informativeText = problem.message
         alert.beginSheetModal(for: window)
     }
 
-    private func updateTitle() {
-        guard let window else { return }
+    private func updateTitle() { show(titles()) }
+
+    private func show(_ titles: (title: String, subtitle: String)) {
+        window?.title = titles.title
+        window?.subtitle = titles.subtitle
+    }
+
+    /// The selection's name, and its unread count, search results or loading state. Observed: the
+    /// window retitles whenever anything read here changes.
+    private func titles() -> (title: String, subtitle: String) {
         let unread = store.selectionRole == .drafts ? 0 : store.badgeCount(store.selection)
-        window.title = list.openBundle?.title ?? store.selectionTitle
+        let title = list.openBundle?.title ?? store.selectionTitle
         if store.searchQuery != nil {
-            window.subtitle = store.isLoading ? "Searching…" : "\(store.conversations.count) results"
+            return (title, store.isLoading ? "Searching…" : "\(store.conversations.count) results")
         } else if store.selection.isChat {
-            window.subtitle = store.chat.isLoading && store.chat.rows.isEmpty ? "Loading…" : (unread > 0 ? "\(unread.formatted()) unread" : "")
+            return (title, store.chat.isLoading && store.chat.rows.isEmpty ? "Loading…" : (unread > 0 ? "\(unread.formatted()) unread" : ""))
         } else if store.isLoading && store.conversations.isEmpty {
-            window.subtitle = "Loading…"
+            return (title, "Loading…")
         } else if list.openBundle != nil {
             let counts = list.bundleCounts
-            window.subtitle = "\(counts.total.formatted()) conversations" + (counts.unread > 0 ? " · \(counts.unread.formatted()) unread" : "")
+            return (title, "\(counts.total.formatted()) conversations" + (counts.unread > 0 ? " · \(counts.unread.formatted()) unread" : ""))
         } else {
-            window.subtitle = unread > 0 ? "\(unread.formatted()) unread" : ""
+            return (title, unread > 0 ? "\(unread.formatted()) unread" : "")
         }
     }
 

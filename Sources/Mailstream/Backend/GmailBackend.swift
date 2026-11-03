@@ -4,7 +4,7 @@ import Foundation
 /// message but spam and trash). Envelopes' immutable fields are cached by message id and their
 /// labels kept current through the mailbox history, so a refresh fetches metadata only for
 /// messages it has not seen.
-final class GmailBackend: MailBackend {
+nonisolated final class GmailBackend: MailBackend {
     static let allMail = "ALL"
     private let api: API
     private let cache: GmailEnvelopeCache
@@ -19,7 +19,7 @@ final class GmailBackend: MailBackend {
         "STARRED": .starred, "IMPORTANT": .important,
     ]
 
-    func identity() async throws -> Address {
+    @concurrent func identity() async throws -> Address {
         struct Profile: Decodable, Sendable { let emailAddress: String }
         struct SendAsList: Decodable, Sendable {
             struct Entry: Decodable, Sendable {
@@ -39,7 +39,7 @@ final class GmailBackend: MailBackend {
         return Address(name: name.isEmpty ? nil : name, email: email)
     }
 
-    func mailboxes(counts: Bool) async throws -> [Mailbox] {
+    @concurrent func mailboxes(counts: Bool) async throws -> [Mailbox] {
         struct LabelList: Decodable, Sendable {
             struct Label: Decodable, Sendable {
                 let id: String
@@ -86,7 +86,7 @@ final class GmailBackend: MailBackend {
         }
     }
 
-    func envelopes(mailbox: String, cursor: String?, pageSize: Int, priority: RequestPriority) async throws -> EnvelopePage {
+    @concurrent func envelopes(mailbox: String, cursor: String?, pageSize: Int, priority: RequestPriority) async throws -> EnvelopePage {
         var query = Self.scope(mailbox) + [("maxResults", "\(min(max(pageSize, 1), 500))"),
                                            ("fields", "messages(id),nextPageToken")]
         if let cursor { query.append(("pageToken", cursor)) }
@@ -94,7 +94,7 @@ final class GmailBackend: MailBackend {
         return EnvelopePage(envelopes: envelopes, next: next)
     }
 
-    func search(mailbox: String, query: String, pageSize: Int) async throws -> [Envelope] {
+    @concurrent func search(mailbox: String, query: String, pageSize: Int) async throws -> [Envelope] {
         let parameters = Self.scope(mailbox) + [("q", query), ("maxResults", "\(min(max(pageSize, 1), 500))"),
                                                 ("fields", "messages(id),nextPageToken")]
         return try await listing(Self.url("messages", parameters), priority: .interactive).envelopes
@@ -114,8 +114,8 @@ final class GmailBackend: MailBackend {
         return (envelopes, page.nextPageToken)
     }
 
-    func content(id: String, mailbox: String, directory: URL, urlBase: String,
-                 priority: RequestPriority) async throws -> MessageContent {
+    @concurrent func content(id: String, mailbox: String, directory: URL, urlBase: String,
+                             priority: RequestPriority) async throws -> MessageContent {
         let message = try await api.get(GmailMessage.self, Self.url("messages/\(Self.escape(id))", [("format", "full")]),
                                         priority: priority, cost: 5)
         guard let payload = message.payload else {
@@ -160,7 +160,7 @@ final class GmailBackend: MailBackend {
         }
     }
 
-    func setFlag(_ flag: MessageFlag, _ on: Bool, ids: [String], mailbox: String) async throws {
+    @concurrent func setFlag(_ flag: MessageFlag, _ on: Bool, ids: [String], mailbox: String) async throws {
         let label = flag == .seen ? "UNREAD" : "STARRED"
         // Seen is the absence of UNREAD.
         let add = (flag == .seen) != on
@@ -170,7 +170,7 @@ final class GmailBackend: MailBackend {
     /// Labels Gmail keeps to itself: a move never takes them off.
     private static let fixed: Set<String> = [allMail, "SENT", "DRAFT"]
 
-    func move(ids: [String], from: String, to: String) async throws {
+    @concurrent func move(ids: [String], from: String, to: String) async throws {
         guard from != to, !ids.isEmpty else { return }
         if to == "TRASH" {
             try await each(ids, "trash")
@@ -190,7 +190,7 @@ final class GmailBackend: MailBackend {
         try await modify(ids, add: to == Self.allMail ? [] : [to], remove: remove.sorted())
     }
 
-    func delete(ids: [String], mailbox: String) async throws {
+    @concurrent func delete(ids: [String], mailbox: String) async throws {
         struct Body: Encodable { let ids: [String] }
         for chunk in Self.chunks(ids, 1000) {
             let request = API.request(Self.url("messages/batchDelete"), method: "POST", json: Body(ids: chunk))
@@ -200,7 +200,7 @@ final class GmailBackend: MailBackend {
     }
 
     /// Uploads through the media endpoint, which takes messages up to 35 MB with their thread.
-    func send(_ message: OutgoingMessage) async throws {
+    @concurrent func send(_ message: OutgoingMessage) async throws {
         struct Metadata: Encodable { let threadId: String? }
         let raw = try MIMEMessage.render(message, messageID: "\(UUID().uuidString.lowercased())@mailstream.local")
         let boundary = "ms_upload_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
@@ -294,7 +294,7 @@ final class GmailBackend: MailBackend {
 
 // MARK: - Gmail resources
 
-private struct GmailMessage: Decodable, Sendable {
+private nonisolated struct GmailMessage: Decodable, Sendable {
     let id: String
     let threadId: String?
     let labelIds: [String]?
@@ -304,7 +304,7 @@ private struct GmailMessage: Decodable, Sendable {
     let payload: GmailPart?
 }
 
-private struct GmailPart: Decodable, Sendable {
+private nonisolated struct GmailPart: Decodable, Sendable {
     struct Header: Decodable, Sendable {
         let name: String
         let value: String
@@ -325,7 +325,7 @@ private struct GmailPart: Decodable, Sendable {
     }
 }
 
-private struct GmailBody: Decodable, Sendable {
+private nonisolated struct GmailBody: Decodable, Sendable {
     let attachmentId: String?
     let data: String?
 }
@@ -336,7 +336,7 @@ private struct GmailBody: Decodable, Sendable {
 /// mailbox history from the last history id seen, and a history too old to answer drops the
 /// cache so the next listing fetches metadata afresh.
 private actor GmailEnvelopeCache {
-    private struct Entry {
+    private nonisolated struct Entry {
         let envelope: Envelope
         var labels: Set<String>
 
@@ -563,7 +563,7 @@ extension GmailBackend {
 
     /// The mailbox's current history id.
     fileprivate static func historyID(api: API, priority: RequestPriority) async throws -> UInt64? {
-        struct Profile: Decodable { let historyId: String? }
+        struct Profile: Decodable, Sendable { let historyId: String? }
         return try await api.get(Profile.self, url("profile", [("fields", "historyId")]), priority: priority, cost: 1)
             .historyId.flatMap(UInt64.init)
     }
@@ -672,7 +672,7 @@ extension GmailBackend {
 
 /// Walks a `format=full` payload: picks the HTML and plain bodies, stores every other part
 /// through `MessageAssembly` in part order, and renders forwarded messages inline.
-private struct GmailContentRenderer {
+private nonisolated struct GmailContentRenderer {
     var assembly: MessageAssembly
     let fetched: [String: Data]
     private var nextIndex = 0

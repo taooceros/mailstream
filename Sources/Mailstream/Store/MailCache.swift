@@ -4,21 +4,26 @@ import Foundation
 /// On-disk cache under ~/Library/Caches so launches paint from the last known state before the
 /// network answers. Everything here is disposable.
 ///
-/// Reads are `async` and nonisolated, so they always run on the concurrent executor, never on the
-/// caller's (main) thread. Writes go through one serial queue, which also encodes, so the last
-/// write for a file always wins and callers never wait.
-final class MailCache: Sendable {
+/// Reads are `@concurrent`, so they always run on the concurrent executor, never on the caller's
+/// (main) thread. Writes are queued in call order to one writer task off the main actor, which
+/// also encodes, so the last write for a file always wins and callers never wait.
+nonisolated final class MailCache: Sendable {
     static let contentVersion = 3
     static let scheme = "mscid"
 
     let root: URL
-    private let writer = DispatchQueue(label: "dev.mailstream.cache-writer", qos: .utility)
+    private let writes: AsyncStream<@Sendable () -> Void>.Continuation
 
     init() {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         root = caches.appendingPathComponent("dev.mailstream.Mailstream", isDirectory: true)
+        let (queue, writes) = AsyncStream.makeStream(of: (@Sendable () -> Void).self)
+        self.writes = writes
+        Task(name: "Cache writer", priority: .utility) {
+            for await write in queue { write() }
+        }
         let root = root
-        writer.async {
+        writes.yield {
             let fm = FileManager.default
             for legacy in Self.legacy { try? fm.removeItem(at: root.appendingPathComponent(legacy)) }
             for sub in ["envelopes-v2", "messages-v2", "mailboxes-v2", "chat-v2"] {
@@ -26,6 +31,8 @@ final class MailCache: Sendable {
             }
         }
     }
+
+    deinit { writes.finish() }
 
     /// Layouts from before the provider APIs, keyed by account, mailbox and chat account names
     /// that no provider id matches.
@@ -36,13 +43,13 @@ final class MailCache: Sendable {
         return digest.prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 
-    private func read<T: Decodable>(_ type: T.Type, at url: URL) async -> T? {
+    @concurrent private func read<T: Decodable & Sendable>(_ type: T.Type, at url: URL) async -> T? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
     }
 
     private func write<T: Encodable & Sendable>(_ value: T, to url: URL, creatingDirectory: Bool = false) {
-        writer.async {
+        writes.yield {
             guard let data = try? JSONEncoder().encode(value) else { return }
             if creatingDirectory {
                 try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -151,6 +158,6 @@ final class MailCache: Sendable {
 
     func removeChatMessages(_ key: ChatSpaceKey) {
         let url = chatMessagesURL(key)
-        writer.async { try? FileManager.default.removeItem(at: url) }
+        writes.yield { try? FileManager.default.removeItem(at: url) }
     }
 }

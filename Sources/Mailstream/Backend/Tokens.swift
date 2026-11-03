@@ -3,7 +3,7 @@ import Security
 
 /// OAuth access tokens by account id, refreshed from the refresh tokens kept in the Keychain.
 /// Concurrent callers for one account share a single refresh; the Keychain item is read once.
-final class Tokens: TokenSource {
+nonisolated final class Tokens: TokenSource {
     private let state: State
 
     /// `providers` are the signed-in accounts and whose token endpoint each refreshes against.
@@ -155,7 +155,7 @@ final class Tokens: TokenSource {
 }
 
 /// What the Keychain keeps for sign-ins, by account id and provider.
-struct SignIns: Codable, Equatable, Sendable {
+nonisolated struct SignIns: Codable, Equatable, Sendable {
     var refreshTokens: [String: String] = [:]
     /// The client each account's refresh token was issued to.
     var clients: [String: OAuthClient] = [:]
@@ -167,7 +167,7 @@ struct SignIns: Codable, Equatable, Sendable {
 /// account `refresh-tokens`) holding `SignIns` as JSON, so macOS asks about Mailstream's access
 /// once rather than per account. Items from before clients were stored hold a bare object of
 /// refresh token by account id.
-enum Keychain {
+nonisolated enum Keychain {
     static let service = "dev.mailstream.Mailstream.oauth"
     private static let account = "refresh-tokens"
 

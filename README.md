@@ -7,7 +7,7 @@ Cloudflare Worker relay (`Push/`).
 
 ## Requirements
 
-- macOS 15 or later, Swift 6 toolchain (Command Line Tools is enough, no Xcode project)
+- macOS 26 or later, Swift 6.2 or later (Command Line Tools is enough, no Xcode project)
 - A Google Cloud OAuth client and a Microsoft Entra app registration of your own
   (see First-time setup); their ids and secrets are entered in the app at sign-in
 - For push: a Cloudflare account (`wrangler`) and the Google Cloud CLI (`gcloud`)

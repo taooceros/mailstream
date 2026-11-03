@@ -1,6 +1,6 @@
 import Foundation
 
-enum HTMLText {
+nonisolated enum HTMLText {
     static func escape(_ text: String) -> String {
         var out = ""
         out.reserveCapacity(text.utf8.count)

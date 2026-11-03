@@ -3,7 +3,7 @@ import AppKit
 /// Google Chat's message markup (`*bold*`, `_italic_`, `~strike~`, `` `code` ``, fenced blocks,
 /// `<url|label>`, `<users/…>` mentions), rendered minimally. Everything else is escaped, so a
 /// message can never inject markup into the reader.
-enum ChatMarkup {
+nonisolated enum ChatMarkup {
     private static let fence = try! NSRegularExpression(pattern: "```\\n?([\\s\\S]*?)\\n?```")
     private static let code = try! NSRegularExpression(pattern: "`([^`\\n]+)`")
     private static let token = try! NSRegularExpression(pattern: #"<(https?://[^|>\s]+)(?:\|([^>\n]*))?>|<(users/[^>\s]+)>"#)
@@ -98,7 +98,7 @@ enum ChatMarkup {
 /// Markup of a chat space in the reader page: a header, a log of messages and a composer. The
 /// log is a list of items, one per message, each with a stable DOM id, so new messages are
 /// appended and changed ones replaced without re-rendering the page.
-enum ChatPage {
+nonisolated enum ChatPage {
     /// One message (with the day divider or "New" line above it, if any) as it sits in the log.
     struct Item: Equatable, Sendable {
         let id: String
@@ -106,13 +106,13 @@ enum ChatPage {
     }
 
     /// Who sent a pending message: the user.
-    struct Sender: Sendable {
+    struct Sender: Equatable, Sendable {
         let key: String
         let label: String
     }
 
     /// Everything the log is built from, copied out of the stores so it builds off the main actor.
-    struct Input: Sendable {
+    struct Input: Equatable, Sendable {
         let messages: [ChatMessage]
         let pending: [ChatPending]
         /// Incoming messages after this are marked unread; without it the last `unread` incoming ones are.
@@ -130,8 +130,8 @@ enum ChatPage {
             let firstUnread: String?
         }
 
-        /// Nonisolated and async, so it never runs on the caller's actor.
-        func build() async -> Output {
+        /// Runs on the concurrent executor, never on the caller's actor.
+        @concurrent func build() async -> Output {
             ChatPage.log(self)
         }
     }

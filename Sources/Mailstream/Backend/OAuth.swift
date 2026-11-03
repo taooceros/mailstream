@@ -2,7 +2,7 @@ import AppKit
 import CryptoKit
 import Network
 
-extension Provider {
+nonisolated extension Provider {
     var authorizeURL: URL {
         switch self {
         case .google: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
@@ -58,7 +58,7 @@ extension Provider {
 }
 
 /// An OAuth client the person registered with the provider and entered in Settings ▸ Accounts.
-struct OAuthClient: Codable, Equatable, Sendable {
+nonisolated struct OAuthClient: Codable, Equatable, Sendable {
     var id: String
     /// Google's desktop clients have one; a Microsoft public client has none.
     var secret: String?
@@ -77,7 +77,7 @@ struct OAuthClient: Codable, Equatable, Sendable {
 }
 
 /// A token endpoint answer.
-struct TokenResponse: Decodable, Sendable {
+nonisolated struct TokenResponse: Decodable, Sendable {
     let accessToken: String
     let expiresIn: Int?
     /// Always present after sign-in; on refresh only when the provider rotated it (Microsoft).
@@ -89,7 +89,7 @@ struct TokenResponse: Decodable, Sendable {
 
 /// A sign-in or token endpoint failure. `code` is the OAuth error code (`invalid_grant`, …), or
 /// one of this app's: `config`, `listener`, `timeout`, `state`, `response`.
-struct OAuthError: LocalizedError, Sendable {
+nonisolated struct OAuthError: LocalizedError, Sendable {
     var status = 0
     let code: String
     let message: String
@@ -97,7 +97,7 @@ struct OAuthError: LocalizedError, Sendable {
 }
 
 /// Browser sign-in: authorization code with PKCE, redirected to a one-shot loopback listener.
-enum OAuth {
+nonisolated enum OAuth {
     /// The only redirect the Microsoft app registration allows; Google desktop clients accept any
     /// loopback port.
     static let redirect = "http://localhost:49152"
@@ -136,10 +136,7 @@ enum OAuth {
             throw OAuthError(code: "config", message: "Could not build the sign-in address.")
         }
 
-        let listener = try RedirectListener(state: state)
-        let code = try await listener.code {
-            Task { @MainActor in NSWorkspace.shared.open(url) }
-        }
+        let code = try await RedirectListener.code(state: state) { NSWorkspace.shared.open(url) }
 
         let response = try await exchange([
             "grant_type": "authorization_code",
@@ -239,110 +236,106 @@ enum OAuth {
 }
 
 /// One-shot HTTP listener on the loopback interface for the OAuth redirect. Answers the browser
-/// with a small page, then stops. All mutable state is touched only on `queue`.
-private final class RedirectListener: @unchecked Sendable {
+/// with a small page and stops at the first sign-in result, after five minutes, or when the
+/// calling task is cancelled.
+private nonisolated enum RedirectListener {
     private static let port: NWEndpoint.Port = 49152
-    private static let timeout: DispatchTimeInterval = .seconds(300)
-
-    private let queue = DispatchQueue(label: "dev.mailstream.oauth-redirect")
-    private let listener: NWListener
-    private let state: String
-    private var continuation: CheckedContinuation<String, any Error>?
-    private var outcome: Result<String, any Error>?
-
-    init(state: String) throws {
-        self.state = state
-        let parameters = NWParameters.tcp
-        parameters.requiredInterfaceType = .loopback
-        parameters.allowLocalEndpointReuse = true
-        do {
-            listener = try NWListener(using: parameters, on: Self.port)
-        } catch {
-            throw OAuthError(code: "listener", message: "Could not listen for the sign-in on port 49152: \(error.localizedDescription)")
-        }
-    }
 
     /// Starts listening, calls `ready` once the port is open, and returns the authorization code.
-    func code(ready: @escaping @Sendable () -> Void) async throws -> String {
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                self.queue.async { self.start(continuation, ready: ready) }
+    static func code(state: String, ready: @escaping @Sendable () -> Void) async throws -> String {
+        let listener: NetworkListener<TCP>
+        do {
+            listener = try NetworkListener(using: .parameters { TCP() }
+                .localPort(port).requiredInterfaceType(.loopback).localEndpointReuseAllowed(true))
+        } catch {
+            throw failure(error)
+        }
+        let (outcomes, report) = AsyncStream.makeStream(of: Result<String, any Error>.self)
+        listener.onStateUpdate { _, update in
+            switch update {
+            case .ready: ready()
+            case .failed(let error): report.yield(.failure(failure(error)))
+            default: break
             }
-        } onCancel: {
-            self.queue.async { self.finish(.failure(CancellationError())) }
+        }
+        return try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask {
+                do {
+                    try await listener.run { connection in
+                        if let outcome = await serve(connection, state: state) { report.yield(outcome) }
+                    }
+                } catch {
+                    throw Task.isCancelled ? CancellationError() : failure(error)
+                }
+                throw CancellationError()
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(300))
+                throw OAuthError(code: "timeout", message: "The sign-in timed out after five minutes.")
+            }
+            group.addTask {
+                for await outcome in outcomes { return try outcome.get() }
+                throw CancellationError()
+            }
+            // The first to finish decides; leaving the group closes the listener.
+            defer { group.cancelAll() }
+            guard let code = try await group.next() else { throw CancellationError() }
+            return code
         }
     }
 
-    private func start(_ continuation: CheckedContinuation<String, any Error>, ready: @escaping @Sendable () -> Void) {
-        if let outcome {
-            continuation.resume(with: outcome)
-            return
-        }
-        self.continuation = continuation
-        listener.stateUpdateHandler = { [self] state in
-            switch state {
-            case .ready:
-                ready()
-            case .failed(let error):
-                finish(.failure(OAuthError(code: "listener", message: "Could not listen for the sign-in on port 49152: \(error.localizedDescription)")))
-            default:
-                break
-            }
-        }
-        listener.newConnectionHandler = { [self] connection in
-            connection.start(queue: queue)
-            receive(connection, Data())
-        }
-        listener.start(queue: queue)
-        queue.asyncAfter(deadline: .now() + Self.timeout) { [weak self] in
-            self?.finish(.failure(OAuthError(code: "timeout", message: "The sign-in timed out after five minutes.")))
-        }
+    private static func failure(_ error: any Error) -> OAuthError {
+        OAuthError(code: "listener", message: "Could not listen for the sign-in on port 49152: \(error.localizedDescription)")
     }
 
-    /// Reads up to the end of the request head.
-    private func receive(_ connection: NWConnection, _ buffer: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [self] data, _, isComplete, error in
-            var buffer = buffer
-            if let data { buffer.append(data) }
-            if let end = buffer.range(of: Data("\r\n\r\n".utf8)) {
-                handle(connection, head: String(decoding: buffer[..<end.lowerBound], as: UTF8.self))
-            } else if error != nil || isComplete || buffer.count > 65_536 {
-                connection.cancel()
-            } else {
-                receive(connection, buffer)
+    /// Reads up to the end of the request head and answers it; returns the sign-in's result when
+    /// this was the redirect. A connection that fails or ends early is dropped.
+    private static func serve(_ connection: NetworkConnection<TCP>, state: String) async -> Result<String, any Error>? {
+        var buffer = Data()
+        do {
+            while true {
+                let (data, metadata) = try await connection.receive(atMost: 16_384)
+                buffer.append(data)
+                if let end = buffer.range(of: Data("\r\n\r\n".utf8)) {
+                    return try await handle(connection, head: String(decoding: buffer[..<end.lowerBound], as: UTF8.self),
+                                            state: state)
+                }
+                if metadata.endOfStream || buffer.count > 65_536 { return nil }
             }
+        } catch {
+            return nil
         }
     }
 
     /// Accepts only `GET /?code=…&state=…` (or the provider's `error=…`) with this sign-in's state;
     /// anything else (a favicon, a stale tab) is answered and ignored.
-    private func handle(_ connection: NWConnection, head: String) {
+    private static func handle(_ connection: NetworkConnection<TCP>, head: String,
+                               state: String) async throws -> Result<String, any Error>? {
         let requestLine = head.components(separatedBy: "\r\n").first ?? ""
         let parts = requestLine.split(separator: " ")
-        guard outcome == nil, parts.count == 3, parts[0] == "GET",
+        guard parts.count == 3, parts[0] == "GET",
               let components = URLComponents(string: "http://localhost" + String(parts[1])), components.path == "/" else {
-            respond(connection, status: "404 Not Found", text: "Not found.")
-            return
+            try await respond(connection, status: "404 Not Found", text: "Not found.")
+            return nil
         }
         let query = Dictionary((components.queryItems ?? []).map { ($0.name, $0.value ?? "") }) { first, _ in first }
         guard query["state"] == state else {
-            respond(connection, status: "400 Bad Request",
-                    text: "This sign-in page is out of date. Start again from Mailstream.")
-            return
+            try await respond(connection, status: "400 Bad Request",
+                              text: "This sign-in page is out of date. Start again from Mailstream.")
+            return nil
         }
         if let code = query["code"], !code.isEmpty {
-            respond(connection, status: "200 OK", text: nil)
-            finish(.success(code))
-        } else {
-            let reason = query["error_description"].flatMap { $0.isEmpty ? nil : $0 }
-                ?? query["error"] ?? "The provider sent no authorization code."
-            respond(connection, status: "200 OK", text: "Sign-in failed: \(reason)")
-            finish(.failure(OAuthError(code: query["error"] ?? "response", message: "Sign-in failed: \(reason)")))
+            try await respond(connection, status: "200 OK", text: nil)
+            return .success(code)
         }
+        let reason = query["error_description"].flatMap { $0.isEmpty ? nil : $0 }
+            ?? query["error"] ?? "The provider sent no authorization code."
+        try await respond(connection, status: "200 OK", text: "Sign-in failed: \(reason)")
+        return .failure(OAuthError(code: query["error"] ?? "response", message: "Sign-in failed: \(reason)"))
     }
 
     /// `text` nil: the success page.
-    private func respond(_ connection: NWConnection, status: String, text: String?) {
+    private static func respond(_ connection: NetworkConnection<TCP>, status: String, text: String?) async throws {
         let message = text ?? "You can close this tab and return to Mailstream."
         let escaped = message.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
@@ -354,16 +347,6 @@ private final class RedirectListener: @unchecked Sendable {
         let body = Data(html.utf8)
         let head = "HTTP/1.1 \(status)\r\nContent-Type: text/html; charset=utf-8\r\n"
             + "Content-Length: \(body.count)\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n"
-        connection.send(content: Data(head.utf8) + body, completion: .contentProcessed { _ in connection.cancel() })
-    }
-
-    private func finish(_ result: Result<String, any Error>) {
-        guard outcome == nil else { return }
-        outcome = result
-        listener.stateUpdateHandler = nil
-        listener.newConnectionHandler = nil
-        listener.cancel()
-        continuation?.resume(with: result)
-        continuation = nil
+        try await connection.send(Data(head.utf8) + body)
     }
 }

@@ -3,7 +3,7 @@ import UniformTypeIdentifiers
 
 /// An outgoing message as RFC 5322 bytes with CRLF line ends: the raw message Gmail sends and
 /// Graph's MIME `sendMail` takes. Both providers drop the Bcc header when they send.
-enum MIMEMessage {
+nonisolated enum MIMEMessage {
     /// `messageID` without angle brackets.
     static func render(_ message: OutgoingMessage, messageID: String) throws -> Data {
         var headers = [addressField("From", [message.from])]

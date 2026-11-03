@@ -4,7 +4,7 @@ import Foundation
 /// "smol" model role in a one-shot, tool-less run.
 actor OmpTagger {
     /// One conversation as the model sees it.
-    struct Item: Sendable {
+    nonisolated struct Item: Sendable {
         /// Opaque key echoed back in the result.
         var id: String
         var senderName: String
@@ -19,7 +19,7 @@ actor OmpTagger {
         var latestFromUser: Bool
     }
 
-    struct Failure: LocalizedError, Sendable {
+    nonisolated struct Failure: LocalizedError, Sendable {
         let message: String
         var errorDescription: String? { message }
     }
@@ -42,7 +42,7 @@ actor OmpTagger {
         let executable = try await resolvedExecutable()
         let output = try await ProcessRunner.run(executable: executable,
                                                  arguments: Self.arguments(prompt: Self.prompt(items)),
-                                                 environment: tools.environment,
+                                                 environment: await tools.environment,
                                                  currentDirectory: workingDirectory)
         guard output.status == 0 else {
             let line = String(decoding: output.stderr, as: UTF8.self)
@@ -58,33 +58,34 @@ actor OmpTagger {
 
     private func resolvedExecutable() async throws -> URL {
         if let executable { return executable }
-        let tools = tools
-        let found = await withCheckedContinuation { (continuation: CheckedContinuation<URL?, Never>) in
-            DispatchQueue.global(qos: .utility).async {
-                continuation.resume(returning: Self.locate(tools: tools))
-            }
-        }
-        guard let found else { throw Failure(message: "omp not found") }
+        guard let found = await Self.locate(tools: tools) else { throw Failure(message: "omp not found") }
         executable = found
         return found
     }
 
     /// `MAILSTREAM_OMP`, else the PATH candidate reporting the highest `--version`.
-    private static func locate(tools: ToolEnvironment) -> URL? {
-        let fm = FileManager.default
-        if let override = tools.environment["MAILSTREAM_OMP"], fm.isExecutableFile(atPath: override) {
+    @concurrent
+    private static func locate(tools: ToolEnvironment) async -> URL? {
+        let environment = await tools.environment
+        if let override = environment["MAILSTREAM_OMP"], FileManager.default.isExecutableFile(atPath: override) {
             return URL(fileURLWithPath: override)
         }
-        let candidates = tools.executables(named: "omp")
+        let candidates = await tools.executables(named: "omp")
         guard !candidates.isEmpty else { return nil }
-        let versions = VersionTable(count: candidates.count)
-        DispatchQueue.concurrentPerform(iterations: candidates.count) { index in
-            let output = ToolEnvironment.runQuickly(candidates[index], ["--version"], environment: tools.environment)
-            versions.set(index, output.flatMap(version(in:)))
+        let versions = await withTaskGroup { group in
+            for (index, candidate) in candidates.enumerated() {
+                group.addTask {
+                    let output = await ToolEnvironment.runQuickly(candidate, ["--version"], environment: environment)
+                    return (index, output.flatMap(version(in:)))
+                }
+            }
+            var versions = [[Int]?](repeating: nil, count: candidates.count)
+            for await (index, version) in group { versions[index] = version }
+            return versions
         }
         // Highest version wins; ties and unversioned candidates keep PATH order.
         let best = candidates.indices.max { a, b in
-            let va = versions.get(a) ?? [], vb = versions.get(b) ?? []
+            let va = versions[a] ?? [], vb = versions[b] ?? []
             return va == vb ? a > b : va.lexicographicallyPrecedes(vb)
         }
         return best.map { URL(fileURLWithPath: candidates[$0]) }
@@ -134,7 +135,7 @@ actor OmpTagger {
         when unclear.
         """
 
-    private struct PromptItem: Encodable {
+    private nonisolated struct PromptItem: Encodable {
         let id: String
         let from: String
         let toMe: Bool
@@ -204,15 +205,4 @@ actor OmpTagger {
             .map { $0.prefix(1).uppercased() + $0.dropFirst() }
             .joined(separator: " ")
     }
-}
-
-/// Results of the concurrent `--version` probes.
-private final class VersionTable: @unchecked Sendable {
-    private let lock = NSLock()
-    private var versions: [[Int]?]
-
-    init(count: Int) { versions = Array(repeating: nil, count: count) }
-
-    func set(_ index: Int, _ version: [Int]?) { lock.withLock { versions[index] = version } }
-    func get(_ index: Int) -> [Int]? { lock.withLock { versions[index] } }
 }

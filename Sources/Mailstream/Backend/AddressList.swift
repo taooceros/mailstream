@@ -2,7 +2,7 @@ import Foundation
 
 /// RFC 5322 address-list headers (`To`, `Cc`, `From`, `Reply-To`) as provider APIs hand them
 /// over: display names quoted or bare, commas inside quotes, comments, groups and bare addresses.
-enum AddressList {
+nonisolated enum AddressList {
     static func parse(_ header: String) -> [Address] {
         var addresses: [Address] = []
         var phrase = ""
@@ -87,7 +87,7 @@ enum AddressList {
 }
 
 /// Header and body text in the charsets mail declares.
-enum HeaderText {
+nonisolated enum HeaderText {
     /// Decodes RFC 2047 encoded-words (`=?UTF-8?B?…?=`); text without them is returned as is.
     static func decode(_ text: String) -> String {
         guard text.contains("=?") else { return text }

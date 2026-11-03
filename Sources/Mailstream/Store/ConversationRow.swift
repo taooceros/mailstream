@@ -2,7 +2,7 @@ import Foundation
 
 /// What one list row shows, worked out off the main thread together with the list, so scrolling
 /// and reloads only copy finished strings into views.
-struct ConversationRow: Hashable, Sendable {
+nonisolated struct ConversationRow: Hashable, Sendable {
     let id: String
     let latest: MessageRef
     /// "me, Josh" or "To Josh, Heidi"; the thread count is separate.
@@ -105,7 +105,7 @@ struct ConversationRow: Hashable, Sendable {
 }
 
 /// Subjects lose `Re:`/`Fwd:` (the thread count says as much) and `[list]` tags step back visually.
-enum SubjectStyle {
+nonisolated enum SubjectStyle {
     private static let reply = try! NSRegularExpression(
         pattern: #"^\s*(?:(?:re|fwd?|fw|aw|wg|sv|回复|答复|转发)\s*(?:\[\d+\])?\s*[:：]\s*)+"#, options: [.caseInsensitive])
     private static let listTag = try! NSRegularExpression(pattern: #"^\s*((?:\[[^\]\n]{1,40}\]\s*)+)"#)

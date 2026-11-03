@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 
 /// Stable per-account color, used for sidebar dots, list markers and reader chips.
 @MainActor
@@ -87,11 +88,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private var roots: [Node] = []
     private var updatingSelection = false
     private var expanded: Set<String> = ["unified:inbox", "chat", "section:Accounts"]
+    private var storeWatch: Task<Void, Never>?
 
     init(store: MailStore) {
         self.store = store
         super.init(nibName: nil, bundle: nil)
     }
+
+    isolated deinit { storeWatch?.cancel() }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
@@ -116,14 +120,16 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         scroll.automaticallyAdjustsContentInsets = true
         view = scroll
 
-        NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .storeAccountsChanged, object: store)
-        NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .chatSpacesChanged, object: store.chat)
-        reload()
+        storeWatch = Task.immediate(name: "Sidebar") { [weak self, store] in
+            // The tree and its badges: accounts, their mailboxes and counts, chat accounts, unread spaces.
+            let shown = Observations { _ = (store.accounts, store.mailboxes, store.chat.accounts, store.chat.unreadSpaces(account: nil)) }
+            for await _ in shown { self?.reload() }
+        }
     }
 
     /// Same tree as before (only counts or names moved): refresh the nodes and the visible cells in
     /// place. A different tree reloads and restores expansion.
-    @objc private func reload() {
+    private func reload() {
         let nodes = buildNodes()
         if Self.shape(nodes) == Self.shape(roots) {
             Self.adopt(nodes, into: roots)

@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 
 /// Shows one Google Chat space in the reader's persistent page, beside conversations: the space's
 /// messages as a chat log with a composer at the bottom. The log is built off the main actor and
@@ -21,8 +22,11 @@ final class ChatReader {
     private var lastRead: Date?
     private var unreadAtOpen = 0
     private var firstUnread: String?
-    private var building = false
-    private var needsBuild = false
+    /// Follows what the page shows of the space on screen.
+    private var watch: Task<Void, Never>?
+    private var lastSnapshot: Snapshot?
+    /// Requests made while a pass runs coalesce into one more pass.
+    private lazy var building = CoalescedTask("Chat log") { [weak self] in await self?.buildPass() }
 
     private struct Draft {
         var text = ""
@@ -41,10 +45,9 @@ final class ChatReader {
     init(store: MailStore, reader: ReaderViewController) {
         self.store = store
         self.reader = reader
-        let center = NotificationCenter.default
-        center.addObserver(self, selector: #selector(messagesChanged(_:)), name: .chatMessagesChanged, object: store.chat)
-        center.addObserver(self, selector: #selector(avatarResolved(_:)), name: .avatarResolved, object: store.avatars)
     }
+
+    isolated deinit { watch?.cancel() }
 
     /// Puts `key` in the page with whatever is in memory; messages fill in as they arrive.
     func show(_ key: ChatSpaceKey) {
@@ -56,13 +59,23 @@ final class ChatReader {
         unreadAtOpen = space?.unread ?? 0
         lastRead = unreadAtOpen > 0 ? space?.lastRead : nil
         reader.beginChat()
-        build()
+        watch = Task.immediate(name: "Chat reader") { [weak self] in
+            for await snapshot in Observations({ [weak self] in self?.snapshot(of: key) }) {
+                guard let self else { return }
+                guard let snapshot, snapshot != lastSnapshot else { continue }
+                lastSnapshot = snapshot
+                build()
+            }
+        }
     }
 
     /// Leaves the space, keeping an unsent draft.
     func hide() {
         guard let key else { return }
         drafts[key] = draft.isEmpty ? nil : draft
+        watch?.cancel()
+        watch = nil
+        lastSnapshot = nil
         self.key = nil
         token += 1
         shown = []
@@ -80,38 +93,33 @@ final class ChatReader {
 
     // MARK: - Building
 
-    @objc private func messagesChanged(_ note: Notification) {
-        guard let key, note.userInfo?["space"] as? ChatSpaceKey == key else { return }
-        build()
+    /// Everything the page shows of a space. Messages of other spaces, and pictures of people not
+    /// in this one, leave it equal, so they rebuild nothing.
+    private struct Snapshot: Equatable, Sendable {
+        let input: ChatPage.Input
+        let more: Bool
+        let loaded: Bool
+        let failure: String?
+        let loadingEarlier: Bool
     }
 
-    /// A sender's picture arrived: the log is rebuilt with it, replacing only their messages.
-    @objc private func avatarResolved(_ note: Notification) {
-        guard let key, let email = note.userInfo?["email"] as? String else { return }
-        let senders = store.chat.thread(key)?.messages.compactMap { $0.sender.email?.lowercased() } ?? []
-        let me = store.chat.account(named: key.account)?.email?.lowercased()
-        guard senders.contains(email) || me == email else { return }
-        build()
+    private func snapshot(of key: ChatSpaceKey) -> Snapshot {
+        // Pictures arriving can change `input.avatars`.
+        _ = store.avatars.revision
+        let thread = store.chat.thread(key)
+        return Snapshot(input: input(for: key), more: thread?.more ?? false, loaded: thread?.loaded ?? false,
+                        failure: thread?.failure, loadingEarlier: store.chat.isLoadingEarlier(key))
     }
 
-    /// Requests made while a pass runs coalesce into one more pass.
-    private func build() {
-        needsBuild = true
-        guard !building else { return }
-        building = true
-        Task { await buildPasses() }
-    }
+    private func build() { building.request() }
 
-    private func buildPasses() async {
-        while needsBuild {
-            needsBuild = false
-            guard let key else { break }
-            let token = token
-            let output = await input(for: key).build()
-            guard token == self.token, !needsBuild else { continue }
-            publish(output, key: key)
-        }
-        building = false
+    private func buildPass() async {
+        guard let key else { return }
+        let token = token
+        let output = await input(for: key).build()
+        // Shown elsewhere meanwhile, or changed again: the next pass publishes.
+        guard token == self.token, !building.isPending else { return }
+        publish(output, key: key)
     }
 
     private func input(for key: ChatSpaceKey) -> ChatPage.Input {

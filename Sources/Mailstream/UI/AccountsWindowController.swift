@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 
 /// The Accounts window: the signed-in accounts in a rounded list (badge in the account's
 /// sidebar color, label, address, what it is used for), adding one by browser sign-in,
@@ -28,6 +29,7 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
     private var status: (text: String, isError: Bool)?
     /// What the table shows: `accounts.records` as of the last reload.
     private var rows: [AccountRecord]
+    private var accountWatch: Task<Void, Never>?
 
     private init(accounts: AccountStore) {
         self.accounts = accounts
@@ -44,10 +46,13 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
         window.delegate = self
         buildUI()
         window.center()
-        NotificationCenter.default.addObserver(self, selector: #selector(accountsChanged),
-                                               name: AccountStore.didChange, object: accounts)
+        accountWatch = Task.immediate(name: "Accounts window") { [weak self, accounts] in
+            for await _ in Observations({ accounts.records }).dropFirst() { self?.reloadRows() }
+        }
         updateControls()
     }
+
+    isolated deinit { accountWatch?.cancel() }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
@@ -266,7 +271,7 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
     }
 
     /// Reloads the table, keeping the selected account selected.
-    @objc private func accountsChanged() {
+    private func reloadRows() {
         let selected = rows.indices.contains(table.selectedRow) ? rows[table.selectedRow].id : nil
         rows = accounts.records
         table.reloadData()
@@ -371,6 +376,8 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
         switch result {
         case .success(let record):
             status = ("Signed in as \(record.id).", false)
+            // The account observation reloads on a later turn; the new row is needed now.
+            reloadRows()
             if let row = rows.firstIndex(where: { $0.id == record.id }) {
                 table.selectRowIndexes([row], byExtendingSelection: false)
             }

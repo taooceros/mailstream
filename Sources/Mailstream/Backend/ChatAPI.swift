@@ -2,7 +2,7 @@ import Foundation
 
 /// The Google Chat REST resources `Chat` reads and writes.
 /// Reference: <https://developers.google.com/workspace/chat/api/reference/rest>.
-enum ChatAPI {
+nonisolated enum ChatAPI {
     static let base = URL(string: "https://chat.googleapis.com/v1/")!
 
     /// `path` under the API root, with `query` encoded.
@@ -31,7 +31,7 @@ enum ChatAPI {
         let lastActiveTime: String?
         let singleUserBotDm: Bool
 
-        init(from decoder: Decoder) throws {
+        init(from decoder: any Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             name = try c.decode(String.self, forKey: .name)
             spaceType = try c.decodeIfPresent(String.self, forKey: .spaceType) ?? ""
@@ -55,7 +55,7 @@ enum ChatAPI {
         let avatarUrl: String?
         let type: String?
 
-        init(from decoder: Decoder) throws {
+        init(from decoder: any Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
             displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
@@ -69,7 +69,7 @@ enum ChatAPI {
 
     /// Any JSON value other than null; only its presence matters.
     struct Present: Decodable, Sendable {
-        init(from decoder: Decoder) throws {}
+        init(from decoder: any Decoder) throws {}
     }
 
     struct Message: Decodable, Sendable {
@@ -95,7 +95,7 @@ enum ChatAPI {
         let cardsV2: Present?
         let cards: Present?
 
-        init(from decoder: Decoder) throws {
+        init(from decoder: any Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
             sender = try c.decodeIfPresent(User.self, forKey: .sender)

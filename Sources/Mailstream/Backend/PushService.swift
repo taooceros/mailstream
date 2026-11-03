@@ -1,42 +1,44 @@
 import AppKit
 import Network
+import Observation
 
 /// Live mail changes through the push relay: one WebSocket carrying Gmail Pub/Sub and Graph change
 /// notifications, plus the Gmail watches and Graph subscriptions that make the providers send them.
 /// Without push configuration it stays idle and the store keeps polling.
-@MainActor final class PushService {
-    /// `isConnected` changed.
-    static let connectionChanged = Notification.Name("PushService.connectionChanged")
-
+/// `isConnected` is observable; the mail store polls less while it is true.
+@Observable
+final class PushService {
     private(set) var isConnected = false
 
-    private let accounts: AccountStore
-    private let onChange: @MainActor (String) -> Void
-    private let config = AppConfig.current
-    private var started = false
-    private var observers: [any NSObjectProtocol] = []
-    private var timer: Timer?
-    private let monitor = NWPathMonitor()
-    private var pathSatisfied = true
+    @ObservationIgnored private let accounts: AccountStore
+    @ObservationIgnored private let onChange: (String) -> Void
+    @ObservationIgnored private let config = AppConfig.current
+    @ObservationIgnored private var started = false
+    /// Account changes, network paths and the hourly renewal.
+    @ObservationIgnored private var watchers: [Task<Void, Never>] = []
+    @ObservationIgnored private var wake: NotificationCenter.ObservationToken?
+    @ObservationIgnored private var pathSatisfied = true
 
-    private var socket: URLSessionWebSocketTask?
+    @ObservationIgnored private var socket: URLSessionWebSocketTask?
     /// Bumped whenever a socket opens or closes, so loops of a replaced socket stop.
-    private var generation = 0
-    private var lastHeard: ContinuousClock.Instant?
-    private var listener: Task<Void, Never>?
-    private var heartbeat: Task<Void, Never>?
-    private var reconnect: Task<Void, Never>?
-    private var failures = 0
+    @ObservationIgnored private var generation = 0
+    @ObservationIgnored private var lastHeard: ContinuousClock.Instant?
+    @ObservationIgnored private var listener: Task<Void, Never>?
+    @ObservationIgnored private var heartbeat: Task<Void, Never>?
+    @ObservationIgnored private var reconnect: Task<Void, Never>?
+    @ObservationIgnored private var failures = 0
 
-    private var registrations: [String: Registration]
+    @ObservationIgnored private var registrations: [String: Registration]
     /// The API of every account seen, kept so a removed account's registration can still be stopped.
-    private var apis: [String: API] = [:]
+    @ObservationIgnored private var apis: [String: API] = [:]
     /// Graph accounts whose subscription asked to be reauthorized.
-    private var reauthorize: Set<String> = []
+    @ObservationIgnored private var reauthorize: Set<String> = []
     /// Accounts whose last registration failure was already logged.
-    private var reported: Set<String> = []
-    private var pass: Task<Void, Never>?
-    private var passAgain = false
+    @ObservationIgnored private var reported: Set<String> = []
+    /// One registration pass at a time; a request during a pass runs another after it.
+    @ObservationIgnored private lazy var registration = CoalescedTask("Push registrations") { [weak self] in
+        await self?.reconcile()
+    }
 
     private static let session = URLSession(configuration: .ephemeral)
     private static let gmail = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me")!
@@ -45,7 +47,7 @@ import Network
     /// Requested lifetime of a Graph subscription (70 h); renewed with a day left.
     private static let graphLifetime: TimeInterval = 4200 * 60
 
-    init(accounts: AccountStore, onChange: @escaping @MainActor (String) -> Void) {
+    init(accounts: AccountStore, onChange: @escaping (String) -> Void) {
         self.accounts = accounts
         self.onChange = onChange
         let decoder = JSONDecoder()
@@ -53,29 +55,37 @@ import Network
         registrations = (try? Data(contentsOf: Self.file)).flatMap { try? decoder.decode([String: Registration].self, from: $0) } ?? [:]
     }
 
+    isolated deinit {
+        watchers.forEach { $0.cancel() }
+        listener?.cancel()
+        heartbeat?.cancel()
+        reconnect?.cancel()
+        if let wake { NSWorkspace.shared.notificationCenter.removeObserver(wake) }
+    }
+
     /// Connects the socket and registers every account; follows account changes, wake and
     /// network changes, and renews registrations hourly.
     func start() {
         guard !started, socketConfigured else { return }
         started = true
-        observers.append(NotificationCenter.default.addObserver(forName: AccountStore.didChange, object: nil,
-                                                                queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.checkRegistrations() }
-        })
-        observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification,
-                                                                           object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.reconnectNow()
-                self?.checkRegistrations()
-            }
-        })
-        monitor.pathUpdateHandler = { [weak self] path in
-            let satisfied = path.status == .satisfied
-            MainActor.assumeIsolated { self?.pathChanged(satisfied: satisfied) }
-        }
-        monitor.start(queue: .main)
-        timer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.checkRegistrations() }
+        let accounts = accounts
+        watchers = [
+            Task.immediate(name: "Push account changes") { [weak self] in
+                for await _ in Observations({ accounts.records }).dropFirst() { self?.checkRegistrations() }
+            },
+            Task(name: "Push network path") { [weak self] in
+                for await path in NWPathMonitor() { self?.pathChanged(satisfied: path.status == .satisfied) }
+            },
+            Task(name: "Push renewal") { [weak self] in
+                while true {
+                    do { try await Task.sleep(for: .seconds(3600)) } catch { return }
+                    self?.checkRegistrations()
+                }
+            },
+        ]
+        wake = NSWorkspace.shared.notificationCenter.addObserver(of: NSWorkspace.shared, for: .didWake) { [weak self] _ in
+            self?.reconnectNow()
+            self?.checkRegistrations()
         }
         connect()
         checkRegistrations()
@@ -199,14 +209,12 @@ import Network
     }
 
     private func setConnected(_ connected: Bool) {
-        guard connected != isConnected else { return }
-        isConnected = connected
-        NotificationCenter.default.post(name: Self.connectionChanged, object: self)
+        if connected != isConnected { isConnected = connected }
     }
 
     // MARK: - Events
 
-    private struct Event: Decodable {
+    private nonisolated struct Event: Decodable {
         let source: String
         let email: String?
         let subscriptionId: String?
@@ -243,7 +251,7 @@ import Network
     // MARK: - Registrations
 
     /// A Gmail watch (`id` is its Pub/Sub topic) or a Graph subscription (`id` is the subscription id).
-    private struct Registration: Codable {
+    private nonisolated struct Registration: Codable {
         enum Kind: String, Codable { case gmail, graph }
         let kind: Kind
         let id: String
@@ -253,25 +261,12 @@ import Network
         var due: Bool { expires.timeIntervalSinceNow < 24 * 3600 }
     }
 
-    private struct GraphSubscription: Decodable {
+    private nonisolated struct GraphSubscription: Decodable, Sendable {
         let id: String
         let expirationDateTime: String?
     }
 
-    /// Runs one registration pass at a time; a request during a pass runs another after it.
-    private func checkRegistrations() {
-        guard pass == nil else {
-            passAgain = true
-            return
-        }
-        pass = Task {
-            repeat {
-                passAgain = false
-                await reconcile()
-            } while passAgain
-            pass = nil
-        }
-    }
+    private func checkRegistrations() { registration.request() }
 
     private func reconcile() async {
         for (account, registration) in registrations where accounts.record(account) == nil {
@@ -302,7 +297,7 @@ import Network
         guard let topic = config.gmailTopic, !topic.isEmpty else { return }
         if let current = registrations[account], current.kind == .gmail, current.id == topic, !current.due { return }
         struct Body: Encodable { let topicName: String }
-        struct Answer: Decodable { let expiration: String }
+        nonisolated struct Answer: Decodable, Sendable { let expiration: String }
         let request = API.request(Self.gmail.appending(path: "watch"), method: "POST", json: Body(topicName: topic))
         let answer = try await api.decode(Answer.self, request, priority: .background)
         guard let milliseconds = Double(answer.expiration) else {

@@ -2,7 +2,7 @@ import AppKit
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let accounts = AccountStore()
+    private let accounts = AccountStore(problems: StoreProblems())
     private var store: MailStore!
     private var mainWindow: MainWindowController!
 

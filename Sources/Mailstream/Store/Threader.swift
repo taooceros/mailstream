@@ -7,7 +7,7 @@ import Foundation
 /// `primary` messages decide which conversations exist (the selected mailbox); `context` messages
 /// (the account's inbox and sent mail) only join conversations a primary message already started,
 /// so the reader shows both sides of an exchange.
-enum Threader {
+nonisolated enum Threader {
     static let subjectWindow: TimeInterval = 45 * 24 * 3600
 
     static func conversations(primary: [MailMessage], context: [MailMessage]) -> [Conversation] {

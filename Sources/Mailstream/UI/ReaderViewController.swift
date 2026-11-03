@@ -1,6 +1,7 @@
 import AppKit
+import Observation
 import UniformTypeIdentifiers
-@preconcurrency import WebKit
+import WebKit
 
 @MainActor
 protocol ReaderDelegate: AnyObject {
@@ -15,7 +16,7 @@ protocol ReaderDelegate: AnyObject {
 /// content through script, not a navigation. Google Chat spaces share the page (`ChatReader`).
 @MainActor
 final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
-    weak var delegate: ReaderDelegate?
+    weak var delegate: (any ReaderDelegate)?
 
     private let store: MailStore
     private var webView: WKWebView!
@@ -57,6 +58,10 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
     private var planning: (ref: MessageRef, all: Bool)?
     /// Renders chat spaces into this page.
     private lazy var chatReader = ChatReader(store: store, reader: self)
+    /// Senders whose picture the page was sent since the thread rendered.
+    private var avatarsSent = Set<String>()
+    /// Pictures arriving and the conversation's "Waiting on you" flag.
+    private var storeWatches: [Task<Void, Never>] = []
 
     init(store: MailStore) {
         self.store = store
@@ -65,6 +70,8 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    isolated deinit { storeWatches.forEach { $0.cancel() } }
 
     override func loadView() {
         let configuration = WKWebViewConfiguration()
@@ -111,34 +118,32 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         ])
         view = container
         loadShell()
-        NotificationCenter.default.addObserver(self, selector: #selector(avatarResolved(_:)), name: .avatarResolved,
-                                               object: store.avatars)
-        NotificationCenter.default.addObserver(self, selector: #selector(tagsChanged), name: .storeTagsChanged, object: store)
+        let store = store
+        storeWatches = [
+            Task.immediate(name: "Reader pictures") { [weak self] in
+                for await _ in Observations({ store.avatars.revision }).dropFirst() { self?.pushAvatars() }
+            },
+            // Resolving from the list or the menu flips the header's "Waiting on you" chip in place.
+            Task.immediate(name: "Reader waiting flag") { [weak self] in
+                let waiting = Observations { [weak self] in self?.conversation.map { store.tag(for: $0)?.toRespond == true } }
+                for await waiting in waiting.dropFirst() {
+                    guard let waiting = waiting ?? nil else { continue }
+                    self?.call("const chip = document.getElementById('waiting'); if (chip) chip.hidden = !waiting;",
+                               ["waiting": waiting])
+                }
+            },
+        ]
     }
 
-    @objc private func avatarResolved(_ note: Notification) {
-        guard let email = note.userInfo?["email"] as? String,
-              messages.contains(where: { $0.envelope.from.first?.normalizedEmail == email })
-        else { return }
-        pushAvatars(only: email)
-    }
-
-    /// Resolving from the list or the menu flips the header's "Waiting on you" chip in place.
-    @objc private func tagsChanged() {
-        guard let conversation else { return }
-        call("const chip = document.getElementById('waiting'); if (chip) chip.hidden = !waiting;",
-             ["waiting": store.tag(for: conversation)?.toRespond == true])
-    }
-
-    /// Sends known pictures into the page; `only` limits it to one sender.
-    private func pushAvatars(only email: String? = nil) {
+    /// Sends the page the senders' pictures it does not have yet.
+    private func pushAvatars() {
+        guard pageReady else { return }
         let automated = conversation.flatMap { store.tag(for: $0) }.map { $0.category != .people } ?? false
-        var seen = Set<String>()
         for message in messages {
-            guard let sender = message.envelope.from.first?.normalizedEmail, email == nil || sender == email,
-                  seen.insert(sender).inserted,
+            guard let sender = message.envelope.from.first?.normalizedEmail, !avatarsSent.contains(sender),
                   let url = store.avatars.dataURL(for: sender, automated: automated)
             else { continue }
+            avatarsSent.insert(sender)
             call("MS.setAvatar(email, url)", ["email": sender, "url": url])
         }
     }
@@ -209,6 +214,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         conversation = nil
         messages = []
         pageReady = false
+        avatarsSent = []
         pending = []
         loaded = []
         staged = nil
@@ -254,6 +260,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         self.conversation = conversation
         messages = conversation?.messages ?? []
         pageReady = false
+        avatarsSent = []
         pending = []
         loaded = []
         staged = nil
@@ -709,9 +716,9 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
 
 /// Breaks the retain cycle between `WKUserContentController` and its handler.
 private final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
-    weak var target: WKScriptMessageHandler?
+    weak var target: (any WKScriptMessageHandler)?
 
-    init(_ target: WKScriptMessageHandler) { self.target = target }
+    init(_ target: any WKScriptMessageHandler) { self.target = target }
 
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         target?.userContentController(controller, didReceive: message)
@@ -741,8 +748,8 @@ private final class PartSchemeHandler: NSObject, WKURLSchemeHandler {
         let file = cache.messageDirectory(key: key).appendingPathComponent(name)
         let id = ObjectIdentifier(task)
         active.insert(id)
-        Task {
-            let data = await Task.detached(priority: .userInitiated) { try? Data(contentsOf: file) }.value
+        Task(priority: .userInitiated) {
+            let data = await Self.read(file)
             guard active.remove(id) != nil else { return }
             guard let data else {
                 task.didFailWithError(URLError(.fileDoesNotExist))
@@ -757,5 +764,9 @@ private final class PartSchemeHandler: NSObject, WKURLSchemeHandler {
 
     func webView(_ webView: WKWebView, stop task: any WKURLSchemeTask) {
         active.remove(ObjectIdentifier(task))
+    }
+
+    @concurrent private nonisolated static func read(_ file: URL) async -> Data? {
+        try? Data(contentsOf: file)
     }
 }

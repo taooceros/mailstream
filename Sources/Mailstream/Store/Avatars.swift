@@ -1,41 +1,45 @@
 import AppKit
 import CryptoKit
 import dnssd
-
-extension Notification.Name {
-    /// A sender's avatar image arrived; `userInfo["email"]` is the lowercased address.
-    static let avatarResolved = Notification.Name("AvatarStore.resolved")
-}
+import Observation
+import Synchronization
 
 /// Sender pictures for the list and the reader, looked up lazily for what is on screen.
 ///
 /// Sources, best first: the photo of a Google or Outlook contact (accounts granted contacts
 /// access), the sender domain's BIMI logo, Gravatar, and for automated mail the
 /// domain's site icon. Anything without a picture keeps its initials.
-@MainActor
+///
+/// Observable through `revision`: views showing initials look again when it changes.
+@Observable
 final class AvatarStore {
-    private let resolver: AvatarResolver
-    private let images = NSCache<NSString, NSImage>()
-    private let pngs = NSCache<NSString, NSData>()
-    private let large = NSCache<NSString, NSImage>()
-    private var missing = Set<String>()
-    private var pending = Set<String>()
+    /// Bumped whenever pictures arrive; arrivals within one main-actor turn are one change.
+    private(set) var revision = 0
+
+    @ObservationIgnored private let resolver: AvatarResolver
+    @ObservationIgnored private let images = NSCache<NSString, NSImage>()
+    @ObservationIgnored private let pngs = NSCache<NSString, NSData>()
+    @ObservationIgnored private let large = NSCache<NSString, NSImage>()
+    @ObservationIgnored private var missing = Set<String>()
+    @ObservationIgnored private var pending = Set<String>()
+    /// Follows the photo accounts as accounts are added, removed or regranted.
+    @ObservationIgnored private var accountWatch: Task<Void, Never>?
 
     init(accounts: AccountStore, root: URL) {
-        resolver = AvatarResolver(accounts: Self.photoAccounts(accounts),
-                                  root: root.appendingPathComponent("avatars", isDirectory: true))
+        let resolver = AvatarResolver(accounts: Self.photoAccounts(accounts),
+                                      root: root.appendingPathComponent("avatars", isDirectory: true))
+        self.resolver = resolver
         images.countLimit = 400
         pngs.countLimit = 400
         large.countLimit = 12
-        NotificationCenter.default.addObserver(forName: AccountStore.didChange, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                let fresh = Self.photoAccounts(accounts)
-                let resolver = self.resolver
-                Task { await resolver.use(fresh) }
+        accountWatch = Task.immediate(name: "Avatar accounts") {
+            for await _ in Observations({ accounts.records }).dropFirst() {
+                await resolver.use(Self.photoAccounts(accounts))
             }
         }
     }
+
+    isolated deinit { accountWatch?.cancel() }
 
     /// Google accounts with `contacts.readonly` (and the domain directory with `directory.readonly`)
     /// and Microsoft accounts with `Contacts.Read`.
@@ -57,12 +61,17 @@ final class AvatarStore {
     }
 
     /// The picture for `email` when it is already known; otherwise starts looking and returns nil,
-    /// posting `.avatarResolved` if one turns up. `automated` allows the domain's site icon.
+    /// bumping `revision` if one turns up. `automated` allows the domain's site icon.
     func image(for email: String, automated: Bool) -> NSImage? {
         let key = email.lowercased()
         if let image = images.object(forKey: key as NSString) { return image }
         request(key, automated: automated)
         return nil
+    }
+
+    /// The picture for `email` if one is in memory, without looking for one.
+    func cachedImage(for email: String) -> NSImage? {
+        images.object(forKey: email.lowercased() as NSString)
     }
 
     /// The same picture as a `data:` URL, for the reader page.
@@ -97,7 +106,7 @@ final class AvatarStore {
             }
             images.setObject(image, forKey: key as NSString)
             pngs.setObject(png as NSData, forKey: key as NSString)
-            NotificationCenter.default.post(name: .avatarResolved, object: self, userInfo: ["email": key])
+            revision += 1
         }
     }
 }
@@ -150,9 +159,13 @@ actor AvatarResolver {
         case .miss: return nil
         case .unknown: break
         }
-        await permits.acquire()
-        let png = await find(email, automated: automated, side: side)
-        await permits.release()
+        let png: Data?
+        do {
+            png = try await permits.withPermit { await find(email, automated: automated, side: side) }
+        } catch {
+            // Cancelled while waiting for a permit: nothing was looked up, so no miss is cached.
+            return nil
+        }
         store(png, at: key, stamp: stamp)
         return png
     }
@@ -509,47 +522,69 @@ actor AvatarResolver {
     }
 }
 
-/// DNS TXT lookups through the system resolver, answered on a private queue without blocking.
-enum DNSText {
+/// DNS TXT lookups through the system resolver, without blocking; empty after 4 s or on failure.
+nonisolated enum DNSText {
     static func records(_ name: String) async -> [String] {
-        await withCheckedContinuation { continuation in
-            TXTQuery(continuation).start(name)
+        let query = TXTQuery()
+        return await withTaskGroup { group in
+            // Times out the query, and tears it down at once when the caller is cancelled.
+            group.addTask {
+                try? await Task.sleep(for: .seconds(4))
+                query.cancel()
+            }
+            let records = await withCheckedContinuation { query.start(name, $0) }
+            group.cancelAll()
+            return records
         }
     }
 }
 
-/// One query; every field is touched only on `queue`.
-private final class TXTQuery: @unchecked Sendable {
+/// One query. DNSService has no async API and answers only on a dispatch queue, so this bridge
+/// keeps one; a `Mutex` guards the state its callbacks share with the caller.
+private nonisolated final class TXTQuery: Sendable {
     private static let queue = DispatchQueue(label: "dev.mailstream.dns")
-    private var continuation: CheckedContinuation<[String], Never>?
-    private var ref: DNSServiceRef?
-    private var records: [String] = []
 
-    init(_ continuation: CheckedContinuation<[String], Never>) {
-        self.continuation = continuation
+    private struct State {
+        var continuation: CheckedContinuation<[String], Never>?
+        var ref: DNSServiceRef?
+        var records: [String] = []
+        var finished = false
     }
 
-    func start(_ name: String) {
-        Self.queue.async { [self] in
-            // The callback's context holds a reference until the query is torn down in `finish`.
-            let context = Unmanaged.passRetained(self).toOpaque()
-            var ref: DNSServiceRef?
-            let flags = DNSServiceFlags(kDNSServiceFlagsReturnIntermediates)
-            let status = DNSServiceQueryRecord(&ref, flags, 0, name, UInt16(kDNSServiceType_TXT), UInt16(kDNSServiceClass_IN),
-                                               { _, flags, _, error, _, _, _, length, data, _, context in
-                guard let context else { return }
-                Unmanaged<TXTQuery>.fromOpaque(context).takeUnretainedValue()
-                    .received(flags: flags, error: error, length: length, data: data)
-            }, context)
-            guard status == DNSServiceErrorType(kDNSServiceErr_NoError), let ref else {
-                Unmanaged<TXTQuery>.fromOpaque(context).release()
-                finish()
-                return
-            }
-            self.ref = ref
-            DNSServiceSetDispatchQueue(ref, Self.queue)
-            Self.queue.asyncAfter(deadline: .now() + 4) { self.finish() }
+    private let state = Mutex(State())
+
+    /// `DNSText.records` holds the query until it finishes, so the callback's context is unretained.
+    func start(_ name: String, _ continuation: CheckedContinuation<[String], Never>) {
+        let finished = state.withLock { state in
+            if !state.finished { state.continuation = continuation }
+            return state.finished
         }
+        // Cancelled before it began.
+        if finished { return continuation.resume(returning: []) }
+        Self.queue.async { [self] in
+            // Answers arrive on this queue too, so none can run while the lock is held here.
+            let started = state.withLock { state in
+                guard !state.finished else { return false }
+                var ref: DNSServiceRef?
+                let flags = DNSServiceFlags(kDNSServiceFlagsReturnIntermediates)
+                let status = DNSServiceQueryRecord(&ref, flags, 0, name, UInt16(kDNSServiceType_TXT), UInt16(kDNSServiceClass_IN),
+                                                   { _, flags, _, error, _, _, _, length, data, _, context in
+                    guard let context else { return }
+                    Unmanaged<TXTQuery>.fromOpaque(context).takeUnretainedValue()
+                        .received(flags: flags, error: error, length: length, data: data)
+                }, Unmanaged.passUnretained(self).toOpaque())
+                guard status == DNSServiceErrorType(kDNSServiceErr_NoError), let ref else { return false }
+                state.ref = ref
+                DNSServiceSetDispatchQueue(ref, Self.queue)
+                return true
+            }
+            if !started { finish() }
+        }
+    }
+
+    /// Ends the query with what it has; the ref is deallocated on its queue, as DNSService requires.
+    func cancel() {
+        Self.queue.async { [self] in finish() }
     }
 
     private func received(flags: DNSServiceFlags, error: DNSServiceErrorType, length: UInt16, data: UnsafeRawPointer?) {
@@ -565,25 +600,24 @@ private final class TXTQuery: @unchecked Sendable {
                 text.append(contentsOf: bytes[(index + 1)..<end])
                 index = end
             }
-            records.append(String(decoding: text, as: UTF8.self))
+            let record = String(decoding: text, as: UTF8.self)
+            state.withLock { $0.records.append(record) }
         }
         if flags & DNSServiceFlags(kDNSServiceFlagsMoreComing) == 0 { finish() }
     }
 
     private func finish() {
-        guard let continuation else { return }
-        self.continuation = nil
-        if let ref {
-            DNSServiceRefDeallocate(ref)
-            self.ref = nil
-            Unmanaged.passUnretained(self).release()
+        let (continuation, ref, records) = state.withLock { state in
+            defer { state = State(finished: true) }
+            return (state.continuation, state.ref, state.records)
         }
-        continuation.resume(returning: records)
+        if let ref { DNSServiceRefDeallocate(ref) }
+        continuation?.resume(returning: records)
     }
 }
 
 /// An account whose contacts give sender photos.
-struct PhotoAccount: Sendable {
+nonisolated struct PhotoAccount: Sendable {
     let api: API
     let provider: Provider
     /// Also read the Workspace domain's directory (Google).

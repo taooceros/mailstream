@@ -1,7 +1,7 @@
 import Foundation
 
 /// Build-time configuration injected into Info.plist by scripts/bundle.sh (never committed).
-struct AppConfig: Sendable {
+nonisolated struct AppConfig: Sendable {
     let googleClientID: String?, googleClientSecret: String?
     let microsoftClientID: String?, microsoftClientSecret: String?
     let pushURL: URL?, pushToken: String?, graphClientState: String?, gmailTopic: String?

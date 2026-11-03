@@ -1,18 +1,18 @@
 import Foundation
 
-enum RequestPriority: Sendable {
+nonisolated enum RequestPriority: Sendable {
     case interactive, background
 }
 
 /// A request a provider refused: the HTTP status and the provider's message.
-struct APIError: LocalizedError, Sendable {
+nonisolated struct APIError: LocalizedError, Sendable {
     let status: Int
     let message: String
     var errorDescription: String? { message }
 }
 
 /// Access tokens by account id.
-protocol TokenSource: Sendable {
+nonisolated protocol TokenSource: Sendable {
     func token(for account: String) async throws -> String
     /// Forgets `token` after a server rejected it, so the next `token(for:)` refreshes.
     func reject(_ token: String, account: String) async
@@ -22,8 +22,8 @@ protocol TokenSource: Sendable {
 /// limiting (429, or Google's 403 rate-limit reasons: never processed) backs off and repeats; 5xx
 /// and dropped connections repeat only requests that may run twice. Concurrency is bounded per
 /// priority so background prefetch never starves interactive reads, and requests with a `cost`
-/// first spend it from the account's `QuotaBudget`.
-final class API: Sendable {
+/// first spend it from the account's `QuotaBudget`. Decoding runs off the caller's actor.
+nonisolated final class API: Sendable {
     let account: String
     private let tokens: any TokenSource
     private let budget: QuotaBudget?
@@ -57,8 +57,9 @@ final class API: Sendable {
         return request
     }
 
-    func decode<T: Decodable>(_ type: T.Type, _ request: URLRequest, priority: RequestPriority = .interactive,
-                              cost: Int = 0, decoder: JSONDecoder = JSONDecoder()) async throws -> T {
+    @concurrent
+    func decode<T: Decodable & Sendable>(_ type: T.Type, _ request: URLRequest, priority: RequestPriority = .interactive,
+                                         cost: Int = 0, decoder: JSONDecoder = JSONDecoder()) async throws -> T {
         let (data, _) = try await send(request, priority: priority, cost: cost)
         do {
             return try decoder.decode(T.self, from: data)
@@ -67,8 +68,8 @@ final class API: Sendable {
         }
     }
 
-    func get<T: Decodable>(_ type: T.Type, _ url: URL, priority: RequestPriority = .interactive, cost: Int = 0,
-                           decoder: JSONDecoder = JSONDecoder()) async throws -> T {
+    func get<T: Decodable & Sendable>(_ type: T.Type, _ url: URL, priority: RequestPriority = .interactive, cost: Int = 0,
+                                      decoder: JSONDecoder = JSONDecoder()) async throws -> T {
         try await decode(type, Self.request(url), priority: priority, cost: cost, decoder: decoder)
     }
 

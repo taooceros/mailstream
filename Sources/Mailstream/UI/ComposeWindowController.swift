@@ -373,7 +373,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         bodyView.isEditable = enabled
     }
 
-    private func presentError(message: String, error: Error?) {
+    private func presentError(message: String, error: (any Error)?) {
         guard let window else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning

@@ -1,10 +1,11 @@
 import Foundation
+import Observation
 
-enum Provider: String, Codable, Sendable {
+nonisolated enum Provider: String, Codable, Sendable {
     case google, microsoft
 }
 
-struct AccountRecord: Codable, Hashable, Sendable, Identifiable {
+nonisolated struct AccountRecord: Codable, Hashable, Sendable, Identifiable {
     /// Lowercased address. The key of everything: Account.name, MailboxKey.account, MessageRef.account, cache paths.
     let id: String
     let provider: Provider
@@ -18,20 +19,21 @@ struct AccountRecord: Codable, Hashable, Sendable, Identifiable {
 
 /// The signed-in accounts, in the order they were added, persisted in
 /// `~/Library/Application Support/Mailstream/accounts.json`; refresh tokens live in the Keychain.
-@MainActor
+/// Stores follow sign-ins, removals and renames by observing `records`.
+@Observable
 final class AccountStore {
-    /// Posted after add, remove and rename.
-    static let didChange = Notification.Name("AccountStore.didChange")
-
     private(set) var records: [AccountRecord]
-    let tokens: Tokens
-    private var apis: [String: API] = [:]
-    private var backends: [String: any MailBackend] = [:]
+    @ObservationIgnored let tokens: Tokens
+    /// Where a failed save of the account list is reported.
+    @ObservationIgnored let problems: StoreProblems
+    @ObservationIgnored private var apis: [String: API] = [:]
+    @ObservationIgnored private var backends: [String: any MailBackend] = [:]
 
     private static let file = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appending(path: "Mailstream/accounts.json")
 
-    init() {
+    init(problems: StoreProblems) {
+        self.problems = problems
         let records = (try? Data(contentsOf: Self.file)).flatMap { try? JSONDecoder().decode([AccountRecord].self, from: $0) } ?? []
         self.records = records
         tokens = Tokens(providers: Dictionary(records.map { ($0.id, $0.provider) }) { first, _ in first })
@@ -77,7 +79,6 @@ final class AccountStore {
             records.append(record)
         }
         try persist()
-        NotificationCenter.default.post(name: Self.didChange, object: self)
         return record
     }
 
@@ -98,16 +99,13 @@ final class AccountStore {
         save()
     }
 
-    /// Persists and posts `didChange`; a failed write is reported on `.storeError` (from this store).
+    /// Persists `records`; a failed write is reported as an alert.
     private func save() {
         do {
             try persist()
         } catch {
-            NotificationCenter.default.post(name: .storeError, object: self, userInfo: [
-                "message": "Could not save the account list: \(error.localizedDescription)", "alert": true,
-            ])
+            problems.report("Could not save the account list: \(error.localizedDescription)", from: .accounts, alert: true)
         }
-        NotificationCenter.default.post(name: Self.didChange, object: self)
     }
 
     private func persist() throws {

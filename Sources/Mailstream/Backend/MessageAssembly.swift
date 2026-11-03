@@ -4,7 +4,7 @@ import Foundation
 /// the message's cache directory (served to the reader under `urlBase` by `PartSchemeHandler`),
 /// `cid:` references in the HTML are pointed at them, and parts the HTML shows stay out of the
 /// attachment list.
-struct MessageAssembly {
+nonisolated struct MessageAssembly {
     let directory: URL
     let urlBase: String
     private var stored: [Attachment] = []

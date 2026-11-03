@@ -1,6 +1,7 @@
 import AppKit
+import Observation
 
-enum Selection: Hashable, Sendable {
+nonisolated enum Selection: Hashable, Sendable {
     /// The same role across every account: All Inboxes, all Sent, …
     case unified(MailboxRole)
     case mailbox(MailboxKey)
@@ -23,26 +24,14 @@ enum Selection: Hashable, Sendable {
 
 /// What a published conversation list was built for. The list compares this, not the live
 /// selection, so it never dresses an old list in a new mailbox's layout while a rebuild is running.
-struct ListContext: Equatable, Sendable {
+nonisolated struct ListContext: Equatable, Sendable {
     var selection: Selection
     var search: String?
     var role: MailboxRole
 }
 
-extension Notification.Name {
-    /// Accounts, mailboxes or unread counts changed.
-    static let storeAccountsChanged = Notification.Name("MailStore.accountsChanged")
-    /// The conversation list for the current selection, or its loading state, changed.
-    static let storeListChanged = Notification.Name("MailStore.listChanged")
-    /// Snippets or message bodies arrived; `userInfo["refs"]` is a `Set<MessageRef>`, batched per
-    /// main-actor turn.
-    static let storeContentLoaded = Notification.Name("MailStore.contentLoaded")
-    /// A user-facing failure; `userInfo["message"]` is the text.
-    static let storeError = Notification.Name("MailStore.error")
-}
-
 /// A failure of the store itself rather than of a provider.
-struct StoreError: LocalizedError, Sendable {
+nonisolated struct StoreError: LocalizedError, Sendable {
     let message: String
     var errorDescription: String? { message }
 
@@ -56,22 +45,31 @@ struct StoreError: LocalizedError, Sendable {
 /// as finished values. Lists paint from the disk cache before any request starts, then refresh
 /// from the providers. Mutations apply optimistically to the visible list at once (no rethreading)
 /// and roll back on failure.
-@MainActor
+///
+/// Observable: the sidebar and window follow `accounts` and `mailboxes`, the list follows
+/// `listContext`, `conversations`, `isLoading`, tags and `snippets`; failures go to `problems`.
+@Observable
 final class MailStore {
     nonisolated static let pageSize = 50
     static let prefetchCount = 40
     /// Polling while push is down, and as a safety net while it is up.
-    static let pollInterval: TimeInterval = 90
-    static let pushPollInterval: TimeInterval = 15 * 60
+    static let pollInterval: Duration = .seconds(90)
+    static let pushPollInterval: Duration = .seconds(15 * 60)
+    static let countsInterval: Duration = .seconds(300)
 
     /// Signed-in accounts, their tokens and backends.
     let accountStore: AccountStore
-    private let tools: ToolEnvironment
+    @ObservationIgnored private let tools: ToolEnvironment
     let cache = MailCache()
-    private(set) lazy var avatars = AvatarStore(accounts: accountStore, root: cache.root)
+    @ObservationIgnored private(set) lazy var avatars = AvatarStore(accounts: accountStore, root: cache.root)
     /// Google Chat accounts, spaces and messages; selected through `Selection.chat`.
-    private(set) lazy var chat = ChatStore(cache: cache, accounts: accountStore)
-    private lazy var push = PushService(accounts: accountStore) { [weak self] id in self?.refresh(account: id) }
+    @ObservationIgnored private(set) lazy var chat = ChatStore(cache: cache, accounts: accountStore)
+    @ObservationIgnored private lazy var push = PushService(accounts: accountStore) { [weak self] id in
+        self?.refresh(account: id)
+    }
+
+    /// Failures of every store, for status lines and alerts.
+    var problems: StoreProblems { accountStore.problems }
 
     private(set) var accounts: [Account] = []
     private(set) var mailboxes: [String: [Mailbox]] = [:]
@@ -81,7 +79,6 @@ final class MailStore {
     private(set) var isLoading = false
     private(set) var searchQuery: String?
     private(set) var lastRefresh: Date?
-    private(set) var lastError: String?
 
     private struct Listing {
         var envelopes: [Envelope]
@@ -92,46 +89,57 @@ final class MailStore {
 
     private var listings: [MailboxKey: Listing] = [:]
     /// Mailboxes whose disk cache was already read (hit or miss), so it is read at most once.
-    private var cacheRead = Set<MailboxKey>()
-    private var searchResults: [MailboxKey: [Envelope]] = [:]
+    @ObservationIgnored private var cacheRead = Set<MailboxKey>()
+    @ObservationIgnored private var searchResults: [MailboxKey: [Envelope]] = [:]
     private var rows: [String: ConversationRow] = [:]
-    /// Display-ready previews: quoted history trimmed, whitespace collapsed.
-    private var snippets: [MessageRef: String] = [:]
-    private var contents: [MessageRef: LoadedContent] = [:]
-    private var contentOrder: [MessageRef] = []
-    private var contentTasks: [MessageRef: Task<LoadedContent, Error>] = [:]
-    private var prefetching = Set<MessageRef>()
-    private var loadedRefs = Set<MessageRef>()
-    private var rebuildTask: Task<Void, Never>?
-    private var needsRebuild = false
-    private var refreshTask: Task<Void, Never>?
+    /// Display-ready previews: quoted history trimmed, whitespace collapsed. Arrivals within one
+    /// main-actor turn reach observers as one change.
+    private(set) var snippets: [MessageRef: String] = [:]
+    @ObservationIgnored private var contents: [MessageRef: LoadedContent] = [:]
+    @ObservationIgnored private var contentOrder: [MessageRef] = []
+    @ObservationIgnored private var contentTasks: [MessageRef: Task<LoadedContent, any Error>] = [:]
+    @ObservationIgnored private var prefetching = Set<MessageRef>()
+    /// Rethreads the list off the main actor. Requests made while a pass runs coalesce into one
+    /// more pass, and a pass whose inputs changed under it is dropped rather than shown, so
+    /// optimistic edits never flicker back.
+    @ObservationIgnored private lazy var rebuild = CoalescedTask("Mail list rebuild") { [weak self] in
+        await self?.rebuildPass()
+    }
+    @ObservationIgnored private var refreshTask: Task<Void, Never>?
     /// Pushed changes waiting out their coalescing delay, by account.
-    private var accountRefreshes: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var accountRefreshes: [String: Task<Void, Never>] = [:]
     /// First-page requests made per mailbox; only the latest one's answer is applied.
-    private var firstPageRequests: [MailboxKey: Int] = [:]
-    private var searchTask: Task<Void, Never>?
-    private var loadMoreTask: Task<Void, Never>?
-    private var pollTimer: Timer?
-    private var countsTimer: Timer?
-    private var observers: [NSObjectProtocol] = []
+    @ObservationIgnored private var firstPageRequests: [MailboxKey: Int] = [:]
+    @ObservationIgnored private var searchTask: Task<Void, Never>?
+    @ObservationIgnored private var loadMoreTask: Task<Void, Never>?
+    @ObservationIgnored private var polling: (interval: Duration, task: Task<Void, Never>)?
+    /// Account changes, push connectivity and the counts refresh.
+    @ObservationIgnored private var watchers: [Task<Void, Never>] = []
 
-    private lazy var tagger = OmpTagger(tools: tools, workingDirectory: cache.root)
-    /// Keyed by `tagKey(_:)`, so a new message in a conversation re-tags it.
-    private var tags: [String: ConversationTag] = [:]
+    @ObservationIgnored private lazy var tagger = OmpTagger(tools: tools, workingDirectory: cache.root)
+    /// Keyed by `tagKey(_:)`, so a new message in a conversation re-tags it; read through `tag(for:)`.
+    private(set) var tags: [String: ConversationTag] = [:]
     /// Keys the model was asked about but skipped; automatic passes leave them alone.
-    private var tagAttempted = Set<String>()
+    @ObservationIgnored private var tagAttempted = Set<String>()
     private var taggingEnabled = true
     /// Identities are known, so "to me" and "from me" are meaningful.
-    private var taggingReady = false
-    private var taggingTask: Task<Void, Never>?
-    private var taggingDebounce: Task<Void, Never>?
-    private var taggingRerun = false
-    private var taggingBackoffUntil: Date?
+    @ObservationIgnored private var taggingReady = false
+    /// One tagging pass at a time; a request during a pass runs one more after it.
+    @ObservationIgnored private lazy var tagging = CoalescedTask("AI tagging") { [weak self] in
+        await self?.taggingPass()
+    }
+    @ObservationIgnored private var taggingDebounce: Task<Void, Never>?
+    @ObservationIgnored private var taggingBackoffUntil: Date?
 
     init(accounts: AccountStore, tools: ToolEnvironment) {
         self.accountStore = accounts
         self.tools = tools
         taggingEnabled = UserDefaults.standard.object(forKey: Self.taggingDefaultsKey) as? Bool ?? true
+    }
+
+    isolated deinit {
+        watchers.forEach { $0.cancel() }
+        polling?.task.cancel()
     }
 
     // MARK: - Startup
@@ -143,27 +151,36 @@ final class MailStore {
         }
         chat.start()
         push.start()
-        let center = NotificationCenter.default
-        observers.append(center.addObserver(forName: AccountStore.didChange, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.accountsDidChange() }
-        })
-        observers.append(center.addObserver(forName: PushService.connectionChanged, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.pushConnectionChanged() }
-        })
+        let accountStore = accountStore, push = push
+        watchers = [
+            Task.immediate(name: "Mail account changes") { [weak self] in
+                for await _ in Observations({ accountStore.records }).dropFirst() { self?.accountsDidChange() }
+            },
+            Task.immediate(name: "Mail push connectivity") { [weak self] in
+                for await _ in Observations({ push.isConnected }).dropFirst() { self?.pushConnectionChanged() }
+            },
+            Task(name: "Mail counts") { [weak self] in
+                while true {
+                    do { try await Task.sleep(for: Self.countsInterval) } catch { return }
+                    self?.refreshCounts()
+                }
+            },
+        ]
         schedulePolling()
-        countsTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshCounts() }
-        }
     }
 
     /// Polls every 90 s while push is down, every 15 min while it delivers changes.
     private func schedulePolling() {
         let interval = push.isConnected ? Self.pushPollInterval : Self.pollInterval
-        if let pollTimer, pollTimer.timeInterval == interval { return }
-        pollTimer?.invalidate()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { if self?.isLoading == false { self?.refresh() } }
-        }
+        if polling?.interval == interval { return }
+        polling?.task.cancel()
+        polling = (interval, Task(name: "Mail polling") { [weak self] in
+            while true {
+                do { try await Task.sleep(for: interval) } catch { return }
+                guard let self else { return }
+                if !isLoading { refresh() }
+            }
+        })
     }
 
     /// A socket that just connected catches up on whatever changed while it was down.
@@ -183,8 +200,7 @@ final class MailStore {
         guard !restored.isEmpty else { return }
         accounts = restored
         await loadCachedMailboxes(restored.map(\.name))
-        post(.storeAccountsChanged)
-        setNeedsRebuild()
+        rebuild.request()
         refresh()
     }
 
@@ -222,8 +238,7 @@ final class MailStore {
             accounts = next
             cache.saveAccounts(next)
             if !removed.isEmpty { forget(removed) }
-            post(.storeAccountsChanged)
-            setNeedsRebuild()
+            rebuild.request()
         }
         guard !load.isEmpty else { return }
         Task {
@@ -281,9 +296,8 @@ final class MailStore {
            accounts[index].identity != identity {
             accounts[index].identity = identity
             // Rows say "me" for the user's own addresses.
-            setNeedsRebuild()
+            rebuild.request()
         }
-        post(.storeAccountsChanged)
     }
 
     private func applyMailboxes(_ list: [Mailbox], account: String) {
@@ -311,7 +325,6 @@ final class MailStore {
             guard list != mailboxes[name] else { return }
             mailboxes[name] = list
             cache.saveMailboxes(list, for: name)
-            post(.storeAccountsChanged)
         }
     }
 
@@ -407,7 +420,7 @@ final class MailStore {
         loadMoreTask?.cancel()
         searchQuery = nil
         searchResults = [:]
-        setNeedsRebuild()
+        rebuild.request()
         if selection.isChat { chat.refresh() } else { refresh() }
     }
 
@@ -439,34 +452,19 @@ final class MailStore {
         }
     }
 
-    /// Rethreads the list off the main actor. Requests made while a pass runs coalesce into one more
-    /// pass, and a pass whose inputs changed under it is dropped rather than shown, so optimistic
-    /// edits never flicker back.
-    private func setNeedsRebuild() {
-        needsRebuild = true
-        guard rebuildTask == nil else { return }
-        rebuildTask = Task { [weak self] in
-            await self?.rebuildPasses()
-        }
-    }
-
-    private func rebuildPasses() async {
-        while needsRebuild {
-            needsRebuild = false
-            await loadCachedListings(primaryKeys + contextKeys)
-            let context = ListContext(selection: selection, search: searchQuery, role: selectionRole)
-            let input = ListInput(primary: sources(primaryKeys, primary: true), context: sources(contextKeys, primary: false),
-                                  own: ownAddresses, recipients: context.role.showsRecipients)
-            let output = await input.build()
-            guard !needsRebuild else { continue }
-            conversations = output.conversations
-            rows = output.rows
-            listContext = context
-            post(.storeListChanged)
-            prefetchSnippets()
-            scheduleTagging()
-        }
-        rebuildTask = nil
+    private func rebuildPass() async {
+        await loadCachedListings(primaryKeys + contextKeys)
+        let context = ListContext(selection: selection, search: searchQuery, role: selectionRole)
+        let input = ListInput(primary: sources(primaryKeys, primary: true), context: sources(contextKeys, primary: false),
+                              own: ownAddresses, recipients: context.role.showsRecipients)
+        let output = await input.build()
+        // Inputs changed meanwhile: the next pass shows them.
+        guard !rebuild.isPending else { return }
+        conversations = output.conversations
+        rows = output.rows
+        listContext = context
+        prefetchSnippets()
+        scheduleTagging()
     }
 
     func refresh() {
@@ -474,15 +472,13 @@ final class MailStore {
         guard !keys.isEmpty else { return }
         refreshTask?.cancel()
         isLoading = true
-        lastError = nil
-        post(.storeListChanged)
+        problems.clear(.mail)
         refreshTask = Task {
             await loadCachedListings(keys)
             await fetchFirstPages(keys)
             guard !Task.isCancelled else { return }
             isLoading = false
             lastRefresh = Date()
-            post(.storeListChanged)
         }
     }
 
@@ -511,7 +507,7 @@ final class MailStore {
             firstPageRequests[key, default: 0] += 1
             tickets[key] = firstPageRequests[key]
         }
-        await withTaskGroup(of: (MailboxKey, Result<EnvelopePage, Error>).self) { group in
+        await withTaskGroup(of: (MailboxKey, Result<EnvelopePage, any Error>).self) { group in
             for (key, backend) in backends(keys) {
                 group.addTask {
                     do {
@@ -528,7 +524,7 @@ final class MailStore {
                       firstPageRequests[key] == tickets[key] else { continue }
                 switch result {
                 case .success(let page):
-                    if merge(firstPage: page, into: key) { setNeedsRebuild() }
+                    if merge(firstPage: page, into: key) { rebuild.request() }
                 case .failure(let error): report(error, context: key.account)
                 }
             }
@@ -563,7 +559,6 @@ final class MailStore {
         guard loadMoreTask == nil, canLoadMore else { return }
         let jobs = backends(primaryKeys.filter { listings[$0]?.next != nil })
         isLoading = true
-        post(.storeListChanged)
         loadMoreTask = Task {
             defer { loadMoreTask = nil }
             for (key, backend) in jobs {
@@ -582,8 +577,7 @@ final class MailStore {
                 }
             }
             isLoading = false
-            post(.storeListChanged)
-            setNeedsRebuild()
+            rebuild.request()
         }
     }
 
@@ -597,19 +591,19 @@ final class MailStore {
                 searchQuery = nil
                 searchResults = [:]
                 isLoading = false
-                setNeedsRebuild()
+                rebuild.request()
             }
             return
         }
         searchQuery = query
         searchResults = [:]
         isLoading = true
-        setNeedsRebuild()
+        rebuild.request()
         let jobs = backends(primaryKeys)
         searchTask = Task {
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled else { return }
-            await withTaskGroup(of: (MailboxKey, Result<[Envelope], Error>).self) { group in
+            await withTaskGroup(of: (MailboxKey, Result<[Envelope], any Error>).self) { group in
                 for (key, backend) in jobs {
                     group.addTask {
                         // Bound before the tuple is built: Swift 6.3 at -O drops `key` from
@@ -628,12 +622,11 @@ final class MailStore {
                     case .success(let list): searchResults[key] = list
                     case .failure(let error): report(error, context: key.account)
                     }
-                    setNeedsRebuild()
+                    rebuild.request()
                 }
             }
             guard !Task.isCancelled else { return }
             isLoading = false
-            post(.storeListChanged)
         }
     }
 
@@ -668,7 +661,7 @@ final class MailStore {
 
     /// A message as the reader needs it, with its display preview and body markup, worked out off
     /// the main actor.
-    struct LoadedContent: Sendable {
+    nonisolated struct LoadedContent: Sendable {
         let content: MessageContent
         let snippet: String
         /// The HTML body, or the plain-text one as escaped HTML.
@@ -727,16 +720,11 @@ final class MailStore {
 
     /// One shared load per message: disk cache first, else the provider, assembled and cached off
     /// the main actor.
-    private func loadTask(_ ref: MessageRef, priority: RequestPriority) -> Task<LoadedContent, Error> {
+    private func loadTask(_ ref: MessageRef, priority: RequestPriority) -> Task<LoadedContent, any Error> {
         if let task = contentTasks[ref] { return task }
         let backend = accountStore.backend(for: ref.account), cache = cache
-        let task = Task.detached(priority: priority == .interactive ? .userInitiated : .utility) {
-            if let cached = await cache.loadContent(ref) { return LoadedContent(cached) }
-            guard let backend else { throw StoreError.signedOut }
-            let content = try await backend.content(id: ref.id, mailbox: ref.mailbox, directory: cache.messageDirectory(ref),
-                                                    urlBase: cache.partURLBase(ref), priority: priority)
-            cache.saveContent(content, for: ref)
-            return LoadedContent(content)
+        let task = Task(priority: priority == .interactive ? .userInitiated : .utility) {
+            try await Self.load(ref, backend: backend, cache: cache, priority: priority)
         }
         contentTasks[ref] = task
         Task {
@@ -744,6 +732,16 @@ final class MailStore {
             if contentTasks[ref] == task { contentTasks[ref] = nil }
         }
         return task
+    }
+
+    @concurrent private nonisolated static func load(_ ref: MessageRef, backend: (any MailBackend)?, cache: MailCache,
+                                                     priority: RequestPriority) async throws -> LoadedContent {
+        if let cached = await cache.loadContent(ref) { return LoadedContent(cached) }
+        guard let backend else { throw StoreError.signedOut }
+        let content = try await backend.content(id: ref.id, mailbox: ref.mailbox, directory: cache.messageDirectory(ref),
+                                                urlBase: cache.partURLBase(ref), priority: priority)
+        cache.saveContent(content, for: ref)
+        return LoadedContent(content)
     }
 
     nonisolated static func displaySnippet(_ raw: String) -> String {
@@ -759,16 +757,7 @@ final class MailStore {
     }
 
     private func setSnippet(_ snippet: String, for ref: MessageRef) {
-        guard snippets[ref] != snippet else { return }
-        snippets[ref] = snippet
-        loadedRefs.insert(ref)
-        guard loadedRefs.count == 1 else { return }
-        // Arrivals within one main-actor turn reach the list as one batch of row reloads.
-        Task {
-            let refs = loadedRefs
-            loadedRefs = []
-            post(.storeContentLoaded, userInfo: ["refs": refs])
-        }
+        if snippets[ref] != snippet { snippets[ref] = snippet }
     }
 
     /// Fetches the latest message of the top conversations in the background, for list previews.
@@ -802,9 +791,7 @@ final class MailStore {
     static let taggingBackoff: TimeInterval = 300
 
     /// Short user-facing progress or failure text; nil when idle.
-    private(set) var aiTaggingStatus: String? {
-        didSet { if aiTaggingStatus != oldValue { post(.storeTagsChanged) } }
-    }
+    private(set) var aiTaggingStatus: String?
 
     var aiTaggingEnabled: Bool {
         get { taggingEnabled }
@@ -817,11 +804,9 @@ final class MailStore {
                 startTaggingPass()
             } else {
                 taggingDebounce?.cancel()
-                taggingTask?.cancel()
-                taggingRerun = false
+                tagging.cancel()
                 aiTaggingStatus = nil
             }
-            post(.storeTagsChanged)
         }
     }
 
@@ -843,7 +828,6 @@ final class MailStore {
         tag.toRespond = waiting
         tags[key] = tag
         cache.saveTags(tags)
-        post(.storeTagsChanged)
     }
 
     /// Forgets every tag and tags the current list again, ignoring any failure backoff.
@@ -852,13 +836,8 @@ final class MailStore {
         tagAttempted = []
         taggingBackoffUntil = nil
         cache.saveTags(tags)
-        post(.storeTagsChanged)
-        if let taggingTask {
-            taggingTask.cancel()
-            taggingRerun = true
-        } else {
-            startTaggingPass()
-        }
+        taggingDebounce?.cancel()
+        tagging.restart()
     }
 
     /// The conversation's latest message, so a new reply re-tags it.
@@ -881,21 +860,15 @@ final class MailStore {
     private func startTaggingPass() {
         taggingDebounce?.cancel()
         guard taggingEnabled, taggingReady else { return }
-        if taggingTask != nil {
-            taggingRerun = true
-            return
-        }
+        tagging.request()
+    }
+
+    private func taggingPass() async {
+        guard taggingEnabled, taggingReady else { return }
         if let until = taggingBackoffUntil, until > Date() { return }
         let items = untaggedItems()
         guard !items.isEmpty else { return }
-        taggingTask = Task {
-            await runTagging(items)
-            taggingTask = nil
-            if taggingRerun {
-                taggingRerun = false
-                startTaggingPass()
-            }
-        }
+        await runTagging(items)
     }
 
     /// Tags `items` in batches, one omp process at a time.
@@ -911,7 +884,6 @@ final class MailStore {
                 tags.merge(result) { _, new in new }
                 tagAttempted.formUnion(batch.map(\.id))
                 cache.saveTags(tags)
-                post(.storeTagsChanged)
                 remaining -= batch.count
             } catch {
                 if Task.isCancelled || error is CancellationError {
@@ -1010,7 +982,6 @@ final class MailStore {
             list[index].unread = max(0, unread + delta * messages.count)
             mailboxes[key.account] = list
         }
-        post(.storeAccountsChanged)
     }
 
     /// Destination of "Archive": the archive folder, else Gmail's All Mail.
@@ -1113,7 +1084,7 @@ final class MailStore {
             guard remaining.contains(where: { primary.contains($0.ref.mailboxKey) }) else { return nil }
             return Conversation(id: conversation.id, account: conversation.account, messages: remaining)
         }
-        setNeedsRebuild()
+        rebuild.request()
     }
 
     /// Replaces (or with nil, removes) the visible conversations holding any of `refs`, reformats
@@ -1138,29 +1109,21 @@ final class MailStore {
                 rows[conversation.id] = nil
             }
         }
-        if rebuildTask != nil { needsRebuild = true }
+        if rebuild.isRunning { rebuild.request() }
         guard changed else { return }
         conversations = next
-        post(.storeListChanged)
     }
 
     // MARK: - Reporting
 
-    private func post(_ name: Notification.Name, userInfo: [String: Any]? = nil) {
-        NotificationCenter.default.post(name: name, object: self, userInfo: userInfo)
-    }
-
-    private func report(_ error: Error, context: String? = nil, alert: Bool = false) {
-        if error is CancellationError { return }
-        let text = context.map { "\($0): \(error.localizedDescription)" } ?? error.localizedDescription
-        lastError = text
-        post(.storeError, userInfo: ["message": text, "alert": alert])
+    private func report(_ error: any Error, context: String? = nil, alert: Bool = false) {
+        problems.report(error, from: .mail, context: context, alert: alert)
     }
 }
 
 /// Everything a list rebuild reads, copied out of the store so threading and row formatting run
 /// on the concurrent executor. Arrays are copy-on-write, so taking this snapshot copies nothing.
-struct ListInput: Sendable {
+nonisolated struct ListInput: Sendable {
     struct Source: Sendable {
         let key: MailboxKey
         let role: MailboxRole
@@ -1177,8 +1140,8 @@ struct ListInput: Sendable {
         let rows: [String: ConversationRow]
     }
 
-    /// Nonisolated and async, so it never runs on the caller's actor.
-    func build() async -> Output {
+    /// Runs on the concurrent executor, never on the caller's actor.
+    @concurrent func build() async -> Output {
         func messages(_ sources: [Source]) -> [MailMessage] {
             var out: [MailMessage] = []
             out.reserveCapacity(sources.reduce(0) { $0 + $1.envelopes.count })

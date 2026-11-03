@@ -1202,7 +1202,7 @@ enum ReaderPage {
 }
 
 extension NSColor {
-    var cssHex: String {
+    nonisolated var cssHex: String {
         guard let rgb = usingColorSpace(.sRGB) else { return "#888" }
         return String(format: "#%02x%02x%02x", Int(rgb.redComponent * 255), Int(rgb.greenComponent * 255),
                       Int(rgb.blueComponent * 255))

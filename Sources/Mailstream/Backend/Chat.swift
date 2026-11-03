@@ -1,7 +1,7 @@
 import Foundation
 
 /// A Google Chat request that could not be made, or an answer that could not be read.
-struct ChatError: LocalizedError, Sendable {
+nonisolated struct ChatError: LocalizedError, Sendable {
     let message: String
     var errorDescription: String? { message }
 }
@@ -9,12 +9,12 @@ struct ChatError: LocalizedError, Sendable {
 // MARK: - Chat values (also the disk cache's JSON)
 
 /// A Google account with Chat access; `name` and `email` are both its address (the account id).
-struct ChatAccount: Codable, Hashable, Sendable {
+nonisolated struct ChatAccount: Codable, Hashable, Sendable {
     let name: String
     let email: String?
 }
 
-struct ChatUser: Codable, Hashable, Sendable {
+nonisolated struct ChatUser: Codable, Hashable, Sendable {
     /// `users/<id>`, stable across spaces.
     let name: String
     let displayName: String?
@@ -22,7 +22,7 @@ struct ChatUser: Codable, Hashable, Sendable {
     let avatarUrl: String?
     let bot: Bool
 
-    init(from decoder: Decoder) throws {
+    init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
         displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
@@ -50,13 +50,13 @@ struct ChatUser: Codable, Hashable, Sendable {
     var address: Address { Address(name: displayName, email: email ?? "") }
 }
 
-struct ChatAttachment: Codable, Hashable, Sendable {
+nonisolated struct ChatAttachment: Codable, Hashable, Sendable {
     let name: String
     let contentType: String?
     let url: String?
 }
 
-struct ChatMessage: Codable, Hashable, Sendable {
+nonisolated struct ChatMessage: Codable, Hashable, Sendable {
     /// `spaces/x/messages/y`.
     let name: String
     let sender: ChatUser
@@ -73,7 +73,7 @@ struct ChatMessage: Codable, Hashable, Sendable {
     let card: Bool
     let attachments: [ChatAttachment]
 
-    init(from decoder: Decoder) throws {
+    init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
         sender = try c.decode(ChatUser.self, forKey: .sender)
@@ -88,10 +88,10 @@ struct ChatMessage: Codable, Hashable, Sendable {
     }
 }
 
-enum ChatSpaceKind: String, Codable, Sendable {
+nonisolated enum ChatSpaceKind: String, Codable, Sendable {
     case dm, group, space, bot
 
-    init(from decoder: Decoder) throws {
+    init(from decoder: any Decoder) throws {
         self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .space
     }
 
@@ -105,7 +105,7 @@ enum ChatSpaceKind: String, Codable, Sendable {
     }
 }
 
-struct ChatSpace: Codable, Hashable, Sendable {
+nonisolated struct ChatSpace: Codable, Hashable, Sendable {
     /// `spaces/x`.
     let name: String
     let kind: ChatSpaceKind
@@ -119,7 +119,7 @@ struct ChatSpace: Codable, Hashable, Sendable {
     var unread: Int
     var latest: ChatMessage?
 
-    init(from decoder: Decoder) throws {
+    init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
         kind = try c.decodeIfPresent(ChatSpaceKind.self, forKey: .kind) ?? .space
@@ -136,7 +136,7 @@ struct ChatSpace: Codable, Hashable, Sendable {
 }
 
 /// One `Chat.spaces` answer; also the disk cache of an account's space list.
-struct ChatSpaceList: Codable, Sendable {
+nonisolated struct ChatSpaceList: Codable, Sendable {
     /// The user's `users/<id>`.
     var me: String?
     var more: Bool
@@ -144,20 +144,20 @@ struct ChatSpaceList: Codable, Sendable {
 }
 
 /// One `Chat.messages` answer: ascending, the newest `limit` before `before`.
-struct ChatMessagePage: Codable, Sendable {
+nonisolated struct ChatMessagePage: Codable, Sendable {
     var messages: [ChatMessage]
     var more: Bool
     var lastRead: Date?
 }
 
 /// RFC 3339 with or without fractional seconds; fractional first, so microseconds survive.
-func parseChatDate(_ raw: String) -> Date? {
+nonisolated func parseChatDate(_ raw: String) -> Date? {
     if let date = try? Date(raw, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true)) { return date }
     return try? Date(raw, strategy: .iso8601)
 }
 
 /// RFC 3339 in UTC with microseconds, the precision Google reports, for the `createTime` filter.
-func formatChatDate(_ date: Date) -> String {
+nonisolated func formatChatDate(_ date: Date) -> String {
     let seconds = date.timeIntervalSince1970.rounded(.down)
     var micros = Int(((date.timeIntervalSince1970 - seconds) * 1_000_000).rounded())
     var whole = Date(timeIntervalSince1970: seconds)
@@ -173,7 +173,7 @@ func formatChatDate(_ date: Date) -> String {
 
 // MARK: - From the API
 
-extension ChatUser {
+nonisolated extension ChatUser {
     init(_ user: ChatAPI.User?) {
         name = user?.name ?? ""
         displayName = user?.displayName.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
@@ -183,7 +183,7 @@ extension ChatUser {
     }
 }
 
-extension ChatMessage {
+nonisolated extension ChatMessage {
     /// `mine` overrides the comparison of the sender with `me`.
     init(_ message: ChatAPI.Message, me: String?, mine: Bool? = nil) {
         let sender = ChatUser(message.sender)
@@ -212,7 +212,7 @@ extension ChatMessage {
     }
 }
 
-extension ChatSpace {
+nonisolated extension ChatSpace {
     init(name: String, kind: ChatSpaceKind, title: String, members: [ChatUser], lastActive: Date?, lastRead: Date?,
          unread: Int, latest: ChatMessage?) {
         self.name = name
@@ -286,7 +286,7 @@ actor Chat {
         async let recheckResults = Self.bounded(recheck) { space in try await ChatAPI.readState(api, space: space.name) }
         let fresh = await freshResults, rechecked = await recheckResults
 
-        var failures: [Error] = []
+        var failures: [any Error] = []
         for result in fresh {
             switch result {
             case .success(let summary): memory[account, default: Memory()].summaries[summary.space.name] = summary
@@ -434,10 +434,10 @@ actor Chat {
 
     /// Runs `work` over `items`, at most `fanOut` at once; results keep `items`' order.
     private static func bounded<T: Sendable, R: Sendable>(_ items: [T], _ work: @escaping @Sendable (T) async throws -> R)
-        async -> [Result<R, Error>] {
-        var results = [Result<R, Error>?](repeating: nil, count: items.count)
-        await withTaskGroup(of: (Int, Result<R, Error>).self) { group in
-            let run: @Sendable (Int, T) async -> (Int, Result<R, Error>) = { index, item in
+        async -> [Result<R, any Error>] {
+        var results = [Result<R, any Error>?](repeating: nil, count: items.count)
+        await withTaskGroup(of: (Int, Result<R, any Error>).self) { group in
+            let run: @Sendable (Int, T) async -> (Int, Result<R, any Error>) = { index, item in
                 do { return (index, .success(try await work(item))) } catch { return (index, .failure(error)) }
             }
             var next = 0

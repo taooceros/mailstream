@@ -2,14 +2,14 @@ import Foundation
 
 /// A Microsoft account's mail over Microsoft Graph. Every request asks for immutable ids, so a
 /// message keeps its id across moves; folder ids are mailbox ids.
-final class GraphBackend: MailBackend {
+nonisolated final class GraphBackend: MailBackend {
     private let api: API
 
     init(api: API) {
         self.api = api
     }
 
-    func identity() async throws -> Address {
+    @concurrent func identity() async throws -> Address {
         let user = try await api.decode(User.self, Self.request(Self.url("me", [("$select", "displayName,mail,userPrincipalName")])))
         guard let email = [user.mail, user.userPrincipalName].compactMap({ $0 }).first(where: { !$0.isEmpty }) else {
             throw APIError(status: 200, message: "Microsoft Graph returned no address for this account")
@@ -19,7 +19,7 @@ final class GraphBackend: MailBackend {
 
     // MARK: Folders
 
-    func mailboxes(counts: Bool) async throws -> [Mailbox] {
+    @concurrent func mailboxes(counts: Bool) async throws -> [Mailbox] {
         async let known = wellKnownFolders()
         let top = try await pages(Folder.self, Self.url("me/mailFolders", Self.folderQuery), priority: .interactive)
         let wellKnown = try await known
@@ -92,7 +92,7 @@ final class GraphBackend: MailBackend {
     private static let envelopeFields =
         "id,conversationId,internetMessageId,subject,from,toRecipients,receivedDateTime,isRead,flag,isDraft,hasAttachments"
 
-    func envelopes(mailbox: String, cursor: String?, pageSize: Int, priority: RequestPriority) async throws -> EnvelopePage {
+    @concurrent func envelopes(mailbox: String, cursor: String?, pageSize: Int, priority: RequestPriority) async throws -> EnvelopePage {
         let url: URL
         if let cursor {
             guard let next = URL(string: cursor) else { throw APIError(status: 0, message: "Invalid page cursor") }
@@ -105,7 +105,7 @@ final class GraphBackend: MailBackend {
         return EnvelopePage(envelopes: page.value.map(Self.envelope), next: page.nextLink)
     }
 
-    func search(mailbox: String, query: String, pageSize: Int) async throws -> [Envelope] {
+    @concurrent func search(mailbox: String, query: String, pageSize: Int) async throws -> [Envelope] {
         let terms = query.replacingOccurrences(of: "\"", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !terms.isEmpty else { return [] }
         let url = try Self.url("me/mailFolders/\(Self.segment(mailbox))/messages",
@@ -129,8 +129,8 @@ final class GraphBackend: MailBackend {
 
     // MARK: Content
 
-    func content(id: String, mailbox: String, directory: URL, urlBase: String,
-                 priority: RequestPriority) async throws -> MessageContent {
+    @concurrent func content(id: String, mailbox: String, directory: URL, urlBase: String,
+                             priority: RequestPriority) async throws -> MessageContent {
         let messagePath = "me/messages/\(Self.segment(id))"
         let message = try await api.decode(Full.self,
                                            Self.request(Self.url(messagePath,
@@ -215,7 +215,7 @@ final class GraphBackend: MailBackend {
 
     // MARK: Changes
 
-    func setFlag(_ flag: MessageFlag, _ on: Bool, ids: [String], mailbox: String) async throws {
+    @concurrent func setFlag(_ flag: MessageFlag, _ on: Bool, ids: [String], mailbox: String) async throws {
         let change: Change = switch flag {
         case .seen: .read(on)
         case .flagged: .flagged(on)
@@ -223,11 +223,11 @@ final class GraphBackend: MailBackend {
         try await batch("PATCH", ids: ids, body: change)
     }
 
-    func move(ids: [String], from: String, to: String) async throws {
+    @concurrent func move(ids: [String], from: String, to: String) async throws {
         try await batch("POST", ids: ids, path: "/move", body: .move(to))
     }
 
-    func delete(ids: [String], mailbox: String) async throws {
+    @concurrent func delete(ids: [String], mailbox: String) async throws {
         try await batch("DELETE", ids: ids)
     }
 
@@ -272,7 +272,7 @@ final class GraphBackend: MailBackend {
 
     // MARK: Sending
 
-    func send(_ message: OutgoingMessage) async throws {
+    @concurrent func send(_ message: OutgoingMessage) async throws {
         let mime = try MIMEMessage.render(message, messageID: "\(UUID().uuidString.lowercased())@mailstream.local")
         var request = try Self.request(Self.url("me/sendMail"), method: "POST")
         request.setValue("text/plain", forHTTPHeaderField: "Content-Type")
@@ -314,7 +314,7 @@ final class GraphBackend: MailBackend {
     }
 
     /// Pages through `first` and every `@odata.nextLink` after it.
-    private func pages<Item: Decodable>(_ type: Item.Type, _ first: URL, priority: RequestPriority) async throws -> [Item] {
+    private func pages<Item: Decodable & Sendable>(_ type: Item.Type, _ first: URL, priority: RequestPriority) async throws -> [Item] {
         var items: [Item] = []
         var next: URL? = first
         while let url = next {
@@ -328,8 +328,8 @@ final class GraphBackend: MailBackend {
 
 // MARK: - Graph JSON
 
-extension GraphBackend {
-    fileprivate struct Page<Item: Decodable>: Decodable {
+nonisolated extension GraphBackend {
+    fileprivate struct Page<Item: Decodable & Sendable>: Decodable, Sendable {
         let value: [Item]
         let nextLink: String?
 
@@ -339,13 +339,13 @@ extension GraphBackend {
         }
     }
 
-    fileprivate struct User: Decodable {
+    fileprivate struct User: Decodable, Sendable {
         let displayName: String?
         let mail: String?
         let userPrincipalName: String?
     }
 
-    fileprivate struct FolderID: Decodable {
+    fileprivate struct FolderID: Decodable, Sendable {
         let id: String
     }
 
@@ -371,8 +371,8 @@ extension GraphBackend {
         }
     }
 
-    fileprivate struct Message: Decodable {
-        struct Flag: Decodable { let flagStatus: String? }
+    fileprivate struct Message: Decodable, Sendable {
+        struct Flag: Decodable, Sendable { let flagStatus: String? }
 
         let id: String
         let conversationId: String?
@@ -392,8 +392,8 @@ extension GraphBackend {
         let content: String?
     }
 
-    fileprivate struct Full: Decodable {
-        struct Header: Decodable {
+    fileprivate struct Full: Decodable, Sendable {
+        struct Header: Decodable, Sendable {
             let name: String
             let value: String
         }
@@ -420,8 +420,8 @@ extension GraphBackend {
         }
     }
 
-    fileprivate struct AttachedItem: Decodable {
-        struct Item: Decodable {
+    fileprivate struct AttachedItem: Decodable, Sendable {
+        struct Item: Decodable, Sendable {
             let subject: String?
             let from: Recipient?
             let body: Body?
@@ -463,8 +463,8 @@ extension GraphBackend {
         let body: Change?
     }
 
-    fileprivate struct BatchAnswer: Decodable {
-        struct Item: Decodable {
+    fileprivate struct BatchAnswer: Decodable, Sendable {
+        struct Item: Decodable, Sendable {
             let id: String
             let status: Int
             let headers: [String: String]?

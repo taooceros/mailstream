@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 
 enum ConversationAction {
     case archive, trash, toggleRead, toggleStar, toggleWaiting, reply, replyAll, forward
@@ -21,7 +22,7 @@ protocol ConversationListDelegate: AnyObject {
 /// Store updates are diffed so rows slide in and out instead of the list jumping.
 @MainActor
 final class ConversationListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
-    weak var delegate: ConversationListDelegate?
+    weak var delegate: (any ConversationListDelegate)?
 
     private enum Row {
         case section(String, count: Int?, accent: Bool)
@@ -68,8 +69,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     private let emptyLabel = NSTextField(labelWithString: "")
     private let status = StatusPill()
     private var rows: [Row] = []
+    /// What each row's cell shows (see `signature`), as of its last configuration.
     private var signatures: [Int] = []
-    private var rowByRef: [MessageRef: Int] = [:]
     private var highlightedID: String?
     private var lastHighlightedRow = 0
     private var suppressSelection = false
@@ -82,6 +83,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     /// Pages fetched without the user scrolling, to fill a Smart Inbox whose rows were mostly bundled.
     private var autoFillPages = 0
     private static let autoFillLimit = 6
+    /// The published list, row content, account names and the status line.
+    private var storeWatches: [Task<Void, Never>] = []
 
     /// The Smart Inbox bundle being browsed, nil at the top level.
     private(set) var openBundle: MailCategory?
@@ -95,6 +98,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    isolated deinit { storeWatches.forEach { $0.cancel() } }
 
     var tableView: NSTableView { table }
 
@@ -151,18 +156,38 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         view = container
 
         let center = NotificationCenter.default
-        center.addObserver(self, selector: #selector(listChanged), name: .storeListChanged, object: store)
-        center.addObserver(self, selector: #selector(listChanged), name: .storeTagsChanged, object: store)
-        center.addObserver(self, selector: #selector(contentLoaded(_:)), name: .storeContentLoaded, object: store)
-        center.addObserver(self, selector: #selector(accountsChanged), name: .storeAccountsChanged, object: store)
-        center.addObserver(self, selector: #selector(storeError), name: .storeError, object: store)
-        center.addObserver(self, selector: #selector(avatarResolved(_:)), name: .avatarResolved, object: store.avatars)
-        center.addObserver(self, selector: #selector(chatChanged), name: .chatSpacesChanged, object: store.chat)
-        center.addObserver(self, selector: #selector(storeError), name: .storeError, object: store.chat)
         center.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         center.addObserver(self, selector: #selector(userScrolled), name: NSScrollView.willStartLiveScrollNotification, object: scroll)
         center.addObserver(self, selector: #selector(scrollEnded), name: NSScrollView.didEndLiveScrollNotification, object: scroll)
-        listChanged()
+        observeStore()
+    }
+
+    /// Each change reaches the list once per main-actor turn, however many arrived in it.
+    private func observeStore() {
+        let store = store
+        storeWatches = [
+            // What the rows are built from: the published list, its tags and loading state, and the
+            // chat spaces while the list shows them.
+            Task.immediate(name: "List rows") { [weak self] in
+                let built = Observations {
+                    _ = (store.listContext, store.conversations, store.isLoading, store.aiTaggingEnabled, store.tags)
+                    if store.listContext.selection.isChat { _ = (store.chat.rows, store.chat.isLoading) }
+                }
+                for await _ in built { self?.listChanged() }
+            },
+            // Previews and pictures arriving.
+            Task.immediate(name: "List content") { [weak self] in
+                for await _ in Observations({ _ = (store.snippets, store.avatars.revision) }) { self?.refreshVisibleRows() }
+            },
+            Task.immediate(name: "List accounts") { [weak self] in
+                for await names in Observations({ store.accounts.flatMap { [$0.name, $0.label] } }) {
+                    self?.accountsChanged(names)
+                }
+            },
+            Task.immediate(name: "List status") { [weak self] in
+                for await line in Observations({ [weak self] in self?.statusLine() }) { self?.show(line ?? nil) }
+            },
+        ]
     }
 
     // MARK: - Building rows
@@ -277,12 +302,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
 
     // MARK: - Store updates
 
-    /// Chat spaces matter only while the list shows them.
-    @objc private func chatChanged() {
-        if isChat { listChanged() }
-    }
-
-    @objc private func listChanged() {
+    private func listChanged() {
         var context = false
         if lastContext != store.listContext {
             context = lastContext != nil
@@ -331,8 +351,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         } else {
             emptyLabel.stringValue = store.isLoading ? "Loading…" : (store.listContext.search != nil ? "No Results" : "No Conversations")
         }
-        updateStatus()
-        DispatchQueue.main.async { [weak self] in self?.afterReload() }
+        Task { [weak self] in self?.afterReload() }
     }
 
     /// Replaces the rows; small changes animate as row insertions and removals.
@@ -341,10 +360,6 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         let oldSignatures = signatures
         rows = newRows
         signatures = newRows.map(signature)
-        rowByRef = [:]
-        for (index, row) in rows.enumerated() {
-            if let conversation = row.conversation { rowByRef[conversation.latest.ref] = index }
-        }
 
         guard animated, !oldKeys.isEmpty, view.window != nil else {
             table.reloadData()
@@ -458,26 +473,16 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         return nil
     }
 
-    /// Visible rows with that sender take the picture in place; offscreen ones get it when configured.
-    @objc private func avatarResolved(_ note: Notification) {
-        guard let email = note.userInfo?["email"] as? String,
-              let photo = store.avatars.image(for: email, automated: false) else { return }
+    /// Previews or pictures arrived: visible rows whose cells show something else reload, and those
+    /// still on initials take their picture in place. Offscreen rows are current when configured.
+    private func refreshVisibleRows() {
         let visible = table.rows(in: table.visibleRect)
-        for index in visible.location..<(visible.location + visible.length) {
-            (table.view(atColumn: 0, row: index, makeIfNecessary: false) as? ConversationRowCell)?.showPhoto(photo, for: email)
-        }
-    }
-
-    /// One batch per main-actor turn, however many previews arrived in it.
-    @objc private func contentLoaded(_ note: Notification) {
-        guard let refs = note.userInfo?["refs"] as? Set<MessageRef> else { return }
         var changed = IndexSet()
-        for ref in refs {
-            guard let row = rowByRef[ref] else { continue }
-            let signature = signature(rows[row])
-            if signatures[row] != signature {
-                signatures[row] = signature
-                changed.insert(row)
+        for index in visible.location..<min(rows.count, visible.location + visible.length) {
+            if rows[index].conversation != nil, signatures[index] != signature(rows[index]) { changed.insert(index) }
+            if let cell = table.view(atColumn: 0, row: index, makeIfNecessary: false) as? ConversationRowCell,
+               let key = cell.missingPhoto, let photo = store.avatars.cachedImage(for: key) {
+                cell.showPhoto(photo, for: key)
             }
         }
         reloadChanged(changed)
@@ -485,8 +490,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
 
     /// Cells read the account bar's color from the account order and its label, so only a
     /// different set or naming of accounts redraws rows; unread-count changes don't.
-    @objc private func accountsChanged() {
-        let names = store.accounts.flatMap { [$0.name, $0.label] }
+    private func accountsChanged(_ names: [String]) {
         guard names != accountNames else { return }
         accountNames = names
         guard !rows.isEmpty else { return }
@@ -507,27 +511,23 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         if !set.isEmpty { table.reloadData(forRowIndexes: set, columnIndexes: [0]) }
     }
 
-    @objc private func storeError() { updateStatus() }
-
-    /// The floating status capsule appears only while something is happening or went wrong.
-    private func updateStatus() {
+    /// What the floating status capsule says; nil hides it. It appears only while something is
+    /// happening or went wrong.
+    private func statusLine() -> (text: String, busy: Bool)? {
+        let problems = store.problems.current
         if isChat {
-            if store.chat.isLoading {
-                status.show("Checking for messages…", busy: true)
-            } else if let error = store.chat.lastError {
-                status.show(error, busy: false, warning: true)
-            } else {
-                status.hide()
-            }
-        } else if store.isLoading {
-            status.show(store.searchQuery != nil ? "Searching…" : "Checking for mail…", busy: true)
-        } else if let error = store.lastError {
-            status.show(error, busy: false, warning: true)
-        } else if let tagging = store.aiTaggingStatus {
-            status.show(tagging, busy: true)
-        } else {
-            status.hide()
+            if store.chat.isLoading { return ("Checking for messages…", true) }
+            return problems[.chat].map { ($0.message, false) }
         }
+        if store.isLoading { return (store.searchQuery != nil ? "Searching…" : "Checking for mail…", true) }
+        if let problem = problems[.mail] { return (problem.message, false) }
+        return store.aiTaggingStatus.map { ($0, true) }
+    }
+
+    /// Busy lines spin; the others are failures.
+    private func show(_ line: (text: String, busy: Bool)?) {
+        guard let line else { return status.hide() }
+        status.show(line.text, busy: line.busy, warning: !line.busy)
     }
 
     @objc private func scrolled() {
@@ -558,7 +558,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             self.table.scrollRowToVisible(0)
         }
         delegate?.conversationListDidChangeBundle(self)
-        DispatchQueue.main.async { [weak self] in self?.afterReload() }
+        Task { [weak self] in self?.afterReload() }
     }
 
     func leaveBundle() {
@@ -690,6 +690,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             cell.onOpen = { [weak self] category in self?.enterBundle(category) }
             return cell
         case .conversation(let conversation):
+            // What the cell now shows, so content arriving later reloads it only if it differs.
+            signatures[row] = signature(rows[row])
             let cell = tableView.makeView(withIdentifier: ConversationRowCell.identifier, owner: nil) as? ConversationRowCell
                 ?? ConversationRowCell()
             let context = store.listContext
@@ -823,7 +825,10 @@ final class ConversationTableView: NSTableView {
     private var hoverArea: NSTrackingArea?
     private var pointer: NSPoint?
     private var hoveredRow = -1
-    private var windowObservers: [NSObjectProtocol] = []
+    /// Follow the window gaining and losing key status.
+    private var windowWatches: [Task<Void, Never>] = []
+
+    isolated deinit { windowWatches.forEach { $0.cancel() } }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -851,12 +856,12 @@ final class ConversationTableView: NSTableView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        windowObservers.forEach(NotificationCenter.default.removeObserver)
-        windowObservers = []
+        windowWatches.forEach { $0.cancel() }
+        windowWatches = []
         guard let window else { return }
-        windowObservers = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map { name in
-            NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refreshHover() }
+        windowWatches = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map { name in
+            Task(name: "List hover: \(name.rawValue)") { [weak self] in
+                for await _ in NotificationCenter.default.notifications(named: name, object: window) { self?.refreshHover() }
             }
         }
     }

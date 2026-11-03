@@ -1,6 +1,6 @@
 import Foundation
 
-struct Address: Codable, Hashable, Sendable {
+nonisolated struct Address: Codable, Hashable, Sendable {
     var name: String?
     var email: String
 
@@ -47,7 +47,7 @@ struct Address: Codable, Hashable, Sendable {
     }
 }
 
-enum MailboxRole: String, Codable, Sendable, CaseIterable {
+nonisolated enum MailboxRole: String, Codable, Sendable, CaseIterable {
     case inbox, starred, important, sent, drafts, archive, all, junk, trash, other
 
     var sortOrder: Int {
@@ -99,7 +99,7 @@ enum MailboxRole: String, Codable, Sendable, CaseIterable {
     var showsRecipients: Bool { self == .sent || self == .drafts }
 }
 
-struct Account: Hashable, Sendable, Identifiable, Codable {
+nonisolated struct Account: Hashable, Sendable, Identifiable, Codable {
     /// `AccountRecord.id`: the lowercased address.
     let name: String
     /// Shown in the sidebar and on threads.
@@ -112,7 +112,7 @@ struct Account: Hashable, Sendable, Identifiable, Codable {
     var email: String { identity?.email ?? name }
 }
 
-struct Mailbox: Hashable, Sendable, Identifiable, Codable {
+nonisolated struct Mailbox: Hashable, Sendable, Identifiable, Codable {
     let account: String
     let id: String
     let name: String
@@ -125,12 +125,12 @@ struct Mailbox: Hashable, Sendable, Identifiable, Codable {
     var displayName: String { role == .other ? name : role.title }
 }
 
-struct MailboxKey: Hashable, Sendable, Codable {
+nonisolated struct MailboxKey: Hashable, Sendable, Codable {
     let account: String
     let mailbox: String
 }
 
-struct Envelope: Codable, Hashable, Sendable {
+nonisolated struct Envelope: Codable, Hashable, Sendable {
     let id: String
     /// The provider's thread (Gmail thread id, Graph conversation id).
     let thread: String?
@@ -149,7 +149,7 @@ struct Envelope: Codable, Hashable, Sendable {
     var isDraft: Bool { flags.contains("draft") }
 }
 
-struct MessageRef: Hashable, Sendable, Codable {
+nonisolated struct MessageRef: Hashable, Sendable, Codable {
     let account: String
     let mailbox: String
     let id: String
@@ -157,7 +157,7 @@ struct MessageRef: Hashable, Sendable, Codable {
     var mailboxKey: MailboxKey { MailboxKey(account: account, mailbox: mailbox) }
 }
 
-struct MailMessage: Hashable, Sendable, Identifiable {
+nonisolated struct MailMessage: Hashable, Sendable, Identifiable {
     let ref: MessageRef
     var envelope: Envelope
     var role: MailboxRole
@@ -167,7 +167,7 @@ struct MailMessage: Hashable, Sendable, Identifiable {
 
 /// One thread. Everything the list sorts and filters by is worked out once, when the threader
 /// builds it, instead of on every read.
-struct Conversation: Identifiable, Hashable, Sendable {
+nonisolated struct Conversation: Identifiable, Hashable, Sendable {
     let id: String
     let account: String
     /// Ascending by date.
@@ -215,7 +215,7 @@ struct Conversation: Identifiable, Hashable, Sendable {
     }
 }
 
-struct Attachment: Codable, Hashable, Sendable {
+nonisolated struct Attachment: Codable, Hashable, Sendable {
     let part: Int
     let filename: String
     let mime: String
@@ -226,7 +226,7 @@ struct Attachment: Codable, Hashable, Sendable {
     let storedName: String
 }
 
-struct MessageContent: Codable, Sendable {
+nonisolated struct MessageContent: Codable, Sendable {
     /// HTML body with `cid:` references rewritten to the `mscid:` scheme, nil for text-only mail.
     var html: String?
     var text: String?
