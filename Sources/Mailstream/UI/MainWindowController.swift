@@ -31,6 +31,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     /// Conversation under the list's keyboard highlight.
     private var highlighted: Conversation?
     private var escapeMonitor: Any?
+    private var backMonitor: Any?
+    private var swipe = BackSwipe()
+    /// Whether a back swipe has the reader under the user's fingers.
+    private var dragging = false
     /// Bumped per open/close so a late "page ready" callback cannot re-present a stale reader.
     private var navigation = 0
     private var transitions = 0
@@ -111,6 +115,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             }
             return handled ? nil : event
         }
+        // A two-finger swipe right drags the reader away (when "Swipe between pages" uses two
+        // fingers), and a mouse's Back button goes back like Escape.
+        backMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .otherMouseDown]) { [weak self] event in
+            let handled = MainActor.assumeIsolated { self?.handleBackInput(event) ?? false }
+            return handled ? nil : event
+        }
 
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(listChanged), name: .storeListChanged, object: store)
@@ -158,12 +168,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     }
 
     private func closeReader() {
+        leaveReader { swap(forward: false) { [weak self] in self?.reader.show(nil) } }
+    }
+
+    /// Back to the list; `animation` takes the reader away once the row is highlighted, before the
+    /// list takes focus.
+    private func leaveReader(_ animation: () -> Void) {
         guard opened != nil else { return }
         let last = opened
         opened = nil
         navigation += 1
         list.highlight(last)
-        swap(forward: false) { [weak self] in self?.reader.show(nil) }
+        animation()
         window?.makeFirstResponder(list.tableView)
         updateTitle()
         window?.toolbar?.validateVisibleItems()
@@ -176,6 +192,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         let current = transitions
         let page = reader.view
         page.layer?.removeAnimation(forKey: "fold")
+        page.layer?.removeAnimation(forKey: "swipe")
+        list.view.layer?.removeAnimation(forKey: "swipe")
+        dragging = false
         list.view.isHidden = false
         list.view.alphaValue = 1
         page.isHidden = false
@@ -218,6 +237,88 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     }
 
     private var canGoBack: Bool { opened != nil || list.openBundle != nil }
+
+    // MARK: - Swipe back
+
+    private func handleBackInput(_ event: NSEvent) -> Bool {
+        guard let window, event.window === window, window.attachedSheet == nil else { return false }
+        if event.type == .otherMouseDown {
+            guard event.buttonNumber == 3, canGoBack else { return false }
+            goBack(nil)
+            return true
+        }
+        let page = reader.view
+        let canStart = opened != nil && NSEvent.isSwipeTrackingFromScrollEventsEnabled
+            && page.bounds.contains(page.convert(event.locationInWindow, from: nil))
+        switch swipe.feed(event, canStart: canStart) {
+        case .pass:
+            return false
+        case .consume:
+            return true
+        case .drag(let offset):
+            dragReader(to: offset)
+            return true
+        case .release(let offset, let velocity):
+            releaseReader(at: offset, velocity: velocity)
+            return true
+        }
+    }
+
+    /// The reader follows the fingers to the right, uncovering the list, which settles from slightly
+    /// enlarged as it does on close.
+    private func dragReader(to offset: CGFloat) {
+        guard opened != nil, let page = reader.view.layer, let below = list.view.layer else { return }
+        if !dragging {
+            dragging = true
+            // An open still settling must neither hide the list nor keep animating under the fingers.
+            transitions += 1
+            for key in ["unfold", "fold", "opacity", "swipe"] { page.removeAnimation(forKey: key) }
+            below.removeAnimation(forKey: "unfold")
+            reader.view.alphaValue = 1
+            list.view.alphaValue = 1
+            list.view.isHidden = false
+        }
+        let progress = min(offset / max(reader.view.bounds.width, 1), 1)
+        Motion.hold(page, "transform", at: CATransform3DMakeTranslation(offset, 0, 0), key: "swipe")
+        Motion.hold(below, "transform", at: Motion.centered(1 + 0.03 * (1 - progress), in: below), key: "swipe")
+    }
+
+    /// Past a third of the width, or flicked right, the reader slides off and the list stays; otherwise
+    /// it slides back into place.
+    private func releaseReader(at offset: CGFloat, velocity: CGFloat) {
+        guard dragging, let page = reader.view.layer, let below = list.view.layer else { return }
+        dragging = false
+        let width = max(reader.view.bounds.width, 1)
+        let back = opened != nil && (offset > width / 3 || (velocity > 400 && offset > 20))
+        let remaining = back ? width - offset : offset
+        let duration = min(0.3, max(0.16, Double(remaining / max(abs(velocity), 1500))))
+        let progress = min(offset / width, 1)
+        transitions += 1
+        let current = transitions
+        Motion.group({
+            for (layer, from, to) in [
+                (page, CATransform3DMakeTranslation(offset, 0, 0), back ? CATransform3DMakeTranslation(width, 0, 0) : CATransform3DIdentity),
+                (below, Motion.centered(1 + 0.03 * (1 - progress), in: below), back ? CATransform3DIdentity : Motion.centered(1.03, in: below)),
+            ] {
+                let slide = Motion.basic("transform", from: from, to: to, duration: duration)
+                slide.fillMode = .forwards
+                slide.isRemovedOnCompletion = false
+                layer.add(slide, forKey: "swipe")
+            }
+        }, completion: { [weak self] in
+            guard let self, self.transitions == current else { return }
+            page.removeAnimation(forKey: "swipe")
+            below.removeAnimation(forKey: "swipe")
+            if back {
+                self.reader.view.isHidden = true
+                (self.list.tableView as? ConversationTableView)?.refreshHover()
+                self.reader.show(nil)
+            } else {
+                self.list.view.isHidden = true
+            }
+        })
+        if back { leaveReader {} }
+    }
 
     // MARK: - Store observation
 

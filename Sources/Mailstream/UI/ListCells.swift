@@ -159,6 +159,18 @@ enum Motion {
                   forKey: "unfold")
     }
 
+    /// Shows `layer`'s `keyPath` at `value` until replaced under `key`, for a frame of an interactive
+    /// gesture; the model value, which AppKit owns for layer-backed views, stays untouched.
+    static func hold(_ layer: CALayer, _ keyPath: String, at value: Any, key: String) {
+        let animation = CABasicAnimation(keyPath: keyPath)
+        animation.fromValue = value
+        animation.toValue = value
+        animation.duration = 1e6
+        animation.fillMode = .forwards
+        animation.isRemovedOnCompletion = false
+        layer.add(animation, forKey: key)
+    }
+
     /// A scale about the layer's center. Transforms pivot on the anchor point, so shift the pivot to
     /// the center, which is the same point whichever way the layer's geometry is flipped.
     static func centered(_ scale: CGFloat, in layer: CALayer) -> CATransform3D {

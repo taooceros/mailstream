@@ -83,8 +83,10 @@ isn't you; in Sent, the recipient), the senders, subject and preview, one topic
 ("● Work"), the date and the account's
 color bar. `Re:`/`Fwd:` prefixes are dropped and `[list]` tags are dimmed.
 Hovering a row cross-fades the date into an archive / trash / read / star pill.
-Clicking a row, or pressing Return or Space, opens the conversation; Esc, ⌘[
-or the toolbar back button returns.
+Clicking a row, or pressing Return or Space, opens the conversation; Esc, ⌘[,
+the toolbar back button or a mouse's Back button returns. A two-finger swipe
+right on the trackpad drags the reader off the list and goes back once past a
+third of its width or flicked (when "Swipe between pages" uses two fingers).
 
 The reader is a 720 pt reading column: serif subject, one line of metadata,
 messages separated by hairlines, collapsed messages as one-line previews, quoted
@@ -182,7 +184,7 @@ app, published). Thunderbird's public client is refused for them.
 | Action | Menu | List key |
 | --- | --- | --- |
 | Open conversation or bundle | | Return / Space |
-| Back to list | ⌘[ | Esc |
+| Back to list | ⌘[ | Esc, two-finger swipe right |
 | New message | ⌘N | |
 | Reply / Reply All / Forward | ⌘R / ⇧⌘R / ⇧⌘F | r / a / f |
 | Archive | ⌃⌘A | e |
