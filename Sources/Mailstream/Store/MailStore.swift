@@ -525,9 +525,12 @@ final class MailStore {
             await withTaskGroup(of: (MailboxKey, Result<[Envelope], Error>).self) { group in
                 for key in keys {
                     group.addTask {
+                        // Bound before the tuple is built: Swift 6.3 at -O drops `key` from
+                        // `(key, .success(try await …))` on success, so the list got garbage keys.
                         do {
-                            return (key, .success(try await himalaya.search(account: key.account, mailbox: key.mailbox,
-                                                                            query: expression, pageSize: Self.pageSize)))
+                            let list = try await himalaya.search(account: key.account, mailbox: key.mailbox,
+                                                                 query: expression, pageSize: Self.pageSize)
+                            return (key, .success(list))
                         } catch {
                             return (key, .failure(error))
                         }
