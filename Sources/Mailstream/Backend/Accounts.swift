@@ -60,11 +60,12 @@ final class AccountStore {
         return backend
     }
 
-    /// Browser OAuth. Signing in to an account already here replaces its token, name and scopes
-    /// and keeps its label.
-    func signIn(_ provider: Provider) async throws -> AccountRecord {
-        let grant = try await OAuth.signIn(provider)
-        try await tokens.install(account: grant.id, provider: provider, refreshToken: grant.refreshToken,
+    /// Browser OAuth with the person's `client`. Signing in to an account already here replaces
+    /// its token, client, name and scopes and keeps its label.
+    func signIn(_ provider: Provider, client: OAuthClient) async throws -> AccountRecord {
+        let grant = try await OAuth.signIn(provider, client: client)
+        try await tokens.install(account: grant.id, provider: provider, client: client,
+                                 refreshToken: grant.refreshToken,
                                  accessToken: grant.accessToken, expiresIn: TimeInterval(grant.expiresIn))
         var record = AccountRecord(id: grant.id, provider: provider, label: grant.id, displayName: grant.name,
                                    scopes: grant.scopes)

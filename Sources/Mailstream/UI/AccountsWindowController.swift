@@ -60,7 +60,7 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
         let title = NSTextField(labelWithString: "Accounts")
         title.font = .systemFont(ofSize: 20, weight: .semibold)
         let subtitle = NSTextField(wrappingLabelWithString:
-            "Mailstream signs in to Google and Microsoft in your browser. Sign-ins stay in your Keychain.")
+            "Mailstream signs in to Google and Microsoft in your browser, with an OAuth client you registered. Sign-ins stay in your Keychain.")
         subtitle.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         subtitle.textColor = .secondaryLabelColor
 
@@ -293,12 +293,71 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
     @objc private func addGoogle() { startSignIn(.google) }
     @objc private func addMicrosoft() { startSignIn(.microsoft) }
 
+    /// Asks for the OAuth client (prefilled with the last one used, else the build's), then signs in.
     private func startSignIn(_ provider: Provider) {
+        guard signIn == nil else { return }
+        Task { [weak self, accounts] in
+            let suggested = (try? await accounts.tokens.suggestedClient(for: provider)) ?? nil
+            self?.askForClient(provider, suggested: suggested)
+        }
+    }
+
+    private func askForClient(_ provider: Provider, suggested: OAuthClient?) {
+        guard signIn == nil, let window else { return }
+        let idField = NSTextField(string: suggested?.id ?? "")
+        idField.placeholderString = provider == .google ? "Client ID" : "Application (client) ID"
+        let secretField = NSSecureTextField(string: suggested?.secret ?? "")
+        secretField.placeholderString = provider == .google ? "Client secret" : "Client secret (empty for a public client)"
+        let grid = NSGridView(views: [
+            [NSTextField(labelWithString: "Client ID:"), idField],
+            [NSTextField(labelWithString: "Client secret:"), secretField],
+        ])
+        grid.rowSpacing = 8
+        grid.columnSpacing = 8
+        grid.column(at: 0).xPlacement = .trailing
+        grid.rowAlignment = .none
+        for index in 0..<grid.numberOfRows { grid.row(at: index).yPlacement = .center }
+        idField.widthAnchor.constraint(equalToConstant: 260).isActive = true
+        secretField.widthAnchor.constraint(equalToConstant: 260).isActive = true
+        grid.frame.size = grid.fittingSize
+
+        let alert = NSAlert()
+        alert.messageText = provider == .google ? "Sign in with Google" : "Sign in with Microsoft"
+        alert.informativeText = switch provider {
+        case .google:
+            "Enter the client ID and secret of your Google Cloud OAuth client (type Desktop app). "
+                + "Mailstream then opens Google's sign-in in your browser."
+        case .microsoft:
+            "Enter the application ID of your Microsoft Entra app, and its secret unless it is a public client. "
+                + "Its redirect URI must be \(OAuth.redirect)."
+        }
+        alert.accessoryView = grid
+        alert.addButton(withTitle: "Continue in Browser")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = idField.stringValue.isEmpty ? idField : secretField
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            let id = idField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let secret = secretField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if id.isEmpty {
+                status = ("Enter your OAuth client's ID to sign in.", true)
+            } else if provider == .google && secret.isEmpty {
+                // Google redeems a desktop client's code only with its secret.
+                status = ("Google needs the client secret too; the Cloud Console shows it next to the client ID.", true)
+            } else {
+                beginSignIn(provider, client: OAuthClient(id: id, secret: secret.isEmpty ? nil : secret))
+                return
+            }
+            updateControls()
+        }
+    }
+
+    private func beginSignIn(_ provider: Provider, client: OAuthClient) {
         guard signIn == nil else { return }
         status = ("Waiting for the browser…", false)
         signIn = Task { [weak self, accounts] in
             do {
-                let record = try await accounts.signIn(provider)
+                let record = try await accounts.signIn(provider, client: client)
                 self?.signInEnded(.success(record))
             } catch {
                 self?.signInEnded(.failure(error))

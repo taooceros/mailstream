@@ -55,21 +55,24 @@ extension Provider {
         case .microsoft: ["scope": scopes.joined(separator: " ")]
         }
     }
+}
 
-    /// Client id and secret from Info.plist.
-    fileprivate func client() throws -> (id: String, secret: String) {
+/// An OAuth client the person registered with the provider and entered in Settings ▸ Accounts.
+struct OAuthClient: Codable, Equatable, Sendable {
+    var id: String
+    /// Google's desktop clients have one; a Microsoft public client has none.
+    var secret: String?
+
+    /// The client this build carries in its Info.plist, if any (scripts/bundle.sh): the default
+    /// offered before anything was entered, and what accounts signed in before clients were
+    /// stored refresh with.
+    static func builtIn(_ provider: Provider) -> OAuthClient? {
         let config = AppConfig.current
-        let (id, secret, idKey, secretKey) = switch self {
-        case .google:
-            (config.googleClientID, config.googleClientSecret, "MSGoogleClientID", "MSGoogleClientSecret")
-        case .microsoft:
-            (config.microsoftClientID, config.microsoftClientSecret, "MSMicrosoftClientID", "MSMicrosoftClientSecret")
+        let (id, secret) = switch provider {
+        case .google: (config.googleClientID, config.googleClientSecret)
+        case .microsoft: (config.microsoftClientID, config.microsoftClientSecret)
         }
-        guard let id else { throw OAuthError(code: "config", message: "This build has no \(idKey) in its Info.plist.") }
-        guard let secret else {
-            throw OAuthError(code: "config", message: "This build has no \(secretKey) in its Info.plist.")
-        }
-        return (id, secret)
+        return id.map { OAuthClient(id: $0, secret: secret) }
     }
 }
 
@@ -111,10 +114,10 @@ enum OAuth {
     }
 
     /// Opens the provider's sign-in page in the default browser and waits (up to five minutes)
-    /// for the redirect. Cancelling the task stops waiting and closes the listener.
+    /// for the redirect, then redeems the code with `client`. Cancelling the task stops waiting
+    /// and closes the listener.
     @MainActor
-    static func signIn(_ provider: Provider) async throws -> Grant {
-        let client = try provider.client()
+    static func signIn(_ provider: Provider, client: OAuthClient) async throws -> Grant {
         let verifier = randomToken()
         let state = randomToken()
         let challenge = base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
@@ -156,21 +159,23 @@ enum OAuth {
                      accessToken: response.accessToken, expiresIn: response.expiresIn ?? 3600)
     }
 
-    /// A new access token from `refreshToken`.
-    static func refresh(_ refreshToken: String, provider: Provider) async throws -> TokenResponse {
+    /// A new access token from `refreshToken`, redeemed with the `client` that issued it.
+    static func refresh(_ refreshToken: String, provider: Provider, client: OAuthClient) async throws -> TokenResponse {
         try await exchange(["grant_type": "refresh_token", "refresh_token": refreshToken],
-                           provider: provider, client: provider.client())
+                           provider: provider, client: client)
     }
 
     /// POSTs `form` (plus the client credentials) to the token endpoint. Failures answer
     /// `{"error": …, "error_description": …}`.
     private static func exchange(_ form: [String: String], provider: Provider,
-                                 client: (id: String, secret: String)) async throws -> TokenResponse {
+                                 client: OAuthClient) async throws -> TokenResponse {
         var request = URLRequest(url: provider.tokenURL)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let body = form.merging(["client_id": client.id, "client_secret": client.secret]) { current, _ in current }
+        var credentials = ["client_id": client.id]
+        if let secret = client.secret, !secret.isEmpty { credentials["client_secret"] = secret }
+        let body = form.merging(credentials) { current, _ in current }
             .merging(provider.tokenExtras) { current, _ in current }
         request.httpBody = Data(formEncoded(body).utf8)
         let (data, response) = try await API.session.data(for: request)

@@ -19,11 +19,17 @@ final class Tokens: TokenSource {
         await state.reject(token, account: account)
     }
 
-    /// Starts over from a fresh sign-in: stores `refreshToken` and caches `accessToken`.
-    func install(account: String, provider: Provider, refreshToken: String, accessToken: String,
-                 expiresIn: TimeInterval) async throws {
-        try await state.install(account: account, provider: provider, refreshToken: refreshToken,
+    /// Starts over from a fresh sign-in: stores `refreshToken` with the `client` that issued it,
+    /// remembers `client` for the provider's next sign-in, and caches `accessToken`.
+    func install(account: String, provider: Provider, client: OAuthClient, refreshToken: String,
+                 accessToken: String, expiresIn: TimeInterval) async throws {
+        try await state.install(account: account, provider: provider, client: client, refreshToken: refreshToken,
                                 access: Access(token: accessToken, expiry: Date(timeIntervalSinceNow: expiresIn)))
+    }
+
+    /// The client to offer for `provider`'s next sign-in: the one used last, else the build's.
+    func suggestedClient(for provider: Provider) async throws -> OAuthClient? {
+        try await state.suggestedClient(for: provider)
     }
 
     /// Signs `account` out: deletes its refresh token and forgets its access token.
@@ -46,7 +52,7 @@ final class Tokens: TokenSource {
         private var access: [String: Access] = [:]
         private var flights: [String: Flight] = [:]
         /// The Keychain item's contents once read.
-        private var refreshTokens: [String: String]?
+        private var signIns: SignIns?
 
         init(providers: [String: Provider]) {
             self.providers = providers
@@ -59,8 +65,13 @@ final class Tokens: TokenSource {
             if let current = flights[account] {
                 flight = current
             } else {
-                guard let refreshToken = try stored()[account] else { throw Tokens.signInAgain(account) }
-                flight = Flight(task: Task { try await OAuth.refresh(refreshToken, provider: provider) })
+                let stored = try stored()
+                guard let refreshToken = stored.refreshTokens[account] else { throw Tokens.signInAgain(account) }
+                // Only the client that issued a refresh token can redeem it.
+                guard let client = stored.clients[account] ?? OAuthClient.builtIn(provider) else {
+                    throw Tokens.signInAgain(account)
+                }
+                flight = Flight(task: Task { try await OAuth.refresh(refreshToken, provider: provider, client: client) })
                 flights[account] = flight
             }
             let response: TokenResponse
@@ -90,33 +101,51 @@ final class Tokens: TokenSource {
             if access[account]?.token == token { access[account] = nil }
         }
 
-        func install(account: String, provider: Provider, refreshToken: String, access fresh: Access) throws {
-            try setRefreshToken(refreshToken, for: account)
+        func install(account: String, provider: Provider, client: OAuthClient, refreshToken: String,
+                     access fresh: Access) throws {
+            var signIns = try stored()
+            signIns.refreshTokens[account] = refreshToken
+            signIns.clients[account] = client
+            signIns.lastClients[provider.rawValue] = client
+            try save(signIns)
             providers[account] = provider
             flights[account] = nil
             access[account] = fresh
         }
 
+        func suggestedClient(for provider: Provider) throws -> OAuthClient? {
+            try stored().lastClients[provider.rawValue] ?? OAuthClient.builtIn(provider)
+        }
+
         func forget(_ account: String) {
-            try? setRefreshToken(nil, for: account)
+            if var signIns = try? stored() {
+                signIns.refreshTokens[account] = nil
+                signIns.clients[account] = nil
+                try? save(signIns)
+            }
             providers[account] = nil
             flights[account] = nil
             access[account] = nil
         }
 
-        private func stored() throws -> [String: String] {
-            if let refreshTokens { return refreshTokens }
+        private func stored() throws -> SignIns {
+            if let signIns { return signIns }
             let loaded = try Keychain.load()
-            refreshTokens = loaded
+            signIns = loaded
             return loaded
         }
 
-        private func setRefreshToken(_ token: String?, for account: String) throws {
-            var tokens = try stored()
-            guard tokens[account] != token else { return }
-            tokens[account] = token
-            try Keychain.store(tokens)
-            refreshTokens = tokens
+        private func setRefreshToken(_ token: String, for account: String) throws {
+            var signIns = try stored()
+            guard signIns.refreshTokens[account] != token else { return }
+            signIns.refreshTokens[account] = token
+            try save(signIns)
+        }
+
+        private func save(_ contents: SignIns) throws {
+            guard contents != signIns else { return }
+            try Keychain.store(contents)
+            signIns = contents
         }
     }
 
@@ -125,9 +154,19 @@ final class Tokens: TokenSource {
     }
 }
 
-/// Refresh tokens in the login keychain: one generic password (service
-/// `dev.mailstream.Mailstream.oauth`, account `refresh-tokens`) holding a JSON object of refresh
-/// token by account id, so macOS asks about Mailstream's access once rather than per account.
+/// What the Keychain keeps for sign-ins, by account id and provider.
+struct SignIns: Codable, Equatable, Sendable {
+    var refreshTokens: [String: String] = [:]
+    /// The client each account's refresh token was issued to.
+    var clients: [String: OAuthClient] = [:]
+    /// The client last signed in with, by `Provider.rawValue`, offered for the next sign-in.
+    var lastClients: [String: OAuthClient] = [:]
+}
+
+/// Sign-ins in the login keychain: one generic password (service `dev.mailstream.Mailstream.oauth`,
+/// account `refresh-tokens`) holding `SignIns` as JSON, so macOS asks about Mailstream's access
+/// once rather than per account. Items from before clients were stored hold a bare object of
+/// refresh token by account id.
 enum Keychain {
     static let service = "dev.mailstream.Mailstream.oauth"
     private static let account = "refresh-tokens"
@@ -140,8 +179,8 @@ enum Keychain {
         }
     }
 
-    /// The stored refresh tokens by account id; empty when there are none.
-    static func load() throws -> [String: String] {
+    /// The stored sign-ins; empty when there are none.
+    static func load() throws -> SignIns {
         var query = base
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -149,25 +188,27 @@ enum Keychain {
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         switch status {
         case errSecSuccess:
-            guard let data = result as? Data else { return [:] }
-            return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+            guard let data = result as? Data else { return SignIns() }
+            if let signIns = try? JSONDecoder().decode(SignIns.self, from: data) { return signIns }
+            let legacy = (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+            return SignIns(refreshTokens: legacy)
         case errSecItemNotFound:
-            return [:]
+            return SignIns()
         default:
             throw Failure(status: status)
         }
     }
 
-    /// Replaces the stored tokens; none left deletes the item.
-    static func store(_ tokens: [String: String]) throws {
-        guard !tokens.isEmpty else {
+    /// Replaces the stored sign-ins; with no refresh token left the item is deleted.
+    static func store(_ signIns: SignIns) throws {
+        guard !signIns.refreshTokens.isEmpty || !signIns.lastClients.isEmpty else {
             let deleted = SecItemDelete(base as CFDictionary)
             guard deleted == errSecSuccess || deleted == errSecItemNotFound else { throw Failure(status: deleted) }
             return
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
-        let data = try encoder.encode(tokens)
+        let data = try encoder.encode(signIns)
         let update = SecItemUpdate(base as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         switch update {
         case errSecSuccess:
