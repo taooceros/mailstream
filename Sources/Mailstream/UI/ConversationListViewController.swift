@@ -571,14 +571,21 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             let context = store.listContext
             let row = store.row(for: conversation)
             let tag = store.tag(for: conversation)
+            let automated = tag.map { $0.category != .people } ?? false
             cell.configure(row, snippet: store.snippet(for: conversation.latest.ref),
                            archivable: ![.archive, .all, .trash].contains(context.role),
                            account: context.selection.isUnified
                                ? (conversation.account, AccountStyle.color(for: conversation.account, in: store)) : nil,
                            tag: tag,
-                           photo: store.avatars.image(for: row.avatarKey, automated: tag.map { $0.category != .people } ?? false))
+                           photo: store.avatars.image(for: row.avatarKey, automated: automated))
             let id = conversation.id
             cell.onAction = { [weak self] action in self?.perform(action, id: id) }
+            let person = Address(name: row.avatarName, email: row.avatarKey)
+            cell.onAvatar = { [weak self] anchor, photo in
+                guard let self else { return }
+                AvatarPreview.show(person, small: photo, automated: automated, avatars: self.store.avatars,
+                                   relativeTo: anchor.bounds, of: anchor)
+            }
             return cell
         }
     }

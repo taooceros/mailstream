@@ -17,6 +17,7 @@ final class AvatarStore {
     private let resolver: AvatarResolver
     private let images = NSCache<NSString, NSImage>()
     private let pngs = NSCache<NSString, NSData>()
+    private let large = NSCache<NSString, NSImage>()
     private var missing = Set<String>()
     private var pending = Set<String>()
 
@@ -24,6 +25,7 @@ final class AvatarStore {
         resolver = AvatarResolver(tools: tools, root: root.appendingPathComponent("avatars", isDirectory: true))
         images.countLimit = 400
         pngs.countLimit = 400
+        large.countLimit = 12
     }
 
     /// The picture for `email` when it is already known; otherwise starts looking and returns nil,
@@ -45,6 +47,16 @@ final class AvatarStore {
         return "data:image/png;base64," + (png as Data).base64EncodedString()
     }
 
+    /// The same picture at 512 px for an enlarged view, fetched from its source on demand.
+    func largeImage(for email: String, automated: Bool) async -> NSImage? {
+        let key = email.lowercased()
+        if let image = large.object(forKey: key as NSString) { return image }
+        guard let png = await resolver.avatar(for: key, automated: automated, side: 512),
+              let image = NSImage(data: png) else { return nil }
+        large.setObject(image, forKey: key as NSString)
+        return image
+    }
+
     private func request(_ key: String, automated: Bool) {
         guard key.contains("@"), !missing.contains(key), pending.insert(key).inserted else { return }
         let resolver = resolver
@@ -63,9 +75,11 @@ final class AvatarStore {
 }
 
 /// Finds and caches one normalized 96 px PNG per sender. Results, including misses, live on disk
-/// so a relaunch paints from cache; a miss is retried once the contact directory changes.
+/// so a relaunch paints from cache; a miss is retried once the contact directory changes. Other
+/// sizes, for enlarged views, go to the same source uncached.
 actor AvatarResolver {
-    private static let side = 96
+    /// The cached size: rows and the reader draw at most 34 pt, so 96 px covers Retina.
+    static let side = 96
     private static let hit: TimeInterval = 14 * 86_400
     private static let miss: TimeInterval = 3 * 86_400
     private static let directoryAge: TimeInterval = 86_400
@@ -99,7 +113,9 @@ actor AvatarResolver {
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
-    func avatar(for email: String, automated: Bool) async -> Data? {
+    func avatar(for email: String, automated: Bool, side: Int = AvatarResolver.side) async -> Data? {
+        let automated = automated || Self.looksAutomated(email)
+        guard side == Self.side else { return await find(email, automated: automated, side: side) }
         let key = "p-" + Self.hash(email)
         let stamp = await contacts().stamp
         switch cached(key, stamp: stamp) {
@@ -108,19 +124,19 @@ actor AvatarResolver {
         case .unknown: break
         }
         await permits.acquire()
-        let png = await find(email, automated: automated || Self.looksAutomated(email))
+        let png = await find(email, automated: automated, side: side)
         await permits.release()
         store(png, at: key, stamp: stamp)
         return png
     }
 
-    private func find(_ email: String, automated: Bool) async -> Data? {
-        if let source = await contacts().photos[email], let png = await contactPhoto(source) { return png }
+    private func find(_ email: String, automated: Bool, side: Int) async -> Data? {
+        if let source = await contacts().photos[email], let png = await contactPhoto(source, side: side) { return png }
         let domain = email.split(separator: "@").last.map(String.init) ?? ""
         let company = !domain.isEmpty && !Self.freemail.contains(domain)
-        if automated, company, let png = await domainLogo(domain) { return png }
-        if let png = await gravatar(email) { return png }
-        if !automated, company, let png = await bimi(domain) { return png }
+        if automated, company, let png = await domainLogo(domain, side: side) { return png }
+        if let png = await gravatar(email, side: side) { return png }
+        if !automated, company, let png = await bimi(domain, side: side) { return png }
         return nil
     }
 
@@ -246,7 +262,7 @@ actor AvatarResolver {
         return answered ? photos : nil
     }
 
-    private func contactPhoto(_ source: String) async -> Data? {
+    private func contactPhoto(_ source: String, side: Int) async -> Data? {
         if source.hasPrefix("graph:") {
             let rest = source.dropFirst("graph:".count)
             guard let slash = rest.firstIndex(of: "/") else { return nil }
@@ -254,34 +270,36 @@ actor AvatarResolver {
             guard let token = await token(account),
                   let url = URL(string: "https://graph.microsoft.com/v1.0/me/contacts/\(id)/photo/$value")
             else { return nil }
-            return await fetch(url, token: token).flatMap { Self.normalize($0, style: .photo) }
+            return await fetch(url, token: token).flatMap { Self.normalize($0, style: .photo, side: side) }
         }
         // Google serves any size; ask for the one drawn.
         var link = source
         if let range = link.range(of: #"=s\d+(-c)?$"#, options: .regularExpression) { link.removeSubrange(range) }
-        guard let url = URL(string: link + "=s\(Self.side)-c") else { return nil }
-        return await fetch(url).flatMap { Self.normalize($0, style: .photo) }
+        guard let url = URL(string: link + "=s\(side)-c") else { return nil }
+        return await fetch(url).flatMap { Self.normalize($0, style: .photo, side: side) }
     }
 
     // MARK: - Public sources
 
-    private func gravatar(_ email: String) async -> Data? {
-        guard let url = URL(string: "https://gravatar.com/avatar/\(Self.hash(email))?s=\(Self.side)&d=404") else { return nil }
-        return await fetch(url).flatMap { Self.normalize($0, style: .photo) }
+    private func gravatar(_ email: String, side: Int) async -> Data? {
+        guard let url = URL(string: "https://gravatar.com/avatar/\(Self.hash(email))?s=\(side)&d=404") else { return nil }
+        return await fetch(url).flatMap { Self.normalize($0, style: .photo, side: side) }
     }
 
     /// The BIMI logo, else the site icon, shared by every sender at the domain.
-    private func domainLogo(_ domain: String) async -> Data? {
-        if let png = await bimi(domain) { return png }
-        return await sharedPerDomain("i-", domain) { await self.siteIcon(Self.organization(domain)) }
+    private func domainLogo(_ domain: String, side: Int) async -> Data? {
+        if let png = await bimi(domain, side: side) { return png }
+        return await sharedPerDomain("i-", domain, side: side) { await self.siteIcon(Self.organization(domain), side: side) }
     }
 
-    private func bimi(_ domain: String) async -> Data? {
-        await sharedPerDomain("b-", domain) { await self.lookUpBIMI(domain) }
+    private func bimi(_ domain: String, side: Int) async -> Data? {
+        await sharedPerDomain("b-", domain, side: side) { await self.lookUpBIMI(domain, side: side) }
     }
 
-    /// One lookup per domain and kind, in memory and on disk.
-    private func sharedPerDomain(_ kind: String, _ domain: String, _ body: @escaping @Sendable () async -> Data?) async -> Data? {
+    /// One lookup per domain and kind, in memory and on disk; other sizes are fetched each time.
+    private func sharedPerDomain(_ kind: String, _ domain: String, side: Int,
+                                 _ body: @escaping @Sendable () async -> Data?) async -> Data? {
+        guard side == Self.side else { return await body() }
         let key = kind + Self.hash(domain)
         if let task = domains[key] { return await task.value }
         switch cached(key, stamp: nil) {
@@ -297,7 +315,7 @@ actor AvatarResolver {
     }
 
     /// `default._bimi.<domain>`, falling back to the organizational domain as the spec does.
-    private func lookUpBIMI(_ domain: String) async -> Data? {
+    private func lookUpBIMI(_ domain: String, side: Int) async -> Data? {
         var names = [domain]
         let organization = Self.organization(domain)
         if organization != domain { names.append(organization) }
@@ -309,14 +327,14 @@ actor AvatarResolver {
                 .first { $0.hasPrefix("l=") }
                 .map { String($0.dropFirst(2)) }
             guard let link, link.hasPrefix("https://"), let url = URL(string: link) else { return nil }
-            return await fetch(url, limit: 128 * 1024).flatMap { Self.normalize($0, style: .logo) }
+            return await fetch(url, limit: 128 * 1024).flatMap { Self.normalize($0, style: .logo, side: side) }
         }
         return nil
     }
 
     /// The home page's touch icon or largest declared icon, else `/favicon.ico`; icons smaller
     /// than 32 px are too blurry to use.
-    private func siteIcon(_ domain: String) async -> Data? {
+    private func siteIcon(_ domain: String, side: Int) async -> Data? {
         guard let home = URL(string: "https://\(domain)/") else { return nil }
         var candidates: [URL] = []
         if let (data, finalURL) = await fetchPage(home) {
@@ -324,7 +342,7 @@ actor AvatarResolver {
         }
         if let favicon = URL(string: "/favicon.ico", relativeTo: home)?.absoluteURL { candidates.append(favicon) }
         for url in candidates.prefix(4) {
-            if let data = await fetch(url), let png = Self.normalize(data, style: .icon) { return png }
+            if let data = await fetch(url), let png = Self.normalize(data, style: .icon, side: side) { return png }
         }
         return nil
     }
@@ -448,7 +466,7 @@ actor AvatarResolver {
 
     /// A square PNG at the drawn size: photos and logos fill it; site icons sit inside on white,
     /// as their transparent corners and odd shapes don't survive a circular crop.
-    private static func normalize(_ data: Data, style: Style) -> Data? {
+    private static func normalize(_ data: Data, style: Style, side: Int) -> Data? {
         guard let image = NSImage(data: data), image.isValid, image.size.width > 0, image.size.height > 0 else { return nil }
         let pixels = image.representations.map { max($0.pixelsWide, $0.pixelsHigh) }.max() ?? 0
         // Vector reps report no pixels; raster icons must be big enough to scale down cleanly.
@@ -482,7 +500,7 @@ actor AvatarResolver {
         if style == .logo {
             let corners = [(1, 1), (side - 2, 1), (1, side - 2), (side - 2, side - 2)]
             if corners.contains(where: { (rep.colorAt(x: $0.0, y: $0.1)?.alphaComponent ?? 0) < 0.5 }) {
-                return normalize(data, style: .icon)
+                return normalize(data, style: .icon, side: side)
             }
         }
         return rep.representation(using: .png, properties: [:])

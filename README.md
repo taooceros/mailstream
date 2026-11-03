@@ -133,7 +133,9 @@ re-tag everything, from the View menu. Without tags, the list is plain and dated
 ## Avatars
 
 Each list row and reader message shows the sender's picture when one is found,
-and their initials otherwise. Sources, best first:
+and their first letter otherwise. Click a picture to enlarge it: a popover
+shows it at 512 px, fetched again from the same source, with the name and
+address. Sources, best first:
 
 1. **Contact photos** from Google (People API: saved contacts, "other contacts"
    and a Workspace directory) or Outlook (Graph contacts). They come from ortie

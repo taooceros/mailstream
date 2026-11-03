@@ -8,8 +8,9 @@ struct ConversationRow: Hashable, Sendable {
     /// "me, Josh" or "To Josh, Heidi"; the thread count is separate.
     let participants: String
     let count: Int
-    /// Initials of the person the conversation is with, and the address their avatar color is keyed on.
+    /// Letter and name of the person the conversation is with, and the address their avatar is keyed on.
     let avatarInitials: String
+    let avatarName: String
     let avatarKey: String
     /// `[list]` tags, shown quieter than the subject.
     let subjectPrefix: String
@@ -28,6 +29,7 @@ struct ConversationRow: Hashable, Sendable {
         count = conversation.messages.count
         let person = Self.counterpart(conversation, own: own)
         avatarInitials = person.map(Avatar.initials) ?? "?"
+        avatarName = person?.displayName ?? ""
         avatarKey = person?.normalizedEmail ?? ""
         (subjectPrefix, subjectTitle) = SubjectStyle.split(conversation.subject)
         date = conversation.latestDate.map { Self.format($0, calendar: calendar, now: now) } ?? ""

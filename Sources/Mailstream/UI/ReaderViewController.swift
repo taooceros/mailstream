@@ -134,6 +134,20 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         }
     }
 
+    /// Enlarges a sender's picture; `rect` is the avatar's box in page (CSS) pixels.
+    private func showAvatar(of message: MailMessage, at rect: [Double]) {
+        guard let from = message.envelope.from.first else { return }
+        let sender = store.withIdentityName(from)
+        let automated = conversation.flatMap { store.tag(for: $0) }.map { $0.category != .people } ?? false
+        guard let photo = store.avatars.image(for: sender.email, automated: automated) else { return }
+        let scale = webView.pageZoom * webView.magnification
+        let height = rect[3] * scale
+        let top = rect[1] * scale
+        let anchor = NSRect(x: rect[0] * scale, y: webView.isFlipped ? top : webView.bounds.height - top - height,
+                            width: rect[2] * scale, height: height)
+        AvatarPreview.show(sender, small: photo, automated: automated, avatars: store.avatars, relativeTo: anchor, of: webView)
+    }
+
     /// WebKit holds page rendering near 60 fps through its internal feature
     /// `PreferPageRenderingUpdatesNear60FPSEnabled`; turning it off lets the reader animate at the
     /// display's full rate (120 Hz on ProMotion). Private API, so anything missing makes this a no-op.
@@ -364,6 +378,9 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         case "load-remote":
             allowRemote = true
             render(conversation)
+        case "avatar":
+            guard let target, let rect = body["rect"] as? [Double], rect.count == 4 else { return }
+            showAvatar(of: target, at: rect)
         case "compose-to":
             if let email = body["email"] as? String, !email.isEmpty {
                 delegate?.reader(self, composeTo: Address(name: nil, email: email))

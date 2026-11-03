@@ -125,7 +125,7 @@ enum ReaderPage {
         let initials = HTMLText.escape(Avatar.initials(for: sender))
         let key = HTMLText.escape(sender.normalizedEmail)
         let avatar = card.avatar.map {
-            "<div class=\"avatar photo\" data-avatar=\"\(key)\" style=\"background-image:url('\($0)')\"></div>"
+            "<div class=\"avatar photo\" data-action=\"avatar\" data-avatar=\"\(key)\" style=\"background-image:url('\($0)')\"></div>"
         } ?? "<div class=\"avatar\" data-avatar=\"\(key)\">\(initials)</div>"
         let date = envelope.date.map { date -> String in
             let calendar = Calendar.current
@@ -236,11 +236,11 @@ enum ReaderPage {
       transition: background-color .15s var(--ease); }
     .msg.collapsed .msg-head:hover { background: var(--hover); }
     .msg.expanded .msg-head { padding-top: 18px; align-items: flex-start; }
-    .avatar { flex: none; width: 28px; height: 28px; border-radius: 50%; font-weight: 650; font-size: 10.5px;
+    .avatar { flex: none; width: 34px; height: 34px; border-radius: 50%; font-weight: 650; font-size: 15px;
       display: flex; align-items: center; justify-content: center; color: var(--avatar);
       background: color-mix(in srgb, var(--avatar) 15%, transparent); transition: transform .25s var(--ease); }
     .msg.collapsed .avatar { transform: scale(.86); }
-    .avatar.photo { background-size: cover; background-position: center; }
+    .avatar.photo { background-size: cover; background-position: center; cursor: zoom-in; }
     .who { flex: 1; min-width: 0; }
     .line1 { display: flex; gap: 8px; align-items: baseline; white-space: nowrap; min-width: 0; }
     .line1 > span { overflow: hidden; text-overflow: ellipsis; }
@@ -417,6 +417,11 @@ enum ReaderPage {
         }
         event.preventDefault();
         event.stopPropagation();
+        if (action === 'avatar') {
+          const r = el.getBoundingClientRect();
+          post({ action, index: Number(el.closest('.msg').id.slice(4)), rect: [r.left, r.top, r.width, r.height] });
+          return;
+        }
         if (action === 'toggle') {
           if (window.getSelection && String(window.getSelection()).length > 0) return;
           toggle(Number(el.dataset.index));
@@ -695,6 +700,7 @@ enum ReaderPage {
             if (el.dataset.avatar !== email) continue;
             el.textContent = '';
             el.classList.add('photo');
+            el.dataset.action = 'avatar';
             el.style.backgroundImage = "url('" + url + "')";
           }
         },

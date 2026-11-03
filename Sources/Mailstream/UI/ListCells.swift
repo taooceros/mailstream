@@ -61,7 +61,7 @@ enum ListMetrics {
     static let dotX: CGFloat = 14
     /// Left edge of the sender column: the avatar, then the names.
     static let senderX: CGFloat = 28
-    static let avatarSize: CGFloat = 22
+    static let avatarSize: CGFloat = 28
     static let senderWidth: CGFloat = 196
     static let nameX: CGFloat = senderX + avatarSize + 9
     static let subjectX: CGFloat = senderX + senderWidth + 16
@@ -286,6 +286,8 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
     static let identifier = NSUserInterfaceItemIdentifier("ConversationRowCell")
 
     var onAction: ((ConversationAction) -> Void)?
+    /// A click on the sender's picture, with the view to anchor an enlarged one to.
+    var onAvatar: ((NSView, NSImage) -> Void)?
 
     private static let textHeight = labelLineHeight(.systemFont(ofSize: 13))
     private static let dateHeight = labelLineHeight(.monospacedDigitSystemFont(ofSize: 12, weight: .regular))
@@ -349,6 +351,10 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
         pill.isHidden = true
 
         for view in [unreadDot, avatar, sender, line, trailing, pill] as [NSView] { addSubview(view) }
+        avatar.onClick = { [weak self] in
+            guard let self, let photo = self.avatar.photo else { return }
+            self.onAvatar?(self.avatar, photo)
+        }
     }
 
     @available(*, unavailable)
@@ -904,7 +910,7 @@ final class DotView: NSView {
 /// Initials on a tint of the person's color, or their picture once one is known: the reader's
 /// avatar in miniature, drawn by its layer.
 final class AvatarView: NSView {
-    private static let font = NSFont.systemFont(ofSize: 9, weight: .semibold)
+    private static let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
     private static let lineHeight = labelLineHeight(font)
 
     private let label = NSTextField(labelWithString: "")
@@ -934,7 +940,12 @@ final class AvatarView: NSView {
         if let photo { show(photo, animated: false) } else { hidePhoto() }
     }
 
+    /// Set while a picture is shown; letters are not clickable.
+    var onClick: (() -> Void)?
+    private(set) var photo: NSImage?
+
     func show(_ photo: NSImage, animated: Bool) {
+        self.photo = photo
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         picture.contents = photo
@@ -942,6 +953,7 @@ final class AvatarView: NSView {
         picture.isHidden = false
         CATransaction.commit()
         label.isHidden = true
+        window?.invalidateCursorRects(for: self)
         if animated {
             let fade = Motion.basic("opacity", from: 0, to: 1, duration: 0.2)
             picture.add(fade, forKey: "fade")
@@ -949,12 +961,14 @@ final class AvatarView: NSView {
     }
 
     private func hidePhoto() {
+        photo = nil
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         picture.contents = nil
         picture.isHidden = true
         CATransaction.commit()
         label.isHidden = false
+        window?.invalidateCursorRects(for: self)
     }
 
     override var wantsUpdateLayer: Bool { true }
@@ -981,10 +995,26 @@ final class AvatarView: NSView {
         }
     }
 
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    /// Only a picture takes the click (to enlarge it); otherwise the row underneath gets it.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        photo != nil && onClick != nil && frame.contains(point) ? self : nil
+    }
+
+    /// Enlarges from a background window too, like the rows around it.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
+    }
+
+    override func resetCursorRects() {
+        if photo != nil { addCursorRect(bounds, cursor: .pointingHand) }
+    }
 }
 
-/// Sender initials and a stable per-address color, shared by the sidebar and the reader.
+/// A sender's letter and a stable per-address color, shared by the sidebar and the reader.
 enum Avatar {
     static func color(for email: String) -> NSColor {
         let palette: [NSColor] = [.systemBlue, .systemPurple, .systemPink, .systemRed, .systemOrange,
@@ -994,14 +1024,11 @@ enum Avatar {
         return palette[Int(hash % UInt64(palette.count))]
     }
 
+    /// The first letter of the name (or the address), uppercased; "?" when there is none.
     static func initials(for address: Address) -> String {
-        let name = address.displayName
-        if name.unicodeScalars.contains(where: { $0.properties.isIdeographic }) {
-            return String(name.trimmingCharacters(in: .whitespaces).prefix(1))
-        }
-        let words = name.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).filter { !$0.isEmpty }
-        let letters = words.prefix(2).compactMap(\.first).map { String($0).uppercased() }
-        return letters.isEmpty ? "?" : letters.joined()
+        let name = address.displayName.trimmingCharacters(in: .whitespaces)
+        guard let first = name.first(where: { $0.isLetter || $0.isNumber }) else { return "?" }
+        return String(first).uppercased()
     }
 }
 
