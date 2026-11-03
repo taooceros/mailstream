@@ -36,6 +36,12 @@ enum HTMLText {
         return out
     }
 
+    /// Whether `html` references remote images, styles or fonts.
+    static func hasRemoteContent(_ html: String) -> Bool {
+        html.range(of: #"(src|background|poster)\s*=\s*["']?\s*(https?:)?//|url\(\s*["']?\s*(https?:)?//|<link[^>]+href\s*=\s*["']?\s*https?:"#,
+                   options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
     /// Plain text to HTML: linkified, whitespace preserved, `>` quote runs wrapped in blockquotes
     /// and signatures (after a `-- ` line, or a lone mobile footer) in `.ms-signature`, for the
     /// reader to fold.

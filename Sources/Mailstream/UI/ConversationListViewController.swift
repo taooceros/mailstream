@@ -56,6 +56,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     private var lastHighlightedRow = 0
     private var suppressSelection = false
     private var lastContext: ListContext?
+    /// Waits out the pointer's or keyboard highlight's dwell before preloading a conversation.
+    private var preloadTask: Task<Void, Never>?
     /// Account order the visible cells' account bars were colored with.
     private var accountNames: [String] = []
     private var savedScroll: [String: CGFloat] = [:]
@@ -98,6 +100,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         table.action = #selector(rowClicked)
         table.onKey = { [weak self] action in self?.performOnHighlight(action) }
         table.onOpen = { [weak self] in self?.openHighlighted() }
+        table.onHoverRow = { [weak self] row in self?.preload(row) }
         let menu = NSMenu()
         menu.delegate = self
         table.menu = menu
@@ -506,6 +509,19 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         if table.selectedRow >= 0 { lastHighlightedRow = table.selectedRow }
         highlightedID = highlightedConversation?.id
         delegate?.conversationList(self, didHighlight: highlightedConversation)
+        preload(table.selectedRow)
+    }
+
+    /// Loads the conversation at `row` once the pointer or highlight rests on it, so opening it
+    /// finds its bodies in memory; passing over rows loads nothing.
+    private func preload(_ row: Int) {
+        preloadTask?.cancel()
+        guard row >= 0, row < rows.count, let conversation = rows[row].conversation else { return }
+        preloadTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled, let self else { return }
+            store.preload(conversation)
+        }
     }
 
     @objc private func rowClicked() {
@@ -674,6 +690,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
 final class ConversationTableView: NSTableView {
     var onKey: ((ConversationAction) -> Void)?
     var onOpen: (() -> Void)?
+    /// The row under the pointer changed (-1: none).
+    var onHoverRow: ((Int) -> Void)?
 
     /// Set while the user scrolls, so rows don't flash as they pass under the pointer.
     var hoverSuspended = false {
@@ -766,7 +784,11 @@ final class ConversationTableView: NSTableView {
 
     private func setPointer(_ point: NSPoint?) {
         pointer = point
-        hoveredRow = point.map { row(at: $0) } ?? -1
+        let under = point.map { row(at: $0) } ?? -1
+        if under != hoveredRow {
+            hoveredRow = under
+            onHoverRow?(under)
+        }
         enumerateAvailableRowViews { rowView, row in sync(rowView, row: row) }
     }
 

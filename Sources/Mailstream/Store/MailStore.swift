@@ -73,7 +73,7 @@ final class MailStore {
     private var rows: [String: ConversationRow] = [:]
     /// Display-ready previews: quoted history trimmed, whitespace collapsed.
     private var snippets: [MessageRef: String] = [:]
-    private var contents: [MessageRef: MessageContent] = [:]
+    private var contents: [MessageRef: LoadedContent] = [:]
     private var contentOrder: [MessageRef] = []
     private var contentTasks: [MessageRef: Task<LoadedContent, Error>] = [:]
     private var prefetching = Set<MessageRef>()
@@ -580,24 +580,64 @@ final class MailStore {
 
     // MARK: - Content
 
-    /// A message as the reader needs it, with its display preview, worked out off the main actor.
-    private struct LoadedContent: Sendable {
+    /// A message as the reader needs it, with its display preview and body markup, worked out off
+    /// the main actor.
+    struct LoadedContent: Sendable {
         let content: MessageContent
         let snippet: String
+        /// The HTML body, or the plain-text one as escaped HTML.
+        let body: String
+        let isHTML: Bool
+        /// Whether the HTML body references remote images, styles or fonts.
+        let hasRemote: Bool
+
+        init(_ content: MessageContent) {
+            self.content = content
+            snippet = MailStore.displaySnippet(content.snippet)
+            if let html = content.html {
+                body = html
+                isHTML = true
+                hasRemote = HTMLText.hasRemoteContent(html)
+            } else {
+                body = HTMLText.plainToHTML(content.text ?? "")
+                isHTML = false
+                hasRemote = false
+            }
+        }
     }
 
     /// Display-ready preview for the list, the reader's collapsed cards and the tagger.
     func snippet(for ref: MessageRef) -> String? { snippets[ref] }
 
-    func loadedContent(for ref: MessageRef) -> MessageContent? { contents[ref] }
+    func loadedContent(for ref: MessageRef) -> MessageContent? { contents[ref]?.content }
 
-    func content(for ref: MessageRef, priority: RequestPriority = .interactive) async throws -> MessageContent {
-        if let content = contents[ref] { return content }
+    /// The message's reader-ready content if it is in memory, so a thread can render it in its first frame.
+    func preparedContent(for ref: MessageRef) -> LoadedContent? { contents[ref] }
+
+    func content(for ref: MessageRef, priority: RequestPriority = .interactive) async throws -> LoadedContent {
+        if let loaded = contents[ref] { return loaded }
         let task = contentTasks[ref] ?? loadTask(ref, priority: priority)
         let loaded = try await task.value
         remember(loaded, for: ref)
-        return loaded.content
+        return loaded
     }
+
+    /// Starts loading the conversation the user is about to open (pointer resting on it, keyboard
+    /// highlight), newest messages first, so the reader finds their bodies in memory.
+    func preload(_ conversation: Conversation) {
+        for message in conversation.messages.suffix(Self.preloadCount).reversed() {
+            let ref = message.ref
+            guard contents[ref] == nil else { continue }
+            let task = loadTask(ref, priority: .interactive)
+            Task {
+                guard let loaded = try? await task.value, contents[ref] == nil else { return }
+                remember(loaded, for: ref)
+            }
+        }
+    }
+
+    /// Messages `preload` brings in per conversation: enough for the thread's visible end.
+    private static let preloadCount = 10
 
     /// One shared load per message: disk cache first, else himalaya, parsed and cached off the main actor.
     private func loadTask(_ ref: MessageRef, priority: RequestPriority) -> Task<LoadedContent, Error> {
@@ -612,7 +652,7 @@ final class MailStore {
                 content = try MessageParser.parse(data, directory: cache.messageDirectory(ref), urlBase: cache.partURLBase(ref))
                 cache.saveContent(content, for: ref)
             }
-            return LoadedContent(content: content, snippet: Self.displaySnippet(content.snippet))
+            return LoadedContent(content)
         }
         contentTasks[ref] = task
         Task {
@@ -629,7 +669,7 @@ final class MailStore {
 
     private func remember(_ loaded: LoadedContent, for ref: MessageRef) {
         if contents[ref] == nil { contentOrder.append(ref) }
-        contents[ref] = loaded.content
+        contents[ref] = loaded
         while contentOrder.count > 80 { contents[contentOrder.removeFirst()] = nil }
         setSnippet(loaded.snippet, for: ref)
     }

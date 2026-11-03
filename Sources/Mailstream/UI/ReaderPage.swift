@@ -2,8 +2,9 @@ import AppKit
 
 /// HTML scaffolding for the conversation reader: one long-lived shell page whose column
 /// `MS.render` fills per conversation. Message bodies arrive later through `MS.setBody`; HTML mail
-/// renders inside a same-origin `srcdoc` iframe that inherits the page's Content-Security-Policy,
-/// so remote content stays blocked unless the relaxed shell is loaded for a known sender or a click.
+/// renders inside a same-origin `srcdoc` iframe that inherits the page's Content-Security-Policy
+/// (no scripts, remote images and styles allowed); a body whose remote content stays blocked
+/// carries a stricter policy of its own (`blockingRemoteContent`).
 @MainActor
 enum ReaderPage {
     struct Card {
@@ -17,19 +18,40 @@ enum ReaderPage {
         let avatar: String?
     }
 
-    /// The persistent page: styles and an empty column (the script is a user script). A CSP cannot
-    /// be loosened after load, so allowing remote content means navigating to the relaxed shell.
-    static func shell(allowRemote: Bool) -> String {
-        let remote = allowRemote ? " https: http:" : ""
-        let csp = "default-src 'none'; img-src data: mscid:\(remote); style-src 'unsafe-inline'\(remote); "
-            + "font-src data:\(remote); media-src data: mscid:; frame-src about:; child-src about:"
+    /// The persistent page: styles and an empty column (the script is a user script). Its CSP
+    /// allows remote images, styles and fonts so that no conversation needs a different page; only
+    /// mail bodies, which block them per frame, and escaped markup ever reach it.
+    static let shell: String = {
+        let csp = "default-src 'none'; img-src data: mscid: https: http:; style-src 'unsafe-inline' https: http:; "
+            + "font-src data: https: http:; media-src data: mscid:; frame-src about:; child-src about:"
         return """
         <!doctype html><html><head><meta charset="utf-8">
         <meta http-equiv="Content-Security-Policy" content="\(csp)">
         <meta name="color-scheme" content="light dark">
         <style>\(css)</style></head><body><div class="column" id="column"></div></body></html>
         """
+    }()
+
+    /// `html` with a CSP of its own that keeps its frame from loading anything remote; a `srcdoc`
+    /// document enforces both its own and its parent's policy. The meta goes after any leading
+    /// whitespace, comments and doctype, which must come first for the page to keep standards mode.
+    static func blockingRemoteContent(_ html: String) -> String {
+        var rest = Substring(html)
+        while true {
+            rest = rest.drop(while: { $0.isWhitespace || $0 == "\u{FEFF}" })
+            if rest.hasPrefix("<!--"), let end = rest.range(of: "-->") {
+                rest = rest[end.upperBound...]
+            } else if rest.prefix(9).lowercased() == "<!doctype", let end = rest.firstIndex(of: ">") {
+                rest = rest[rest.index(after: end)...]
+            } else {
+                break
+            }
+        }
+        return String(html[..<rest.startIndex]) + strictPolicy + rest
     }
+
+    private static let strictPolicy = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; "
+        + "img-src data: mscid:; style-src 'unsafe-inline'; font-src data:; media-src data: mscid:\">"
 
     /// The column's content for one conversation: header, remote banner, thread and reply dock.
     /// `chat` lays the thread out as a conversation: every message open, grouped by sender and day.
@@ -278,11 +300,6 @@ enum ReaderPage {
         let full = (to.isEmpty ? "" : "to " + to.map(\.rfc5322).joined(separator: ", "))
             + (cc.isEmpty ? "" : "\ncc " + cc.map(\.rfc5322).joined(separator: ", "))
         return "<span title=\"\(HTMLText.escape(full))\">to \(HTMLText.escape(shown))\(more)</span>"
-    }
-
-    static func hasRemoteContent(_ html: String) -> Bool {
-        html.range(of: #"(src|background|poster)\s*=\s*["']?\s*(https?:)?//|url\(\s*["']?\s*(https?:)?//|<link[^>]+href\s*=\s*["']?\s*https?:"#,
-                   options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     // MARK: - Styles
@@ -890,7 +907,8 @@ enum ReaderPage {
 
       window.MS = {
         // Replaces the whole column, so bodies, frames, folds, the composer and the banner all
-        // start fresh, scrolled to the top (a chat thread: to its focus message).
+        // start fresh, scrolled to the top (a chat thread: to its focus message). Bodies already in
+        // memory come along, so the thread's first frame shows them.
         render(state) {
           generation = state.generation;
           chatMode = !!state.chat;
@@ -899,6 +917,7 @@ enum ReaderPage {
           $('column').innerHTML = state.html;
           bindComposer();
           unfollow();
+          for (const [index, payload] of state.bodies) MS.setBody(index, payload);
           window.scrollTo(0, 0);
           if (chatMode && state.focus > 0) follow(state.focus);
         },

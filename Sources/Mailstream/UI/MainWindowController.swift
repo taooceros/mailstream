@@ -148,8 +148,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             self.window?.makeFirstResponder(self.reader.view)
         }
         // Slide in as soon as the thread is in the page, so the reader never arrives blank. A shell
-        // still loading (cold start, CSP switch) gets a short fallback; a warm shell gets a longer
-        // one that only matters when the web process stalls.
+        // still loading (cold start, web process restart) gets a short fallback; a warm shell gets a
+        // longer one that only matters when the web process stalls.
         reader.show(conversation, onReady: present)
         DispatchQueue.main.asyncAfter(deadline: .now() + (reader.awaitsShell ? 0.12 : 0.4)) { present() }
         if conversation.isUnread { store.setRead(conversation, read: true) }

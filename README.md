@@ -46,8 +46,9 @@ normalized subjects within a 45-day window.
 
 The reader loads remote content only from known senders: your own addresses,
 people you have written to, and senders you chose "Always Load" for. Junk and
-other mail block it with a CSP until you click "Load Images". Each message body
-is rendered in a sandboxed `srcdoc` iframe, with page JavaScript disabled.
+other mail block it with a strict CSP inside each message frame until you click
+"Load Images". Each message body is rendered in a sandboxed `srcdoc` iframe,
+with page JavaScript disabled.
 
 The main thread never waits on IO or heavy work. Launch paints the last session
 (accounts, mailboxes, envelopes, tags) from the cache before himalaya answers.
@@ -61,9 +62,14 @@ turn and reload only the rows whose content changed. Cache reads and writes
 
 The reader is one persistent WebKit page, loaded and warmed at launch. Opening
 a conversation replaces its content through JavaScript (no navigation), and the
-reader slides in once the thread is in the page. Only switching between blocked
-and allowed remote content reloads the page, because its CSP cannot be loosened
-in place.
+reader slides in once the thread is in the page. Blocked and allowed remote
+content share that page: its CSP allows remote images, styles and fonts, and
+each blocked body carries a stricter policy of its own.
+
+Message bodies are parsed, converted to HTML and checked for remote content off
+the main thread, then kept in memory. Resting the pointer on a row (or moving
+the keyboard highlight to it) for 80 ms loads that conversation, so opening it
+renders the bodies with the thread in the first frame of the slide-in.
 
 ## Layout
 

@@ -24,7 +24,7 @@ extension MailStore {
         var to = draft?.to.compactMap(Address.parse) ?? []
         var cc: [Address] = []
         if all {
-            let content = try? await content(for: source.ref)
+            let content = try? await content(for: source.ref).content
             var seen = Set(to.map(\.normalizedEmail)).union(ownAddresses)
             for address in source.envelope.to + source.envelope.from + (content?.cc ?? [])
                 where seen.insert(address.normalizedEmail).inserted {
@@ -47,7 +47,7 @@ extension MailStore {
 
     /// Sends an inline reply as plain text plus HTML, the HTML quoting the source's own HTML body.
     func sendReply(_ text: String, plan: ReplyPlan, source: MailMessage) async throws {
-        let content = try? await content(for: source.ref)
+        let content = try? await content(for: source.ref).content
         let fields = Himalaya.ComposeFields(from: account(named: source.ref.account)?.identity?.rfc5322,
                                             to: plan.to.map(\.rfc5322), cc: plan.cc.map(\.rfc5322), bcc: [],
                                             subject: plan.subject, body: plan.plainBody(text), attachments: [])

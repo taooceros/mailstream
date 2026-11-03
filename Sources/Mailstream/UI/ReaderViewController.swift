@@ -27,13 +27,11 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
     private var pageReady = false
     private var pending: [(Int, [String: Any])] = []
     private var loaded = Set<Int>()
+    /// Whether this thread's bodies may load remote content; blocked ones carry their own strict CSP.
     private var allowRemote = false
     private var generation = 0
     private var onReady: (() -> Void)?
-    /// CSP mode of the shell page loaded or loading (true: remote content allowed); nil before the
-    /// first load and after its web process died.
-    private var shellRemote: Bool?
-    /// The shell's navigation while it loads.
+    /// The shell's navigation while it loads (at launch, and after its web process died).
     private var shellLoad: WKNavigation?
     /// `MS.render` state of the current thread, waiting for the shell to finish loading.
     private var staged: [String: Any]?
@@ -110,7 +108,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
             placeholder.centerYAnchor.constraint(equalTo: container.centerYAnchor),
         ])
         view = container
-        loadShell(remote: false)
+        loadShell()
         NotificationCenter.default.addObserver(self, selector: #selector(avatarResolved(_:)), name: .avatarResolved,
                                                object: store.avatars)
         NotificationCenter.default.addObserver(self, selector: #selector(tagsChanged), name: .storeTagsChanged, object: store)
@@ -176,8 +174,8 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
 
     // MARK: - Rendering
 
-    /// Whether showing a conversation now waits for a shell page to load (cold start, CSP switch).
-    var awaitsShell: Bool { shellRemote == nil || shellLoad != nil }
+    /// Whether showing a conversation now waits for the shell page to load.
+    var awaitsShell: Bool { shellLoad != nil }
 
     /// Renders `conversation`; `onReady` runs once its thread is in the page (a later `show` replaces it).
     func show(_ conversation: Conversation?, onReady: (() -> Void)? = nil) {
@@ -248,23 +246,23 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
                                      trustLabel: trustLabel)
         // A chat opens on the first unread message, else the latest.
         let focus = messages.firstIndex { !$0.envelope.isSeen } ?? lastIndex
-        staged = ["generation": generation, "accent": NSColor.controlAccentColor.cssHex, "html": html,
-                  "chat": chat, "focus": focus]
-        // A thread only ever renders into a shell whose CSP matches what the user allowed for it.
-        if shellRemote != allowRemote {
-            loadShell(remote: allowRemote)
-        } else if shellLoad == nil {
-            commit()
+        // Open bodies already in memory render with the thread itself.
+        var bodies: [[Any]] = []
+        for card in cards where card.expanded {
+            guard let prepared = store.preparedContent(for: card.message.ref) else { continue }
+            loaded.insert(card.index)
+            bodies.append([card.index, payload(for: prepared, message: card.message)])
         }
+        staged = ["generation": generation, "accent": NSColor.controlAccentColor.cssHex, "html": html,
+                  "chat": chat, "focus": focus, "bodies": bodies]
+        if shellLoad == nil { commit() }
         // Collapsed messages load in the background so their previews fill in and expanding is instant.
         for card in cards { load(card.index, priority: card.expanded ? .interactive : .background) }
     }
 
-    /// Navigates to a fresh shell with the strict or the relaxed CSP; a staged thread renders once it loads.
-    private func loadShell(remote: Bool) {
-        shellRemote = remote
-        shellLoad = webView.loadHTMLString(ReaderPage.shell(allowRemote: remote),
-                                           baseURL: URL(string: "\(MailCache.scheme)://reader/"))
+    /// Navigates to a fresh shell; a staged thread renders once it loads.
+    private func loadShell() {
+        shellLoad = webView.loadHTMLString(ReaderPage.shell, baseURL: URL(string: "\(MailCache.scheme)://reader/"))
     }
 
     /// Swaps the staged thread into the loaded shell; the page is ready once that script has run.
@@ -293,8 +291,8 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         Task {
             let payload: [String: Any]
             do {
-                let content = try await store.content(for: message.ref, priority: priority)
-                payload = self.payload(for: content, message: message)
+                let prepared = try await store.content(for: message.ref, priority: priority)
+                payload = self.payload(for: prepared, message: message)
             } catch {
                 payload = ["kind": "error", "content": "Could not load this message: \(error.localizedDescription)"]
             }
@@ -303,7 +301,8 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         }
     }
 
-    private func payload(for content: MessageContent, message: MailMessage) -> [String: Any] {
+    private func payload(for prepared: MailStore.LoadedContent, message: MailMessage) -> [String: Any] {
+        let content = prepared.content
         var payload: [String: Any] = [
             "recipients": ReaderPage.recipients(message.envelope.to, cc: content.cc, own: store.ownAddresses),
             "snippet": content.snippet,
@@ -322,13 +321,13 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
                 return item
             },
         ]
-        if let html = content.html {
+        if prepared.isHTML {
             payload["kind"] = "html"
-            payload["content"] = html
-            payload["remote"] = !allowRemote && ReaderPage.hasRemoteContent(html)
+            payload["content"] = allowRemote ? prepared.body : ReaderPage.blockingRemoteContent(prepared.body)
+            payload["remote"] = !allowRemote && prepared.hasRemote
         } else {
             payload["kind"] = "text"
-            payload["content"] = HTMLText.plainToHTML(content.text ?? "")
+            payload["content"] = prepared.body
         }
         return payload
     }
@@ -350,9 +349,8 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
 
     /// The shell dies with its web process: load a new one, with the thread on screen if any.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        shellRemote = nil
-        shellLoad = nil
-        if conversation == nil { loadShell(remote: false) } else { render(conversation) }
+        loadShell()
+        if conversation != nil { render(conversation) }
     }
 
     // MARK: - Messages from the page
