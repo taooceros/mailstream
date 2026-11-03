@@ -300,6 +300,8 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
 
     private let unreadDot = DotView()
     private let avatar = AvatarView()
+    /// Whose picture `avatar` stands for, so a late one only lands on the row it belongs to.
+    private var avatarKey = ""
     private let sender = NSTextField(labelWithString: "")
     private let line = NSTextField(labelWithString: "")
     /// Paperclip, star, topic, date and account tick: one layer, so hover fades them together.
@@ -355,10 +357,11 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
     /// `snippet` is display-ready (history trimmed, whitespace collapsed) and `row` precomputed off
     /// the main thread, so this only copies values into views.
     func configure(_ row: ConversationRow, snippet: String?, archivable: Bool,
-                   account: (name: String, color: NSColor)?, tag: ConversationTag?) {
+                   account: (name: String, color: NSColor)?, tag: ConversationTag?, photo: NSImage?) {
         let unread = row.isUnread
         unreadDot.isHidden = !unread
-        avatar.configure(initials: row.avatarInitials, color: Avatar.color(for: row.avatarKey))
+        avatarKey = row.avatarKey
+        avatar.configure(initials: row.avatarInitials, color: Avatar.color(for: row.avatarKey), photo: photo)
         star.isHidden = !row.isFlagged
         paperclip.isHidden = !row.hasAttachment
         accountTick.fill = account?.color ?? .clear
@@ -406,6 +409,12 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
         starButton.toolTip = row.isFlagged ? "Unstar" : "Star"
         archiveButton.isHidden = !archivable
         needsLayout = true
+    }
+
+    /// A picture that arrived after the row was configured.
+    func showPhoto(_ photo: NSImage, for key: String) {
+        guard key == avatarKey else { return }
+        avatar.show(photo, animated: true)
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -892,30 +901,60 @@ final class DotView: NSView {
     }
 }
 
-/// Initials on a tint of the person's color: the reader's avatar in miniature, drawn by its layer.
+/// Initials on a tint of the person's color, or their picture once one is known: the reader's
+/// avatar in miniature, drawn by its layer.
 final class AvatarView: NSView {
     private static let font = NSFont.systemFont(ofSize: 9, weight: .semibold)
     private static let lineHeight = labelLineHeight(font)
 
     private let label = NSTextField(labelWithString: "")
+    private let picture = CALayer()
     private var color: NSColor = .systemBlue
 
     init() {
         super.init(frame: .zero)
         wantsLayer = true
+        layer?.masksToBounds = true
         label.font = Self.font
         label.alignment = .center
         addSubview(label)
+        picture.contentsGravity = .resizeAspectFill
+        picture.isHidden = true
+        layer?.addSublayer(picture)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(initials: String, color: NSColor) {
+    func configure(initials: String, color: NSColor, photo: NSImage?) {
         label.stringValue = initials
         label.textColor = color
         self.color = color
         needsDisplay = true
+        if let photo { show(photo, animated: false) } else { hidePhoto() }
+    }
+
+    func show(_ photo: NSImage, animated: Bool) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        picture.contents = photo
+        picture.contentsScale = window?.backingScaleFactor ?? 2
+        picture.isHidden = false
+        CATransaction.commit()
+        label.isHidden = true
+        if animated {
+            let fade = Motion.basic("opacity", from: 0, to: 1, duration: 0.2)
+            picture.add(fade, forKey: "fade")
+        }
+    }
+
+    private func hidePhoto() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        picture.contents = nil
+        picture.isHidden = true
+        CATransaction.commit()
+        label.isHidden = false
     }
 
     override var wantsUpdateLayer: Bool { true }
@@ -929,6 +968,10 @@ final class AvatarView: NSView {
     override func layout() {
         super.layout()
         place(label, x: 0, size: NSSize(width: bounds.width, height: Self.lineHeight), height: bounds.height)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        picture.frame = bounds
+        CATransaction.commit()
     }
 
     override func updateLayer() {

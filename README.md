@@ -130,6 +130,30 @@ Tags are keyed by the latest message, so a new reply re-tags the conversation.
 They are cached in `tags-v1.json` in the cache directory. Turn tagging off, or
 re-tag everything, from the View menu. Without tags, the list is plain and dated.
 
+## Avatars
+
+Each list row and reader message shows the sender's picture when one is found,
+and their initials otherwise. Sources, best first:
+
+1. **Contact photos** from Google (People API: saved contacts, "other contacts"
+   and a Workspace directory) or Outlook (Graph contacts). They come from ortie
+   accounts whose names end in `-contacts`, e.g. `gmail-personal-contacts` with
+   scopes `contacts.readonly`, `contacts.other.readonly` (plus
+   `directory.readonly` on Workspace), or `outlook-personal-contacts` with
+   `Contacts.Read`. Keeping them separate from the mail tokens means a failed
+   grant never touches mail. The provider is read from `endpoints.authorization`.
+2. **BIMI logo** of the sender's domain (DNS `default._bimi.<domain>`).
+3. **Gravatar**, requested with the SHA-256 of the address and `d=404`.
+4. **Site icon** of the domain, for automated mail only (tagged non-people, or a
+   `noreply`-style address). Icons smaller than 32 px are skipped.
+
+Free-mail domains (gmail.com, outlook.com, …) never get a domain logo. Results,
+including misses, are cached as 96 px PNGs in
+`~/Library/Caches/dev.mailstream.Mailstream/avatars` (hits 14 days, misses 3 days).
+A change in the contact directory, rebuilt daily, retires cached misses.
+Google's People API scopes need your own Google Cloud OAuth client (Desktop
+app, published). Thunderbird's public client is refused for them.
+
 ## Shortcuts
 
 | Action | Menu | List key |

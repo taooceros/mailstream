@@ -13,6 +13,8 @@ enum ReaderPage {
         let snippet: String?
         /// First `From` address, with an own address given its account display name.
         let sender: Address
+        /// The sender's picture as a `data:` URL, when already known.
+        let avatar: String?
     }
 
     /// The persistent page: styles and an empty column (the script is a user script). A CSP cannot
@@ -121,6 +123,10 @@ enum ReaderPage {
         let email = HTMLText.escape(sender.email)
         let color = Avatar.color(for: sender.email).cssHex
         let initials = HTMLText.escape(Avatar.initials(for: sender))
+        let key = HTMLText.escape(sender.normalizedEmail)
+        let avatar = card.avatar.map {
+            "<div class=\"avatar photo\" data-avatar=\"\(key)\" style=\"background-image:url('\($0)')\"></div>"
+        } ?? "<div class=\"avatar\" data-avatar=\"\(key)\">\(initials)</div>"
         let date = envelope.date.map { date -> String in
             let calendar = Calendar.current
             let style: Date.FormatStyle = calendar.isDate(date, equalTo: Date(), toGranularity: .year)
@@ -136,7 +142,7 @@ enum ReaderPage {
         return """
         <article id="msg-\(i)" class="msg \(state)\(unread)" style="--avatar:\(color); animation-delay:\(delay)ms">
           <div class="msg-head" data-action="toggle" data-index="\(i)">
-            <div class="avatar">\(initials)</div>
+            \(avatar)
             <div class="who">
               <div class="line1">
                 <span class="name">\(name)</span>
@@ -234,6 +240,7 @@ enum ReaderPage {
       display: flex; align-items: center; justify-content: center; color: var(--avatar);
       background: color-mix(in srgb, var(--avatar) 15%, transparent); transition: transform .25s var(--ease); }
     .msg.collapsed .avatar { transform: scale(.86); }
+    .avatar.photo { background-size: cover; background-position: center; }
     .who { flex: 1; min-width: 0; }
     .line1 { display: flex; gap: 8px; align-items: baseline; white-space: nowrap; min-width: 0; }
     .line1 > span { overflow: hidden; text-overflow: ellipsis; }
@@ -681,6 +688,15 @@ enum ReaderPage {
             list.appendChild(item);
           }
           if (payload.remote) document.getElementById('remote-banner').hidden = false;
+        },
+        // A sender's picture arrived after the thread rendered.
+        setAvatar(email, url) {
+          for (const el of document.querySelectorAll('.avatar[data-avatar]')) {
+            if (el.dataset.avatar !== email) continue;
+            el.textContent = '';
+            el.classList.add('photo');
+            el.style.backgroundImage = "url('" + url + "')";
+          }
         },
         scrollToMessage(index) {
           const article = document.getElementById('msg-' + index);

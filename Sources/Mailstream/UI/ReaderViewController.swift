@@ -110,6 +110,28 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         ])
         view = container
         loadShell(remote: false)
+        NotificationCenter.default.addObserver(self, selector: #selector(avatarResolved(_:)), name: .avatarResolved,
+                                               object: store.avatars)
+    }
+
+    @objc private func avatarResolved(_ note: Notification) {
+        guard let email = note.userInfo?["email"] as? String,
+              messages.contains(where: { $0.envelope.from.first?.normalizedEmail == email })
+        else { return }
+        pushAvatars(only: email)
+    }
+
+    /// Sends known pictures into the page; `only` limits it to one sender.
+    private func pushAvatars(only email: String? = nil) {
+        let automated = conversation.flatMap { store.tag(for: $0) }.map { $0.category != .people } ?? false
+        var seen = Set<String>()
+        for message in messages {
+            guard let sender = message.envelope.from.first?.normalizedEmail, email == nil || sender == email,
+                  seen.insert(sender).inserted,
+                  let url = store.avatars.dataURL(for: sender, automated: automated)
+            else { continue }
+            call("MS.setAvatar(email, url)", ["email": sender, "url": url])
+        }
     }
 
     /// WebKit holds page rendering near 60 fps through its internal feature
@@ -179,11 +201,14 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         placeholder.isHidden = true
 
         let lastIndex = messages.count - 1
+        let automated = store.tag(for: conversation).map { $0.category != .people } ?? false
         let cards = messages.enumerated().map { index, message in
-            ReaderPage.Card(index: index, message: message,
-                            expanded: index == lastIndex || !message.envelope.isSeen || messages.count == 1,
-                            snippet: store.snippet(for: message.ref),
-                            sender: store.withIdentityName(message.envelope.from.first ?? Address(name: nil, email: "unknown")))
+            let sender = store.withIdentityName(message.envelope.from.first ?? Address(name: nil, email: "unknown"))
+            return ReaderPage.Card(index: index, message: message,
+                                   expanded: index == lastIndex || !message.envelope.isSeen || messages.count == 1,
+                                   snippet: store.snippet(for: message.ref),
+                                   sender: sender,
+                                   avatar: store.avatars.dataURL(for: sender.email, automated: automated))
         }
         let labels = Array(Set(messages.compactMap { message -> String? in
             message.role == .other ? store.mailbox(message.ref.mailboxKey)?.displayName : nil
@@ -223,6 +248,8 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
             let queued = self.pending
             self.pending = []
             for (index, payload) in queued { self.deliver(index, payload) }
+            // Pictures that resolved while the thread was on its way in.
+            self.pushAvatars()
             if self.reply != nil { self.presentReply(focus: false) }
         }
     }

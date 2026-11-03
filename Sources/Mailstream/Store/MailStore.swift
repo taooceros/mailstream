@@ -48,6 +48,7 @@ final class MailStore {
     let himalaya: Himalaya
     private let tools: ToolEnvironment
     let cache = MailCache()
+    private(set) lazy var avatars = AvatarStore(tools: tools, root: cache.root)
 
     private(set) var accounts: [Account] = []
     private(set) var mailboxes: [String: [Mailbox]] = [:]

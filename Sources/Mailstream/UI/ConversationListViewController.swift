@@ -135,6 +135,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         center.addObserver(self, selector: #selector(contentLoaded(_:)), name: .storeContentLoaded, object: store)
         center.addObserver(self, selector: #selector(accountsChanged), name: .storeAccountsChanged, object: store)
         center.addObserver(self, selector: #selector(storeError), name: .storeError, object: store)
+        center.addObserver(self, selector: #selector(avatarResolved(_:)), name: .avatarResolved, object: store.avatars)
         center.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         center.addObserver(self, selector: #selector(userScrolled), name: NSScrollView.willStartLiveScrollNotification, object: scroll)
         center.addObserver(self, selector: #selector(scrollEnded), name: NSScrollView.didEndLiveScrollNotification, object: scroll)
@@ -375,6 +376,16 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         return nil
     }
 
+    /// Visible rows with that sender take the picture in place; offscreen ones get it when configured.
+    @objc private func avatarResolved(_ note: Notification) {
+        guard let email = note.userInfo?["email"] as? String,
+              let photo = store.avatars.image(for: email, automated: false) else { return }
+        let visible = table.rows(in: table.visibleRect)
+        for index in visible.location..<(visible.location + visible.length) {
+            (table.view(atColumn: 0, row: index, makeIfNecessary: false) as? ConversationRowCell)?.showPhoto(photo, for: email)
+        }
+    }
+
     /// One batch per main-actor turn, however many previews arrived in it.
     @objc private func contentLoaded(_ note: Notification) {
         guard let refs = note.userInfo?["refs"] as? Set<MessageRef> else { return }
@@ -558,11 +569,14 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             let cell = tableView.makeView(withIdentifier: ConversationRowCell.identifier, owner: nil) as? ConversationRowCell
                 ?? ConversationRowCell()
             let context = store.listContext
-            cell.configure(store.row(for: conversation), snippet: store.snippet(for: conversation.latest.ref),
+            let row = store.row(for: conversation)
+            let tag = store.tag(for: conversation)
+            cell.configure(row, snippet: store.snippet(for: conversation.latest.ref),
                            archivable: ![.archive, .all, .trash].contains(context.role),
                            account: context.selection.isUnified
                                ? (conversation.account, AccountStyle.color(for: conversation.account, in: store)) : nil,
-                           tag: store.tag(for: conversation))
+                           tag: tag,
+                           photo: store.avatars.image(for: row.avatarKey, automated: tag.map { $0.category != .people } ?? false))
             let id = conversation.id
             cell.onAction = { [weak self] action in self?.perform(action, id: id) }
             return cell
