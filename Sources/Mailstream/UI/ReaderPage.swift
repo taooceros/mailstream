@@ -521,11 +521,11 @@ enum ReaderPage {
     @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
     """
 
-    /// Injected into every HTML mail frame.
+    /// Injected into every HTML mail frame. The frame stays transparent so a body takes on its
+    /// card's surface (the chat hover tint; in dark mode the frame's own white card).
     static let frameCSS = """
     html, body { height: auto !important; min-height: 0 !important; }
-    html { background: #fff; }
-    body { margin: 0; padding: 2px 0; color: #1d1d1f; background-color: #fff;
+    body { margin: 0; padding: 2px 0; color: #1d1d1f;
       font: 14px/1.45 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; overflow-wrap: break-word; }
     img { max-width: 100%; }
     pre { white-space: pre-wrap; }
