@@ -81,6 +81,9 @@ actor AvatarResolver {
     /// Contact address → where its photo is: an image URL, or `graph:<account>/<contact id>`.
     private struct Directory: Codable {
         var built: Date
+        /// The ortie accounts it loaded; a configured account missing here (new, or failed last
+        /// time) rebuilds it at once.
+        var accounts: [String]
         var photos: [String: String]
         /// Changes whenever the set of contact photos does, retiring cached misses.
         var stamp: String { String(photos.count) }
@@ -167,26 +170,31 @@ actor AvatarResolver {
 
     private func loadDirectory() async -> Directory {
         let url = root.appendingPathComponent("directory.json")
+        let accounts = Self.photoAccounts()
         if let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(Directory.self, from: data),
-           Date().timeIntervalSince(saved.built) < Self.directoryAge {
+           Set(accounts.map(\.name)).isSubset(of: saved.accounts), Date().timeIntervalSince(saved.built) < Self.directoryAge {
             return saved
         }
         var photos: [String: String] = [:]
-        for account in Self.photoAccounts() {
+        var loaded: [String] = []
+        for account in accounts {
             guard let token = await token(account.name) else { continue }
-            switch account.provider {
-            case .google: photos.merge(await googlePhotos(token: token)) { current, _ in current }
-            case .microsoft: photos.merge(await graphPhotos(token: token, account: account.name)) { current, _ in current }
+            let found = switch account.provider {
+            case .google: await googlePhotos(token: token)
+            case .microsoft: await graphPhotos(token: token, account: account.name)
             }
+            guard let found else { continue }
+            loaded.append(account.name)
+            photos.merge(found) { current, _ in current }
         }
-        let fresh = Directory(built: Date(), photos: photos)
+        let fresh = Directory(built: Date(), accounts: loaded, photos: photos)
         if let data = try? JSONEncoder().encode(fresh) { try? data.write(to: url, options: .atomic) }
         return fresh
     }
 
     /// Saved contacts, "other contacts" (people the user has written with) and, on Workspace
-    /// accounts, the organization's directory.
-    private func googlePhotos(token: String) async -> [String: String] {
+    /// accounts, the organization's directory. Nil when the token is refused for all of them.
+    private func googlePhotos(token: String) async -> [String: String]? {
         let base = "https://people.googleapis.com/v1/"
         let lists = [
             ("people/me/connections?personFields=emailAddresses,photos&pageSize=1000", "connections"),
@@ -195,11 +203,13 @@ actor AvatarResolver {
              "people"),
         ]
         var photos: [String: String] = [:]
+        var answered = false
         for (path, field) in lists {
             var pageToken: String?
             for _ in 0..<30 {
                 let page = pageToken.map { "&pageToken=" + ($0.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0) } ?? ""
                 guard let url = URL(string: base + path + page), let json = await getJSON(url, token: token) else { break }
+                answered = true
                 for person in json[field] as? [[String: Any]] ?? [] {
                     let photo = (person["photos"] as? [[String: Any]] ?? []).first { $0["default"] as? Bool != true }
                     guard let link = photo?["url"] as? String else { continue }
@@ -211,15 +221,18 @@ actor AvatarResolver {
                 if pageToken == nil { break }
             }
         }
-        return photos
+        return answered ? photos : nil
     }
 
-    /// Outlook contacts; whether one has a photo is only known when it is fetched.
-    private func graphPhotos(token: String, account: String) async -> [String: String] {
+    /// Outlook contacts; whether one has a photo is only known when it is fetched. Nil when the
+    /// token is refused.
+    private func graphPhotos(token: String, account: String) async -> [String: String]? {
         var photos: [String: String] = [:]
+        var answered = false
         var next = URL(string: "https://graph.microsoft.com/v1.0/me/contacts?$select=emailAddresses&$top=999")
         for _ in 0..<30 {
             guard let url = next, let json = await getJSON(url, token: token) else { break }
+            answered = true
             for contact in json["value"] as? [[String: Any]] ?? [] {
                 guard let id = contact["id"] as? String else { continue }
                 for address in contact["emailAddresses"] as? [[String: Any]] ?? [] {
@@ -230,7 +243,7 @@ actor AvatarResolver {
             }
             next = (json["@odata.nextLink"] as? String).flatMap(URL.init(string:))
         }
-        return photos
+        return answered ? photos : nil
     }
 
     private func contactPhoto(_ source: String) async -> Data? {
