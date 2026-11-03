@@ -181,7 +181,7 @@ nonisolated enum ChatAPI {
         return try await api.decode(ReadState.self, request)
     }
 
-    /// Creates a message; never repeated.
+    /// Creates a message; never repeated (a POST).
     static func createMessage(_ api: API, space: String, text: String, thread: String?) async throws -> Message {
         struct Body: Encodable {
             let text: String
@@ -190,11 +190,6 @@ nonisolated enum ChatAPI {
         let query = thread == nil ? [] : [("messageReplyOption", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD")]
         let request = API.request(url("\(space)/messages", query), method: "POST",
                                   json: Body(text: text, thread: thread.map { Message.Thread(name: $0) }))
-        let (data, _) = try await api.send(request, idempotent: false)
-        do {
-            return try JSONDecoder().decode(Message.self, from: data)
-        } catch {
-            throw ChatError(message: "Unexpected answer from Google Chat: \(error)")
-        }
+        return try await api.decode(Message.self, request)
     }
 }

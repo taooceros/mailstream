@@ -62,18 +62,9 @@ nonisolated final class GmailBackend: MailBackend {
             return Mailbox(account: account, id: label.id, name: label.name, role: .other, unread: nil, total: nil)
         }
         if counts {
-            let api = self.api
-            let tallies = try await withThrowingTaskGroup(of: (String, Tally).self) { group in
-                for box in boxes {
-                    group.addTask {
-                        let url = Self.url("labels/\(Self.escape(box.id))", [("fields", "messagesTotal,messagesUnread")])
-                        return (box.id, try await api.get(Tally.self, url, priority: .background, cost: 1))
-                    }
-                }
-                var tallies: [String: Tally] = [:]
-                for try await (id, tally) in group { tallies[id] = tally }
-                return tallies
-            }
+            let tallies = try await Self.batchGet(Tally.self, "labels", ids: boxes.map(\.id),
+                                                  query: Self.encode([("fields", "messagesTotal,messagesUnread")]),
+                                                  unitCost: 1, api: api, priority: .background)
             for index in boxes.indices {
                 boxes[index].unread = tallies[boxes[index].id]?.messagesUnread
                 boxes[index].total = tallies[boxes[index].id]?.messagesTotal
@@ -128,7 +119,7 @@ nonisolated final class GmailBackend: MailBackend {
         return renderer.assembly.finish(html: body?.primary == true ? body?.html : nil, text: body?.text,
                                         cc: AddressList.parse(payload.header("Cc") ?? ""),
                                         replyTo: AddressList.parse(payload.header("Reply-To") ?? ""),
-                                        references: Self.messageIDs(payload.header("References")))
+                                        references: parseMessageIDList(payload.header("References")))
     }
 
     /// Bodies Gmail left out of the message (`body.attachmentId`), by attachment id. A
@@ -151,7 +142,7 @@ nonisolated final class GmailBackend: MailBackend {
                 group.addTask {
                     let url = Self.url("messages/\(Self.escape(message))/attachments/\(Self.escape(attachment))")
                     let body = try await api.get(GmailBody.self, url, priority: priority, cost: 5)
-                    return (attachment, body.data.flatMap(Self.base64URL) ?? Data())
+                    return (attachment, body.data.flatMap { Data(base64URLEncoded: $0) } ?? Data())
                 }
             }
             var data: [String: Data] = [:]
@@ -192,7 +183,7 @@ nonisolated final class GmailBackend: MailBackend {
 
     @concurrent func delete(ids: [String], mailbox: String) async throws {
         struct Body: Encodable { let ids: [String] }
-        for chunk in Self.chunks(ids, 1000) {
+        for chunk in ids.chunked(into: 1000) {
             let request = API.request(Self.url("messages/batchDelete"), method: "POST", json: Body(ids: chunk))
             _ = try await api.send(request, idempotent: true, cost: 50)
         }
@@ -222,7 +213,7 @@ nonisolated final class GmailBackend: MailBackend {
             let removeLabelIds: [String]
         }
         guard !ids.isEmpty, !(add.isEmpty && remove.isEmpty) else { return }
-        for chunk in Self.chunks(ids, 1000) {
+        for chunk in ids.chunked(into: 1000) {
             let request = API.request(Self.url("messages/batchModify"), method: "POST",
                                       json: Body(ids: chunk, addLabelIds: add, removeLabelIds: remove))
             _ = try await api.send(request, idempotent: true, cost: 50)
@@ -271,24 +262,6 @@ nonisolated final class GmailBackend: MailBackend {
 
     fileprivate static func escape(_ text: String) -> String {
         text.addingPercentEncoding(withAllowedCharacters: unreserved) ?? text
-    }
-
-    fileprivate static func chunks<T>(_ items: [T], _ size: Int) -> [[T]] {
-        stride(from: 0, to: items.count, by: size).map { Array(items[$0..<min($0 + size, items.count)]) }
-    }
-
-    fileprivate static func base64URL(_ text: String) -> Data? {
-        var base64 = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
-        return Data(base64Encoded: base64, options: .ignoreUnknownCharacters)
-    }
-
-    /// Normalized ids in a Message-ID list header (`In-Reply-To`, `References`).
-    fileprivate static func messageIDs(_ header: String?) -> [String] {
-        guard let header, !header.isEmpty else { return [] }
-        let bracketed = header.matches(of: /<([^<>]+)>/).map { String($0.1) }
-        let raw = bracketed.isEmpty ? header.split(whereSeparator: \.isWhitespace).map(String.init) : bracketed
-        return raw.map(normalizeMessageID).filter { !$0.isEmpty }
     }
 }
 
@@ -528,13 +501,13 @@ private actor GmailEnvelopeCache {
 
     private static func entry(_ message: GmailMessage, hasAttachment: Bool) -> Entry {
         let payload = message.payload
-        let inReplyTo = GmailBackend.messageIDs(payload?.header("In-Reply-To"))
+        let inReplyTo = parseMessageIDList(payload?.header("In-Reply-To"))
         let messageID = payload?.header("Message-ID").map(normalizeMessageID)
         let envelope = Envelope(
             id: message.id,
             thread: message.threadId,
             messageID: messageID?.isEmpty == false ? messageID : nil,
-            inReplyTo: inReplyTo.isEmpty ? Array(GmailBackend.messageIDs(payload?.header("References")).suffix(1)) : inReplyTo,
+            inReplyTo: inReplyTo.isEmpty ? Array(parseMessageIDList(payload?.header("References")).suffix(1)) : inReplyTo,
             flags: [],
             subject: HeaderText.decode(payload?.header("Subject") ?? ""),
             from: AddressList.parse(payload?.header("From") ?? ""),
@@ -568,69 +541,77 @@ extension GmailBackend {
             .historyId.flatMap(UInt64.init)
     }
 
-    /// Metadata of `ids` through Gmail's batch endpoint, 50 per request; messages that no
-    /// longer exist are left out. Sub-requests Gmail throttles are repeated after a pause.
+    /// Message metadata of `ids` through the batch endpoint; messages that no longer exist are left out.
     fileprivate static func metadata(_ ids: [String], query: String, api: API,
                                      priority: RequestPriority) async throws -> [GmailMessage] {
-        try await withThrowingTaskGroup(of: [GmailMessage].self) { group in
-            for chunk in chunks(ids, 50) {
-                group.addTask { try await Self.batch(chunk, query: query, api: api, priority: priority) }
+        Array(try await batchGet(GmailMessage.self, "messages", ids: ids, query: query, unitCost: 5, api: api,
+                                 priority: priority).values)
+    }
+
+    /// `GET <collection>/<id>?<query>` for every id through Gmail's batch endpoint, 50 per
+    /// request, each answer keyed by id; ids that no longer exist are left out. `unitCost` is one
+    /// sub-request's quota units.
+    fileprivate static func batchGet<T: Decodable & Sendable>(_ type: T.Type, _ collection: String, ids: [String],
+                                                             query: String, unitCost: Int, api: API,
+                                                             priority: RequestPriority) async throws -> [String: T] {
+        try await withThrowingTaskGroup(of: [String: T].self) { group in
+            for chunk in ids.chunked(into: 50) {
+                group.addTask {
+                    try await batch(T.self, collection, ids: chunk, query: query, unitCost: unitCost, api: api,
+                                    priority: priority)
+                }
             }
-            var messages: [GmailMessage] = []
-            for try await part in group { messages += part }
-            return messages
+            var found: [String: T] = [:]
+            for try await part in group { found.merge(part) { first, _ in first } }
+            return found
         }
     }
 
-    private static func batch(_ ids: [String], query: String, api: API, priority: RequestPriority) async throws -> [GmailMessage] {
-        var pending = ids
-        var messages: [GmailMessage] = []
-        var attempt = 0
-        while !pending.isEmpty {
-            attempt += 1
+    /// One batch request; sub-requests Gmail throttles or fails transiently are sent again.
+    private static func batch<T: Decodable & Sendable>(_ type: T.Type, _ collection: String, ids: [String], query: String,
+                                                      unitCost: Int, api: API, priority: RequestPriority) async throws -> [String: T] {
+        var found: [String: T] = [:]
+        try await API.repeatingThrottled(Array(ids.indices), service: "Gmail") { pending in
             let boundary = "batch_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
             var body = ""
-            for (index, id) in pending.enumerated() {
+            for index in pending {
                 body += "--\(boundary)\r\nContent-Type: application/http\r\nContent-ID: <m\(index)>\r\n\r\n"
-                    + "GET /gmail/v1/users/me/messages/\(escape(id))?\(query)\r\n\r\n"
+                    + "GET /gmail/v1/users/me/\(collection)/\(escape(ids[index]))?\(query)\r\n\r\n"
             }
             body += "--\(boundary)--\r\n"
             var request = API.request(URL(string: "https://gmail.googleapis.com/batch/gmail/v1")!, method: "POST",
                                       headers: ["Content-Type": "multipart/mixed; boundary=\(boundary)"])
             request.httpBody = Data(body.utf8)
-            let (data, response) = try await api.send(request, priority: priority, idempotent: true, cost: 5 * pending.count)
+            let (data, response) = try await api.send(request, priority: priority, idempotent: true,
+                                                      cost: unitCost * pending.count)
             guard let responseBoundary = HeaderText.parameter("boundary", in: response.value(forHTTPHeaderField: "Content-Type")) else {
                 throw APIError(status: response.statusCode, message: "Gmail answered a batch request without parts")
             }
-            var retry: [String] = []
-            var answered = Set<Int>()
+            // Whatever stays in `retry` (throttled, failed transiently, unanswered) is sent again.
+            var retry = Set(pending)
             for part in batchParts(data, boundary: responseBoundary) {
-                guard let index = part.index, pending.indices.contains(index) else { continue }
-                answered.insert(index)
+                guard let index = part.index, retry.contains(index) else { continue }
                 switch part.status {
                 case 200:
                     do {
-                        messages.append(try JSONDecoder().decode(GmailMessage.self, from: part.body))
+                        found[ids[index]] = try JSONDecoder().decode(T.self, from: part.body)
                     } catch {
                         throw APIError(status: 200, message: "Unexpected answer from gmail.googleapis.com: \(error)")
                     }
                 case 404:
-                    continue
+                    break
                 case 429, 500..<600:
-                    retry.append(pending[index])
-                case 403 where API.isRateLimit(part.body):
-                    retry.append(pending[index])
+                    continue
+                case 403 where APIError.Body(part.body)?.isRateLimit == true:
+                    continue
                 default:
-                    throw APIError(status: part.status, message: errorMessage(part.body, status: part.status))
+                    throw APIError(status: part.status, body: part.body)
                 }
+                retry.remove(index)
             }
-            retry += pending.indices.filter { !answered.contains($0) }.map { pending[$0] }
-            guard !retry.isEmpty else { break }
-            guard attempt < 6 else { throw APIError(status: 429, message: "Gmail is limiting requests; try again shortly") }
-            try await Task.sleep(for: .milliseconds(min(500 << (attempt - 1), 8000)))
-            pending = retry
+            return (retry.sorted(), nil)
         }
-        return messages
+        return found
     }
 
     private struct BatchPart {
@@ -657,15 +638,6 @@ extension GmailBackend {
         }
         return parts
     }
-
-    private static func errorMessage(_ data: Data, status: Int) -> String {
-        struct Body: Decodable {
-            struct Inner: Decodable { let message: String? }
-            let error: Inner?
-        }
-        let message = (try? JSONDecoder().decode(Body.self, from: data))?.error?.message ?? ""
-        return message.isEmpty ? "Gmail answered \(status)" : message
-    }
 }
 
 // MARK: - Content
@@ -682,8 +654,8 @@ private nonisolated struct GmailContentRenderer {
         self.fetched = fetched
     }
 
-    /// What a part shows. `primary` when `html` is a real HTML body; other HTML (an inline
-    /// image, a forwarded message) only joins when a sibling has one.
+    /// What a part shows. `primary` when `html` is a real HTML body (a forwarded message's
+    /// included); other HTML (an inline image) only joins when a sibling has one.
     struct Segment {
         var html: String?
         var text: String?
@@ -745,17 +717,14 @@ private nonisolated struct GmailContentRenderer {
             return nil
         }
         let source = ([part] + nested).first { $0.header("From") != nil }
-        let from = AddressList.parse(source?.header("From") ?? "").first?.rfc5322 ?? "unknown sender"
-        let subject = HeaderText.decode(source?.header("Subject") ?? "")
-        let headline = subject.isEmpty ? "Attached message from \(from)" : "Attached message from \(from): \(subject)"
         let inner = nested.count == 1 ? render(nested[0], related: false)
             : Self.combine(renderAll(nested, related: false))
-        let innerText = inner?.text ?? (inner?.primary == true ? inner?.html.map(HTMLText.strip) : nil) ?? ""
-        let innerHTML = inner?.primary == true ? (inner?.html ?? "") : HTMLText.plainToHTML(innerText)
-        return Segment(html: "<div class=\"ms-attached-message\"><div class=\"ms-attached-headline\">\(HTMLText.escape(headline))</div>"
-                           + innerHTML + "</div>",
-                       text: "---------- \(headline) ----------\n" + innerText,
-                       primary: false)
+        let innerHTML = inner?.primary == true ? inner?.html : nil
+        let attached = MessageAssembly.AttachedMessage(
+            from: AddressList.parse(source?.header("From") ?? "").first,
+            subject: HeaderText.decode(source?.header("Subject") ?? ""),
+            html: innerHTML, text: inner?.text ?? innerHTML.map(HTMLText.strip) ?? "")
+        return Segment(html: attached.html, text: attached.text, primary: attached.hasHTML)
     }
 
     /// Siblings shown one after another (multipart/mixed, related and the rest).
@@ -771,7 +740,7 @@ private nonisolated struct GmailContentRenderer {
     }
 
     private func data(_ part: GmailPart) -> Data? {
-        if let data = part.body?.data { return GmailBackend.base64URL(data) }
+        if let data = part.body?.data { return Data(base64URLEncoded: data) }
         if let id = part.body?.attachmentId { return fetched[id] }
         return nil
     }

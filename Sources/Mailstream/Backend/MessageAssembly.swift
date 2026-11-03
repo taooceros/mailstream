@@ -63,3 +63,26 @@ nonisolated struct MessageAssembly {
                               snippet: HTMLText.snippet(from: snippetSource))
     }
 }
+
+nonisolated extension MessageAssembly {
+    /// A message attached to the one assembled (`message/rfc822`, an Outlook item), shown inline
+    /// below a headline naming its sender and subject.
+    struct AttachedMessage: Sendable {
+        /// The block for an HTML body: the attached HTML, else its text as HTML.
+        let html: String
+        /// The block for a plain body: the headline as a divider, then the text.
+        let text: String
+        /// The attached message has an HTML body, worth showing even below a plain one.
+        let hasHTML: Bool
+
+        /// `html` is the attached message's HTML body, nil when it has only `text`.
+        init(from sender: Address?, subject: String, html: String?, text: String) {
+            let from = sender?.rfc5322 ?? "unknown sender"
+            let headline = subject.isEmpty ? "Attached message from \(from)" : "Attached message from \(from): \(subject)"
+            self.html = "<div class=\"ms-attached-message\"><div class=\"ms-attached-headline\">\(HTMLText.escape(headline))</div>"
+                + (html ?? HTMLText.plainToHTML(text)) + "</div>"
+            self.text = "---------- \(headline) ----------\n" + text
+            hasHTML = html != nil
+        }
+    }
+}

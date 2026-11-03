@@ -37,10 +37,7 @@ enum TagPalette {
 
     private static func pair(for label: String) -> (String, String) {
         let key = label.lowercased()
-        if let pair = known[key] { return pair }
-        var hash: UInt64 = 1469598103934665603
-        for byte in key.utf8 { hash = (hash ^ UInt64(byte)) &* 1099511628211 }
-        return fallback[Int(hash % UInt64(fallback.count))]
+        return known[key] ?? fallback[stableIndex(of: key, in: fallback.count)]
     }
 
     /// Light-appearance hex, for CSS (the reader derives its dark variant).
@@ -182,11 +179,16 @@ enum Motion {
     }
 }
 
-/// Height Auto Layout gives a one-line label in `font`.
-@MainActor private func labelLineHeight(_ font: NSFont) -> CGFloat {
-    let label = NSTextField(labelWithString: "Ag")
-    label.font = font
-    return label.intrinsicContentSize.height
+extension NSFont {
+    /// Height of one line of text in this font, as a one-line label sizes itself.
+    var lineHeight: CGFloat { ceil(NSAttributedString(string: "Ag", attributes: [.font: self]).size().height) }
+}
+
+/// A slot in `0..<count` for `key` that is the same on every launch (FNV-1a; `hashValue` is seeded).
+nonisolated private func stableIndex(of key: String, in count: Int) -> Int {
+    var hash: UInt64 = 1469598103934665603
+    for byte in key.utf8 { hash = (hash ^ UInt64(byte)) &* 1099511628211 }
+    return Int(hash % UInt64(count))
 }
 
 /// Puts `view`'s alignment rect of `size` at `x`, centered in `height`, pixel-aligned in its
@@ -301,16 +303,18 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
     /// A click on the sender's picture, with the view to anchor an enlarged one to.
     var onAvatar: ((NSView, NSImage) -> Void)?
 
-    private static let textHeight = labelLineHeight(.systemFont(ofSize: 13))
-    private static let dateHeight = labelLineHeight(.monospacedDigitSystemFont(ofSize: 12, weight: .regular))
+    private static let textHeight = NSFont.systemFont(ofSize: 13).lineHeight
+    private static let dateHeight = dateFont.lineHeight
     private static let dateFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
     private static let unreadDateFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
     private static let paperclipImage = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Attachment")
     private static let starredImage = NSImage(systemSymbolName: "star.fill", accessibilityDescription: "Starred")
-    private static let markReadImage = NSImage(systemSymbolName: "envelope.open", accessibilityDescription: nil)
-    private static let markUnreadImage = NSImage(systemSymbolName: "envelope.badge", accessibilityDescription: nil)
-    private static let starImage = NSImage(systemSymbolName: "star", accessibilityDescription: nil)
-    private static let unstarImage = NSImage(systemSymbolName: "star.slash", accessibilityDescription: nil)
+
+    private let readButton = HoverActionButton(.toggleRead)
+    private let starButton = HoverActionButton(.toggleStar)
+    private let archiveButton = HoverActionButton(.archive)
+    /// Only on conversations waiting on the user's reply.
+    private let resolveButton = HoverActionButton(.toggleWaiting)
 
     private let unreadDot = DotView()
     private let avatar = AvatarView()
@@ -326,11 +330,6 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
     private let date = NSTextField(labelWithString: "")
     private let accountTick = FillView()
     private let pill = ActionPill()
-    private var readButton: HoverActionButton!
-    private var starButton: HoverActionButton!
-    private var archiveButton: HoverActionButton!
-    /// Only on conversations waiting on the user's reply.
-    private var resolveButton: HoverActionButton!
     private var hovering = false
     /// Chat rows have no quick actions: hovering keeps the date.
     private var showsActions = true
@@ -354,14 +353,8 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
         trailing.wantsLayer = true
         for view in [paperclip, star, topic, date, accountTick] as [NSView] { trailing.addSubview(view) }
 
-        readButton = HoverActionButton(symbol: "envelope.badge", label: "Mark as Unread")
-        starButton = HoverActionButton(symbol: "star", label: "Star")
-        archiveButton = HoverActionButton(symbol: "archivebox", label: "Archive")
-        resolveButton = HoverActionButton(symbol: "checkmark.circle", label: "Resolve")
-        let trashButton = HoverActionButton(symbol: "trash", label: "Move to Trash")
-        for (button, action) in [(resolveButton!, ConversationAction.toggleWaiting), (archiveButton!, .archive),
-                                 (trashButton, .trash), (readButton!, .toggleRead), (starButton!, .toggleStar)] {
-            button.handler = { [weak self] in self?.onAction?(action) }
+        for button in [resolveButton, archiveButton, HoverActionButton(.trash), readButton, starButton] {
+            button.handler = { [weak self] in self?.onAction?($0) }
             pill.add(button)
         }
         pill.alphaValue = 0
@@ -427,10 +420,9 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
         text.addAttribute(.paragraphStyle, value: NSParagraphStyle.truncatingTail, range: NSRange(location: 0, length: text.length))
         line.attributedStringValue = text
 
-        readButton.image = unread ? Self.markReadImage : Self.markUnreadImage
-        readButton.toolTip = unread ? "Mark as Read" : "Mark as Unread"
-        starButton.image = row.isFlagged ? Self.unstarImage : Self.starImage
-        starButton.toolTip = row.isFlagged ? "Unstar" : "Star"
+        let state = ConversationAction.State(unread: unread, flagged: row.isFlagged)
+        readButton.show(state)
+        starButton.show(state)
         archiveButton.isHidden = !archivable
         resolveButton.isHidden = tag?.toRespond != true
         needsLayout = true
@@ -498,7 +490,7 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
         var start = dateX
         var packed: [(view: NSView, x: CGFloat, size: NSSize)] = []
         for view in [topic, star, paperclip] as [NSView] where !view.isHidden {
-            let size = view === topic ? NSSize(width: topic.fittingWidth, height: height) : view.intrinsicContentSize
+            let size = view.intrinsicContentSize
             start -= 10 + size.width
             packed.append((view, start, size))
         }
@@ -507,9 +499,9 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
         place(date, x: dateX - start, size: NSSize(width: ListMetrics.dateWidth, height: Self.dateHeight), height: height)
         place(accountTick, x: tickX - start, size: NSSize(width: 2.5, height: 12), height: height)
 
-        let pillWidth = pill.fittingWidth
-        let pillX = width - 10 - pillWidth
-        place(pill, x: pillX, size: NSSize(width: pillWidth, height: ActionPill.height), height: height)
+        let pillSize = pill.intrinsicContentSize
+        let pillX = width - 10 - pillSize.width
+        place(pill, x: pillX, size: pillSize, height: height)
 
         let lineEnd = hovering ? min(start - 14, pillX - 10) : start - 14
         place(line, x: ListMetrics.subjectX, size: NSSize(width: max(0, lineEnd - ListMetrics.subjectX), height: Self.textHeight),
@@ -747,7 +739,7 @@ final class BundleTile: NSView {
 
 final class SectionHeaderCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("SectionHeaderCell")
-    private static let textHeight = labelLineHeight(.systemFont(ofSize: 11, weight: .semibold))
+    private static let textHeight = NSFont.systemFont(ofSize: 11, weight: .semibold).lineHeight
     private let label = NSTextField(labelWithString: "")
     private let dot = DotView()
 
@@ -801,16 +793,15 @@ final class SectionHeaderCell: NSTableCellView {
 
 /// "● Work": a topic as a tiny colored dot and quiet text, no pill.
 final class TopicLabel: NSView {
-    private static let textHeight = labelLineHeight(.systemFont(ofSize: 11.5))
+    private static let font = NSFont.systemFont(ofSize: 11.5)
+    private static let textHeight = font.lineHeight
     private let dot = DotView()
     private let label = NSTextField(labelWithString: "")
     private var textWidth: CGFloat = 0
-    /// Dot, 5 pt gap, text.
-    var fittingWidth: CGFloat { 11 + textWidth }
 
     init() {
         super.init(frame: .zero)
-        label.font = .systemFont(ofSize: 11.5)
+        label.font = Self.font
         label.textColor = .secondaryLabelColor
         addSubview(dot)
         addSubview(label)
@@ -824,8 +815,12 @@ final class TopicLabel: NSView {
         guard text != label.stringValue else { return }
         label.stringValue = text
         textWidth = label.intrinsicContentSize.width
+        invalidateIntrinsicContentSize()
         needsLayout = true
     }
+
+    /// Dot, 5 pt gap, text.
+    override var intrinsicContentSize: NSSize { NSSize(width: 11 + textWidth, height: Self.textHeight) }
 
     override func setFrameSize(_ newSize: NSSize) {
         if newSize != frame.size { needsLayout = true }
@@ -845,9 +840,10 @@ final class ActionPill: NSView {
     private static let inset: CGFloat = 3
     private var buttons: [HoverActionButton] = []
 
-    /// Width that fits the visible buttons.
-    var fittingWidth: CGFloat {
-        CGFloat(buttons.count(where: { !$0.isHidden })) * HoverActionButton.size.width + 2 * Self.inset
+    /// Fits the visible buttons.
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: CGFloat(buttons.count(where: { !$0.isHidden })) * HoverActionButton.size.width + 2 * Self.inset,
+               height: Self.height)
     }
 
     init() {
@@ -894,20 +890,30 @@ final class ActionPill: NSView {
     }
 }
 
+/// One quick action in a row's hover pill, titled for the row it sits on.
 final class HoverActionButton: NSButton {
     static let size = NSSize(width: 28, height: 26)
-    var handler: (() -> Void)?
+    var handler: ((ConversationAction) -> Void)?
+    private let quickAction: ConversationAction
 
-    init(symbol: String, label: String) {
+    init(_ action: ConversationAction) {
+        quickAction = action
         super.init(frame: .zero)
-        image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
         symbolConfiguration = .init(pointSize: 12, weight: .regular)
-        toolTip = label
         isBordered = false
         contentTintColor = .secondaryLabelColor
         setButtonType(.momentaryChange)
         target = self
-        action = #selector(fire)
+        self.action = #selector(fire)
+        show(ConversationAction.State())
+    }
+
+    /// Titles the button for a conversation in `state`.
+    func show(_ state: ConversationAction.State) {
+        let label = quickAction.label(in: state)
+        guard toolTip != label.title else { return }
+        toolTip = label.title
+        image = NSImage(systemSymbolName: label.symbol, accessibilityDescription: label.title)
     }
 
     @available(*, unavailable)
@@ -933,7 +939,7 @@ final class HoverActionButton: NSButton {
     override func mouseEntered(with event: NSEvent) { contentTintColor = .labelColor }
     override func mouseExited(with event: NSEvent) { contentTintColor = .secondaryLabelColor }
 
-    @objc private func fire() { handler?() }
+    @objc private func fire() { handler?(quickAction) }
 }
 
 /// A filled circle drawn by its layer.
@@ -965,7 +971,7 @@ final class DotView: NSView {
 /// avatar in miniature, drawn by its layer.
 final class AvatarView: NSView {
     private static let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-    private static let lineHeight = labelLineHeight(font)
+    private static let lineHeight = font.lineHeight
 
     private let label = NSTextField(labelWithString: "")
     private let picture = CALayer()
@@ -1073,9 +1079,7 @@ enum Avatar {
     nonisolated static func color(for email: String) -> NSColor {
         let palette: [NSColor] = [.systemBlue, .systemPurple, .systemPink, .systemRed, .systemOrange,
                                   .systemGreen, .systemTeal, .systemIndigo, .systemBrown, .systemMint, .systemCyan]
-        var hash: UInt64 = 1469598103934665603
-        for byte in email.lowercased().utf8 { hash = (hash ^ UInt64(byte)) &* 1099511628211 }
-        return palette[Int(hash % UInt64(palette.count))]
+        return palette[stableIndex(of: email.lowercased(), in: palette.count)]
     }
 
     /// The first letter of the name (or the address), uppercased; "?" when there is none.

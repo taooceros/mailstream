@@ -159,18 +159,25 @@ final class ChatStore {
         }
     }
 
-    /// Takes the chat accounts from `AccountStore`; removed accounts' spaces disappear.
+    /// Takes the chat accounts from `AccountStore`; removed accounts' spaces, messages and fetches
+    /// disappear.
     private func syncAccounts() async {
         let fresh = accountStore.records.filter(Self.isChat).map { ChatAccount(name: $0.id, email: $0.id) }
         guard fresh != accounts else { return }
         let names = Set(fresh.map(\.name))
+        let chat = chat
         for gone in accounts.map(\.name) where !names.contains(gone) {
-            let chat = chat
             Task { await chat.forget(account: gone) }
         }
         accounts = fresh
         listings = listings.filter { names.contains($0.key) }
         threads = threads.filter { names.contains($0.key.account) }
+        fetches = fetches.filter { names.contains($0.key.account) }
+        for (key, task) in earlier where !names.contains(key.account) {
+            task.cancel()
+            earlier[key] = nil
+        }
+        readMarks = readMarks.filter { names.contains($0.key.account) }
         if let openSpace, !names.contains(openSpace.account) { self.openSpace = nil }
         await loadCachedSpaces(fresh.map(\.name).filter { listings[$0] == nil })
         cache.saveChatAccounts(fresh)
@@ -182,17 +189,15 @@ final class ChatStore {
 
     /// `quiet` polls (the poll loop's) show no progress.
     private func poll(quiet: Bool) {
-        let names = accounts.map(\.name)
-        guard !names.isEmpty else { return }
+        let jobs = accounts.map { ($0.name, listings[$0.name]?.limit ?? Self.spacesPage) }
+        guard !jobs.isEmpty else { return }
         if !quiet { isLoading = true }
         guard pollTask == nil else { return }
         let chat = chat
-        let limits = Dictionary(names.map { ($0, listings[$0]?.limit ?? Self.spacesPage) }, uniquingKeysWith: { a, _ in a })
         pollTask = Task {
             var failed = false
             await withTaskGroup(of: (String, Int, Result<ChatSpaceList, any Error>).self) { group in
-                for name in names {
-                    let limit = limits[name] ?? Self.spacesPage
+                for (name, limit) in jobs {
                     group.addTask {
                         do {
                             let list = try await chat.spaces(account: name, limit: limit)

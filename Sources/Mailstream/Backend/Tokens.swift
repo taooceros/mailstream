@@ -43,14 +43,10 @@ nonisolated final class Tokens: TokenSource {
     }
 
     private actor State {
-        private struct Flight {
-            let id = UUID()
-            let task: Task<TokenResponse, any Error>
-        }
-
         private var providers: [String: Provider]
         private var access: [String: Access] = [:]
-        private var flights: [String: Flight] = [:]
+        /// Refreshes in flight, shared by every caller for that account.
+        private var flights: [String: Task<TokenResponse, any Error>] = [:]
         /// The Keychain item's contents once read.
         private var signIns: SignIns?
 
@@ -61,7 +57,7 @@ nonisolated final class Tokens: TokenSource {
         func token(for account: String) async throws -> String {
             if let cached = access[account], cached.expiry.timeIntervalSinceNow > 300 { return cached.token }
             guard let provider = providers[account] else { throw Tokens.signInAgain(account) }
-            let flight: Flight
+            let flight: Task<TokenResponse, any Error>
             if let current = flights[account] {
                 flight = current
             } else {
@@ -71,22 +67,22 @@ nonisolated final class Tokens: TokenSource {
                 guard let client = stored.clients[account] ?? OAuthClient.builtIn(provider) else {
                     throw Tokens.signInAgain(account)
                 }
-                flight = Flight(task: Task { try await OAuth.refresh(refreshToken, provider: provider, client: client) })
+                flight = Task { try await OAuth.refresh(refreshToken, provider: provider, client: client) }
                 flights[account] = flight
             }
             let response: TokenResponse
             do {
-                response = try await flight.task.value
+                response = try await flight.value
             } catch let error as OAuthError {
-                if flights[account]?.id == flight.id { flights[account] = nil }
+                if flights[account] == flight { flights[account] = nil }
                 if error.code == "invalid_grant" { throw Tokens.signInAgain(account) }
                 throw APIError(status: error.status, message: error.message)
             } catch {
-                if flights[account]?.id == flight.id { flights[account] = nil }
+                if flights[account] == flight { flights[account] = nil }
                 throw error
             }
             // The first waiter back records the result; a sign-in or removal meanwhile supersedes it.
-            if flights[account]?.id == flight.id {
+            if flights[account] == flight {
                 flights[account] = nil
                 if let rotated = response.refreshToken {
                     try setRefreshToken(rotated, for: account)

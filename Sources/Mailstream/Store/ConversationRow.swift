@@ -31,7 +31,9 @@ nonisolated struct ConversationRow: Hashable, Sendable {
         avatarInitials = person.map(Avatar.initials) ?? "?"
         avatarName = person?.displayName ?? ""
         avatarKey = person?.normalizedEmail ?? ""
-        (subjectPrefix, subjectTitle) = SubjectStyle.split(conversation.subject)
+        let subject = Subject(conversation.subject)
+        subjectPrefix = subject.list
+        subjectTitle = subject.displayTitle
         date = conversation.latestDate.map { Self.format($0, calendar: calendar, now: now) } ?? ""
         section = Self.section(conversation.latestDate, calendar: calendar, now: now)
         isUnread = conversation.isUnread
@@ -73,12 +75,8 @@ nonisolated struct ConversationRow: Hashable, Sendable {
 
     /// The latest sender who isn't the user; in a thread of only the user's own mail, its recipient.
     static func counterpart(_ conversation: Conversation, own: Set<String>) -> Address? {
-        conversation.messages.reversed()
-            .compactMap { message -> Address? in
-                guard let from = message.envelope.from.first, !own.contains(from.normalizedEmail) else { return nil }
-                return from
-            }.first
-            ?? conversation.latest.envelope.to.first(where: { !own.contains($0.normalizedEmail) })
+        conversation.latestIncoming(own: own)?.envelope.from.first
+            ?? conversation.latest.envelope.to.first { !own.contains($0.normalizedEmail) }
             ?? conversation.latest.envelope.from.first
     }
 
@@ -103,29 +101,3 @@ nonisolated struct ConversationRow: Hashable, Sendable {
         return date.formatted(.dateTime.month(.wide).year())
     }
 }
-
-/// Subjects lose `Re:`/`Fwd:` (the thread count says as much) and `[list]` tags step back visually.
-nonisolated enum SubjectStyle {
-    private static let reply = try! NSRegularExpression(
-        pattern: #"^\s*(?:(?:re|fwd?|fw|aw|wg|sv|回复|答复|转发)\s*(?:\[\d+\])?\s*[:：]\s*)+"#, options: [.caseInsensitive])
-    private static let listTag = try! NSRegularExpression(pattern: #"^\s*((?:\[[^\]\n]{1,40}\]\s*)+)"#)
-
-    static func split(_ subject: String) -> (prefix: String, title: String) {
-        var text = subject
-        for _ in 0..<2 {
-            let range = NSRange(text.startIndex..., in: text)
-            text = reply.stringByReplacingMatches(in: text, range: range, withTemplate: "")
-            if let match = listTag.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
-               let tags = Range(match.range(at: 1), in: text) {
-                let rest = String(text[tags.upperBound...])
-                let cleaned = reply.stringByReplacingMatches(in: rest, range: NSRange(rest.startIndex..., in: rest), withTemplate: "")
-                if !cleaned.trimmingCharacters(in: .whitespaces).isEmpty {
-                    return (String(text[tags]).trimmingCharacters(in: .whitespaces), cleaned)
-                }
-            }
-        }
-        let title = text.trimmingCharacters(in: .whitespaces)
-        return ("", title.isEmpty ? (subject.isEmpty ? "(No Subject)" : subject) : title)
-    }
-}
-

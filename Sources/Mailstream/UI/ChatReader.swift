@@ -1,14 +1,14 @@
 import AppKit
 import Observation
 
-/// Shows one Google Chat space in the reader's persistent page, beside conversations: the space's
-/// messages as a chat log with a composer at the bottom. The log is built off the main actor and
-/// diffed against what the page shows, so new messages append, changed ones (a pending message
-/// that failed) are replaced in place, and the page never reloads.
+/// Shows one Google Chat space in the reader's web page (`WebShell`), as the mail reader's peer:
+/// the space's messages as a chat log with a composer at the bottom. The log is built off the main
+/// actor and diffed against what the page shows, so new messages append, changed ones (a pending
+/// message that failed) are replaced in place, and the page never reloads.
 @MainActor
-final class ChatReader {
+final class ChatReader: WebShellClient {
     private let store: MailStore
-    private unowned let reader: ReaderViewController
+    private let shell: WebShell
 
     /// The space on screen.
     private(set) var key: ChatSpaceKey?
@@ -16,7 +16,7 @@ final class ChatReader {
     private var token = 0
     /// The log as the page has it, in order.
     private var shown: [ChatPage.Item] = []
-    /// Whether this space's page was handed to the reader; later builds only send changes.
+    /// Whether this space's page was handed to the shell; later builds only send changes.
     private var staged = false
     /// Read state when the space was opened, so its unread messages stay marked while it is open.
     private var lastRead: Date?
@@ -42,9 +42,9 @@ final class ChatReader {
     /// Whether the composer has focus, as last reported by the page, so Escape can decide at once.
     private var composerFocused = false
 
-    init(store: MailStore, reader: ReaderViewController) {
+    init(store: MailStore, shell: WebShell) {
         self.store = store
-        self.reader = reader
+        self.shell = shell
     }
 
     isolated deinit { watch?.cancel() }
@@ -58,7 +58,7 @@ final class ChatReader {
         let space = store.chat.space(key)
         unreadAtOpen = space?.unread ?? 0
         lastRead = unreadAtOpen > 0 ? space?.lastRead : nil
-        reader.beginChat()
+        shell.begin(self)
         watch = Task.immediate(name: "Chat reader") { [weak self] in
             for await snapshot in Observations({ [weak self] in self?.snapshot(of: key) }) {
                 guard let self else { return }
@@ -85,8 +85,9 @@ final class ChatReader {
     }
 
     /// Renders the space into a fresh page (its web process restarted).
-    func reload() {
+    func shellDidReload(_ shell: WebShell) {
         guard key != nil else { return }
+        shell.begin(self)
         staged = false
         build()
     }
@@ -157,10 +158,9 @@ final class ChatReader {
             "status": ChatPage.status(loading: !(thread?.loaded ?? false), failure: thread?.failure, empty: items.isEmpty),
             "focus": firstUnread ?? "",
         ]
-        guard staged, reader.acceptsChatScript else {
+        guard staged else {
             let space = store.chat.space(key)
             let title = space?.title ?? "Chat"
-            state["space"] = true
             state["accent"] = NSColor.controlAccentColor.cssHex
             state["html"] = ChatPage.page(title: title.isEmpty ? "Chat" : title, kind: space?.kind ?? .space,
                                           memberCount: space?.members.count ?? 0,
@@ -168,7 +168,7 @@ final class ChatReader {
                                           accountColor: AccountStyle.chatHex(for: key.account, in: store))
             state["log"] = items.map(\.html).joined()
             state["draft"] = ["text": draft.text, "thread": draft.thread ?? "", "who": draft.who ?? ""]
-            reader.stageChat(state)
+            shell.render("MS.chat.render", state)
             staged = true
             shown = items
             return
@@ -187,12 +187,12 @@ final class ChatReader {
             // Earlier messages loaded above, or the order changed: the log is replaced in place.
             state["log"] = items.map(\.html).joined()
         }
-        reader.runChat("MS.chatUpdate(update)", ["update": state])
+        shell.call("MS.chat.update(update)", ["update": state])
     }
 
     // MARK: - Messages from the page
 
-    func handle(_ action: String, _ body: [String: Any]) {
+    func shell(_ shell: WebShell, received action: String, _ body: [String: Any]) {
         guard let key else { return }
         func nonEmpty(_ field: String) -> String? {
             (body[field] as? String).flatMap { $0.isEmpty ? nil : $0 }
@@ -218,7 +218,7 @@ final class ChatReader {
             guard let email = nonEmpty("email"), email.contains("@"), let rect = body["rect"] as? [Double], rect.count == 4
             else { return }
             let name = store.chat.thread(key)?.messages.last { $0.sender.email?.lowercased() == email }?.sender.displayName
-            reader.showAvatar(of: Address(name: name, email: email), automated: false, at: rect)
+            shell.showAvatar(of: Address(name: name, email: email), automated: false, at: rect)
         default:
             break
         }
@@ -228,7 +228,7 @@ final class ChatReader {
     func handleEscape() -> Bool {
         guard composerFocused else { return false }
         composerFocused = false
-        reader.runChat("MS.chatBlur()", [:])
+        shell.call("MS.chat.blur()")
         return true
     }
 }

@@ -113,7 +113,7 @@ nonisolated enum HeaderText {
             let charset = String(match.1.split(separator: "*").first ?? match.1).lowercased()
             if charset != pendingCharset { flush() }
             pendingCharset = charset
-            pending.append(match.2.lowercased() == "b" ? base64(match.3) : quoted(match.3))
+            pending.append(match.2.lowercased() == "b" ? Data(base64URLEncoded: match.3) ?? Data() : quoted(match.3))
             cursor = match.range.upperBound
         }
         flush()
@@ -151,11 +151,6 @@ nonisolated enum HeaderText {
         let cf = CFStringConvertIANACharSetNameToEncoding((aliases[name] ?? name) as CFString)
         guard cf != kCFStringEncodingInvalidId else { return nil }
         return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cf))
-    }
-
-    private static func base64(_ text: Substring) -> Data {
-        let padded = text + String(repeating: "=", count: (4 - text.count % 4) % 4)
-        return Data(base64Encoded: String(padded), options: .ignoreUnknownCharacters) ?? Data()
     }
 
     private static func quoted(_ text: Substring) -> Data {

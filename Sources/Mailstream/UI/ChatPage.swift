@@ -10,7 +10,6 @@ nonisolated enum ChatMarkup {
     private static let bold = try! NSRegularExpression(pattern: #"(?<![\w*])\*(?=\S)([^*\n]*?\S)\*(?![\w*])"#)
     private static let italic = try! NSRegularExpression(pattern: #"(?<![\w_])_(?=\S)([^_\n]*?\S)_(?![\w_])"#)
     private static let strike = try! NSRegularExpression(pattern: #"(?<![\w~])~(?=\S)([^~\n]*?\S)~(?![\w~])"#)
-    private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
 
     /// `names` maps `users/<id>` to a display name, for mentions.
     static func html(_ text: String, names: [String: String]) -> String {
@@ -69,18 +68,7 @@ nonisolated enum ChatMarkup {
 
     /// Escapes, links bare URLs and applies emphasis outside them.
     private static func autolink(_ text: String) -> String {
-        guard let detector, text.contains(where: { $0 == "." || $0 == ":" }) else { return emphasis(HTMLText.escape(text)) }
-        let ns = text as NSString
-        var out = ""
-        var cursor = 0
-        for found in detector.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-            guard let url = found.url, ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") else { continue }
-            out += emphasis(HTMLText.escape(ns.substring(with: NSRange(location: cursor, length: found.range.location - cursor))))
-            out += "<a href=\"\(HTMLText.escape(url.absoluteString))\">\(HTMLText.escape(ns.substring(with: found.range)))</a>"
-            cursor = NSMaxRange(found.range)
-        }
-        out += emphasis(HTMLText.escape(ns.substring(from: cursor)))
-        return out
+        HTMLText.linkify(text, schemes: ["http", "https", "mailto"]) { emphasis(HTMLText.escape($0)) }
     }
 
     /// On already escaped text, whose entities hold no `*`, `_` or `~`.
@@ -136,9 +124,6 @@ nonisolated enum ChatPage {
         }
     }
 
-    /// A sender's next message within this window, on the same day, joins their previous one.
-    private static let groupWindow: TimeInterval = 3600
-
     private struct Entry {
         let id: String
         let senderID: String
@@ -184,7 +169,7 @@ nonisolated enum ChatPage {
         for entry in entries {
             var html = "<div class=\"chat-item\" id=\"\(entry.id)\">"
             let sameDay = previous.map { calendar.isDate($0.created, inSameDayAs: entry.created) } ?? false
-            if !sameDay { html += dayDivider(entry.created, calendar: calendar) }
+            if !sameDay { html += ReaderPage.dayDivider(entry.created, calendar: calendar) }
             var opensUnread = false
             if unread.contains(entry.id), firstUnread == nil {
                 firstUnread = entry.id
@@ -192,7 +177,7 @@ nonisolated enum ChatPage {
                 html += "<div class=\"day new\"><span>New</span></div>"
             }
             let continued = sameDay && !opensUnread && previous?.senderID == entry.senderID
-                && entry.created.timeIntervalSince(previous?.created ?? .distantPast) < groupWindow
+                && entry.created.timeIntervalSince(previous?.created ?? .distantPast) < ReaderPage.groupWindow
             html += article(entry, continued: continued, unread: unread.contains(entry.id), input: input, starters: starters)
             html += "</div>"
             items.append(Item(id: entry.id, html: html))
@@ -203,27 +188,17 @@ nonisolated enum ChatPage {
 
     private static func article(_ entry: Entry, continued: Bool, unread: Bool, input: Input,
                                 starters: [String: ChatMessage]) -> String {
-        let color = Avatar.color(for: entry.senderKey).cssHex
-        let time = HTMLText.escape(entry.created.formatted(.dateTime.hour().minute()))
-        let full = HTMLText.escape(entry.created.formatted(date: .complete, time: .shortened))
-        let key = HTMLText.escape(entry.senderKey)
+        let time = entry.created.formatted(.dateTime.hour().minute())
         let message = entry.message
-        let gutter: String
-        var head = ""
-        if continued {
-            gutter = "<span class=\"chat-time\" title=\"\(full)\">\(entry.pending == nil ? time : "")</span>"
-        } else {
-            if let url = input.avatars[entry.senderKey], let safe = cssURL(url) {
-                // Only pictures AvatarStore has (by address) can be enlarged.
-                let action = entry.hasEmail && url.hasPrefix("data:") ? " data-action=\"avatar\"" : ""
-                gutter = "<div class=\"avatar photo\"\(action) data-avatar=\"\(key)\" style=\"background-image:url('\(safe)')\"></div>"
-            } else {
-                gutter = "<div class=\"avatar\" data-avatar=\"\(key)\">\(HTMLText.escape(entry.initials))</div>"
-            }
-            let status = entry.pending.map { $0.failure == nil ? "Sending…" : "Not sent" }
-            head = "<div class=\"chat-head\"><span class=\"name\">\(HTMLText.escape(entry.label))</span>"
-                + "<span class=\"date\" title=\"\(full)\">\(status.map(HTMLText.escape) ?? time)</span></div>"
+        var head: ReaderPage.ChatHead?
+        if !continued {
+            let photo = input.avatars[entry.senderKey]
+            // Only pictures AvatarStore has (by address) can be enlarged.
+            let avatar = ReaderPage.avatar(key: entry.senderKey, photo: photo, initials: entry.initials,
+                                           enlarges: entry.hasEmail && photo?.hasPrefix("data:") == true)
+            head = ReaderPage.ChatHead(avatar: avatar, name: entry.label)
         }
+        let status = entry.pending.map { $0.failure == nil ? "Sending…" : "Not sent" }
         var body = ""
         if let message, message.threadReply, let thread = message.thread {
             var reference = "<span>↳ Reply in thread</span>"
@@ -258,20 +233,18 @@ nonisolated enum ChatPage {
             let starter = starters[thread] ?? message
             let who = starter.mine ? "your message" : starter.sender.label
             actions = "<div class=\"actions\"><button title=\"Reply in Thread\" data-action=\"chat-reply\" "
-                + "data-thread=\"\(HTMLText.escape(thread))\" data-who=\"\(HTMLText.escape(who))\">\(replyIcon)</button></div>"
+                + "data-thread=\"\(HTMLText.escape(thread))\" data-who=\"\(HTMLText.escape(who))\">\(ReaderPage.Icon.reply)</button></div>"
         }
-        var classes = "msg chat"
-        if continued { classes += " continued" }
-        if unread { classes += " unread" }
-        if entry.mine { classes += " mine" }
-        if message?.threadReply == true { classes += " threaded" }
-        if let pending = entry.pending { classes += pending.failure == nil ? " pending" : " failed" }
-        return """
-        <article class="\(classes)" style="--avatar:\(color)">\
-        <div class="chat-gutter">\(gutter)</div>\
-        <div class="chat-main">\(head)\(body)</div>\(actions)\
-        </article>
-        """
+        var classes: [String] = []
+        if unread { classes.append("unread") }
+        if entry.mine { classes.append("mine") }
+        if message?.threadReply == true { classes.append("threaded") }
+        if let pending = entry.pending { classes.append(pending.failure == nil ? "pending" : "failed") }
+        // A pending message's head says how sending goes; continued, it shows no time until sent.
+        return ReaderPage.chatMessage(classes: classes, style: "--avatar:\(Avatar.color(for: entry.senderKey).cssHex)",
+                                      head: head, time: continued ? (entry.pending == nil ? time : "") : status ?? time,
+                                      full: entry.created.formatted(date: .complete, time: .shortened),
+                                      main: body, actions: actions)
     }
 
     private static func attachment(_ attachment: ChatAttachment) -> String {
@@ -287,39 +260,14 @@ nonisolated enum ChatPage {
             + "title=\"\(HTMLText.escape(attachment.name))\">\(inner)</div>"
     }
 
-    private static func dayDivider(_ date: Date, calendar: Calendar) -> String {
-        let label: String
-        if calendar.isDateInToday(date) {
-            label = "Today"
-        } else if calendar.isDateInYesterday(date) {
-            label = "Yesterday"
-        } else if calendar.isDate(date, equalTo: Date(), toGranularity: .year) {
-            label = date.formatted(.dateTime.weekday(.wide).month(.wide).day())
-        } else {
-            label = date.formatted(.dateTime.month(.wide).day().year())
-        }
-        return "<div class=\"day\"><span>\(HTMLText.escape(label))</span></div>"
-    }
-
     /// A DOM id for a resource name (`spaces/x/messages/y`) or pending id.
     static func domID(_ name: String) -> String {
         "cm-" + String(name.map { $0.isASCII && ($0.isLetter || $0.isNumber) ? $0 : "-" })
     }
 
-    /// `url` if it is safe inside `url('…')` in a style attribute: a data URL or a plain https URL.
-    private static func cssURL(_ url: String) -> String? {
-        if url.hasPrefix("data:image/") { return url.contains(where: { "'\"()\\ ".contains($0) }) ? nil : url }
-        guard url.hasPrefix("https://"), !url.contains(where: { "'\"()\\<> \n\r\t".contains($0) }) else { return nil }
-        return url
-    }
-
-    private static let replyIcon = "<svg class=\"icon\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path "
-        + "d=\"M6.5 3.5 2.5 7.5l4 4M3 7.5h6.5a4 4 0 0 1 4 4v1\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" "
-        + "stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
-
     // MARK: - Page chrome
 
-    /// Header, an empty log and the composer; the log fills in through `MS.render`/`MS.chatUpdate`.
+    /// Header, an empty log and the composer; the log fills in through `MS.chat.render`/`MS.chat.update`.
     static func page(title: String, kind: ChatSpaceKind, memberCount: Int, accountLabel: String, accountColor: String) -> String {
         var meta = ["<span class=\"meta-item\">\(HTMLText.escape(kind.title))</span>",
                     "<span class=\"meta-item\" style=\"--tint:\(HTMLText.escape(accountColor))\"><i class=\"mark bar\"></i>"
@@ -338,7 +286,7 @@ nonisolated enum ChatPage {
         <footer class="reply-dock composing chat-dock" id="dock">
           <section class="composer" id="composer">
             <div class="c-head" id="c-thread" hidden>
-              <span class="c-mode">\(replyIcon)</span>
+              <span class="c-mode">\(ReaderPage.Icon.reply)</span>
               <div class="c-to" id="c-thread-label"></div>
               <button class="c-btn" title="Cancel Thread Reply" data-action="chat-unthread">✕</button>
             </div>
@@ -398,5 +346,164 @@ nonisolated enum ChatPage {
     .chat-dock #c-text { min-height: 40px; padding-top: 10px; }
     .chat-dock .c-head[hidden] { display: none; }
     .chat-dock .c-status { color: var(--faint); }
+    """
+
+    /// The chat space page, run after `WebShell`'s script, whose `Shell` it uses: `MS.chat.render`
+    /// puts a space in the column, `MS.chat.update` applies the log's changes.
+    static let script = """
+    (() => {
+      const { post, $, escapeHTML, show } = Shell;
+      // The thread the next message replies in, set from a message's reply button.
+      let thread = null, who = null, positioned = false;
+
+      const space = {
+        act(el, action) {
+          if (action === 'chat-reply') {
+            setThread(el.dataset.thread, el.dataset.who);
+            $('c-text').focus();
+            report();
+          } else if (action === 'chat-unthread') {
+            setThread(null, null);
+            report();
+          } else if (action === 'chat-send') {
+            send();
+          } else {
+            post({ action, id: el.dataset.id || '', url: el.dataset.url || '' });
+          }
+        },
+      };
+
+      function setThread(next, name) {
+        thread = next || null;
+        who = name || null;
+        const head = $('c-thread');
+        if (!head) return;
+        head.hidden = !thread;
+        $('c-thread-label').innerHTML = thread
+          ? '<span class="c-label">Reply in thread to</span><b>' + escapeHTML(who || '') + '</b>' : '';
+      }
+
+      // Every keystroke reaches the app, so leaving the space keeps the draft.
+      function report() {
+        const text = $('c-text');
+        if (text) post({ action: 'chat-state', text: text.value, thread: thread || '', who: who || '',
+                         focused: document.activeElement === text });
+      }
+
+      function grow() {
+        const text = $('c-text');
+        text.style.height = 'auto';
+        text.style.height = Math.max(40, text.scrollHeight) + 'px';
+      }
+
+      function send() {
+        const text = $('c-text');
+        if (!text.value.trim()) return;
+        post({ action: 'chat-send', text: text.value, thread: thread || '' });
+        text.value = '';
+        grow();
+        setThread(null, null);
+        report();
+      }
+
+      function bindComposer() {
+        const text = $('c-text');
+        text.addEventListener('input', () => { grow(); report(); });
+        text.addEventListener('focus', report);
+        text.addEventListener('blur', report);
+        // Return sends, Shift-Return breaks the line; an input method's Return only commits its text.
+        text.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.isComposing && event.keyCode !== 229) {
+            event.preventDefault();
+            send();
+          }
+        });
+      }
+
+      function fragment(html) {
+        const template = document.createElement('template');
+        template.innerHTML = html;
+        template.content.querySelectorAll('.msg').forEach((msg) => msg.classList.add('static'));
+        return template.content;
+      }
+
+      function nearBottom() {
+        return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 80;
+      }
+
+      function toBottom(smooth) {
+        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+      }
+
+      // A space opens on its first unread message, else at its end.
+      function position(focus) {
+        const target = focus ? document.getElementById(focus) : null;
+        if (target) target.scrollIntoView({ block: 'center' }); else toBottom(false);
+        positioned = true;
+      }
+
+      function chrome(state) {
+        const earlier = $('chat-earlier');
+        earlier.hidden = !state.earlier;
+        const button = earlier.querySelector('button');
+        button.disabled = !!state.loadingEarlier;
+        button.textContent = state.loadingEarlier ? 'Loading…' : 'Load earlier messages';
+        $('chat-status').innerHTML = state.status || '';
+      }
+
+      MS.chat = {
+        render(state) {
+          show(space, state);
+          $('chat-log').innerHTML = state.log;
+          chrome(state);
+          bindComposer();
+          const text = $('c-text');
+          text.value = state.draft.text || '';
+          grow();
+          setThread(state.draft.thread, state.draft.who);
+          positioned = false;
+          if (state.log) position(state.focus);
+          setTimeout(() => {
+            text.focus();
+            text.setSelectionRange(text.value.length, text.value.length);
+          }, 80);
+        },
+        // New messages append (and slide in); changed ones are replaced in place; anything else
+        // replaces the log, keeping what is on screen where it was.
+        update(update) {
+          const log = $('chat-log');
+          if (!log) return;
+          const bottom = nearBottom();
+          const fromBottom = document.documentElement.scrollHeight - window.scrollY;
+          for (const id of update.remove || []) {
+            const el = document.getElementById(id);
+            if (el) el.remove();
+          }
+          for (const [id, html] of update.replace || []) {
+            const el = document.getElementById(id);
+            if (el) el.replaceWith(fragment(html));
+          }
+          const replaced = update.log !== undefined && update.log !== null;
+          if (replaced) {
+            log.innerHTML = '';
+            log.appendChild(fragment(update.log));
+          }
+          let mine = false;
+          for (const html of update.append || []) {
+            log.insertAdjacentHTML('beforeend', html);
+            if (log.lastElementChild && log.lastElementChild.querySelector('.msg.mine')) mine = true;
+          }
+          chrome(update);
+          if (!positioned) {
+            if (log.childElementCount) position(update.focus);
+            return;
+          }
+          if ((update.append || []).length && (bottom || mine)) toBottom(true);
+          else if (replaced && !bottom) window.scrollTo(0, document.documentElement.scrollHeight - fromBottom);
+          else if (bottom) toBottom(false);
+        },
+        blur() { const text = $('c-text'); if (text) text.blur(); },
+      };
+    })();
     """
 }

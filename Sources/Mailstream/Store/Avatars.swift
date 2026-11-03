@@ -128,15 +128,32 @@ actor AvatarResolver {
     private var directory: Task<Directory, Never>?
     private var domains: [String: Task<Data?, Never>] = [:]
 
-    /// Contact address → where its photo is: an image URL, or `graph:<account>/<contact id>`.
-    private struct Directory: Codable {
-        var built: Date
+    /// Where a contact's photo is.
+    private nonisolated enum PhotoSource: Codable, Hashable {
+        /// A Google photo, served at any size.
+        case url(URL)
+        /// An Outlook contact; whether it has a photo is only known when it is fetched.
+        case graphContact(account: String, id: String)
+    }
+
+    /// Contact address → where its photo is.
+    private nonisolated struct Directory: Codable {
+        let built: Date
         /// The accounts it loaded; any difference from the current photo accounts (one added,
         /// removed, or failed last time) rebuilds it at once.
-        var accounts: [String]
-        var photos: [String: String]
-        /// Changes whenever the set of contact photos does, retiring cached misses.
-        var stamp: String { String(photos.count) }
+        let accounts: [String]
+        let photos: [String: PhotoSource]
+        /// A digest of `photos`: changes whenever any contact photo does, retiring cached misses.
+        let stamp: String
+
+        init(built: Date, accounts: [String], photos: [String: PhotoSource]) {
+            self.built = built
+            self.accounts = accounts
+            self.photos = photos
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            stamp = AvatarResolver.hash((try? encoder.encode(photos)) ?? Data())
+        }
     }
 
     init(accounts: [PhotoAccount], root: URL) {
@@ -238,7 +255,7 @@ actor AvatarResolver {
            Set(accounts.map(\.name)) == Set(saved.accounts), Date().timeIntervalSince(saved.built) < Self.directoryAge {
             return saved
         }
-        var photos: [String: String] = [:]
+        var photos: [String: PhotoSource] = [:]
         var loaded: [String] = []
         for account in accounts {
             let found = switch account.provider {
@@ -256,75 +273,120 @@ actor AvatarResolver {
 
     /// Saved contacts, "other contacts" (people the user has written with) and, on Workspace
     /// accounts, the organization's directory. Nil when every one of them is refused.
-    private func googlePhotos(api: API, directory: Bool) async -> [String: String]? {
-        let base = "https://people.googleapis.com/v1/"
+    private func googlePhotos(api: API, directory: Bool) async -> [String: PhotoSource]? {
+        let readMask = URLQueryItem(name: "readMask", value: "emailAddresses,photos")
         var lists = [
-            ("people/me/connections?personFields=emailAddresses,photos&pageSize=1000", "connections"),
-            ("otherContacts?readMask=emailAddresses,photos&pageSize=1000", "otherContacts"),
+            ("people/me/connections", [URLQueryItem(name: "personFields", value: "emailAddresses,photos")]),
+            ("otherContacts", [readMask]),
         ]
         if directory {
-            lists.append(("people:listDirectoryPeople?readMask=emailAddresses,photos&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE&pageSize=1000",
-                          "people"))
+            lists.append(("people:listDirectoryPeople",
+                          [readMask, URLQueryItem(name: "sources", value: "DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE")]))
         }
-        var photos: [String: String] = [:]
+        var photos: [String: PhotoSource] = [:]
         var answered = false
-        for (path, field) in lists {
+        for (path, query) in lists {
+            let base = URL(string: "https://people.googleapis.com/v1/" + path)!
+                .appending(queryItems: query + [URLQueryItem(name: "pageSize", value: "1000")])
             var pageToken: String?
             for _ in 0..<30 {
-                let page = pageToken.map { "&pageToken=" + ($0.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0) } ?? ""
-                guard let url = URL(string: base + path + page), let json = await getJSON(url, api: api) else { break }
+                let url = pageToken.map { base.appending(queryItems: [URLQueryItem(name: "pageToken", value: $0)]) } ?? base
+                guard let page = try? await api.get(PeoplePage.self, url, priority: .background) else { break }
                 answered = true
-                for person in json[field] as? [[String: Any]] ?? [] {
-                    let photo = (person["photos"] as? [[String: Any]] ?? []).first { $0["default"] as? Bool != true }
-                    guard let link = photo?["url"] as? String else { continue }
-                    for address in person["emailAddresses"] as? [[String: Any]] ?? [] {
-                        if let email = (address["value"] as? String)?.lowercased(), photos[email] == nil { photos[email] = link }
+                for person in page.people {
+                    guard let link = person.photos?.first(where: { $0.default != true })?.url.flatMap(URL.init(string:))
+                    else { continue }
+                    for address in person.emailAddresses ?? [] {
+                        if let email = address.value?.lowercased(), photos[email] == nil { photos[email] = .url(link) }
                     }
                 }
-                pageToken = json["nextPageToken"] as? String
+                pageToken = page.nextPageToken
                 if pageToken == nil { break }
             }
         }
         return answered ? photos : nil
     }
 
-    /// Outlook contacts; whether one has a photo is only known when it is fetched. Nil when the
-    /// request is refused.
-    private func graphPhotos(api: API) async -> [String: String]? {
-        var photos: [String: String] = [:]
+    /// One page of saved contacts, other contacts or directory people.
+    private nonisolated struct PeoplePage: Decodable {
+        struct Person: Decodable {
+            struct Photo: Decodable {
+                let url: String?
+                let `default`: Bool?
+            }
+            struct Email: Decodable { let value: String? }
+            let photos: [Photo]?
+            let emailAddresses: [Email]?
+        }
+
+        let people: [Person]
+        let nextPageToken: String?
+
+        private enum CodingKeys: String, CodingKey { case connections, otherContacts, people, nextPageToken }
+
+        /// Each list names its people differently.
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            people = try [CodingKeys.connections, .otherContacts, .people].flatMap {
+                try container.decodeIfPresent([Person].self, forKey: $0) ?? []
+            }
+            nextPageToken = try container.decodeIfPresent(String.self, forKey: .nextPageToken)
+        }
+    }
+
+    /// Outlook contacts. Nil when the request is refused.
+    private func graphPhotos(api: API) async -> [String: PhotoSource]? {
+        var photos: [String: PhotoSource] = [:]
         var answered = false
-        var next = URL(string: "https://graph.microsoft.com/v1.0/me/contacts?$select=emailAddresses&$top=999")
+        var next: URL? = URL(string: "https://graph.microsoft.com/v1.0/me/contacts")!
+            .appending(queryItems: [URLQueryItem(name: "$select", value: "emailAddresses"), URLQueryItem(name: "$top", value: "999")])
         for _ in 0..<30 {
-            guard let url = next, let json = await getJSON(url, api: api) else { break }
+            guard let url = next, let page = try? await api.get(GraphContacts.self, url, priority: .background) else { break }
             answered = true
-            for contact in json["value"] as? [[String: Any]] ?? [] {
-                guard let id = contact["id"] as? String else { continue }
-                for address in contact["emailAddresses"] as? [[String: Any]] ?? [] {
-                    if let email = (address["address"] as? String)?.lowercased(), photos[email] == nil {
-                        photos[email] = "graph:\(api.account)/\(id)"
+            for contact in page.value {
+                for address in contact.emailAddresses ?? [] {
+                    if let email = address.address?.lowercased(), photos[email] == nil {
+                        photos[email] = .graphContact(account: api.account, id: contact.id)
                     }
                 }
             }
-            next = (json["@odata.nextLink"] as? String).flatMap(URL.init(string:))
+            next = page.nextLink
         }
         return answered ? photos : nil
     }
 
-    private func contactPhoto(_ source: String, side: Int) async -> Data? {
-        if source.hasPrefix("graph:") {
-            let rest = source.dropFirst("graph:".count)
-            guard let slash = rest.firstIndex(of: "/") else { return nil }
-            let account = String(rest[..<slash]), id = String(rest[rest.index(after: slash)...])
+    private nonisolated struct GraphContacts: Decodable {
+        struct Contact: Decodable {
+            struct Email: Decodable { let address: String? }
+            let id: String
+            let emailAddresses: [Email]?
+        }
+
+        let value: [Contact]
+        let nextLink: URL?
+
+        private enum CodingKeys: String, CodingKey {
+            case value
+            case nextLink = "@odata.nextLink"
+        }
+    }
+
+    private func contactPhoto(_ source: PhotoSource, side: Int) async -> Data? {
+        let data: Data?
+        switch source {
+        case .url(let url):
+            // Google serves any size; ask for the one drawn.
+            var link = url.absoluteString
+            if let range = link.range(of: #"=s\d+(-c)?$"#, options: .regularExpression) { link.removeSubrange(range) }
+            guard let sized = URL(string: link + "=s\(side)-c") else { return nil }
+            data = await fetch(sized)
+        case .graphContact(let account, let id):
             guard let api = accounts.first(where: { $0.name == account })?.api,
                   let url = URL(string: "https://graph.microsoft.com/v1.0/me/contacts/\(id)/photo/$value")
             else { return nil }
-            return await fetch(url, api: api).flatMap { Self.normalize($0, style: .photo, side: side) }
+            data = await fetch(url, api: api)
         }
-        // Google serves any size; ask for the one drawn.
-        var link = source
-        if let range = link.range(of: #"=s\d+(-c)?$"#, options: .regularExpression) { link.removeSubrange(range) }
-        guard let url = URL(string: link + "=s\(side)-c") else { return nil }
-        return await fetch(url).flatMap { Self.normalize($0, style: .photo, side: side) }
+        return data.flatMap { Self.normalize($0, style: .photo, side: side) }
     }
 
     // MARK: - Public sources
@@ -421,11 +483,6 @@ actor AvatarResolver {
 
     // MARK: - Network
 
-    private func getJSON(_ url: URL, api: API) async -> [String: Any]? {
-        guard let data = await fetch(url, api: api, limit: 16 * 1024 * 1024) else { return nil }
-        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-    }
-
     /// The body of a successful GET, as the account's user when `api` is given; nil on any failure
     /// or past `limit` bytes.
     private func fetch(_ url: URL, api: API? = nil, limit: Int = 2 * 1024 * 1024) async -> Data? {
@@ -437,8 +494,7 @@ actor AvatarResolver {
         }
         guard let answer, let http = answer.response, http.statusCode == 200, answer.data.count <= limit
         else { return nil }
-        let data = answer.data
-        return data
+        return answer.data
     }
 
     private func fetchPage(_ url: URL) async -> (Data, URL)? {
@@ -470,9 +526,13 @@ actor AvatarResolver {
         return labels.suffix(keep).joined(separator: ".")
     }
 
+    /// Hex SHA-256 of `text` trimmed and lowercased, the way Gravatar keys addresses.
     private static func hash(_ text: String) -> String {
-        SHA256.hash(data: Data(text.trimmingCharacters(in: .whitespaces).lowercased().utf8))
-            .map { String(format: "%02x", $0) }.joined()
+        hash(Data(text.trimmingCharacters(in: .whitespaces).lowercased().utf8))
+    }
+
+    private static func hash(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     /// `logo` fills like a photo unless its corners are see-through (a rounded square on nothing),

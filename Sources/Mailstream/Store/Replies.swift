@@ -36,7 +36,7 @@ extension MailStore {
     nonisolated static func replyRecipients(for source: MailMessage, content: MessageContent?, own: Set<String>,
                                             all: Bool) -> (to: [Address], cc: [Address]) {
         let envelope = source.envelope
-        let fromMe = envelope.from.contains { own.contains($0.normalizedEmail) }
+        let fromMe = source.isFromUser(own: own)
         let replyTo = content?.replyTo ?? []
         var to = fromMe ? envelope.to : (replyTo.isEmpty ? envelope.from : replyTo)
         guard all else { return (to, []) }
@@ -47,15 +47,14 @@ extension MailStore {
     }
 
     func replyPlan(for source: MailMessage, all: Bool) async throws -> ReplyPlan {
-        let content = try await content(for: source.ref).content
+        let content = try await contents.load(source.ref).content
         let recipients = Self.replyRecipients(for: source, content: content, own: ownAddresses, all: all)
-        return ReplyPlan(to: recipients.to, cc: recipients.cc,
-                         subject: Self.prefixed(source.envelope.subject, "Re:", unless: ["re:", "aw:"]),
+        return ReplyPlan(to: recipients.to, cc: recipients.cc, subject: Subject.reply(to: source.envelope.subject),
                          quotedText: Self.quote(content.text ?? ""), attribution: Self.attribution(for: source))
     }
 
     func forwardDraft(for source: MailMessage) async throws -> ForwardDraft {
-        let content = try await content(for: source.ref).content
+        let content = try await contents.load(source.ref).content
         let envelope = source.envelope
         var header = ["---------- Forwarded message ---------",
                       "From: " + envelope.from.map(Self.headerForm).joined(separator: ", ")]
@@ -64,7 +63,7 @@ extension MailStore {
         header.append("To: " + envelope.to.map(Self.headerForm).joined(separator: ", "))
         if !content.cc.isEmpty { header.append("Cc: " + content.cc.map(Self.headerForm).joined(separator: ", ")) }
         let text = (content.text ?? "").replacingOccurrences(of: "\r\n", with: "\n")
-        return ForwardDraft(subject: Self.prefixed(envelope.subject, "Fwd:", unless: ["fwd:", "fw:"]),
+        return ForwardDraft(subject: Subject.forward(envelope.subject),
                             body: header.joined(separator: "\n") + "\n\n" + text)
     }
 
@@ -83,13 +82,6 @@ extension MailStore {
         address.displayName == address.email ? address.email : "\(address.displayName) <\(address.email)>"
     }
 
-    /// `subject` with `prefix` in front, unless it already starts with one of `existing` (lowercased).
-    private nonisolated static func prefixed(_ subject: String, _ prefix: String, unless existing: [String]) -> String {
-        let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lower = trimmed.lowercased()
-        return existing.contains { lower.hasPrefix($0) } ? trimmed : prefix + " " + trimmed
-    }
-
     private nonisolated static func quote(_ text: String) -> String {
         let body = text.replacingOccurrences(of: "\r\n", with: "\n").trimmingCharacters(in: .newlines)
         guard !body.isEmpty else { return "" }
@@ -106,7 +98,7 @@ extension MailStore {
                                       to: to, cc: cc, bcc: bcc, subject: subject, text: text, html: html,
                                       attachments: attachments, inReplyTo: nil, references: [], thread: nil)
         guard let source else { return message }
-        let references = (try? await content(for: source.ref).content.references) ?? []
+        let references = (try? await contents.load(source.ref).content.references) ?? []
         message.thread = source.envelope.thread
         if let id = source.envelope.messageID {
             message.inReplyTo = id
@@ -119,7 +111,7 @@ extension MailStore {
 
     /// Sends an inline reply as plain text plus HTML, the HTML quoting the source's own HTML body.
     func sendReply(_ text: String, plan: ReplyPlan, source: MailMessage) async throws {
-        let content = try? await content(for: source.ref).content
+        let content = try? await contents.load(source.ref).content
         let html = ReplyHTML.document(reply: text, attribution: plan.attribution, source: content)
         let message = await outgoing(account: source.ref.account, source: source, to: plan.to, cc: plan.cc, bcc: [],
                                      subject: plan.subject, text: plan.plainBody(text), html: html)

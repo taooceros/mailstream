@@ -84,16 +84,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(view, title: "View", to: main)
 
         let message = NSMenu(title: "Message")
-        message.addItem(item("Reply", #selector(MainWindowController.reply(_:)), "r"))
-        message.addItem(item("Reply All", #selector(MainWindowController.replyAll(_:)), "r", [.command, .shift]))
-        message.addItem(item("Forward", #selector(MainWindowController.forward(_:)), "f", [.command, .shift]))
+        func entry(_ action: ConversationAction, _ key: String, _ modifiers: NSEvent.ModifierFlags = .command) {
+            message.addItem(item(action.label().title, action.command, key, modifiers))
+        }
+        entry(.reply, "r")
+        entry(.replyAll, "r", [.command, .shift])
+        entry(.forward, "f", [.command, .shift])
         message.addItem(.separator())
-        message.addItem(item("Archive", #selector(MainWindowController.archive(_:)), "a", [.command, .control]))
-        message.addItem(item("Move to Trash", #selector(MainWindowController.trash(_:)), "\u{8}"))
+        entry(.archive, "a", [.command, .control])
+        entry(.trash, "\u{8}")
         message.addItem(.separator())
-        message.addItem(item("Mark as Unread", #selector(MainWindowController.toggleRead(_:)), "u", [.command, .shift]))
-        message.addItem(item("Star", #selector(MainWindowController.toggleStar(_:)), "l", [.command, .shift]))
-        message.addItem(item("Resolve", #selector(MainWindowController.toggleWaiting(_:)), "d", [.command, .shift]))
+        entry(.toggleRead, "u", [.command, .shift])
+        entry(.toggleStar, "l", [.command, .shift])
+        entry(.toggleWaiting, "d", [.command, .shift])
         add(message, title: "Message", to: main)
 
         let window = NSMenu(title: "Window")

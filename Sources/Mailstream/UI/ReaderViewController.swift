@@ -1,7 +1,5 @@
 import AppKit
 import Observation
-import UniformTypeIdentifiers
-import WebKit
 
 @MainActor
 protocol ReaderDelegate: AnyObject {
@@ -10,32 +8,37 @@ protocol ReaderDelegate: AnyObject {
     func reader(_ reader: ReaderViewController, composeTo address: Address)
 }
 
-/// Renders one conversation into a single long-lived web page: native-feeling cards for each
-/// message, HTML bodies in auto-sized iframes, quoted history folded, remote content blocked unless
-/// the sender is known (`MailStore.loadsRemoteContent`). Switching conversations swaps the page's
-/// content through script, not a navigation. Google Chat spaces share the page (`ChatReader`).
+/// What the reader shows.
+enum ReaderTarget {
+    case conversation(Conversation)
+    case chat(ChatSpaceKey)
+
+    var conversation: Conversation? {
+        if case .conversation(let conversation) = self { return conversation }
+        return nil
+    }
+}
+
+/// Renders one conversation into the reader's long-lived web page (`WebShell`): native-feeling
+/// cards for each message, HTML bodies in auto-sized iframes, quoted history folded, remote content
+/// blocked unless the sender is known (`MailStore.loadsRemoteContent`). Switching conversations
+/// swaps the page's content through script, not a navigation. Chat spaces render into the same
+/// page through `ChatReader`, its peer.
 @MainActor
-final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
+final class ReaderViewController: NSViewController, WebShellClient {
     weak var delegate: (any ReaderDelegate)?
 
     private let store: MailStore
-    private var webView: WKWebView!
+    private var shell: WebShell!
+    /// Renders chat spaces into the shell.
+    private var chatReader: ChatReader!
     private let placeholder = NSStackView()
-    private let world = WKContentWorld.world(name: "mailstream")
     private var conversation: Conversation?
     private var messages: [MailMessage] = []
-    /// Whether the current thread is in the page's DOM, so bodies and reply state can be sent.
-    private var pageReady = false
-    private var pending: [(Int, [String: Any])] = []
+    /// Messages whose body was requested for the page on screen.
     private var loaded = Set<Int>()
     /// Whether this thread's bodies may load remote content; blocked ones carry their own strict CSP.
     private var allowRemote = false
-    private var generation = 0
-    private var onReady: (() -> Void)?
-    /// The shell's navigation while it loads (at launch, and after its web process died).
-    private var shellLoad: WKNavigation?
-    /// `MS.render` state of the current thread, waiting for the shell to finish loading.
-    private var staged: [String: Any]?
 
     /// An inline reply in progress; `plan` arrives once the source's content is loaded.
     private struct Reply {
@@ -54,11 +57,8 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
     private var drafts: [String: Reply] = [:]
     /// Whether the reply's text field has focus, as last reported by the page, so Escape can decide at once.
     private var replyFocused = false
-    private var replyFocusPending = false
     private var planning: (ref: MessageRef, all: Bool)?
-    /// Renders chat spaces into this page.
-    private lazy var chatReader = ChatReader(store: store, reader: self)
-    /// Senders whose picture the page was sent since the thread rendered.
+    /// Senders whose picture the page has.
     private var avatarsSent = Set<String>()
     /// Pictures arriving and the conversation's "Waiting on you" flag.
     private var storeWatches: [Task<Void, Never>] = []
@@ -74,22 +74,9 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
     isolated deinit { storeWatches.forEach { $0.cancel() } }
 
     override func loadView() {
-        let configuration = WKWebViewConfiguration()
-        Self.allowFullFrameRate(configuration.preferences)
-        configuration.setURLSchemeHandler(PartSchemeHandler(cache: store.cache), forURLScheme: MailCache.scheme)
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
-        configuration.websiteDataStore = .nonPersistent()
-        configuration.suppressesIncrementalRendering = false
-        let controller = configuration.userContentController
-        controller.addUserScript(WKUserScript(source: ReaderPage.script, injectionTime: .atDocumentEnd,
-                                              forMainFrameOnly: true, in: world))
-        controller.add(WeakScriptHandler(self), contentWorld: world, name: "ms")
-
-        webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.navigationDelegate = self
-        webView.uiDelegate = self
-        webView.allowsMagnification = true
-        webView.underPageBackgroundColor = .windowBackgroundColor
+        shell = WebShell(cache: store.cache, avatars: store.avatars) { [weak self] url in self?.open(url) }
+        chatReader = ChatReader(store: store, shell: shell)
+        let webView = shell.webView
         webView.isHidden = true
 
         let icon = NSImageView(image: NSImage(systemSymbolName: "envelope.open", accessibilityDescription: nil) ?? NSImage())
@@ -104,7 +91,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         placeholder.addArrangedSubview(label)
 
         let container = NSView()
-        for view in [webView!, placeholder] as [NSView] {
+        for view in [webView, placeholder] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview(view)
         }
@@ -117,7 +104,6 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
             placeholder.centerYAnchor.constraint(equalTo: container.centerYAnchor),
         ])
         view = container
-        loadShell()
         let store = store
         storeWatches = [
             Task.immediate(name: "Reader pictures") { [weak self] in
@@ -125,117 +111,57 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
             },
             // Resolving from the list or the menu flips the header's "Waiting on you" chip in place.
             Task.immediate(name: "Reader waiting flag") { [weak self] in
-                let waiting = Observations { [weak self] in self?.conversation.map { store.tag(for: $0)?.toRespond == true } }
+                let waiting = Observations { [weak self] in self?.conversation.map { store.tagging.tag(for: $0)?.toRespond == true } }
                 for await waiting in waiting.dropFirst() {
                     guard let waiting = waiting ?? nil else { continue }
-                    self?.call("const chip = document.getElementById('waiting'); if (chip) chip.hidden = !waiting;",
-                               ["waiting": waiting])
+                    self?.shell.call("const chip = document.getElementById('waiting'); if (chip) chip.hidden = !waiting;",
+                                     ["waiting": waiting])
                 }
             },
         ]
     }
 
+    /// Mail from services, whose pictures are logos.
+    private var isAutomated: Bool {
+        conversation.flatMap { store.tagging.tag(for: $0) }.map { $0.category != .people } ?? false
+    }
+
     /// Sends the page the senders' pictures it does not have yet.
     private func pushAvatars() {
-        guard pageReady else { return }
-        let automated = conversation.flatMap { store.tag(for: $0) }.map { $0.category != .people } ?? false
+        let automated = isAutomated
         for message in messages {
             guard let sender = message.envelope.from.first?.normalizedEmail, !avatarsSent.contains(sender),
                   let url = store.avatars.dataURL(for: sender, automated: automated)
             else { continue }
             avatarsSent.insert(sender)
-            call("MS.setAvatar(email, url)", ["email": sender, "url": url])
+            shell.call("MS.setAvatar(email, url)", ["email": sender, "url": url])
         }
     }
 
-    /// Enlarges a sender's picture; `rect` is the avatar's box in page (CSS) pixels.
-    private func showAvatar(of message: MailMessage, at rect: [Double]) {
-        guard let from = message.envelope.from.first else { return }
-        let automated = conversation.flatMap { store.tag(for: $0) }.map { $0.category != .people } ?? false
-        showAvatar(of: store.withIdentityName(from), automated: automated, at: rect)
-    }
+    // MARK: - Showing
 
-    /// Enlarges `person`'s picture from AvatarStore; `rect` is the avatar's box in page (CSS) pixels.
-    func showAvatar(of person: Address, automated: Bool, at rect: [Double]) {
-        guard let photo = store.avatars.image(for: person.email, automated: automated) else { return }
-        let scale = webView.pageZoom * webView.magnification
-        let height = rect[3] * scale
-        let top = rect[1] * scale
-        let anchor = NSRect(x: rect[0] * scale, y: webView.isFlipped ? top : webView.bounds.height - top - height,
-                            width: rect[2] * scale, height: height)
-        AvatarPreview.show(person, small: photo, automated: automated, avatars: store.avatars, relativeTo: anchor, of: webView)
-    }
+    /// Whether showing something now waits for the shell page to load.
+    var awaitsShell: Bool { shell.awaitsShell }
 
-    /// WebKit holds page rendering near 60 fps through its internal feature
-    /// `PreferPageRenderingUpdatesNear60FPSEnabled`; turning it off lets the reader animate at the
-    /// display's full rate (120 Hz on ProMotion). Private API, so anything missing makes this a no-op.
-    private static func allowFullFrameRate(_ preferences: WKPreferences) {
-        let list = NSSelectorFromString("_features"), set = NSSelectorFromString("_setEnabled:forFeature:")
-        let key = NSSelectorFromString("key")
-        guard let listMethod = class_getClassMethod(WKPreferences.self, list), preferences.responds(to: set) else { return }
-        typealias List = @convention(c) (AnyClass, Selector) -> NSArray?
-        typealias SetEnabled = @convention(c) (WKPreferences, Selector, Bool, NSObject) -> Void
-        let features = unsafeBitCast(method_getImplementation(listMethod), to: List.self)(WKPreferences.self, list)
-        guard let feature = (features as? [NSObject])?.first(where: { feature in
-            feature.responds(to: key)
-                && feature.perform(key)?.takeUnretainedValue() as? String == "PreferPageRenderingUpdatesNear60FPSEnabled"
-        }) else { return }
-        unsafeBitCast(preferences.method(for: set), to: SetEnabled.self)(preferences, set, false, feature)
-    }
-
-    // MARK: - Rendering
-
-    /// Whether showing a conversation now waits for the shell page to load.
-    var awaitsShell: Bool { shellLoad != nil }
-
-    /// Renders `conversation`; `onReady` runs once its thread is in the page (a later `show` replaces it).
-    func show(_ conversation: Conversation?, onReady: (() -> Void)? = nil) {
-        chatReader.hide()
-        allowRemote = conversation.map(store.loadsRemoteContent) ?? false
-        render(conversation)
-        self.onReady = onReady
-    }
-
-    /// The chat space on screen, if any.
-    var chatSpace: ChatSpaceKey? { chatReader.key }
-
-    /// Renders a chat space; `onReady` runs once it is in the page (a later `show` replaces it).
-    func showChat(_ key: ChatSpaceKey, onReady: (() -> Void)? = nil) {
-        chatReader.show(key)
-        self.onReady = onReady
-    }
-
-    /// Hands the page to a chat space: the conversation leaves (its reply kept as a draft).
-    func beginChat() {
-        generation += 1
-        if let reply, reply.sending || !reply.isEmpty { drafts[reply.conversation] = reply }
-        reply = nil
-        replyFocused = false
-        conversation = nil
-        messages = []
-        pageReady = false
-        avatarsSent = []
-        pending = []
-        loaded = []
-        staged = nil
-        webView.isHidden = false
-        placeholder.isHidden = true
-    }
-
-    /// Renders a chat space's `MS.render` state, at once or when the shell has loaded.
-    func stageChat(_ state: [String: Any]) {
-        var state = state
-        state["generation"] = generation
-        staged = state
-        if shellLoad == nil { commit() }
-    }
-
-    /// Whether the chat space's render was sent to the page, so updates can follow it (scripts run in order).
-    var acceptsChatScript: Bool { shellLoad == nil && staged == nil && chatReader.key != nil }
-
-    func runChat(_ script: String, _ arguments: [String: Any]) {
-        guard acceptsChatScript else { return }
-        webView.callAsyncJavaScript(script, arguments: arguments, in: nil, in: world, completionHandler: nil)
+    /// Renders `target` (nothing: the placeholder); `onReady` runs once it is in the page (a later
+    /// `show` replaces it).
+    func show(_ target: ReaderTarget?, onReady: (() -> Void)? = nil) {
+        switch target {
+        case .conversation(let conversation):
+            chatReader.hide()
+            allowRemote = store.loadsRemoteContent(for: conversation)
+            render(conversation)
+        case .chat(let key):
+            leaveConversation()
+            chatReader.show(key)
+        case nil:
+            chatReader.hide()
+            leaveConversation()
+            shell.clear()
+        }
+        shell.webView.isHidden = target == nil
+        placeholder.isHidden = target != nil
+        shell.onReady = onReady
     }
 
     /// Re-renders only when the conversation gained or lost messages; flag changes keep the page.
@@ -250,44 +176,41 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         }
     }
 
-    private func render(_ conversation: Conversation?) {
-        generation += 1
-        if conversation?.id != self.conversation?.id {
-            if let reply, reply.sending || !reply.isEmpty { drafts[reply.conversation] = reply }
-            reply = conversation.flatMap { drafts.removeValue(forKey: $0.id) }
-            replyFocused = false
-        }
-        self.conversation = conversation
-        messages = conversation?.messages ?? []
-        pageReady = false
-        avatarsSent = []
-        pending = []
+    /// The conversation leaves the page, its unsent reply kept as a draft.
+    private func leaveConversation() {
+        if let reply, reply.sending || !reply.isEmpty { drafts[reply.conversation] = reply }
+        reply = nil
+        replyFocused = false
+        conversation = nil
+        messages = []
         loaded = []
-        staged = nil
-        guard let conversation else {
-            webView.isHidden = true
-            placeholder.isHidden = false
-            if !awaitsShell {
-                webView.callAsyncJavaScript("MS.clear(generation)", arguments: ["generation": generation],
-                                            in: nil, in: world, completionHandler: nil)
-            }
-            return
+        avatarsSent = []
+    }
+
+    private func render(_ conversation: Conversation) {
+        if conversation.id != self.conversation?.id {
+            leaveConversation()
+            reply = drafts.removeValue(forKey: conversation.id)
         }
-        webView.isHidden = false
-        placeholder.isHidden = true
+        shell.begin(self)
+        self.conversation = conversation
+        messages = conversation.messages
+        loaded = []
 
         let lastIndex = messages.count - 1
-        let automated = store.tag(for: conversation).map { $0.category != .people } ?? false
+        let tag = store.tagging.tag(for: conversation)
+        let automated = isAutomated
         // Back-and-forth between people reads as a chat; mail from services keeps the card stack.
         let chat = !automated && messages.count > 1
         let cards = messages.enumerated().map { index, message in
             let sender = store.withIdentityName(message.envelope.from.first ?? Address(name: nil, email: "unknown"))
             return ReaderPage.Card(index: index, message: message,
                                    expanded: chat || index == lastIndex || !message.envelope.isSeen || messages.count == 1,
-                                   snippet: store.snippet(for: message.ref),
+                                   snippet: store.contents.snippet(for: message.ref),
                                    sender: sender,
                                    avatar: store.avatars.dataURL(for: sender.email, automated: automated))
         }
+        avatarsSent = Set(cards.compactMap { $0.avatar == nil ? nil : $0.sender.normalizedEmail })
         let labels = Array(Set(messages.compactMap { message -> String? in
             message.role == .other ? store.mailbox(message.ref.mailboxKey)?.displayName : nil
         })).sorted()
@@ -297,72 +220,46 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         let html = ReaderPage.thread(conversation: conversation, cards: cards, own: store.ownAddresses,
                                      accountLabel: store.label(account: conversation.account),
                                      accountColor: AccountStyle.hex(for: conversation.account, in: store),
-                                     mailboxLabels: labels, tag: store.tag(for: conversation), chat: chat,
-                                     trustLabel: trustLabel)
+                                     mailboxLabels: labels, tag: tag, chat: chat, trustLabel: trustLabel)
         // A chat opens on the first unread message, else the latest.
         let focus = messages.firstIndex { !$0.envelope.isSeen } ?? lastIndex
         // Open bodies already in memory render with the thread itself.
         var bodies: [[Any]] = []
         for card in cards where card.expanded {
-            guard let prepared = store.preparedContent(for: card.message.ref) else { continue }
+            guard let content = store.contents.loaded(card.message.ref) else { continue }
             loaded.insert(card.index)
-            bodies.append([card.index, payload(for: prepared, message: card.message)])
+            bodies.append([card.index, payload(for: content, message: card.message)])
         }
-        staged = ["generation": generation, "accent": NSColor.controlAccentColor.cssHex, "html": html,
-                  "chat": chat, "focus": focus, "bodies": bodies]
-        if shellLoad == nil { commit() }
+        shell.render("MS.render", ["accent": NSColor.controlAccentColor.cssHex, "html": html, "chat": chat,
+                                   "focus": focus, "bodies": bodies])
+        if reply != nil { presentReply(focus: false) }
         // Collapsed messages load in the background so their previews fill in and expanding is instant.
         for card in cards { load(card.index, priority: card.expanded ? .interactive : .background) }
-    }
-
-    /// Navigates to a fresh shell; a staged thread renders once it loads.
-    private func loadShell() {
-        shellLoad = webView.loadHTMLString(ReaderPage.shell, baseURL: URL(string: "\(MailCache.scheme)://reader/"))
-    }
-
-    /// Swaps the staged thread into the loaded shell; the page is ready once that script has run.
-    private func commit() {
-        guard let state = staged else { return }
-        staged = nil
-        let generation = generation
-        webView.callAsyncJavaScript("MS.render(state)", arguments: ["state": state], in: nil, in: world) { [weak self] _ in
-            guard let self, generation == self.generation else { return }
-            self.pageReady = true
-            self.onReady?()
-            self.onReady = nil
-            let queued = self.pending
-            self.pending = []
-            for (index, payload) in queued { self.deliver(index, payload) }
-            // Pictures that resolved while the thread was on its way in.
-            self.pushAvatars()
-            if self.reply != nil { self.presentReply(focus: false) }
-        }
     }
 
     private func load(_ index: Int, priority: RequestPriority = .interactive) {
         guard index < messages.count, loaded.insert(index).inserted else { return }
         let message = messages[index]
-        let generation = generation
+        let generation = shell.generation
         Task {
             let payload: [String: Any]
             do {
-                let prepared = try await store.content(for: message.ref, priority: priority)
-                payload = self.payload(for: prepared, message: message)
+                payload = self.payload(for: try await store.contents.load(message.ref, priority: priority), message: message)
             } catch {
                 payload = ["kind": "error", "content": "Could not load this message: \(error.localizedDescription)"]
             }
-            guard generation == self.generation else { return }
-            deliver(index, payload)
+            guard generation == shell.generation else { return }
+            shell.call("MS.setBody(index, payload)", ["index": index, "payload": payload])
         }
     }
 
-    private func payload(for prepared: MailStore.LoadedContent, message: MailMessage) -> [String: Any] {
-        let content = prepared.content
+    private func payload(for loaded: LoadedContent, message: MailMessage) -> [String: Any] {
+        let content = loaded.content
         var payload: [String: Any] = [
             "recipients": ReaderPage.recipients(message.envelope.to, cc: content.cc, own: store.ownAddresses),
             "snippet": content.snippet,
             "attachments": content.attachments.map { attachment -> [String: Any] in
-                let url = store.attachmentURL(attachment, of: message.ref)
+                let url = store.cache.attachmentURL(attachment, of: message.ref)
                 var item: [String: Any] = [
                     "part": attachment.part,
                     "name": attachment.filename,
@@ -376,47 +273,25 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
                 return item
             },
         ]
-        if prepared.isHTML {
+        if loaded.isHTML {
             payload["kind"] = "html"
-            payload["content"] = allowRemote ? prepared.body : ReaderPage.blockingRemoteContent(prepared.body)
-            payload["remote"] = !allowRemote && prepared.hasRemote
+            payload["content"] = allowRemote ? loaded.body : ReaderPage.blockingRemoteContent(loaded.body)
+            payload["remote"] = !allowRemote && loaded.hasRemote
         } else {
             payload["kind"] = "text"
-            payload["content"] = prepared.body
+            payload["content"] = loaded.body
         }
         return payload
     }
 
-    private func deliver(_ index: Int, _ payload: [String: Any]) {
-        guard pageReady else {
-            pending.append((index, payload))
-            return
-        }
-        webView.callAsyncJavaScript("MS.setBody(index, payload)", arguments: ["index": index, "payload": payload],
-                                    in: nil, in: world, completionHandler: nil)
-    }
-
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard navigation === shellLoad else { return }
-        shellLoad = nil
-        commit()
-    }
-
-    /// The shell dies with its web process: load a new one, with the thread on screen if any.
-    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        loadShell()
-        if conversation != nil { render(conversation) } else { chatReader.reload() }
+    /// The shell came back from a crashed web process: the thread renders again.
+    func shellDidReload(_ shell: WebShell) {
+        if let conversation { render(conversation) }
     }
 
     // MARK: - Messages from the page
 
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any], let action = body["action"] as? String,
-              body["generation"] as? Int == generation else { return }
-        if chatReader.key != nil, action == "avatar" || action.hasPrefix("chat-") {
-            chatReader.handle(action, body)
-            return
-        }
+    func shell(_ shell: WebShell, received action: String, _ body: [String: Any]) {
         let index = body["index"] as? Int ?? -1
         let target = index >= 0 && index < messages.count ? messages[index] : nil
         switch action {
@@ -447,38 +322,35 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
             if let reply { startReply(all: !reply.all, to: reply.source) }
         case "attachment", "save-attachment":
             guard let target, let part = body["part"] as? Int,
-                  let attachment = store.loadedContent(for: target.ref)?.attachments.first(where: { $0.part == part }) else { return }
-            let url = store.attachmentURL(attachment, of: target.ref)
+                  let attachment = store.contents.loaded(target.ref)?.content.attachments.first(where: { $0.part == part })
+            else { return }
+            let url = store.cache.attachmentURL(attachment, of: target.ref)
             if action == "attachment" { NSWorkspace.shared.open(url) } else { save(url, name: attachment.filename) }
         case "load-remote":
             allowRemote = true
-            render(conversation)
+            if let conversation { render(conversation) }
         case "trust-remote":
             guard let conversation else { return }
             store.trustRemoteContent(from: store.untrustedSenders(in: conversation))
             allowRemote = true
             render(conversation)
         case "resolve":
-            if let conversation { store.setWaiting(conversation, waiting: false) }
+            if let conversation { store.tagging.setWaiting(conversation, waiting: false) }
         case "avatar":
-            guard let target, let rect = body["rect"] as? [Double], rect.count == 4 else { return }
-            showAvatar(of: target, at: rect)
+            guard let target, let from = target.envelope.from.first, let rect = body["rect"] as? [Double], rect.count == 4
+            else { return }
+            shell.showAvatar(of: store.withIdentityName(from), automated: isAutomated, at: rect)
         case "compose-to":
             if let email = body["email"] as? String, !email.isEmpty {
                 delegate?.reader(self, composeTo: Address(name: nil, email: email))
             }
-        case "link":
-            if let href = body["href"] as? String, let url = URL(string: href) { open(url) }
         default:
             break
         }
     }
 
     private var latestIncoming: MailMessage? {
-        let own = store.ownAddresses
-        return messages.last { message in
-            !message.envelope.isDraft && !message.envelope.from.contains { own.contains($0.normalizedEmail) }
-        } ?? messages.last
+        conversation.map { $0.latestIncoming(own: store.ownAddresses) ?? $0.latest }
     }
 
     private func compose(_ action: String, message: MailMessage) {
@@ -499,21 +371,16 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
     private func presentReply(focus: Bool) {
         guard let reply else { return }
         planReply()
-        guard pageReady else {
-            replyFocusPending = replyFocusPending || focus
-            return
-        }
         let options: [String: Any] = [
-            "all": reply.all, "canAll": canReplyAll(reply.source), "text": reply.text,
-            "focus": focus || replyFocusPending, "sending": reply.sending,
+            "all": reply.all, "canAll": canReplyAll(reply.source), "text": reply.text, "focus": focus,
+            "sending": reply.sending,
         ]
-        replyFocusPending = false
-        call("MS.openReply(options)", ["options": options])
+        shell.call("MS.openReply(options)", ["options": options])
         if let plan = reply.plan {
             pushReplyInfo(to: plan.to, cc: plan.cc)
         } else {
             // From what is loaded already, shown at once until the plan replaces it.
-            let guess = MailStore.replyRecipients(for: reply.source, content: store.loadedContent(for: reply.source.ref),
+            let guess = MailStore.replyRecipients(for: reply.source, content: store.contents.loaded(reply.source.ref)?.content,
                                                   own: store.ownAddresses, all: reply.all)
             pushReplyInfo(to: guess.to, cc: guess.cc)
         }
@@ -557,37 +424,35 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
                     reply.sending = false
                 }
                 guard self.reply?.conversation == key else { return }
-                call("MS.replyStatus(state, message)",
-                     ["state": "error", "message": "\(wasSending ? "Not sent" : "Could not prepare the reply"): \(error.localizedDescription)"])
+                shell.call("MS.replyStatus(state, message)",
+                           ["state": "error", "message": "\(wasSending ? "Not sent" : "Could not prepare the reply"): \(error.localizedDescription)"])
             }
         }
     }
 
     private func pushReplyInfo(to: [Address], cc: [Address]) {
         let own = store.ownAddresses
-        func names(_ list: [Address]) -> String {
-            list.map { own.contains($0.normalizedEmail) ? "me" : $0.displayName }.joined(separator: ", ")
-        }
+        func names(_ list: [Address]) -> String { list.map { ReaderPage.name($0, own: own) }.joined(separator: ", ") }
         var title = "To: " + to.map(\.rfc5322).joined(separator: ", ")
         if !cc.isEmpty { title += "\nCc: " + cc.map(\.rfc5322).joined(separator: ", ") }
-        call("MS.setReplyInfo(info)", ["info": ["to": names(to), "cc": names(cc), "title": title]])
+        shell.call("MS.setReplyInfo(info)", ["info": ["to": names(to), "cc": names(cc), "title": title]])
     }
 
     /// The source rendered like a message body, for the folded quote under the reply.
     private func pushReplyQuote() {
         guard let source = reply?.source else { return }
-        let generation = generation
+        let generation = shell.generation
         Task {
-            guard let content = try? await store.content(for: source.ref), generation == self.generation,
+            guard let content = try? await store.contents.load(source.ref), generation == shell.generation,
                   self.reply?.source.ref == source.ref else { return }
             var quote = payload(for: content, message: source)
             quote["attribution"] = MailStore.attribution(for: source)
-            call("MS.setReplyQuote(quote)", ["quote": quote])
+            shell.call("MS.setReplyQuote(quote)", ["quote": quote])
         }
     }
 
     private func canReplyAll(_ source: MailMessage) -> Bool {
-        let cc = store.loadedContent(for: source.ref)?.cc ?? []
+        let cc = store.contents.loaded(source.ref)?.content.cc ?? []
         let others = Set((source.envelope.to + source.envelope.from + cc).map(\.normalizedEmail)).subtracting(store.ownAddresses)
         return others.count > 1
     }
@@ -602,7 +467,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         }
         reply.sending = true
         self.reply = reply
-        call("MS.replyStatus(state, message)", ["state": "sending", "message": "Sending…"])
+        shell.call("MS.replyStatus(state, message)", ["state": "sending", "message": "Sending…"])
         if let plan = reply.plan { transmit(reply, plan: plan) } else { planReply() }
     }
 
@@ -615,12 +480,11 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
                 guard self.reply?.conversation == key else { return }
                 self.reply = nil
                 replyFocused = false
-                call("MS.replySent()", [:])
+                shell.call("MS.replySent()")
             } catch {
                 withReply(in: key) { $0.sending = false }
                 guard self.reply?.conversation == key else { return }
-                call("MS.replyStatus(state, message)",
-                     ["state": "error", "message": "Not sent: \(error.localizedDescription)"])
+                shell.call("MS.replyStatus(state, message)", ["state": "error", "message": "Not sent: \(error.localizedDescription)"])
             }
         }
     }
@@ -630,7 +494,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         drafts[reply.conversation] = nil
         self.reply = nil
         replyFocused = false
-        call("MS.closeReply()", [:])
+        shell.call("MS.closeReply()")
     }
 
     /// Moves the reply into a full composer window (attachments, editable recipients and quote).
@@ -645,21 +509,18 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
     /// should go back as usual, the reply then waiting as a draft.
     func handleEscape() -> Bool {
         if chatReader.key != nil { return chatReader.handleEscape() }
-        guard let reply, !reply.sending, !webView.isHidden else { return false }
+        guard let reply, !reply.sending else { return false }
         if reply.isEmpty {
             discardReply()
             return true
         }
         guard replyFocused else { return false }
         replyFocused = false
-        call("MS.blurReply()", [:])
+        shell.call("MS.blurReply()")
         return true
     }
 
-    private func call(_ script: String, _ arguments: [String: Any]) {
-        guard pageReady else { return }
-        webView.callAsyncJavaScript(script, arguments: arguments, in: nil, in: world, completionHandler: nil)
-    }
+    // MARK: - Links and files
 
     private func open(_ url: URL) {
         if url.scheme?.lowercased() == "mailto" {
@@ -685,88 +546,5 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
                 NSAlert(error: error).beginSheetModal(for: window)
             }
         }
-    }
-
-    // MARK: - Navigation policy
-
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                 decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
-        let url = navigationAction.request.url
-        let scheme = url?.scheme?.lowercased()
-        if navigationAction.navigationType == .linkActivated, let url {
-            open(url)
-            decisionHandler(.cancel)
-            return
-        }
-        // Allow only our own document and srcdoc frames; refreshes or redirects inside mail are refused.
-        if scheme == "about" || (scheme == MailCache.scheme && navigationAction.targetFrame?.isMainFrame == true
-                                 && navigationAction.navigationType == .other) {
-            decisionHandler(.allow)
-        } else {
-            decisionHandler(.cancel)
-        }
-    }
-
-    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
-                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = navigationAction.request.url { open(url) }
-        return nil
-    }
-}
-
-/// Breaks the retain cycle between `WKUserContentController` and its handler.
-private final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
-    weak var target: (any WKScriptMessageHandler)?
-
-    init(_ target: any WKScriptMessageHandler) { self.target = target }
-
-    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-        target?.userContentController(controller, didReceive: message)
-    }
-}
-
-/// Serves cached MIME parts at `mscid://<message-key>/<stored-name>`, reading files off the main
-/// thread; a task WebKit stopped meanwhile is never answered.
-@MainActor
-private final class PartSchemeHandler: NSObject, WKURLSchemeHandler {
-    private let cache: MailCache
-    /// Tasks started and not yet stopped or answered.
-    private var active = Set<ObjectIdentifier>()
-
-    init(cache: MailCache) { self.cache = cache }
-
-    func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
-        guard let url = task.request.url, let key = url.host, key.allSatisfy(\.isHexDigit) else {
-            task.didFailWithError(URLError(.fileDoesNotExist))
-            return
-        }
-        let name = url.path.removingPercentEncoding.map { String($0.drop(while: { $0 == "/" })) } ?? ""
-        guard !name.isEmpty, !name.contains("/"), !name.hasPrefix(".") else {
-            task.didFailWithError(URLError(.fileDoesNotExist))
-            return
-        }
-        let file = cache.messageDirectory(key: key).appendingPathComponent(name)
-        let id = ObjectIdentifier(task)
-        active.insert(id)
-        Task(priority: .userInitiated) {
-            let data = await Self.read(file)
-            guard active.remove(id) != nil else { return }
-            guard let data else {
-                task.didFailWithError(URLError(.fileDoesNotExist))
-                return
-            }
-            let mime = UTType(filenameExtension: file.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
-            task.didReceive(URLResponse(url: url, mimeType: mime, expectedContentLength: data.count, textEncodingName: nil))
-            task.didReceive(data)
-            task.didFinish()
-        }
-    }
-
-    func webView(_ webView: WKWebView, stop task: any WKURLSchemeTask) {
-        active.remove(ObjectIdentifier(task))
-    }
-
-    @concurrent private nonisolated static func read(_ file: URL) async -> Data? {
-        try? Data(contentsOf: file)
     }
 }

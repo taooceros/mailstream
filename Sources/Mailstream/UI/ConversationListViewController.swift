@@ -1,8 +1,37 @@
 import AppKit
 import Observation
 
-enum ConversationAction {
+/// A command on one conversation, from the toolbar, the menus, the keyboard or a row's hover pill.
+nonisolated enum ConversationAction: CaseIterable {
     case archive, trash, toggleRead, toggleStar, toggleWaiting, reply, replyAll, forward
+
+    /// What the toggles act on; without a conversation they read as read, unstarred and waiting.
+    struct State {
+        var unread = false
+        var flagged = false
+        var waiting = true
+    }
+
+    /// Title and SF Symbol in `state`: a toggle names what it will do.
+    func label(in state: State = State()) -> (title: String, symbol: String) {
+        switch self {
+        case .archive: ("Archive", "archivebox")
+        case .trash: ("Move to Trash", "trash")
+        case .toggleRead: state.unread ? ("Mark as Read", "envelope.open") : ("Mark as Unread", "envelope.badge")
+        case .toggleStar: state.flagged ? ("Unstar", "star.slash") : ("Star", "star")
+        case .toggleWaiting: state.waiting ? ("Resolve", "checkmark.circle") : ("Mark as Waiting on You", "clock.badge")
+        case .reply: ("Reply", "arrowshape.turn.up.left")
+        case .replyAll: ("Reply All", "arrowshape.turn.up.left.2")
+        case .forward: ("Forward", "arrowshape.turn.up.right")
+        }
+    }
+}
+
+nonisolated extension ConversationAction.State {
+    init(_ conversation: Conversation?, tag: ConversationTag?) {
+        self.init(unread: conversation?.isUnread == true, flagged: conversation?.isFlagged == true,
+                  waiting: tag?.toRespond ?? true)
+    }
 }
 
 @MainActor
@@ -170,14 +199,14 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             // chat spaces while the list shows them.
             Task.immediate(name: "List rows") { [weak self] in
                 let built = Observations {
-                    _ = (store.listContext, store.conversations, store.isLoading, store.aiTaggingEnabled, store.tags)
+                    _ = (store.listContext, store.conversations, store.isLoading, store.tagging.isEnabled, store.tagging.tags)
                     if store.listContext.selection.isChat { _ = (store.chat.rows, store.chat.isLoading) }
                 }
                 for await _ in built { self?.listChanged() }
             },
             // Previews and pictures arriving.
             Task.immediate(name: "List content") { [weak self] in
-                for await _ in Observations({ _ = (store.snippets, store.avatars.revision) }) { self?.refreshVisibleRows() }
+                for await _ in Observations({ _ = (store.contents.snippets, store.avatars.revision) }) { self?.refreshVisibleRows() }
             },
             Task.immediate(name: "List accounts") { [weak self] in
                 for await names in Observations({ store.accounts.flatMap { [$0.name, $0.label] } }) {
@@ -194,7 +223,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
 
     /// Decided by what the published list was built for, never the live selection.
     private var isSmart: Bool {
-        store.listContext.search == nil && store.listContext.role == .inbox && store.aiTaggingEnabled
+        store.listContext.search == nil && store.listContext.role == .inbox && store.tagging.isEnabled
     }
 
     /// The published list is Google Chat's.
@@ -219,7 +248,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         var waiting: [Conversation] = []
         var people: [Conversation] = []
         for conversation in conversations {
-            let tag = store.tag(for: conversation)
+            let tag = store.tagging.tag(for: conversation)
             if let category = tag?.category, Self.bundled.contains(category) {
                 buckets[category, default: []].append(conversation)
             } else if tag?.toRespond == true {
@@ -292,8 +321,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             }
         case .conversation(let conversation):
             hasher.combine(store.row(for: conversation))
-            hasher.combine(store.tag(for: conversation))
-            hasher.combine(store.snippet(for: conversation.latest.ref))
+            hasher.combine(store.tagging.tag(for: conversation))
+            hasher.combine(store.contents.snippet(for: conversation.latest.ref))
         case .space(let space):
             hasher.combine(space)
         }
@@ -462,7 +491,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         let range = table.rows(in: table.visibleRect)
         guard range.length > 0 else { return }
         let upper = min(rows.count, range.location + range.length + 10)
-        store.prefetchSnippets(for: rows[range.location..<upper].compactMap(\.conversation))
+        store.contents.prefetchSnippets(for: rows[range.location..<upper].compactMap(\.conversation))
     }
 
     private func nearestConversationRow(to row: Int) -> Int? {
@@ -521,7 +550,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         }
         if store.isLoading { return (store.searchQuery != nil ? "Searching…" : "Checking for mail…", true) }
         if let problem = problems[.mail] { return (problem.message, false) }
-        return store.aiTaggingStatus.map { ($0, true) }
+        return store.tagging.status.map { ($0, true) }
     }
 
     /// Busy lines spin; the others are failures.
@@ -581,8 +610,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     }
 
     /// Moves the keyboard highlight to `conversation` without opening it (used after Back).
-    func highlight(_ conversation: Conversation?) {
-        guard let conversation, let row = rows.firstIndex(where: { $0.conversation?.id == conversation.id }) else { return }
+    func highlight(_ conversation: Conversation) {
+        guard let row = rows.firstIndex(where: { $0.conversation?.id == conversation.id }) else { return }
         suppressSelection = true
         table.selectRowIndexes([row], byExtendingSelection: false)
         suppressSelection = false
@@ -624,7 +653,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         preloadTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(80))
             guard !Task.isCancelled, let self else { return }
-            store.preload(conversation)
+            store.contents.preload(conversation)
         }
     }
 
@@ -696,9 +725,9 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
                 ?? ConversationRowCell()
             let context = store.listContext
             let row = store.row(for: conversation)
-            let tag = store.tag(for: conversation)
+            let tag = store.tagging.tag(for: conversation)
             let automated = tag.map { $0.category != .people } ?? false
-            cell.configure(row, snippet: store.snippet(for: conversation.latest.ref),
+            cell.configure(row, snippet: store.contents.snippet(for: conversation.latest.ref),
                            archivable: ![.archive, .all, .trash].contains(context.role),
                            account: context.selection.isUnified
                                ? (store.label(account: conversation.account),
@@ -759,25 +788,23 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             return
         }
         guard let conversation = rows[row].conversation else { return }
-        func add(_ title: String, _ symbol: String, _ action: ConversationAction) {
-            let item = NSMenuItem(title: title, action: #selector(contextAction(_:)), keyEquivalent: "")
-            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        let state = ConversationAction.State(conversation, tag: store.tagging.tag(for: conversation))
+        func add(_ action: ConversationAction) {
+            let label = action.label(in: state)
+            let item = NSMenuItem(title: label.title, action: #selector(contextAction(_:)), keyEquivalent: "")
+            item.image = NSImage(systemSymbolName: label.symbol, accessibilityDescription: nil)
             item.target = self
             item.representedObject = ContextPayload(action: action, id: conversation.id)
             menu.addItem(item)
         }
-        add("Reply", "arrowshape.turn.up.left", .reply)
-        add("Reply All", "arrowshape.turn.up.left.2", .replyAll)
-        add("Forward", "arrowshape.turn.up.right", .forward)
+        for action in [ConversationAction.reply, .replyAll, .forward] { add(action) }
         menu.addItem(.separator())
-        add(conversation.isUnread ? "Mark as Read" : "Mark as Unread", conversation.isUnread ? "envelope.open" : "envelope.badge", .toggleRead)
-        add(conversation.isFlagged ? "Unstar" : "Star", conversation.isFlagged ? "star.slash" : "star", .toggleStar)
-        if let tag = store.tag(for: conversation), tag.category == .people {
-            add(tag.toRespond ? "Resolve" : "Mark as Waiting on You", tag.toRespond ? "checkmark.circle" : "clock.badge", .toggleWaiting)
-        }
+        add(.toggleRead)
+        add(.toggleStar)
+        if store.tagging.canMarkWaiting(conversation) { add(.toggleWaiting) }
         menu.addItem(.separator())
-        if store.canArchive(conversation) { add("Archive", "archivebox", .archive) }
-        add("Move to Trash", "trash", .trash)
+        if store.canArchive(conversation) { add(.archive) }
+        add(.trash)
     }
 
     private final class ContextPayload: NSObject {

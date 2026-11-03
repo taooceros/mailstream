@@ -38,7 +38,9 @@ nonisolated struct StoreError: LocalizedError, Sendable {
     static let signedOut = StoreError(message: "The account is no longer signed in.")
 }
 
-/// Single source of truth for the UI, and the only main-actor part of the data layer.
+/// Single source of truth for the mail UI: accounts and mailboxes, the selected list with its
+/// pagination and search, and mutations. Message bodies and previews live in `contents`, AI tags
+/// in `tagging`.
 ///
 /// The main actor only holds state and applies small changes: disk reads, network I/O, parsing,
 /// threading and row formatting all run on the concurrent executor, and their results land here
@@ -47,11 +49,11 @@ nonisolated struct StoreError: LocalizedError, Sendable {
 /// and roll back on failure.
 ///
 /// Observable: the sidebar and window follow `accounts` and `mailboxes`, the list follows
-/// `listContext`, `conversations`, `isLoading`, tags and `snippets`; failures go to `problems`.
+/// `listContext`, `conversations` and `isLoading`; failures go to `problems`.
 @Observable
 final class MailStore {
     nonisolated static let pageSize = 50
-    static let prefetchCount = 40
+    private static let prefetchCount = 40
     /// Polling while push is down, and as a safety net while it is up.
     static let pollInterval: Duration = .seconds(90)
     static let pushPollInterval: Duration = .seconds(15 * 60)
@@ -59,8 +61,11 @@ final class MailStore {
 
     /// Signed-in accounts, their tokens and backends.
     let accountStore: AccountStore
-    @ObservationIgnored private let tools: ToolEnvironment
-    let cache = MailCache()
+    let cache: MailCache
+    /// Message bodies and list previews.
+    @ObservationIgnored let contents: ContentStore
+    /// AI tags of the inbox conversations.
+    @ObservationIgnored let tagging: TagStore
     @ObservationIgnored private(set) lazy var avatars = AvatarStore(accounts: accountStore, root: cache.root)
     /// Google Chat accounts, spaces and messages; selected through `Selection.chat`.
     @ObservationIgnored private(set) lazy var chat = ChatStore(cache: cache, accounts: accountStore)
@@ -92,13 +97,6 @@ final class MailStore {
     @ObservationIgnored private var cacheRead = Set<MailboxKey>()
     @ObservationIgnored private var searchResults: [MailboxKey: [Envelope]] = [:]
     private var rows: [String: ConversationRow] = [:]
-    /// Display-ready previews: quoted history trimmed, whitespace collapsed. Arrivals within one
-    /// main-actor turn reach observers as one change.
-    private(set) var snippets: [MessageRef: String] = [:]
-    @ObservationIgnored private var contents: [MessageRef: LoadedContent] = [:]
-    @ObservationIgnored private var contentOrder: [MessageRef] = []
-    @ObservationIgnored private var contentTasks: [MessageRef: Task<LoadedContent, any Error>] = [:]
-    @ObservationIgnored private var prefetching = Set<MessageRef>()
     /// Rethreads the list off the main actor. Requests made while a pass runs coalesce into one
     /// more pass, and a pass whose inputs changed under it is dropped rather than shown, so
     /// optimistic edits never flicker back.
@@ -116,25 +114,17 @@ final class MailStore {
     /// Account changes, push connectivity and the counts refresh.
     @ObservationIgnored private var watchers: [Task<Void, Never>] = []
 
-    @ObservationIgnored private lazy var tagger = OmpTagger(tools: tools, workingDirectory: cache.root)
-    /// Keyed by `tagKey(_:)`, so a new message in a conversation re-tags it; read through `tag(for:)`.
-    private(set) var tags: [String: ConversationTag] = [:]
-    /// Keys the model was asked about but skipped; automatic passes leave them alone.
-    @ObservationIgnored private var tagAttempted = Set<String>()
-    private var taggingEnabled = true
-    /// Identities are known, so "to me" and "from me" are meaningful.
-    @ObservationIgnored private var taggingReady = false
-    /// One tagging pass at a time; a request during a pass runs one more after it.
-    @ObservationIgnored private lazy var tagging = CoalescedTask("AI tagging") { [weak self] in
-        await self?.taggingPass()
-    }
-    @ObservationIgnored private var taggingDebounce: Task<Void, Never>?
-    @ObservationIgnored private var taggingBackoffUntil: Date?
+    /// Every account's first load finished, so identities are known: "to me" and "from me" mean
+    /// something to the tagger, and a reconnecting push socket has a list to catch up.
+    @ObservationIgnored private var connected = false
 
     init(accounts: AccountStore, tools: ToolEnvironment) {
-        self.accountStore = accounts
-        self.tools = tools
-        taggingEnabled = UserDefaults.standard.object(forKey: Self.taggingDefaultsKey) as? Bool ?? true
+        let cache = MailCache()
+        let contents = ContentStore(accounts: accounts, cache: cache)
+        accountStore = accounts
+        self.cache = cache
+        self.contents = contents
+        tagging = TagStore(cache: cache, tools: tools, contents: contents)
     }
 
     isolated deinit {
@@ -186,17 +176,15 @@ final class MailStore {
     /// A socket that just connected catches up on whatever changed while it was down.
     private func pushConnectionChanged() {
         schedulePolling()
-        if push.isConnected, taggingReady, !isLoading { refresh() }
+        if push.isConnected, connected, !isLoading { refresh() }
     }
 
     /// Paints the signed-in accounts with their last known identities, mailboxes, tags and lists,
     /// and starts fetching mail for them, before any provider has answered.
     private func restoreFromCache() async {
-        let cache = cache
-        async let savedTags = cache.loadTags()
-        async let savedAccounts = cache.loadAccounts()
-        if let saved = await savedTags { tags.merge(saved) { current, _ in current } }
-        let restored = signedInAccounts(keeping: await savedAccounts ?? [])
+        async let restoredTags: Void = tagging.restore()
+        let restored = signedInAccounts(keeping: await cache.loadAccounts() ?? [])
+        await restoredTags
         guard !restored.isEmpty else { return }
         accounts = restored
         await loadCachedMailboxes(restored.map(\.name))
@@ -209,7 +197,7 @@ final class MailStore {
             for account in accounts { group.addTask { await self.loadAccount(account.name) } }
         }
         cache.saveAccounts(accounts)
-        taggingReady = true
+        connected = true
         refresh()
         scheduleTagging()
         refreshCounts()
@@ -227,8 +215,8 @@ final class MailStore {
     }
 
     /// Follows sign-ins, removals and renames: added accounts load, removed ones drop their
-    /// mailboxes, listings and selection. An account without mailboxes (its last load failed,
-    /// e.g. before signing in again) loads again.
+    /// mailboxes, listings, message content and selection. An account without mailboxes (its last
+    /// load failed, e.g. before signing in again) loads again.
     private func accountsDidChange() {
         let next = signedInAccounts(keeping: accounts)
         let before = Set(accounts.map(\.name))
@@ -257,6 +245,7 @@ final class MailStore {
         listings = listings.filter { !removed.contains($0.key.account) }
         searchResults = searchResults.filter { !removed.contains($0.key.account) }
         cacheRead = cacheRead.filter { !removed.contains($0.account) }
+        contents.forget(accounts: removed)
         switch selection {
         case .mailbox(let key) where removed.contains(key.account): select(.allInboxes)
         case .chat(let account?) where removed.contains(account): select(.allChats)
@@ -463,7 +452,7 @@ final class MailStore {
         conversations = output.conversations
         rows = output.rows
         listContext = context
-        prefetchSnippets()
+        contents.prefetchSnippets(for: Array(conversations.prefix(Self.prefetchCount)))
         scheduleTagging()
     }
 
@@ -657,281 +646,16 @@ final class MailStore {
         return out
     }
 
-    // MARK: - Content
-
-    /// A message as the reader needs it, with its display preview and body markup, worked out off
-    /// the main actor.
-    nonisolated struct LoadedContent: Sendable {
-        let content: MessageContent
-        let snippet: String
-        /// The HTML body, or the plain-text one as escaped HTML.
-        let body: String
-        let isHTML: Bool
-        /// Whether the HTML body references remote images, styles or fonts.
-        let hasRemote: Bool
-
-        init(_ content: MessageContent) {
-            self.content = content
-            snippet = MailStore.displaySnippet(content.snippet)
-            if let html = content.html {
-                body = html
-                isHTML = true
-                hasRemote = HTMLText.hasRemoteContent(html)
-            } else {
-                body = HTMLText.plainToHTML(content.text ?? "")
-                isHTML = false
-                hasRemote = false
-            }
-        }
-    }
-
-    /// Display-ready preview for the list, the reader's collapsed cards and the tagger.
-    func snippet(for ref: MessageRef) -> String? { snippets[ref] }
-
-    func loadedContent(for ref: MessageRef) -> MessageContent? { contents[ref]?.content }
-
-    /// The message's reader-ready content if it is in memory, so a thread can render it in its first frame.
-    func preparedContent(for ref: MessageRef) -> LoadedContent? { contents[ref] }
-
-    func content(for ref: MessageRef, priority: RequestPriority = .interactive) async throws -> LoadedContent {
-        if let loaded = contents[ref] { return loaded }
-        let task = contentTasks[ref] ?? loadTask(ref, priority: priority)
-        let loaded = try await task.value
-        remember(loaded, for: ref)
-        return loaded
-    }
-
-    /// Starts loading the conversation the user is about to open (pointer resting on it, keyboard
-    /// highlight), newest messages first, so the reader finds their bodies in memory.
-    func preload(_ conversation: Conversation) {
-        for message in conversation.messages.suffix(Self.preloadCount).reversed() {
-            let ref = message.ref
-            guard contents[ref] == nil else { continue }
-            let task = loadTask(ref, priority: .interactive)
-            Task {
-                guard let loaded = try? await task.value, contents[ref] == nil else { return }
-                remember(loaded, for: ref)
-            }
-        }
-    }
-
-    /// Messages `preload` brings in per conversation: enough for the thread's visible end.
-    private static let preloadCount = 10
-
-    /// One shared load per message: disk cache first, else the provider, assembled and cached off
-    /// the main actor.
-    private func loadTask(_ ref: MessageRef, priority: RequestPriority) -> Task<LoadedContent, any Error> {
-        if let task = contentTasks[ref] { return task }
-        let backend = accountStore.backend(for: ref.account), cache = cache
-        let task = Task(priority: priority == .interactive ? .userInitiated : .utility) {
-            try await Self.load(ref, backend: backend, cache: cache, priority: priority)
-        }
-        contentTasks[ref] = task
-        Task {
-            _ = try? await task.value
-            if contentTasks[ref] == task { contentTasks[ref] = nil }
-        }
-        return task
-    }
-
-    @concurrent private nonisolated static func load(_ ref: MessageRef, backend: (any MailBackend)?, cache: MailCache,
-                                                     priority: RequestPriority) async throws -> LoadedContent {
-        if let cached = await cache.loadContent(ref) { return LoadedContent(cached) }
-        guard let backend else { throw StoreError.signedOut }
-        let content = try await backend.content(id: ref.id, mailbox: ref.mailbox, directory: cache.messageDirectory(ref),
-                                                urlBase: cache.partURLBase(ref), priority: priority)
-        cache.saveContent(content, for: ref)
-        return LoadedContent(content)
-    }
-
-    nonisolated static func displaySnippet(_ raw: String) -> String {
-        HTMLText.trimHistory(raw)
-            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
-    }
-
-    private func remember(_ loaded: LoadedContent, for ref: MessageRef) {
-        if contents[ref] == nil { contentOrder.append(ref) }
-        contents[ref] = loaded
-        while contentOrder.count > 80 { contents[contentOrder.removeFirst()] = nil }
-        setSnippet(loaded.snippet, for: ref)
-    }
-
-    private func setSnippet(_ snippet: String, for ref: MessageRef) {
-        if snippets[ref] != snippet { snippets[ref] = snippet }
-    }
-
-    /// Fetches the latest message of the top conversations in the background, for list previews.
-    private func prefetchSnippets() {
-        prefetchSnippets(for: Array(conversations.prefix(Self.prefetchCount)))
-    }
-
-    /// Fetches previews for `conversations` (rows the list is showing) in the background.
-    func prefetchSnippets(for conversations: [Conversation]) {
-        for conversation in conversations {
-            let ref = conversation.latest.ref
-            guard snippets[ref] == nil, prefetching.insert(ref).inserted else { continue }
-            let task = loadTask(ref, priority: .background)
-            Task {
-                defer { prefetching.remove(ref) }
-                guard let loaded = try? await task.value else { return }
-                setSnippet(loaded.snippet, for: ref)
-            }
-        }
-    }
-
-    func attachmentURL(_ attachment: Attachment, of ref: MessageRef) -> URL {
-        cache.attachmentURL(attachment, of: ref)
-    }
-
     // MARK: - AI tagging
 
-    private static let taggingDefaultsKey = "AITaggingEnabled"
-    static let taggingPassLimit = 150
-    static let taggingBatchSize = 20
-    static let taggingBackoff: TimeInterval = 300
-
-    /// Short user-facing progress or failure text; nil when idle.
-    private(set) var aiTaggingStatus: String?
-
-    var aiTaggingEnabled: Bool {
-        get { taggingEnabled }
-        set {
-            taggingEnabled = newValue
-            UserDefaults.standard.set(newValue, forKey: Self.taggingDefaultsKey)
-            tagAttempted = []
-            taggingBackoffUntil = nil
-            if newValue {
-                startTaggingPass()
-            } else {
-                taggingDebounce?.cancel()
-                tagging.cancel()
-                aiTaggingStatus = nil
-            }
-        }
-    }
-
-    func tag(for conversation: Conversation) -> ConversationTag? {
-        taggingEnabled ? tags[Self.tagKey(conversation)] : nil
-    }
-
-    /// Whether `conversation` can be resolved or put back on "Waiting on you": only people
-    /// conversations the tagger has judged carry the flag.
-    func canMarkWaiting(_ conversation: Conversation) -> Bool {
-        tag(for: conversation)?.category == .people
-    }
-
-    /// Resolves the conversation (`waiting: false`) or puts it back on "Waiting on you". The flag
-    /// belongs to the latest message, so a new incoming one is judged afresh.
-    func setWaiting(_ conversation: Conversation, waiting: Bool) {
-        let key = Self.tagKey(conversation)
-        guard taggingEnabled, var tag = tags[key], tag.category == .people, tag.toRespond != waiting else { return }
-        tag.toRespond = waiting
-        tags[key] = tag
-        cache.saveTags(tags)
-    }
-
-    /// Forgets every tag and tags the current list again, ignoring any failure backoff.
-    func retagAll() {
-        tags = [:]
-        tagAttempted = []
-        taggingBackoffUntil = nil
-        cache.saveTags(tags)
-        taggingDebounce?.cancel()
-        tagging.restart()
-    }
-
-    /// The conversation's latest message, so a new reply re-tags it.
-    nonisolated static func tagKey(_ conversation: Conversation) -> String {
-        let latest = conversation.latest
-        return latest.envelope.messageID ?? "\(latest.ref.account)/\(latest.ref.mailbox)/\(latest.ref.id)"
-    }
-
+    /// Offers the conversations with a message in a listed inbox to the tagger, once identities
+    /// are known.
     private func scheduleTagging() {
-        guard taggingEnabled, taggingReady else { return }
-        taggingDebounce?.cancel()
-        taggingDebounce = Task {
-            try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled else { return }
-            startTaggingPass()
-        }
-    }
-
-    /// Runs one pass now, or once after the pass in flight.
-    private func startTaggingPass() {
-        taggingDebounce?.cancel()
-        guard taggingEnabled, taggingReady else { return }
-        tagging.request()
-    }
-
-    private func taggingPass() async {
-        guard taggingEnabled, taggingReady else { return }
-        if let until = taggingBackoffUntil, until > Date() { return }
-        let items = untaggedItems()
-        guard !items.isEmpty else { return }
-        await runTagging(items)
-    }
-
-    /// Tags `items` in batches, one omp process at a time.
-    private func runTagging(_ items: [OmpTagger.Item]) async {
-        let tagger = tagger
-        var remaining = items.count
-        for start in stride(from: 0, to: items.count, by: Self.taggingBatchSize) {
-            let batch = Array(items[start..<min(start + Self.taggingBatchSize, items.count)])
-            aiTaggingStatus = "Tagging \(remaining) conversation\(remaining == 1 ? "" : "s")…"
-            do {
-                let result = try await tagger.tag(batch)
-                try Task.checkCancellation()
-                tags.merge(result) { _, new in new }
-                tagAttempted.formUnion(batch.map(\.id))
-                cache.saveTags(tags)
-                remaining -= batch.count
-            } catch {
-                if Task.isCancelled || error is CancellationError {
-                    aiTaggingStatus = nil
-                } else {
-                    aiTaggingStatus = "AI tagging failed: \(error.localizedDescription)"
-                    taggingBackoffUntil = Date().addingTimeInterval(Self.taggingBackoff)
-                }
-                return
-            }
-        }
-        aiTaggingStatus = nil
-    }
-
-    /// Newest untagged conversations whose primary messages are in an inbox.
-    private func untaggedItems() -> [OmpTagger.Item] {
+        guard connected else { return }
         let primary = Set(primaryKeys)
-        let own = ownAddresses
-        var keys = Set<String>()
-        var items: [OmpTagger.Item] = []
-        for conversation in conversations where items.count < Self.taggingPassLimit {
-            guard conversation.messages.contains(where: { $0.role == .inbox && primary.contains($0.ref.mailboxKey) })
-            else { continue }
-            let key = Self.tagKey(conversation)
-            guard tags[key] == nil, !tagAttempted.contains(key), keys.insert(key).inserted else { continue }
-            items.append(taggingItem(conversation, key: key, own: own))
-        }
-        return items
-    }
-
-    private func taggingItem(_ conversation: Conversation, key: String, own: Set<String>) -> OmpTagger.Item {
-        let messages = conversation.messages
-        let fromUser = messages.map { message in
-            message.role == .sent || message.envelope.from.contains { own.contains($0.normalizedEmail) }
-        }
-        let firstIncoming = fromUser.firstIndex(of: false)
-        let incoming = fromUser.lastIndex(of: false).map { messages[$0] } ?? conversation.latest
-        let sender = incoming.envelope.from.first
-        return OmpTagger.Item(
-            id: key,
-            senderName: sender?.displayName ?? "",
-            senderEmail: sender?.email ?? "",
-            userInTo: incoming.envelope.to.contains { own.contains($0.normalizedEmail) },
-            subject: conversation.subject,
-            snippet: String((snippet(for: incoming.ref) ?? "").prefix(OmpTagger.maxSnippet)),
-            messageCount: messages.count,
-            userReplied: firstIncoming.map { fromUser[($0 + 1)...].contains(true) } ?? false,
-            latestFromUser: fromUser.last ?? false)
+        tagging.schedule(conversations.filter { conversation in
+            conversation.messages.contains { $0.role == .inbox && primary.contains($0.ref.mailboxKey) }
+        }, own: ownAddresses)
     }
 
     // MARK: - Mutations

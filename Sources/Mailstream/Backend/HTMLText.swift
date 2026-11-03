@@ -19,21 +19,20 @@ nonisolated enum HTMLText {
 
     private static let urlDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
 
-    /// Escapes and linkifies one line of plain text.
-    static func linkify(_ line: String) -> String {
-        guard let detector = urlDetector, line.contains(where: { $0 == "." || $0 == ":" }) else { return escape(line) }
-        let ns = line as NSString
+    /// Plain text as HTML with its URLs linked: the text between links goes through `plain`
+    /// (escaping by default), and only URLs with one of `schemes` count when given.
+    static func linkify(_ text: String, schemes: Set<String>? = nil, plain: (String) -> String = escape) -> String {
+        guard let detector = urlDetector, text.contains(where: { $0 == "." || $0 == ":" }) else { return plain(text) }
+        let ns = text as NSString
         var out = ""
         var cursor = 0
-        for match in detector.matches(in: line, range: NSRange(location: 0, length: ns.length)) {
-            guard let url = match.url else { continue }
-            out += escape(ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor)))
-            let label = ns.substring(with: match.range)
-            out += "<a href=\"\(escape(url.absoluteString))\">\(escape(label))</a>"
-            cursor = match.range.location + match.range.length
+        for match in detector.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            guard let url = match.url, schemes?.contains(url.scheme?.lowercased() ?? "") ?? true else { continue }
+            out += plain(ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor)))
+            out += "<a href=\"\(escape(url.absoluteString))\">\(escape(ns.substring(with: match.range)))</a>"
+            cursor = NSMaxRange(match.range)
         }
-        out += escape(ns.substring(from: cursor))
-        return out
+        return out + plain(ns.substring(from: cursor))
     }
 
     /// Whether `html` references remote images, styles or fonts.
@@ -186,7 +185,7 @@ nonisolated enum HTMLText {
 
     /// Drops a reply's quoted history and client signatures from a one-line preview, even when the
     /// attribution line was wrapped or cut off.
-    static func trimHistory(_ snippet: String) -> String {
+    private static func trimHistory(_ snippet: String) -> String {
         var text = snippet
         for pattern in historyPatterns {
             let range = NSRange(text.startIndex..., in: text)

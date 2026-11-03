@@ -113,14 +113,14 @@ nonisolated enum OAuth {
         let expiresIn: Int
     }
 
-    /// Opens the provider's sign-in page in the default browser and waits (up to five minutes)
-    /// for the redirect, then redeems the code with `client`. Cancelling the task stops waiting
-    /// and closes the listener.
+    /// Opens the provider's sign-in page in the default browser once the redirect listener is up,
+    /// waits (up to five minutes) for the redirect, then redeems the code with `client`.
+    /// Cancelling the task stops waiting and closes the listener.
     @MainActor
     static func signIn(_ provider: Provider, client: OAuthClient) async throws -> Grant {
         let verifier = randomToken()
         let state = randomToken()
-        let challenge = base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
+        let challenge = Data(SHA256.hash(data: Data(verifier.utf8))).base64URLEncodedString()
         var components = URLComponents(url: provider.authorizeURL, resolvingAgainstBaseURL: false)
         let parameters = [
             "client_id": client.id,
@@ -136,7 +136,14 @@ nonisolated enum OAuth {
             throw OAuthError(code: "config", message: "Could not build the sign-in address.")
         }
 
-        let code = try await RedirectListener.code(state: state) { NSWorkspace.shared.open(url) }
+        // The browser opens from here, on the main actor, once the redirect can be received.
+        let listener = try RedirectListener(state: state)
+        let code = try await withThrowingTaskGroup { group in
+            group.addTask { try await listener.code() }
+            if await listener.ready() { NSWorkspace.shared.open(url) }
+            guard let code = try await group.next() else { throw CancellationError() }
+            return code
+        }
 
         let response = try await exchange([
             "grant_type": "authorization_code",
@@ -203,27 +210,17 @@ nonisolated enum OAuth {
 
         init?(jwt: String) {
             let parts = jwt.split(separator: ".")
-            guard parts.count >= 2 else { return nil }
-            var payload = parts[1].replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-            payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+            guard parts.count >= 2, let data = Data(base64URLEncoded: parts[1]) else { return nil }
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
-            guard let data = Data(base64Encoded: payload),
-                  let claims = try? decoder.decode(Claims.self, from: data) else { return nil }
+            guard let claims = try? decoder.decode(Claims.self, from: data) else { return nil }
             self = claims
         }
     }
 
     /// 256 random bits, base64url: a PKCE verifier (43 characters) or a `state`.
     private static func randomToken() -> String {
-        base64URL(SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) })
-    }
-
-    private static func base64URL(_ data: Data) -> String {
-        data.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
+        SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }.base64URLEncodedString()
     }
 
     /// `application/x-www-form-urlencoded`, also used for the authorization query.
@@ -237,35 +234,55 @@ nonisolated enum OAuth {
 
 /// One-shot HTTP listener on the loopback interface for the OAuth redirect. Answers the browser
 /// with a small page and stops at the first sign-in result, after five minutes, or when the
-/// calling task is cancelled.
-private nonisolated enum RedirectListener {
+/// task running `code()` is cancelled.
+private nonisolated struct RedirectListener: Sendable {
     private static let port: NWEndpoint.Port = 49152
 
-    /// Starts listening, calls `ready` once the port is open, and returns the authorization code.
-    static func code(state: String, ready: @escaping @Sendable () -> Void) async throws -> String {
-        let listener: NetworkListener<TCP>
+    private let listener: NetworkListener<TCP>
+    private let state: String
+    /// One element once the port is open; finishes when listening stops.
+    private let readiness: AsyncStream<Void>
+    private let opened: AsyncStream<Void>.Continuation
+    private let outcomes: AsyncStream<Result<String, any Error>>
+    private let report: AsyncStream<Result<String, any Error>>.Continuation
+
+    init(state: String) throws {
         do {
             listener = try NetworkListener(using: .parameters { TCP() }
-                .localPort(port).requiredInterfaceType(.loopback).localEndpointReuseAllowed(true))
+                .localPort(Self.port).requiredInterfaceType(.loopback).localEndpointReuseAllowed(true))
         } catch {
-            throw failure(error)
+            throw Self.failure(error)
         }
+        self.state = state
+        let (readiness, opened) = AsyncStream.makeStream(of: Void.self)
         let (outcomes, report) = AsyncStream.makeStream(of: Result<String, any Error>.self)
+        (self.readiness, self.opened, self.outcomes, self.report) = (readiness, opened, outcomes, report)
         listener.onStateUpdate { _, update in
             switch update {
-            case .ready: ready()
-            case .failed(let error): report.yield(.failure(failure(error)))
+            case .ready: opened.yield()
+            case .failed(let error): report.yield(.failure(Self.failure(error)))
             default: break
             }
         }
+    }
+
+    /// Waits, while `code()` runs, for the port to open; false when listening stopped first.
+    func ready() async -> Bool {
+        for await _ in readiness { return true }
+        return false
+    }
+
+    /// Listens and returns the authorization code.
+    func code() async throws -> String {
+        defer { opened.finish() }
         return try await withThrowingTaskGroup(of: String.self) { group in
-            group.addTask {
+            group.addTask { [listener, state, report] in
                 do {
                     try await listener.run { connection in
-                        if let outcome = await serve(connection, state: state) { report.yield(outcome) }
+                        if let outcome = await Self.serve(connection, state: state) { report.yield(outcome) }
                     }
                 } catch {
-                    throw Task.isCancelled ? CancellationError() : failure(error)
+                    throw Task.isCancelled ? CancellationError() : Self.failure(error)
                 }
                 throw CancellationError()
             }
@@ -273,7 +290,7 @@ private nonisolated enum RedirectListener {
                 try await Task.sleep(for: .seconds(300))
                 throw OAuthError(code: "timeout", message: "The sign-in timed out after five minutes.")
             }
-            group.addTask {
+            group.addTask { [outcomes] in
                 for await outcome in outcomes { return try outcome.get() }
                 throw CancellationError()
             }
@@ -337,12 +354,10 @@ private nonisolated enum RedirectListener {
     /// `text` nil: the success page.
     private static func respond(_ connection: NetworkConnection<TCP>, status: String, text: String?) async throws {
         let message = text ?? "You can close this tab and return to Mailstream."
-        let escaped = message.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
         let html = """
             <!doctype html><html><head><meta charset="utf-8"><title>Mailstream</title></head>\
             <body style="font: 15px -apple-system, sans-serif; margin: 4em auto; max-width: 32em; text-align: center">\
-            <p>\(escaped)</p></body></html>
+            <p>\(HTMLText.escape(message))</p></body></html>
             """
         let body = Data(html.utf8)
         let head = "HTTP/1.1 \(status)\r\nContent-Type: text/html; charset=utf-8\r\n"

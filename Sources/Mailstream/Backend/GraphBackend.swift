@@ -4,9 +4,11 @@ import Foundation
 /// message keeps its id across moves; folder ids are mailbox ids.
 nonisolated final class GraphBackend: MailBackend {
     private let api: API
+    private let wellKnownFolders: WellKnownFolders
 
     init(api: API) {
         self.api = api
+        wellKnownFolders = WellKnownFolders(api: api)
     }
 
     @concurrent func identity() async throws -> Address {
@@ -20,7 +22,7 @@ nonisolated final class GraphBackend: MailBackend {
     // MARK: Folders
 
     @concurrent func mailboxes(counts: Bool) async throws -> [Mailbox] {
-        async let known = wellKnownFolders()
+        async let known = wellKnownFolders.ids()
         let top = try await pages(Folder.self, Self.url("me/mailFolders", Self.folderQuery), priority: .interactive)
         let wellKnown = try await known
         let hidden = Set(Self.systemFolders.compactMap { wellKnown[$0] })
@@ -45,25 +47,43 @@ nonisolated final class GraphBackend: MailBackend {
     /// Exchange's own folders, left out of the sidebar with everything under them.
     private static let systemFolders = ["conversationhistory", "outbox", "syncissues"]
 
-    /// Well-known folder name → folder id; names the mailbox lacks are absent.
-    private func wellKnownFolders() async throws -> [String: String] {
-        try await withThrowingTaskGroup(of: (String, String?).self) { group in
-            for name in Self.roleFolders.map(\.0) + Self.systemFolders {
-                group.addTask {
-                    do {
-                        let folder = try await self.api.decode(FolderID.self,
-                                                               Self.request(Self.url("me/mailFolders/\(name)", [("$select", "id")])))
-                        return (name, folder.id)
-                    } catch let error as APIError where error.status == 404 {
-                        return (name, nil)
+    /// Well-known folder name → folder id; names the mailbox lacks are absent. Found ids are kept
+    /// for the backend's life (Graph's folder ids never change); missing names, which the mailbox
+    /// may gain (Archive appears on first use), are asked again.
+    private actor WellKnownFolders {
+        private let api: API
+        private var known: [String: String] = [:]
+
+        init(api: API) {
+            self.api = api
+        }
+
+        func ids() async throws -> [String: String] {
+            let wanted = (GraphBackend.roleFolders.map(\.0) + GraphBackend.systemFolders).filter { known[$0] == nil }
+            guard !wanted.isEmpty else { return known }
+            let found = try await Self.lookUp(wanted, api: api)
+            known.merge(found) { current, _ in current }
+            return known
+        }
+
+        private static func lookUp(_ names: [String], api: API) async throws -> [String: String] {
+            try await withThrowingTaskGroup(of: (String, String?).self) { group in
+                for name in names {
+                    group.addTask {
+                        do {
+                            let url = try GraphBackend.url("me/mailFolders/\(name)", [("$select", "id")])
+                            return (name, try await api.decode(FolderID.self, GraphBackend.request(url)).id)
+                        } catch let error as APIError where error.status == 404 {
+                            return (name, nil)
+                        }
                     }
                 }
+                var ids: [String: String] = [:]
+                for try await (name, id) in group {
+                    if let id { ids[name] = id }
+                }
+                return ids
             }
-            var ids: [String: String] = [:]
-            for try await (name, id) in group {
-                if let id { ids[name] = id }
-            }
-            return ids
         }
     }
 
@@ -164,19 +184,16 @@ nonisolated final class GraphBackend: MailBackend {
             switch part {
             case let .file(name, mime, contentID, inline, bytes):
                 assembly.store(bytes, index: index, filename: name, mime: mime, contentID: contentID, inline: inline)
-            case let .message(headline, innerHTML, innerText):
-                if let outer = html {
-                    html = outer + "<div class=\"ms-attached-message\"><div class=\"ms-attached-headline\">\(HTMLText.escape(headline))</div>"
-                        + (innerHTML ?? HTMLText.plainToHTML(innerText)) + "</div>"
-                } else {
-                    text = (text ?? "") + "\n\n---------- \(headline) ----------\n" + innerText
-                }
+            case let .message(attached):
+                // A plain message with an HTML one attached is shown as HTML, its own text included.
+                if html == nil, attached.hasHTML { html = HTMLText.plainToHTML(text ?? "") }
+                if let outer = html { html = outer + attached.html }
+                if let outer = text { text = outer + "\n\n" + attached.text }
             }
         }
 
-        let references = message.internetMessageHeaders?
-            .first { $0.name.caseInsensitiveCompare("References") == .orderedSame }?
-            .value.split(whereSeparator: \.isWhitespace).map { normalizeMessageID(String($0)) }.filter { !$0.isEmpty } ?? []
+        let references = parseMessageIDList(message.internetMessageHeaders?
+            .first { $0.name.caseInsensitiveCompare("References") == .orderedSame }?.value)
         return assembly.finish(html: html, text: text, cc: (message.ccRecipients ?? []).compactMap(\.address),
                                replyTo: (message.replyTo ?? []).compactMap(\.address), references: references)
     }
@@ -200,14 +217,11 @@ nonisolated final class GraphBackend: MailBackend {
                                                              prefer: Self.htmlBody),
                                                 priority: priority)
             let attached = expanded.item
-            let from = attached?.from?.address?.rfc5322 ?? "unknown sender"
-            let subject = attached?.subject ?? ""
-            let headline = subject.isEmpty ? "Attached message from \(from)" : "Attached message from \(from): \(subject)"
             let content = attached?.body?.content ?? ""
-            if attached?.body?.contentType?.lowercased() == "text" {
-                return .message(headline: headline, html: nil, text: content)
-            }
-            return .message(headline: headline, html: content, text: HTMLText.strip(content))
+            let isText = attached?.body?.contentType?.lowercased() == "text"
+            return .message(MessageAssembly.AttachedMessage(from: attached?.from?.address, subject: attached?.subject ?? "",
+                                                            html: isText ? nil : content,
+                                                            text: isText ? content : HTMLText.strip(content)))
         default:
             return nil
         }
@@ -241,31 +255,24 @@ nonisolated final class GraphBackend: MailBackend {
             BatchRequest(id: String(index + 1), method: method, url: "/me/messages/\(Self.segment(id))\(path)",
                          headers: headers, body: body)
         }
-        for start in stride(from: 0, to: requests.count, by: 20) {
-            var pending = Array(requests[start..<min(start + 20, requests.count)])
-            var attempt = 0
-            while !pending.isEmpty {
-                attempt += 1
+        for chunk in requests.chunked(into: 20) {
+            try await API.repeatingThrottled(chunk, service: "Microsoft Graph") { pending in
                 let answer = try await api.decode(BatchAnswer.self,
                                                   Self.request(Self.url("$batch"), method: "POST", json: BatchPayload(requests: pending)))
                 var throttled = Set<String>()
-                var delay = 1.0
+                var retryAfter: Double?
                 for item in answer.responses.sorted(by: { (Int($0.id) ?? 0) < (Int($1.id) ?? 0) }) {
                     switch item.status {
                     case 200..<300:
                         continue
-                    case 429 where attempt < 5:
+                    case 429:
                         throttled.insert(item.id)
-                        if let seconds = item.headers?.first(where: { $0.key.caseInsensitiveCompare("Retry-After") == .orderedSame })
-                            .flatMap({ Double($0.value) }) {
-                            delay = max(delay, seconds)
-                        }
+                        if let seconds = item.retryAfter { retryAfter = max(retryAfter ?? 0, seconds) }
                     default:
-                        throw APIError(status: item.status, message: item.message ?? "Microsoft Graph answered \(item.status)")
+                        throw APIError(status: item.status, message: item.body?.message ?? "Microsoft Graph answered \(item.status)")
                     }
                 }
-                pending = pending.filter { throttled.contains($0.id) }
-                if !pending.isEmpty { try await Task.sleep(for: .milliseconds(Int(min(delay, 30) * 1000))) }
+                return (pending.filter { throttled.contains($0.id) }, retryAfter)
             }
         }
     }
@@ -433,7 +440,7 @@ nonisolated extension GraphBackend {
     /// An attachment ready for `MessageAssembly`, or an attached message rendered inline.
     fileprivate enum Part: Sendable {
         case file(name: String?, mime: String, contentID: String?, inline: Bool, bytes: Data)
-        case message(headline: String, html: String?, text: String)
+        case message(MessageAssembly.AttachedMessage)
     }
 
     /// The JSON body of one batched change.
@@ -468,13 +475,8 @@ nonisolated extension GraphBackend {
             let id: String
             let status: Int
             let headers: [String: String]?
-            /// The error message of a failed sub-request.
-            let message: String?
-
-            private struct ErrorBody: Decodable {
-                struct Inner: Decodable { let message: String? }
-                let error: Inner?
-            }
+            /// A failed sub-request's error answer.
+            let body: APIError.Body?
 
             enum CodingKeys: String, CodingKey { case id, status, headers, body }
 
@@ -483,7 +485,12 @@ nonisolated extension GraphBackend {
                 id = try container.decode(String.self, forKey: .id)
                 status = try container.decode(Int.self, forKey: .status)
                 headers = try? container.decodeIfPresent([String: String].self, forKey: .headers)
-                message = (try? container.decodeIfPresent(ErrorBody.self, forKey: .body))?.error?.message
+                body = try? container.decodeIfPresent(APIError.Body.self, forKey: .body)
+            }
+
+            /// Seconds Graph asked to wait before repeating a throttled sub-request.
+            var retryAfter: Double? {
+                headers?.first { $0.key.caseInsensitiveCompare("Retry-After") == .orderedSame }.flatMap { Double($0.value) }
             }
         }
 

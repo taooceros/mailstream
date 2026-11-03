@@ -18,7 +18,7 @@ extension MailStore {
         // Replies inside this thread count too, so a search result's sender is known before the
         // sent mailbox that holds the reply is loaded.
         var known = correspondents()
-        for message in conversation.messages where message.envelope.from.contains(where: { own.contains($0.normalizedEmail) }) {
+        for message in conversation.messages where message.isFromUser(own: own) {
             known.formUnion(message.envelope.to.map(\.normalizedEmail))
         }
         var seen = Set<String>()

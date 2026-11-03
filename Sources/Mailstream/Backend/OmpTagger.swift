@@ -12,7 +12,7 @@ actor OmpTagger {
         /// The user is a direct To recipient, not cc'd or reached through a list.
         var userInTo: Bool
         var subject: String
-        /// Start of the message text; empty when not loaded yet.
+        /// The message's one-line snippet; empty when not loaded yet. Cut to `maxSnippet` here.
         var snippet: String
         var messageCount: Int
         var userReplied: Bool
@@ -24,8 +24,8 @@ actor OmpTagger {
         var errorDescription: String? { message }
     }
 
-    static let maxSnippet = 200
-    static let maxLabelLength = 16
+    private static let maxSnippet = 200
+    private static let maxLabelLength = 16
 
     private let tools: ToolEnvironment
     private let workingDirectory: URL
@@ -98,13 +98,13 @@ actor OmpTagger {
 
     // MARK: Prompt
 
-    static func arguments(prompt: String) -> [String] {
+    private static func arguments(prompt: String) -> [String] {
         ["-p", "--no-session", "--no-tools", "--no-skills", "--no-rules", "--no-context-files",
          "--no-extensions", "--no-lsp", "--no-title", "--thinking", "off", "--model", "smol",
          "--max-time", "120", "--system-prompt", systemPrompt, prompt]
     }
 
-    static let systemPrompt = """
+    private static let systemPrompt = """
         You sort email conversations for a mail client. The user message is a JSON array with one object \
         per conversation: id; from (sender of the latest incoming message); toMe (true if the user is a \
         direct To recipient, false if cc'd or reached via a list); subject; snippet (start of that message, \
@@ -147,13 +147,13 @@ actor OmpTagger {
     }
 
     /// Items are numbered from 1 so the model echoes short ids; `parse` maps them back.
-    static func prompt(_ items: [Item]) -> String {
+    private static func prompt(_ items: [Item]) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let lines = items.enumerated().compactMap { index, item -> String? in
             let name = item.senderName.trimmingCharacters(in: .whitespacesAndNewlines)
             let from = name.isEmpty || name == item.senderEmail ? item.senderEmail : "\(name) <\(item.senderEmail)>"
-            let snippet = item.snippet.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(maxSnippet)
+            let snippet = item.snippet.prefix(maxSnippet)
             let entry = PromptItem(id: String(index + 1), from: from, toMe: item.userInTo, subject: item.subject,
                                    snippet: snippet.isEmpty ? nil : String(snippet), count: item.messageCount,
                                    replied: item.userReplied, lastFromMe: item.latestFromUser)
@@ -164,7 +164,7 @@ actor OmpTagger {
 
     // MARK: Parsing
 
-    static func parse(_ data: Data, items: [Item]) throws -> [String: ConversationTag] {
+    private static func parse(_ data: Data, items: [Item]) throws -> [String: ConversationTag] {
         let text = String(decoding: data, as: UTF8.self)
         guard let start = text.firstIndex(of: "["), let end = text.lastIndex(of: "]"), start < end,
               let array = try? JSONSerialization.jsonObject(with: Data(text[start...end].utf8)) as? [Any]

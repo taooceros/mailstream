@@ -67,7 +67,11 @@ nonisolated func normalizeMessageID(_ raw: String) -> String {
     raw.trimmingCharacters(in: CharacterSet(charactersIn: "<> \t\r\n")).lowercased()
 }
 
-nonisolated func parseISODate(_ raw: String) -> Date? {
-    if let date = try? Date(raw, strategy: .iso8601) { return date }
-    return try? Date(raw, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true))
+/// Normalized ids in a Message-ID list header (`In-Reply-To`, `References`): the bracketed ones,
+/// adjacent or spaced, else whitespace-separated bare ids.
+nonisolated func parseMessageIDList(_ header: String?) -> [String] {
+    guard let header, !header.isEmpty else { return [] }
+    let bracketed = header.matches(of: /<([^<>]+)>/).map { String($0.1) }
+    let raw = bracketed.isEmpty ? header.split(whereSeparator: \.isWhitespace).map(String.init) : bracketed
+    return raw.map(normalizeMessageID).filter { !$0.isEmpty }
 }

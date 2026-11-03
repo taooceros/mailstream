@@ -1,10 +1,10 @@
 import AppKit
 
-/// HTML scaffolding for the conversation reader: one long-lived shell page whose column
-/// `MS.render` fills per conversation. Message bodies arrive later through `MS.setBody`; HTML mail
-/// renders inside a same-origin `srcdoc` iframe that inherits the page's Content-Security-Policy
-/// (no scripts, remote images and styles allowed); a body whose remote content stays blocked
-/// carries a stricter policy of its own (`blockingRemoteContent`).
+/// HTML scaffolding for a conversation in the reader's shell page (`WebShell`): `MS.render` fills
+/// the column per conversation, and message bodies arrive later through `MS.setBody`. HTML mail
+/// renders inside a same-origin `srcdoc` iframe that inherits the shell's Content-Security-Policy;
+/// a body whose remote content stays blocked carries a stricter policy of its own
+/// (`blockingRemoteContent`). It also holds the markup chat spaces (`ChatPage`) share.
 @MainActor
 enum ReaderPage {
     struct Card {
@@ -17,20 +17,6 @@ enum ReaderPage {
         /// The sender's picture as a `data:` URL, when already known.
         let avatar: String?
     }
-
-    /// The persistent page: styles and an empty column (the script is a user script). Its CSP
-    /// allows remote images, styles and fonts so that no conversation needs a different page; only
-    /// mail bodies, which block them per frame, and escaped markup ever reach it.
-    static let shell: String = {
-        let csp = "default-src 'none'; img-src data: mscid: https: http:; style-src 'unsafe-inline' https: http:; "
-            + "font-src data: https: http:; media-src data: mscid:; frame-src about:; child-src about:"
-        return """
-        <!doctype html><html><head><meta charset="utf-8">
-        <meta http-equiv="Content-Security-Policy" content="\(csp)">
-        <meta name="color-scheme" content="light dark">
-        <style>\(css)\(ChatPage.css)</style></head><body><div class="column" id="column"></div></body></html>
-        """
-    }()
 
     /// `html` with a CSP of its own that keeps its frame from loading anything remote; a `srcdoc`
     /// document enforces both its own and its parent's policy. The meta goes after any leading
@@ -74,13 +60,11 @@ enum ReaderPage {
         for label in mailboxLabels { meta.append(Self.meta(label, tint: nil)) }
         if conversation.messages.count > 1 { meta.append(Self.meta("\(conversation.messages.count) messages", tint: nil)) }
 
-        let replyTarget = conversation.messages.last { message in
-            !(message.envelope.from.contains { own.contains($0.normalizedEmail) })
-        }?.envelope.from.first?.shortName
+        let replyTarget = conversation.latestIncoming(own: own)?.envelope.from.first?.shortName
         let replyLabel = replyTarget.map { "Reply to \(HTMLText.escape($0))…" } ?? "Reply…"
         var html = """
         <header class="thread-header">
-          <h1>\(HTMLText.escape(SubjectStyle.split(conversation.subject).title))</h1>
+          <h1>\(HTMLText.escape(Subject(conversation.subject).displayTitle))</h1>
           <div class="thread-meta">\(waiting)\(meta.joined(separator: "<i class=\"sep\">·</i>"))</div>
         </header>
         <div id="remote-banner" class="banner" hidden>
@@ -131,7 +115,7 @@ enum ReaderPage {
     }
 
     /// Inline SVG glyphs, so icons match SF Symbols' weight instead of falling back to text arrows.
-    enum Icon {
+    nonisolated enum Icon {
         private static func svg(_ path: String) -> String {
             "<svg class=\"icon\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path d=\"\(path)\" fill=\"none\" "
                 + "stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
@@ -152,9 +136,6 @@ enum ReaderPage {
         return "<span class=\"meta-item\"\(style)>\(markup)\(HTMLText.escape(text))</span>"
     }
 
-    /// A sender's next message within this window, on the same day, joins their previous one.
-    private static let groupWindow: TimeInterval = 3600
-
     /// Messages as a chat log: a divider per day, and runs from one sender under one name.
     private static func chatMessages(_ cards: [Card], own: Set<String>) -> String {
         let calendar = Calendar.current
@@ -164,7 +145,7 @@ enum ReaderPage {
             let date = card.message.envelope.date
             let last = previous?.message.envelope.date
             let sameDay = date.flatMap { date in last.map { calendar.isDate($0, inSameDayAs: date) } } ?? false
-            if let date, !sameDay { html += dayDivider(date) }
+            if let date, !sameDay { html += dayDivider(date, calendar: calendar) }
             let continued = sameDay && previous?.sender.normalizedEmail == card.sender.normalizedEmail
                 && date.flatMap { date in last.map { date.timeIntervalSince($0) < groupWindow } } == true
             html += chatArticle(card, own: own, continued: continued, position: position, total: cards.count)
@@ -173,8 +154,90 @@ enum ReaderPage {
         return html
     }
 
-    private static func dayDivider(_ date: Date) -> String {
-        let calendar = Calendar.current
+    private static func chatArticle(_ card: Card, own: Set<String>, continued: Bool, position: Int, total: Int) -> String {
+        let envelope = card.message.envelope
+        let sender = card.sender
+        let i = card.index
+        let head = continued ? nil : ChatHead(
+            avatar: avatar(card), name: displayName(sender, own: own), title: sender.email,
+            extra: (envelope.isFlagged ? Icon.star : "")
+                + "<span class=\"recipients\" id=\"rcpt-\(i)\">\(recipients(envelope.to, cc: [], own: own))</span>")
+        return chatMessage(id: "msg-\(i)", classes: ["expanded"] + (envelope.isSeen ? [] : ["unread"]),
+                           style: style(card, position: position, total: total), head: head,
+                           time: envelope.date?.formatted(.dateTime.hour().minute()) ?? "",
+                           full: envelope.date?.formatted(date: .complete, time: .shortened) ?? "",
+                           main: bodySlot(i), actions: actions(i))
+    }
+
+    private static func article(_ card: Card, own: Set<String>, position: Int, total: Int) -> String {
+        let envelope = card.message.envelope
+        let email = HTMLText.escape(card.sender.email)
+        let date = envelope.date.map { date -> String in
+            let style: Date.FormatStyle = Calendar.current.isDate(date, equalTo: Date(), toGranularity: .year)
+                ? .dateTime.month(.abbreviated).day().hour().minute()
+                : .dateTime.month(.abbreviated).day().year().hour().minute()
+            return HTMLText.escape(date.formatted(style))
+        } ?? ""
+        let state = card.expanded ? "expanded" : "collapsed"
+        let unread = envelope.isSeen ? "" : " unread"
+        let i = card.index
+        return """
+        <article id="msg-\(i)" class="msg \(state)\(unread)" style="\(style(card, position: position, total: total))">
+          <div class="msg-head" data-action="toggle" data-index="\(i)">
+            \(avatar(card))
+            <div class="who">
+              <div class="line1">
+                <span class="name">\(HTMLText.escape(displayName(card.sender, own: own)))</span>
+                <span class="email" data-action="compose-to" data-email="\(email)">\(email)</span>
+                <span class="snippet">\(HTMLText.escape(card.snippet ?? ""))</span>
+              </div>
+              <div class="recipients" id="rcpt-\(i)">\(recipients(envelope.to, cc: [], own: own))</div>
+            </div>
+            <div class="meta">
+              \(actions(i))
+              \(envelope.isFlagged ? Icon.star : "")
+              <span class="date">\(date)</span>
+            </div>
+          </div>
+          <div class="fold"><div class="fold-inner"><div class="fold-content">\(bodySlot(i))</div></div></div>
+        </article>
+        """
+    }
+
+    private static func displayName(_ sender: Address, own: Set<String>) -> String {
+        own.contains(sender.normalizedEmail) ? "\(sender.displayName) (me)" : sender.displayName
+    }
+
+    private static func avatar(_ card: Card) -> String {
+        avatar(key: card.sender.normalizedEmail, photo: card.avatar, initials: Avatar.initials(for: card.sender),
+               enlarges: true)
+    }
+
+    /// The sender's color; later messages arrive a beat after earlier ones, and only the last few animate at all.
+    private static func style(_ card: Card, position: Int, total: Int) -> String {
+        "--avatar:\(Avatar.color(for: card.sender.email).cssHex); animation-delay:\(max(0, position - max(0, total - 6)) * 30)ms"
+    }
+
+    /// Where `MS.setBody` puts message `index`'s body and attachments.
+    private static func bodySlot(_ index: Int) -> String {
+        "<div class=\"msg-body\" id=\"body-\(index)\"><div class=\"skeleton\"><i></i><i></i><i class=\"short\"></i></div></div>"
+            + "<div class=\"attachments\" id=\"att-\(index)\"></div>"
+    }
+
+    private static func actions(_ index: Int) -> String {
+        "<div class=\"actions\">"
+            + "<button title=\"Reply\" data-action=\"reply\" data-index=\"\(index)\">\(Icon.reply)</button>"
+            + "<button title=\"Reply All\" data-action=\"replyAll\" data-index=\"\(index)\">\(Icon.replyAll)</button>"
+            + "<button title=\"Forward\" data-action=\"forward\" data-index=\"\(index)\">\(Icon.forward)</button></div>"
+    }
+
+    // MARK: - Chat logs
+
+    /// A sender's next message within this window, on the same day, joins their previous one.
+    nonisolated static let groupWindow: TimeInterval = 3600
+
+    /// A divider naming `date`'s day.
+    nonisolated static func dayDivider(_ date: Date, calendar: Calendar) -> String {
         let label: String
         if calendar.isDateInToday(date) {
             label = "Today"
@@ -188,112 +251,60 @@ enum ReaderPage {
         return "<div class=\"day\"><span>\(HTMLText.escape(label))</span></div>"
     }
 
-    /// One message in a chat log; a `continued` one drops the avatar and name, showing its time on hover.
-    private static func chatArticle(_ card: Card, own: Set<String>, continued: Bool, position: Int, total: Int) -> String {
-        let envelope = card.message.envelope
-        let sender = card.sender
-        let isOwn = own.contains(sender.normalizedEmail)
-        let name = HTMLText.escape(isOwn ? "\(sender.displayName) (me)" : sender.displayName)
-        let email = HTMLText.escape(sender.email)
-        let color = Avatar.color(for: sender.email).cssHex
-        let time = HTMLText.escape(envelope.date?.formatted(.dateTime.hour().minute()) ?? "")
-        let full = HTMLText.escape(envelope.date?.formatted(date: .complete, time: .shortened) ?? "")
-        let i = card.index
-        let gutter: String
-        let head: String
-        if continued {
-            gutter = "<span class=\"chat-time\" title=\"\(full)\">\(time)</span>"
-            head = ""
-        } else {
-            let key = HTMLText.escape(sender.normalizedEmail)
-            gutter = card.avatar.map {
-                "<div class=\"avatar photo\" data-action=\"avatar\" data-avatar=\"\(key)\" style=\"background-image:url('\($0)')\"></div>"
-            } ?? "<div class=\"avatar\" data-avatar=\"\(key)\">\(HTMLText.escape(Avatar.initials(for: sender)))</div>"
-            head = """
-            <div class="chat-head">
-              <span class="name" title="\(email)">\(name)</span>
-              <span class="date" title="\(full)">\(time)</span>
-              \(envelope.isFlagged ? Icon.star : "")
-              <span class="recipients" id="rcpt-\(i)">\(recipients(envelope.to, cc: [], own: own))</span>
-            </div>
-            """
+    /// `key`'s picture, or their initials while none is known; `enlarges` lets a click enlarge it.
+    nonisolated static func avatar(key: String, photo: String?, initials: String, enlarges: Bool) -> String {
+        let key = HTMLText.escape(key)
+        guard let photo = photo.flatMap(cssURL) else {
+            return "<div class=\"avatar\" data-avatar=\"\(key)\">\(HTMLText.escape(initials))</div>"
         }
-        let unread = envelope.isSeen ? "" : " unread"
-        let delay = max(0, position - max(0, total - 6)) * 30
-        return """
-        <article id="msg-\(i)" class="msg chat expanded\(continued ? " continued" : "")\(unread)" style="--avatar:\(color); animation-delay:\(delay)ms">
-          <div class="chat-gutter">\(gutter)</div>
-          <div class="chat-main">
-            \(head)
-            <div class="msg-body" id="body-\(i)"><div class="skeleton"><i></i><i></i><i class="short"></i></div></div>
-            <div class="attachments" id="att-\(i)"></div>
-          </div>
-          <div class="actions">
-            <button title="Reply" data-action="reply" data-index="\(i)">\(Icon.reply)</button>
-            <button title="Reply All" data-action="replyAll" data-index="\(i)">\(Icon.replyAll)</button>
-            <button title="Forward" data-action="forward" data-index="\(i)">\(Icon.forward)</button>
-          </div>
-        </article>
-        """
+        let action = enlarges ? " data-action=\"avatar\"" : ""
+        return "<div class=\"avatar photo\"\(action) data-avatar=\"\(key)\" style=\"background-image:url('\(photo)')\"></div>"
     }
 
-    private static func article(_ card: Card, own: Set<String>, position: Int, total: Int) -> String {
-        let envelope = card.message.envelope
-        let sender = card.sender
-        let isOwn = own.contains(sender.normalizedEmail)
-        let name = HTMLText.escape(isOwn ? "\(sender.displayName) (me)" : sender.displayName)
-        let email = HTMLText.escape(sender.email)
-        let color = Avatar.color(for: sender.email).cssHex
-        let initials = HTMLText.escape(Avatar.initials(for: sender))
-        let key = HTMLText.escape(sender.normalizedEmail)
-        let avatar = card.avatar.map {
-            "<div class=\"avatar photo\" data-action=\"avatar\" data-avatar=\"\(key)\" style=\"background-image:url('\($0)')\"></div>"
-        } ?? "<div class=\"avatar\" data-avatar=\"\(key)\">\(initials)</div>"
-        let date = envelope.date.map { date -> String in
-            let calendar = Calendar.current
-            let style: Date.FormatStyle = calendar.isDate(date, equalTo: Date(), toGranularity: .year)
-                ? .dateTime.month(.abbreviated).day().hour().minute()
-                : .dateTime.month(.abbreviated).day().year().hour().minute()
-            return HTMLText.escape(date.formatted(style))
-        } ?? ""
-        let state = card.expanded ? "expanded" : "collapsed"
-        let unread = envelope.isSeen ? "" : " unread"
-        let i = card.index
-        // Later messages arrive a beat after earlier ones; only the last few animate at all.
-        let delay = max(0, position - max(0, total - 6)) * 30
-        return """
-        <article id="msg-\(i)" class="msg \(state)\(unread)" style="--avatar:\(color); animation-delay:\(delay)ms">
-          <div class="msg-head" data-action="toggle" data-index="\(i)">
-            \(avatar)
-            <div class="who">
-              <div class="line1">
-                <span class="name">\(name)</span>
-                <span class="email" data-action="compose-to" data-email="\(email)">\(email)</span>
-                <span class="snippet">\(HTMLText.escape(card.snippet ?? ""))</span>
-              </div>
-              <div class="recipients" id="rcpt-\(i)">\(recipients(envelope.to, cc: [], own: own))</div>
-            </div>
-            <div class="meta">
-              <div class="actions">
-                <button title="Reply" data-action="reply" data-index="\(i)">\(Icon.reply)</button>
-                <button title="Reply All" data-action="replyAll" data-index="\(i)">\(Icon.replyAll)</button>
-                <button title="Forward" data-action="forward" data-index="\(i)">\(Icon.forward)</button>
-              </div>
-              \(envelope.isFlagged ? Icon.star : "")
-              <span class="date">\(date)</span>
-            </div>
-          </div>
-          <div class="fold"><div class="fold-inner"><div class="fold-content">
-            <div class="msg-body" id="body-\(i)"><div class="skeleton"><i></i><i></i><i class="short"></i></div></div>
-            <div class="attachments" id="att-\(i)"></div>
-          </div></div></div>
-        </article>
-        """
+    /// `url` if it is safe inside `url('…')` in a style attribute: a data URL or a plain https URL.
+    nonisolated private static func cssURL(_ url: String) -> String? {
+        if url.hasPrefix("data:image/") { return url.contains(where: { "'\"()\\ ".contains($0) }) ? nil : url }
+        guard url.hasPrefix("https://"), !url.contains(where: { "'\"()\\<> \n\r\t".contains($0) }) else { return nil }
+        return url
+    }
+
+    /// Who starts a run of messages in a chat log: avatar markup, name (`title` its tooltip) and
+    /// markup following the time.
+    nonisolated struct ChatHead {
+        let avatar: String
+        let name: String
+        var title: String?
+        var extra = ""
+    }
+
+    /// One message in a chat log, a mail thread's or a chat space's. Without a `head` it continues
+    /// its sender's run: no avatar or name, and its `time` shows in the gutter on hover.
+    nonisolated static func chatMessage(id: String? = nil, classes: [String], style: String, head: ChatHead?,
+                                        time: String, full: String, main: String, actions: String) -> String {
+        let time = HTMLText.escape(time), full = HTMLText.escape(full)
+        let gutter: String, top: String
+        if let head {
+            let title = head.title.map { " title=\"\(HTMLText.escape($0))\"" } ?? ""
+            gutter = head.avatar
+            top = "<div class=\"chat-head\"><span class=\"name\"\(title)>\(HTMLText.escape(head.name))</span>"
+                + "<span class=\"date\" title=\"\(full)\">\(time)</span>\(head.extra)</div>"
+        } else {
+            gutter = "<span class=\"chat-time\" title=\"\(full)\">\(time)</span>"
+            top = ""
+        }
+        let classes = (["msg", "chat"] + classes + (head == nil ? ["continued"] : [])).joined(separator: " ")
+        return "<article\(id.map { " id=\"\($0)\"" } ?? "") class=\"\(classes)\" style=\"\(style)\">"
+            + "<div class=\"chat-gutter\">\(gutter)</div><div class=\"chat-main\">\(top)\(main)</div>\(actions)</article>"
+    }
+
+    /// How a recipient reads in a thread: "me" for the user's own addresses.
+    static func name(_ address: Address, own: Set<String>) -> String {
+        own.contains(address.normalizedEmail) ? "me" : address.displayName
     }
 
     /// "to Josh, me +2", with the full list in the tooltip.
     static func recipients(_ to: [Address], cc: [Address], own: Set<String>) -> String {
-        let all = (to + cc).map { own.contains($0.normalizedEmail) ? "me" : $0.displayName }
+        let all = (to + cc).map { name($0, own: own) }
         guard !all.isEmpty else { return "" }
         let shown = all.prefix(3).joined(separator: ", ")
         let more = all.count > 3 ? " +\(all.count - 3)" : ""
@@ -523,7 +534,7 @@ enum ReaderPage {
 
     /// Injected into every HTML mail frame. The frame stays transparent so a body takes on its
     /// card's surface (the chat hover tint; in dark mode the frame's own white card).
-    static let frameCSS = """
+    private static let frameCSS = """
     html, body { height: auto !important; min-height: 0 !important; }
     body { margin: 0; padding: 2px 0; color: #1d1d1f;
       font: 14px/1.45 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; overflow-wrap: break-word; }
@@ -542,14 +553,15 @@ enum ReaderPage {
 
     // MARK: - Script
 
+    /// The mail thread page, run after `WebShell`'s script, whose `Shell` it uses.
     static let script = """
     (() => {
-      // Messages carry the render they came from, so the app ignores clicks on a thread it replaced.
-      let generation = 0;
-      const post = (msg) => window.webkit.messageHandlers.ms.postMessage(Object.assign(msg, { generation }));
+      const { post, $, escapeHTML, show } = Shell;
       const FRAME_CSS = \(jsString(frameCSS));
       // Chat threads fold signatures along with quotes.
       let chatMode = false;
+      // Clears the "Reply sent" note on the composer pill.
+      let sentTimer = 0;
       const SIGNATURES = ['.gmail_signature', '.gmail_signature_prefix', '[data-smartmail="gmail_signature"]',
                           '.moz-signature', '#Signature', '#AppleMailSignature', '#ms-outlook-mobile-signature',
                           '.ms-signature'].join(', ');
@@ -581,46 +593,26 @@ enum ReaderPage {
       }
       window.addEventListener('scroll', () => { if (followed && Math.abs(window.scrollY - pinned) > 1) place(); });
 
-      document.addEventListener('click', (event) => {
-        const link = event.target.closest('a[href]');
-        if (link && !event.target.closest('[data-action]')) {
-          event.preventDefault();
-          post({ action: 'link', href: link.href });
-          return;
-        }
-        const el = event.target.closest('[data-action]');
-        if (!el) return;
-        const action = el.dataset.action;
-        if (action === 'compose-to' && el.closest('.msg.collapsed')) {
-          toggle(Number(el.closest('.msg').id.slice(4)));
-          return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        if (action === 'avatar') {
-          const r = el.getBoundingClientRect();
-          const msg = el.closest('.msg');
-          post({ action, index: msg && msg.id ? Number(msg.id.slice(4)) : -1, email: el.dataset.avatar || '',
-                 rect: [r.left, r.top, r.width, r.height] });
-          return;
-        }
-        if (action.startsWith('chat-')) {
-          chatAction(el, action);
-          return;
-        }
-        if (action === 'toggle') {
-          if (window.getSelection && String(window.getSelection()).length > 0) return;
-          toggle(Number(el.dataset.index));
-          return;
-        }
-        if (action === 'reply-quote') {
-          toggleQuote();
-          return;
-        }
-        post({ action, index: el.dataset.index !== undefined ? Number(el.dataset.index) : -1,
-               part: el.dataset.part !== undefined ? Number(el.dataset.part) : -1,
-               email: el.dataset.email || '', text: composerText() });
-      }, true);
+      const mail = {
+        act(el, action) {
+          if (action === 'compose-to' && el.closest('.msg.collapsed')) {
+            toggle(Number(el.closest('.msg').id.slice(4)));
+          } else if (action === 'toggle') {
+            if (window.getSelection && String(window.getSelection()).length > 0) return;
+            toggle(Number(el.dataset.index));
+          } else if (action === 'reply-quote') {
+            toggleQuote();
+          } else {
+            post({ action, index: el.dataset.index !== undefined ? Number(el.dataset.index) : -1,
+                   part: el.dataset.part !== undefined ? Number(el.dataset.part) : -1,
+                   email: el.dataset.email || '', text: composerText() });
+          }
+        },
+        leave() {
+          clearTimeout(sentTimer);
+          unfollow();
+        },
+      };
 
       function toggle(index) {
         const article = document.getElementById('msg-' + index);
@@ -826,14 +818,7 @@ enum ReaderPage {
 
       window.addEventListener('resize', () => document.querySelectorAll('iframe.mail-frame').forEach(fit));
 
-      function escapeHTML(text) {
-        return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-      }
-
       // MARK: Inline reply
-
-      const $ = (id) => document.getElementById(id);
-      let sentTimer = 0;
 
       function composerText() {
         const text = $('c-text');
@@ -911,189 +896,16 @@ enum ReaderPage {
         }
       }
 
-      // MARK: Chat spaces
-
-      // The thread a chat message will reply in, set from a message's reply button.
-      let chatThread = null, chatWho = null, chatPositioned = false;
-
-      function chatAction(el, action) {
-        if (action === 'chat-reply') {
-          setChatThread(el.dataset.thread, el.dataset.who);
-          $('c-text').focus();
-          reportChat();
-        } else if (action === 'chat-unthread') {
-          setChatThread(null, null);
-          reportChat();
-        } else if (action === 'chat-send') {
-          sendChat();
-        } else {
-          post({ action, id: el.dataset.id || '', url: el.dataset.url || '' });
-        }
-      }
-
-      function setChatThread(thread, who) {
-        chatThread = thread || null;
-        chatWho = who || null;
-        const head = $('c-thread');
-        if (!head) return;
-        head.hidden = !chatThread;
-        $('c-thread-label').innerHTML = chatThread
-          ? '<span class="c-label">Reply in thread to</span><b>' + escapeHTML(chatWho || '') + '</b>' : '';
-      }
-
-      // Every keystroke reaches the app, so leaving the space keeps the draft.
-      function reportChat() {
-        const text = $('c-text');
-        if (text) post({ action: 'chat-state', text: text.value, thread: chatThread || '', who: chatWho || '',
-                         focused: document.activeElement === text });
-      }
-
-      function growChat() {
-        const text = $('c-text');
-        text.style.height = 'auto';
-        text.style.height = Math.max(40, text.scrollHeight) + 'px';
-      }
-
-      function sendChat() {
-        const text = $('c-text');
-        if (!text.value.trim()) return;
-        post({ action: 'chat-send', text: text.value, thread: chatThread || '' });
-        text.value = '';
-        growChat();
-        setChatThread(null, null);
-        reportChat();
-      }
-
-      function bindChatComposer() {
-        const text = $('c-text');
-        text.addEventListener('input', () => { growChat(); reportChat(); });
-        text.addEventListener('focus', reportChat);
-        text.addEventListener('blur', reportChat);
-        // Return sends, Shift-Return breaks the line; an input method's Return only commits its text.
-        text.addEventListener('keydown', (event) => {
-          if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.isComposing && event.keyCode !== 229) {
-            event.preventDefault();
-            sendChat();
-          }
-        });
-      }
-
-      function fragment(html) {
-        const template = document.createElement('template');
-        template.innerHTML = html;
-        template.content.querySelectorAll('.msg').forEach((msg) => msg.classList.add('static'));
-        return template.content;
-      }
-
-      function nearBottom() {
-        return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 80;
-      }
-
-      function toBottom(smooth) {
-        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
-      }
-
-      // A space opens on its first unread message, else at its end.
-      function positionChat(focus) {
-        const target = focus ? document.getElementById(focus) : null;
-        if (target) target.scrollIntoView({ block: 'center' }); else toBottom(false);
-        chatPositioned = true;
-      }
-
-      function chatChrome(state) {
-        const earlier = $('chat-earlier');
-        earlier.hidden = !state.earlier;
-        const button = earlier.querySelector('button');
-        button.disabled = !!state.loadingEarlier;
-        button.textContent = state.loadingEarlier ? 'Loading…' : 'Load earlier messages';
-        $('chat-status').innerHTML = state.status || '';
-      }
-
-      function chatRender(state) {
-        generation = state.generation;
-        chatMode = false;
-        clearTimeout(sentTimer);
-        unfollow();
-        document.documentElement.style.setProperty('--accent', state.accent);
-        $('column').innerHTML = state.html;
-        $('chat-log').innerHTML = state.log;
-        chatChrome(state);
-        bindChatComposer();
-        const text = $('c-text');
-        text.value = state.draft.text || '';
-        growChat();
-        setChatThread(state.draft.thread, state.draft.who);
-        chatPositioned = false;
-        window.scrollTo(0, 0);
-        if (state.log) positionChat(state.focus);
-        setTimeout(() => {
-          text.focus();
-          text.setSelectionRange(text.value.length, text.value.length);
-        }, 80);
-      }
-
-      // New messages append (and slide in); changed ones are replaced in place; anything else
-      // replaces the log, keeping what is on screen where it was.
-      function chatUpdate(update) {
-        const log = $('chat-log');
-        if (!log) return;
-        const bottom = nearBottom();
-        const fromBottom = document.documentElement.scrollHeight - window.scrollY;
-        for (const id of update.remove || []) {
-          const el = document.getElementById(id);
-          if (el) el.remove();
-        }
-        for (const [id, html] of update.replace || []) {
-          const el = document.getElementById(id);
-          if (el) el.replaceWith(fragment(html));
-        }
-        const replaced = update.log !== undefined && update.log !== null;
-        if (replaced) {
-          log.innerHTML = '';
-          log.appendChild(fragment(update.log));
-        }
-        let mine = false;
-        for (const html of update.append || []) {
-          log.insertAdjacentHTML('beforeend', html);
-          if (log.lastElementChild && log.lastElementChild.querySelector('.msg.mine')) mine = true;
-        }
-        chatChrome(update);
-        if (!chatPositioned) {
-          if (log.childElementCount) positionChat(update.focus);
-          return;
-        }
-        if ((update.append || []).length && (bottom || mine)) toBottom(true);
-        else if (replaced && !bottom) window.scrollTo(0, document.documentElement.scrollHeight - fromBottom);
-        else if (bottom) toBottom(false);
-      }
-
-      window.MS = {
+      Object.assign(MS, {
         // Replaces the whole column, so bodies, frames, folds, the composer and the banner all
         // start fresh, scrolled to the top (a chat thread: to its focus message). Bodies already in
-        // memory come along, so the thread's first frame shows them. A chat space (`state.space`)
-        // renders its own header, log and composer.
+        // memory come along, so the thread's first frame shows them.
         render(state) {
-          if (state.space) {
-            chatRender(state);
-            return;
-          }
-          generation = state.generation;
+          show(mail, state);
           chatMode = !!state.chat;
-          clearTimeout(sentTimer);
-          document.documentElement.style.setProperty('--accent', state.accent);
-          $('column').innerHTML = state.html;
           bindComposer();
-          unfollow();
           for (const [index, payload] of state.bodies) MS.setBody(index, payload);
-          window.scrollTo(0, 0);
           if (chatMode && state.focus > 0) follow(state.focus);
-        },
-        clear(next) {
-          generation = next;
-          clearTimeout(sentTimer);
-          unfollow();
-          $('column').innerHTML = '';
-          window.scrollTo(0, 0);
         },
         setBody(index, payload) {
           const article = document.getElementById('msg-' + index);
@@ -1188,13 +1000,11 @@ enum ReaderPage {
         },
         closeReply() { closeComposer(); },
         blurReply() { $('c-text').blur(); },
-        chatUpdate(update) { chatUpdate(update); },
-        chatBlur() { const text = $('c-text'); if (text) text.blur(); },
-      };
+      });
     })();
     """
 
-    static func jsString(_ text: String) -> String {
+    private static func jsString(_ text: String) -> String {
         let data = (try? JSONSerialization.data(withJSONObject: [text], options: [])) ?? Data("[\"\"]".utf8)
         let array = String(decoding: data, as: UTF8.self)
         return String(array.dropFirst().dropLast())

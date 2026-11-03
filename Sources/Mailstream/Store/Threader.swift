@@ -62,7 +62,7 @@ nonisolated enum Threader {
         var lastBySubject: [String: Int] = [:]
         for index in order {
             let envelope = messages[index].envelope
-            let (normalized, hadPrefix) = normalizeSubject(envelope.subject)
+            let (normalized, hadPrefix) = threadKey(envelope.subject)
             guard normalized.count >= 4 else { continue }
             let key = messages[index].ref.account + "\u{1}" + normalized
             if let previous = lastBySubject[key], hadPrefix || !envelope.inReplyTo.isEmpty {
@@ -98,27 +98,11 @@ nonisolated enum Threader {
         return conversations
     }
 
-    private static let prefixes = ["re", "fw", "fwd", "aw", "wg", "sv", "vs", "tr", "rif", "回复", "答复", "转发", "回覆", "轉寄"]
-
-    /// Strips reply/forward prefixes (`Re:`, `Fwd[2]:`, `回复：`) and collapses whitespace.
-    static func normalizeSubject(_ subject: String) -> (String, Bool) {
-        var s = Substring(subject.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
-        var stripped = false
-        outer: while true {
-            for prefix in prefixes {
-                guard s.hasPrefix(prefix), s.count > prefix.count else { continue }
-                var rest = s.dropFirst(prefix.count)
-                if rest.first == "[" || rest.first == "(" {
-                    let close: Character = rest.first == "[" ? "]" : ")"
-                    if let end = rest.firstIndex(of: close) { rest = rest[rest.index(after: end)...] }
-                }
-                guard let colon = rest.first, colon == ":" || colon == "：" else { continue }
-                s = Substring(rest.dropFirst().trimmingCharacters(in: .whitespaces))
-                stripped = true
-                continue outer
-            }
-            break
-        }
-        return (s.split(whereSeparator: \.isWhitespace).joined(separator: " "), stripped)
+    /// The subject as threading compares it: list tags and title lowercased, whitespace collapsed;
+    /// and whether it had a reply/forward prefix.
+    private static func threadKey(_ raw: String) -> (String, Bool) {
+        let subject = Subject(raw)
+        let text = subject.list.isEmpty ? subject.title : subject.list + " " + subject.title
+        return (text.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " "), subject.prefix != nil)
     }
 }

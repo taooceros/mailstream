@@ -163,6 +163,11 @@ nonisolated struct MailMessage: Hashable, Sendable, Identifiable {
     var role: MailboxRole
 
     var id: MessageRef { ref }
+
+    /// Written by the user: a draft, sent mail, or from one of `own` (lowercased addresses).
+    func isFromUser(own: Set<String>) -> Bool {
+        envelope.isDraft || role == .sent || envelope.from.contains { own.contains($0.normalizedEmail) }
+    }
 }
 
 /// One thread. Everything the list sorts and filters by is worked out once, when the threader
@@ -203,6 +208,11 @@ nonisolated struct Conversation: Identifiable, Hashable, Sendable {
     }
 
     var latest: MailMessage { messages[messages.count - 1] }
+
+    /// The latest message the user did not write; nil when they wrote them all.
+    func latestIncoming(own: Set<String>) -> MailMessage? {
+        messages.last { !$0.isFromUser(own: own) }
+    }
 
     /// The same thread with some envelopes changed in place (flags), for optimistic updates.
     func updating(_ refs: Set<MessageRef>, _ change: (inout Envelope) -> Void) -> Conversation {

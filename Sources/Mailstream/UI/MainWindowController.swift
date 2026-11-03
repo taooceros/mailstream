@@ -28,10 +28,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     private let reader: ReaderViewController
     private let content = NSViewController()
     private var searchItem: NSSearchToolbarItem?
-    /// Conversation open in the reader; nil while the list is showing.
-    private var opened: Conversation?
-    /// Chat space open in the reader; nil while the list or a conversation is showing.
-    private var openedSpace: ChatSpaceKey?
+    /// What the reader shows; nil while the list is showing.
+    private var opened: ReaderTarget?
     /// Conversation under the list's keyboard highlight.
     private var highlighted: Conversation?
     private var escapeMonitor: Any?
@@ -146,7 +144,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     private func handleEscape(_ event: NSEvent) -> Bool {
         guard event.keyCode == 53, let window, event.window === window, window.attachedSheet == nil,
               canGoBack, !(window.firstResponder is NSTextView) else { return false }
-        if opened != nil || openedSpace != nil, reader.handleEscape() { return true }
+        if opened != nil, reader.handleEscape() { return true }
         goBack(nil)
         return true
     }
@@ -156,7 +154,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     /// What toolbar and menu commands act on: the open conversation, else the highlighted row.
     /// Chat has none, so every mail command validates to disabled there.
-    private var selected: Conversation? { store.selection.isChat ? nil : opened ?? highlighted }
+    private var selected: Conversation? { store.selection.isChat ? nil : opened?.conversation ?? highlighted }
 
     /// Account new messages default to: the selected conversation's, then the selected mailbox's.
     var preferredAccount: String? {
@@ -167,11 +165,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     // MARK: - Navigation
 
-    private func open(_ conversation: Conversation) {
-        let wasOpen = opened != nil || openedSpace != nil
-        openedSpace = nil
-        opened = conversation
-        highlighted = conversation
+    /// Opens a conversation (marking it read) or a chat space (the store fetches its newest
+    /// messages and marks it read) in the reader.
+    private func open(_ target: ReaderTarget) {
+        let wasOpen = opened != nil
+        opened = target
+        if let conversation = target.conversation { highlighted = conversation }
         navigation += 1
         let current = navigation
         var presented = false
@@ -181,43 +180,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             if !wasOpen { self.swap(forward: true) }
             self.window?.makeFirstResponder(self.reader.view)
         }
-        // Slide in as soon as the thread is in the page, so the reader never arrives blank. A shell
+        // Slide in as soon as the target is in the page, so the reader never arrives blank. A shell
         // still loading (cold start, web process restart) gets a short fallback; a warm shell gets a
         // longer one that only matters when the web process stalls.
-        reader.show(conversation, onReady: present)
+        reader.show(target, onReady: present)
         let fallback: Duration = reader.awaitsShell ? .milliseconds(120) : .milliseconds(400)
         Task {
             try? await Task.sleep(for: fallback)
             present()
         }
-        if conversation.isUnread { store.setRead(conversation, read: true) }
-        updateTitle()
-        window?.toolbar?.validateVisibleItems()
-    }
-
-    /// Opens a chat space: the reader slides in with what is cached, and the store fetches the
-    /// newest messages and marks the space read.
-    private func openChat(_ key: ChatSpaceKey) {
-        let wasOpen = opened != nil || openedSpace != nil
-        opened = nil
-        openedSpace = key
-        navigation += 1
-        let current = navigation
-        var presented = false
-        let present = { [weak self] in
-            guard let self, !presented, self.navigation == current else { return }
-            presented = true
-            if !wasOpen { self.swap(forward: true) }
-            self.window?.makeFirstResponder(self.reader.view)
+        // The reader captured a space's unread state before opening marks it read.
+        switch target {
+        case .conversation(let conversation): if conversation.isUnread { store.setRead(conversation, read: true) }
+        case .chat(let key): store.chat.open(key)
         }
-        // The reader captures the unread state before opening marks the space read.
-        reader.showChat(key, onReady: present)
-        let fallback: Duration = reader.awaitsShell ? .milliseconds(120) : .milliseconds(400)
-        Task {
-            try? await Task.sleep(for: fallback)
-            present()
-        }
-        store.chat.open(key)
         updateTitle()
         window?.toolbar?.validateVisibleItems()
     }
@@ -229,16 +205,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     /// Back to the list; `animation` takes the reader away once the row is highlighted, before the
     /// list takes focus.
     private func leaveReader(_ animation: () -> Void) {
-        guard opened != nil || openedSpace != nil else { return }
-        let last = opened, lastSpace = openedSpace
+        guard let last = opened else { return }
         opened = nil
-        openedSpace = nil
         navigation += 1
-        if let lastSpace {
+        switch last {
+        case .conversation(let conversation):
+            list.highlight(conversation)
+        case .chat(let key):
             store.chat.close()
-            list.highlight(space: lastSpace)
-        } else {
-            list.highlight(last)
+            list.highlight(space: key)
         }
         animation()
         window?.makeFirstResponder(list.tableView)
@@ -287,17 +262,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     }
 
     @objc func goBack(_ sender: Any?) {
-        if opened != nil || openedSpace != nil {
+        if opened != nil {
             closeReader()
         } else {
             list.leaveBundle()
         }
     }
 
-    /// A conversation or a chat space is in the reader.
-    private var readerOpen: Bool { opened != nil || openedSpace != nil }
-
-    private var canGoBack: Bool { readerOpen || list.openBundle != nil }
+    private var canGoBack: Bool { opened != nil || list.openBundle != nil }
 
     // MARK: - Swipe back
 
@@ -309,7 +281,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             return true
         }
         let page = reader.view
-        let canStart = readerOpen && NSEvent.isSwipeTrackingFromScrollEventsEnabled
+        let canStart = opened != nil && NSEvent.isSwipeTrackingFromScrollEventsEnabled
             && page.bounds.contains(page.convert(event.locationInWindow, from: nil))
         switch swipe.feed(event, canStart: canStart) {
         case .pass:
@@ -328,7 +300,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     /// The reader follows the fingers sideways, uncovering the list, which settles from slightly
     /// enlarged as it does on close.
     private func dragReader(to offset: CGFloat) {
-        guard readerOpen, let page = reader.view.layer, let below = list.view.layer else { return }
+        guard opened != nil, let page = reader.view.layer, let below = list.view.layer else { return }
         if !dragging {
             dragging = true
             // An open still settling must not keep animating under the fingers.
@@ -350,7 +322,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         let width = max(reader.view.bounds.width, 1)
         let distance = abs(offset)
         let onward = offset < 0 ? -velocity : velocity
-        let back = readerOpen && (distance > width / 3 || (onward > 400 && distance > 20))
+        let back = opened != nil && (distance > width / 3 || (onward > 400 && distance > 20))
         let remaining = back ? width - distance : distance
         let duration = min(0.3, max(0.16, Double(remaining / max(abs(velocity), 1500))))
         let progress = min(distance / width, 1)
@@ -384,20 +356,22 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     /// The store published a list: the open conversation follows it, or the reader closes.
     private func listChanged() {
-        // Another selection replaced the chat list the open space came from: return to the list.
-        if let openedSpace, store.listContext.selection != .allChats, store.listContext.selection != .chat(openedSpace.account) {
-            closeReader()
-        }
-        if !store.listContext.selection.isChat { list.chatFilter = nil }
-        if let opened {
-            if let fresh = store.conversations.first(where: { $0.id == opened.id }) {
-                self.opened = fresh
+        switch opened {
+        case .chat(let key):
+            // Another selection replaced the chat list the open space came from: return to the list.
+            if store.listContext.selection != .allChats, store.listContext.selection != .chat(key.account) { closeReader() }
+        case .conversation(let conversation):
+            if let fresh = store.conversations.first(where: { $0.id == conversation.id }) {
+                opened = .conversation(fresh)
                 reader.update(fresh)
             } else if store.searchQuery == nil {
                 // Archived, trashed or moved away while open: return to the list.
                 closeReader()
             }
+        case nil:
+            break
         }
+        if !store.listContext.selection.isChat { list.chatFilter = nil }
         if let highlighted, let fresh = store.conversations.first(where: { $0.id == highlighted.id }) {
             self.highlighted = fresh
         }
@@ -447,11 +421,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     }
 
     func conversationList(_ list: ConversationListViewController, open conversation: Conversation) {
-        open(conversation)
+        open(.conversation(conversation))
     }
 
     func conversationList(_ list: ConversationListViewController, openChat space: ChatSpaceKey) {
-        openChat(space)
+        open(.chat(space))
     }
 
     func conversationList(_ list: ConversationListViewController, perform action: ConversationAction, on conversation: Conversation) {
@@ -484,7 +458,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             }
         case .toggleRead: store.setRead(conversation, read: conversation.isUnread)
         case .toggleStar: store.setFlagged(conversation, flagged: !conversation.isFlagged)
-        case .toggleWaiting: store.setWaiting(conversation, waiting: store.tag(for: conversation)?.toRespond != true)
+        case .toggleWaiting:
+            store.tagging.setWaiting(conversation, waiting: store.tagging.tag(for: conversation)?.toRespond != true)
         case .reply: replyInline(all: false, conversation)
         case .replyAll: replyInline(all: true, conversation)
         case .forward: composeForward(conversation)
@@ -493,15 +468,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     /// Replies open the conversation and its inline reply; the window composer is one click away there.
     private func replyInline(all: Bool, _ conversation: Conversation) {
-        if opened?.id != conversation.id { open(conversation) }
+        if opened?.conversation?.id != conversation.id { open(.conversation(conversation)) }
         reader.startReply(all: all)
     }
 
     private func composeForward(_ conversation: Conversation) {
-        let own = store.ownAddresses
-        let source = conversation.messages.last { message in
-            !message.envelope.isDraft && !(message.envelope.from.contains { own.contains($0.normalizedEmail) })
-        } ?? conversation.latest
+        let source = conversation.latestIncoming(own: store.ownAddresses) ?? conversation.latest
         ComposeWindowController.open(store: store, mode: .forward(source.ref), account: source.ref.account, source: source)
     }
 
@@ -538,8 +510,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         searchItem.beginSearchInteraction()
     }
 
-    @objc func toggleAITagging(_ sender: Any?) { store.aiTaggingEnabled.toggle() }
-    @objc func retagAll(_ sender: Any?) { store.retagAll() }
+    @objc func toggleAITagging(_ sender: Any?) { store.tagging.isEnabled.toggle() }
+    @objc func retagAll(_ sender: Any?) { store.tagging.retagAll() }
 
     @objc func archive(_ sender: Any?) { if let selected { perform(.archive, on: selected) } }
     @objc func trash(_ sender: Any?) { if let selected { perform(.trash, on: selected) } }
@@ -551,43 +523,44 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     @objc func forward(_ sender: Any?) { if let selected { perform(.forward, on: selected) } }
 
     private func isEnabled(_ action: Selector) -> Bool {
+        if let command = ConversationAction(command: action) {
+            guard let selected else { return false }
+            switch command {
+            case .archive: return store.canArchive(selected)
+            case .toggleWaiting: return store.tagging.canMarkWaiting(selected)
+            default: return true
+            }
+        }
         switch action {
         case #selector(goBack(_:)): return canGoBack
-        case #selector(retagAll(_:)): return store.aiTaggingEnabled
-        case #selector(archive(_:)): return selected.map(store.canArchive) ?? false
-        case #selector(toggleWaiting(_:)): return selected.map(store.canMarkWaiting) ?? false
-        case #selector(trash(_:)), #selector(toggleRead(_:)), #selector(toggleStar(_:)),
-             #selector(reply(_:)), #selector(replyAll(_:)), #selector(forward(_:)):
-            return selected != nil
+        case #selector(retagAll(_:)): return store.tagging.isEnabled
         default: return true
         }
     }
 
+    /// What the selection's toggles act on, for their titles and symbols.
+    private var selectedState: ConversationAction.State {
+        ConversationAction.State(selected, tag: selected.flatMap(store.tagging.tag(for:)))
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         guard let action = menuItem.action else { return true }
-        if action == #selector(toggleRead(_:)) {
-            menuItem.title = selected?.isUnread == true ? "Mark as Read" : "Mark as Unread"
-        } else if action == #selector(toggleStar(_:)) {
-            menuItem.title = selected?.isFlagged == true ? "Unstar" : "Star"
-        } else if action == #selector(toggleWaiting(_:)) {
-            let waiting = selected.flatMap(store.tag(for:))?.toRespond ?? true
-            menuItem.title = waiting ? "Resolve" : "Mark as Waiting on You"
+        if let command = ConversationAction(command: action) {
+            menuItem.title = command.label(in: selectedState).title
         } else if action == #selector(toggleAITagging(_:)) {
-            menuItem.state = store.aiTaggingEnabled ? .on : .off
+            menuItem.state = store.tagging.isEnabled ? .on : .off
         }
         return isEnabled(action)
     }
 
     func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
         guard let action = item.action else { return true }
-        if action == #selector(toggleRead(_:)) {
-            let unread = selected?.isUnread == true
-            item.image = NSImage(systemSymbolName: unread ? "envelope.open" : "envelope.badge", accessibilityDescription: nil)
-            item.label = unread ? "Mark as Read" : "Mark as Unread"
-        } else if action == #selector(toggleStar(_:)) {
-            let starred = selected?.isFlagged == true
-            item.image = NSImage(systemSymbolName: starred ? "star.fill" : "star", accessibilityDescription: nil)
-            item.label = starred ? "Unstar" : "Star"
+        if let command = ConversationAction(command: action) {
+            let label = command.label(in: selectedState)
+            if item.label != label.title {
+                item.label = label.title
+                item.image = NSImage(systemSymbolName: label.symbol, accessibilityDescription: label.title)
+            }
         }
         return isEnabled(action)
     }
@@ -646,16 +619,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             return item
         case .compose: return button(identifier, "New Message", "square.and.pencil", #selector(composeNew(_:)))
         case .refresh: return button(identifier, "Get New Mail", "arrow.clockwise", #selector(refresh(_:)))
-        case .archive: return button(identifier, "Archive", "archivebox", #selector(archive(_:)))
-        case .trash: return button(identifier, "Trash", "trash", #selector(trash(_:)))
-        case .read: return button(identifier, "Mark as Unread", "envelope.badge", #selector(toggleRead(_:)))
-        case .star: return button(identifier, "Star", "star", #selector(toggleStar(_:)))
-        case .reply: return button(identifier, "Reply", "arrowshape.turn.up.left", #selector(reply(_:)))
-        case .replyAll: return button(identifier, "Reply All", "arrowshape.turn.up.left.2", #selector(replyAll(_:)))
-        case .forward: return button(identifier, "Forward", "arrowshape.turn.up.right", #selector(forward(_:)))
-        default: return nil
+        default:
+            guard let action = Self.toolbarActions[identifier] else { return nil }
+            let label = action.label()
+            return button(identifier, label.title, label.symbol, action.command)
         }
     }
+
+    private static let toolbarActions: [NSToolbarItem.Identifier: ConversationAction] = [
+        .archive: .archive, .trash: .trash, .read: .toggleRead, .star: .toggleStar, .reply: .reply,
+        .replyAll: .replyAll, .forward: .forward,
+    ]
 
     private func button(_ identifier: NSToolbarItem.Identifier, _ label: String, _ symbol: String,
                         _ action: Selector) -> NSToolbarItem {
@@ -668,5 +642,26 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         item.target = self
         item.action = action
         return item
+    }
+}
+
+extension ConversationAction {
+    /// The window command performing this action, which the main menu and the toolbar send.
+    var command: Selector {
+        switch self {
+        case .archive: #selector(MainWindowController.archive(_:))
+        case .trash: #selector(MainWindowController.trash(_:))
+        case .toggleRead: #selector(MainWindowController.toggleRead(_:))
+        case .toggleStar: #selector(MainWindowController.toggleStar(_:))
+        case .toggleWaiting: #selector(MainWindowController.toggleWaiting(_:))
+        case .reply: #selector(MainWindowController.reply(_:))
+        case .replyAll: #selector(MainWindowController.replyAll(_:))
+        case .forward: #selector(MainWindowController.forward(_:))
+        }
+    }
+
+    init?(command: Selector) {
+        guard let action = Self.allCases.first(where: { $0.command == command }) else { return nil }
+        self = action
     }
 }

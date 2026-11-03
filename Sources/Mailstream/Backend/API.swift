@@ -9,6 +9,44 @@ nonisolated struct APIError: LocalizedError, Sendable {
     let status: Int
     let message: String
     var errorDescription: String? { message }
+
+    init(status: Int, message: String) {
+        self.status = status
+        self.message = message
+    }
+
+    /// A refusal from the error answer `body`: its message, else the start of the body.
+    init(status: Int, body: Data) {
+        let text = String(decoding: body.prefix(300), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        self.status = status
+        message = Body(body)?.message ?? (text.isEmpty ? "The server answered \(status)" : text)
+    }
+
+    /// The error answer Google and Graph share: `{"error": {"message": …}}`, plus Google's
+    /// `status` and `errors[].reason`.
+    struct Body: Decodable, Sendable {
+        struct Detail: Decodable, Sendable {
+            struct Reason: Decodable, Sendable { let reason: String? }
+            let message: String?
+            let status: String?
+            let errors: [Reason]?
+        }
+        let error: Detail?
+
+        init?(_ data: Data) {
+            guard let body = try? JSONDecoder().decode(Self.self, from: data) else { return nil }
+            self = body
+        }
+
+        var message: String? { error?.message.flatMap { $0.isEmpty ? nil : $0 } }
+
+        /// Google refuses over-quota requests with 403 and one of these reasons; nothing ran.
+        var isRateLimit: Bool {
+            guard let error else { return false }
+            let reasons: Set<String> = ["rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded"]
+            return error.status == "RESOURCE_EXHAUSTED" || (error.errors ?? []).contains { reasons.contains($0.reason ?? "") }
+        }
+    }
 }
 
 /// Access tokens by account id.
@@ -105,53 +143,48 @@ nonisolated final class API: Sendable {
                     refreshed = true
                     await tokens.reject(token, account: account)
                     continue
-                case 429 where attempt < 6, 403 where attempt < 6 && Self.isRateLimit(data),
+                case 429 where attempt < Self.rateLimitAttempts,
+                     403 where attempt < Self.rateLimitAttempts && APIError.Body(data)?.isRateLimit == true,
                      500..<600 where repeatable && attempt < 4:
-                    try await Task.sleep(for: Self.delay(http, attempt: attempt))
+                    let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
+                    try await Task.sleep(for: Self.backoff(attempt: attempt, retryAfter: retryAfter))
                     continue
                 default:
-                    throw APIError(status: http.statusCode, message: Self.message(data, status: http.statusCode))
+                    throw APIError(status: http.statusCode, body: data)
                 }
             }
         }
     }
 
-    /// Google refuses over-quota requests with 403 and one of these reasons; nothing ran.
-    static func isRateLimit(_ data: Data) -> Bool {
-        struct Body: Decodable {
-            struct Inner: Decodable {
-                struct Reason: Decodable { let reason: String? }
-                let errors: [Reason]?
-                let status: String?
+    /// Sends `items` through `send`, which answers the ones to send again (throttled or left
+    /// unanswered) and the longest Retry-After among them, and repeats those after `backoff`
+    /// until none are left. `service` names the provider when it keeps refusing.
+    static func repeatingThrottled<Item>(_ items: [Item], service: String,
+                                         _ send: ([Item]) async throws -> (retry: [Item], retryAfter: Double?)) async throws {
+        var pending = items
+        var attempt = 0
+        while !pending.isEmpty {
+            attempt += 1
+            let (retry, retryAfter) = try await send(pending)
+            guard !retry.isEmpty else { return }
+            guard attempt < rateLimitAttempts else {
+                throw APIError(status: 429, message: "\(service) is limiting requests; try again shortly")
             }
-            let error: Inner?
+            try await Task.sleep(for: backoff(attempt: attempt, retryAfter: retryAfter))
+            pending = retry
         }
-        guard let error = (try? JSONDecoder().decode(Body.self, from: data))?.error else { return false }
-        let reasons: Set<String> = ["rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded"]
-        return error.status == "RESOURCE_EXHAUSTED" || (error.errors ?? []).contains { reasons.contains($0.reason ?? "") }
     }
+
+    /// Attempts at a request the provider keeps throttling before giving up.
+    private static let rateLimitAttempts = 6
 
     private static let transient: Set<URLError.Code> = [.timedOut, .networkConnectionLost, .cannotConnectToHost,
                                                          .dnsLookupFailed, .notConnectedToInternet]
 
-    /// Retry-After when given (seconds), else exponential from half a second, capped at 8 s.
-    private static func delay(_ response: HTTPURLResponse, attempt: Int) -> Duration {
-        if let header = response.value(forHTTPHeaderField: "Retry-After"), let seconds = Double(header) {
-            return .milliseconds(Int(min(seconds, 30) * 1000))
-        }
+    /// The pause before repeating attempt `attempt`: Retry-After when given (seconds, at most 30),
+    /// else exponential from half a second, capped at 8 s.
+    private static func backoff(attempt: Int, retryAfter: Double?) -> Duration {
+        if let retryAfter { return .milliseconds(Int(min(retryAfter, 30) * 1000)) }
         return .milliseconds(min(500 << (attempt - 1), 8000))
-    }
-
-    /// Google and Graph both answer `{"error": {"message": …}}`.
-    private static func message(_ data: Data, status: Int) -> String {
-        struct Body: Decodable {
-            struct Inner: Decodable { let message: String? }
-            let error: Inner?
-        }
-        if let message = (try? JSONDecoder().decode(Body.self, from: data))?.error?.message, !message.isEmpty {
-            return message
-        }
-        let text = String(decoding: data.prefix(300), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? "The server answered \(status)" : text
     }
 }

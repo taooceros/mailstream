@@ -150,12 +150,6 @@ nonisolated struct ChatMessagePage: Codable, Sendable {
     var lastRead: Date?
 }
 
-/// RFC 3339 with or without fractional seconds; fractional first, so microseconds survive.
-nonisolated func parseChatDate(_ raw: String) -> Date? {
-    if let date = try? Date(raw, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true)) { return date }
-    return try? Date(raw, strategy: .iso8601)
-}
-
 /// RFC 3339 in UTC with microseconds, the precision Google reports, for the `createTime` filter.
 nonisolated func formatChatDate(_ date: Date) -> String {
     let seconds = date.timeIntervalSince1970.rounded(.down)
@@ -169,7 +163,6 @@ nonisolated func formatChatDate(_ date: Date) -> String {
     if base.hasSuffix("Z") { base.removeLast() }
     return base + String(format: ".%06dZ", micros)
 }
-
 
 // MARK: - From the API
 
@@ -191,10 +184,10 @@ nonisolated extension ChatMessage {
         // `<users/…>` mentions), with a trailing newline.
         let formatted = message.formattedText.map { String($0.reversed().drop { $0 == "\n" }.reversed()) }
         text = [formatted, message.text].compactMap { $0 }.first { !$0.isEmpty } ?? message.fallbackText ?? ""
-        let createdRaw = message.createTime.flatMap(parseChatDate)
+        let createdRaw = message.createTime.flatMap(parseISODate)
         created = createdRaw ?? .distantPast
         // The API sets `lastUpdateTime` on every message; only a later one is an edit.
-        edited = message.lastUpdateTime.flatMap(parseChatDate).flatMap { updated in
+        edited = message.lastUpdateTime.flatMap(parseISODate).flatMap { updated in
             createdRaw.map { updated > $0 } ?? true ? updated : nil
         }
         name = message.name
@@ -268,7 +261,7 @@ actor Chat {
         let api = try await resolve(account)
         let limit = max(limit, 1)
         var all = try await ChatAPI.spaces(api)
-        all.sort { (parseChatDate($0.lastActiveTime ?? "") ?? .distantPast) > (parseChatDate($1.lastActiveTime ?? "") ?? .distantPast) }
+        all.sort { (parseISODate($0.lastActiveTime ?? "") ?? .distantPast) > (parseISODate($1.lastActiveTime ?? "") ?? .distantPast) }
         let more = all.count > limit
         all = Array(all.prefix(limit))
 
@@ -296,9 +289,9 @@ actor Chat {
         for (space, result) in zip(recheck, rechecked) {
             guard case .success(let state) = result, let raw = state.lastReadTime,
                   var summary = memory[account]?.summaries[space.name] else { continue }
-            let lastRead = parseChatDate(raw)
+            let lastRead = parseISODate(raw)
             guard lastRead != summary.space.lastRead else { continue }
-            if let lastRead, lastRead >= (parseChatDate(summary.lastActiveRaw) ?? .distantPast) {
+            if let lastRead, lastRead >= (parseISODate(summary.lastActiveRaw) ?? .distantPast) {
                 summary.space.unread = 0
                 summary.space.lastRead = lastRead
             } else {
@@ -323,7 +316,7 @@ actor Chat {
         let me = learnMe(state?.user, account: account)
         return ChatMessagePage(messages: (page.messages ?? []).reversed().map { ChatMessage($0, me: me) },
                                more: !(page.nextPageToken ?? "").isEmpty,
-                               lastRead: state?.lastReadTime.flatMap(parseChatDate))
+                               lastRead: state?.lastReadTime.flatMap(parseISODate))
     }
 
     /// Marks the space read up to now; returns the new read time.
@@ -332,7 +325,7 @@ actor Chat {
         let api = try await resolve(account)
         let now = Date()
         let state = try await ChatAPI.markRead(api, space: space, time: formatChatDate(now))
-        let lastRead = state.lastReadTime.flatMap(parseChatDate) ?? now
+        let lastRead = state.lastReadTime.flatMap(parseISODate) ?? now
         if var summary = memory[account]?.summaries[space] {
             summary.space.unread = 0
             summary.space.lastRead = lastRead
@@ -370,11 +363,11 @@ actor Chat {
         let me = learnMe(state.user, account: account)
         let page = try await ChatAPI.messages(api, space: space.name, limit: Self.summaryMessages, before: nil)
         let messages = page.messages ?? []
-        let lastRead = state.lastReadTime.flatMap(parseChatDate)
+        let lastRead = state.lastReadTime.flatMap(parseISODate)
         let unread = messages.filter { message in
             guard message.sender?.name != me else { return false }
             guard let lastRead else { return true }
-            return (message.createTime.flatMap(parseChatDate) ?? .distantPast) > lastRead
+            return (message.createTime.flatMap(parseISODate) ?? .distantPast) > lastRead
         }.count
 
         let kind: ChatSpaceKind = switch space.spaceType {
@@ -402,7 +395,7 @@ actor Chat {
         }
         let title = named ? displayName : Self.title(members, kind: kind)
         let summary = ChatSpace(name: space.name, kind: kind, title: title, members: members.map { ChatUser($0) },
-                                lastActive: space.lastActiveTime.flatMap(parseChatDate), lastRead: lastRead,
+                                lastActive: space.lastActiveTime.flatMap(parseISODate), lastRead: lastRead,
                                 unread: unread, latest: messages.first.map { ChatMessage($0, me: me) })
         return Summary(space: summary, lastActiveRaw: space.lastActiveTime ?? "")
     }
