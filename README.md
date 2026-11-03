@@ -9,15 +9,21 @@ Cloudflare Worker relay (`Push/`).
 
 - macOS 15 or later, Swift 6 toolchain (Command Line Tools is enough, no Xcode project)
 - A Google Cloud OAuth client and a Microsoft Entra app registration of your own
-  (see First-time setup); their ids and secrets are build-time configuration
+  (see First-time setup); their ids and secrets are entered in the app at sign-in
 - For push: a Cloudflare account (`wrangler`) and the Google Cloud CLI (`gcloud`)
 - Optional: the `omp` CLI on `PATH` with a working "smol" model role, for AI tagging
 
 Accounts are added in the app: Mailstream ▸ Settings… (⌘,) ▸ Add Google Account… or
-Add Microsoft Account… opens the provider's sign-in in your browser and returns to
-the app. Refresh tokens are kept in one macOS Keychain item for all accounts, so
-macOS asks about access at most once; the account list (address,
-label, granted scopes) in `~/Library/Application Support/Mailstream/accounts.json`.
+Add Microsoft Account… first asks for the OAuth client ID and secret, then opens the
+provider's sign-in in your browser and returns to the app. Google needs a "Desktop
+app" client and its secret; Microsoft needs redirect URI `http://localhost:49152`,
+and the secret may be empty for a public client. The fields are prefilled with the
+client last used for that provider, else the one the build carries in its
+`Info.plist`. Refresh tokens, with the client each was issued to, are kept in one
+macOS Keychain item for all accounts (service `dev.mailstream.Mailstream.oauth`,
+account `refresh-tokens`), so macOS asks about access at most once; the account
+list (address, label, granted scopes) in
+`~/Library/Application Support/Mailstream/accounts.json`.
 With no account, Settings opens at launch. Labels can be renamed inline there.
 
 Mailstream resolves `PATH` from your login shell to find omp. It picks the newest
@@ -50,7 +56,8 @@ Everything is kept in the login keychain, service `dev.mailstream.build`.
 `scripts/bundle.sh` copies the items into the app's `Info.plist` (`MSGoogleClientID`,
 `MSGoogleClientSecret`, `MSMicrosoftClientID`, `MSMicrosoftClientSecret`, `MSPushURL`,
 `MSPushToken`, `MSGraphClientState`, `MSGmailTopic`). A missing item is left out with
-a warning; without the push items the app polls instead.
+a warning; the OAuth clients are then entered at sign-in, and without the push items
+the app polls instead.
 
 ## Build and run
 
@@ -70,8 +77,8 @@ prompt: add any Apple ID in Xcode ▸ Settings ▸ Accounts, then Manage Certifi
 GitHub Actions (`.github/workflows/build.yml`) builds every push and pull request on
 macOS 26 with Xcode 26.4 (Swift 6.3), with warnings as errors, and keeps the app as a
 disk image (`Mailstream.dmg`) in the run's artifacts. Each build of `main` replaces the `nightly` prerelease. CI has no
-OAuth clients, push settings or signing identity, so that app is signed ad hoc and
-cannot sign in; it is for checking the build, not daily use. Dragged to Applications, it needs
+OAuth clients, push settings or signing identity, so that app is signed ad hoc, polls
+for mail and asks for your OAuth client at sign-in. Dragged to Applications, it needs
 `xattr -dr com.apple.quarantine /Applications/Mailstream.app` before the first launch.
 
 ## Architecture
