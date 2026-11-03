@@ -76,9 +76,10 @@ CONFIG=debug ./scripts/run.sh       # bundle, quit the running copy, launch
 swift build                         # compile check only
 ```
 
-The bundle is signed with "Mailstream Local Signing", else ad hoc with a warning (an
-ad-hoc build cannot read the previous build's Keychain item, so sign-ins are lost on
-every rebuild). `scripts/make-icon.swift` regenerates `Resources/AppIcon.png`.
+The bundle is signed with the first "Apple Development" identity, else "Mailstream
+Local Signing", else ad hoc with a warning (an ad-hoc build cannot read the previous
+build's Keychain item, so sign-ins are lost on every rebuild). `scripts/make-icon.swift`
+regenerates `Resources/AppIcon.png`.
 
 GitHub Actions (`.github/workflows/build.yml`) builds every push and pull request on
 macOS 26 with Xcode 26.4 (Swift 6.3), with warnings as errors, and keeps the app as a
