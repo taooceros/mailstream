@@ -2,7 +2,8 @@
 //!
 //! The C entry point Mailstream calls in place of spawning `himalaya`. A request is the CLI's
 //! argument list as a JSON array of strings; its result is what the CLI would have printed on
-//! stdout, with the exit status beside it.
+//! stdout, with the exit status beside it. A request that starts with `chat` goes to
+//! [`crate::chat`] instead, and answers with JSON the same way.
 //!
 //! Each request runs on a thread of its own and answers through a callback, so the caller never
 //! waits. The shared commands (mailbox, envelope, flag, message, attachment) run over a pooled
@@ -106,6 +107,14 @@ fn handle(request: &[u8]) -> (i32, Vec<u8>) {
         Ok(args) => args,
         Err(err) => return failure(true, anyhow!("Invalid engine request: {err}")),
     };
+    #[cfg(feature = "chat")]
+    if args.first().is_some_and(|first| first == "chat") {
+        return match panic::catch_unwind(|| crate::chat::run(&args[1..])) {
+            Ok(Ok(output)) => (0, output),
+            Ok(Err(err)) => failure(true, err),
+            Err(panic) => failure(true, anyhow!("Engine panicked: {}", panic_message(panic))),
+        };
+    }
     match attempt(&args, true) {
         Attempt::Done(json, result) => finish(json, result),
         Attempt::Stale => match attempt(&args, false) {
@@ -113,6 +122,14 @@ fn handle(request: &[u8]) -> (i32, Vec<u8>) {
             Attempt::Stale => unreachable!("a fresh session is never stale"),
         },
     }
+}
+
+fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".into())
 }
 
 enum Attempt {
@@ -133,14 +150,7 @@ fn attempt(args: &[String], reuse: bool) -> Attempt {
     match outcome {
         Ok(Outcome { result: Err(_), reused: true, repeatable: true }) => Attempt::Stale,
         Ok(Outcome { result, .. }) => Attempt::Done(json, result),
-        Err(panic) => {
-            let message = panic
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "unknown panic".into());
-            Attempt::Done(json, Err(anyhow!("Engine panicked: {message}")))
-        }
+        Err(panic) => Attempt::Done(json, Err(anyhow!("Engine panicked: {}", panic_message(panic)))),
     }
 }
 

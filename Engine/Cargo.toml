@@ -17,7 +17,7 @@ path = "src/lib.rs"
 crate-type = ["staticlib"]
 
 [features]
-default = ["rustls-ring", "imap", "smtp", "jmap", "gmail", "msgraph", "maildir", "mbox", "sieve", "pimdir", "vendored"]
+default = ["rustls-ring", "imap", "smtp", "jmap", "gmail", "msgraph", "maildir", "mbox", "sieve", "pimdir", "vendored", "chat"]
 native-tls = ["pimalaya-stream/native-tls", "io-pim-discovery/native-tls", "io-imap?/native-tls", "io-jmap?/native-tls", "io-gmail?/native-tls", "io-msgraph?/native-tls", "io-smtp?/native-tls", "io-managesieve?/native-tls"]
 rustls-aws = ["pimalaya-stream/rustls-aws", "io-pim-discovery/rustls-aws", "io-imap?/rustls-aws", "io-jmap?/rustls-aws", "io-gmail?/rustls-aws", "io-msgraph?/rustls-aws", "io-smtp?/rustls-aws", "io-managesieve?/rustls-aws"]
 rustls-ring = ["pimalaya-stream/rustls-ring", "io-pim-discovery/rustls-ring", "io-imap?/rustls-ring", "io-jmap?/rustls-ring", "io-gmail?/rustls-ring", "io-msgraph?/rustls-ring", "io-smtp?/rustls-ring", "io-managesieve?/rustls-ring"]
@@ -32,6 +32,8 @@ m2dir = ["dep:convert_case", "dep:io-m2dir", "dep:mail-parser", "io-m2dir/client
 sieve = ["dep:io-managesieve", "io-managesieve/client", "io-managesieve/scram"]
 pimdir = ["dep:io-pimdir", "dep:mail-parser"]
 vendored = ["pimalaya-stream/vendored", "io-pimdir?/vendored"]
+# Mailstream's own: Google Chat (`src/chat/`), over the same TLS stream as the mail backends.
+chat = ["dep:io-http"]
 
 # Unwinding, not abort: a panic in one request becomes that request's error instead of killing
 # the app.
@@ -56,6 +58,7 @@ crossterm = { version = "0.29", default-features = false, features = ["serde"] }
 dirs = "7"
 humansize = "2"
 io-gmail = { version = "0.4", default-features = false, optional = true }
+io-http = { version = "0.5", default-features = false, optional = true }
 io-imap = { version = "0.7.1", default-features = false, optional = true }
 io-jmap = { version = "0.4.1", default-features = false, optional = true }
 io-m2dir = { version = "0.2", default-features = false, optional = true }

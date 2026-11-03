@@ -28,7 +28,7 @@ enum ReaderPage {
         <!doctype html><html><head><meta charset="utf-8">
         <meta http-equiv="Content-Security-Policy" content="\(csp)">
         <meta name="color-scheme" content="light dark">
-        <style>\(css)</style></head><body><div class="column" id="column"></div></body></html>
+        <style>\(css)\(ChatPage.css)</style></head><body><div class="column" id="column"></div></body></html>
         """
     }()
 
@@ -599,7 +599,13 @@ enum ReaderPage {
         event.stopPropagation();
         if (action === 'avatar') {
           const r = el.getBoundingClientRect();
-          post({ action, index: Number(el.closest('.msg').id.slice(4)), rect: [r.left, r.top, r.width, r.height] });
+          const msg = el.closest('.msg');
+          post({ action, index: msg && msg.id ? Number(msg.id.slice(4)) : -1, email: el.dataset.avatar || '',
+                 rect: [r.left, r.top, r.width, r.height] });
+          return;
+        }
+        if (action.startsWith('chat-')) {
+          chatAction(el, action);
           return;
         }
         if (action === 'toggle') {
@@ -905,11 +911,172 @@ enum ReaderPage {
         }
       }
 
+      // MARK: Chat spaces
+
+      // The thread a chat message will reply in, set from a message's reply button.
+      let chatThread = null, chatWho = null, chatPositioned = false;
+
+      function chatAction(el, action) {
+        if (action === 'chat-reply') {
+          setChatThread(el.dataset.thread, el.dataset.who);
+          $('c-text').focus();
+          reportChat();
+        } else if (action === 'chat-unthread') {
+          setChatThread(null, null);
+          reportChat();
+        } else if (action === 'chat-send') {
+          sendChat();
+        } else {
+          post({ action, id: el.dataset.id || '', url: el.dataset.url || '' });
+        }
+      }
+
+      function setChatThread(thread, who) {
+        chatThread = thread || null;
+        chatWho = who || null;
+        const head = $('c-thread');
+        if (!head) return;
+        head.hidden = !chatThread;
+        $('c-thread-label').innerHTML = chatThread
+          ? '<span class="c-label">Reply in thread to</span><b>' + escapeHTML(chatWho || '') + '</b>' : '';
+      }
+
+      // Every keystroke reaches the app, so leaving the space keeps the draft.
+      function reportChat() {
+        const text = $('c-text');
+        if (text) post({ action: 'chat-state', text: text.value, thread: chatThread || '', who: chatWho || '',
+                         focused: document.activeElement === text });
+      }
+
+      function growChat() {
+        const text = $('c-text');
+        text.style.height = 'auto';
+        text.style.height = Math.max(40, text.scrollHeight) + 'px';
+      }
+
+      function sendChat() {
+        const text = $('c-text');
+        if (!text.value.trim()) return;
+        post({ action: 'chat-send', text: text.value, thread: chatThread || '' });
+        text.value = '';
+        growChat();
+        setChatThread(null, null);
+        reportChat();
+      }
+
+      function bindChatComposer() {
+        const text = $('c-text');
+        text.addEventListener('input', () => { growChat(); reportChat(); });
+        text.addEventListener('focus', reportChat);
+        text.addEventListener('blur', reportChat);
+        // Return sends, Shift-Return breaks the line; an input method's Return only commits its text.
+        text.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.isComposing && event.keyCode !== 229) {
+            event.preventDefault();
+            sendChat();
+          }
+        });
+      }
+
+      function fragment(html) {
+        const template = document.createElement('template');
+        template.innerHTML = html;
+        template.content.querySelectorAll('.msg').forEach((msg) => msg.classList.add('static'));
+        return template.content;
+      }
+
+      function nearBottom() {
+        return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 80;
+      }
+
+      function toBottom(smooth) {
+        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+      }
+
+      // A space opens on its first unread message, else at its end.
+      function positionChat(focus) {
+        const target = focus ? document.getElementById(focus) : null;
+        if (target) target.scrollIntoView({ block: 'center' }); else toBottom(false);
+        chatPositioned = true;
+      }
+
+      function chatChrome(state) {
+        const earlier = $('chat-earlier');
+        earlier.hidden = !state.earlier;
+        const button = earlier.querySelector('button');
+        button.disabled = !!state.loadingEarlier;
+        button.textContent = state.loadingEarlier ? 'Loading…' : 'Load earlier messages';
+        $('chat-status').innerHTML = state.status || '';
+      }
+
+      function chatRender(state) {
+        generation = state.generation;
+        chatMode = false;
+        clearTimeout(sentTimer);
+        unfollow();
+        document.documentElement.style.setProperty('--accent', state.accent);
+        $('column').innerHTML = state.html;
+        $('chat-log').innerHTML = state.log;
+        chatChrome(state);
+        bindChatComposer();
+        const text = $('c-text');
+        text.value = state.draft.text || '';
+        growChat();
+        setChatThread(state.draft.thread, state.draft.who);
+        chatPositioned = false;
+        window.scrollTo(0, 0);
+        if (state.log) positionChat(state.focus);
+        setTimeout(() => {
+          text.focus();
+          text.setSelectionRange(text.value.length, text.value.length);
+        }, 80);
+      }
+
+      // New messages append (and slide in); changed ones are replaced in place; anything else
+      // replaces the log, keeping what is on screen where it was.
+      function chatUpdate(update) {
+        const log = $('chat-log');
+        if (!log) return;
+        const bottom = nearBottom();
+        const fromBottom = document.documentElement.scrollHeight - window.scrollY;
+        for (const id of update.remove || []) {
+          const el = document.getElementById(id);
+          if (el) el.remove();
+        }
+        for (const [id, html] of update.replace || []) {
+          const el = document.getElementById(id);
+          if (el) el.replaceWith(fragment(html));
+        }
+        const replaced = update.log !== undefined && update.log !== null;
+        if (replaced) {
+          log.innerHTML = '';
+          log.appendChild(fragment(update.log));
+        }
+        let mine = false;
+        for (const html of update.append || []) {
+          log.insertAdjacentHTML('beforeend', html);
+          if (log.lastElementChild && log.lastElementChild.querySelector('.msg.mine')) mine = true;
+        }
+        chatChrome(update);
+        if (!chatPositioned) {
+          if (log.childElementCount) positionChat(update.focus);
+          return;
+        }
+        if ((update.append || []).length && (bottom || mine)) toBottom(true);
+        else if (replaced && !bottom) window.scrollTo(0, document.documentElement.scrollHeight - fromBottom);
+        else if (bottom) toBottom(false);
+      }
+
       window.MS = {
         // Replaces the whole column, so bodies, frames, folds, the composer and the banner all
         // start fresh, scrolled to the top (a chat thread: to its focus message). Bodies already in
-        // memory come along, so the thread's first frame shows them.
+        // memory come along, so the thread's first frame shows them. A chat space (`state.space`)
+        // renders its own header, log and composer.
         render(state) {
+          if (state.space) {
+            chatRender(state);
+            return;
+          }
           generation = state.generation;
           chatMode = !!state.chat;
           clearTimeout(sentTimer);
@@ -1021,6 +1188,8 @@ enum ReaderPage {
         },
         closeReply() { closeComposer(); },
         blurReply() { $('c-text').blur(); },
+        chatUpdate(update) { chatUpdate(update); },
+        chatBlur() { const text = $('c-text'); if (text) text.blur(); },
       };
     })();
     """

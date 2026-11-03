@@ -13,16 +13,35 @@ enum AccountStyle {
     static func color(for account: String, in store: MailStore) -> NSColor {
         NSColor(hex: hex(for: account, in: store))
     }
+
+    /// A chat account takes the color of the mail account with the same address, else the next
+    /// color after the mail accounts'.
+    static func chatHex(for chatAccount: String, in store: MailStore) -> String {
+        if let email = store.chat.account(named: chatAccount)?.email?.lowercased(),
+           let mail = store.accounts.first(where: { $0.email?.lowercased() == email }) {
+            return hex(for: mail.name, in: store)
+        }
+        let index = store.chat.accounts.firstIndex { $0.name == chatAccount } ?? 0
+        return palette[(store.accounts.count + index) % palette.count]
+    }
+
+    static func chatColor(for chatAccount: String, in store: MailStore) -> NSColor {
+        NSColor(hex: chatHex(for: chatAccount, in: store))
+    }
 }
 
 /// Spark-style sidebar: unified mailboxes first (Inbox expands into each account's inbox), then
-/// every account's full folder tree, collapsed by default.
+/// Google Chat (expanding into each chat account when there are several), then every account's
+/// full folder tree, collapsed by default.
 @MainActor
 final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate {
     final class Node {
         enum Kind {
             case unified(MailboxRole)
             case accountInbox(Mailbox)
+            /// All chat accounts' spaces.
+            case chat
+            case chatAccount(ChatAccount)
             case section(String)
             case account(Account)
             case mailbox(Mailbox)
@@ -41,6 +60,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             switch kind {
             case .unified(let role): "unified:\(role)"
             case .accountInbox(let mailbox), .mailbox(let mailbox): "mailbox:\(mailbox.account)\u{1}\(mailbox.id)"
+            case .chat: "chat"
+            case .chatAccount(let account): "chat:\(account.name)"
             case .section(let title): "section:\(title)"
             case .account(let account): "account:\(account.name)"
             case .folders(let account, _): "folders:\(account)"
@@ -51,6 +72,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             switch kind {
             case .unified(let role): .unified(role)
             case .accountInbox(let mailbox), .mailbox(let mailbox): .mailbox(mailbox.key)
+            case .chat: .allChats
+            case .chatAccount(let account): .chat(account.name)
             default: nil
             }
         }
@@ -62,7 +85,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private let outline = NSOutlineView()
     private var roots: [Node] = []
     private var updatingSelection = false
-    private var expanded: Set<String> = ["unified:inbox", "section:Accounts"]
+    private var expanded: Set<String> = ["unified:inbox", "chat", "section:Accounts"]
 
     init(store: MailStore) {
         self.store = store
@@ -93,6 +116,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         view = scroll
 
         NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .storeAccountsChanged, object: store)
+        NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .chatSpacesChanged, object: store.chat)
         reload()
     }
 
@@ -124,6 +148,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             guard !boxes.isEmpty else { continue }
             let children = role == .inbox && boxes.count > 1 ? boxes.map { Node(.accountInbox($0)) } : []
             nodes.append(Node(.unified(role), children: children))
+        }
+        let chats = store.chat.accounts
+        if !chats.isEmpty {
+            nodes.append(Node(.chat, children: chats.count > 1 ? chats.map { Node(.chatAccount($0)) } : []))
         }
         var accounts: [Node] = []
         for account in store.accounts {
@@ -237,6 +265,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                            leading: .dot(AccountStyle.color(for: mailbox.account, in: store)),
                            badge: mailbox.unread ?? 0, secondary: true)
             cell.toolTip = store.account(named: mailbox.account)?.email
+        case .chat:
+            cell.configure(title: "Chat", leading: .symbol("bubble.left.and.bubble.right"),
+                           badge: store.badgeCount(.allChats))
+        case .chatAccount(let account):
+            cell.configure(title: account.email ?? account.name,
+                           leading: .dot(AccountStyle.chatColor(for: account.name, in: store)),
+                           badge: store.badgeCount(.chat(account.name)), secondary: true)
+            cell.toolTip = account.name
         case .account(let account):
             cell.configure(title: account.name,
                            leading: .avatar(Address(name: account.name, email: account.email ?? account.name),

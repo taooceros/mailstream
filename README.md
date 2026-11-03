@@ -38,6 +38,7 @@ CONFIG=debug ./scripts/run.sh       # bundle, quit the running copy, launch
 | Parsing | `Backend/MessageParser.swift`, `HTMLText.swift` | Converts mail-parser JSON into HTML or text bodies, inline `cid:` parts, attachments and snippets |
 | Store | `Store/MailStore.swift`, `Threader.swift`, `ConversationRow.swift`, `MailCache.swift` | Main-actor state, off-main list rebuilds, optimistic flag and move actions, async disk cache in `~/Library/Caches/dev.mailstream.Mailstream` |
 | Tagging | `Backend/OmpTagger.swift`, `Model/Tags.swift` | Runs `omp -p --model smol` on batches of conversations and parses the JSON tags |
+| Chat | `Engine/src/chat/` (Rust), `Backend/Chat.swift`, `Store/ChatStore.swift`, `UI/ChatPage.swift`, `UI/ChatReader.swift` | The engine's `chat` commands call the Google Chat REST API over pooled TLS connections and keep each account's space summaries in memory, so a poll only refetches spaces with new activity; Swift holds main-actor spaces and message state with a disk cache, and renders a space's log into the reader's page |
 | UI | `UI/*` | Sidebar plus a full-width content area that shows the list or one conversation, compose window |
 
 Threading groups messages from the Inbox and Sent of each account using
@@ -179,6 +180,35 @@ A change in the contact directory, rebuilt daily, retires cached misses.
 Google's People API scopes need your own Google Cloud OAuth client (Desktop
 app, published). Thunderbird's public client is refused for them.
 
+## Google Chat
+
+Google Chat comes from ortie accounts whose names end in `-chat`, e.g.
+`school-gmail-chat`. The account's `extras.login_hint` is the address, and it
+matches the chat account to a mail account's color. It needs these scopes:
+`chat.spaces.readonly`, `chat.messages.readonly`, `chat.messages.create`,
+`chat.memberships.readonly` and `chat.users.readstate`. The API only works for
+Google Workspace accounts, not personal gmail.com ones. It also only works when
+the OAuth client's Google Cloud project has the Chat API enabled and configured
+(Google Chat API → Configuration: a name, an avatar and a description;
+interactive features can stay off). Like the contacts accounts, it is kept
+separate from the mail tokens.
+
+The sidebar shows a Chat item (with one child per chat account when there are
+several) after the unified mailboxes. Its badge counts spaces with unread
+messages. The list shows spaces newest first, in the same rows as mail: DMs and
+bots under the other person's picture, groups and spaces under the latest
+sender's. Opening a space shows its messages in the reader as a chat log, with
+the first unread message marked, and marks the space read. Earlier messages load
+from the top of the log.
+
+The composer sits at the bottom of the space: Return sends, Shift-Return starts
+a new line, and hovering a message offers Reply in thread. A message that fails
+to send stays in the log with Retry and Delete. Spaces refresh every 20 s, and
+an open space marks new messages read as they arrive. Search filters the loaded
+spaces by title and latest message. Every request goes through the engine; the
+last 150 messages of the 20 most recently opened spaces are cached in
+`chat/` in the cache directory.
+
 ## Shortcuts
 
 | Action | Menu | List key |
@@ -201,3 +231,4 @@ app, published). Thunderbird's public client is refused for them.
 - There is no push (IMAP IDLE or Graph subscriptions). The inbox refreshes every 90 s and unread counts every 5 min.
 - Mail requests still go through himalaya's command interface, one command per call: listing a page re-runs its search, and nothing streams.
 - Opening a conversation marks its unread messages as read.
+- Chat cannot send attachments, and searching chat only filters the spaces already listed.

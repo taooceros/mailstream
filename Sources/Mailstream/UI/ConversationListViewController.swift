@@ -9,6 +9,7 @@ protocol ConversationListDelegate: AnyObject {
     /// The keyboard highlight moved; toolbar commands apply to this conversation.
     func conversationList(_ list: ConversationListViewController, didHighlight conversation: Conversation?)
     func conversationList(_ list: ConversationListViewController, open conversation: Conversation)
+    func conversationList(_ list: ConversationListViewController, openChat space: ChatSpaceKey)
     func conversationList(_ list: ConversationListViewController, perform action: ConversationAction, on conversation: Conversation)
     /// Entered or left a Smart Inbox bundle.
     func conversationListDidChangeBundle(_ list: ConversationListViewController)
@@ -16,6 +17,7 @@ protocol ConversationListDelegate: AnyObject {
 
 /// Full-width list. Inboxes become a Smart Inbox: AI-tagged notifications, newsletters and
 /// invitations sit on a shelf of tiles, people waiting on a reply come first, the rest by date.
+/// The Chat selection lists Google Chat spaces in the same rows, newest first, without mail actions.
 /// Store updates are diffed so rows slide in and out instead of the list jumping.
 @MainActor
 final class ConversationListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
@@ -25,10 +27,25 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         case section(String, count: Int?, accent: Bool)
         case shelf([(MailCategory, [Conversation])])
         case conversation(Conversation)
+        case space(ChatRow)
 
         var conversation: Conversation? {
             if case .conversation(let conversation) = self { return conversation }
             return nil
+        }
+
+        var space: ChatRow? {
+            if case .space(let space) = self { return space }
+            return nil
+        }
+
+        /// Identity of a row that can be highlighted and opened; nil for headers and the shelf.
+        var id: String? {
+            switch self {
+            case .conversation(let conversation): conversation.id
+            case .space(let space): "h:" + space.id
+            case .section, .shelf: nil
+            }
         }
 
         /// Stable identity across rebuilds, for diffing.
@@ -37,6 +54,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             case .section(let title, _, _): "s:" + title
             case .shelf: "shelf"
             case .conversation(let conversation): "c:" + conversation.id
+            case .space(let space): "h:" + space.id
             }
         }
     }
@@ -139,6 +157,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         center.addObserver(self, selector: #selector(accountsChanged), name: .storeAccountsChanged, object: store)
         center.addObserver(self, selector: #selector(storeError), name: .storeError, object: store)
         center.addObserver(self, selector: #selector(avatarResolved(_:)), name: .avatarResolved, object: store.avatars)
+        center.addObserver(self, selector: #selector(chatChanged), name: .chatSpacesChanged, object: store.chat)
+        center.addObserver(self, selector: #selector(storeError), name: .storeError, object: store.chat)
         center.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         center.addObserver(self, selector: #selector(userScrolled), name: NSScrollView.willStartLiveScrollNotification, object: scroll)
         center.addObserver(self, selector: #selector(scrollEnded), name: NSScrollView.didEndLiveScrollNotification, object: scroll)
@@ -152,7 +172,19 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         store.listContext.search == nil && store.listContext.role == .inbox && store.aiTaggingEnabled
     }
 
+    /// The published list is Google Chat's.
+    private var isChat: Bool { store.listContext.selection.isChat }
+
+    /// Search text in the Chat selection: filters spaces by title and preview, locally.
+    var chatFilter: String? {
+        didSet { if chatFilter != oldValue, isChat { listChanged() } }
+    }
+
     private func buildRows() -> [Row] {
+        if isChat {
+            openBundle = nil
+            return chatRows()
+        }
         let conversations = store.conversations
         guard isSmart else {
             openBundle = nil
@@ -201,6 +233,25 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         return rows
     }
 
+    private func chatRows() -> [Row] {
+        guard case .chat(let account) = store.listContext.selection else { return [] }
+        var spaces = store.chat.rows(account: account)
+        if let filter = chatFilter?.trimmingCharacters(in: .whitespaces), !filter.isEmpty {
+            spaces = spaces.filter { $0.title.localizedCaseInsensitiveContains(filter) || $0.preview.localizedCaseInsensitiveContains(filter) }
+        }
+        var rows: [Row] = []
+        rows.reserveCapacity(spaces.count + 8)
+        var current: String?
+        for space in spaces {
+            if space.section != current {
+                rows.append(.section(space.section, count: nil, accent: false))
+                current = space.section
+            }
+            rows.append(.space(space))
+        }
+        return rows
+    }
+
     /// What a row's cell shows; equal signatures need no reload.
     private func signature(_ row: Row) -> Int {
         var hasher = Hasher()
@@ -218,11 +269,18 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             hasher.combine(store.row(for: conversation))
             hasher.combine(store.tag(for: conversation))
             hasher.combine(store.snippet(for: conversation.latest.ref))
+        case .space(let space):
+            hasher.combine(space)
         }
         return hasher.finalize()
     }
 
     // MARK: - Store updates
+
+    /// Chat spaces matter only while the list shows them.
+    @objc private func chatChanged() {
+        if isChat { listChanged() }
+    }
 
     @objc private func listChanged() {
         var context = false
@@ -249,12 +307,12 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         suppressSelection = true
         var notify = false
         if let highlightedID {
-            if let row = rows.firstIndex(where: { $0.conversation?.id == highlightedID }) {
+            if let row = rows.firstIndex(where: { $0.id == highlightedID }) {
                 if table.selectedRow != row { table.selectRowIndexes([row], byExtendingSelection: false) }
             } else if let row = nearestConversationRow(to: previousRow), store.listContext.search == nil {
                 // The highlighted conversation left the list (archived, trashed): advance like Mail does.
                 table.selectRowIndexes([row], byExtendingSelection: false)
-                self.highlightedID = rows[row].conversation?.id
+                self.highlightedID = rows[row].id
                 notify = true
             } else {
                 table.deselectAll(nil)
@@ -268,7 +326,11 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         if notify { delegate?.conversationList(self, didHighlight: highlightedConversation) }
 
         emptyLabel.isHidden = !rows.isEmpty
-        emptyLabel.stringValue = store.isLoading ? "Loading…" : (store.listContext.search != nil ? "No Results" : "No Conversations")
+        if isChat {
+            emptyLabel.stringValue = store.chat.isLoading ? "Loading…" : (chatFilter?.isEmpty == false ? "No Results" : "No Chats")
+        } else {
+            emptyLabel.stringValue = store.isLoading ? "Loading…" : (store.listContext.search != nil ? "No Results" : "No Conversations")
+        }
         updateStatus()
         DispatchQueue.main.async { [weak self] in self?.afterReload() }
     }
@@ -356,10 +418,27 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
 
     private func afterReload() {
         requestVisibleSnippets()
-        guard store.canLoadMore, !store.isLoading, autoFillPages < Self.autoFillLimit,
+        guard canLoadMore, !isLoadingList, autoFillPages < Self.autoFillLimit,
               let document = scroll.documentView else { return }
         if document.bounds.height < scroll.contentView.bounds.height + 600 {
             autoFillPages += 1
+            loadMore()
+        }
+    }
+
+    /// Paging of what the list shows: mail pages, or a larger chat spaces limit.
+    private var canLoadMore: Bool {
+        guard isChat else { return store.canLoadMore }
+        guard case .chat(let account) = store.listContext.selection, chatFilter?.isEmpty ?? true else { return false }
+        return store.chat.canLoadMore(account: account)
+    }
+
+    private var isLoadingList: Bool { isChat ? store.chat.isLoading : store.isLoading }
+
+    private func loadMore() {
+        if case .chat(let account) = store.listContext.selection {
+            store.chat.loadMore(account: account)
+        } else {
             store.loadMore()
         }
     }
@@ -374,8 +453,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     private func nearestConversationRow(to row: Int) -> Int? {
         guard !rows.isEmpty else { return nil }
         let start = min(max(row, 0), rows.count - 1)
-        for index in start..<rows.count where rows[index].conversation != nil { return index }
-        for index in stride(from: start, through: 0, by: -1) where rows[index].conversation != nil { return index }
+        for index in start..<rows.count where rows[index].id != nil { return index }
+        for index in stride(from: start, through: 0, by: -1) where rows[index].id != nil { return index }
         return nil
     }
 
@@ -432,7 +511,15 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
 
     /// The floating status capsule appears only while something is happening or went wrong.
     private func updateStatus() {
-        if store.isLoading {
+        if isChat {
+            if store.chat.isLoading {
+                status.show("Checking for messages…", busy: true)
+            } else if let error = store.chat.lastError {
+                status.show(error, busy: false, warning: true)
+            } else {
+                status.hide()
+            }
+        } else if store.isLoading {
             status.show(store.searchQuery != nil ? "Searching…" : "Checking for mail…", busy: true)
         } else if let error = store.lastError {
             status.show(error, busy: false, warning: true)
@@ -446,9 +533,9 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     @objc private func scrolled() {
         table.refreshHover()
         requestVisibleSnippets()
-        guard store.canLoadMore, !store.isLoading, let document = scroll.documentView else { return }
+        guard canLoadMore, !isLoadingList, let document = scroll.documentView else { return }
         let visible = scroll.contentView.bounds
-        if visible.maxY > document.bounds.height - 600 { store.loadMore() }
+        if visible.maxY > document.bounds.height - 600 { loadMore() }
     }
 
     @objc private func userScrolled() {
@@ -504,10 +591,22 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         table.scrollRowToVisible(row)
     }
 
+    /// Moves the keyboard highlight to a chat space's row (used after Back).
+    func highlight(space key: ChatSpaceKey) {
+        let id = "h:" + key.id
+        guard let row = rows.firstIndex(where: { $0.id == id }) else { return }
+        suppressSelection = true
+        table.selectRowIndexes([row], byExtendingSelection: false)
+        suppressSelection = false
+        highlightedID = id
+        lastHighlightedRow = row
+        table.scrollRowToVisible(row)
+    }
+
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !suppressSelection else { return }
         if table.selectedRow >= 0 { lastHighlightedRow = table.selectedRow }
-        highlightedID = highlightedConversation?.id
+        highlightedID = table.selectedRow >= 0 && table.selectedRow < rows.count ? rows[table.selectedRow].id : nil
         delegate?.conversationList(self, didHighlight: highlightedConversation)
         preload(table.selectedRow)
     }
@@ -516,7 +615,12 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     /// finds its bodies in memory; passing over rows loads nothing.
     private func preload(_ row: Int) {
         preloadTask?.cancel()
-        guard row >= 0, row < rows.count, let conversation = rows[row].conversation else { return }
+        guard row >= 0, row < rows.count else { return }
+        if let space = rows[row].space {
+            store.chat.preload(space.key)
+            return
+        }
+        guard let conversation = rows[row].conversation else { return }
         preloadTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(80))
             guard !Task.isCancelled, let self else { return }
@@ -536,7 +640,11 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     }
 
     private func open(_ row: Int) {
-        if case .conversation(let conversation) = rows[row] { delegate?.conversationList(self, open: conversation) }
+        switch rows[row] {
+        case .conversation(let conversation): delegate?.conversationList(self, open: conversation)
+        case .space(let space): delegate?.conversationList(self, openChat: space.key)
+        case .section, .shelf: break
+        }
     }
 
     private func performOnHighlight(_ action: ConversationAction) {
@@ -552,12 +660,12 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         switch rows[row] {
         case .section: ListMetrics.sectionHeight
         case .shelf: ListMetrics.shelfHeight
-        case .conversation: ListMetrics.rowHeight
+        case .conversation, .space: ListMetrics.rowHeight
         }
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        guard rows[row].conversation != nil else { return nil }
+        guard rows[row].id != nil else { return nil }
         return tableView.makeView(withIdentifier: Self.rowViewID, owner: nil) as? ListRowView
             ?? { let view = ListRowView(); view.identifier = Self.rowViewID; return view }()
     }
@@ -565,7 +673,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     private static let rowViewID = NSUserInterfaceItemIdentifier("ListRowView")
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        rows[row].conversation != nil
+        rows[row].id != nil
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -600,6 +708,22 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             cell.onAvatar = { [weak self] anchor, photo in
                 guard let self else { return }
                 AvatarPreview.show(person, small: photo, automated: automated, avatars: self.store.avatars,
+                                   relativeTo: anchor.bounds, of: anchor)
+            }
+            return cell
+        case .space(let space):
+            let cell = tableView.makeView(withIdentifier: ConversationRowCell.identifier, owner: nil) as? ConversationRowCell
+                ?? ConversationRowCell()
+            let photo = space.avatarKey.isEmpty ? nil : store.avatars.image(for: space.avatarKey, automated: false)
+            cell.configure(space, account: store.listContext.selection == .allChats
+                               ? (store.chat.account(named: space.key.account)?.email ?? space.key.account,
+                                  AccountStyle.chatColor(for: space.key.account, in: store)) : nil,
+                           photo: photo)
+            cell.onAction = nil
+            let person = Address(name: space.avatarName, email: space.avatarKey)
+            cell.onAvatar = { [weak self] anchor, photo in
+                guard let self else { return }
+                AvatarPreview.show(person, small: photo, automated: false, avatars: self.store.avatars,
                                    relativeTo: anchor.bounds, of: anchor)
             }
             return cell
@@ -645,7 +769,22 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let row = table.clickedRow
-        guard row >= 0, row < rows.count, let conversation = rows[row].conversation else { return }
+        guard row >= 0, row < rows.count else { return }
+        if let space = rows[row].space {
+            let open = NSMenuItem(title: "Open", action: #selector(openChatFromMenu(_:)), keyEquivalent: "")
+            open.target = self
+            open.representedObject = row
+            menu.addItem(open)
+            if space.isUnread {
+                let read = NSMenuItem(title: "Mark as Read", action: #selector(markChatRead(_:)), keyEquivalent: "")
+                read.image = NSImage(systemSymbolName: "envelope.open", accessibilityDescription: nil)
+                read.target = self
+                read.representedObject = space.key.id
+                menu.addItem(read)
+            }
+            return
+        }
+        guard let conversation = rows[row].conversation else { return }
         func add(_ title: String, _ symbol: String, _ action: ConversationAction) {
             let item = NSMenuItem(title: title, action: #selector(contextAction(_:)), keyEquivalent: "")
             item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
@@ -679,6 +818,17 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     @objc private func contextAction(_ sender: NSMenuItem) {
         guard let payload = sender.representedObject as? ContextPayload else { return }
         perform(payload.action, id: payload.id)
+    }
+
+    @objc private func openChatFromMenu(_ sender: NSMenuItem) {
+        guard let row = sender.representedObject as? Int, row < rows.count else { return }
+        open(row)
+    }
+
+    @objc private func markChatRead(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let space = rows.lazy.compactMap(\.space).first(where: { $0.id == id }) else { return }
+        store.chat.markRead(space.key)
     }
 }
 

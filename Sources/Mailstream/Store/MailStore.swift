@@ -4,11 +4,19 @@ enum Selection: Hashable, Sendable {
     /// The same role across every account: All Inboxes, all Sent, …
     case unified(MailboxRole)
     case mailbox(MailboxKey)
+    /// Google Chat spaces of one chat account, or of all of them (nil).
+    case chat(String?)
 
     static let allInboxes = Selection.unified(.inbox)
+    static let allChats = Selection.chat(nil)
 
     var isUnified: Bool {
         if case .unified = self { return true }
+        return false
+    }
+
+    var isChat: Bool {
+        if case .chat = self { return true }
         return false
     }
 }
@@ -49,6 +57,8 @@ final class MailStore {
     private let tools: ToolEnvironment
     let cache = MailCache()
     private(set) lazy var avatars = AvatarStore(tools: tools, root: cache.root)
+    /// Google Chat accounts, spaces and messages; selected through `Selection.chat`.
+    private(set) lazy var chat = ChatStore(cache: cache)
 
     private(set) var accounts: [Account] = []
     private(set) var mailboxes: [String: [Mailbox]] = [:]
@@ -111,6 +121,7 @@ final class MailStore {
             await restoreFromCache()
             await connect()
         }
+        chat.start()
         timers.append(Timer.scheduledTimer(withTimeInterval: 90, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { if self?.isLoading == false { self?.refresh() } }
         })
@@ -286,6 +297,7 @@ final class MailStore {
         switch selection {
         case .unified(let role): role == .inbox ? "All Inboxes" : role.title
         case .mailbox(let key): mailbox(key)?.displayName ?? key.mailbox
+        case .chat(let account): account.map { chat.account(named: $0)?.email ?? $0 } ?? "Chat"
         }
     }
 
@@ -293,6 +305,7 @@ final class MailStore {
         switch selection {
         case .unified(let role): role
         case .mailbox(let key): mailbox(key)?.role ?? .other
+        case .chat: .other
         }
     }
 
@@ -310,6 +323,7 @@ final class MailStore {
         switch selection {
         case .unified(let role): boxes = unifiedMailboxes(role)
         case .mailbox(let key): boxes = mailbox(key).map { [$0] } ?? []
+        case .chat(let account): return chat.unreadSpaces(account: account)
         }
         return boxes.reduce(0) { $0 + (($1.role == .drafts ? $1.total : $1.unread) ?? 0) }
     }
@@ -322,6 +336,7 @@ final class MailStore {
         switch selection {
         case .unified(let role): unifiedMailboxes(role).map(\.key)
         case .mailbox(let key): [key]
+        case .chat: []
         }
     }
 
@@ -345,7 +360,7 @@ final class MailStore {
         searchQuery = nil
         searchResults = [:]
         setNeedsRebuild()
-        refresh()
+        if selection.isChat { chat.refresh() } else { refresh() }
     }
 
     /// The row a cell shows for `conversation`, formatted with the list it belongs to.

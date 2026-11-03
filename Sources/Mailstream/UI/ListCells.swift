@@ -332,6 +332,8 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
     /// Only on conversations waiting on the user's reply.
     private var resolveButton: HoverActionButton!
     private var hovering = false
+    /// Chat rows have no quick actions: hovering keeps the date.
+    private var showsActions = true
 
     init() {
         super.init(frame: .zero)
@@ -380,6 +382,7 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
     func configure(_ row: ConversationRow, snippet: String?, archivable: Bool,
                    account: (name: String, color: NSColor)?, tag: ConversationTag?, photo: NSImage?) {
         let unread = row.isUnread
+        showsActions = true
         unreadDot.isHidden = !unread
         avatarKey = row.avatarKey
         avatar.configure(initials: row.avatarInitials, color: Avatar.color(for: row.avatarKey), photo: photo)
@@ -433,6 +436,37 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
         needsLayout = true
     }
 
+    /// A chat space in the same columns: title where the senders go, "Sender: text" as the line.
+    func configure(_ row: ChatRow, account: (name: String, color: NSColor)?, photo: NSImage?) {
+        let unread = row.isUnread
+        showsActions = false
+        setHovering(false, animated: false)
+        unreadDot.isHidden = !unread
+        avatarKey = row.avatarKey
+        avatar.configure(initials: row.avatarInitials, color: Avatar.color(for: row.avatarColorKey), photo: photo)
+        star.isHidden = true
+        paperclip.isHidden = !row.hasAttachment
+        topic.isHidden = true
+        accountTick.fill = account?.color ?? .clear
+        accountTick.toolTip = account?.name
+        date.stringValue = row.date
+        date.textColor = unread ? .labelColor : .secondaryLabelColor
+        date.font = unread ? Self.unreadDateFont : Self.dateFont
+
+        let name = NSMutableAttributedString(string: row.title, attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: unread ? .semibold : .regular),
+            .foregroundColor: unread ? NSColor.labelColor : NSColor.labelColor.withAlphaComponent(0.72),
+            .paragraphStyle: NSParagraphStyle.truncatingTail,
+        ])
+        sender.attributedStringValue = name
+        line.attributedStringValue = NSAttributedString(string: row.preview, attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: unread ? .medium : .regular),
+            .foregroundColor: unread ? NSColor.labelColor : NSColor.secondaryLabelColor,
+            .paragraphStyle: NSParagraphStyle.truncatingTail,
+        ])
+        needsLayout = true
+    }
+
     /// A picture that arrived after the row was configured.
     func showPhoto(_ photo: NSImage, for key: String) {
         guard key == avatarKey else { return }
@@ -480,6 +514,7 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
     }
 
     func setHovering(_ hovering: Bool, animated: Bool) {
+        let hovering = hovering && showsActions
         if hovering != self.hovering {
             self.hovering = hovering
             needsLayout = true

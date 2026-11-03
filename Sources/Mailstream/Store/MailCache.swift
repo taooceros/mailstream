@@ -19,7 +19,7 @@ final class MailCache: Sendable {
         root = caches.appendingPathComponent("dev.mailstream.Mailstream", isDirectory: true)
         let root = root
         writer.async {
-            for sub in ["envelopes", "messages", "mailboxes"] {
+            for sub in ["envelopes", "messages", "mailboxes", "chat"] {
                 try? FileManager.default.createDirectory(at: root.appendingPathComponent(sub), withIntermediateDirectories: true)
             }
         }
@@ -108,5 +108,43 @@ final class MailCache: Sendable {
 
     func attachmentURL(_ attachment: Attachment, of ref: MessageRef) -> URL {
         messageDirectory(ref).appendingPathComponent(attachment.storedName)
+    }
+
+    // MARK: Chat
+
+    private var chatAccountsURL: URL { root.appendingPathComponent("chat-accounts-v1.json") }
+
+    func loadChatAccounts() async -> [ChatAccount]? { await read([ChatAccount].self, at: chatAccountsURL) }
+
+    func saveChatAccounts(_ accounts: [ChatAccount]) { write(accounts, to: chatAccountsURL) }
+
+    private func chatSpacesURL(_ account: String) -> URL {
+        root.appendingPathComponent("chat/spaces-\(Self.hash(account)).json")
+    }
+
+    func loadChatSpaces(_ account: String) async -> ChatSpaceList? { await read(ChatSpaceList.self, at: chatSpacesURL(account)) }
+
+    func saveChatSpaces(_ list: ChatSpaceList, for account: String) { write(list, to: chatSpacesURL(account)) }
+
+    private var chatRecentURL: URL { root.appendingPathComponent("chat/recent-v1.json") }
+
+    /// Spaces whose messages are kept on disk, most recently opened first.
+    func loadChatRecent() async -> [ChatSpaceKey]? { await read([ChatSpaceKey].self, at: chatRecentURL) }
+
+    func saveChatRecent(_ keys: [ChatSpaceKey]) { write(keys, to: chatRecentURL) }
+
+    private func chatMessagesURL(_ key: ChatSpaceKey) -> URL {
+        root.appendingPathComponent("chat/messages-\(Self.hash(key.account, key.space)).json")
+    }
+
+    func loadChatMessages(_ key: ChatSpaceKey) async -> ChatMessagePage? {
+        await read(ChatMessagePage.self, at: chatMessagesURL(key))
+    }
+
+    func saveChatMessages(_ page: ChatMessagePage, for key: ChatSpaceKey) { write(page, to: chatMessagesURL(key)) }
+
+    func removeChatMessages(_ key: ChatSpaceKey) {
+        let url = chatMessagesURL(key)
+        writer.async { try? FileManager.default.removeItem(at: url) }
     }
 }

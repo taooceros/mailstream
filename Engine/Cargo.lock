@@ -1650,6 +1650,7 @@ dependencies = [
  "dirs 7.0.0",
  "humansize",
  "io-gmail",
+ "io-http",
  "io-imap",
  "io-jmap",
  "io-m2dir",

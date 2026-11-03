@@ -12,7 +12,7 @@ protocol ReaderDelegate: AnyObject {
 /// Renders one conversation into a single long-lived web page: native-feeling cards for each
 /// message, HTML bodies in auto-sized iframes, quoted history folded, remote content blocked unless
 /// the sender is known (`MailStore.loadsRemoteContent`). Switching conversations swaps the page's
-/// content through script, not a navigation.
+/// content through script, not a navigation. Google Chat spaces share the page (`ChatReader`).
 @MainActor
 final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     weak var delegate: ReaderDelegate?
@@ -55,6 +55,8 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
     private var replyFocused = false
     private var replyFocusPending = false
     private var planning: (ref: MessageRef, all: Bool)?
+    /// Renders chat spaces into this page.
+    private lazy var chatReader = ChatReader(store: store, reader: self)
 
     init(store: MailStore) {
         self.store = store
@@ -144,15 +146,19 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
     /// Enlarges a sender's picture; `rect` is the avatar's box in page (CSS) pixels.
     private func showAvatar(of message: MailMessage, at rect: [Double]) {
         guard let from = message.envelope.from.first else { return }
-        let sender = store.withIdentityName(from)
         let automated = conversation.flatMap { store.tag(for: $0) }.map { $0.category != .people } ?? false
-        guard let photo = store.avatars.image(for: sender.email, automated: automated) else { return }
+        showAvatar(of: store.withIdentityName(from), automated: automated, at: rect)
+    }
+
+    /// Enlarges `person`'s picture from AvatarStore; `rect` is the avatar's box in page (CSS) pixels.
+    func showAvatar(of person: Address, automated: Bool, at rect: [Double]) {
+        guard let photo = store.avatars.image(for: person.email, automated: automated) else { return }
         let scale = webView.pageZoom * webView.magnification
         let height = rect[3] * scale
         let top = rect[1] * scale
         let anchor = NSRect(x: rect[0] * scale, y: webView.isFlipped ? top : webView.bounds.height - top - height,
                             width: rect[2] * scale, height: height)
-        AvatarPreview.show(sender, small: photo, automated: automated, avatars: store.avatars, relativeTo: anchor, of: webView)
+        AvatarPreview.show(person, small: photo, automated: automated, avatars: store.avatars, relativeTo: anchor, of: webView)
     }
 
     /// WebKit holds page rendering near 60 fps through its internal feature
@@ -179,9 +185,51 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
 
     /// Renders `conversation`; `onReady` runs once its thread is in the page (a later `show` replaces it).
     func show(_ conversation: Conversation?, onReady: (() -> Void)? = nil) {
+        chatReader.hide()
         allowRemote = conversation.map(store.loadsRemoteContent) ?? false
         render(conversation)
         self.onReady = onReady
+    }
+
+    /// The chat space on screen, if any.
+    var chatSpace: ChatSpaceKey? { chatReader.key }
+
+    /// Renders a chat space; `onReady` runs once it is in the page (a later `show` replaces it).
+    func showChat(_ key: ChatSpaceKey, onReady: (() -> Void)? = nil) {
+        chatReader.show(key)
+        self.onReady = onReady
+    }
+
+    /// Hands the page to a chat space: the conversation leaves (its reply kept as a draft).
+    func beginChat() {
+        generation += 1
+        if let reply, reply.sending || !reply.isEmpty { drafts[reply.conversation] = reply }
+        reply = nil
+        replyFocused = false
+        conversation = nil
+        messages = []
+        pageReady = false
+        pending = []
+        loaded = []
+        staged = nil
+        webView.isHidden = false
+        placeholder.isHidden = true
+    }
+
+    /// Renders a chat space's `MS.render` state, at once or when the shell has loaded.
+    func stageChat(_ state: [String: Any]) {
+        var state = state
+        state["generation"] = generation
+        staged = state
+        if shellLoad == nil { commit() }
+    }
+
+    /// Whether the chat space's render was sent to the page, so updates can follow it (scripts run in order).
+    var acceptsChatScript: Bool { shellLoad == nil && staged == nil && chatReader.key != nil }
+
+    func runChat(_ script: String, _ arguments: [String: Any]) {
+        guard acceptsChatScript else { return }
+        webView.callAsyncJavaScript(script, arguments: arguments, in: nil, in: world, completionHandler: nil)
     }
 
     /// Re-renders only when the conversation gained or lost messages; flag changes keep the page.
@@ -350,7 +398,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
     /// The shell dies with its web process: load a new one, with the thread on screen if any.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         loadShell()
-        if conversation != nil { render(conversation) }
+        if conversation != nil { render(conversation) } else { chatReader.reload() }
     }
 
     // MARK: - Messages from the page
@@ -358,6 +406,10 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any], let action = body["action"] as? String,
               body["generation"] as? Int == generation else { return }
+        if chatReader.key != nil, action == "avatar" || action.hasPrefix("chat-") {
+            chatReader.handle(action, body)
+            return
+        }
         let index = body["index"] as? Int ?? -1
         let target = index >= 0 && index < messages.count ? messages[index] : nil
         switch action {
@@ -597,6 +649,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
     /// Escape while replying: leaves the text field, or closes an empty reply. False when Escape
     /// should go back as usual, the reply then waiting as a draft.
     func handleEscape() -> Bool {
+        if chatReader.key != nil { return chatReader.handleEscape() }
         guard let reply, !reply.sending, !webView.isHidden else { return false }
         if reply.isEmpty {
             discardReply()

@@ -1,11 +1,13 @@
 //! # Mailstream engine
 //!
-//! himalaya 2.2.1 as a library linked into Mailstream. The modules below are himalaya's own; its
-//! binary entry point is replaced by [`engine`], which runs the same command lines in-process
-//! and keeps each account's connections open between them.
+//! himalaya 2.2.1 as a library linked into Mailstream. The modules below are himalaya's own, plus
+//! [`chat`] (Google Chat, Mailstream's); its binary entry point is replaced by [`engine`], which
+//! runs the same command lines in-process and keeps each account's connections open between them.
 
 mod account;
 mod backend;
+#[cfg(feature = "chat")]
+mod chat;
 mod cli;
 mod config;
 mod email;
