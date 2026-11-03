@@ -19,7 +19,8 @@ protocol TokenSource: Sendable {
 }
 
 /// Authorized HTTPS requests for one account. A 401 refreshes the token and repeats once; rate
-/// limiting (429, or Google's 403 rate-limit reasons: never processed) backs off and repeats; 5xx
+/// limiting (429, or Google's 403 rate-limit reasons: never processed) backs off and repeats, and
+/// also pauses the account's `QuotaBudget` so its other requests stop adding to the overload; 5xx
 /// and dropped connections repeat only requests that may run twice. Concurrency is bounded per
 /// priority so background prefetch never starves interactive reads, and requests with a `cost`
 /// first spend it from the account's `QuotaBudget`.
@@ -27,8 +28,8 @@ final class API: Sendable {
     let account: String
     private let tokens: any TokenSource
     private let budget: QuotaBudget?
-    private let interactive = AsyncSemaphore(6)
-    private let background = AsyncSemaphore(3)
+    private let interactive: AsyncSemaphore
+    private let background: AsyncSemaphore
 
     static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
@@ -38,10 +39,20 @@ final class API: Sendable {
         return URLSession(configuration: configuration)
     }()
 
-    init(account: String, tokens: any TokenSource, budget: QuotaBudget? = nil) {
+    /// Outlook refuses more than four requests at once per mailbox (MailboxConcurrency), so Graph
+    /// accounts pass 3 + 1; Gmail takes 6 + 3.
+    init(account: String, tokens: any TokenSource, budget: QuotaBudget? = nil,
+         interactive: Int = 6, background: Int = 3) {
         self.account = account
         self.tokens = tokens
         self.budget = budget
+        self.interactive = AsyncSemaphore(interactive)
+        self.background = AsyncSemaphore(background)
+    }
+
+    /// The provider refused for load: no request of this account spends quota for `delay`.
+    func throttled(for delay: Duration) async {
+        await budget?.pause(for: delay)
     }
 
     /// A request with `body` encoded as JSON when given.
@@ -106,7 +117,9 @@ final class API: Sendable {
                     continue
                 case 429 where attempt < 6, 403 where attempt < 6 && Self.isRateLimit(data),
                      500..<600 where repeatable && attempt < 4:
-                    try await Task.sleep(for: Self.delay(http, attempt: attempt))
+                    let delay = Self.delay(http, attempt: attempt)
+                    if http.statusCode < 500 { await throttled(for: delay) }
+                    try await Task.sleep(for: delay)
                     continue
                 default:
                     throw APIError(status: http.statusCode, message: Self.message(data, status: http.statusCode))

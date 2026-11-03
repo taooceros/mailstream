@@ -572,18 +572,16 @@ extension GmailBackend {
             .historyId.flatMap(UInt64.init)
     }
 
-    /// Metadata of `ids` through Gmail's batch endpoint, 50 per request; messages that no
-    /// longer exist are left out. Sub-requests Gmail throttles are repeated after a pause.
+    /// Metadata of `ids` through Gmail's batch endpoint, 50 per request and one batch at a time:
+    /// each sub-request counts against the per-user quota, so parallel batches were what Gmail
+    /// refused. Messages that no longer exist are left out; throttled sub-requests are repeated.
     fileprivate static func metadata(_ ids: [String], query: String, api: API,
                                      priority: RequestPriority) async throws -> [GmailMessage] {
-        try await withThrowingTaskGroup(of: [GmailMessage].self) { group in
-            for chunk in chunks(ids, 50) {
-                group.addTask { try await Self.batch(chunk, query: query, api: api, priority: priority) }
-            }
-            var messages: [GmailMessage] = []
-            for try await part in group { messages += part }
-            return messages
+        var messages: [GmailMessage] = []
+        for chunk in chunks(ids, 50) {
+            messages += try await batch(chunk, query: query, api: api, priority: priority)
         }
+        return messages
     }
 
     private static func batch(_ ids: [String], query: String, api: API, priority: RequestPriority) async throws -> [GmailMessage] {
@@ -631,7 +629,9 @@ extension GmailBackend {
             retry += pending.indices.filter { !answered.contains($0) }.map { pending[$0] }
             guard !retry.isEmpty else { break }
             guard attempt < 6 else { throw APIError(status: 429, message: "Gmail is limiting requests; try again shortly") }
-            try await Task.sleep(for: .milliseconds(min(500 << (attempt - 1), 8000)))
+            let delay = Duration.milliseconds(min(500 << (attempt - 1), 8000))
+            await api.throttled(for: delay)
+            try await Task.sleep(for: delay)
             pending = retry
         }
         return messages
