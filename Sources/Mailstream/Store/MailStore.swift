@@ -565,6 +565,19 @@ final class MailStore {
         return out
     }
 
+    /// Lowercased addresses the user has written to in loaded listings: recipients of sent mail.
+    func correspondents() -> Set<String> {
+        let own = ownAddresses
+        var out = Set<String>()
+        for (key, listing) in listings {
+            let sent = mailbox(key)?.role == .sent
+            for envelope in listing.envelopes where sent || envelope.from.contains(where: { own.contains($0.normalizedEmail) }) {
+                out.formUnion(envelope.to.map(\.normalizedEmail))
+            }
+        }
+        return out
+    }
+
     // MARK: - Content
 
     /// A message as the reader needs it, with its display preview, worked out off the main actor.

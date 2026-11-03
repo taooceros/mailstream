@@ -3,7 +3,7 @@ import AppKit
 /// HTML scaffolding for the conversation reader: one long-lived shell page whose column
 /// `MS.render` fills per conversation. Message bodies arrive later through `MS.setBody`; HTML mail
 /// renders inside a same-origin `srcdoc` iframe that inherits the page's Content-Security-Policy,
-/// so remote content stays blocked until the user allows it and the relaxed shell is loaded.
+/// so remote content stays blocked unless the relaxed shell is loaded for a known sender or a click.
 @MainActor
 enum ReaderPage {
     struct Card {
@@ -33,8 +33,11 @@ enum ReaderPage {
 
     /// The column's content for one conversation: header, remote banner, thread and reply dock.
     /// `chat` lays the thread out as a conversation: every message open, grouped by sender and day.
+    /// `trustLabel` names the senders the banner offers to always load remote content from; nil
+    /// offers only a one-time load (junk).
     static func thread(conversation: Conversation, cards: [Card], own: Set<String>, accountLabel: String,
-                       accountColor: String, mailboxLabels: [String], tag: ConversationTag?, chat: Bool) -> String {
+                       accountColor: String, mailboxLabels: [String], tag: ConversationTag?, chat: Bool,
+                       trustLabel: String?) -> String {
         var meta: [String] = []
         if tag?.toRespond == true { meta.append(Self.meta("Waiting on you", tint: "#F59E0B", mark: "dot")) }
         if let tag, tag.category != .people { meta.append(Self.meta(tag.category.title, tint: nil)) }
@@ -53,8 +56,9 @@ enum ReaderPage {
           <div class="thread-meta">\(meta.joined(separator: "<i class=\"sep\">·</i>"))</div>
         </header>
         <div id="remote-banner" class="banner" hidden>
-          <span>Remote images are blocked to protect your privacy.</span>
+          <span>\(trustLabel == nil ? "Remote images are blocked in junk mail." : "Remote images are blocked to protect your privacy.")</span>
           <button data-action="load-remote">Load Images</button>
+          \(trustLabel.map { "<button data-action=\"trust-remote\">Always Load from \(HTMLText.escape($0))</button>" } ?? "")
         </div>
         <main id="thread"\(chat ? " class=\"chat\"" : "")>
         """

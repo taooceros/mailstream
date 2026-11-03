@@ -44,8 +44,10 @@ Threading groups messages from the Inbox and Sent of each account using
 `Message-ID` and `In-Reply-To`. When those headers are missing, it falls back to
 normalized subjects within a 45-day window.
 
-The reader blocks remote content by default with a CSP. Each message body is
-rendered in a sandboxed `srcdoc` iframe, with page JavaScript disabled.
+The reader loads remote content only from known senders: your own addresses,
+people you have written to, and senders you chose "Always Load" for. Junk and
+other mail block it with a CSP until you click "Load Images". Each message body
+is rendered in a sandboxed `srcdoc` iframe, with page JavaScript disabled.
 
 The main thread never waits on IO or heavy work. Launch paints the last session
 (accounts, mailboxes, envelopes, tags) from the cache before himalaya answers.
@@ -59,8 +61,9 @@ turn and reload only the rows whose content changed. Cache reads and writes
 
 The reader is one persistent WebKit page, loaded and warmed at launch. Opening
 a conversation replaces its content through JavaScript (no navigation), and the
-reader slides in once the thread is in the page. Only allowing remote images
-reloads the page, because its CSP cannot be loosened in place.
+reader slides in once the thread is in the page. Only switching between blocked
+and allowed remote content reloads the page, because its CSP cannot be loosened
+in place.
 
 ## Layout
 

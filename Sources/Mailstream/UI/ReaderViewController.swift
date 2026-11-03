@@ -10,8 +10,9 @@ protocol ReaderDelegate: AnyObject {
 }
 
 /// Renders one conversation into a single long-lived web page: native-feeling cards for each
-/// message, HTML bodies in auto-sized iframes, quoted history folded, remote content blocked by
-/// default. Switching conversations swaps the page's content through script, not a navigation.
+/// message, HTML bodies in auto-sized iframes, quoted history folded, remote content blocked unless
+/// the sender is known (`MailStore.loadsRemoteContent`). Switching conversations swaps the page's
+/// content through script, not a navigation.
 @MainActor
 final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     weak var delegate: ReaderDelegate?
@@ -172,7 +173,7 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
 
     /// Renders `conversation`; `onReady` runs once its thread is in the page (a later `show` replaces it).
     func show(_ conversation: Conversation?, onReady: (() -> Void)? = nil) {
-        allowRemote = false
+        allowRemote = conversation.map(store.loadsRemoteContent) ?? false
         render(conversation)
         self.onReady = onReady
     }
@@ -229,10 +230,14 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
         let labels = Array(Set(messages.compactMap { message -> String? in
             message.role == .other ? store.mailbox(message.ref.mailboxKey)?.displayName : nil
         })).sorted()
+        let junk = conversation.messages.contains { $0.role == .junk }
+        let untrusted = store.untrustedSenders(in: conversation)
+        let trustLabel = junk || untrusted.isEmpty ? nil : untrusted.count == 1 ? untrusted[0].shortName : "These Senders"
         let html = ReaderPage.thread(conversation: conversation, cards: cards, own: store.ownAddresses,
                                      accountLabel: conversation.account,
                                      accountColor: AccountStyle.hex(for: conversation.account, in: store),
-                                     mailboxLabels: labels, tag: store.tag(for: conversation), chat: chat)
+                                     mailboxLabels: labels, tag: store.tag(for: conversation), chat: chat,
+                                     trustLabel: trustLabel)
         // A chat opens on the first unread message, else the latest.
         let focus = messages.firstIndex { !$0.envelope.isSeen } ?? lastIndex
         staged = ["generation": generation, "accent": NSColor.controlAccentColor.cssHex, "html": html,
@@ -381,6 +386,11 @@ final class ReaderViewController: NSViewController, WKNavigationDelegate, WKUIDe
             let url = store.attachmentURL(attachment, of: target.ref)
             if action == "attachment" { NSWorkspace.shared.open(url) } else { save(url, name: attachment.filename) }
         case "load-remote":
+            allowRemote = true
+            render(conversation)
+        case "trust-remote":
+            guard let conversation else { return }
+            store.trustRemoteContent(from: store.untrustedSenders(in: conversation))
             allowRemote = true
             render(conversation)
         case "avatar":
