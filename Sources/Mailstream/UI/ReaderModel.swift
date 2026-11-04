@@ -2,12 +2,23 @@ import AppKit
 import Observation
 import WebKit
 
-/// The reader for SwiftUI (the port of `ReaderViewController`): renders one conversation into the
-/// long-lived web page (`WebShell`): native-feeling cards for each message, HTML bodies in
-/// auto-sized iframes, quoted history folded, remote content blocked unless the sender is known
-/// (`MailStore.loadsRemoteContent`). Switching conversations swaps the page's content through
-/// script, not a navigation. Chat spaces render into the same page through `ChatModel`, its peer.
-/// `ReaderView` shows the shell's web view, the placeholder and the picture preview.
+/// What the reader shows.
+enum ReaderTarget {
+    case conversation(Conversation)
+    case chat(ChatSpaceKey)
+
+    var conversation: Conversation? {
+        if case .conversation(let conversation) = self { return conversation }
+        return nil
+    }
+}
+
+/// The reader: renders one conversation into the long-lived web page (`WebShell`): native-feeling
+/// cards for each message, HTML bodies in auto-sized iframes, quoted history folded, remote content
+/// blocked unless the sender is known (`MailStore.loadsRemoteContent`). Switching conversations
+/// swaps the page's content through script, not a navigation. Chat spaces render into the same
+/// page through `ChatModel`, its peer. `ReaderView` shows the shell's web view, the placeholder
+/// and the picture preview.
 @MainActor
 @Observable
 final class ReaderModel: WebShellClient {
@@ -60,7 +71,7 @@ final class ReaderModel: WebShellClient {
     init(store: MailStore) {
         self.store = store
         var openLink: (URL) -> Void = { _ in }
-        shell = WebShell(cache: store.cache, avatars: store.avatars) { url in openLink(url) }
+        shell = WebShell(cache: store.cache) { url in openLink(url) }
         shell.webView.isHidden = true
         chat = ChatModel(store: store, shell: shell) { [weak self] person, automated, message in
             self?.presentAvatar(of: person, automated: automated, from: message)
@@ -332,9 +343,9 @@ final class ReaderModel: WebShellClient {
     // MARK: - Picture preview
 
     /// Enlarges `person`'s picture over the web view. `message` is the page's `avatar` message, whose
-    /// `rect` is the avatar's box in viewport CSS pixels. It maps to the web view's points the same way
-    /// `WebShell.showAvatar` maps it: scaled by `pageZoom * magnification`. SwiftUI's coordinates are
-    /// top-left, like a flipped `WKWebView`, so the top needs no flipping.
+    /// `rect` is the avatar's box in viewport CSS pixels, scaled to the web view's points by
+    /// `pageZoom * magnification`. SwiftUI's coordinates are top-left, like a flipped `WKWebView`,
+    /// so the top needs no flipping.
     private func presentAvatar(of person: Address, automated: Bool, from message: [String: Any]) {
         guard let rect = message["rect"] as? [Double], rect.count == 4,
               let photo = store.avatars.image(for: person.email, automated: automated) else { return }

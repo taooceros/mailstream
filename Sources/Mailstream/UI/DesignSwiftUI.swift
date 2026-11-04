@@ -2,12 +2,8 @@ import SwiftUI
 
 // `Design` for SwiftUI views: the same tokens, as SwiftUI values.
 
-extension Design.Color {
-    var swiftUI: SwiftUI.Color { SwiftUI.Color(nsColor: color) }
-}
-
 extension SwiftUI.Color {
-    static func design(_ token: Design.Color) -> SwiftUI.Color { token.swiftUI }
+    static func design(_ token: Design.Color) -> SwiftUI.Color { SwiftUI.Color(nsColor: token.color) }
 }
 
 extension Font {
@@ -35,7 +31,7 @@ extension View {
         self.shadow(color: .black.opacity(Double(shadow.opacity)), radius: shadow.radius, y: shadow.offsetY)
     }
 
-    /// `CALayer.styleAsCard`: the control background inside a hairline edge.
+    /// A card: the control background inside a hairline edge.
     func designCard(_ radius: Design.Radius) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius.rawValue)
         return background(SwiftUI.Color(nsColor: .controlBackgroundColor), in: shape)

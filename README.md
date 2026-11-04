@@ -1,6 +1,6 @@
 # Mailstream
 
-A native macOS mail client (AppKit + WebKit, Swift 6) for Gmail and Outlook. It
+A native macOS mail client (SwiftUI + WebKit, Swift 6) for Gmail and Outlook. It
 talks to the providers directly: the Gmail API, Microsoft Graph and the Google
 Chat API, over HTTPS from the app. New mail arrives by push through a small
 Cloudflare Worker relay (`Push/`).
@@ -153,13 +153,13 @@ for mail and asks for your OAuth client at sign-in. Dragged to Applications, it 
 | Accounts | `Backend/Accounts.swift`, `OAuth.swift`, `Tokens.swift`, `AppConfig.swift`, `UI/AccountsWindowController.swift` | Signed-in accounts, browser sign-in (authorization code with PKCE, loopback redirect), refresh tokens in the Keychain, build-time defaults from `Info.plist`, the Settings window |
 | Control | `Control/Settings.swift`, `Commands.swift`, `CLI.swift`, `ControlSocket.swift`, `ControlService.swift`, `MailStore+Control.swift` | settings.json with live reload (an observable `Settings`), the `mailstream` command table, the CLI, the control socket (a `NetworkListener` on a Unix-domain path) and the app side of each command |
 | Backend | `Backend/API.swift`, `MailBackend.swift`, `GmailBackend.swift`, `MIMEMessage.swift`, `GraphBackend.swift`, `MessageAssembly.swift`, `HTMLText.swift`, `AsyncSemaphore.swift`, `QuotaBudget.swift` | `API` sends authorized requests per account (token refresh on 401, backoff on 429 and 5xx; a rate-limit refusal pauses the whole account's quota budget; Gmail runs 6 interactive / 3 background requests at a time within a 3,000-units-a-minute budget, Graph 3 / 1 for Outlook's limit of four per mailbox). Gmail and Graph implement one `MailBackend` protocol: mailboxes with roles, cursor-paged envelopes, search, message content (bodies, inline `cid:` parts and attachments written to the cache), flags, moves, sending |
-| Chat | `Backend/Chat.swift`, `ChatAPI.swift`, `Store/ChatStore.swift`, `UI/ChatPage.swift`, `UI/ChatReader.swift` | Google Chat REST API for Google accounts granted Chat access; main-actor spaces and message state with a disk cache, rendered into the reader's page |
+| Chat | `Backend/Chat.swift`, `ChatAPI.swift`, `Store/ChatStore.swift`, `UI/ChatPage.swift`, `UI/ChatModel.swift` | Google Chat REST API for Google accounts granted Chat access; main-actor spaces and message state with a disk cache, rendered into the reader's page |
 | Push | `Backend/PushService.swift`, `Push/` | One WebSocket to the relay; registers Gmail watches and Graph subscriptions for every account and asks the store to refresh the account a notification names |
 | Store | `Store/MailStore.swift`, `ContentStore.swift`, `TagStore.swift`, `StoreProblems.swift`, `CoalescedTask.swift`, `Replies.swift`, `Threader.swift`, `ConversationRow.swift`, `MailCache.swift` | `MailStore`: accounts, mailboxes, listings, selection, search and optimistic flag and move actions. It owns `ContentStore` (bodies and previews) and `TagStore` (AI tags). `StoreProblems` is the one error channel. Also reply planning and the async disk cache in `~/Library/Caches/dev.mailstream.Mailstream` |
 | Model | `Model/*` | Plain values: messages, conversations, tags, `Subject` (reply and forward prefixes, list tags) |
 | Support | `Support/*` | Small shared helpers: chunking, base64url, ISO 8601 dates |
 | Tagging | `Backend/OmpTagger.swift`, `Store/TagStore.swift` | Runs `omp -p --model <aiTagging.model>` on batches of conversations and parses the JSON tags |
-| UI | `UI/*` | Sidebar plus a full-width content area that shows the list or one conversation; `WebShell` hosts the one web view that the mail reader and `ChatReader` render into; compose window |
+| UI | `UI/*` | Sidebar plus a full-width content area that shows the list or one conversation; `WebShell` hosts the one web view that the mail reader (`ReaderModel`) and `ChatModel` render into; compose window |
 
 `Push/` is the relay, a Cloudflare Worker with one Durable Object: Gmail (through
 the Pub/Sub push subscription) and Graph (change notifications) POST to it, and

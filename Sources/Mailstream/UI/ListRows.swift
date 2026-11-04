@@ -16,6 +16,38 @@ extension Color {
     }
 }
 
+/// Fixed horizontal stops, so every row's columns read as straight vertical lines.
+enum ListMetrics {
+    static let rowHeight: CGFloat = 38
+    static let sectionHeight: CGFloat = 34
+    static let shelfHeight: CGFloat = 70
+    /// Center of the unread dot.
+    static let dotX: CGFloat = 14
+    /// Left edge of the sender column: the avatar, then the names.
+    static let senderX: CGFloat = 28
+    static let avatarSize: CGFloat = 28
+    static let senderWidth: CGFloat = 196
+    static let nameX: CGFloat = senderX + avatarSize + 9
+    static let subjectX: CGFloat = senderX + senderWidth + 16
+    static let dateWidth: CGFloat = 62
+}
+
+/// A sender's letter and a stable per-address color, shared by the sidebar and the reader.
+enum Avatar {
+    nonisolated static func color(for email: String) -> NSColor {
+        let palette: [NSColor] = [.systemBlue, .systemPurple, .systemPink, .systemRed, .systemOrange,
+                                  .systemGreen, .systemTeal, .systemIndigo, .systemBrown, .systemMint, .systemCyan]
+        return palette[stableIndex(of: email.lowercased(), in: palette.count)]
+    }
+
+    /// The first letter of the name (or the address), uppercased; "?" when there is none.
+    nonisolated static func initials(for address: Address) -> String {
+        let name = address.displayName.trimmingCharacters(in: .whitespaces)
+        guard let first = name.first(where: { $0.isLetter || $0.isNumber }) else { return "?" }
+        return String(first).uppercased()
+    }
+}
+
 // The conversation list's lines in SwiftUI. Every view here draws from plain values, so the same
 // rows render from the store in the list and from fixtures anywhere else.
 
@@ -177,8 +209,8 @@ struct ListRowConversation: View {
     let content: ListRowContent
     let hovered: Bool
     var onAction: (ConversationAction) -> Void = { _ in }
-    /// A click on the sender's picture, with a view to anchor an enlarged one to.
-    var onAvatar: ((NSView, NSImage) -> Void)?
+    /// Where the sender's picture enlarges from; without it the picture does not take clicks.
+    var avatars: AvatarStore?
 
     private var showsPill: Bool { hovered && content.showsActions }
     private var pillWidth: CGFloat {
@@ -192,7 +224,11 @@ struct ListRowConversation: View {
                     .frame(width: 7, height: 7)
                     .offset(x: ListMetrics.dotX - 3.5)
             }
-            ListRowAvatar(initials: content.initials, color: content.avatarColor, photo: content.photo, onClick: onAvatar)
+            ListRowAvatar(initials: content.initials, color: content.avatarColor, photo: content.photo,
+                          preview: avatars.map { avatars in
+                              { AvatarPreviewItem(address: content.person, small: $0, automated: content.automated,
+                                                  avatars: avatars) }
+                          })
                 .offset(x: ListMetrics.senderX)
             Text(content.sender)
                 .lineLimit(1).truncationMode(.tail)
@@ -280,8 +316,8 @@ struct ListRowAvatar: View {
     let color: NSColor
     let photo: NSImage?
     /// Only a picture takes the click (to enlarge it); otherwise the row underneath gets it.
-    var onClick: ((NSView, NSImage) -> Void)?
-    @State private var anchor = ListRowAnchor.Box()
+    var preview: ((NSImage) -> AvatarPreviewItem)?
+    @State private var shown: AvatarPreviewItem?
 
     var body: some View {
         let size = ListMetrics.avatarSize
@@ -300,33 +336,16 @@ struct ListRowAvatar: View {
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
-        .background(ListRowAnchor(box: anchor))
         .overlay {
-            if let photo, let onClick {
+            if let photo, let preview {
                 Color.clear
                     .contentShape(Circle())
-                    .onTapGesture { if let view = anchor.view { onClick(view, photo) } }
+                    .onTapGesture { shown = preview(photo) }
                     .pointerStyle(.link)
             }
         }
+        .popover(item: $shown, arrowEdge: .trailing) { AvatarPreviewView(item: $0) }
     }
-}
-
-/// An AppKit view behind a SwiftUI one, for anchoring an AppKit popover to it.
-struct ListRowAnchor: NSViewRepresentable {
-    final class Box {
-        weak var view: NSView?
-    }
-
-    let box: Box
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        box.view = view
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) { box.view = nsView }
 }
 
 // MARK: - Hover pill

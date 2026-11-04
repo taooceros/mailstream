@@ -1,8 +1,9 @@
 import AppKit
 
-/// The app's visual language, defined once. AppKit views read these tokens directly; the web pages
-/// get the same values as CSS custom properties (`Design.stylesheet`), resolved for the light and
-/// the dark appearance, so the native list and the HTML reader cannot drift apart.
+/// The app's visual language, defined once. SwiftUI views read these tokens through
+/// `DesignSwiftUI.swift`; the web pages get the same values as CSS custom properties
+/// (`Design.stylesheet`), resolved for the light and the dark appearance, so the native list and
+/// the HTML reader cannot drift apart.
 ///
 /// Colors follow the system's semantic colors, so both surfaces track the appearance and accent
 /// the user picked. Sizes, radii and durations are short scales: pick the nearest step rather than
@@ -43,15 +44,6 @@ enum Design {
             }
         }
 
-        var cgColor: CGColor { color.cgColor }
-
-        /// The color as `appearance` draws it, for layers set outside `updateLayer`.
-        func cgColor(in appearance: NSAppearance) -> CGColor {
-            var resolved = color.cgColor
-            appearance.performAsCurrentDrawingAppearance { resolved = color.cgColor }
-            return resolved
-        }
-
         /// `var(--name)`, for CSS written in Swift.
         var css: String { "var(--\(rawValue))" }
     }
@@ -72,23 +64,14 @@ enum Design {
         case display = 27
 
         var cssName: String { "--size-\(self)" }
-        var css: String { "var(\(cssName))" }
     }
 
+    /// For the AppKit text views of the compose fields.
     static func font(_ size: TextSize, weight: NSFont.Weight = .regular) -> NSFont {
         .systemFont(ofSize: size.rawValue, weight: weight)
     }
 
-    static func monospacedFont(_ size: TextSize, weight: NSFont.Weight = .regular) -> NSFont {
-        .monospacedSystemFont(ofSize: size.rawValue, weight: weight)
-    }
-
-    /// Digits of equal width, for counts and dates that line up in columns.
-    static func monospacedDigitFont(_ size: TextSize, weight: NSFont.Weight = .regular) -> NSFont {
-        .monospacedDigitSystemFont(ofSize: size.rawValue, weight: weight)
-    }
-
-    /// CSS font stacks; AppKit uses the system fonts they name first.
+    /// CSS font stacks; native text uses the system fonts they name first.
     enum FontFamily: String, CaseIterable {
         case ui, serif, mono
 
@@ -101,7 +84,6 @@ enum Design {
         }
 
         var cssName: String { "--font-\(rawValue)" }
-        var css: String { "var(\(cssName))" }
     }
 
     // MARK: Shape
@@ -118,10 +100,9 @@ enum Design {
         case panel = 14
 
         var cssName: String { "--radius-\(self)" }
-        var css: String { "var(\(cssName))" }
     }
 
-    /// A drop shadow. Native layers apply it; CSS gets it as `box-shadow`.
+    /// A drop shadow. SwiftUI applies it (`designShadow`); CSS gets it as `box-shadow`.
     struct Shadow {
         var opacity: Float
         var radius: CGFloat
@@ -129,14 +110,6 @@ enum Design {
 
         /// Under a page sliding over another (the reader, a bundle) during a back swipe.
         static let page = Shadow(opacity: 0.12, radius: 14)
-
-        func apply(to layer: CALayer, path: CGPath? = nil) {
-            layer.shadowColor = NSColor.black.cgColor
-            layer.shadowOpacity = opacity
-            layer.shadowRadius = radius
-            layer.shadowOffset = CGSize(width: 0, height: -offsetY)
-            layer.shadowPath = path
-        }
 
         /// Elevations the web pages use, lowest first.
         static let css: [(name: String, value: String)] = [
@@ -161,7 +134,6 @@ enum Design {
         case long = 0.45
 
         var cssName: String { "--dur-\(self)" }
-        var css: String { "var(\(cssName))" }
     }
 
     /// The house easing curve: quick start, long soft landing.
@@ -205,7 +177,7 @@ enum Design {
     }
 }
 
-/// Muted topic colors shared by the list (AppKit) and the reader (CSS). Known topics keep fixed hues.
+/// Muted topic colors shared by the list (SwiftUI) and the reader (CSS). Known topics keep fixed hues.
 enum TagPalette {
     private static let known: [String: (String, String)] = [
         "work": ("#3B82F6", "#60A5FA"), "education": ("#A855F7", "#C084FC"), "finance": ("#10B981", "#34D399"),

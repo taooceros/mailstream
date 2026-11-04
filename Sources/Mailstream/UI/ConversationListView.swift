@@ -214,10 +214,7 @@ struct ConversationListMailRow: View {
             tag: tag, photo: photo)
         let id = conversation.id
         return ListRowConversation(content: content, hovered: hovered, onAction: { model.perform($0, id: id) },
-                                   onAvatar: { view, photo in
-                                       AvatarPreview.show(content.person, small: photo, automated: automated,
-                                                          avatars: store.avatars, relativeTo: view.bounds, of: view)
-                                   })
+                                   avatars: store.avatars)
             .modifier(ListRowChrome(highlighted: highlighted, emphasized: emphasized, hovered: hovered))
             .contentShape(Rectangle())
             .onTapGesture(perform: onClick)
@@ -265,10 +262,7 @@ struct ConversationListChatRow: View {
                 ? (store.label(account: space.key.account), AccountStyle.chatColor(for: space.key.account, in: store)) : nil,
             photo: photo)
         let key = space.key
-        return ListRowConversation(content: content, hovered: hovered, onAvatar: { view, photo in
-            AvatarPreview.show(content.person, small: photo, automated: false, avatars: store.avatars,
-                               relativeTo: view.bounds, of: view)
-        })
+        return ListRowConversation(content: content, hovered: hovered, avatars: store.avatars)
         .modifier(ListRowChrome(highlighted: highlighted, emphasized: emphasized, hovered: hovered))
         .contentShape(Rectangle())
         .onTapGesture(perform: onClick)

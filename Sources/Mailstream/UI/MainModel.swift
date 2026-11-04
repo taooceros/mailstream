@@ -299,7 +299,7 @@ final class MainModel {
         list.hoverSuspended = false
     }
 
-    /// `Motion.unfold`'s spring.
+    /// A scaled-down page spreading back to full size.
     private static let unfold = Animation.interpolatingSpring(mass: 1, stiffness: 300, damping: 32)
 
     func goBack() {
@@ -394,7 +394,7 @@ final class MainModel {
                                               canGoBack: opened != nil)
         transitions += 1
         let current = transitions
-        // `Motion.slide`: critically damped, starting at the fingers' speed in units of the change.
+        // Critically damped, starting at the fingers' speed in units of the change.
         let initial = target != offset ? max(0, velocity / (target - offset)) : 0
         withAnimation(.interpolatingSpring(mass: 1, stiffness: 440, damping: 42, initialVelocity: initial)) {
             readerOffset = target

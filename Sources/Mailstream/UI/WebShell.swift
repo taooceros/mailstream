@@ -2,7 +2,7 @@ import AppKit
 import UniformTypeIdentifiers
 import WebKit
 
-/// A page rendered into the shell: a mail thread (`ReaderViewController`) or a chat space (`ChatReader`).
+/// A page rendered into the shell: a mail thread (`ReaderModel`) or a chat space (`ChatModel`).
 @MainActor
 protocol WebShellClient: AnyObject {
     /// A message the page posted while this client's render was current.
@@ -23,7 +23,6 @@ final class WebShell: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
     /// Runs once, after the next render is in the page.
     var onReady: (() -> Void)?
 
-    private let avatars: AvatarStore
     private let openLink: (URL) -> Void
     private let world = WKContentWorld.world(name: "mailstream")
     private weak var client: (any WebShellClient)?
@@ -35,8 +34,7 @@ final class WebShell: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
     private var rendered = false
     private var queue: [(script: String, arguments: [String: Any])] = []
 
-    init(cache: MailCache, avatars: AvatarStore, openLink: @escaping (URL) -> Void) {
-        self.avatars = avatars
+    init(cache: MailCache, openLink: @escaping (URL) -> Void) {
         self.openLink = openLink
         let configuration = WKWebViewConfiguration()
         Self.allowFullFrameRate(configuration.preferences)
@@ -92,19 +90,6 @@ final class WebShell: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
     func clear() {
         reset()
         if shellLoad == nil { run("MS.clear(generation)", ["generation": generation]) }
-    }
-
-    /// Enlarges `person`'s picture from AvatarStore; `message` is the page's `avatar` message, whose
-    /// `rect` is the avatar's box in page (CSS) pixels.
-    func showAvatar(of person: Address, automated: Bool, from message: [String: Any]) {
-        guard let rect = message["rect"] as? [Double], rect.count == 4,
-              let photo = avatars.image(for: person.email, automated: automated) else { return }
-        let scale = webView.pageZoom * webView.magnification
-        let height = rect[3] * scale
-        let top = rect[1] * scale
-        let anchor = NSRect(x: rect[0] * scale, y: webView.isFlipped ? top : webView.bounds.height - top - height,
-                            width: rect[2] * scale, height: height)
-        AvatarPreview.show(person, small: photo, automated: automated, avatars: avatars, relativeTo: anchor, of: webView)
     }
 
     private func reset() {

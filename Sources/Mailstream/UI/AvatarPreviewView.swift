@@ -1,19 +1,18 @@
 import SwiftUI
 
-/// A sender picture the page asked to enlarge; `anchor` is the avatar's box in the web view's
-/// points, top-left origin (see `ReaderModel.presentAvatar`).
+/// A sender picture to enlarge. In the reader, `anchor` is the avatar's box in the web view's
+/// points, top-left origin (see `ReaderModel.presentAvatar`); a list row anchors on its avatar.
 struct AvatarPreviewItem: Identifiable {
     let id = UUID()
     let address: Address
     let small: NSImage
     let automated: Bool
-    let anchor: CGRect
+    var anchor = CGRect.zero
     let avatars: AvatarStore
 }
 
-/// Click-to-enlarge for sender pictures (the port of `AvatarPreview`): the picture, the name and
-/// the address. It opens at once on the small cached picture and cross-fades to the 512 px one
-/// when it arrives.
+/// Click-to-enlarge for sender pictures: the picture, the name and the address. It opens at once
+/// on the small cached picture and cross-fades to the 512 px one when it arrives.
 struct AvatarPreviewView: View {
     private static let side: CGFloat = 220
 

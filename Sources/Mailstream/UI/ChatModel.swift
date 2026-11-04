@@ -1,8 +1,7 @@
 import AppKit
 import Observation
 
-/// `ReaderModel`'s chat peer (the SwiftUI port of `ChatReader`). Shows one Google Chat space in the
-/// reader's web page (`WebShell`):
+/// `ReaderModel`'s chat peer. Shows one Google Chat space in the reader's web page (`WebShell`):
 /// the space's messages as a chat log with a composer at the bottom. The log is built off the main
 /// actor and diffed against what the page shows, so new messages append, changed ones (a pending
 /// message that failed) are replaced in place, and the page never reloads.

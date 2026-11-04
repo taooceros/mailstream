@@ -16,6 +16,7 @@ This repo is a colocated jj repo (`.jj` + `.git`), pushed to `github.com/taoocer
 - Check with `swift build` and launch with `scripts/run.sh`: both use the incremental debug build
   (seconds per edit). A release build (`scripts/bundle.sh`, `CONFIG=release`) re-optimizes the
   whole module single-threaded, ~30 s per edit; build it only to check performance or ship.
+- Test only what you changed: build, then exercise the parts your change touches (the view, flow or command you edited). Do not re-run the whole app checklist or every CLI case after each change; we iterate in small steps.
 
 ## Swift: concurrency and state
 
@@ -50,7 +51,11 @@ Reuse these instead of writing another copy:
   `Backend/Endpoints.swift`.
 - Disk: JSON files are read and written with `JSONFile`; `MailCache` queues its writes.
 - Style: every color, type size, radius, shadow and duration comes from `Design`
-  (`UI/Design.swift`). AppKit reads the tokens directly; the pages' CSS uses them as custom
-  properties (`var(--muted)`, `var(--size-body)`, `var(--dur-quick)`) from `Design.stylesheet`,
-  so native and HTML surfaces match. Add a token rather than a literal; use the nearest step of a
-  scale. AppKit boilerplate (labels, sheets, pinning, toolbar buttons) is in `UI/ViewKit.swift`.
+  (`UI/Design.swift`). SwiftUI reads the tokens through the adapters in `UI/DesignSwiftUI.swift`
+  (`Color.design(.muted)`, `Font.design(.body)`, `Animation.house(.quick)`, `.designShadow`,
+  `.designCard`); the pages' CSS uses them as custom properties (`var(--muted)`,
+  `var(--size-body)`, `var(--dur-quick)`) from `Design.stylesheet`, so native and HTML surfaces
+  match. Add a token rather than a literal; use the nearest step of a scale. List lines are the
+  value-driven row views in `UI/ListRows.swift`, laid out on the `ListMetrics` stops.
+- UI is SwiftUI except three AppKit islands: the `WKWebView` reader (`WebShell`), the
+  `NSTextView`/`NSTokenField` compose fields, and the swipe-back and Escape `NSEvent` monitors.

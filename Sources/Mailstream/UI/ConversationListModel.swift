@@ -2,6 +2,40 @@ import AppKit
 import Observation
 import SwiftUI
 
+/// A command on one conversation, from the toolbar, the menus, the keyboard or a row's hover pill.
+nonisolated enum ConversationAction: CaseIterable {
+    case archive, trash, restore, toggleRead, toggleStar, toggleWaiting, reply, replyAll, forward
+
+    /// What the toggles act on; without a conversation they read as read, unstarred and waiting.
+    struct State {
+        var unread = false
+        var flagged = false
+        var waiting = true
+    }
+
+    /// Title and SF Symbol in `state`: a toggle names what it will do.
+    func label(in state: State = State()) -> (title: String, symbol: String) {
+        switch self {
+        case .archive: ("Archive", "archivebox")
+        case .trash: ("Move to Trash", "trash")
+        case .restore: ("Move to Inbox", "tray.and.arrow.up")
+        case .toggleRead: state.unread ? ("Mark as Read", "envelope.open") : ("Mark as Unread", "envelope.badge")
+        case .toggleStar: state.flagged ? ("Unstar", "star.slash") : ("Star", "star")
+        case .toggleWaiting: state.waiting ? ("Resolve", "checkmark.circle") : ("Mark as Waiting on You", "clock.badge")
+        case .reply: ("Reply", "arrowshape.turn.up.left")
+        case .replyAll: ("Reply All", "arrowshape.turn.up.left.2")
+        case .forward: ("Forward", "arrowshape.turn.up.right")
+        }
+    }
+}
+
+nonisolated extension ConversationAction.State {
+    init(_ conversation: Conversation?, tag: ConversationTag?) {
+        self.init(unread: conversation?.isUnread == true, flagged: conversation?.isFlagged == true,
+                  waiting: tag?.toRespond ?? true)
+    }
+}
+
 /// One line of the conversation list.
 enum ConversationListItem: Identifiable {
     case section(String, count: Int?, accent: Bool)
