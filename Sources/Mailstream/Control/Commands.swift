@@ -1,5 +1,53 @@
 import Foundation
 
+/// Every command, by its request id. Settings commands run in the CLI on settings.json and the
+/// rest need the app, so the CLI and the control server each switch over only their own half.
+nonisolated enum CommandID: Sendable, Equatable {
+    case local(Local)
+    case app(App)
+
+    enum Local: String, Sendable {
+        case configList = "config.list"
+        case configGet = "config.get"
+        case configSet = "config.set"
+        case configReset = "config.reset"
+        case configAdd = "config.add"
+        case configRemove = "config.remove"
+        case configSchema = "config.schema"
+        case configPath = "config.path"
+    }
+
+    enum App: String, Sendable {
+        case status
+        case accountsList = "accounts.list"
+        case accountsRename = "accounts.rename"
+        case accountsAdd = "accounts.add"
+        case accountsRemove = "accounts.remove"
+        case mailboxes
+        case mailList = "mail.list"
+        case mailSearch = "mail.search"
+        case mailShow = "mail.show"
+        case mailRead = "mail.read"
+        case mailStar = "mail.star"
+        case mailArchive = "mail.archive"
+        case mailTrash = "mail.trash"
+        case mailRestore = "mail.restore"
+        case mailTag = "mail.tag"
+        case mailRetag = "mail.retag"
+        case mailSend = "mail.send"
+        case mailReply = "mail.reply"
+        case refresh
+    }
+
+    /// The request's `command`: `mail.list`.
+    var rawValue: String {
+        switch self {
+        case .local(let command): command.rawValue
+        case .app(let command): command.rawValue
+        }
+    }
+}
+
 /// The command-line and socket interface: one table both the `mailstream` CLI (parsing, help,
 /// `mailstream commands`) and the app's control server (dispatch) read, so they cannot drift.
 nonisolated struct CommandSpec: Sendable {
@@ -22,19 +70,23 @@ nonisolated struct CommandSpec: Sendable {
         var variadic = false
         var required = false
         var defaultValue: JSON? = nil
+
+        /// How usage text and errors name it: `<id>` or `--limit`.
+        var label: String { positional ? "<\(name)>" : "--\(name)" }
     }
 
-    /// Space-separated words, e.g. `mail list`.
-    let name: String
+    let command: CommandID
     let summary: String
     var arguments: [Argument] = []
     /// Has effects Mailstream cannot undo (sending, signing out): the request must carry `yes: true`.
     var confirm = false
-    /// Runs in the CLI itself on settings.json; the app need not be running.
-    var local = false
 
     /// The request's `command`: `mail.list`.
-    var id: String { name.replacingOccurrences(of: " ", with: ".") }
+    var id: String { command.rawValue }
+    /// Space-separated words, e.g. `mail list`.
+    var name: String { id.replacingOccurrences(of: ".", with: " ") }
+    /// Runs in the CLI itself on settings.json; the app need not be running.
+    var local: Bool { if case .local = command { true } else { false } }
 
     static func named(_ id: String) -> CommandSpec? { all.first { $0.id == id } }
 
@@ -44,94 +96,100 @@ nonisolated struct CommandSpec: Sendable {
         name: "ids", kind: .list, summary: "Conversation ids from `mail list`, `mail search` or `mail show`.",
         positional: true, variadic: true, required: true)
 
+    private static let conversationID = Argument(name: "id", kind: .string, summary: "Conversation id.", positional: true, required: true)
+
     private static let mailbox = Argument(
         name: "mailbox", kind: .list,
         summary: "Mailbox roles (inbox, starred, important, sent, drafts, archive, all, junk, trash), or with --account a mailbox id or name. Comma-separated for several.")
 
     private static let account = Argument(name: "account", kind: .string, summary: "Only this account (its address).")
 
-    static let all: [CommandSpec] = [
-        CommandSpec(name: "status", summary: "The app's state: version, accounts, sync, push, AI tagging, settings problems."),
+    private static let accountAddress = Argument(name: "account", kind: .string, summary: "Account address.", positional: true, required: true)
 
-        CommandSpec(name: "config list", summary: "Every setting with its value, default, type and description.", local: true),
-        CommandSpec(name: "config get", summary: "One setting.", arguments: [
+    private static let limit = Argument(name: "limit", kind: .int, summary: "Most conversations returned (1-100).", defaultValue: 25)
+
+    private static let settingKey = Argument(name: "key", kind: .string, summary: "Setting key.", positional: true, required: true)
+
+    static let all: [CommandSpec] = [
+        CommandSpec(command: .app(.status), summary: "The app's state: version, accounts, sync, push, AI tagging, settings problems."),
+
+        CommandSpec(command: .local(.configList), summary: "Every setting with its value, default, type and description."),
+        CommandSpec(command: .local(.configGet), summary: "One setting.", arguments: [
             Argument(name: "key", kind: .string, summary: "Setting key, e.g. sync.pollSeconds.", positional: true, required: true),
-        ], local: true),
-        CommandSpec(name: "config set", summary: "Changes a setting; the running app applies it at once.", arguments: [
-            Argument(name: "key", kind: .string, summary: "Setting key.", positional: true, required: true),
+        ]),
+        CommandSpec(command: .local(.configSet), summary: "Changes a setting; the running app applies it at once.", arguments: [
+            settingKey,
             Argument(name: "value", kind: .string, summary: "true/false, a number, text, or for lists a JSON array or comma-separated values.",
                      positional: true, required: true),
-        ], local: true),
-        CommandSpec(name: "config reset", summary: "Puts a setting back to its default.", arguments: [
-            Argument(name: "key", kind: .string, summary: "Setting key.", positional: true, required: true),
-        ], local: true),
-        CommandSpec(name: "config add", summary: "Adds values to a list setting.", arguments: [
+        ]),
+        CommandSpec(command: .local(.configReset), summary: "Puts a setting back to its default.", arguments: [settingKey]),
+        CommandSpec(command: .local(.configAdd), summary: "Adds values to a list setting.", arguments: [
             Argument(name: "key", kind: .string, summary: "List setting key, e.g. remoteContent.trustedSenders.", positional: true, required: true),
             Argument(name: "values", kind: .list, summary: "Values to add.", positional: true, variadic: true, required: true),
-        ], local: true),
-        CommandSpec(name: "config remove", summary: "Removes values from a list setting.", arguments: [
+        ]),
+        CommandSpec(command: .local(.configRemove), summary: "Removes values from a list setting.", arguments: [
             Argument(name: "key", kind: .string, summary: "List setting key.", positional: true, required: true),
             Argument(name: "values", kind: .list, summary: "Values to remove.", positional: true, variadic: true, required: true),
-        ], local: true),
-        CommandSpec(name: "config schema", summary: "JSON Schema of settings.json.", local: true),
-        CommandSpec(name: "config path", summary: "Where settings.json lives; editing it directly works too.", local: true),
+        ]),
+        CommandSpec(command: .local(.configSchema), summary: "JSON Schema of settings.json."),
+        CommandSpec(command: .local(.configPath), summary: "Where settings.json lives; editing it directly works too."),
 
-        CommandSpec(name: "accounts list", summary: "Signed-in accounts: address, label, provider, services."),
-        CommandSpec(name: "accounts rename", summary: "Changes the label an account shows in the sidebar; empty shows the address.", arguments: [
-            Argument(name: "account", kind: .string, summary: "Account address.", positional: true, required: true),
+        CommandSpec(command: .app(.accountsList), summary: "Signed-in accounts: address, label, provider, services."),
+        CommandSpec(command: .app(.accountsRename), summary: "Changes the label an account shows in the sidebar; empty shows the address.", arguments: [
+            accountAddress,
             Argument(name: "label", kind: .string, summary: "New label.", positional: true, required: true),
         ]),
-        CommandSpec(name: "accounts add", summary: "Signs in a new account through the browser and waits (up to 5 minutes) for the person to finish.", arguments: [
+        CommandSpec(command: .app(.accountsAdd), summary: "Signs in a new account through the browser and waits (up to 5 minutes) for the person to finish.", arguments: [
             Argument(name: "provider", kind: .choice(["google", "microsoft"]), summary: "Provider.", positional: true, required: true),
             Argument(name: "client-id", kind: .string, summary: "OAuth client id; defaults to the one used last (or the build's)."),
             Argument(name: "client-secret", kind: .string, summary: "OAuth client secret; Google requires one."),
         ]),
-        CommandSpec(name: "accounts remove", summary: "Signs an account out and deletes its saved sign-in. Mail on the server is untouched.", arguments: [
-            Argument(name: "account", kind: .string, summary: "Account address.", positional: true, required: true),
+        CommandSpec(command: .app(.accountsRemove), summary: "Signs an account out and deletes its saved sign-in. Mail on the server is untouched.", arguments: [
+            accountAddress,
             yes,
         ], confirm: true),
 
-        CommandSpec(name: "mailboxes", summary: "Each account's mailboxes with role, id and counts.", arguments: [account]),
+        CommandSpec(command: .app(.mailboxes), summary: "Each account's mailboxes with role, id and counts.", arguments: [account]),
 
-        CommandSpec(name: "mail list", summary: "Conversations in mailboxes, newest first, with AI category and waiting-on-you flag.", arguments: [
+        CommandSpec(command: .app(.mailList), summary: "Conversations in mailboxes, newest first, with AI category and waiting-on-you flag.", arguments: [
             mailbox, account,
             Argument(name: "unread", kind: .bool, summary: "Only unread conversations."),
             Argument(name: "starred", kind: .bool, summary: "Only starred conversations."),
             Argument(name: "category", kind: .choice(MailCategory.allCases.map(\.rawValue)), summary: "Only this AI category."),
             Argument(name: "waiting", kind: .bool, summary: "Only conversations waiting on your reply."),
-            Argument(name: "limit", kind: .int, summary: "Most conversations returned (1-100).", defaultValue: 25),
+            limit,
         ]),
-        CommandSpec(name: "mail search", summary: "Searches every mailbox but trash and junk with the providers' own search (subject, people, body; Gmail operators such as from: work), newest first.", arguments: [
+        CommandSpec(command: .app(.mailSearch), summary: "Searches every mailbox but trash and junk with the providers' own search (subject, people, body; Gmail operators such as from: work), newest first.", arguments: [
             Argument(name: "query", kind: .string, summary: "Free text, or the provider's search syntax.", positional: true, required: true),
             account,
-            Argument(name: "limit", kind: .int, summary: "Most conversations returned (1-100).", defaultValue: 25),
+            limit,
         ]),
-        CommandSpec(name: "mail show", summary: "A conversation's messages with headers, text bodies and attachments.", arguments: [
-            Argument(name: "id", kind: .string, summary: "Conversation id.", positional: true, required: true),
+        CommandSpec(command: .app(.mailShow), summary: "A conversation's messages with headers, text bodies and attachments.", arguments: [
+            conversationID,
             Argument(name: "max-chars", kind: .int, summary: "Longest text body returned per message.", defaultValue: 20_000),
         ]),
-        CommandSpec(name: "mail read", summary: "Marks conversations read (or with --unread, unread).", arguments: [
+        CommandSpec(command: .app(.mailRead), summary: "Marks conversations read (or with --unread, unread).", arguments: [
             conversationIDs,
             Argument(name: "unread", kind: .bool, summary: "Mark unread instead."),
         ]),
-        CommandSpec(name: "mail star", summary: "Stars conversations (or with --off, unstars them).", arguments: [
+        CommandSpec(command: .app(.mailStar), summary: "Stars conversations (or with --off, unstars them).", arguments: [
             conversationIDs,
             Argument(name: "off", kind: .bool, summary: "Remove the star instead."),
         ]),
-        CommandSpec(name: "mail archive", summary: "Moves conversations out of the inbox (or the mailbox they were listed from) into Archive / All Mail.",
+        CommandSpec(command: .app(.mailArchive), summary: "Moves conversations out of the inbox (or the mailbox they were listed from) into Archive / All Mail.",
                     arguments: [conversationIDs]),
-        CommandSpec(name: "mail trash", summary: "Moves conversations to the trash. Messages already in the trash are deleted for good, which needs --yes.",
+        CommandSpec(command: .app(.mailTrash), summary: "Moves conversations to the trash. Messages already in the trash are deleted for good, which needs --yes.",
                     arguments: [conversationIDs, yes]),
-        CommandSpec(name: "mail restore", summary: "Moves conversations' messages in the trash or junk back to the inbox.",
+        CommandSpec(command: .app(.mailRestore), summary: "Moves conversations' messages in the trash or junk back to the inbox.",
                     arguments: [conversationIDs]),
-        CommandSpec(name: "mail tag", summary: "Corrects the AI tag: category, waiting-on-you, topic labels.", arguments: [
+        CommandSpec(command: .app(.mailTag), summary: "Corrects the AI tag: category, waiting-on-you, topic labels.", arguments: [
             conversationIDs,
             Argument(name: "category", kind: .choice(MailCategory.allCases.map(\.rawValue)), summary: "New category."),
             Argument(name: "waiting", kind: .choice(["true", "false"]), summary: "Whether it waits on your reply (people conversations only)."),
             Argument(name: "labels", kind: .list, summary: "Topic labels (at most two)."),
         ]),
-        CommandSpec(name: "mail retag", summary: "Forgets every AI tag and tags the current list again."),
-        CommandSpec(name: "mail send", summary: "Sends a new plain-text message.", arguments: [
+        CommandSpec(command: .app(.mailRetag), summary: "Forgets every AI tag and tags the current list again."),
+        CommandSpec(command: .app(.mailSend), summary: "Sends a new plain-text message.", arguments: [
             Argument(name: "from", kind: .string, summary: "Sending account (its address).", required: true),
             Argument(name: "to", kind: .list, summary: "Recipients.", required: true),
             Argument(name: "cc", kind: .list, summary: "Cc recipients."),
@@ -140,14 +198,14 @@ nonisolated struct CommandSpec: Sendable {
             Argument(name: "body", kind: .string, summary: "Plain-text body; `-` reads standard input.", required: true),
             yes,
         ], confirm: true),
-        CommandSpec(name: "mail reply", summary: "Replies to a conversation's latest message, quoting it like the app does.", arguments: [
-            Argument(name: "id", kind: .string, summary: "Conversation id.", positional: true, required: true),
+        CommandSpec(command: .app(.mailReply), summary: "Replies to a conversation's latest message, quoting it like the app does.", arguments: [
+            conversationID,
             Argument(name: "body", kind: .string, summary: "Plain-text reply; `-` reads standard input.", required: true),
             Argument(name: "all", kind: .bool, summary: "Reply to everyone."),
             yes,
         ], confirm: true),
 
-        CommandSpec(name: "refresh", summary: "Fetches new mail and counts for the list on screen now."),
+        CommandSpec(command: .app(.refresh), summary: "Fetches new mail and counts for the list on screen now."),
     ]
 
     static let overview = """
@@ -171,20 +229,24 @@ nonisolated struct CommandSpec: Sendable {
 
     /// Usage text for one command.
     var help: String {
-        let positionals = arguments.filter(\.positional).map { $0.variadic ? "<\($0.name)>..." : "<\($0.name)>" }
+        let positionals = arguments.filter(\.positional).map { $0.variadic ? "\($0.label)..." : $0.label }
         var lines = ["mailstream \(([name] + positionals).joined(separator: " "))\(arguments.contains { !$0.positional } ? " [options]" : "")",
                      "", summary]
         if !arguments.isEmpty { lines.append("") }
         for argument in arguments {
-            let label = argument.positional ? "<\(argument.name)>" : "--\(argument.name)"
             var detail = argument.summary
             if case .choice(let values) = argument.kind { detail += " One of: \(values.joined(separator: ", "))." }
             if argument.required && !argument.positional { detail += " Required." }
-            if let value = argument.defaultValue { detail += " Default: \(String(decoding: value.encoded(pretty: false), as: UTF8.self))." }
-            lines.append("  \(label.padding(toLength: 18, withPad: " ", startingAt: 0)) \(detail)")
+            if let value = argument.defaultValue { detail += " Default: \(value.text(pretty: false))." }
+            lines.append(Self.row(argument.label, detail))
         }
         if local { lines += ["", "Works without the app running."] }
         return lines.joined(separator: "\n")
+    }
+
+    /// One line of a two-column help listing.
+    static func row(_ term: String, _ description: String) -> String {
+        "  \(term.padding(toLength: 18, withPad: " ", startingAt: 0)) \(description)"
     }
 
     /// The command as JSON, for `mailstream commands`.
@@ -226,6 +288,33 @@ nonisolated struct ControlError: LocalizedError, Sendable {
         self.message = message
     }
 
+    /// Any failure as a command failure: a `ControlError` as it is, anything else under `failed`.
+    init(_ error: any Error) {
+        self = error as? ControlError ?? ControlError("failed", error.localizedDescription)
+    }
+
+    static func usage(_ message: String) -> ControlError { ControlError("usage", message) }
+    static func invalidSetting(_ message: String) -> ControlError { ControlError("invalid_setting", message) }
+
     var errorDescription: String? { message }
-    var json: JSON { ["error": ["code": .string(code), "message": .string(message)]] }
+    /// `{"code", "message"}`: the `error` of a failed answer, and of the CLI's stderr.
+    var body: JSON { ["code": .string(code), "message": .string(message)] }
+    var json: JSON { ["error": body] }
+}
+
+/// Values typed as words, on a command line or as a request's text.
+nonisolated enum TypedValue {
+    /// `true`/`yes`/`on`/`1` or their opposites, any case; nil for anything else.
+    static func bool(_ word: String) -> Bool? {
+        switch word.lowercased() {
+        case "true", "yes", "on", "1": true
+        case "false", "no", "off", "0": false
+        default: nil
+        }
+    }
+
+    /// Comma-separated values, each trimmed of spaces, empty ones dropped.
+    static func list(_ text: String) -> [String] {
+        text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
 }

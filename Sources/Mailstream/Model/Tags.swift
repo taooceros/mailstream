@@ -36,4 +36,7 @@ nonisolated struct ConversationTag: Codable, Sendable, Hashable {
     var toRespond: Bool
     /// At most two short topic labels, e.g. "Finance", "Travel".
     var labels: [String]
+
+    /// Waiting on the user's reply: only people conversations can be.
+    var isWaiting: Bool { category == .people && toRespond }
 }

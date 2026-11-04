@@ -66,6 +66,16 @@ nonisolated enum JSON: Sendable, Equatable, Codable {
         return (try? encoder.encode(self)) ?? Data("null".utf8)
     }
 
+    /// `encoded` as text, for printing.
+    func text(pretty: Bool = true) -> String { String(decoding: encoded(pretty: pretty), as: UTF8.self) }
+
+    /// `encoded` and a newline: a line of a file, a stream or the socket protocol.
+    func encodedLine(pretty: Bool = true) -> Data {
+        var data = encoded(pretty: pretty)
+        data.append(0x0A)
+        return data
+    }
+
     static func decode(_ data: Data) throws -> JSON {
         try JSONDecoder().decode(JSON.self, from: data)
     }
@@ -91,4 +101,8 @@ nonisolated extension JSON: ExpressibleByStringLiteral, ExpressibleByBooleanLite
 
 nonisolated extension Optional where Wrapped == String {
     var json: JSON { map(JSON.string) ?? .null }
+}
+
+nonisolated extension Optional where Wrapped == Int {
+    var json: JSON { map(JSON.int) ?? .null }
 }

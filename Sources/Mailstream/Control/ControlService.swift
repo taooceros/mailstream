@@ -30,80 +30,71 @@ final class ControlService {
             guard let name = request?["command"]?.string else {
                 throw ControlError("bad_request", "Expected {\"command\": …, \"args\": {…}}.")
             }
-            guard let spec = CommandSpec.named(name), !spec.local else {
+            guard let spec = CommandSpec.named(name), case .app(let command) = spec.command else {
                 throw ControlError("unknown_command", "Unknown command \"\(name)\"; `mailstream commands` lists them.")
             }
             let args = try Arguments(spec: spec, values: request?["args"]?.object ?? [:])
-            answer = ["ok": true, "result": try await run(spec, args)]
-        } catch let error as ControlError {
-            answer = ["ok": false, "error": ["code": .string(error.code), "message": .string(error.message)]]
+            answer = ["ok": true, "result": try await run(command, args)]
         } catch {
-            answer = ["ok": false, "error": ["code": "failed", "message": .string(error.localizedDescription)]]
+            answer = ["ok": false, "error": ControlError(error).body]
         }
         return answer.encoded(pretty: false)
     }
 
-    private func run(_ spec: CommandSpec, _ args: Arguments) async throws -> JSON {
-        switch spec.id {
-        case "status": return status()
-        case "accounts.list": return .array(accounts.records.map(accountJSON))
-        case "accounts.rename": return try rename(args)
-        case "accounts.add": return try await addAccount(args)
-        case "accounts.remove": return try removeAccount(args)
-        case "mailboxes": return try mailboxes(args)
-        case "mail.list": return try await list(args, query: nil)
-        case "mail.search": return try await list(args, query: try args.required("query"))
-        case "mail.show": return try await show(args)
-        case "mail.read":
+    private func run(_ command: CommandID.App, _ args: Arguments) async throws -> JSON {
+        switch command {
+        case .status: return status()
+        case .accountsList: return .array(accounts.records.map(accountJSON))
+        case .accountsRename: return try rename(args)
+        case .accountsAdd: return try await addAccount(args)
+        case .accountsRemove: return try removeAccount(args)
+        case .mailboxes: return try mailboxes(args)
+        case .mailList: return try await list(args, query: nil)
+        case .mailSearch: return try await list(args, query: try args.required("query"))
+        case .mailShow: return try await show(args)
+        case .mailRead:
             let unread = args.bool("unread")
             return try await each(args) { known in
                 try await self.store.setRead(known.conversation, read: !unread).value
-                return .remember(known.conversation.updating(Set(known.conversation.messages.map(\.ref))) { envelope in
-                    if unread { envelope.flags.remove(MessageFlag.seen.rawValue) } else { envelope.flags.insert(MessageFlag.seen.rawValue) }
-                })
+                return .remember(known.conversation.updating(Set(known.conversation.messages.map(\.ref))) { $0.setFlag(.seen, !unread) })
             }
-        case "mail.star":
+        case .mailStar:
             let off = args.bool("off")
             return try await each(args) { known in
                 try await self.store.setFlagged(known.conversation, flagged: !off).value
                 let refs: Set<MessageRef> = off ? Set(known.conversation.messages.map(\.ref)) : [known.conversation.latest.ref]
-                return .remember(known.conversation.updating(refs) { envelope in
-                    if off { envelope.flags.remove(MessageFlag.flagged.rawValue) } else { envelope.flags.insert(MessageFlag.flagged.rawValue) }
-                })
+                return .remember(known.conversation.updating(refs) { $0.setFlag(.flagged, !off) })
             }
-        case "mail.archive":
+        case .mailArchive:
             return try await each(args) { known in
                 try await self.store.archive(known.conversation, from: known.primary).value
                 return .forget
             }
-        case "mail.trash":
-            let yes = args.bool("yes")
+        case .mailTrash:
             return try await each(args) { known in
-                if !yes, let trash = self.store.mailbox(account: known.conversation.account, role: .trash),
+                if let trash = self.store.mailbox(account: known.conversation.account, role: .trash),
                    known.conversation.messages.contains(where: { $0.ref.mailbox == trash.id }) {
-                    throw ControlError("confirm", "\(known.conversation.id) is already in the trash, so it would be deleted for good. Re-run with --yes.")
+                    try self.requireYes(args, "\(known.conversation.id) is already in the trash, so it would be deleted for good. Re-run with --yes.")
                 }
                 try await self.store.trash(known.conversation).value
                 return .forget
             }
-        case "mail.restore":
+        case .mailRestore:
             return try await each(args) { known in
                 try await self.store.restore(known.conversation).value
                 return .forget
             }
-        case "mail.tag": return try tag(args)
-        case "mail.retag":
-            guard store.tagging.isEnabled else { throw ControlError("disabled", "AI tagging is off (aiTagging.enabled).") }
+        case .mailTag: return try await tag(args)
+        case .mailRetag:
+            guard store.tagging.isEnabled else { throw ControlError("disabled", TagStore.offMessage) }
             store.tagging.retagAll()
             return ["started": true]
-        case "mail.send": return try await send(args)
-        case "mail.reply": return try await reply(args)
-        case "refresh":
+        case .mailSend: return try await send(args)
+        case .mailReply: return try await reply(args)
+        case .refresh:
             store.refresh()
             store.refreshCounts()
             return ["started": true]
-        default:
-            throw ControlError("unknown_command", "\(spec.name) is not handled by the app.")
         }
     }
 
@@ -144,12 +135,22 @@ final class ControlService {
         ]
     }
 
+    /// The signed-in account named by `--account`, as the account list knows it.
     private func record(_ args: Arguments) throws -> AccountRecord {
         let id = try args.required("account").lowercased()
-        guard let record = accounts.record(id) else {
-            throw ControlError("unknown_account", "No account \(id); `mailstream accounts list` shows them.")
-        }
+        guard let record = accounts.record(id) else { throw Self.unknownAccount(id) }
         return record
+    }
+
+    /// `id` when the mail store has the account. Accounts restored from the cache are there before
+    /// the account list loads, so this is not `record(_:)`.
+    private func mailAccount(_ id: String) throws -> String {
+        guard store.account(named: id) != nil else { throw Self.unknownAccount(id) }
+        return id
+    }
+
+    private static func unknownAccount(_ id: String) -> ControlError {
+        ControlError("unknown_account", "No account \(id); `mailstream accounts list` shows them.")
     }
 
     private func rename(_ args: Arguments) throws -> JSON {
@@ -160,48 +161,47 @@ final class ControlService {
 
     private func removeAccount(_ args: Arguments) throws -> JSON {
         let record = try record(args)
-        guard args.bool("yes") else {
-            throw ControlError("confirm", "Would sign out of \(record.id) and delete its saved sign-in (mail on the server stays). Re-run with --yes.")
-        }
+        try requireYes(args, "Would sign out of \(record.id) and delete its saved sign-in (mail on the server stays). Re-run with --yes.")
         accounts.remove(record.id)
         return ["removed": .string(record.id)]
     }
 
     private func addAccount(_ args: Arguments) async throws -> JSON {
         guard let provider = Provider(rawValue: try args.required("provider")) else {
-            throw ControlError("usage", "provider must be google or microsoft.")
+            throw ControlError.usage("provider must be google or microsoft.")
         }
         let suggested = try await accounts.tokens.suggestedClient(for: provider)
         let id = args.string("client-id") ?? suggested?.id
         let secret = args.string("client-secret") ?? (args.string("client-id") == nil ? suggested?.secret : nil)
         guard let id, !id.isEmpty else {
-            throw ControlError("usage", "No OAuth client known for \(provider.rawValue); pass --client-id (and --client-secret).")
+            throw ControlError.usage("No OAuth client known for \(provider.rawValue); pass --client-id (and --client-secret).")
         }
         if provider == .google, secret?.isEmpty != false {
-            throw ControlError("usage", "Google needs the client secret too: --client-secret.")
+            throw ControlError.usage("Google needs the client secret too: --client-secret.")
         }
         let record = try await accounts.signIn(provider, client: OAuthClient(id: id, secret: secret?.isEmpty == true ? nil : secret))
         return accountJSON(record)
     }
 
     private func mailboxes(_ args: Arguments) throws -> JSON {
-        let names = try accountFilter(args).map { [$0] } ?? store.accounts.map(\.name)
+        let names = try accountNames(args)
         return .object(Dictionary(uniqueKeysWithValues: names.map { name in
             (name, .array((store.mailboxes[name] ?? []).map { box in
                 [
                     "id": .string(box.id), "name": .string(box.displayName), "role": .string(box.role.rawValue),
-                    "unread": box.unread.map(JSON.int) ?? .null, "total": box.total.map(JSON.int) ?? .null,
+                    "unread": box.unread.json, "total": box.total.json,
                 ]
             }))
         }))
     }
 
     private func accountFilter(_ args: Arguments) throws -> String? {
-        guard let id = args.string("account")?.lowercased() else { return nil }
-        guard store.account(named: id) != nil else {
-            throw ControlError("unknown_account", "No account \(id); `mailstream accounts list` shows them.")
-        }
-        return id
+        try args.string("account").map { try mailAccount($0.lowercased()) }
+    }
+
+    /// The `--account` filter's account, or every account.
+    private func accountNames(_ args: Arguments) throws -> [String] {
+        try accountFilter(args).map { [$0] } ?? store.accounts.map(\.name)
     }
 
     // MARK: - Listing
@@ -235,7 +235,7 @@ final class ControlService {
         let limit = min(max(args.int("limit") ?? 25, 1), 100)
         let pageSize = min(max(limit, 25), 100)
         let listing = if let query {
-            await store.agentSearch(try accountFilter(args).map { [$0] } ?? store.accounts.map(\.name), query: query, pageSize: pageSize)
+            await store.agentSearch(try accountNames(args), query: query, pageSize: pageSize)
         } else {
             await store.agentListing(try mailboxKeys(args), pageSize: pageSize)
         }
@@ -248,7 +248,7 @@ final class ControlService {
             if args.bool("starred"), !conversation.isFlagged { return false }
             let tag = store.tagging.tag(for: conversation)
             if let category, tag?.category != category { return false }
-            if args.bool("waiting"), !(tag?.category == .people && tag?.toRespond == true) { return false }
+            if args.bool("waiting"), tag?.isWaiting != true { return false }
             return true
         }.prefix(limit)
         for conversation in conversations { remember(conversation, primary: listing.primary) }
@@ -272,14 +272,14 @@ final class ControlService {
             let envelope = message.envelope
             var item: [String: JSON] = [
                 "id": .string(message.ref.id), "mailbox": .string(message.ref.mailbox), "role": .string(message.role.rawValue),
-                "from": .strings(envelope.from.map(Self.text)), "to": .strings(envelope.to.map(Self.text)),
+                "from": Self.addresses(envelope.from), "to": Self.addresses(envelope.to),
                 "date": .date(envelope.date), "subject": .string(envelope.subject),
                 "unread": .bool(!envelope.isSeen), "starred": .bool(envelope.isFlagged),
             ]
             switch bodies[message.ref] {
             case .success(let content):
                 let text = content.text.flatMap { $0.isEmpty ? nil : $0 } ?? content.html.map(HTMLText.strip) ?? ""
-                item["cc"] = .strings(content.cc.map(Self.text))
+                item["cc"] = Self.addresses(content.cc)
                 item["text"] = .string(String(text.prefix(maxChars)))
                 item["truncated"] = .bool(text.count > maxChars)
                 item["attachments"] = .array(content.attachments.filter { !$0.inline }.map { attachment in
@@ -307,7 +307,7 @@ final class ControlService {
             "account": .string(conversation.account),
             "subject": .string(conversation.subject),
             "date": .date(conversation.latestDate),
-            "from": incoming.envelope.from.first.map { .string(Self.text($0)) } ?? .null,
+            "from": incoming.envelope.from.first.map(Self.text).json,
             "participants": .strings(people.map { own.contains($0.normalizedEmail) ? "me" : $0.displayName }),
             "messageCount": .int(conversation.messages.count),
             "unread": .bool(conversation.isUnread),
@@ -315,8 +315,8 @@ final class ControlService {
             "hasAttachment": .bool(conversation.hasAttachment),
             "mailboxes": .strings(Array(Set(conversation.messages.map(\.role.rawValue))).sorted()),
             "snippet": store.contents.snippet(for: conversation.latest.ref).json,
-            "category": tag.map { .string($0.category.rawValue) } ?? .null,
-            "waiting": .bool(tag?.category == .people && tag?.toRespond == true),
+            "category": (tag?.category.rawValue).json,
+            "waiting": .bool(tag?.isWaiting == true),
             "labels": .strings(tag?.labels ?? []),
         ]
     }
@@ -324,6 +324,11 @@ final class ControlService {
     private static func text(_ address: Address) -> String {
         address.name.map { "\($0) <\(address.email)>" } ?? address.email
     }
+
+    private static func addresses(_ list: [Address]) -> JSON { .strings(list.map(text)) }
+
+    /// The addresses as a confirmation names them.
+    private static func emails(_ list: [Address]) -> String { list.map(\.email).joined(separator: ", ") }
 
     // MARK: - Known conversations
 
@@ -353,77 +358,79 @@ final class ControlService {
 
     /// Runs `action` on each conversation id; failures are listed rather than stopping the rest.
     private func each(_ args: Arguments, _ action: (Known) async throws -> Outcome) async throws -> JSON {
+        try await batch(args, rejectsEmpty: true, failureCodes: true) { id in
+            let found = try lookup(id)
+            switch try await action(found) {
+            case .remember(let updated): known[id]?.conversation = updated
+            case .forget: known[id] = nil
+            }
+            return .string(id)
+        }
+    }
+
+    /// `{"done": [what work returned], "failed": [{id, (code,) message}]}` over the request's ids.
+    /// `each` refuses an empty list and reports failure codes; `tag` does neither.
+    private func batch(_ args: Arguments, rejectsEmpty: Bool, failureCodes: Bool,
+                       _ work: (String) async throws -> JSON) async throws -> JSON {
         let ids = args.list("ids") ?? []
-        guard !ids.isEmpty else { throw ControlError("usage", "Give at least one conversation id.") }
-        var done: [String] = []
+        if rejectsEmpty, ids.isEmpty { throw ControlError.usage("Give at least one conversation id.") }
+        var done: [JSON] = []
         var failed: [JSON] = []
         for id in ids {
             do {
-                let found = try lookup(id)
-                switch try await action(found) {
-                case .remember(let updated): known[id]?.conversation = updated
-                case .forget: known[id] = nil
-                }
-                done.append(id)
-            } catch let error as ControlError {
-                failed.append(["id": .string(id), "code": .string(error.code), "message": .string(error.message)])
+                done.append(try await work(id))
             } catch {
-                failed.append(["id": .string(id), "code": "failed", "message": .string(error.localizedDescription)])
+                let error = ControlError(error)
+                var failure: [String: JSON] = ["id": .string(id), "message": .string(error.message)]
+                if failureCodes { failure["code"] = .string(error.code) }
+                failed.append(.object(failure))
             }
         }
-        return ["done": .strings(done), "failed": .array(failed)]
+        return ["done": .array(done), "failed": .array(failed)]
+    }
+
+    /// Refuses unless the request carries `yes`; `message` says what would have happened.
+    private func requireYes(_ args: Arguments, _ message: @autoclosure () -> String) throws {
+        guard args.bool("yes") else { throw ControlError("confirm", message()) }
     }
 
     // MARK: - Tags and sending
 
-    private func tag(_ args: Arguments) throws -> JSON {
+    private func tag(_ args: Arguments) async throws -> JSON {
         let category = try args.string("category").map { name in
-            guard let category = MailCategory(rawValue: name) else { throw ControlError("usage", "Unknown category \(name).") }
+            guard let category = MailCategory(rawValue: name) else { throw ControlError.usage("Unknown category \(name).") }
             return category
         }
         let waiting = args.string("waiting").map { $0 == "true" }
         let labels = args.list("labels")
         guard category != nil || waiting != nil || labels != nil else {
-            throw ControlError("usage", "Give --category, --waiting or --labels.")
+            throw ControlError.usage("Give --category, --waiting or --labels.")
         }
-        var tagged: [JSON] = []
-        var failed: [JSON] = []
-        for id in args.list("ids") ?? [] {
-            do {
-                let tag = try store.tagging.edit(try lookup(id).conversation, category: category, waiting: waiting, labels: labels)
-                tagged.append(["id": .string(id), "category": .string(tag.category.rawValue), "waiting": .bool(tag.toRespond),
-                               "labels": .strings(tag.labels)])
-            } catch {
-                failed.append(["id": .string(id), "message": .string(error.localizedDescription)])
-            }
+        return try await batch(args, rejectsEmpty: false, failureCodes: false) { id in
+            let tag = try store.tagging.edit(try lookup(id).conversation, category: category, waiting: waiting, labels: labels)
+            return ["id": .string(id), "category": .string(tag.category.rawValue), "waiting": .bool(tag.toRespond),
+                    "labels": .strings(tag.labels)]
         }
-        return ["done": .array(tagged), "failed": .array(failed)]
     }
 
     private func addresses(_ args: Arguments, _ name: String) throws -> [Address] {
         try (args.list(name) ?? []).map { raw in
             guard let address = Address.parse(raw), address.email.contains("@") else {
-                throw ControlError("usage", "--\(name): \"\(raw)\" is not an email address.")
+                throw ControlError.usage("--\(name): \"\(raw)\" is not an email address.")
             }
             return address
         }
     }
 
     private func send(_ args: Arguments) async throws -> JSON {
-        let from = try args.required("from").lowercased()
-        guard store.account(named: from) != nil else {
-            throw ControlError("unknown_account", "No account \(from); `mailstream accounts list` shows them.")
-        }
+        let from = try mailAccount(try args.required("from").lowercased())
         let to = try addresses(args, "to"), cc = try addresses(args, "cc"), bcc = try addresses(args, "bcc")
-        guard !to.isEmpty else { throw ControlError("usage", "--to needs at least one address.") }
+        guard !to.isEmpty else { throw ControlError.usage("--to needs at least one address.") }
         let subject = try args.required("subject"), body = try args.required("body")
-        let everyone = (to + cc + bcc).map(\.email).joined(separator: ", ")
-        guard args.bool("yes") else {
-            throw ControlError("confirm", "Would send \"\(subject)\" (\(body.count) characters) from \(from) to \(everyone). Re-run with --yes.")
-        }
+        try requireYes(args, "Would send \"\(subject)\" (\(body.count) characters) from \(from) to \(Self.emails(to + cc + bcc)). Re-run with --yes.")
         let message = await store.outgoing(account: from, source: nil, to: to, cc: cc, bcc: bcc, subject: subject, text: body)
         try await store.send(message, account: from)
-        return ["sent": true, "from": .string(from), "to": .strings(to.map(Self.text)), "subject": .string(subject)]
+        return ["sent": true, "from": .string(from), "to": Self.addresses(to), "subject": .string(subject)]
     }
 
     private func reply(_ args: Arguments) async throws -> JSON {
@@ -431,12 +438,9 @@ final class ControlService {
         let source = conversation.messages.last { $0.role != .drafts } ?? conversation.latest
         let plan = try await store.replyPlan(for: source, all: args.bool("all"))
         let body = try args.required("body")
-        let everyone = (plan.to + plan.cc).map(\.email).joined(separator: ", ")
-        guard args.bool("yes") else {
-            throw ControlError("confirm", "Would send \"\(plan.subject)\" from \(source.ref.account) to \(everyone). Re-run with --yes.")
-        }
+        try requireYes(args, "Would send \"\(plan.subject)\" from \(source.ref.account) to \(Self.emails(plan.to + plan.cc)). Re-run with --yes.")
         try await store.sendReply(body, plan: plan, source: source)
-        return ["sent": true, "from": .string(source.ref.account), "to": .strings((plan.to + plan.cc).map(Self.text)),
+        return ["sent": true, "from": .string(source.ref.account), "to": Self.addresses(plan.to + plan.cc),
                 "subject": .string(plan.subject)]
     }
 }
@@ -453,11 +457,11 @@ nonisolated struct Arguments: Sendable {
             } else if let value = argument.defaultValue {
                 out[argument.name] = value
             } else if argument.required {
-                throw ControlError("usage", "\(spec.name): \(argument.positional ? "<\(argument.name)>" : "--\(argument.name)") is required.")
+                throw ControlError.usage("\(spec.name): \(argument.label) is required.")
             }
         }
         if let unknown = values.keys.first(where: { key in !spec.arguments.contains { $0.name == key } }) {
-            throw ControlError("usage", "\(spec.name) has no argument \"\(unknown)\".")
+            throw ControlError.usage("\(spec.name) has no argument \"\(unknown)\".")
         }
         self.values = out
     }
@@ -472,7 +476,7 @@ nonisolated struct Arguments: Sendable {
     }
 
     func required(_ name: String) throws -> String {
-        guard let value = string(name) else { throw ControlError("usage", "\(name) is required.") }
+        guard let value = string(name) else { throw ControlError.usage("\(name) is required.") }
         return value
     }
 
@@ -482,7 +486,7 @@ nonisolated struct Arguments: Sendable {
     func list(_ name: String) -> [String]? {
         switch values[name] {
         case .array(let items): items.compactMap(\.string)
-        case .string(let value): value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        case .string(let value): TypedValue.list(value)
         default: nil
         }
     }

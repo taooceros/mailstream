@@ -14,6 +14,9 @@ nonisolated enum ControlSocket {
     static let path = SettingsFile.directory.appending(path: "control.sock").path
     /// Requests larger than this are refused.
     static let maxRequest = 16 << 20
+    /// Answers larger than this are read as no answer: bodies of `mail show` make answers much
+    /// larger than any request.
+    static let maxAnswer = 256 << 20
 
     fileprivate static func address() throws -> (sockaddr_un, socklen_t) {
         var address = sockaddr_un()
@@ -70,13 +73,20 @@ nonisolated enum ControlSocket {
                 return nil
             }
             if count == 0 { break }
-            if let newline = buffer[0..<count].firstIndex(of: 0x0A) {
-                data.append(contentsOf: buffer[0..<newline])
-                return data
-            }
-            data.append(contentsOf: buffer[0..<count])
+            if append(buffer[0..<count], to: &data) { return data }
         }
         return data.count <= limit ? data : nil
+    }
+
+    /// Appends `chunk` to `message` up to the first newline, which ends a message on either side;
+    /// true once it has.
+    static func append(_ chunk: some Collection<UInt8>, to message: inout Data) -> Bool {
+        guard let newline = chunk.firstIndex(of: 0x0A) else {
+            message.append(contentsOf: chunk)
+            return false
+        }
+        message.append(contentsOf: chunk[..<newline])
+        return true
     }
 }
 
@@ -131,12 +141,7 @@ nonisolated struct ControlServer: Sendable {
         var data = Data()
         while data.count <= limit {
             let (chunk, metadata) = try await connection.receive(atMost: 64 << 10)
-            if let newline = chunk.firstIndex(of: 0x0A) {
-                data.append(chunk[..<newline])
-                break
-            }
-            data.append(chunk)
-            if metadata.endOfStream { break }
+            if ControlSocket.append(chunk, to: &data) || metadata.endOfStream { break }
         }
         return data.count <= limit ? data : nil
     }

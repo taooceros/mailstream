@@ -24,74 +24,56 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         case addresses
     }
 
-    var kind: Kind {
-        switch self {
-        case .aiTaggingEnabled: .bool
-        case .aiTaggingModel, .aiTaggingOmpPath: .string
-        case .aiTaggingBatchSize: .int(1...100)
-        case .aiTaggingPassLimit: .int(1...2000)
-        case .aiTaggingBackoffSeconds: .int(0...86_400)
-        case .trustedSenders: .addresses
-        case .pollSeconds: .int(15...3600)
-        case .pushPollSeconds: .int(60...86_400)
-        case .chatPollSeconds: .int(5...3600)
-        }
-    }
-
-    var defaultValue: JSON {
-        switch self {
-        case .aiTaggingEnabled: true
-        case .aiTaggingModel: "smol"
-        case .aiTaggingOmpPath: ""
-        case .aiTaggingBatchSize: 20
-        case .aiTaggingPassLimit: 150
-        case .aiTaggingBackoffSeconds: 300
-        case .trustedSenders: []
-        case .pollSeconds: 90
-        case .pushPollSeconds: 900
-        case .chatPollSeconds: 20
-        }
-    }
-
-    var summary: String {
+    /// What the key holds, its default and its description: the one place a new setting is
+    /// described.
+    private var descriptor: (kind: Kind, defaultValue: JSON, summary: String) {
         switch self {
         case .aiTaggingEnabled:
-            "Sort the inbox into People, Notifications, Newsletters and Invitations with omp, and flag mail waiting on a reply."
-        case .aiTaggingModel: "omp model role or model id the tagger runs (`omp --model`)."
-        case .aiTaggingOmpPath: "Path of the omp executable; empty picks the newest omp on the login shell's PATH."
-        case .aiTaggingBatchSize: "Conversations sent to omp per run."
-        case .aiTaggingPassLimit: "Most conversations one tagging pass looks at, newest first."
-        case .aiTaggingBackoffSeconds: "Wait after a failed tagging run before tagging automatically again."
+            (.bool, true,
+             "Sort the inbox into People, Notifications, Newsletters and Invitations with omp, and flag mail waiting on a reply.")
+        case .aiTaggingModel: (.string, "smol", "omp model role or model id the tagger runs (`omp --model`).")
+        case .aiTaggingOmpPath: (.string, "", "Path of the omp executable; empty picks the newest omp on the login shell's PATH.")
+        case .aiTaggingBatchSize: (.int(1...100), 20, "Conversations sent to omp per run.")
+        case .aiTaggingPassLimit: (.int(1...2000), 150, "Most conversations one tagging pass looks at, newest first.")
+        case .aiTaggingBackoffSeconds: (.int(0...86_400), 300, "Wait after a failed tagging run before tagging automatically again.")
         case .trustedSenders:
-            "Senders whose remote images and fonts always load, besides your own addresses and people you wrote to."
-        case .pollSeconds: "Mail polling interval while push is not connected."
-        case .pushPollSeconds: "Safety-net polling interval while push is connected."
-        case .chatPollSeconds: "Google Chat polling interval."
+            (.addresses, [],
+             "Senders whose remote images and fonts always load, besides your own addresses and people you wrote to.")
+        case .pollSeconds: (.int(15...3600), 90, "Mail polling interval while push is not connected.")
+        case .pushPollSeconds: (.int(60...86_400), 900, "Safety-net polling interval while push is connected.")
+        case .chatPollSeconds: (.int(5...3600), 20, "Google Chat polling interval.")
         }
     }
+
+    var kind: Kind { descriptor.kind }
+    var defaultValue: JSON { descriptor.defaultValue }
+    var summary: String { descriptor.summary }
+
+    /// The value in effect given the file's valid `values`: the default when the key is absent.
+    func value(in values: [Setting: JSON]) -> JSON { values[self] ?? defaultValue }
 
     /// `value` checked against the kind and normalized; throws a message naming the setting.
     func validate(_ value: JSON) throws -> JSON {
         switch kind {
         case .bool:
-            guard let bool = value.bool else { throw SettingsError("\(rawValue) must be true or false.") }
+            guard let bool = value.bool else { throw ControlError.invalidSetting("\(rawValue) must be true or false.") }
             return .bool(bool)
         case .int(let range):
-            guard let int = value.int else { throw SettingsError("\(rawValue) must be an integer.") }
+            guard let int = value.int else { throw ControlError.invalidSetting("\(rawValue) must be an integer.") }
             guard range.contains(int) else {
-                throw SettingsError("\(rawValue) must be between \(range.lowerBound) and \(range.upperBound).")
+                throw ControlError.invalidSetting("\(rawValue) must be between \(range.lowerBound) and \(range.upperBound).")
             }
             return .int(int)
         case .string:
-            guard let string = value.string else { throw SettingsError("\(rawValue) must be a string.") }
+            guard let string = value.string else { throw ControlError.invalidSetting("\(rawValue) must be a string.") }
             return .string(string.trimmingCharacters(in: .whitespacesAndNewlines))
         case .addresses:
             guard let items = value.array, let strings = value.strings, strings.count == items.count else {
-                throw SettingsError("\(rawValue) must be an array of email addresses.")
+                throw ControlError.invalidSetting("\(rawValue) must be an array of email addresses.")
             }
             let addresses = strings.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             if let bad = addresses.first(where: { !$0.contains("@") || $0.contains(where: \.isWhitespace) }) {
-                throw SettingsError("\(rawValue): \"\(bad)\" is not an email address.")
+                throw ControlError.invalidSetting("\(rawValue): \"\(bad)\" is not an email address.")
             }
             return .strings(Array(Set(addresses)).sorted())
         }
@@ -103,13 +85,12 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         switch kind {
         case .bool:
-            switch trimmed.lowercased() {
-            case "true", "on", "yes", "1": return true
-            case "false", "off", "no", "0": return false
-            default: throw SettingsError("\(rawValue) must be true or false, not \"\(text)\".")
+            guard let bool = TypedValue.bool(trimmed) else {
+                throw ControlError.invalidSetting("\(rawValue) must be true or false, not \"\(text)\".")
             }
+            return .bool(bool)
         case .int:
-            guard let int = Int(trimmed) else { throw SettingsError("\(rawValue) must be an integer, not \"\(text)\".") }
+            guard let int = Int(trimmed) else { throw ControlError.invalidSetting("\(rawValue) must be an integer, not \"\(text)\".") }
             return try validate(.int(int))
         case .string:
             return try validate(.string(text))
@@ -141,7 +122,7 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
     static func named(_ key: String) throws -> Setting {
         guard let setting = Setting(rawValue: key) else {
             let close = allCases.map(\.rawValue).filter { $0.lowercased().contains(key.lowercased()) }
-            throw SettingsError("Unknown setting \"\(key)\"." + (close.isEmpty ? "" : " Did you mean \(close.joined(separator: ", "))?")
+            throw ControlError.invalidSetting("Unknown setting \"\(key)\"." + (close.isEmpty ? "" : " Did you mean \(close.joined(separator: ", "))?")
                                 + " `mailstream config list` shows them all.")
         }
         return setting
@@ -158,12 +139,6 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
             "properties": .object(Dictionary(uniqueKeysWithValues: allCases.map { ($0.rawValue, $0.schema) })),
         ])
     }
-}
-
-nonisolated struct SettingsError: LocalizedError, Sendable {
-    let message: String
-    init(_ message: String) { self.message = message }
-    var errorDescription: String? { message }
 }
 
 /// Reading and writing settings.json, without the app: the CLI uses this directly.
@@ -185,9 +160,9 @@ nonisolated enum SettingsFile {
         do {
             json = try JSON.decode(data)
         } catch {
-            throw SettingsError("\(url.path) is not valid JSON: \(error.localizedDescription)")
+            throw ControlError.invalidSetting("\(url.path) is not valid JSON: \(error.localizedDescription)")
         }
-        guard let object = json.object else { throw SettingsError("\(url.path) must hold a JSON object.") }
+        guard let object = json.object else { throw ControlError.invalidSetting("\(url.path) must hold a JSON object.") }
         return object
     }
 
@@ -231,9 +206,7 @@ nonisolated enum SettingsFile {
 
     static func write(_ raw: [String: JSON]) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        var data = JSON.object(raw).encoded()
-        data.append(0x0A)
-        try data.write(to: url, options: .atomic)
+        try JSON.object(raw).encodedLine().write(to: url, options: .atomic)
     }
 }
 
@@ -253,7 +226,7 @@ final class Settings {
         (values, issues) = SettingsFile.read()
     }
 
-    subscript(_ setting: Setting) -> JSON { values[setting] ?? setting.defaultValue }
+    subscript(_ setting: Setting) -> JSON { setting.value(in: values) }
     func bool(_ setting: Setting) -> Bool { self[setting].bool ?? setting.defaultValue.bool ?? false }
     func int(_ setting: Setting) -> Int { self[setting].int ?? setting.defaultValue.int ?? 0 }
     func string(_ setting: Setting) -> String { self[setting].string ?? "" }

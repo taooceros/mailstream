@@ -65,7 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let main = NSMenu()
 
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About Mailstream", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(item("About Mailstream", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), ""))
         appMenu.addItem(.separator())
         appMenu.addItem(item("Settings…", #selector(AppDelegate.showSettings(_:)), ","))
         appMenu.addItem(.separator())
@@ -74,11 +74,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         servicesItem.submenu = services
         NSApp.servicesMenu = services
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Hide Mailstream", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(item("Hide Mailstream", #selector(NSApplication.hide(_:)), "h"))
         appMenu.addItem(item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]))
-        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(item("Show All", #selector(NSApplication.unhideAllApplications(_:)), ""))
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Quit Mailstream", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(item("Quit Mailstream", #selector(NSApplication.terminate(_:)), "q"))
         add(appMenu, title: "Mailstream", to: main)
 
         let file = NSMenu(title: "File")
@@ -130,9 +130,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let window = NSMenu(title: "Window")
         window.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
-        window.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        window.addItem(item("Zoom", #selector(NSWindow.performZoom(_:)), ""))
         window.addItem(.separator())
-        window.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+        window.addItem(item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:)), ""))
         add(window, title: "Window", to: main)
         NSApp.windowsMenu = window
 
