@@ -620,11 +620,13 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         swipeStep += 1
         if swipeUnder == nil {
             let under = CALayer()
-            under.frame = view.bounds
+            under.frame = scroll.frame
             under.backgroundColor = pageColor
-            if let inboxSnapshot, inboxSnapshot.size == view.bounds.size {
+            if let inboxSnapshot {
                 under.contents = inboxSnapshot.image
-                under.contentsGravity = .resize
+                // Same size: exact. Resized since: keep the top of the inbox in place, never stretch.
+                under.contentsGravity = inboxSnapshot.size == table.visibleRect.size ? .resize : .topLeft
+                under.contentsScale = view.window?.backingScaleFactor ?? 2
             }
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -725,11 +727,14 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             ? CGColor(srgbRed: 0x1e / 255, green: 0x1e / 255, blue: 0x1e / 255, alpha: 1) : .white
     }
 
-    /// The list as it is on screen.
+    /// The list as it is on screen. Drawn from the table: the scroll view's own cache comes back
+    /// blank (its clip view's layer draws nothing through `cacheDisplay`).
     private func snapshot() -> (image: CGImage, size: CGSize)? {
-        guard view.window != nil, let rep = scroll.bitmapImageRepForCachingDisplay(in: scroll.bounds) else { return nil }
-        scroll.cacheDisplay(in: scroll.bounds, to: rep)
-        return rep.cgImage.map { ($0, scroll.bounds.size) }
+        guard view.window != nil else { return nil }
+        let visible = table.visibleRect
+        guard !visible.isEmpty, let rep = table.bitmapImageRepForCachingDisplay(in: visible) else { return nil }
+        table.cacheDisplay(in: visible, to: rep)
+        return rep.cgImage.map { ($0, visible.size) }
     }
 
     // MARK: - Highlight and opening
