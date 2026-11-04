@@ -224,6 +224,10 @@ struct ListRowChrome: ViewModifier {
 
 /// One line, five quiet columns: unread dot · avatar and sender · subject and preview · topic · date
 /// and account. Hovering cross-fades the trailing metadata into a floating action pill.
+///
+/// The columns are drawn in one `Canvas`: built from a dozen views, a line cost SwiftUI a view
+/// graph and a layout pass every time it scrolled into view. Only what takes input is a view: the
+/// pill, the picture's click target and the account tick's tooltip.
 struct ListRowConversation: View {
     let content: ListRowContent
     let hovered: Bool
@@ -232,146 +236,178 @@ struct ListRowConversation: View {
     var avatars: AvatarStore?
 
     private var showsPill: Bool { hovered && content.showsActions }
-    private var pillWidth: CGFloat {
-        CGFloat(content.actions.count) * ListRowActionButton.size.width + 2 * ListRowActionPill.inset
-    }
 
     var body: some View {
-        ZStack(alignment: .leading) {
-            if content.unread {
-                Circle().fill(Color.design(.accent))
-                    .frame(width: 7, height: 7)
-                    .offset(x: ListMetrics.dotX - 3.5)
+        ListRowCanvas(content: content, pill: showsPill ? 1 : 0)
+            .overlay(alignment: .leading) {
+                if let photo = content.photo, let avatars {
+                    ListRowPictureTarget(person: content.person, photo: photo, automated: content.automated, avatars: avatars)
+                        .offset(x: ListMetrics.senderX)
+                }
             }
-            ListRowAvatar(initials: content.initials, color: content.avatarColor, photo: content.photo,
-                          preview: avatars.map { avatars in
-                              { AvatarPreviewItem(address: content.person, small: $0, automated: content.automated,
-                                                  avatars: avatars) }
-                          })
-                .offset(x: ListMetrics.senderX)
-            Text(content.sender)
-                .lineLimit(1).truncationMode(.tail)
-                .frame(width: ListMetrics.senderX + ListMetrics.senderWidth - ListMetrics.nameX, alignment: .leading)
-                .offset(x: ListMetrics.nameX)
-            HStack(spacing: 0) {
-                Text(content.line)
-                    .lineLimit(1).truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.trailing, 14)
-                trailing
-                    // While hovering, the subject also ends 10 pt before the pill.
-                    .frame(minWidth: showsPill ? pillWidth - 8 : 0, alignment: .trailing)
+            .overlay(alignment: .trailing) {
+                if let account = content.account {
+                    Color.clear
+                        .frame(width: 8, height: 16)
+                        .contentShape(Rectangle())
+                        .help(account.name)
+                        .padding(.trailing, ListRowCanvas.trailingInset - 2.75)
+                }
             }
-            .padding(.leading, ListMetrics.subjectX)
-            .padding(.trailing, 14)
-            if showsPill {
-                ListRowActionPill(actions: content.actions, onAction: onAction)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .padding(.trailing, 10)
-                    .transition(.asymmetric(insertion: .opacity.combined(with: .offset(x: 6)), removal: .opacity))
+            .overlay(alignment: .trailing) {
+                if showsPill {
+                    ListRowActionPill(actions: content.actions, onAction: onAction)
+                        .padding(.trailing, 10)
+                        .transition(.asymmetric(insertion: .opacity.combined(with: .offset(x: 6)), removal: .opacity))
+                }
             }
-        }
-        .frame(height: ListMetrics.rowHeight)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .animation(.house(.quick), value: showsPill)
-    }
-
-    /// Paperclip, star, topic, date and account tick, packed right to left; hidden items take no space.
-    private var trailing: some View {
-        HStack(spacing: 0) {
-            if content.hasAttachment {
-                Image(systemName: "paperclip")
-                    .font(.system(size: Design.TextSize.caption.rawValue, weight: .medium))
-                    .foregroundStyle(Color.design(.faint))
-                    .accessibilityLabel("Attachment")
-                    .padding(.trailing, 10)
-            }
-            if content.flagged {
-                Image(systemName: "star.fill")
-                    .font(.system(size: Design.TextSize.micro.rawValue, weight: .semibold))
-                    .foregroundStyle(Color.design(.star))
-                    .accessibilityLabel("Starred")
-                    .padding(.trailing, 10)
-            }
-            if let topic = content.topic, let color = content.topicColor {
-                ListRowTopic(text: topic, color: color)
-                    .padding(.trailing, 10)
-            }
-            Text(content.date)
-                .font(.designDigits(.footnote, weight: content.unread ? .medium : .regular))
-                .foregroundStyle(content.unread ? Color.design(.text) : Color.design(.muted))
-                .lineLimit(1)
-                .frame(width: ListMetrics.dateWidth, alignment: .trailing)
-                .padding(.trailing, 8)
-            // The account tick, its tooltip only where there is an account to name.
-            if let account = content.account {
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(account.color)
-                    .frame(width: 2.5, height: 12)
-                    .help(account.name)
-            } else {
-                Color.clear.frame(width: 2.5, height: 12)
-            }
-        }
-        .opacity(showsPill ? 0 : 1)
+            .frame(height: ListMetrics.rowHeight)
+            .frame(maxWidth: .infinity)
+            .animation(.house(.quick), value: showsPill)
     }
 }
 
-/// "● Work": a topic as a tiny colored dot and quiet text, no pill.
-struct ListRowTopic: View {
-    let text: String
-    let color: Color
+/// The drawn columns of a row. `pill` runs from 0 to 1 as the hover pill fades in: the trailing
+/// metadata fades out and the subject ends 10 pt before the pill.
+private struct ListRowCanvas: View, Animatable {
+    static let trailingInset: CGFloat = 14
+
+    let content: ListRowContent
+    var pill: Double
+
+    var animatableData: Double {
+        get { pill }
+        set { pill = newValue }
+    }
 
     var body: some View {
-        HStack(spacing: 5) {
-            Circle().fill(color).frame(width: 6, height: 6)
-            Text(text)
-                .font(.design(.caption))
-                .foregroundStyle(Color.design(.muted))
-                .lineLimit(1)
-                .fixedSize()
+        Canvas { context, size in draw(in: &context, size: size) }
+            .accessibilityElement()
+            .accessibilityLabel(accessibilityText)
+    }
+
+    private var accessibilityText: String {
+        var parts = [String(content.sender.characters), String(content.line.characters), content.date]
+        if content.unread { parts.insert("Unread", at: 0) }
+        if let topic = content.topic { parts.append(topic) }
+        if content.flagged { parts.append("Starred") }
+        if content.hasAttachment { parts.append("Attachment") }
+        if let account = content.account { parts.append(account.name) }
+        return parts.joined(separator: ", ")
+    }
+
+    private func draw(in context: inout GraphicsContext, size: CGSize) {
+        let mid = size.height / 2
+        let lineHeight = context.resolve(Text("Ag").font(.design(.body, weight: .semibold)))
+            .measure(in: size).height
+        if content.unread {
+            context.fill(Path(ellipseIn: CGRect(x: ListMetrics.dotX - 3.5, y: mid - 3.5, width: 7, height: 7)),
+                         with: .color(.design(.accent)))
         }
+        drawAvatar(in: &context, mid: mid)
+        Self.drawLine(context.resolve(Text(content.sender)), in: &context, x: ListMetrics.nameX,
+                      width: ListMetrics.senderX + ListMetrics.senderWidth - ListMetrics.nameX, mid: mid, height: lineHeight)
+
+        // Paperclip, star, topic, date and account tick, packed right to left; hidden items take no space.
+        let right = size.width - Self.trailingInset
+        var trailing = context
+        trailing.opacity = 1 - pill
+        if let account = content.account {
+            trailing.fill(Path(roundedRect: CGRect(x: right - 2.5, y: mid - 6, width: 2.5, height: 12), cornerRadius: 1),
+                          with: .color(account.color))
+        }
+        var x = right - 2.5 - 8
+        trailing.draw(Text(content.date)
+                          .font(.designDigits(.footnote, weight: content.unread ? .medium : .regular))
+                          .foregroundStyle(content.unread ? Color.design(.text) : Color.design(.muted)),
+                      at: CGPoint(x: x, y: mid), anchor: .trailing)
+        x -= ListMetrics.dateWidth
+        if let topic = content.topic, let color = content.topicColor {
+            x -= 10
+            x -= Self.drawTrailing(Text(topic).font(.design(.caption)).foregroundStyle(Color.design(.muted)),
+                                   in: &trailing, right: x, mid: mid, size: size) + 5
+            trailing.fill(Path(ellipseIn: CGRect(x: x - 6, y: mid - 3, width: 6, height: 6)), with: .color(color))
+            x -= 6
+        }
+        if content.flagged {
+            x -= 10
+            x -= Self.drawTrailing(Text(Image(systemName: "star.fill"))
+                                       .font(.system(size: Design.TextSize.micro.rawValue, weight: .semibold))
+                                       .foregroundStyle(Color.design(.star)),
+                                   in: &trailing, right: x, mid: mid, size: size)
+        }
+        if content.hasAttachment {
+            x -= 10
+            x -= Self.drawTrailing(Text(Image(systemName: "paperclip"))
+                                       .font(.system(size: Design.TextSize.caption.rawValue, weight: .medium))
+                                       .foregroundStyle(Color.design(.faint)),
+                                   in: &trailing, right: x, mid: mid, size: size)
+        }
+
+        var reserved = right - x
+        if content.showsActions {
+            let pillWidth = CGFloat(content.actions.count) * ListRowActionButton.size.width + 2 * ListRowActionPill.inset
+            reserved += (max(reserved, pillWidth - 8) - reserved) * pill
+        }
+        Self.drawLine(context.resolve(Text(content.line)), in: &context, x: ListMetrics.subjectX,
+                      width: right - reserved - 14 - ListMetrics.subjectX, mid: mid, height: lineHeight)
+    }
+
+    /// Initials on a tint of the person's color, or their picture once one is known.
+    private func drawAvatar(in context: inout GraphicsContext, mid: CGFloat) {
+        let side = ListMetrics.avatarSize
+        let avatar = CGRect(x: ListMetrics.senderX, y: mid - side / 2, width: side, height: side)
+        context.fill(Path(ellipseIn: avatar), with: .color(content.avatarColor.opacity(0.15)))
+        if let photo = content.photo {
+            var clipped = context
+            clipped.clip(to: Path(ellipseIn: avatar))
+            clipped.draw(Image(nsImage: photo).resizable(), in: Self.filling(avatar, with: photo.size))
+        } else {
+            context.draw(Text(content.initials).font(.design(.body, weight: .semibold)).foregroundStyle(content.avatarColor),
+                         at: CGPoint(x: avatar.midX, y: avatar.midY))
+        }
+    }
+
+    /// One line of `text` from `x`, cut with an ellipsis at `width`: the rect holds a single line.
+    private static func drawLine(_ text: GraphicsContext.ResolvedText, in context: inout GraphicsContext, x: CGFloat,
+                                 width: CGFloat, mid: CGFloat, height: CGFloat) {
+        guard width > 0 else { return }
+        context.draw(text, in: CGRect(x: x, y: mid - height / 2, width: width, height: height))
+    }
+
+    /// Draws `text` ending at `right`; returns its width.
+    private static func drawTrailing(_ text: Text, in context: inout GraphicsContext, right: CGFloat, mid: CGFloat,
+                                     size: CGSize) -> CGFloat {
+        let resolved = context.resolve(text)
+        context.draw(resolved, at: CGPoint(x: right, y: mid), anchor: .trailing)
+        return resolved.measure(in: size).width
+    }
+
+    /// `rect` filled by an image of `size`, centered, as `aspectRatio(contentMode: .fill)` does.
+    private static func filling(_ rect: CGRect, with size: CGSize) -> CGRect {
+        guard size.width > 0, size.height > 0 else { return rect }
+        let scale = max(rect.width / size.width, rect.height / size.height)
+        let fitted = CGSize(width: size.width * scale, height: size.height * scale)
+        return CGRect(x: rect.midX - fitted.width / 2, y: rect.midY - fitted.height / 2,
+                      width: fitted.width, height: fitted.height)
     }
 }
 
-/// Initials on a tint of the person's color, or their picture once one is known.
-struct ListRowAvatar: View {
-    let initials: String
-    let color: Color
-    let photo: NSImage?
-    /// Only a picture takes the click (to enlarge it); otherwise the row underneath gets it.
-    var preview: ((NSImage) -> AvatarPreviewItem)?
+/// A row picture's click target, enlarging it in a popover.
+private struct ListRowPictureTarget: View {
+    let person: Address
+    let photo: NSImage
+    let automated: Bool
+    let avatars: AvatarStore
     @State private var shown: AvatarPreviewItem?
 
     var body: some View {
-        let size = ListMetrics.avatarSize
-        // Only a picture is clipped and takes clicks: a mask and a popover per row cost every
-        // line laid out while scrolling.
-        ZStack {
-            Circle().fill(color.opacity(0.15))
-            if let photo {
-                Image(nsImage: photo)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: size, height: size)
-                    .clipShape(Circle())
-                    .transition(.opacity.animation(.house(.brief)))
-            } else {
-                Text(initials)
-                    .font(.design(.body, weight: .semibold))
-                    .foregroundStyle(color)
-            }
-        }
-        .frame(width: size, height: size)
-        .overlay {
-            if let photo, let preview {
-                Color.clear
-                    .contentShape(Circle())
-                    .onTapGesture { shown = preview(photo) }
-                    .pointerStyle(.link)
-                    .popover(item: $shown, arrowEdge: .trailing) { AvatarPreviewView(item: $0) }
-            }
-        }
+        Color.clear
+            .frame(width: ListMetrics.avatarSize, height: ListMetrics.avatarSize)
+            .contentShape(Circle())
+            .onTapGesture { shown = AvatarPreviewItem(address: person, small: photo, automated: automated, avatars: avatars) }
+            .pointerStyle(.link)
+            .popover(item: $shown, arrowEdge: .trailing) { AvatarPreviewView(item: $0) }
     }
 }
 
