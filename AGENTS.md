@@ -11,6 +11,12 @@ This repo is a colocated jj repo (`.jj` + `.git`), pushed to `github.com/taoocer
 - Push: `jj bookmark set main -r @-` then `jj git push`.
 - The repo is public: never commit secrets, tokens, OAuth client files or personal mail data.
 
+## Building
+
+- Check with `swift build` and launch with `scripts/run.sh`: both use the incremental debug build
+  (seconds per edit). A release build (`scripts/bundle.sh`, `CONFIG=release`) re-optimizes the
+  whole module single-threaded, ~30 s per edit; build it only to check performance or ship.
+
 ## Swift: concurrency and state
 
 macOS 26, Swift 6.2 language mode; `Package.swift` sets `defaultIsolation(MainActor.self)`,

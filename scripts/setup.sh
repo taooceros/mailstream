@@ -85,4 +85,4 @@ else
   Push/deploy.sh
 fi
 
-print -P "\n%BDone.%b Build and launch with: CONFIG=debug scripts/run.sh (or scripts/bundle.sh for a release build)."
+print -P "\n%BDone.%b Build and launch with: scripts/run.sh (or scripts/bundle.sh for a release build)."

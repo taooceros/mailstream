@@ -218,8 +218,9 @@ final class ControlService {
                 }
                 keys += boxes.map(\.key)
             } else {
-                let matches = store.accounts.filter { account == nil || $0.name == account }.flatMap { store.mailboxes[$0.name] ?? [] }
-                    .filter { $0.id == name || $0.name.caseInsensitiveCompare(name) == .orderedSame }
+                let accounts: [Account] = store.accounts.filter { account == nil || $0.name == account }
+                let boxes: [Mailbox] = accounts.flatMap { store.mailboxes[$0.name] ?? [] }
+                let matches = boxes.filter { $0.id == name || $0.name.caseInsensitiveCompare(name) == .orderedSame }
                 guard !matches.isEmpty else {
                     throw ControlError("unknown_mailbox", "No mailbox \"\(name)\"; use a role or an id from `mailstream mailboxes`.")
                 }

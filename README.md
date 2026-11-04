@@ -122,11 +122,16 @@ errors, 3 when the app cannot be reached.
 ## Build and run
 
 ```sh
+./scripts/run.sh                    # debug build, bundle, quit the running copy, launch
+CONFIG=release ./scripts/run.sh     # the same with a release build
 ./scripts/bundle.sh                 # release build → build/Mailstream.app
 CONFIG=debug ./scripts/bundle.sh    # debug build
-CONFIG=debug ./scripts/run.sh       # bundle, quit the running copy, launch
-swift build                         # compile check only
+swift build                         # compile check only (debug, shares run.sh's build)
 ```
+
+Debug builds are incremental: an edit rebuilds in a few seconds. A release build
+optimizes the whole module in one single-threaded pass, about 30 s after any edit, so
+use it for distribution or for checking performance.
 
 The bundle is signed with an "Apple Development" certificate when there is one, else
 ad hoc. Nothing else is needed. Signed ad hoc, each new build is a new app to macOS,
