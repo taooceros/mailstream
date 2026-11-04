@@ -11,7 +11,7 @@ extension MailStore {
         var failures: [String]
     }
 
-    func agentListing(_ keys: [MailboxKey], query: String?, pageSize: Int) async -> AgentListing {
+    func agentListing(_ keys: [MailboxKey], pageSize: Int) async -> AgentListing {
         let jobs = keys.compactMap { key in accountStore.backend(for: key.account).map { (key, $0) } }
         var fetched: [MailboxKey: [Envelope]] = [:]
         var failures = keys.filter { key in !jobs.contains { $0.0 == key } }.map { "\($0.account): signed out" }
@@ -19,12 +19,8 @@ extension MailStore {
             for (key, backend) in jobs {
                 group.addTask {
                     do {
-                        let list = if let query {
-                            try await backend.search(mailbox: key.mailbox, query: query, pageSize: pageSize)
-                        } else {
-                            try await backend.envelopes(mailbox: key.mailbox, cursor: nil, pageSize: pageSize,
-                                                        priority: .interactive).envelopes
-                        }
+                        let list = try await backend.envelopes(mailbox: key.mailbox, cursor: nil, pageSize: pageSize,
+                                                               priority: .interactive).envelopes
                         return (key, .success(list))
                     } catch {
                         return (key, .failure(error))
@@ -38,7 +34,42 @@ extension MailStore {
                 }
             }
         }
-        let primary = keys.filter { fetched[$0] != nil }
+        return await threads(fetched, failures: failures)
+    }
+
+    /// The providers' search over every mailbox of `accounts` but trash and junk, as in the window.
+    func agentSearch(_ accounts: [String], query: String, pageSize: Int) async -> AgentListing {
+        let jobs = accounts.compactMap { account in accountStore.backend(for: account).map { (account, $0) } }
+        var fetched: [MailboxKey: [Envelope]] = [:]
+        var failures = accounts.filter { account in !jobs.contains { $0.0 == account } }.map { "\($0): signed out" }
+        await withTaskGroup(of: (String, Result<[SearchHit], any Error>).self) { group in
+            for (account, backend) in jobs {
+                group.addTask {
+                    do {
+                        let hits = try await backend.search(query: query, pageSize: pageSize)
+                        return (account, .success(hits))
+                    } catch {
+                        return (account, .failure(error))
+                    }
+                }
+            }
+            for await (account, result) in group {
+                switch result {
+                case .success(let hits):
+                    for hit in hits {
+                        let key = MailboxKey(account: account, mailbox: hit.mailbox)
+                        guard let role = mailbox(key)?.role, role != .trash, role != .junk else { continue }
+                        fetched[key, default: []].append(hit.envelope)
+                    }
+                case .failure(let error): failures.append("\(account): \(error.localizedDescription)")
+                }
+            }
+        }
+        return await threads(fetched, failures: failures)
+    }
+
+    private func threads(_ fetched: [MailboxKey: [Envelope]], failures: [String]) async -> AgentListing {
+        let primary = fetched.keys.sorted { ($0.account, $0.mailbox) < ($1.account, $1.mailbox) }
         let roles = Set(primary.map { mailbox($0)?.role ?? .other })
         var context: [MailboxKey] = []
         if !roles.isSubset(of: [.trash, .junk, .drafts, .all]) {

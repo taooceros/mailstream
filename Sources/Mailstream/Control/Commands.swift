@@ -101,9 +101,8 @@ nonisolated struct CommandSpec: Sendable {
             Argument(name: "waiting", kind: .bool, summary: "Only conversations waiting on your reply."),
             Argument(name: "limit", kind: .int, summary: "Most conversations returned (1-100).", defaultValue: 25),
         ]),
-        CommandSpec(name: "mail search", summary: "Searches the providers (subject, people, body), newest first.", arguments: [
-            Argument(name: "query", kind: .string, summary: "Free text.", positional: true, required: true),
-            Argument(name: "mailbox", kind: .list, summary: "Mailboxes to search, as for `mail list`.", defaultValue: .strings(["inbox", "archive", "sent"])),
+        CommandSpec(name: "mail search", summary: "Searches every mailbox but trash and junk with the providers' own search (subject, people, body; Gmail operators such as from: work), newest first.", arguments: [
+            Argument(name: "query", kind: .string, summary: "Free text, or the provider's search syntax.", positional: true, required: true),
             account,
             Argument(name: "limit", kind: .int, summary: "Most conversations returned (1-100).", defaultValue: 25),
         ]),

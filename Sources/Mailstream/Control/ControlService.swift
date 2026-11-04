@@ -227,8 +227,12 @@ final class ControlService {
 
     private func list(_ args: Arguments, query: String?) async throws -> JSON {
         let limit = min(max(args.int("limit") ?? 25, 1), 100)
-        let keys = try mailboxKeys(args)
-        let listing = await store.agentListing(keys, query: query, pageSize: min(max(limit, 25), 100))
+        let pageSize = min(max(limit, 25), 100)
+        let listing = if let query {
+            await store.agentSearch(try accountFilter(args).map { [$0] } ?? store.accounts.map(\.name), query: query, pageSize: pageSize)
+        } else {
+            await store.agentListing(try mailboxKeys(args), pageSize: pageSize)
+        }
         if listing.primary.isEmpty, !listing.failures.isEmpty {
             throw ControlError("provider", listing.failures.joined(separator: "; "))
         }
@@ -330,7 +334,7 @@ final class ControlService {
     private func lookup(_ id: String) throws -> Known {
         if let found = known[id] { return found }
         if let onScreen = store.conversations.first(where: { $0.id == id }) {
-            return Known(conversation: onScreen, primary: Set(store.primaryKeys))
+            return Known(conversation: onScreen, primary: Set(store.listedKeys))
         }
         throw ControlError("unknown_conversation",
                            "Unknown conversation \(id). Ids come from `mail list`, `mail search` or `mail show`, and are remembered while the app runs.")

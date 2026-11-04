@@ -91,22 +91,23 @@ nonisolated final class GmailBackend: MailBackend {
         var query = Self.scope(mailbox) + [("maxResults", "\(min(max(pageSize, 1), 500))"),
                                            ("fields", Self.listFields)]
         if let cursor { query.append(("pageToken", cursor)) }
-        let (envelopes, next) = try await listing(Self.url("messages", query), priority: priority)
-        return EnvelopePage(envelopes: envelopes, next: next)
+        let (ids, next) = try await listing(Self.url("messages", query), priority: priority)
+        return EnvelopePage(envelopes: try await cache.envelopes(ids, priority: priority), next: next)
     }
 
-    @concurrent func search(mailbox: String, query: String, pageSize: Int) async throws -> [Envelope] {
-        let parameters = Self.scope(mailbox) + [("q", query), ("maxResults", "\(min(max(pageSize, 1), 500))"),
-                                                ("fields", Self.listFields)]
-        return try await listing(Self.url("messages", parameters), priority: .interactive).envelopes
+    /// No label filter: Gmail then searches everything but spam and trash, as its web search does.
+    @concurrent func search(query: String, pageSize: Int) async throws -> [SearchHit] {
+        let parameters = [("q", query), ("maxResults", "\(min(max(pageSize, 1), 500))"), ("fields", Self.listFields)]
+        let (ids, _) = try await listing(Self.url("messages", parameters), priority: .interactive)
+        return try await cache.hits(ids, priority: .interactive)
     }
 
     /// `resultSizeEstimate` is always present, so a list with no matches still answers `{…}`;
     /// with only `messages` and `nextPageToken` Gmail sends an empty body, which is not JSON.
     private static let listFields = "messages(id),nextPageToken,resultSizeEstimate"
 
-    /// Lists, brings cached labels up to date meanwhile, then fills in the envelopes.
-    private func listing(_ url: URL, priority: RequestPriority) async throws -> (envelopes: [Envelope], next: String?) {
+    /// Lists message ids, bringing cached labels up to date meanwhile.
+    private func listing(_ url: URL, priority: RequestPriority) async throws -> (ids: [String], next: String?) {
         struct MessageList: Decodable, Sendable {
             struct Item: Decodable, Sendable { let id: String }
             let messages: [Item]?
@@ -115,8 +116,7 @@ nonisolated final class GmailBackend: MailBackend {
         async let synchronized: Void = cache.synchronize(priority: priority)
         let page = try await api.get(MessageList.self, url, priority: priority, cost: 5)
         try await synchronized
-        let envelopes = try await cache.envelopes(page.messages?.map(\.id) ?? [], priority: priority)
-        return (envelopes, page.nextPageToken)
+        return (page.messages?.map(\.id) ?? [], page.nextPageToken)
     }
 
     @concurrent func content(id: String, mailbox: String, directory: URL, urlBase: String,
@@ -477,6 +477,19 @@ private actor GmailEnvelopeCache {
     /// that no longer exist are left out. Ids another caller is already fetching share that
     /// fetch rather than costing quota twice.
     func envelopes(_ ids: [String], priority: RequestPriority) async throws -> [Envelope] {
+        try await lookup(ids, priority: priority).map(\.current)
+    }
+
+    /// `envelopes` placed in the mailbox their labels list them under: Inbox, Sent or Drafts
+    /// when they carry that label, else All Mail.
+    func hits(_ ids: [String], priority: RequestPriority) async throws -> [SearchHit] {
+        try await lookup(ids, priority: priority).map { entry in
+            let mailbox = ["INBOX", "SENT", "DRAFT"].first(where: entry.labels.contains) ?? GmailBackend.allMail
+            return SearchHit(mailbox: mailbox, envelope: entry.current)
+        }
+    }
+
+    private func lookup(_ ids: [String], priority: RequestPriority) async throws -> [Entry] {
         load()
         let unknown = ids.filter { entries[$0] == nil }
         let missing = unknown.filter { loading[$0] == nil }
@@ -488,7 +501,7 @@ private actor GmailEnvelopeCache {
         for task in Set(unknown.compactMap { loading[$0] }) {
             fetched.merge(try await task.value) { a, _ in a }
         }
-        return ids.compactMap { (entries[$0] ?? fetched[$0])?.current }
+        return ids.compactMap { entries[$0] ?? fetched[$0] }
     }
 
     private func fetch(_ ids: [String], priority: RequestPriority) async throws -> [String: Entry] {

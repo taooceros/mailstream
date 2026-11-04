@@ -237,6 +237,13 @@ the toolbar back button or a mouse's Back button returns. A two-finger swipe
 left or right on the trackpad drags the reader off that side and goes back once
 past a third of its width or flicked (when "Swipe between pages" uses two fingers).
 
+Search (⌘F) covers every mailbox of the accounts in view, not just the selected
+one, leaving out trash and junk unless one of them is selected. Matches among
+mail already loaded (subject, people, preview) show at once; once typing pauses,
+the providers' own search (Gmail's, with operators such as `from:` and
+`has:attachment`, and Outlook's) adds what was never loaded and matches in
+bodies.
+
 The reader is a 720 pt reading column: serif subject, one line of metadata,
 messages separated by hairlines, collapsed messages as one-line previews, quoted
 history and its "On …, X wrote:" line folded behind `•••`, and a reply pill

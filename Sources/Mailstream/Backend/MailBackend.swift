@@ -15,8 +15,9 @@ nonisolated protocol MailBackend: Sendable {
     /// Newest first. `cursor` is nil for the first page, else the previous page's `next`.
     @concurrent func envelopes(mailbox: String, cursor: String?, pageSize: Int, priority: RequestPriority) async throws -> EnvelopePage
 
-    /// Messages in `mailbox` matching `query` (free text over subject, people and body), newest first.
-    @concurrent func search(mailbox: String, query: String, pageSize: Int) async throws -> [Envelope]
+    /// Messages anywhere in the account but spam and trash matching `query`, in the provider's own
+    /// search syntax (Gmail's `from:`/`has:attachment`, Outlook's KQL), each with the mailbox it is in.
+    @concurrent func search(query: String, pageSize: Int) async throws -> [SearchHit]
 
     /// The full message. Parts it shows inline or offers as attachments are written into
     /// `directory`; HTML references them under `urlBase` (see `MessageAssembly`). Never marks
@@ -40,6 +41,12 @@ nonisolated struct EnvelopePage: Sendable {
     var envelopes: [Envelope]
     /// Cursor of the next older page; nil at the end.
     var next: String?
+}
+
+/// A search result: the message and the mailbox it lists under.
+nonisolated struct SearchHit: Sendable {
+    let mailbox: String
+    let envelope: Envelope
 }
 
 nonisolated enum MessageFlag: String, Sendable {

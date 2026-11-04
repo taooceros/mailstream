@@ -423,6 +423,13 @@ final class MailStore {
         }
     }
 
+    /// The mailboxes the conversations on screen come from: the selection's, or while searching
+    /// wherever the results are.
+    var listedKeys: [MailboxKey] {
+        guard searchQuery != nil else { return primaryKeys }
+        return searchResults.keys.sorted { ($0.account, $0.mailbox) < ($1.account, $1.mailbox) }
+    }
+
     /// Inbox and sent mail of the accounts in view, so conversations show both directions.
     private var contextKeys: [MailboxKey] {
         if [.trash, .junk, .drafts, .all].contains(selectionRole) { return [] }
@@ -480,7 +487,7 @@ final class MailStore {
     private func rebuildPass() async {
         await loadCachedListings(primaryKeys + contextKeys, inRebuild: true)
         let context = ListContext(selection: selection, search: searchQuery, role: selectionRole)
-        let input = ListInput(primary: sources(primaryKeys, primary: true), context: sources(contextKeys, primary: false),
+        let input = ListInput(primary: sources(listedKeys, primary: true), context: sources(contextKeys, primary: false),
                               own: ownAddresses, recipients: context.role.showsRecipients)
         let output = await input.build()
         // Inputs changed meanwhile: the next pass shows them.
@@ -611,6 +618,9 @@ final class MailStore {
 
     // MARK: - Search
 
+    /// Searches every mailbox of the accounts in view. Matches among mail already loaded show at
+    /// once; the providers' own search, which also reads bodies and mail never loaded, follows once
+    /// typing pauses and merges in.
     func search(_ text: String) {
         searchTask?.cancel()
         let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -624,31 +634,36 @@ final class MailStore {
             return
         }
         searchQuery = query
-        searchResults = [:]
         isLoading = true
-        rebuild.request()
-        let jobs = backends(primaryKeys)
+        let accounts = Set(primaryKeys.map(\.account))
+        let jobs = accounts.sorted().compactMap { account in accountStore.backend(for: account).map { (account, $0) } }
+        let loaded = listings.filter { accounts.contains($0.key.account) && isSearchable($0.key) }.mapValues(\.envelopes)
+        let snippets = contents.snippets
         searchTask = Task(name: "Mail search") {
-            try? await Task.sleep(for: .milliseconds(350))
+            let local = await Self.matches(query, in: loaded, snippets: snippets)
             guard !Task.isCancelled else { return }
-            await withTaskGroup(of: (MailboxKey, Result<[Envelope], any Error>).self) { group in
-                for (key, backend) in jobs {
+            searchResults = local
+            rebuild.request()
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled else { return }
+            await withTaskGroup(of: (String, Result<[SearchHit], any Error>).self) { group in
+                for (account, backend) in jobs {
                     group.addTask {
-                        // Bound before the tuple is built: Swift 6.3 at -O drops `key` from
-                        // `(key, .success(try await …))` on success, so the list got garbage keys.
+                        // Bound before the tuple is built: Swift 6.3 at -O drops the first element
+                        // from `(account, .success(try await …))` on success.
                         do {
-                            let list = try await backend.search(mailbox: key.mailbox, query: query, pageSize: Self.pageSize)
-                            return (key, .success(list))
+                            let hits = try await backend.search(query: query, pageSize: Self.pageSize)
+                            return (account, .success(hits))
                         } catch {
-                            return (key, .failure(error))
+                            return (account, .failure(error))
                         }
                     }
                 }
-                for await (key, result) in group {
+                for await (account, result) in group {
                     guard !Task.isCancelled else { continue }
                     switch result {
-                    case .success(let list): searchResults[key] = list
-                    case .failure(let error): report(error, context: key.account)
+                    case .success(let hits): merge(hits, account: account)
+                    case .failure(let error): report(error, context: account)
                     }
                     rebuild.request()
                 }
@@ -656,6 +671,46 @@ final class MailStore {
             guard !Task.isCancelled else { return }
             isLoading = false
         }
+    }
+
+    /// Provider results replace the loaded-mail matches of the same messages.
+    private func merge(_ hits: [SearchHit], account: String) {
+        let ids = Set(hits.map(\.envelope.id))
+        for key in searchResults.keys where key.account == account {
+            searchResults[key]?.removeAll { ids.contains($0.id) }
+        }
+        for hit in hits {
+            let key = MailboxKey(account: account, mailbox: hit.mailbox)
+            if isSearchable(key) { searchResults[key, default: []].append(hit.envelope) }
+        }
+    }
+
+    /// Search leaves out trash and junk unless they are what is selected, and folders the sidebar
+    /// hides (Outlook's conversation history).
+    func isSearchable(_ key: MailboxKey) -> Bool {
+        guard let role = mailbox(key)?.role else { return false }
+        return (role != .trash && role != .junk) || role == selectionRole
+    }
+
+    /// Loaded envelopes where every word of `query` appears in the subject, a sender or recipient,
+    /// or the preview. Queries with provider operators (`from:`) wait for the provider.
+    @concurrent private nonisolated static func matches(_ query: String, in loaded: [MailboxKey: [Envelope]],
+                                                        snippets: [MessageRef: String]) async -> [MailboxKey: [Envelope]] {
+        let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !terms.contains(where: { $0.contains(":") }) else { return [:] }
+        var seen = Set<String>()
+        var out: [MailboxKey: [Envelope]] = [:]
+        for (key, envelopes) in loaded {
+            for envelope in envelopes where !seen.contains(key.account + "\u{1}" + envelope.id) {
+                let people = (envelope.from + envelope.to).map { "\($0.name ?? "") \($0.email)" }.joined(separator: " ")
+                let text = [envelope.subject, people, snippets[MessageRef(account: key.account, mailbox: key.mailbox, id: envelope.id)] ?? ""]
+                    .joined(separator: "\n")
+                guard terms.allSatisfy({ text.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }) else { continue }
+                seen.insert(key.account + "\u{1}" + envelope.id)
+                out[key, default: []].append(envelope)
+            }
+        }
+        return out
     }
 
     /// Every sender and recipient in loaded listings, for recipient autocompletion.
@@ -777,7 +832,7 @@ final class MailStore {
     /// Messages "Archive" moves: those in `primary` (default: the list on screen) that sit in an
     /// inbox-like mailbox.
     private func archivable(_ conversation: Conversation, primary: Set<MailboxKey>? = nil) -> [MailMessage] {
-        let primary = primary ?? Set(primaryKeys)
+        let primary = primary ?? Set(listedKeys)
         return conversation.messages.filter {
             primary.contains($0.ref.mailboxKey) && ![.sent, .all, .archive, .trash, .drafts].contains($0.role)
         }
@@ -881,7 +936,7 @@ final class MailStore {
             searchResults[key]?.removeAll { ids.contains($0.id) }
             persist(key)
         }
-        let primary = Set(primaryKeys)
+        let primary = Set(listedKeys)
         patchList(touching: refs) { conversation in
             let remaining = conversation.messages.filter { !refs.contains($0.ref) }
             guard remaining.contains(where: { primary.contains($0.ref.mailboxKey) }) else { return nil }

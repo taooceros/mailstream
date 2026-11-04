@@ -126,13 +126,16 @@ nonisolated final class GraphBackend: MailBackend {
         return EnvelopePage(envelopes: page.value.map(Self.envelope), next: page.nextLink)
     }
 
-    @concurrent func search(mailbox: String, query: String, pageSize: Int) async throws -> [Envelope] {
+    /// `/me/messages` spans every folder; each hit keeps the folder it is in.
+    @concurrent func search(query: String, pageSize: Int) async throws -> [SearchHit] {
         let terms = query.replacingOccurrences(of: "\"", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !terms.isEmpty else { return [] }
-        let url = try Self.url("me/mailFolders/\(mailbox.percentEncoded)/messages",
-                               [("$search", "\"\(terms)\""), ("$top", String(pageSize)), ("$select", Self.envelopeFields)])
+        let url = try Self.url("me/messages", [("$search", "\"\(terms)\""), ("$top", String(pageSize)),
+                                               ("$select", Self.envelopeFields + ",parentFolderId")])
         let page = try await api.decode(Page<Message>.self, Self.request(url))
-        return page.value.map(Self.envelope).sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+        return page.value.compactMap { message in
+            message.parentFolderId.map { SearchHit(mailbox: $0, envelope: Self.envelope(message)) }
+        }.sorted { ($0.envelope.date ?? .distantPast) > ($1.envelope.date ?? .distantPast) }
     }
 
     private static func envelope(_ message: Message) -> Envelope {
@@ -382,6 +385,8 @@ nonisolated extension GraphBackend {
         let flag: Flag?
         let isDraft: Bool?
         let hasAttachments: Bool?
+        /// Only selected by search.
+        let parentFolderId: String?
     }
 
     fileprivate struct Body: Decodable, Sendable {
