@@ -1005,9 +1005,7 @@ enum ReaderPage {
     """
 
     private static func jsString(_ text: String) -> String {
-        let data = (try? JSONSerialization.data(withJSONObject: [text], options: [])) ?? Data("[\"\"]".utf8)
-        let array = String(decoding: data, as: UTF8.self)
-        return String(array.dropFirst().dropLast())
+        String(decoding: (try? JSONEncoder().encode(text)) ?? Data("\"\"".utf8), as: UTF8.self)
     }
 }
 

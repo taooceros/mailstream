@@ -24,7 +24,8 @@ final class ChatReader: WebShellClient {
     private var firstUnread: String?
     /// Follows what the page shows of the space on screen.
     private var watch: Task<Void, Never>?
-    private var lastSnapshot: Snapshot?
+    /// What the page was last given, so passes that change nothing publish nothing.
+    private var published: Snapshot?
     /// Requests made while a pass runs coalesce into one more pass.
     private lazy var building = CoalescedTask("Chat log") { [weak self] in await self?.buildPass() }
 
@@ -59,13 +60,12 @@ final class ChatReader: WebShellClient {
         unreadAtOpen = space?.unread ?? 0
         lastRead = unreadAtOpen > 0 ? space?.lastRead : nil
         shell.begin(self)
-        watch = Task.immediate(name: "Chat reader") { [weak self] in
-            for await snapshot in Observations({ [weak self] in self?.snapshot(of: key) }) {
-                guard let self else { return }
-                guard let snapshot, snapshot != lastSnapshot else { continue }
-                lastSnapshot = snapshot
-                build()
+        watch = Task.immediate(name: "Chat reader") { [weak self, store] in
+            // Reads only: the pass builds the page's input, which may start picture lookups.
+            let changes = Observations {
+                _ = (store.avatars.revision, store.chat.thread(key), store.chat.space(key), store.chat.isLoadingEarlier(key))
             }
+            for await _ in changes { self?.build() }
         }
     }
 
@@ -75,7 +75,7 @@ final class ChatReader: WebShellClient {
         drafts[key] = draft.isEmpty ? nil : draft
         watch?.cancel()
         watch = nil
-        lastSnapshot = nil
+        published = nil
         self.key = nil
         token += 1
         shown = []
@@ -89,14 +89,15 @@ final class ChatReader: WebShellClient {
         guard key != nil else { return }
         shell.begin(self)
         staged = false
+        published = nil
         build()
     }
 
     // MARK: - Building
 
     /// Everything the page shows of a space. Messages of other spaces, and pictures of people not
-    /// in this one, leave it equal, so they rebuild nothing.
-    private struct Snapshot: Equatable, Sendable {
+    /// in this one, leave it equal, so their passes publish nothing.
+    private struct Snapshot: Equatable {
         let input: ChatPage.Input
         let more: Bool
         let loaded: Bool
@@ -105,8 +106,6 @@ final class ChatReader: WebShellClient {
     }
 
     private func snapshot(of key: ChatSpaceKey) -> Snapshot {
-        // Pictures arriving can change `input.avatars`.
-        _ = store.avatars.revision
         let thread = store.chat.thread(key)
         return Snapshot(input: input(for: key), more: thread?.more ?? false, loaded: thread?.loaded ?? false,
                         failure: thread?.failure, loadingEarlier: store.chat.isLoadingEarlier(key))
@@ -116,10 +115,13 @@ final class ChatReader: WebShellClient {
 
     private func buildPass() async {
         guard let key else { return }
+        let snapshot = snapshot(of: key)
+        guard snapshot != published else { return }
         let token = token
-        let output = await input(for: key).build()
+        let output = await snapshot.input.build()
         // Shown elsewhere meanwhile, or changed again: the next pass publishes.
         guard token == self.token, !building.isPending else { return }
+        published = snapshot
         publish(output, key: key)
     }
 

@@ -248,11 +248,11 @@ actor Chat {
         var members: [String: [ChatAPI.User]] = [:]
     }
 
-    private let api: @Sendable (String) async -> API?
+    private let api: @MainActor @Sendable (String) -> API?
     private var memory: [String: Memory] = [:]
 
     /// `api` resolves an account id to its requests, or nil when it has no Chat access.
-    init(api: @escaping @Sendable (String) async -> API?) {
+    init(api: @escaping @MainActor @Sendable (String) -> API?) {
         self.api = api
     }
 
@@ -431,7 +431,12 @@ actor Chat {
         var results = [Result<R, any Error>?](repeating: nil, count: items.count)
         await withTaskGroup(of: (Int, Result<R, any Error>).self) { group in
             let run: @Sendable (Int, T) async -> (Int, Result<R, any Error>) = { index, item in
-                do { return (index, .success(try await work(item))) } catch { return (index, .failure(error)) }
+                do {
+                    let value = try await work(item)
+                    return (index, .success(value))
+                } catch {
+                    return (index, .failure(error))
+                }
             }
             var next = 0
             while next < min(items.count, fanOut) {

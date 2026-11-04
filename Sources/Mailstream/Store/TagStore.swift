@@ -135,7 +135,7 @@ final class TagStore {
                 return
             }
         }
-        status = nil
+        if status != nil { status = nil }
     }
 
     private func untaggedItems() -> [OmpTagger.Item] {

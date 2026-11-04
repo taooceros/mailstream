@@ -59,8 +59,10 @@ nonisolated protocol TokenSource: Sendable {
 /// Authorized HTTPS requests for one account. A 401 refreshes the token and repeats once; rate
 /// limiting (429, or Google's 403 rate-limit reasons: never processed) backs off and repeats; 5xx
 /// and dropped connections repeat only requests that may run twice. Concurrency is bounded per
-/// priority so background prefetch never starves interactive reads, and requests with a `cost`
-/// first spend it from the account's `QuotaBudget`. Decoding runs off the caller's actor.
+/// priority so background prefetch never starves interactive reads; a request with a `cost`
+/// spends it from the account's `QuotaBudget` on every attempt, once it holds a permit, so
+/// queued requests neither stampede the budget nor spend it long before they go out. Decoding
+/// runs off the caller's actor.
 nonisolated final class API: Sendable {
     let account: String
     private let tokens: any TokenSource
@@ -116,13 +118,13 @@ nonisolated final class API: Sendable {
     func send(_ request: URLRequest, priority: RequestPriority = .interactive, idempotent: Bool? = nil,
               cost: Int = 0) async throws -> (Data, HTTPURLResponse) {
         let repeatable = idempotent ?? (request.httpMethod != "POST")
-        if let budget, cost > 0 { try await budget.spend(cost, priority: priority) }
         let semaphore = priority == .interactive ? interactive : background
         return try await semaphore.withPermit { [self] in
             var refreshed = false
             var attempt = 0
             while true {
                 attempt += 1
+                if let budget, cost > 0 { try await budget.spend(cost, priority: priority) }
                 let token = try await tokens.token(for: account)
                 var authorized = request
                 authorized.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")

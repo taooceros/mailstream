@@ -126,6 +126,7 @@ actor AvatarResolver {
     private let session: URLSession
     private let permits = AsyncSemaphore(6)
     private var directory: Task<Directory, Never>?
+    /// Domain-wide lookups in flight; finished ones live in the disk cache.
     private var domains: [String: Task<Data?, Never>] = [:]
 
     /// Where a contact's photo is.
@@ -139,8 +140,8 @@ actor AvatarResolver {
     /// Contact address → where its photo is.
     private nonisolated struct Directory: Codable {
         let built: Date
-        /// The accounts it loaded; any difference from the current photo accounts (one added,
-        /// removed, or failed last time) rebuilds it at once.
+        /// The accounts it asked, whether they answered or refused; any difference from the current
+        /// photo accounts (one added, removed, or unreachable last time) rebuilds it at once.
         let accounts: [String]
         let photos: [String: PhotoSource]
         /// A digest of `photos`: changes whenever any contact photo does, retiring cached misses.
@@ -168,27 +169,27 @@ actor AvatarResolver {
 
     func avatar(for email: String, automated: Bool, side: Int = AvatarResolver.side) async -> Data? {
         let automated = automated || Self.looksAutomated(email)
-        guard side == Self.side else { return await find(email, automated: automated, side: side) }
+        let directory = await contacts()
+        guard side == Self.side else { return await find(email, automated: automated, side: side, in: directory) }
         let key = "p-" + Self.hash(email)
-        let stamp = await contacts().stamp
-        switch cached(key, stamp: stamp) {
+        switch await cached(key, stamp: directory.stamp) {
         case .hit(let png): return png
         case .miss: return nil
         case .unknown: break
         }
         let png: Data?
         do {
-            png = try await permits.withPermit { await find(email, automated: automated, side: side) }
+            png = try await permits.withPermit { await find(email, automated: automated, side: side, in: directory) }
         } catch {
             // Cancelled while waiting for a permit: nothing was looked up, so no miss is cached.
             return nil
         }
-        store(png, at: key, stamp: stamp)
+        await store(png, at: key, stamp: directory.stamp)
         return png
     }
 
-    private func find(_ email: String, automated: Bool, side: Int) async -> Data? {
-        if let source = await contacts().photos[email], let png = await contactPhoto(source, side: side) { return png }
+    private func find(_ email: String, automated: Bool, side: Int, in directory: Directory) async -> Data? {
+        if let source = directory.photos[email], let png = await contactPhoto(source, side: side) { return png }
         let domain = email.split(separator: "@").last.map(String.init) ?? ""
         let company = !domain.isEmpty && !Self.freemail.contains(domain)
         if automated, company, let png = await domainLogo(domain, side: side) { return png }
@@ -199,9 +200,9 @@ actor AvatarResolver {
 
     // MARK: - Disk cache
 
-    private enum Cached { case hit(Data), miss, unknown }
+    private nonisolated enum Cached { case hit(Data), miss, unknown }
 
-    private func cached(_ key: String, stamp: String?) -> Cached {
+    @concurrent private nonisolated func cached(_ key: String, stamp: String?) async -> Cached {
         let png = root.appendingPathComponent(key + ".png")
         if let date = Self.modified(png), Date().timeIntervalSince(date) < Self.hit, let data = try? Data(contentsOf: png) {
             return .hit(data)
@@ -215,7 +216,7 @@ actor AvatarResolver {
     }
 
     /// `stamp` ties a miss to the directory it was made against; nil for domain-wide results.
-    private func store(_ png: Data?, at key: String, stamp: String?) {
+    @concurrent private nonisolated func store(_ png: Data?, at key: String, stamp: String?) async {
         let fm = FileManager.default
         let pngURL = root.appendingPathComponent(key + ".png")
         let noneURL = root.appendingPathComponent(key + ".none")
@@ -241,39 +242,67 @@ actor AvatarResolver {
         directory = nil
     }
 
+    /// The contact directory, shared while it loads. One that could not ask every account
+    /// (offline, not signed in yet) is not kept: the next lookup tries again.
     private func contacts() async -> Directory {
         if let directory { return await directory.value }
         let task = Task { await loadDirectory() }
         directory = task
-        return await task.value
+        let loaded = await task.value
+        if Set(loaded.accounts) != Set(accounts.map(\.name)), directory == task { directory = nil }
+        return loaded
     }
 
     private func loadDirectory() async -> Directory {
         let url = root.appendingPathComponent("directory.json")
         let accounts = accounts
-        if let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(Directory.self, from: data),
-           Set(accounts.map(\.name)) == Set(saved.accounts), Date().timeIntervalSince(saved.built) < Self.directoryAge {
+        if let saved = await Self.saved(at: url), Set(accounts.map(\.name)) == Set(saved.accounts),
+           Date().timeIntervalSince(saved.built) < Self.directoryAge {
             return saved
         }
         var photos: [String: PhotoSource] = [:]
-        var loaded: [String] = []
+        var asked: [String] = []
         for account in accounts {
-            let found = switch account.provider {
-            case .google: await googlePhotos(api: account.api, directory: account.directory)
-            case .microsoft: await graphPhotos(api: account.api)
+            let found: [String: PhotoSource]?
+            do {
+                found = switch account.provider {
+                case .google: try await googlePhotos(api: account.api, directory: account.directory)
+                case .microsoft: try await graphPhotos(api: account.api)
+                }
+            } catch {
+                continue
             }
-            guard let found else { continue }
-            loaded.append(account.name)
-            photos.merge(found) { current, _ in current }
+            asked.append(account.name)
+            if let found { photos.merge(found) { current, _ in current } }
         }
-        let fresh = Directory(built: Date(), accounts: loaded, photos: photos)
-        if let data = try? JSONEncoder().encode(fresh) { try? data.write(to: url, options: .atomic) }
+        let fresh = Directory(built: Date(), accounts: asked, photos: photos)
+        if asked.count == accounts.count { await Self.save(fresh, to: url) }
         return fresh
     }
 
+    @concurrent private nonisolated static func saved(at url: URL) async -> Directory? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(Directory.self, from: data)
+    }
+
+    @concurrent private nonisolated static func save(_ directory: Directory, to url: URL) async {
+        if let data = try? JSONEncoder().encode(directory) { try? data.write(to: url, options: .atomic) }
+    }
+
+    /// `request`'s answer; nil when the provider refused it (no permission, no such list), thrown
+    /// when it could not be asked (offline, no token yet, throttled, server error).
+    private nonisolated static func unlessRefused<Page>(_ request: () async throws -> Page) async throws -> Page? {
+        do {
+            return try await request()
+        } catch let error as APIError where (400..<500).contains(error.status) && error.status != 429 {
+            return nil
+        }
+    }
+
     /// Saved contacts, "other contacts" (people the user has written with) and, on Workspace
-    /// accounts, the organization's directory. Nil when every one of them is refused.
-    private func googlePhotos(api: API, directory: Bool) async -> [String: PhotoSource]? {
+    /// accounts, the organization's directory. Nil when every one of them is refused; thrown when
+    /// the account could not be asked.
+    private func googlePhotos(api: API, directory: Bool) async throws -> [String: PhotoSource]? {
         let readMask = URLQueryItem(name: "readMask", value: "emailAddresses,photos")
         var lists = [
             ("people/me/connections", [URLQueryItem(name: "personFields", value: "emailAddresses,photos")]),
@@ -291,7 +320,8 @@ actor AvatarResolver {
             var pageToken: String?
             for _ in 0..<30 {
                 let url = pageToken.map { base.appending(queryItems: [URLQueryItem(name: "pageToken", value: $0)]) } ?? base
-                guard let page = try? await api.get(PeoplePage.self, url, priority: .background) else { break }
+                guard let page = try await Self.unlessRefused({ try await api.get(PeoplePage.self, url, priority: .background) })
+                else { break }
                 answered = true
                 for person in page.people {
                     guard let link = person.photos?.first(where: { $0.default != true })?.url.flatMap(URL.init(string:))
@@ -334,14 +364,16 @@ actor AvatarResolver {
         }
     }
 
-    /// Outlook contacts. Nil when the request is refused.
-    private func graphPhotos(api: API) async -> [String: PhotoSource]? {
+    /// Outlook contacts. Nil when the request is refused; thrown when the account could not be asked.
+    private func graphPhotos(api: API) async throws -> [String: PhotoSource]? {
         var photos: [String: PhotoSource] = [:]
         var answered = false
         var next: URL? = URL(string: "https://graph.microsoft.com/v1.0/me/contacts")!
             .appending(queryItems: [URLQueryItem(name: "$select", value: "emailAddresses"), URLQueryItem(name: "$top", value: "999")])
         for _ in 0..<30 {
-            guard let url = next, let page = try? await api.get(GraphContacts.self, url, priority: .background) else { break }
+            guard let url = next,
+                  let page = try await Self.unlessRefused({ try await api.get(GraphContacts.self, url, priority: .background) })
+            else { break }
             answered = true
             for contact in page.value {
                 for address in contact.emailAddresses ?? [] {
@@ -372,28 +404,30 @@ actor AvatarResolver {
     }
 
     private func contactPhoto(_ source: PhotoSource, side: Int) async -> Data? {
-        let data: Data?
+        let fetched: Data?
         switch source {
         case .url(let url):
             // Google serves any size; ask for the one drawn.
             var link = url.absoluteString
             if let range = link.range(of: #"=s\d+(-c)?$"#, options: .regularExpression) { link.removeSubrange(range) }
             guard let sized = URL(string: link + "=s\(side)-c") else { return nil }
-            data = await fetch(sized)
+            fetched = await fetch(sized)
         case .graphContact(let account, let id):
             guard let api = accounts.first(where: { $0.name == account })?.api,
                   let url = URL(string: "https://graph.microsoft.com/v1.0/me/contacts/\(id)/photo/$value")
             else { return nil }
-            data = await fetch(url, api: api)
+            fetched = await fetch(url, api: api)
         }
-        return data.flatMap { Self.normalize($0, style: .photo, side: side) }
+        guard let fetched else { return nil }
+        return await Self.normalize(fetched, style: .photo, side: side)
     }
 
     // MARK: - Public sources
 
     private func gravatar(_ email: String, side: Int) async -> Data? {
         guard let url = URL(string: "https://gravatar.com/avatar/\(Self.hash(email))?s=\(side)&d=404") else { return nil }
-        return await fetch(url).flatMap { Self.normalize($0, style: .photo, side: side) }
+        guard let fetched = await fetch(url) else { return nil }
+        return await Self.normalize(fetched, style: .photo, side: side)
     }
 
     /// The BIMI logo, else the site icon, shared by every sender at the domain.
@@ -406,21 +440,26 @@ actor AvatarResolver {
         await sharedPerDomain("b-", domain, side: side) { await self.lookUpBIMI(domain, side: side) }
     }
 
-    /// One lookup per domain and kind, in memory and on disk; other sizes are fetched each time.
+    /// One lookup per domain and kind, in memory while it runs and on disk; other sizes are fetched
+    /// each time.
     private func sharedPerDomain(_ kind: String, _ domain: String, side: Int,
                                  _ body: @escaping @Sendable () async -> Data?) async -> Data? {
         guard side == Self.side else { return await body() }
         let key = kind + Self.hash(domain)
         if let task = domains[key] { return await task.value }
-        switch cached(key, stamp: nil) {
-        case .hit(let png): return png
-        case .miss: return nil
-        case .unknown: break
+        let task = Task { () async -> Data? in
+            switch await cached(key, stamp: nil) {
+            case .hit(let png): return png
+            case .miss: return nil
+            case .unknown: break
+            }
+            let png = await body()
+            await store(png, at: key, stamp: nil)
+            return png
         }
-        let task = Task { await body() }
         domains[key] = task
         let png = await task.value
-        store(png, at: key, stamp: nil)
+        domains[key] = nil
         return png
     }
 
@@ -437,7 +476,8 @@ actor AvatarResolver {
                 .first { $0.hasPrefix("l=") }
                 .map { String($0.dropFirst(2)) }
             guard let link, link.hasPrefix("https://"), let url = URL(string: link) else { return nil }
-            return await fetch(url, limit: 128 * 1024).flatMap { Self.normalize($0, style: .logo, side: side) }
+            guard let fetched = await fetch(url, limit: 128 * 1024) else { return nil }
+            return await Self.normalize(fetched, style: .logo, side: side)
         }
         return nil
     }
@@ -452,7 +492,7 @@ actor AvatarResolver {
         }
         if let favicon = URL(string: "/favicon.ico", relativeTo: home)?.absoluteURL { candidates.append(favicon) }
         for url in candidates.prefix(4) {
-            if let data = await fetch(url), let png = Self.normalize(data, style: .icon, side: side) { return png }
+            if let data = await fetch(url), let png = await Self.normalize(data, style: .icon, side: side) { return png }
         }
         return nil
     }
@@ -537,11 +577,12 @@ actor AvatarResolver {
 
     /// `logo` fills like a photo unless its corners are see-through (a rounded square on nothing),
     /// then it sits inside on white like an icon.
-    private enum Style { case photo, logo, icon }
+    private nonisolated enum Style { case photo, logo, icon }
 
     /// A square PNG at the drawn size: photos and logos fill it; site icons sit inside on white,
-    /// as their transparent corners and odd shapes don't survive a circular crop.
-    private static func normalize(_ data: Data, style: Style, side: Int) -> Data? {
+    /// as their transparent corners and odd shapes don't survive a circular crop. Decodes off the
+    /// resolver, so lookups holding permits decode in parallel.
+    @concurrent private nonisolated static func normalize(_ data: Data, style: Style, side: Int) async -> Data? {
         guard let image = NSImage(data: data), image.isValid, image.size.width > 0, image.size.height > 0 else { return nil }
         let pixels = image.representations.map { max($0.pixelsWide, $0.pixelsHigh) }.max() ?? 0
         // Vector reps report no pixels; raster icons must be big enough to scale down cleanly.
@@ -575,7 +616,7 @@ actor AvatarResolver {
         if style == .logo {
             let corners = [(1, 1), (side - 2, 1), (1, side - 2), (side - 2, side - 2)]
             if corners.contains(where: { (rep.colorAt(x: $0.0, y: $0.1)?.alphaComponent ?? 0) < 0.5 }) {
-                return normalize(data, style: .icon, side: side)
+                return await normalize(data, style: .icon, side: side)
             }
         }
         return rep.representation(using: .png, properties: [:])

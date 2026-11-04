@@ -87,6 +87,8 @@ final class PushService {
             self?.reconnectNow()
             self?.checkRegistrations()
         }
+        // A removed account's registration is stopped before its token goes.
+        accounts.beforeSignOut = { [weak self] in await self?.registration.settle() }
         connect()
         checkRegistrations()
     }
@@ -111,8 +113,8 @@ final class PushService {
         self.socket = socket
         lastHeard = nil
         socket.resume()
-        listener = Task { await listen(socket, generation: generation) }
-        heartbeat = Task { await beat(socket, generation: generation) }
+        listener = Task(name: "Push socket listener") { await listen(socket, generation: generation) }
+        heartbeat = Task(name: "Push socket heartbeat") { await beat(socket, generation: generation) }
     }
 
     private func listen(_ socket: URLSessionWebSocketTask, generation: Int) async {
@@ -157,12 +159,12 @@ final class PushService {
         }
     }
 
+    /// The store refreshes everything once the socket connects, so no per-account change is sent.
     private func heard() {
         lastHeard = .now
         guard !isConnected else { return }
         failures = 0
         setConnected(true)
-        for record in accounts.records { onChange(record.id) }
     }
 
     private func fail(_ generation: Int) {
@@ -187,7 +189,7 @@ final class PushService {
         reconnect?.cancel()
         let delay = min(60, pow(2, Double(min(failures, 6))) * Double.random(in: 0.8...1.2))
         failures += 1
-        reconnect = Task {
+        reconnect = Task(name: "Push reconnect") {
             do { try await Task.sleep(for: .seconds(delay)) } catch { return }
             reconnect = nil
             connect()

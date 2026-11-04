@@ -41,7 +41,7 @@ protocol ConversationListDelegate: AnyObject {
     func conversationList(_ list: ConversationListViewController, open conversation: Conversation)
     func conversationList(_ list: ConversationListViewController, openChat space: ChatSpaceKey)
     func conversationList(_ list: ConversationListViewController, perform action: ConversationAction, on conversation: Conversation)
-    /// Entered or left a Smart Inbox bundle.
+    /// Entered or left a Smart Inbox bundle, or the open bundle's counts changed.
     func conversationListDidChangeBundle(_ list: ConversationListViewController)
 }
 
@@ -206,7 +206,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             },
             // Previews and pictures arriving.
             Task.immediate(name: "List content") { [weak self] in
-                for await _ in Observations({ _ = (store.contents.snippets, store.avatars.revision) }) { self?.refreshVisibleRows() }
+                for await _ in Observations({ _ = (store.contents.snippets, store.avatars.revision) }) { self?.refreshPreparedRows() }
             },
             Task.immediate(name: "List accounts") { [weak self] in
                 for await names in Observations({ store.accounts.flatMap { [$0.name, $0.label] } }) {
@@ -344,9 +344,10 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             highlightedID = nil
         }
         let previousRow = table.selectedRow >= 0 ? table.selectedRow : lastHighlightedRow
-        let hadBundle = openBundle
+        let hadBundle = openBundle, hadCounts = bundleCounts
         let newRows = buildRows()
-        if hadBundle != openBundle { delegate?.conversationListDidChangeBundle(self) }
+        // Only this rebuild knows the open bundle's counts, which the window's subtitle shows.
+        if hadBundle != openBundle || hadCounts != bundleCounts { delegate?.conversationListDidChangeBundle(self) }
         if context {
             transition(.rise) { self.apply(newRows, animated: false) }
         } else {
@@ -502,14 +503,15 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         return nil
     }
 
-    /// Previews or pictures arrived: visible rows whose cells show something else reload, and those
-    /// still on initials take their picture in place. Offscreen rows are current when configured.
-    private func refreshVisibleRows() {
-        let visible = table.rows(in: table.visibleRect)
+    /// Previews or pictures arrived: prepared rows (visible, or kept just outside the viewport) whose
+    /// cells show something else reload, and those still on initials take their picture in place.
+    /// Other rows are current when configured.
+    private func refreshPreparedRows() {
         var changed = IndexSet()
-        for index in visible.location..<min(rows.count, visible.location + visible.length) {
+        table.enumerateAvailableRowViews { rowView, index in
+            guard rows.indices.contains(index) else { return }
             if rows[index].conversation != nil, signatures[index] != signature(rows[index]) { changed.insert(index) }
-            if let cell = table.view(atColumn: 0, row: index, makeIfNecessary: false) as? ConversationRowCell,
+            if let cell = rowView.view(atColumn: 0) as? ConversationRowCell,
                let key = cell.missingPhoto, let photo = store.avatars.cachedImage(for: key) {
                 cell.showPhoto(photo, for: key)
             }

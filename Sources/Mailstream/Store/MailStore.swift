@@ -83,7 +83,6 @@ final class MailStore {
     private(set) var listContext = ListContext(selection: .allInboxes, search: nil, role: .inbox)
     private(set) var isLoading = false
     private(set) var searchQuery: String?
-    private(set) var lastRefresh: Date?
 
     private struct Listing {
         var envelopes: [Envelope]
@@ -92,11 +91,13 @@ final class MailStore {
         var next: String?
     }
 
-    private var listings: [MailboxKey: Listing] = [:]
-    /// Mailboxes whose disk cache was already read (hit or miss), so it is read at most once.
-    @ObservationIgnored private var cacheRead = Set<MailboxKey>()
+    @ObservationIgnored private var listings: [MailboxKey: Listing] = [:]
+    /// Disk reads of mailbox listings, in flight or done, so each is read at most once and a later
+    /// caller awaits the read in flight instead of skipping it.
+    @ObservationIgnored private var cacheReads: [MailboxKey: Task<Void, Never>] = [:]
     @ObservationIgnored private var searchResults: [MailboxKey: [Envelope]] = [:]
-    private var rows: [String: ConversationRow] = [:]
+    /// Replaced together with `conversations`, which observers follow instead.
+    @ObservationIgnored private var rows: [String: ConversationRow] = [:]
     /// Rethreads the list off the main actor. Requests made while a pass runs coalesce into one
     /// more pass, and a pass whose inputs changed under it is dropped rather than shown, so
     /// optimistic edits never flicker back.
@@ -130,12 +131,17 @@ final class MailStore {
     isolated deinit {
         watchers.forEach { $0.cancel() }
         polling?.task.cancel()
+        refreshTask?.cancel()
+        searchTask?.cancel()
+        loadMoreTask?.cancel()
+        accountRefreshes.values.forEach { $0.cancel() }
+        cacheReads.values.forEach { $0.cancel() }
     }
 
     // MARK: - Startup
 
     func start() {
-        Task {
+        Task(name: "Mail startup") {
             await restoreFromCache()
             await connect()
         }
@@ -173,10 +179,13 @@ final class MailStore {
         })
     }
 
-    /// A socket that just connected catches up on whatever changed while it was down.
+    /// A socket that just connected catches up on whatever changed while it was down: the lists in
+    /// view and every account's counts.
     private func pushConnectionChanged() {
         schedulePolling()
-        if push.isConnected, connected, !isLoading { refresh() }
+        guard push.isConnected, connected else { return }
+        if !isLoading { refresh() }
+        refreshCounts()
     }
 
     /// Paints the signed-in accounts with their last known identities, mailboxes, tags and lists,
@@ -244,7 +253,12 @@ final class MailStore {
         mailboxes = mailboxes.filter { !removed.contains($0.key) }
         listings = listings.filter { !removed.contains($0.key.account) }
         searchResults = searchResults.filter { !removed.contains($0.key.account) }
-        cacheRead = cacheRead.filter { !removed.contains($0.account) }
+        for (key, read) in cacheReads where removed.contains(key.account) {
+            read.cancel()
+            cacheReads[key] = nil
+        }
+        for account in removed { accountRefreshes.removeValue(forKey: account)?.cancel() }
+        firstPageRequests = firstPageRequests.filter { !removed.contains($0.key.account) }
         contents.forget(accounts: removed)
         switch selection {
         case .mailbox(let key) where removed.contains(key.account): select(.allInboxes)
@@ -256,7 +270,12 @@ final class MailStore {
     private func loadCachedMailboxes(_ names: [String]) async {
         let cache = cache
         await withTaskGroup(of: (String, [Mailbox]?).self) { group in
-            for name in names { group.addTask { (name, await cache.loadMailboxes(name)) } }
+            for name in names {
+                group.addTask {
+                    let list = await cache.loadMailboxes(name)
+                    return (name, list)
+                }
+            }
             for await (name, list) in group {
                 if let list, mailboxes[name] == nil { applyMailboxes(list, account: name) }
             }
@@ -409,6 +428,8 @@ final class MailStore {
         loadMoreTask?.cancel()
         searchQuery = nil
         searchResults = [:]
+        // The cancelled search or page load won't clear it; a refresh sets it again.
+        if isLoading { isLoading = false }
         rebuild.request()
         if selection.isChat { chat.refresh() } else { refresh() }
     }
@@ -419,19 +440,20 @@ final class MailStore {
                                                  calendar: .current, now: Date())
     }
 
-    /// Reads the disk cache of mailboxes not loaded yet, off the main actor, all at once.
-    private func loadCachedListings(_ keys: [MailboxKey]) async {
-        let missing = keys.filter { listings[$0] == nil && !cacheRead.contains($0) }
-        guard !missing.isEmpty else { return }
-        cacheRead.formUnion(missing)
+    /// Reads the disk cache of mailboxes not loaded yet, off the main actor, all at once, and
+    /// awaits reads already in flight. A listing landing in view outside a rebuild pass (which
+    /// reads it anyway) requests one.
+    private func loadCachedListings(_ keys: [MailboxKey], inRebuild: Bool = false) async {
         let cache = cache
-        await withTaskGroup(of: (MailboxKey, [Envelope]?).self) { group in
-            for key in missing { group.addTask { (key, await cache.loadEnvelopes(key)) } }
-            for await (key, cached) in group {
-                guard let cached, listings[key] == nil else { continue }
+        for key in keys where listings[key] == nil && cacheReads[key] == nil {
+            cacheReads[key] = Task {
+                let cached = await cache.loadEnvelopes(key)
+                guard !Task.isCancelled, let cached, listings[key] == nil else { return }
                 listings[key] = Listing(envelopes: cached, next: nil)
+                if !inRebuild, (primaryKeys + contextKeys).contains(key) { rebuild.request() }
             }
         }
+        for key in keys { await cacheReads[key]?.value }
     }
 
     private func sources(_ keys: [MailboxKey], primary: Bool) -> [ListInput.Source] {
@@ -442,7 +464,7 @@ final class MailStore {
     }
 
     private func rebuildPass() async {
-        await loadCachedListings(primaryKeys + contextKeys)
+        await loadCachedListings(primaryKeys + contextKeys, inRebuild: true)
         let context = ListContext(selection: selection, search: searchQuery, role: selectionRole)
         let input = ListInput(primary: sources(primaryKeys, primary: true), context: sources(contextKeys, primary: false),
                               own: ownAddresses, recipients: context.role.showsRecipients)
@@ -451,7 +473,7 @@ final class MailStore {
         guard !rebuild.isPending else { return }
         conversations = output.conversations
         rows = output.rows
-        listContext = context
+        if listContext != context { listContext = context }
         contents.prefetchSnippets(for: Array(conversations.prefix(Self.prefetchCount)))
         scheduleTagging()
     }
@@ -462,12 +484,11 @@ final class MailStore {
         refreshTask?.cancel()
         isLoading = true
         problems.clear(.mail)
-        refreshTask = Task {
+        refreshTask = Task(name: "Mail refresh") {
             await loadCachedListings(keys)
             await fetchFirstPages(keys)
             guard !Task.isCancelled else { return }
             isLoading = false
-            lastRefresh = Date()
         }
     }
 
@@ -475,8 +496,8 @@ final class MailStore {
     /// Bursts (a sync touching many messages) coalesce into one pass.
     func refresh(account: String) {
         guard accountRefreshes[account] == nil else { return }
-        accountRefreshes[account] = Task {
-            try? await Task.sleep(for: .milliseconds(500))
+        accountRefreshes[account] = Task(name: "Mail account refresh") {
+            do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
             accountRefreshes[account] = nil
             refreshCounts(account: account)
             await fetchFirstPages((primaryKeys + contextKeys).filter { $0.account == account })
@@ -548,14 +569,17 @@ final class MailStore {
         guard loadMoreTask == nil, canLoadMore else { return }
         let jobs = backends(primaryKeys.filter { listings[$0]?.next != nil })
         isLoading = true
-        loadMoreTask = Task {
+        loadMoreTask = Task(name: "Mail load more") {
             defer { loadMoreTask = nil }
             for (key, backend) in jobs {
                 guard let cursor = listings[key]?.next else { continue }
                 do {
                     let page = try await backend.envelopes(mailbox: key.mailbox, cursor: cursor,
                                                            pageSize: Self.pageSize, priority: .interactive)
-                    guard !Task.isCancelled, var listing = listings[key] else { return }
+                    // `select` cancelled it and resets `isLoading`.
+                    guard !Task.isCancelled else { return }
+                    // The account was removed meanwhile.
+                    guard var listing = listings[key] else { continue }
                     let known = Set(listing.envelopes.map(\.id))
                     listing.envelopes += page.envelopes.filter { !known.contains($0.id) }
                     listing.next = page.next
@@ -589,7 +613,7 @@ final class MailStore {
         isLoading = true
         rebuild.request()
         let jobs = backends(primaryKeys)
-        searchTask = Task {
+        searchTask = Task(name: "Mail search") {
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled else { return }
             await withTaskGroup(of: (MailboxKey, Result<[Envelope], any Error>).self) { group in
@@ -739,13 +763,14 @@ final class MailStore {
         let elsewhere = conversation.messages.filter { $0.ref.mailbox != trash.id && $0.role != .drafts }
         move(elsewhere, to: trash)
         guard !inTrash.isEmpty else { return }
-        removeEnvelopes(Set(inTrash.map(\.ref)))
+        removeEnvelopes(inTrash)
         Task {
             do {
                 try await backend(for: trash.account).delete(ids: inTrash.map(\.ref.id), mailbox: trash.id)
             } catch {
                 report(error, context: trash.account, alert: true)
                 refresh()
+                refreshCounts(account: trash.account)
             }
         }
     }
@@ -753,7 +778,7 @@ final class MailStore {
     private func move(_ targets: [MailMessage], to destination: Mailbox) {
         let targets = targets.filter { $0.ref.mailbox != destination.id }
         guard !targets.isEmpty else { return }
-        removeEnvelopes(Set(targets.map(\.ref)))
+        removeEnvelopes(targets)
         for (key, messages) in Dictionary(grouping: targets, by: \.ref.mailboxKey) {
             Task {
                 do {
@@ -761,6 +786,7 @@ final class MailStore {
                 } catch {
                     report(error, context: key.account, alert: true)
                     refresh()
+                    refreshCounts(account: key.account)
                 }
             }
         }
@@ -794,8 +820,11 @@ final class MailStore {
         patchList(touching: refs) { $0.updating(refs, change) }
     }
 
-    /// Drops the messages from the visible list at once; a rebuild then reconciles threading.
-    private func removeEnvelopes(_ refs: Set<MessageRef>) {
+    /// Drops the messages from the visible list and their mailboxes' unread counts at once; a
+    /// rebuild then reconciles threading.
+    private func removeEnvelopes(_ targets: [MailMessage]) {
+        let refs = Set(targets.map(\.ref))
+        adjustUnread(targets.filter { !$0.envelope.isSeen }, delta: -1)
         for key in Set(refs.map(\.mailboxKey)) {
             let ids = Set(refs.filter { $0.mailboxKey == key }.map(\.id))
             listings[key]?.envelopes.removeAll { ids.contains($0.id) }

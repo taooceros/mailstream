@@ -10,15 +10,25 @@ nonisolated struct ToolEnvironment: Sendable {
         ToolEnvironment(resolution: Task(name: "Recover login PATH") { await recover() })
     }
 
+    /// Waits for the recovered environment; throws as soon as the waiting task is cancelled.
     var environment: [String: String] {
-        get async { await resolution.value }
+        get async throws {
+            // A stream's iteration ends on cancellation, which awaiting `resolution` directly would not.
+            let (values, continuation) = AsyncStream.makeStream(of: [String: String].self)
+            Task { [resolution] in
+                continuation.yield(await resolution.value)
+                continuation.finish()
+            }
+            for await environment in values { return environment }
+            throw CancellationError()
+        }
     }
 
     /// Executable files called `name` on the recovered PATH, in PATH order, one per resolved target.
-    func executables(named name: String) async -> [String] {
+    func executables(named name: String) async throws -> [String] {
         let fm = FileManager.default
         var seen = Set<String>()
-        return (await environment["PATH"] ?? "").split(separator: ":")
+        return (try await environment["PATH"] ?? "").split(separator: ":")
             .map { "\($0)/\(name)" }
             .filter { fm.isExecutableFile(atPath: $0)
                 && seen.insert(URL(fileURLWithPath: $0).resolvingSymlinksInPath().path).inserted }
@@ -26,19 +36,9 @@ nonisolated struct ToolEnvironment: Sendable {
 
     /// Runs a short-lived command for its output, giving up after three seconds.
     static func runQuickly(_ executable: String, _ arguments: [String], environment: [String: String]) async -> String? {
-        try? await withThrowingTaskGroup { group in
-            group.addTask {
-                let output = try await ProcessRunner.run(executable: URL(fileURLWithPath: executable),
-                                                         arguments: arguments, environment: environment)
-                return String(decoding: output.stdout, as: UTF8.self)
-            }
-            group.addTask {
-                try await Task.sleep(for: .seconds(3))
-                throw CancellationError()
-            }
-            defer { group.cancelAll() }
-            return try await group.next()
-        }
+        let output = try? await ProcessRunner.run(executable: URL(fileURLWithPath: executable), arguments: arguments,
+                                                  environment: environment, timeout: .seconds(3))
+        return output.map { String(decoding: $0.stdout, as: UTF8.self) }
     }
 
     @concurrent

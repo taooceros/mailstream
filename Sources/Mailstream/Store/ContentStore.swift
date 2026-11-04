@@ -36,10 +36,11 @@ final class ContentStore {
 
     @ObservationIgnored private let accounts: AccountStore
     @ObservationIgnored private let cache: MailCache
-    /// Bodies in memory, oldest first in `order`; at most `capacity`.
+    /// Bodies in memory, coldest first in `order`; at most `capacity`. Prefetched bodies only fill
+    /// free room, as the coldest, so they never push out a body the reader used.
     @ObservationIgnored private var bodies: [MessageRef: LoadedContent] = [:]
     @ObservationIgnored private var order: [MessageRef] = []
-    @ObservationIgnored private var tasks: [MessageRef: Task<LoadedContent, any Error>] = [:]
+    @ObservationIgnored private var tasks: [MessageRef: (task: Task<LoadedContent, any Error>, priority: RequestPriority)] = [:]
     /// Bumped by `forget(accounts:)`, so loads in flight then don't bring a removed account's mail back.
     @ObservationIgnored private var generation = 0
 
@@ -82,8 +83,8 @@ final class ContentStore {
     /// Drops everything of `removed` accounts: bodies, previews and loads in flight.
     func forget(accounts removed: Set<String>) {
         generation += 1
-        for (ref, task) in tasks where removed.contains(ref.account) {
-            task.cancel()
+        for (ref, running) in tasks where removed.contains(ref.account) {
+            running.task.cancel()
             tasks[ref] = nil
         }
         bodies = bodies.filter { !removed.contains($0.key.account) }
@@ -92,20 +93,24 @@ final class ContentStore {
     }
 
     /// One shared load per message, assembled and cached off the main actor; its preview is
-    /// published when it lands.
+    /// published when it lands. An interactive request replaces a queued prefetch of the same
+    /// message rather than waiting behind it.
     private func task(_ ref: MessageRef, priority: RequestPriority) -> Task<LoadedContent, any Error> {
-        if let task = tasks[ref] { return task }
+        if let running = tasks[ref], running.priority == .interactive || priority == .background { return running.task }
+        tasks[ref]?.task.cancel()
         let backend = accounts.backend(for: ref.account), cache = cache
         let task = Task(priority: priority == .interactive ? .userInitiated : .utility) {
             try await Self.load(ref, backend: backend, cache: cache, priority: priority)
         }
-        tasks[ref] = task
+        tasks[ref] = (task, priority)
         Task {
             let loaded = try? await task.value
-            // Forgotten meanwhile.
-            guard tasks[ref] == task else { return }
+            // Replaced, or forgotten meanwhile.
+            guard tasks[ref]?.task == task else { return }
             tasks[ref] = nil
-            if let snippet = loaded?.content.snippet, snippets[ref] != snippet { snippets[ref] = snippet }
+            guard let loaded else { return }
+            if snippets[ref] != loaded.content.snippet { snippets[ref] = loaded.content.snippet }
+            if priority == .background { remember(loaded, for: ref, prefetched: true) }
         }
         return task
     }
@@ -113,12 +118,31 @@ final class ContentStore {
     /// Awaits `task` and keeps its body in memory, unless an account was forgotten meanwhile.
     private func keep(_ task: Task<LoadedContent, any Error>, for ref: MessageRef) async throws -> LoadedContent {
         let generation = generation
-        let loaded = try await task.value
-        guard generation == self.generation else { return loaded }
-        if bodies[ref] == nil { order.append(ref) }
+        let loaded: LoadedContent
+        do {
+            loaded = try await task.value
+        } catch is CancellationError where !Task.isCancelled {
+            // A prefetch an interactive load replaced: that load's result stands in.
+            if let next = tasks[ref]?.task, next != task { return try await keep(next, for: ref) }
+            if let body = bodies[ref] { return body }
+            throw CancellationError()
+        }
+        if generation == self.generation { remember(loaded, for: ref, prefetched: false) }
+        return loaded
+    }
+
+    /// A body the reader used goes in as the newest (a prefetched copy of it warms up); a prefetched
+    /// one only into free room, as the coldest.
+    private func remember(_ loaded: LoadedContent, for ref: MessageRef, prefetched: Bool) {
+        if prefetched {
+            guard bodies[ref] == nil, order.count < Self.capacity else { return }
+            order.insert(ref, at: 0)
+        } else {
+            if bodies[ref] != nil { order.removeAll { $0 == ref } }
+            order.append(ref)
+        }
         bodies[ref] = loaded
         while order.count > Self.capacity { bodies[order.removeFirst()] = nil }
-        return loaded
     }
 
     @concurrent private nonisolated static func load(_ ref: MessageRef, backend: (any MailBackend)?, cache: MailCache,

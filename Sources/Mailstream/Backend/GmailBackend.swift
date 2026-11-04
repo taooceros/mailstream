@@ -63,7 +63,7 @@ nonisolated final class GmailBackend: MailBackend {
         }
         if counts {
             let tallies = try await Self.batchGet(Tally.self, "labels", ids: boxes.map(\.id),
-                                                  query: Self.encode([("fields", "messagesTotal,messagesUnread")]),
+                                                  query: formEncoded([("fields", "messagesTotal,messagesUnread")]),
                                                   unitCost: 1, api: api, priority: .background)
             for index in boxes.indices {
                 boxes[index].unread = tallies[boxes[index].id]?.messagesUnread
@@ -107,7 +107,7 @@ nonisolated final class GmailBackend: MailBackend {
 
     @concurrent func content(id: String, mailbox: String, directory: URL, urlBase: String,
                              priority: RequestPriority) async throws -> MessageContent {
-        let message = try await api.get(GmailMessage.self, Self.url("messages/\(Self.escape(id))", [("format", "full")]),
+        let message = try await api.get(GmailMessage.self, Self.url("messages/\(id.percentEncoded)", [("format", "full")]),
                                         priority: priority, cost: 5)
         guard let payload = message.payload else {
             throw APIError(status: 200, message: "Gmail returned message \(id) without content")
@@ -140,7 +140,7 @@ nonisolated final class GmailBackend: MailBackend {
         return try await withThrowingTaskGroup(of: (String, Data).self) { group in
             for attachment in wanted {
                 group.addTask {
-                    let url = Self.url("messages/\(Self.escape(message))/attachments/\(Self.escape(attachment))")
+                    let url = Self.url("messages/\(message.percentEncoded)/attachments/\(attachment.percentEncoded)")
                     let body = try await api.get(GmailBody.self, url, priority: priority, cost: 5)
                     return (attachment, body.data.flatMap { Data(base64URLEncoded: $0) } ?? Data())
                 }
@@ -227,7 +227,7 @@ nonisolated final class GmailBackend: MailBackend {
         try await withThrowingTaskGroup(of: Void.self) { group in
             for id in ids {
                 group.addTask {
-                    let request = API.request(Self.url("messages/\(Self.escape(id))/\(action)"), method: "POST")
+                    let request = API.request(Self.url("messages/\(id.percentEncoded)/\(action)"), method: "POST")
                     _ = try await api.send(request, idempotent: true, cost: 5)
                 }
             }
@@ -250,18 +250,8 @@ nonisolated final class GmailBackend: MailBackend {
 
     fileprivate static func url(_ path: String, _ query: [(String, String)] = []) -> URL {
         var string = base + path
-        if !query.isEmpty { string += "?" + encode(query) }
+        if !query.isEmpty { string += "?" + formEncoded(query) }
         return URL(string: string)!
-    }
-
-    fileprivate static func encode(_ query: [(String, String)]) -> String {
-        query.map { "\(escape($0.0))=\(escape($0.1))" }.joined(separator: "&")
-    }
-
-    private static let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-
-    fileprivate static func escape(_ text: String) -> String {
-        text.addingPercentEncoding(withAllowedCharacters: unreserved) ?? text
     }
 }
 
@@ -527,12 +517,12 @@ extension GmailBackend {
         var query: [(String, String)] = [("format", "metadata")]
         query += headers.map { ("metadataHeaders", $0) }
         query.append(("fields", "id,threadId,labelIds,historyId,internalDate,sizeEstimate,payload(mimeType,headers)"))
-        return encode(query)
+        return formEncoded(query)
     }()
 
     /// The part tree's file names, two levels deep, without bodies or headers.
-    fileprivate static let partsQuery = encode([("format", "full"),
-                                               ("fields", "id,payload(parts(filename,parts(filename)))")])
+    fileprivate static let partsQuery = formEncoded([("format", "full"),
+                                                    ("fields", "id,payload(parts(filename,parts(filename)))")])
 
     /// The mailbox's current history id.
     fileprivate static func historyID(api: API, priority: RequestPriority) async throws -> UInt64? {
@@ -576,7 +566,7 @@ extension GmailBackend {
             var body = ""
             for index in pending {
                 body += "--\(boundary)\r\nContent-Type: application/http\r\nContent-ID: <m\(index)>\r\n\r\n"
-                    + "GET /gmail/v1/users/me/\(collection)/\(escape(ids[index]))?\(query)\r\n\r\n"
+                    + "GET /gmail/v1/users/me/\(collection)/\(ids[index].percentEncoded)?\(query)\r\n\r\n"
             }
             body += "--\(boundary)--\r\n"
             var request = API.request(URL(string: "https://gmail.googleapis.com/batch/gmail/v1")!, method: "POST",

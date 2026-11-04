@@ -1,5 +1,6 @@
 /// Runs an async pass one at a time: requests made while a pass runs coalesce into one more pass
-/// after it. The pass closure should capture its owner weakly; the owner cancels it when it goes.
+/// after it. The pass closure should capture its owner weakly: once the owner is gone, passes do
+/// nothing and the task ends after the one in flight.
 final class CoalescedTask {
     private let name: String
     private let pass: () async -> Void
@@ -12,8 +13,6 @@ final class CoalescedTask {
         self.pass = pass
     }
 
-    isolated deinit { task?.cancel() }
-
     var isRunning: Bool { task != nil }
 
     /// Runs a pass soon, or once more after the one in flight. A pass can check `isPending` to drop
@@ -22,6 +21,12 @@ final class CoalescedTask {
         isPending = true
         guard task == nil else { return }
         task = Task(name: name) { await run() }
+    }
+
+    /// Requests a pass and returns once none is running or pending.
+    func settle() async {
+        request()
+        while let task { await task.value }
     }
 
     /// Cancels the pass in flight and runs a fresh one after it.

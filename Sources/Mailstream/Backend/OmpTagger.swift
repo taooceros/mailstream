@@ -26,6 +26,9 @@ actor OmpTagger {
 
     private static let maxSnippet = 200
     private static let maxLabelLength = 16
+    /// omp's own limit; the process is killed if it overruns it by `exitMargin`.
+    private static let maxTime = 120
+    private static let exitMargin = 30
 
     private let tools: ToolEnvironment
     private let workingDirectory: URL
@@ -42,8 +45,10 @@ actor OmpTagger {
         let executable = try await resolvedExecutable()
         let output = try await ProcessRunner.run(executable: executable,
                                                  arguments: Self.arguments(prompt: Self.prompt(items)),
-                                                 environment: await tools.environment,
-                                                 currentDirectory: workingDirectory)
+                                                 environment: try await tools.environment,
+                                                 currentDirectory: workingDirectory,
+                                                 capturesStderr: true,
+                                                 timeout: .seconds(Self.maxTime + Self.exitMargin))
         guard output.status == 0 else {
             let line = String(decoding: output.stderr, as: UTF8.self)
                 .split(whereSeparator: \.isNewline)
@@ -58,19 +63,19 @@ actor OmpTagger {
 
     private func resolvedExecutable() async throws -> URL {
         if let executable { return executable }
-        guard let found = await Self.locate(tools: tools) else { throw Failure(message: "omp not found") }
+        guard let found = try await Self.locate(tools: tools) else { throw Failure(message: "omp not found") }
         executable = found
         return found
     }
 
     /// `MAILSTREAM_OMP`, else the PATH candidate reporting the highest `--version`.
     @concurrent
-    private static func locate(tools: ToolEnvironment) async -> URL? {
-        let environment = await tools.environment
+    private static func locate(tools: ToolEnvironment) async throws -> URL? {
+        let environment = try await tools.environment
         if let override = environment["MAILSTREAM_OMP"], FileManager.default.isExecutableFile(atPath: override) {
             return URL(fileURLWithPath: override)
         }
-        let candidates = await tools.executables(named: "omp")
+        let candidates = try await tools.executables(named: "omp")
         guard !candidates.isEmpty else { return nil }
         let versions = await withTaskGroup { group in
             for (index, candidate) in candidates.enumerated() {
@@ -101,7 +106,7 @@ actor OmpTagger {
     private static func arguments(prompt: String) -> [String] {
         ["-p", "--no-session", "--no-tools", "--no-skills", "--no-rules", "--no-context-files",
          "--no-extensions", "--no-lsp", "--no-title", "--thinking", "off", "--model", "smol",
-         "--max-time", "120", "--system-prompt", systemPrompt, prompt]
+         "--max-time", String(maxTime), "--system-prompt", systemPrompt, prompt]
     }
 
     private static let systemPrompt = """
@@ -164,32 +169,48 @@ actor OmpTagger {
 
     // MARK: Parsing
 
+    /// One entry of the model's answer. Lenient: a malformed entry decodes empty and is skipped
+    /// instead of failing the whole batch.
+    private nonisolated struct Answer: Decodable {
+        let number: Int?
+        let category: MailCategory?
+        let toRespond: Bool
+        let labels: [String]
+
+        private enum CodingKeys: String, CodingKey { case id, category, toRespond, labels }
+
+        init(from decoder: any Decoder) {
+            let values = try? decoder.container(keyedBy: CodingKeys.self)
+            number = (try? values?.decode(Int.self, forKey: .id))
+                ?? (try? values?.decode(String.self, forKey: .id)).flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            category = (try? values?.decode(String.self, forKey: .category)).flatMap(OmpTagger.category(named:))
+            toRespond = (try? values?.decode(Bool.self, forKey: .toRespond)) ?? false
+            labels = (try? values?.decode([String].self, forKey: .labels)) ?? []
+        }
+    }
+
     private static func parse(_ data: Data, items: [Item]) throws -> [String: ConversationTag] {
         let text = String(decoding: data, as: UTF8.self)
         guard let start = text.firstIndex(of: "["), let end = text.lastIndex(of: "]"), start < end,
-              let array = try? JSONSerialization.jsonObject(with: Data(text[start...end].utf8)) as? [Any]
+              let answers = try? JSONDecoder().decode([Answer].self, from: Data(text[start...end].utf8))
         else {
             let preview = text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80)
             throw Failure(message: preview.isEmpty ? "omp returned nothing" : "unexpected omp output: \(preview)")
         }
         var result: [String: ConversationTag] = [:]
-        for case let object as [String: Any] in array {
-            let rawID = (object["id"] as? String) ?? (object["id"] as? NSNumber)?.stringValue
-            guard let number = rawID.flatMap({ Int($0.trimmingCharacters(in: .whitespaces)) }),
-                  items.indices.contains(number - 1),
-                  let category = (object["category"] as? String).flatMap(category(named:))
+        for answer in answers {
+            guard let number = answer.number, items.indices.contains(number - 1), let category = answer.category
             else { continue }
             let item = items[number - 1]
-            let toRespond = (object["toRespond"] as? Bool) ?? false
             var labels: [String] = []
-            for case let raw as String in (object["labels"] as? [Any]) ?? [] {
+            for raw in answer.labels {
                 let label = titleCase(raw)
                 guard !label.isEmpty, label.count <= maxLabelLength, !labels.contains(label) else { continue }
                 labels.append(label)
                 if labels.count == 2 { break }
             }
             result[item.id] = ConversationTag(category: category,
-                                              toRespond: toRespond && category == .people && !item.latestFromUser,
+                                              toRespond: answer.toRespond && category == .people && !item.latestFromUser,
                                               labels: labels)
         }
         return result

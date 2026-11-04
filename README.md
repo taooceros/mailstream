@@ -86,12 +86,14 @@ for mail and asks for your OAuth client at sign-in. Dragged to Applications, it 
 | Layer | Files | Role |
 | --- | --- | --- |
 | Accounts | `Backend/Accounts.swift`, `OAuth.swift`, `Tokens.swift`, `AppConfig.swift`, `UI/AccountsWindowController.swift` | Signed-in accounts, browser sign-in (authorization code with PKCE, loopback redirect), refresh tokens in the Keychain, build-time configuration from `Info.plist`, the Settings window |
-| Backend | `Backend/API.swift`, `MailBackend.swift`, `GmailBackend.swift`, `MIMEMessage.swift`, `GraphBackend.swift`, `MessageAssembly.swift`, `HTMLText.swift` | `API` sends authorized requests per account (token refresh on 401, backoff on 429 and 5xx, 6 interactive / 3 background requests at a time). Gmail and Graph implement one `MailBackend` protocol: mailboxes with roles, cursor-paged envelopes, search, message content (bodies, inline `cid:` parts and attachments written to the cache), flags, moves, sending |
+| Backend | `Backend/API.swift`, `MailBackend.swift`, `GmailBackend.swift`, `MIMEMessage.swift`, `GraphBackend.swift`, `MessageAssembly.swift`, `HTMLText.swift`, `AsyncSemaphore.swift`, `QuotaBudget.swift` | `API` sends authorized requests per account (token refresh on 401, backoff on 429 and 5xx, 6 interactive / 3 background requests at a time). Gmail and Graph implement one `MailBackend` protocol: mailboxes with roles, cursor-paged envelopes, search, message content (bodies, inline `cid:` parts and attachments written to the cache), flags, moves, sending |
 | Chat | `Backend/Chat.swift`, `ChatAPI.swift`, `Store/ChatStore.swift`, `UI/ChatPage.swift`, `UI/ChatReader.swift` | Google Chat REST API for Google accounts granted Chat access; main-actor spaces and message state with a disk cache, rendered into the reader's page |
 | Push | `Backend/PushService.swift`, `Push/` | One WebSocket to the relay; registers Gmail watches and Graph subscriptions for every account and asks the store to refresh the account a notification names |
-| Store | `Store/MailStore.swift`, `Replies.swift`, `Threader.swift`, `ConversationRow.swift`, `MailCache.swift` | Main-actor state, off-main list rebuilds, optimistic flag and move actions, reply planning, async disk cache in `~/Library/Caches/dev.mailstream.Mailstream` |
-| Tagging | `Backend/OmpTagger.swift`, `Model/Tags.swift` | Runs `omp -p --model smol` on batches of conversations and parses the JSON tags |
-| UI | `UI/*` | Sidebar plus a full-width content area that shows the list or one conversation, compose window |
+| Store | `Store/MailStore.swift`, `ContentStore.swift`, `TagStore.swift`, `StoreProblems.swift`, `CoalescedTask.swift`, `Replies.swift`, `Threader.swift`, `ConversationRow.swift`, `MailCache.swift` | `MailStore`: accounts, mailboxes, listings, selection, search and optimistic flag and move actions. It owns `ContentStore` (bodies and previews) and `TagStore` (AI tags). `StoreProblems` is the one error channel. Also reply planning and the async disk cache in `~/Library/Caches/dev.mailstream.Mailstream` |
+| Model | `Model/*` | Plain values: messages, conversations, tags, `Subject` (reply and forward prefixes, list tags) |
+| Support | `Support/*` | Small shared helpers: chunking, base64url, ISO 8601 dates |
+| Tagging | `Backend/OmpTagger.swift`, `Store/TagStore.swift` | Runs `omp -p --model smol` on batches of conversations and parses the JSON tags |
+| UI | `UI/*` | Sidebar plus a full-width content area that shows the list or one conversation; `WebShell` hosts the one web view that the mail reader and `ChatReader` render into; compose window |
 
 `Push/` is the relay, a Cloudflare Worker with one Durable Object: Gmail (through
 the Pub/Sub push subscription) and Graph (change notifications) POST to it, and
@@ -121,6 +123,17 @@ The main thread only publishes the finished list. Flag changes patch the
 published list in place instead of rebuilding it. Previews arrive in one batch
 per run-loop turn and reload only the rows whose content changed. Cache reads
 and writes (JSON encoding included) run off the main thread.
+
+Concurrency is Swift's own, with no GCD, locks, timers or Combine:
+- The target defaults to main-actor isolation (`defaultIsolation(MainActor.self)`, Swift 6 language mode).
+- Model and backend types are `nonisolated` or actors.
+- Off-main work runs in `@concurrent` functions.
+- Stores are `@Observable`. Each view controller follows them through `Observations` in a named task it owns and
+  cancels.
+- Repeated work coalesces through `CoalescedTask`, which keeps one pass running and at most one waiting.
+- Polling, renewal and backoff are `Task.sleep` loops.
+- Cache writes go through one ordered stream.
+- The only dispatch queue left is the DNS-SD callback bridge for BIMI lookups.
 
 The reader is one persistent WebKit page, loaded and warmed at launch. Opening
 a conversation replaces its content through JavaScript (no navigation), and the

@@ -28,6 +28,10 @@ final class AccountStore {
     @ObservationIgnored let problems: StoreProblems
     @ObservationIgnored private var apis: [String: API] = [:]
     @ObservationIgnored private var backends: [String: any MailBackend] = [:]
+    /// Runs after an account is removed, while its token still works: push stops its registration.
+    @ObservationIgnored var beforeSignOut: (() async -> Void)?
+    /// Removals waiting for `beforeSignOut` before deleting the token; signing in again calls one off.
+    @ObservationIgnored private var signOuts: [String: Task<Void, Never>] = [:]
 
     private static let file = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appending(path: "Mailstream/accounts.json")
@@ -66,6 +70,7 @@ final class AccountStore {
     /// its token, client, name and scopes and keeps its label.
     func signIn(_ provider: Provider, client: OAuthClient) async throws -> AccountRecord {
         let grant = try await OAuth.signIn(provider, client: client)
+        signOuts.removeValue(forKey: grant.id)?.cancel()
         try await tokens.install(account: grant.id, provider: provider, client: client,
                                  refreshToken: grant.refreshToken,
                                  accessToken: grant.accessToken, expiresIn: TimeInterval(grant.expiresIn))
@@ -82,13 +87,18 @@ final class AccountStore {
         return record
     }
 
-    /// Signs out: deletes the Keychain item and the record.
+    /// Signs out: deletes the record, then the Keychain item once `beforeSignOut` is done.
     func remove(_ id: String) {
-        tokens.forget(id)
         apis[id] = nil
         backends[id] = nil
         records.removeAll { $0.id == id }
         save()
+        signOuts[id] = Task {
+            await beforeSignOut?()
+            guard !Task.isCancelled else { return }
+            signOuts[id] = nil
+            tokens.forget(id)
+        }
     }
 
     /// An empty label shows the address again.

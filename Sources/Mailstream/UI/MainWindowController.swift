@@ -42,6 +42,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     private var transitions = 0
     /// The published list, the title's inputs and alerts.
     private var storeWatches: [Task<Void, Never>] = []
+    /// Store alerts not shown yet, oldest first; the window shows them one sheet at a time.
+    private var pendingAlerts: [StoreProblem] = []
 
     init(store: MailStore) {
         self.store = store
@@ -131,8 +133,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
                 }
             },
             Task.immediate(name: "Window alerts") { [weak self] in
-                for await problem in Observations({ problems.alert }).dropFirst() {
-                    if let problem { self?.presentAlert(problem) }
+                for await _ in Observations({ _ = problems.alerts }) {
+                    guard let self else { return }
+                    pendingAlerts += problems.takeAlerts()
+                    presentAlert()
                 }
             },
         ]
@@ -378,13 +382,27 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         window?.toolbar?.validateVisibleItems()
     }
 
-    private func presentAlert(_ problem: StoreProblem) {
-        guard let window, window.attachedSheet == nil else { return }
+    /// Shows the oldest pending alert once the window is on screen and free of sheets.
+    private func presentAlert() {
+        guard let window, window.isVisible || window.isMiniaturized, window.attachedSheet == nil,
+              !pendingAlerts.isEmpty else { return }
+        let problem = pendingAlerts.removeFirst()
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "The action could not be completed"
         alert.informativeText = problem.message
         alert.beginSheetModal(for: window)
+    }
+
+    /// Alerts raised before the window first appears, or while it was closed, show now.
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        presentAlert()
+    }
+
+    /// The next pending alert follows any sheet that ends, on the next turn, once it has detached.
+    func windowDidEndSheet(_ notification: Notification) {
+        Task { [weak self] in self?.presentAlert() }
     }
 
     private func updateTitle() { show(titles()) }

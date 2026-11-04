@@ -95,11 +95,11 @@ export class Hub extends DurableObject {
       this.ctx.acceptWebSocket(server);
       return new Response(null, { status: 101, webSocket: client });
     }
-    const events = await request.json();
+    const messages = (await request.json()).map((event) => JSON.stringify(event));
     for (const socket of this.ctx.getWebSockets()) {
-      for (const event of events) {
+      for (const message of messages) {
         try {
-          socket.send(JSON.stringify(event));
+          socket.send(message);
         } catch {
           // A socket closing mid-broadcast misses this event; the app syncs when it reconnects.
         }

@@ -14,14 +14,14 @@ nonisolated struct StoreProblem: Identifiable, Equatable, Sendable {
 }
 
 /// The one channel every store reports failures into. Status lines observe their source's current
-/// problem, the main window observes `alert`.
+/// problem, the main window drains `alerts`.
 @Observable
 final class StoreProblems {
-    /// The latest problem of each source, until that source clears it (a refresh starts, a poll
-    /// succeeds).
+    /// The latest problem of the mail and chat sources, until that source clears it (a refresh
+    /// starts, a poll succeeds).
     private(set) var current: [StoreProblem.Source: StoreProblem] = [:]
-    /// The latest problem that asked for an alert.
-    private(set) var alert: StoreProblem?
+    /// Problems that asked for an alert and were not shown yet, oldest first.
+    private(set) var alerts: [StoreProblem] = []
 
     /// Records `error` (prefixed with `context`, usually the account); cancellations are not problems.
     func report(_ error: any Error, from source: StoreProblem.Source, context: String? = nil, alert: Bool = false) {
@@ -32,8 +32,15 @@ final class StoreProblems {
 
     func report(_ message: String, from source: StoreProblem.Source, alert: Bool = false) {
         let problem = StoreProblem(source: source, message: message, alert: alert)
-        current[source] = problem
-        if alert { self.alert = problem }
+        if source != .accounts { current[source] = problem }
+        if alert { alerts.append(problem) }
+    }
+
+    /// The pending alerts, which leave the queue.
+    func takeAlerts() -> [StoreProblem] {
+        guard !alerts.isEmpty else { return [] }
+        defer { alerts = [] }
+        return alerts
     }
 
     func clear(_ source: StoreProblem.Source) {

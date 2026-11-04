@@ -25,6 +25,8 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
     private let statusField = NSTextField(labelWithString: "")
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private var signIn: Task<Void, Never>?
+    /// Looks up the suggested client before the client sheet shows, so a second Add can't queue another.
+    private var clientLookup: Task<Void, Never>?
     /// The status line: progress, the last result or the last error.
     private var status: (text: String, isError: Bool)?
     /// What the table shows: `accounts.records` as of the last reload.
@@ -300,10 +302,12 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
 
     /// Asks for the OAuth client (prefilled with the last one used, else the build's), then signs in.
     private func startSignIn(_ provider: Provider) {
-        guard signIn == nil else { return }
-        Task { [weak self, accounts] in
+        guard signIn == nil, clientLookup == nil else { return }
+        clientLookup = Task { [weak self, accounts] in
             let suggested = (try? await accounts.tokens.suggestedClient(for: provider)) ?? nil
-            self?.askForClient(provider, suggested: suggested)
+            guard let self else { return }
+            clientLookup = nil
+            askForClient(provider, suggested: suggested)
         }
     }
 
@@ -360,7 +364,7 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
     private func beginSignIn(_ provider: Provider, client: OAuthClient) {
         guard signIn == nil else { return }
         status = ("Waiting for the browser…", false)
-        signIn = Task { [weak self, accounts] in
+        signIn = Task(name: "Sign-in") { [weak self, accounts] in
             do {
                 let record = try await accounts.signIn(provider, client: client)
                 self?.signInEnded(.success(record))

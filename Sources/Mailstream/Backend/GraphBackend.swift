@@ -72,7 +72,8 @@ nonisolated final class GraphBackend: MailBackend {
                     group.addTask {
                         do {
                             let url = try GraphBackend.url("me/mailFolders/\(name)", [("$select", "id")])
-                            return (name, try await api.decode(FolderID.self, GraphBackend.request(url)).id)
+                            let folder = try await api.decode(FolderID.self, GraphBackend.request(url))
+                            return (name, folder.id)
                         } catch let error as APIError where error.status == 404 {
                             return (name, nil)
                         }
@@ -97,7 +98,7 @@ nonisolated final class GraphBackend: MailBackend {
                 guard (folder.childFolderCount ?? 0) > 0 else { continue }
                 group.addTask {
                     let children = try await self.pages(Folder.self,
-                                                        Self.url("me/mailFolders/\(Self.segment(folder.id))/childFolders", Self.folderQuery),
+                                                        Self.url("me/mailFolders/\(folder.id.percentEncoded)/childFolders", Self.folderQuery),
                                                         priority: .interactive)
                     return try await self.expand(children, path: name, hidden: hidden)
                 }
@@ -118,7 +119,7 @@ nonisolated final class GraphBackend: MailBackend {
             guard let next = URL(string: cursor) else { throw APIError(status: 0, message: "Invalid page cursor") }
             url = next
         } else {
-            url = try Self.url("me/mailFolders/\(Self.segment(mailbox))/messages",
+            url = try Self.url("me/mailFolders/\(mailbox.percentEncoded)/messages",
                                [("$top", String(pageSize)), ("$orderby", "receivedDateTime desc"), ("$select", Self.envelopeFields)])
         }
         let page = try await api.decode(Page<Message>.self, Self.request(url), priority: priority)
@@ -128,7 +129,7 @@ nonisolated final class GraphBackend: MailBackend {
     @concurrent func search(mailbox: String, query: String, pageSize: Int) async throws -> [Envelope] {
         let terms = query.replacingOccurrences(of: "\"", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !terms.isEmpty else { return [] }
-        let url = try Self.url("me/mailFolders/\(Self.segment(mailbox))/messages",
+        let url = try Self.url("me/mailFolders/\(mailbox.percentEncoded)/messages",
                                [("$search", "\"\(terms)\""), ("$top", String(pageSize)), ("$select", Self.envelopeFields)])
         let page = try await api.decode(Page<Message>.self, Self.request(url))
         return page.value.map(Self.envelope).sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
@@ -151,7 +152,7 @@ nonisolated final class GraphBackend: MailBackend {
 
     @concurrent func content(id: String, mailbox: String, directory: URL, urlBase: String,
                              priority: RequestPriority) async throws -> MessageContent {
-        let messagePath = "me/messages/\(Self.segment(id))"
+        let messagePath = "me/messages/\(id.percentEncoded)"
         let message = try await api.decode(Full.self,
                                            Self.request(Self.url(messagePath,
                                                                  [("$select", "body,ccRecipients,replyTo,internetMessageHeaders,hasAttachments")]),
@@ -168,7 +169,8 @@ nonisolated final class GraphBackend: MailBackend {
             parts = try await withThrowingTaskGroup(of: (Int, Part)?.self) { group in
                 for (index, item) in items.enumerated() {
                     group.addTask {
-                        try await self.part(item, messagePath: messagePath, priority: priority).map { (index, $0) }
+                        let part = try await self.part(item, messagePath: messagePath, priority: priority)
+                        return part.map { (index, $0) }
                     }
                 }
                 var found: [(Int, Part)] = []
@@ -200,11 +202,11 @@ nonisolated final class GraphBackend: MailBackend {
 
     /// A file's bytes or an attached message's rendering; nil for kinds not shown (links to cloud files).
     private func part(_ item: AttachmentItem, messagePath: String, priority: RequestPriority) async throws -> Part? {
-        let path = "\(messagePath)/attachments/\(Self.segment(item.id))"
+        let path = "\(messagePath)/attachments/\(item.id.percentEncoded)"
         switch item.kind {
         case "#microsoft.graph.fileAttachment":
             let bytes: Data
-            if let encoded = item.contentBytes, let decoded = Data(base64Encoded: encoded) {
+            if let encoded = item.contentBytes, let decoded = Data(base64URLEncoded: encoded) {
                 bytes = decoded
             } else {
                 bytes = try await api.send(Self.request(Self.url("\(path)/$value")), priority: priority).0
@@ -246,33 +248,32 @@ nonisolated final class GraphBackend: MailBackend {
     }
 
     /// Sends `method` to `/me/messages/{id}<path>` for every id through `$batch`, twenty at a
-    /// time. Sub-requests Graph throttled (429) are sent again after their Retry-After; any other
-    /// failure throws.
+    /// time. Sub-requests Graph throttled (429) or left unanswered are sent again, after the
+    /// longest Retry-After; any other failure throws.
     private func batch(_ method: String, ids: [String], path: String = "", body: Change? = nil) async throws {
         var headers = ["Prefer": Self.immutableIDs]
         if body != nil { headers["Content-Type"] = "application/json" }
         let requests = ids.enumerated().map { index, id in
-            BatchRequest(id: String(index + 1), method: method, url: "/me/messages/\(Self.segment(id))\(path)",
+            BatchRequest(id: String(index + 1), method: method, url: "/me/messages/\(id.percentEncoded)\(path)",
                          headers: headers, body: body)
         }
         for chunk in requests.chunked(into: 20) {
             try await API.repeatingThrottled(chunk, service: "Microsoft Graph") { pending in
                 let answer = try await api.decode(BatchAnswer.self,
                                                   Self.request(Self.url("$batch"), method: "POST", json: BatchPayload(requests: pending)))
-                var throttled = Set<String>()
+                var retry = Set(pending.map(\.id))
                 var retryAfter: Double?
-                for item in answer.responses.sorted(by: { (Int($0.id) ?? 0) < (Int($1.id) ?? 0) }) {
+                for item in answer.responses.sorted(by: { (Int($0.id) ?? 0) < (Int($1.id) ?? 0) }) where retry.contains(item.id) {
                     switch item.status {
                     case 200..<300:
-                        continue
+                        retry.remove(item.id)
                     case 429:
-                        throttled.insert(item.id)
                         if let seconds = item.retryAfter { retryAfter = max(retryAfter ?? 0, seconds) }
                     default:
                         throw APIError(status: item.status, message: item.body?.message ?? "Microsoft Graph answered \(item.status)")
                     }
                 }
-                return (pending.filter { throttled.contains($0.id) }, retryAfter)
+                return (pending.filter { retry.contains($0.id) }, retryAfter)
             }
         }
     }
@@ -293,24 +294,13 @@ nonisolated final class GraphBackend: MailBackend {
     private static let immutableIDs = "IdType=\"ImmutableId\""
     private static let htmlBody = "outlook.body-content-type=\"html\""
 
-    /// `path` is relative to the v1.0 root with ids already passed through `segment`; query
-    /// values are percent-encoded here.
+    /// `path` is relative to the v1.0 root with ids already percent-encoded; query values are
+    /// percent-encoded here.
     private static func url(_ path: String, _ query: [(String, String)] = []) throws -> URL {
         var string = root + path
-        if !query.isEmpty {
-            string += "?" + query.map { "\($0)=\($1.addingPercentEncoding(withAllowedCharacters: queryValueAllowed) ?? $1)" }
-                .joined(separator: "&")
-        }
+        if !query.isEmpty { string += "?" + formEncoded(query) }
         guard let url = URL(string: string) else { throw APIError(status: 0, message: "Invalid Microsoft Graph URL: \(path)") }
         return url
-    }
-
-    private static let queryValueAllowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&=+#;"))
-    private static let segmentAllowed = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))
-
-    /// One id as a path segment.
-    private static func segment(_ id: String) -> String {
-        id.addingPercentEncoding(withAllowedCharacters: segmentAllowed) ?? id
     }
 
     /// A Graph request that asks for immutable ids, plus any other `prefer` preference.

@@ -90,6 +90,10 @@ final class ChatStore {
     @ObservationIgnored private lazy var rebuild = CoalescedTask("Chat list rebuild") { [weak self] in
         await self?.rebuildPass()
     }
+    /// Follows the chat accounts one pass at a time.
+    @ObservationIgnored private lazy var accountSync = CoalescedTask("Chat accounts") { [weak self] in
+        await self?.syncAccounts()
+    }
     /// Account changes and the poll.
     @ObservationIgnored private var watchers: [Task<Void, Never>] = []
 
@@ -97,14 +101,18 @@ final class ChatStore {
         self.cache = cache
         accountStore = accounts
         chat = Chat { id in
-            await MainActor.run {
-                guard accounts.record(id).map(ChatStore.isChat) == true else { return nil }
-                return accounts.api(for: id)
-            }
+            guard accounts.record(id).map(ChatStore.isChat) == true else { return nil }
+            return accounts.api(for: id)
         }
     }
 
-    isolated deinit { watchers.forEach { $0.cancel() } }
+    isolated deinit {
+        watchers.forEach { $0.cancel() }
+        pollTask?.cancel()
+        loadMoreTask?.cancel()
+        earlier.values.forEach { $0.cancel() }
+        fetches.values.forEach { $0.cancel() }
+    }
 
     private var problems: StoreProblems { accountStore.problems }
 
@@ -115,16 +123,16 @@ final class ChatStore {
     // MARK: - Startup and polling
 
     func start() {
-        Task {
+        Task(name: "Chat startup") {
             await restoreFromCache()
-            await syncAccounts()
+            await accountSync.settle()
             poll(quiet: false)
         }
         let accountStore = accountStore
         watchers = [
             Task.immediate(name: "Chat account changes") { [weak self] in
                 for await _ in Observations({ accountStore.records }).dropFirst() {
-                    await self?.syncAccounts()
+                    await self?.accountSync.settle()
                     self?.poll(quiet: false)
                 }
             },
@@ -151,16 +159,21 @@ final class ChatStore {
     private func loadCachedSpaces(_ names: [String]) async {
         let cache = cache
         await withTaskGroup(of: (String, ChatSpaceList?).self) { group in
-            for name in names { group.addTask { (name, await cache.loadChatSpaces(name)) } }
+            for name in names {
+                group.addTask {
+                    let list = await cache.loadChatSpaces(name)
+                    return (name, list)
+                }
+            }
             for await (name, list) in group {
-                guard let list, listings[name] == nil else { continue }
+                guard let list, listings[name] == nil, account(named: name) != nil else { continue }
                 listings[name] = Listing(list: list, limit: max(Self.spacesPage, list.spaces.count))
             }
         }
     }
 
     /// Takes the chat accounts from `AccountStore`; removed accounts' spaces, messages and fetches
-    /// disappear.
+    /// disappear. Runs as `accountSync` passes, never two at once.
     private func syncAccounts() async {
         let fresh = accountStore.records.filter(Self.isChat).map { ChatAccount(name: $0.id, email: $0.id) }
         guard fresh != accounts else { return }
@@ -170,18 +183,34 @@ final class ChatStore {
             Task { await chat.forget(account: gone) }
         }
         accounts = fresh
+        prune()
+        await loadCachedSpaces(fresh.map(\.name).filter { listings[$0] == nil })
+        cache.saveChatAccounts(accounts)
+        rebuild.request()
+    }
+
+    /// Drops whatever belongs to accounts no longer in `accounts`, including their cached messages.
+    private func prune() {
+        let names = Set(accounts.map(\.name))
         listings = listings.filter { names.contains($0.key) }
         threads = threads.filter { names.contains($0.key.account) }
-        fetches = fetches.filter { names.contains($0.key.account) }
+        for (key, fetch) in fetches where !names.contains(key.account) {
+            fetch.cancel()
+            fetches[key] = nil
+        }
         for (key, task) in earlier where !names.contains(key.account) {
             task.cancel()
             earlier[key] = nil
         }
         readMarks = readMarks.filter { names.contains($0.key.account) }
+        readRevisions = readRevisions.filter { names.contains($0.key.account) }
+        let gone = recent.filter { !names.contains($0.account) }
+        if !gone.isEmpty {
+            gone.forEach(cache.removeChatMessages)
+            recent.removeAll { !names.contains($0.account) }
+            cache.saveChatRecent(recent)
+        }
         if let openSpace, !names.contains(openSpace.account) { self.openSpace = nil }
-        await loadCachedSpaces(fresh.map(\.name).filter { listings[$0] == nil })
-        cache.saveChatAccounts(fresh)
-        rebuild.request()
     }
 
     /// Fetches every account's spaces now (toolbar refresh, selecting Chat).
@@ -191,10 +220,10 @@ final class ChatStore {
     private func poll(quiet: Bool) {
         let jobs = accounts.map { ($0.name, listings[$0.name]?.limit ?? Self.spacesPage) }
         guard !jobs.isEmpty else { return }
-        if !quiet { isLoading = true }
+        if !quiet { setLoading(true) }
         guard pollTask == nil else { return }
         let chat = chat
-        pollTask = Task {
+        pollTask = Task(name: "Chat poll") {
             var failed = false
             await withTaskGroup(of: (String, Int, Result<ChatSpaceList, any Error>).self) { group in
                 for (name, limit) in jobs {
@@ -218,7 +247,7 @@ final class ChatStore {
             }
             pollTask = nil
             if !failed { problems.clear(.chat) }
-            isLoading = loadMoreTask != nil
+            setLoading(loadMoreTask != nil)
         }
     }
 
@@ -239,8 +268,8 @@ final class ChatStore {
             if key == openSpace, previous[space.name]?.activity != space.activity { fetchLatest(key) }
         }
         let before = listings[account]?.list
-        listings[account] = Listing(list: list, limit: limit)
         guard before?.spaces != list.spaces || before?.more != list.more || before?.me != list.me else { return }
+        listings[account] = Listing(list: list, limit: limit)
         cache.saveChatSpaces(list, for: account)
         rebuild.request()
     }
@@ -289,8 +318,8 @@ final class ChatStore {
         guard canLoadMore(account: account) else { return }
         let names = accounts.map(\.name).filter { (account == nil || $0 == account) && listings[$0]?.list.more == true }
         let chat = chat
-        isLoading = true
-        loadMoreTask = Task {
+        setLoading(true)
+        loadMoreTask = Task(name: "Chat load more") {
             for name in names {
                 let limit = (listings[name]?.limit ?? Self.spacesPage) + Self.spacesPage
                 do {
@@ -302,8 +331,12 @@ final class ChatStore {
                 }
             }
             loadMoreTask = nil
-            isLoading = pollTask != nil
+            setLoading(pollTask != nil)
         }
+    }
+
+    private func setLoading(_ loading: Bool) {
+        if isLoading != loading { isLoading = loading }
     }
 
     func thread(_ key: ChatSpaceKey) -> ChatThread? { threads[key] }
@@ -354,6 +387,7 @@ final class ChatStore {
             let page = try await chat.messages(account: key.account, space: key.space, limit: Self.messagesPage)
             merge(latest: page, into: key)
         } catch {
+            guard account(named: key.account) != nil else { return }
             if threads[key]?.messages.isEmpty ?? true { threads[key, default: ChatThread()].failure = error.localizedDescription }
             report(error, context: key.account)
         }
@@ -424,7 +458,7 @@ final class ChatStore {
         Task {
             do {
                 let lastRead = try await chat.markRead(account: key.account, space: key.space)
-                guard let lastRead else { return }
+                guard let lastRead, account(named: key.account) != nil else { return }
                 readMarks[key] = max(readMarks[key] ?? lastRead, lastRead)
                 threads[key]?.lastRead = lastRead
                 updateSpace(key) { $0.lastRead = lastRead }
@@ -449,6 +483,8 @@ final class ChatStore {
             do {
                 let message = try await chat.send(account: key.account, space: key.space, text: pending.text,
                                                     thread: pending.thread)
+                // A send that outlived its account's sign-out.
+                guard account(named: key.account) != nil else { return }
                 var thread = threads[key] ?? ChatThread()
                 thread.pending.removeAll { $0.id == pending.id }
                 if !thread.messages.contains(where: { $0.name == message.name }) {

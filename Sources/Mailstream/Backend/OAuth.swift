@@ -131,7 +131,7 @@ nonisolated enum OAuth {
             "code_challenge": challenge,
             "code_challenge_method": "S256",
         ].merging(provider.authorizeExtras) { current, _ in current }
-        components?.percentEncodedQuery = formEncoded(parameters)
+        components?.percentEncodedQuery = formEncoded(parameters.sorted { $0.key < $1.key }.map { ($0.key, $0.value) })
         guard let url = components?.url else {
             throw OAuthError(code: "config", message: "Could not build the sign-in address.")
         }
@@ -181,7 +181,7 @@ nonisolated enum OAuth {
         if let secret = client.secret, !secret.isEmpty { credentials["client_secret"] = secret }
         let body = form.merging(credentials) { current, _ in current }
             .merging(provider.tokenExtras) { current, _ in current }
-        request.httpBody = Data(formEncoded(body).utf8)
+        request.httpBody = Data(formEncoded(body.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }).utf8)
         let (data, response) = try await API.session.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         let decoder = JSONDecoder()
@@ -221,14 +221,6 @@ nonisolated enum OAuth {
     /// 256 random bits, base64url: a PKCE verifier (43 characters) or a `state`.
     private static func randomToken() -> String {
         SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }.base64URLEncodedString()
-    }
-
-    /// `application/x-www-form-urlencoded`, also used for the authorization query.
-    private static func formEncoded(_ fields: [String: String]) -> String {
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "-._~")
-        func encode(_ text: String) -> String { text.addingPercentEncoding(withAllowedCharacters: allowed) ?? text }
-        return fields.sorted { $0.key < $1.key }.map { "\(encode($0.key))=\(encode($0.value))" }.joined(separator: "&")
     }
 }
 
@@ -362,6 +354,6 @@ private nonisolated struct RedirectListener: Sendable {
         let body = Data(html.utf8)
         let head = "HTTP/1.1 \(status)\r\nContent-Type: text/html; charset=utf-8\r\n"
             + "Content-Length: \(body.count)\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n"
-        try await connection.send(Data(head.utf8) + body)
+        try await connection.send(Data(head.utf8) + body, endOfStream: true)
     }
 }
