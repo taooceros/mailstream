@@ -156,7 +156,7 @@ nonisolated struct CommandSpec: Sendable {
             Argument(name: "unread", kind: .bool, summary: "Only unread conversations."),
             Argument(name: "starred", kind: .bool, summary: "Only starred conversations."),
             Argument(name: "category", kind: .choice(MailCategory.allCases.map(\.rawValue)), summary: "Only this AI category."),
-            Argument(name: "waiting", kind: .bool, summary: "Only conversations waiting on your reply."),
+            Argument(name: "waiting", kind: .bool, summary: "Only conversations waiting on your reply or action."),
             limit,
         ]),
         CommandSpec(command: .app(.mailSearch), summary: "Searches every mailbox but trash and junk with the providers' own search (subject, people, body; Gmail operators such as from: work), newest first.", arguments: [
@@ -185,7 +185,7 @@ nonisolated struct CommandSpec: Sendable {
         CommandSpec(command: .app(.mailTag), summary: "Corrects the AI tag: category, waiting-on-you, topic labels.", arguments: [
             conversationIDs,
             Argument(name: "category", kind: .choice(MailCategory.allCases.map(\.rawValue)), summary: "New category."),
-            Argument(name: "waiting", kind: .choice(["true", "false"]), summary: "Whether it waits on your reply (people conversations only)."),
+            Argument(name: "waiting", kind: .choice(["true", "false"]), summary: "Whether it waits on your reply or action (not newsletters)."),
             Argument(name: "labels", kind: .list, summary: "Topic labels (at most two)."),
         ]),
         CommandSpec(command: .app(.mailRetag), summary: "Forgets every AI tag and tags the current list again."),

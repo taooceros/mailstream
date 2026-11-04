@@ -248,7 +248,7 @@ final class ControlService {
             if args.bool("starred"), !conversation.isFlagged { return false }
             let tag = store.tagging.tag(for: conversation)
             if let category, tag?.category != category { return false }
-            if args.bool("waiting"), tag?.isWaiting != true { return false }
+            if args.bool("waiting"), tag?.toRespond != true { return false }
             return true
         }.prefix(limit)
         for conversation in conversations { remember(conversation, primary: listing.primary) }
@@ -316,7 +316,7 @@ final class ControlService {
             "mailboxes": .strings(Array(Set(conversation.messages.map(\.role.rawValue))).sorted()),
             "snippet": store.contents.snippet(for: conversation.latest.ref).json,
             "category": (tag?.category.rawValue).json,
-            "waiting": .bool(tag?.isWaiting == true),
+            "waiting": .bool(tag?.toRespond == true),
             "labels": .strings(tag?.labels ?? []),
         ]
     }

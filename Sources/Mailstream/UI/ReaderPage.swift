@@ -47,9 +47,9 @@ enum ReaderPage {
                        accountColor: String, mailboxLabels: [String], tag: ConversationTag?, chat: Bool,
                        trustLabel: String?) -> String {
         var meta: [String] = []
-        // People threads always carry the chip, hidden once resolved, so the reader can flip it in place.
+        // Every thread that can wait carries the chip, hidden once resolved, so the reader can flip it in place.
         var waiting = ""
-        if let tag, tag.category == .people {
+        if let tag, tag.category != .newsletter {
             let chip = "<span class=\"meta-item\" style=\"--tint:\(Design.Color.waiting.css)\"><i class=\"mark dot\"></i>Waiting on you"
                 + "<button class=\"meta-resolve\" data-action=\"resolve\">Resolve</button></span>"
             waiting = "<span id=\"waiting\" class=\"meta-wait\"\(tag.toRespond ? "" : " hidden")>\(chip)<i class=\"sep\">·</i></span>"

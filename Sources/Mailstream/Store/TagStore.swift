@@ -111,24 +111,24 @@ final class TagStore {
         enabled ? tags[Self.key(conversation)] : nil
     }
 
-    /// Whether `conversation` can be resolved or put back on "Waiting on you": only people
-    /// conversations the tagger has judged carry the flag.
+    /// Whether `conversation` can be resolved or put back on "Waiting on you": any conversation
+    /// the tagger has judged but a newsletter.
     func canMarkWaiting(_ conversation: Conversation) -> Bool {
-        tag(for: conversation)?.category == .people
+        tag(for: conversation).map { $0.category != .newsletter } ?? false
     }
 
     /// Resolves the conversation (`waiting: false`) or puts it back on "Waiting on you". The flag
     /// belongs to the latest message, so a new incoming one is judged afresh.
     func setWaiting(_ conversation: Conversation, waiting: Bool) {
         let key = Self.key(conversation)
-        guard enabled, var tag = tags[key], tag.category == .people, tag.toRespond != waiting else { return }
+        guard enabled, var tag = tags[key], tag.category != .newsletter, tag.toRespond != waiting else { return }
         tag.toRespond = waiting
         tags[key] = tag
         cache.saveTags(tags)
     }
 
     /// Corrects the conversation's tag; nil leaves a part as it is. A conversation the tagger has
-    /// not judged needs a category, and only people conversations can wait on a reply.
+    /// not judged needs a category, and newsletters never wait on the user.
     func edit(_ conversation: Conversation, category: MailCategory?, waiting: Bool?,
               labels: [String]?) throws -> ConversationTag {
         guard enabled else { throw StoreError(message: Self.offMessage) }
@@ -137,11 +137,11 @@ final class TagStore {
             throw StoreError(message: "\(conversation.id) has no AI tag yet; give a category.")
         }
         if let category { tag.category = category }
-        if waiting == true, tag.category != .people {
-            throw StoreError(message: "Only people conversations can wait on a reply.")
+        if waiting == true, tag.category == .newsletter {
+            throw StoreError(message: "Newsletters cannot wait on you.")
         }
         if let waiting { tag.toRespond = waiting }
-        if tag.category != .people { tag.toRespond = false }
+        if tag.category == .newsletter { tag.toRespond = false }
         if let labels {
             tag.labels = Array(labels.map { String($0.trimmingCharacters(in: .whitespaces).prefix(OmpTagger.maxLabelLength)) }
                 .filter { !$0.isEmpty }.prefix(2))

@@ -30,7 +30,7 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         switch self {
         case .aiTaggingEnabled:
             (.bool, true,
-             "Sort the inbox into People, Notifications, Newsletters and Invitations with omp, and flag mail waiting on a reply.")
+             "Sort the inbox into People, Notifications, Newsletters and Invitations with omp, and flag mail waiting on your reply or action.")
         case .aiTaggingModel: (.string, "smol", "omp model role or model id the tagger runs (`omp --model`).")
         case .aiTaggingOmpPath: (.string, "", "Path of the omp executable; empty picks the newest omp on the login shell's PATH.")
         case .aiTaggingBatchSize: (.int(1...100), 20, "Conversations sent to omp per run.")

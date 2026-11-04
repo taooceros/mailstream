@@ -148,10 +148,22 @@ actor OmpTagger {
         surveys, mass mailing-list bulletins.
         - invitation: calendar invitations, event RSVPs and their responses or updates.
 
-        toRespond: true when the latest incoming message is from a human who directly asks the user a \
-        question or makes a request (send, review, confirm, decide, attend) and lastFromMe is false; an \
-        earlier reply (replied) does not answer a newer ask. False when lastFromMe is true, for FYI mail, \
-        and for every non-people category.
+        toRespond: true when the user must personally reply to or act on the latest incoming message; \
+        always false when lastFromMe is true. An earlier reply (replied) does not answer a newer ask.
+        - people: a human directly asks the user a question or makes a request (send, review, confirm, \
+        decide, attend). False for FYI mail.
+        - notification: only when the mail needs a step from the user: approve, sign or pay something; a \
+        payment failed or a card or account is blocked or about to lapse; a security alert about a sign-in, \
+        device or app access the user should check; a person messaged, mentioned or asked the user through \
+        a service (Slack, Teams, an issue or pull request, review comments or suggestions on the user's own \
+        document or pull request); a deadline or a form the user must complete. False for receipts, orders, \
+        shipping, statements or balances that are merely available, codes and password resets, \
+        confirmations of something the user just did (submission received, booking confirmed, agreement \
+        signed), social-network and job alerts, digests, CI and bot activity, broadcast mentions \
+        (@everyone, @channel), and repository activity that does not ask the user anything.
+        - invitation: an unanswered invitation sent to the user personally (toMe) that needs an RSVP. False \
+        for responses, updates, cancellations and mass event announcements.
+        - newsletter: always false.
 
         labels: 0-2 English Title Case topic words, each at most 16 characters, e.g. "Finance", "Travel", \
         "Work", "Shopping", "Security", "Health", "Education", "Tech". Prefer broad, reusable topics; use [] \
@@ -228,7 +240,7 @@ actor OmpTagger {
                 if labels.count == 2 { break }
             }
             result[item.id] = ConversationTag(category: category,
-                                              toRespond: answer.toRespond && category == .people && !item.latestFromUser,
+                                              toRespond: answer.toRespond && category != .newsletter && !item.latestFromUser,
                                               labels: labels)
         }
         return result

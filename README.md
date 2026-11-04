@@ -324,8 +324,12 @@ In inboxes (and All Inboxes), each conversation is tagged by the omp model in
 - **People**: written by a person. These stay in the main list, grouped by date.
 - **Notifications**, **Newsletters** and **Invitations**: three tiles above the
   list showing their unread counts and top senders. Click a tile to browse it.
-- **To respond**: set when a person asked you something and the latest message
-  is not yours. These conversations come first, under "Waiting on you".
+- **To respond**: set when the latest message is not yours and needs your reply
+  or action: a person asked you something, or automated mail asks you to
+  approve, pay, check a sign-in, answer a direct message or review comments, or
+  RSVP. Newsletters never are. These conversations come first, under "Waiting
+  on you", bundled ones included (they stay in their bundle too). Resolve one
+  from its hover pill, the reader header or ⌘⇧D.
 
 Tagging sends each conversation's sender, subject, preview snippet and a few
 flags (whether you are in To, whether you replied) to the model provider
@@ -333,7 +337,7 @@ configured in omp. It runs in batches of 20, one omp process at a time, for up
 to 150 untagged conversations per pass (`aiTagging.batchSize`, `aiTagging.passLimit`).
 
 Tags are keyed by the latest message, so a new reply re-tags the conversation.
-They are cached in `tags-v1.json` in the cache directory. Turn tagging off, or
+They are cached in `tags-v2.json` in the cache directory. Turn tagging off, or
 re-tag everything, from the View menu or with `mailstream config set
 aiTagging.enabled false` and `mailstream mail retag`; `mailstream mail tag` corrects
 one conversation's tag. Without tags, the list is plain and dated.

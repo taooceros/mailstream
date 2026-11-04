@@ -34,9 +34,10 @@ nonisolated final class MailCache: Sendable {
 
     deinit { writes.finish() }
 
-    /// Layouts from before the provider APIs, keyed by account, mailbox and chat account names
-    /// that no provider id matches.
-    private static let legacy = ["envelopes", "messages", "mailboxes", "chat", "accounts-v1.json", "chat-accounts-v1.json"]
+    /// Layouts no longer read: from before the provider APIs, keyed by account, mailbox and chat
+    /// account names that no provider id matches, and tags from before automated mail could wait
+    /// on the user.
+    private static let legacy = ["envelopes", "messages", "mailboxes", "chat", "accounts-v1.json", "chat-accounts-v1.json", "tags-v1.json"]
 
     static func hash(_ parts: String...) -> String {
         let digest = SHA256.hash(data: Data(parts.joined(separator: "\u{1F}").utf8))
@@ -61,7 +62,7 @@ nonisolated final class MailCache: Sendable {
 
     // MARK: Tags
 
-    private var tagsURL: URL { root.appendingPathComponent("tags-v1.json") }
+    private var tagsURL: URL { root.appendingPathComponent("tags-v2.json") }
 
     func loadTags() async -> [String: ConversationTag]? { await read([String: ConversationTag].self, at: tagsURL) }
 

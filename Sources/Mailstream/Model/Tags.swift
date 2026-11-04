@@ -32,11 +32,10 @@ nonisolated enum MailCategory: String, Codable, Sendable, CaseIterable {
 
 nonisolated struct ConversationTag: Codable, Sendable, Hashable {
     var category: MailCategory
-    /// A person asked the user something and the latest message is not from the user.
+    /// The latest incoming message needs the user's reply or action and is not from the user: a
+    /// person asked something, or automated mail asks for an approval, a payment, a security check.
+    /// Newsletters never do.
     var toRespond: Bool
     /// At most two short topic labels, e.g. "Finance", "Travel".
     var labels: [String]
-
-    /// Waiting on the user's reply: only people conversations can be.
-    var isWaiting: Bool { category == .people && toRespond }
 }

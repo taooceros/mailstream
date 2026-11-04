@@ -163,7 +163,8 @@ final class ConversationListBundleLayer: Identifiable {
 }
 
 /// Full-width list. Inboxes become a Smart Inbox: AI-tagged notifications, newsletters and
-/// invitations sit on a shelf of tiles, people waiting on a reply come first, the rest by date.
+/// invitations sit on a shelf of tiles, mail waiting on the user's reply or action comes first
+/// (bundled mail too, which stays in its bundle), the rest by date.
 /// The Chat selection lists Google Chat spaces in the same rows, newest first, without mail actions.
 @Observable
 final class ConversationListModel {
@@ -316,11 +317,12 @@ final class ConversationListModel {
         var people: [Conversation] = []
         for conversation in conversations {
             let tag = store.tagging.tag(for: conversation)
-            if let category = tag?.category, Self.bundled.contains(category) {
-                buckets[category, default: []].append(conversation)
-            } else if tag?.toRespond == true {
+            let category = tag?.category ?? .people
+            let bundled = Self.bundled.contains(category)
+            if bundled { buckets[category, default: []].append(conversation) }
+            if tag?.toRespond == true {
                 waiting.append(conversation)
-            } else {
+            } else if !bundled {
                 people.append(conversation)
             }
         }
