@@ -162,7 +162,6 @@ final class ChatReader: WebShellClient {
         guard staged else {
             let space = store.chat.space(key)
             let title = space?.title ?? "Chat"
-            state["accent"] = NSColor.controlAccentColor.cssHex
             state["html"] = ChatPage.page(title: title.isEmpty ? "Chat" : title, kind: space?.kind ?? .space,
                                           memberCount: space?.members.count ?? 0,
                                           accountLabel: store.label(account: key.account),
@@ -216,10 +215,9 @@ final class ChatReader: WebShellClient {
                   ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return }
             NSWorkspace.shared.open(url)
         case "avatar":
-            guard let email = nonEmpty("email"), email.contains("@"), let rect = body["rect"] as? [Double], rect.count == 4
-            else { return }
+            guard let email = nonEmpty("email"), email.contains("@") else { return }
             let name = store.chat.thread(key)?.messages.last { $0.sender.email?.lowercased() == email }?.sender.displayName
-            shell.showAvatar(of: Address(name: name, email: email), automated: false, at: rect)
+            shell.showAvatar(of: Address(name: name, email: email), automated: false, from: body)
         default:
             break
         }

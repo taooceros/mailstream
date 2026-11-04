@@ -69,10 +69,13 @@ final class WebShell: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
     }
 
     /// Renders the current generation by calling the page's `function` with `state`, at once or
-    /// once the shell has loaded.
+    /// once the shell has loaded. The page takes on the accent color as the web view draws it now.
     func render(_ function: String, _ state: [String: Any]) {
         var state = state
         state["generation"] = generation
+        webView.effectiveAppearance.performAsCurrentDrawingAppearance {
+            state["accent"] = NSColor.controlAccentColor.cssRGBA
+        }
         staged = ("\(function)(state)", state)
         rendered = false
         if shellLoad == nil { commit() }
@@ -91,9 +94,11 @@ final class WebShell: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
         if shellLoad == nil { run("MS.clear(generation)", ["generation": generation]) }
     }
 
-    /// Enlarges `person`'s picture from AvatarStore; `rect` is the avatar's box in page (CSS) pixels.
-    func showAvatar(of person: Address, automated: Bool, at rect: [Double]) {
-        guard let photo = avatars.image(for: person.email, automated: automated) else { return }
+    /// Enlarges `person`'s picture from AvatarStore; `message` is the page's `avatar` message, whose
+    /// `rect` is the avatar's box in page (CSS) pixels.
+    func showAvatar(of person: Address, automated: Bool, from message: [String: Any]) {
+        guard let rect = message["rect"] as? [Double], rect.count == 4,
+              let photo = avatars.image(for: person.email, automated: automated) else { return }
         let scale = webView.pageZoom * webView.magnification
         let height = rect[3] * scale
         let top = rect[1] * scale
@@ -203,10 +208,10 @@ final class WebShell: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
 
     // MARK: - Page
 
-    /// Styles and an empty column; the scripts are user scripts. Its CSP allows remote images,
-    /// styles and fonts so that no page needs a different shell; only mail bodies, which block them
-    /// per frame, and escaped markup ever reach it. HTML mail renders in same-origin `srcdoc` frames
-    /// that inherit this policy (no scripts).
+    /// The tokens, styles and an empty column; the scripts are user scripts. Its CSP allows remote
+    /// images, styles and fonts so that no page needs a different shell; only mail bodies, which
+    /// block them per frame, and escaped markup ever reach it. HTML mail renders in same-origin
+    /// `srcdoc` frames that inherit this policy (no scripts).
     private static let page: String = {
         let csp = "default-src 'none'; img-src data: mscid: https: http:; style-src 'unsafe-inline' https: http:; "
             + "font-src data: https: http:; media-src data: mscid:; frame-src about:; child-src about:"
@@ -214,13 +219,14 @@ final class WebShell: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
         <!doctype html><html><head><meta charset="utf-8">
         <meta http-equiv="Content-Security-Policy" content="\(csp)">
         <meta name="color-scheme" content="light dark">
-        <style>\(ReaderPage.css)\(ChatPage.css)</style></head><body><div class="column" id="column"></div></body></html>
+        <style>\(Design.stylesheet)\n\(ReaderPage.css)</style></head><body><div class="column" id="column"></div></body></html>
         """
     }()
 
-    /// What every page shares, as `Shell`: posting to the app, the column handoff and click routing.
-    /// A page is an object with `act(el, action)` for clicks on its `data-action` elements and an
-    /// optional `leave()`, run when another page takes the column. `MS` holds the app's entry points.
+    /// What every page shares, as `Shell`: posting to the app, the column handoff, click routing and
+    /// the composer's behavior. A page is an object with `act(el, action)` for clicks on its
+    /// `data-action` elements and an optional `leave()`, run when another page takes the column.
+    /// `MS` holds the app's entry points.
     private static let script = """
     (() => {
       // Messages carry the render they came from, so the app ignores clicks on a page it replaced.
@@ -228,6 +234,7 @@ final class WebShell: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
       let page = null;
       const post = (msg) => window.webkit.messageHandlers.ms.postMessage(Object.assign(msg, { generation }));
       const $ = (id) => document.getElementById(id);
+      // The same five characters as `HTMLText.escape`.
       const escapeHTML = (text) => String(text).replace(/[&<>"']/g,
         (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -241,13 +248,47 @@ final class WebShell: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
         window.scrollTo(0, 0);
       }
 
-      document.addEventListener('click', (event) => {
-        const link = event.target.closest('a[href]');
-        if (link && !event.target.closest('[data-action]')) {
+      // Links in `doc` open through the app; one inside a `skip` element is left to it.
+      function interceptLinks(doc, skip) {
+        doc.addEventListener('click', (event) => {
+          const link = event.target.closest('a[href]');
+          if (!link || (skip && event.target.closest(skip))) return;
           event.preventDefault();
           post({ action: 'link', href: link.href });
-          return;
-        }
+        }, true);
+      }
+
+      // A composer's text field grows with its text, from `minHeight`.
+      function autosize(text, minHeight) {
+        text.style.height = 'auto';
+        text.style.height = Math.max(minHeight, text.scrollHeight) + 'px';
+      }
+
+      // Every edit and focus change runs `report`, so the app always has the draft; Enter sends
+      // when `isSend(event)` says so.
+      function bindComposer(text, minHeight, { report, isSend, send }) {
+        text.addEventListener('input', () => { autosize(text, minHeight); report(); });
+        text.addEventListener('focus', report);
+        text.addEventListener('blur', report);
+        text.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' && isSend(event)) {
+            event.preventDefault();
+            send(text);
+          }
+        });
+      }
+
+      // Focuses `text` with the caret after its text, once the composer has settled in.
+      function focusAtEnd(text) {
+        setTimeout(() => {
+          text.focus();
+          text.setSelectionRange(text.value.length, text.value.length);
+        }, 80);
+      }
+
+      // The page's own controls handle clicks on links inside them.
+      interceptLinks(document, '[data-action]');
+      document.addEventListener('click', (event) => {
         const el = event.target.closest('[data-action]');
         if (!el || !page) return;
         event.preventDefault();
@@ -263,7 +304,7 @@ final class WebShell: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
         page.act(el, action);
       }, true);
 
-      window.Shell = { post, $, escapeHTML, show };
+      window.Shell = { post, $, escapeHTML, show, interceptLinks, autosize, bindComposer, focusAtEnd };
       window.MS = {
         clear(next) { show(null, { generation: next }); },
       };

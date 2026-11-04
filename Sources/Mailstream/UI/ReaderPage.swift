@@ -4,7 +4,7 @@ import AppKit
 /// the column per conversation, and message bodies arrive later through `MS.setBody`. HTML mail
 /// renders inside a same-origin `srcdoc` iframe that inherits the shell's Content-Security-Policy;
 /// a body whose remote content stays blocked carries a stricter policy of its own
-/// (`blockingRemoteContent`). It also holds the markup chat spaces (`ChatPage`) share.
+/// (`blockingRemoteContent`). It also holds the markup and styles chat spaces (`ChatPage`) share.
 @MainActor
 enum ReaderPage {
     struct Card {
@@ -50,7 +50,7 @@ enum ReaderPage {
         // People threads always carry the chip, hidden once resolved, so the reader can flip it in place.
         var waiting = ""
         if let tag, tag.category == .people {
-            let chip = "<span class=\"meta-item\" style=\"--tint:#F59E0B\"><i class=\"mark dot\"></i>Waiting on you"
+            let chip = "<span class=\"meta-item\" style=\"--tint:\(Design.Color.waiting.css)\"><i class=\"mark dot\"></i>Waiting on you"
                 + "<button class=\"meta-resolve\" data-action=\"resolve\">Resolve</button></span>"
             waiting = "<span id=\"waiting\" class=\"meta-wait\"\(tag.toRespond ? "" : " hidden")>\(chip)<i class=\"sep\">·</i></span>"
         }
@@ -62,11 +62,7 @@ enum ReaderPage {
 
         let replyTarget = conversation.latestIncoming(own: own)?.envelope.from.first?.shortName
         let replyLabel = replyTarget.map { "Reply to \(HTMLText.escape($0))…" } ?? "Reply…"
-        var html = """
-        <header class="thread-header">
-          <h1>\(HTMLText.escape(Subject(conversation.subject).displayTitle))</h1>
-          <div class="thread-meta">\(waiting)\(meta.joined(separator: "<i class=\"sep\">·</i>"))</div>
-        </header>
+        var html = threadHeader(title: Subject(conversation.subject).displayTitle, meta: meta, leading: waiting) + """
         <div id="remote-banner" class="banner" hidden>
           <span>\(trustLabel == nil ? "Remote images are blocked in junk mail." : "Remote images are blocked to protect your privacy.")</span>
           <button data-action="load-remote">Load Images</button>
@@ -79,6 +75,22 @@ enum ReaderPage {
         } else {
             for (position, card) in cards.enumerated() { html += article(card, own: own, position: position, total: cards.count) }
         }
+        let replyComposer = composer(
+            head: """
+            <span class="c-mode">\(Icon.reply)\(Icon.replyAll)</span>
+            <div class="c-to" id="c-to"></div>
+            <button class="c-btn" id="c-all" title="Reply All" data-action="reply-toggle-all" hidden>\(Icon.replyAll)</button>
+            <button class="c-btn" title="Open in Window" data-action="reply-popout">\(Icon.popout)</button>
+            <button class="c-btn" title="Discard" data-action="reply-discard">\(Icon.trash)</button>
+            """,
+            placeholder: "Write a reply…",
+            extra: """
+            <div class="c-quote" id="c-quote-wrap" hidden>
+              <button class="ms-fold-toggle" data-action="reply-quote" title="Show quoted text">•••</button>
+              <div class="c-quote-fold"><div><div class="c-quote-body" id="c-quote"></div></div></div>
+            </div>
+            """,
+            send: "reply-send", sendIcon: Icon.send, sendKey: "⌘↩")
         html += """
         </main>
         <footer class="reply-dock" id="dock">
@@ -88,30 +100,44 @@ enum ReaderPage {
             <button class="dock-icon" title="Forward" data-action="forward-latest">\(Icon.forward)</button>
           </div></div></div>
           <div class="fold-y composer-fold"><div class="fold-clip">
-            <section class="composer" id="composer">
-              <div class="c-head">
-                <span class="c-mode">\(Icon.reply)\(Icon.replyAll)</span>
-                <div class="c-to" id="c-to"></div>
-                <button class="c-btn" id="c-all" title="Reply All" data-action="reply-toggle-all" hidden>\(Icon.replyAll)</button>
-                <button class="c-btn" title="Open in Window" data-action="reply-popout">\(Icon.popout)</button>
-                <button class="c-btn" title="Discard" data-action="reply-discard">\(Icon.trash)</button>
-              </div>
-              <div class="c-scroll">
-                <textarea id="c-text" rows="1" placeholder="Write a reply…" spellcheck="true"></textarea>
-                <div class="c-quote" id="c-quote-wrap" hidden>
-                  <button class="ms-fold-toggle" data-action="reply-quote" title="Show quoted text">•••</button>
-                  <div class="c-quote-fold"><div><div class="c-quote-body" id="c-quote"></div></div></div>
-                </div>
-              </div>
-              <div class="c-foot">
-                <span class="c-status" id="c-status"></span>
-                <button class="c-send" data-action="reply-send">\(Icon.send)<span>Send</span><span class="kbd">⌘↩</span></button>
-              </div>
-            </section>
+            \(replyComposer)
           </div></div>
         </footer>
         """
         return html
+    }
+
+    /// The page's title over its metadata items, separated by dots; `leading` goes first, unseparated.
+    nonisolated static func threadHeader(title: String, meta: [String], leading: String = "") -> String {
+        """
+        <header class="thread-header">
+          <h1>\(HTMLText.escape(title))</h1>
+          <div class="thread-meta">\(leading)\(meta.joined(separator: "<i class=\"sep\">·</i>"))</div>
+        </header>
+
+        """
+    }
+
+    /// The composer at the foot of a page, a mail reply's or a chat space's: `head` fills its
+    /// header row (`headAttributes` names or hides it), `extra` follows the text field, and the
+    /// send button posts `send`, with `sendKey` as its shortcut hint.
+    nonisolated static func composer(head: String, headAttributes: String = "", placeholder: String, extra: String = "",
+                                     status: String = "", send: String, sendIcon: String = "", sendKey: String) -> String {
+        """
+        <section class="composer" id="composer">
+          <div class="c-head"\(headAttributes)>
+        \(head)
+          </div>
+          <div class="c-scroll">
+            <textarea id="c-text" rows="1" placeholder="\(HTMLText.escape(placeholder))" spellcheck="true"></textarea>
+        \(extra)
+          </div>
+          <div class="c-foot">
+            <span class="c-status" id="c-status">\(status)</span>
+            <button class="c-send" data-action="\(send)">\(sendIcon)<span>Send</span><span class="kbd">\(sendKey)</span></button>
+          </div>
+        </section>
+        """
     }
 
     /// Inline SVG glyphs, so icons match SF Symbols' weight instead of falling back to text arrows.
@@ -130,7 +156,7 @@ enum ReaderPage {
     }
 
     /// Header metadata item: quiet text with an optional colored dot or account bar.
-    private static func meta(_ text: String, tint: String?, mark: String? = nil) -> String {
+    nonisolated static func meta(_ text: String, tint: String?, mark: String? = nil) -> String {
         let style = tint.map { " style=\"--tint:\(HTMLText.escape($0))\"" } ?? ""
         let markup = mark.map { "<i class=\"mark \($0)\"></i>" } ?? ""
         return "<span class=\"meta-item\"\(style)>\(markup)\(HTMLText.escape(text))</span>"
@@ -138,18 +164,10 @@ enum ReaderPage {
 
     /// Messages as a chat log: a divider per day, and runs from one sender under one name.
     private static func chatMessages(_ cards: [Card], own: Set<String>) -> String {
-        let calendar = Calendar.current
+        let runs = chatRuns(cards, date: { $0.message.envelope.date }, sender: { $0.sender.normalizedEmail })
         var html = ""
-        var previous: Card?
-        for (position, card) in cards.enumerated() {
-            let date = card.message.envelope.date
-            let last = previous?.message.envelope.date
-            let sameDay = date.flatMap { date in last.map { calendar.isDate($0, inSameDayAs: date) } } ?? false
-            if let date, !sameDay { html += dayDivider(date, calendar: calendar) }
-            let continued = sameDay && previous?.sender.normalizedEmail == card.sender.normalizedEmail
-                && date.flatMap { date in last.map { date.timeIntervalSince($0) < groupWindow } } == true
-            html += chatArticle(card, own: own, continued: continued, position: position, total: cards.count)
-            previous = card
+        for (position, (card, run)) in zip(cards, runs).enumerated() {
+            html += run.divider + chatArticle(card, own: own, continued: run.continued, position: position, total: cards.count)
         }
         return html
     }
@@ -215,7 +233,7 @@ enum ReaderPage {
 
     /// The sender's color; later messages arrive a beat after earlier ones, and only the last few animate at all.
     private static func style(_ card: Card, position: Int, total: Int) -> String {
-        "--avatar:\(Avatar.color(for: card.sender.email).cssHex); animation-delay:\(max(0, position - max(0, total - 6)) * 30)ms"
+        "--avatar:\(Avatar.color(for: card.sender.email).cssRGBA); animation-delay:\(max(0, position - max(0, total - 6)) * 30)ms"
     }
 
     /// Where `MS.setBody` puts message `index`'s body and attachments.
@@ -231,13 +249,53 @@ enum ReaderPage {
             + "<button title=\"Forward\" data-action=\"forward\" data-index=\"\(index)\">\(Icon.forward)</button></div>"
     }
 
+    // MARK: - Attachments
+
+    /// An attachment tile: a thumbnail, or else `label` (a short type name, uppercased by CSS), over
+    /// the name and `detail`. `attributes` (its action) and `trailing` (its controls) are the page's own.
+    nonisolated static func attachmentTile(name: String, detail: String, label: String, thumb: String? = nil,
+                                           disabled: Bool = false, attributes: String = "", trailing: String = "") -> String {
+        let name = HTMLText.escape(name)
+        let face = thumb.map { "<img src=\"\(HTMLText.escape($0))\">" } ?? HTMLText.escape(label)
+        return "<div class=\"att\(disabled ? " disabled" : "")\"\(attributes) title=\"\(name)\"><div class=\"thumb\">\(face)</div>"
+            + "<div class=\"meta-a\"><div class=\"fname\">\(name)</div><div class=\"fsize\">\(HTMLText.escape(detail))</div></div>"
+            + "\(trailing)</div>"
+    }
+
+    /// A tile's type label: up to four characters of `pathExtension`, else of `fallback`.
+    nonisolated static func attachmentLabel(pathExtension: String, fallback: String) -> String {
+        String((pathExtension.isEmpty ? fallback : pathExtension).prefix(4))
+    }
+
     // MARK: - Chat logs
 
     /// A sender's next message within this window, on the same day, joins their previous one.
-    nonisolated static let groupWindow: TimeInterval = 3600
+    nonisolated private static let groupWindow: TimeInterval = 3600
+
+    /// A chat log's breaks: per item, the day divider above it (empty on the previous item's day)
+    /// and whether it continues the previous item's run, from the same sender on the same day within
+    /// `groupWindow`. An item without a date opens no day and breaks the run; `opensRun` items
+    /// never continue one.
+    nonisolated static func chatRuns<Item>(_ items: [Item], date: (Item) -> Date?, sender: (Item) -> String,
+                                          opensRun: (Item) -> Bool = { _ in false }) -> [(divider: String, continued: Bool)] {
+        let calendar = Calendar.current
+        var runs: [(divider: String, continued: Bool)] = []
+        runs.reserveCapacity(items.count)
+        var previous: Item?
+        for item in items {
+            let day = date(item), last = previous.flatMap(date)
+            let sameDay = day.flatMap { day in last.map { calendar.isDate($0, inSameDayAs: day) } } ?? false
+            let continued = sameDay && !opensRun(item) && previous.map(sender) == sender(item)
+                && day.flatMap { day in last.map { day.timeIntervalSince($0) < groupWindow } } == true
+            let divider = sameDay ? "" : day.map { dayDivider($0, calendar: calendar) } ?? ""
+            runs.append((divider, continued))
+            previous = item
+        }
+        return runs
+    }
 
     /// A divider naming `date`'s day.
-    nonisolated static func dayDivider(_ date: Date, calendar: Calendar) -> String {
+    nonisolated private static func dayDivider(_ date: Date, calendar: Calendar) -> String {
         let label: String
         if calendar.isDateInToday(date) {
             label = "Today"
@@ -315,249 +373,314 @@ enum ReaderPage {
 
     // MARK: - Styles
 
-    static let css = """
-    :root {
-      color-scheme: light dark;
-      --bg: #ffffff; --text: #1d1d1f; --muted: #6e6e73; --faint: #a1a1a6; --line: rgba(0,0,0,.07);
-      --hover: rgba(0,0,0,.035); --chip: rgba(0,0,0,.05); --accent: #007aff;
-      --ease: cubic-bezier(.2,.9,.25,1);
-    }
-    @media (prefers-color-scheme: dark) {
-      :root { --bg: #1e1e1e; --text: #f2f2f7; --muted: #a1a1a6; --faint: #6e6e73; --line: rgba(255,255,255,.08);
-        --hover: rgba(255,255,255,.04); --chip: rgba(255,255,255,.08); }
-    }
-    * { box-sizing: border-box; }
-    html, body { margin: 0; background: var(--bg); color: var(--text);
-      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
-      -webkit-font-smoothing: antialiased; }
-    .column { max-width: 720px; margin: 0 auto; padding: 30px 28px 0; min-height: 100vh;
-      display: flex; flex-direction: column; }
-    /* The native view handles the fade; the page only settles, so text is legible from the first frame. */
-    @keyframes rise { from { opacity: .35; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-    @keyframes settle { from { transform: translateY(6px); } to { transform: none; } }
-    .thread-header { margin: 0 0 18px; animation: settle .45s var(--ease) both; }
-    .thread-header h1 { font-family: "New York", ui-serif, Georgia, serif; font-size: 27px; line-height: 1.22;
-      font-weight: 600; letter-spacing: -.012em; margin: 0 0 9px; overflow-wrap: anywhere; }
-    .thread-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: var(--muted); }
-    .thread-meta .sep { font-style: normal; color: var(--faint); }
-    .meta-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-    .mark { display: inline-block; background: var(--tint); }
-    .mark.dot { width: 6px; height: 6px; border-radius: 50%; }
-    .mark.bar { width: 2.5px; height: 11px; border-radius: 2px; }
-    .meta-wait:not([hidden]) { display: contents; }
-    .meta-resolve { padding: 1px 8px; margin-left: 2px; font-size: 11.5px; font-weight: 550; color: var(--accent);
-      background: color-mix(in srgb, var(--accent) 11%, transparent); }
-    .meta-resolve:hover { background: color-mix(in srgb, var(--accent) 19%, transparent); }
-    .banner { display: flex; align-items: center; gap: 12px; margin: 0 0 14px; padding: 7px 8px 7px 14px;
-      border-radius: 10px; font-size: 12px; color: var(--muted); background: var(--chip);
-      animation: rise .3s var(--ease) both; }
-    .banner[hidden] { display: none; }
-    .banner span { flex: 1; }
-    button { font: inherit; font-size: 12px; font-weight: 550; color: var(--text); background: transparent;
-      border: 0; border-radius: 7px; padding: 4px 10px; cursor: default;
-      transition: background-color .15s var(--ease), color .15s var(--ease), transform .15s var(--ease); }
-    button:hover { background: var(--hover); }
-    button:active { transform: scale(.96); }
-    .banner button { color: var(--accent); background: var(--bg); }
-    .icon { width: 15px; height: 15px; display: block; flex: none; }
-    .icon.star { color: #f5b800; width: 12px; height: 12px; }
-    main { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
-    .msg { border-bottom: 1px solid var(--line); animation: rise .34s var(--ease) both; }
-    .msg-head { display: flex; gap: 12px; align-items: center; cursor: default; padding: 10px 6px;
-      margin: 0 -6px; border-radius: 8px; user-select: none; -webkit-user-select: none;
-      transition: background-color .15s var(--ease); }
-    .msg.collapsed .msg-head:hover { background: var(--hover); }
-    .msg.expanded .msg-head { padding-top: 18px; align-items: flex-start; }
-    .avatar { flex: none; width: 34px; height: 34px; border-radius: 50%; font-weight: 650; font-size: 15px;
-      display: flex; align-items: center; justify-content: center; color: var(--avatar);
-      background: color-mix(in srgb, var(--avatar) 15%, transparent); transition: transform .25s var(--ease); }
-    .msg.collapsed .avatar { transform: scale(.86); }
-    .avatar.photo { background-size: cover; background-position: center; cursor: zoom-in; }
-    .who { flex: 1; min-width: 0; }
-    .line1 { display: flex; gap: 8px; align-items: baseline; white-space: nowrap; min-width: 0; }
-    .line1 > span { overflow: hidden; text-overflow: ellipsis; }
-    .name { font-weight: 600; flex: none; max-width: 50%; }
-    .msg.unread .name::after { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
-      background: var(--accent); margin: 0 0 2px 7px; vertical-align: middle; }
-    .email { color: var(--faint); font-size: 12px; flex: 0 1 auto; }
-    .msg.expanded .email:hover { color: var(--accent); }
-    .recipients { color: var(--muted); font-size: 12px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis;
-      white-space: nowrap; }
-    .snippet { color: var(--muted); font-size: 13px; flex: 1 1 auto; min-width: 0; }
-    .msg.expanded .snippet, .msg.collapsed .recipients, .msg.collapsed .email { display: none; }
-    .meta { flex: none; display: flex; align-items: center; gap: 6px; }
-    .date { color: var(--faint); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-    .actions { display: flex; gap: 0; opacity: 0; transform: translateX(4px);
-      transition: opacity .16s var(--ease), transform .16s var(--ease); }
-    .msg.expanded .msg-head:hover .actions, .msg.expanded .actions:focus-within { opacity: 1; transform: none; }
-    .msg.collapsed .actions { display: none; }
-    .actions button { padding: 4px 6px; color: var(--muted); }
-    .actions button:hover { color: var(--text); }
-    /* Folds animate only their row track; the fade runs on the fixed-size content inside, so the
-       compositor blends it instead of repainting a layer that resizes every frame. */
-    .fold { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .32s var(--ease); }
-    .msg.collapsed .fold { grid-template-rows: 0fr; }
-    .fold-inner { min-height: 0; overflow: hidden; }
-    .fold-content { transition: opacity .24s var(--ease); }
-    .msg.collapsed .fold-content { opacity: 0; }
-    .msg-body { padding: 4px 0 22px 40px; overflow-wrap: anywhere; }
-    .mail-frame { display: block; width: 100%; border: 0; height: 60px; background: transparent; }
-    @media (prefers-color-scheme: dark) {
-      .mail-frame { background: #fff; border-radius: 10px; padding: 14px 16px; box-sizing: content-box; width: calc(100% - 32px); }
-    }
-    .plain { white-space: pre-wrap; font-size: 14.5px; line-height: 1.6; }
-    .ms-plain { white-space: pre-wrap; }
-    .plain a, .ms-plain a { color: var(--accent); }
-    blockquote.ms-quote { margin: 6px 0; padding: 0 0 0 12px; border-left: 2px solid var(--line); color: var(--muted); }
-    .ms-fold-toggle { display: inline-flex; align-items: center; margin: 8px 0; padding: 0 9px; height: 18px;
-      border-radius: 9px; font-size: 12px; letter-spacing: 1px; color: var(--muted); background: var(--chip);
-      transition: background-color .15s var(--ease); }
-    .ms-fold-toggle:hover { background: var(--line); }
-    .ms-fold-toggle.block { display: flex; width: fit-content; }
-    .ms-folded { display: none !important; }
-    .error { color: #d70015; font-size: 13px; padding: 8px 0; }
-    .skeleton i { display: block; height: 9px; border-radius: 5px; margin: 10px 0; background: var(--chip);
-      animation: pulse 1.4s ease-in-out infinite; }
-    .skeleton i:nth-child(2) { width: 88%; animation-delay: .15s; }
-    .skeleton i.short { width: 55%; animation-delay: .3s; }
-    @keyframes pulse { 50% { opacity: .4; } }
-    .attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 0 22px 40px; margin-top: -8px; }
-    .attachments:empty { display: none; }
-    .att { display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 6px; border-radius: 10px;
-      border: 1px solid var(--line); max-width: 280px; cursor: default; transition: background-color .15s var(--ease); }
-    .att:hover { background: var(--hover); }
-    .att .thumb { width: 34px; height: 34px; border-radius: 7px; flex: none; background: var(--chip);
-      display: flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 700;
-      color: var(--muted); overflow: hidden; text-transform: uppercase; }
-    .att .thumb img { width: 100%; height: 100%; object-fit: cover; }
-    .att .meta-a { min-width: 0; }
-    .att .fname { font-size: 12.5px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .att .fsize { font-size: 11px; color: var(--muted); }
-    .att .save { margin-left: 2px; padding: 2px 7px; color: var(--muted); }
-    /* Chat layout: a flat log, one row per message, no cards or folds. */
-    main.chat { border-top: 0; }
-    .day { display: flex; align-items: center; gap: 12px; margin: 16px 0 6px; font-size: 11.5px; font-weight: 600;
-      color: var(--muted); user-select: none; -webkit-user-select: none; }
-    .day::before, .day::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-    .msg.chat { position: relative; display: flex; gap: 12px; margin: 0 -10px; padding: 8px 10px 6px;
-      border: 0; border-radius: 10px; scroll-margin-top: 14px; transition: background-color .15s var(--ease); }
-    .msg.chat.continued { padding-top: 2px; }
-    .msg.chat:hover { background: var(--hover); }
-    .chat-gutter { flex: none; width: 34px; display: flex; justify-content: center; }
-    .chat-time { font-size: 10.5px; line-height: 22px; color: var(--faint); white-space: nowrap;
-      font-variant-numeric: tabular-nums; opacity: 0; transition: opacity .15s var(--ease); }
-    .msg.chat.continued:hover .chat-time, .msg.chat.continued.unread .chat-time { opacity: 1; }
-    .msg.chat.continued.unread .chat-time { color: var(--accent); font-weight: 600; }
-    .chat-main { flex: 1; min-width: 0; }
-    .chat-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; margin-bottom: 1px; }
-    .chat-head .name { max-width: 60%; overflow: hidden; text-overflow: ellipsis; }
-    .chat-head .icon.star { align-self: center; }
-    .chat-head .recipients { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--faint); }
-    .msg.chat .msg-body { padding: 0 0 2px; }
-    .msg.chat .plain { font-size: 14px; line-height: 1.55; }
-    .msg.chat .attachments { padding: 8px 0 4px; margin: 0; }
-    .msg.chat .actions { position: absolute; top: -10px; right: 10px; padding: 1px; border-radius: 8px;
-      border: 1px solid var(--line); background: var(--bg); box-shadow: 0 2px 10px rgba(0,0,0,.08); pointer-events: none; }
-    .msg.chat:hover .actions, .msg.chat .actions:focus-within { opacity: 1; transform: none; pointer-events: auto; }
-    .reply-dock { position: sticky; bottom: 0; margin-top: auto; padding: 28px 0 20px;
-      background: linear-gradient(to bottom, transparent, var(--bg) 38%); animation: rise .5s var(--ease) .08s both; }
-    /* The pill bar folds away as the composer unfolds in its place, both on the same curve. */
-    .fold-y { display: grid; transition: grid-template-rows .38s var(--ease); }
-    .fold-clip { min-height: 0; overflow: hidden; padding: 6px 4px 16px; margin: -6px -4px -16px; }
-    .bar-fold { grid-template-rows: 1fr; }
-    .composer-fold { grid-template-rows: 0fr; pointer-events: none; }
-    .reply-dock.composing .bar-fold { grid-template-rows: 0fr; pointer-events: none; }
-    .reply-dock.composing .composer-fold { grid-template-rows: 1fr; pointer-events: auto; }
-    .dock-bar { display: flex; gap: 6px; align-items: center; transition: opacity .24s var(--ease); }
-    .reply-dock.composing .dock-bar { opacity: 0; }
-    .reply-pill { flex: 1; display: flex; align-items: center; gap: 9px; height: 38px; padding: 0 16px;
-      border-radius: 19px; border: 1px solid var(--line); background: var(--bg); color: var(--muted);
-      font-size: 13px; font-weight: 450; text-align: left;
-      box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 6px 20px rgba(0,0,0,.06); }
-    .reply-pill:hover { background: var(--bg); color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
-      box-shadow: 0 1px 2px rgba(0,0,0,.05), 0 8px 26px rgba(0,0,0,.09); }
-    .reply-pill .icon { color: var(--accent); }
-    .reply-dock.sent .reply-pill { color: #248a3d; border-color: color-mix(in srgb, #34c759 45%, var(--line)); }
-    .reply-dock.sent .reply-pill .icon { color: #34c759; }
-    .dock-icon { width: 38px; height: 38px; padding: 0; border-radius: 50%; display: flex; align-items: center;
-      justify-content: center; color: var(--muted); border: 1px solid var(--line); background: var(--bg); }
-    .dock-icon:hover { color: var(--text); background: var(--bg); border-color: var(--faint); }
-    .composer { display: flex; flex-direction: column; max-height: min(62vh, 560px); border-radius: 14px;
-      border: 1px solid var(--line); background: var(--bg);
-      box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 10px 32px rgba(0,0,0,.09);
-      transform: translateY(12px) scale(.985); transform-origin: 50% 100%; opacity: 0;
-      transition: transform .4s var(--ease), opacity .24s var(--ease), border-color .15s var(--ease); }
-    .reply-dock.composing .composer { transform: none; opacity: 1; }
-    .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
-    .c-head { display: flex; align-items: center; gap: 2px; padding: 7px 6px 0 14px; font-size: 12.5px; color: var(--muted); }
-    .c-mode { display: flex; color: var(--accent); margin-right: 8px; }
-    .c-mode .icon:last-child, .reply-dock.all .c-mode .icon:first-child { display: none; }
-    .reply-dock.all .c-mode .icon:last-child { display: block; }
-    .c-to { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .c-to b { font-weight: 550; color: var(--text); }
-    .c-label { color: var(--faint); margin-right: 5px; }
-    .c-label:not(:first-child) { margin-left: 12px; }
-    .c-pending { display: inline-block; width: 120px; height: 9px; border-radius: 5px; background: var(--chip);
-      vertical-align: middle; animation: pulse 1.4s ease-in-out infinite; }
-    .c-btn { padding: 5px 7px; color: var(--muted); }
-    .c-btn:hover { color: var(--text); }
-    .c-btn.on { color: var(--accent); }
-    .c-btn[hidden], .c-quote[hidden] { display: none; }
-    .c-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-    #c-text { display: block; width: 100%; min-height: 68px; padding: 8px 14px 6px; border: 0; outline: 0; resize: none;
-      background: transparent; color: var(--text); font: 14px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
-    #c-text::placeholder { color: var(--faint); }
-    .c-quote { padding: 0 14px 4px; }
-    .c-quote .ms-fold-toggle { padding: 0 9px; margin: 2px 0 6px; }
-    .c-quote-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .32s var(--ease); }
-    .c-quote.open .c-quote-fold { grid-template-rows: 1fr; }
-    .c-quote-fold > div { min-height: 0; overflow: hidden; }
-    .c-quote-body { padding: 2px 0 8px 12px; border-left: 2px solid var(--line); opacity: 0;
-      transition: opacity .22s var(--ease); }
-    .c-quote.open .c-quote-body { opacity: 1; }
-    .c-quote-attr { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
-    .c-foot { display: flex; align-items: center; gap: 10px; padding: 6px 8px 8px 14px; }
-    .c-status { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden;
-      text-overflow: ellipsis; }
-    .c-status.error { color: #d70015; }
-    .c-send { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px; border-radius: 8px;
-      background: var(--accent); color: #fff; font-weight: 600; }
-    .c-send:hover { background: color-mix(in srgb, var(--accent) 86%, #000); }
-    .c-send .icon { width: 13px; height: 13px; }
-    .c-send .kbd { font-weight: 500; font-size: 11px; opacity: .72; }
-    .composer.sending .c-send { opacity: .55; pointer-events: none; }
-    .composer.sending #c-text { opacity: .6; }
-    .ms-attached-message { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; }
-    .ms-attached-headline { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-    @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
-    """
+    /// The shell page's rules, after `Design.stylesheet`'s tokens (`WebShell.page`), by component.
+    /// Order matters where selectors tie: `.banner button` beats `button:hover`, `.c-status` keeps
+    /// its size over `.error`, and the chat dock overrides the reply dock.
+    static let css = [Style.base, Style.header, Style.messages, Style.mailContent, Style.attachments, Style.chatLog,
+                      Style.replyDock, Style.composer, Style.reducedMotion].joined(separator: "\n")
 
-    /// Injected into every HTML mail frame. The frame stays transparent so a body takes on its
-    /// card's surface (the chat hover tint; in dark mode the frame's own white card).
-    private static let frameCSS = """
-    html, body { height: auto !important; min-height: 0 !important; }
-    body { margin: 0; padding: 2px 0; color: #1d1d1f;
-      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; overflow-wrap: break-word; }
-    img { max-width: 100%; }
-    pre { white-space: pre-wrap; }
-    .ms-plain { white-space: pre-wrap; }
-    blockquote.ms-quote { margin: 6px 0; padding-left: 12px; border-left: 3px solid #d2d2d7; color: #6e6e73; }
-    .ms-fold-toggle { display: inline-block; margin: 8px 0; padding: 0 10px; height: 18px; line-height: 16px;
-      border-radius: 9px; font: 13px -apple-system; letter-spacing: 1px; color: #6e6e73; background: #f0f0f2;
-      border: 1px solid #e0e0e4; cursor: default; }
-    .ms-folded { display: none !important; }
-    .ms-fold-toggle.block { display: block; width: fit-content; }
-    .ms-attached-message { margin-top: 14px; padding: 10px 12px; border: 1px solid #e0e0e4; border-radius: 8px; }
-    .ms-attached-headline { font-size: 12px; color: #6e6e73; margin-bottom: 8px; }
-    """
+    /// Every value comes from a `Design` token, except geometry (pill and circle radii, offsets),
+    /// keyframe loops and stagger delays, the white card under HTML mail in dark mode, and the
+    /// black the Send button mixes in to darken on hover.
+    private enum Style {
+        static let base = """
+        * { box-sizing: border-box; }
+        html, body { margin: 0; background: var(--bg); color: var(--text); font: var(--size-reading)/1.5 var(--font-ui);
+          -webkit-font-smoothing: antialiased; }
+        .column { max-width: 720px; margin: 0 auto; padding: 30px 28px 0; min-height: 100vh;
+          display: flex; flex-direction: column; }
+        /* The native view handles the fade; the page only settles, so text is legible from the first frame. */
+        @keyframes rise { from { opacity: .35; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+        @keyframes settle { from { transform: translateY(6px); } to { transform: none; } }
+        @keyframes pulse { 50% { opacity: .4; } }
+        button { font: inherit; font-size: var(--size-footnote); font-weight: 550; color: var(--text); background: transparent;
+          border: 0; border-radius: var(--radius-control); padding: 4px 10px; cursor: default;
+          transition: background-color var(--dur-quick) var(--ease), color var(--dur-quick) var(--ease),
+            transform var(--dur-quick) var(--ease); }
+        button:hover { background: var(--hover); }
+        button:active { transform: scale(.96); }
+        .icon { width: 15px; height: 15px; display: block; flex: none; }
+        .icon.star { color: var(--star); width: 12px; height: 12px; }
+        .avatar { flex: none; width: 34px; height: 34px; border-radius: 50%; font-weight: 650; font-size: var(--size-headline);
+          display: flex; align-items: center; justify-content: center; color: var(--avatar);
+          background: color-mix(in srgb, var(--avatar) 15%, transparent); transition: transform var(--dur-brief) var(--ease); }
+        .avatar.photo { background-size: cover; background-position: center; cursor: zoom-in; }
+        .error { color: var(--danger); font-size: var(--size-body); padding: 8px 0; }
+        .skeleton i { display: block; height: 9px; border-radius: 5px; margin: 10px 0; background: var(--chip);
+          animation: pulse 1.4s ease-in-out infinite; }
+        .skeleton i:nth-child(2) { width: 88%; animation-delay: .15s; }
+        .skeleton i.short { width: 55%; animation-delay: .3s; }
+        """
+
+        /// The title, its metadata line and the remote content banner.
+        static let header = """
+        .thread-header { margin: 0 0 18px; animation: settle var(--dur-long) var(--ease) both; }
+        .thread-header h1 { font-family: var(--font-serif); font-size: var(--size-display); line-height: 1.22;
+          font-weight: 600; letter-spacing: -.012em; margin: 0 0 9px; overflow-wrap: anywhere; }
+        .thread-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: var(--size-footnote);
+          color: var(--muted); }
+        .thread-meta .sep { font-style: normal; color: var(--faint); }
+        .meta-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+        .mark { display: inline-block; background: var(--tint); }
+        .mark.dot { width: 6px; height: 6px; border-radius: 50%; }
+        .mark.bar { width: 2.5px; height: 11px; border-radius: var(--radius-small); }
+        .meta-wait:not([hidden]) { display: contents; }
+        .meta-resolve { padding: 1px 8px; margin-left: 2px; font-size: var(--size-caption); font-weight: 550; color: var(--accent);
+          background: color-mix(in srgb, var(--accent) 11%, transparent); }
+        .meta-resolve:hover { background: color-mix(in srgb, var(--accent) 19%, transparent); }
+        .banner { display: flex; align-items: center; gap: 12px; margin: 0 0 14px; padding: 7px 8px 7px 14px;
+          border-radius: var(--radius-card); font-size: var(--size-footnote); color: var(--muted); background: var(--chip);
+          animation: rise var(--dur-standard) var(--ease) both; }
+        .banner[hidden] { display: none; }
+        .banner span { flex: 1; }
+        .banner button { color: var(--accent); background: var(--bg); }
+        """
+
+        /// A mail thread's message cards, their folds and bodies.
+        static let messages = """
+        main { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+        .msg { border-bottom: 1px solid var(--line); animation: rise var(--dur-standard) var(--ease) both; }
+        .msg-head { display: flex; gap: 12px; align-items: center; cursor: default; padding: 10px 6px;
+          margin: 0 -6px; border-radius: var(--radius-control); user-select: none; -webkit-user-select: none;
+          transition: background-color var(--dur-quick) var(--ease); }
+        .msg.collapsed .msg-head:hover { background: var(--hover); }
+        .msg.expanded .msg-head { padding-top: 18px; align-items: flex-start; }
+        .msg.collapsed .avatar { transform: scale(.86); }
+        .who { flex: 1; min-width: 0; }
+        .line1 { display: flex; gap: 8px; align-items: baseline; white-space: nowrap; min-width: 0; }
+        .line1 > span { overflow: hidden; text-overflow: ellipsis; }
+        .name { font-weight: 600; flex: none; max-width: 50%; }
+        .msg.unread .name::after { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+          background: var(--accent); margin: 0 0 2px 7px; vertical-align: middle; }
+        .email { color: var(--faint); font-size: var(--size-footnote); flex: 0 1 auto; }
+        .msg.expanded .email:hover { color: var(--accent); }
+        .recipients { color: var(--muted); font-size: var(--size-footnote); margin-top: 1px; overflow: hidden;
+          text-overflow: ellipsis; white-space: nowrap; }
+        .snippet { color: var(--muted); font-size: var(--size-body); flex: 1 1 auto; min-width: 0; }
+        .msg.expanded .snippet, .msg.collapsed .recipients, .msg.collapsed .email { display: none; }
+        .meta { flex: none; display: flex; align-items: center; gap: 6px; }
+        .date { color: var(--faint); font-size: var(--size-footnote); white-space: nowrap; font-variant-numeric: tabular-nums; }
+        .actions { display: flex; gap: 0; opacity: 0; transform: translateX(4px);
+          transition: opacity var(--dur-quick) var(--ease), transform var(--dur-quick) var(--ease); }
+        .msg.expanded .msg-head:hover .actions, .msg.expanded .actions:focus-within { opacity: 1; transform: none; }
+        .msg.collapsed .actions { display: none; }
+        .actions button { padding: 4px 6px; color: var(--muted); }
+        .actions button:hover { color: var(--text); }
+        /* Folds animate only their row track; the fade runs on the fixed-size content inside, so the
+           compositor blends it instead of repainting a layer that resizes every frame. */
+        .fold { display: grid; grid-template-rows: 1fr; transition: grid-template-rows var(--dur-standard) var(--ease); }
+        .msg.collapsed .fold { grid-template-rows: 0fr; }
+        .fold-inner { min-height: 0; overflow: hidden; }
+        .fold-content { transition: opacity var(--dur-brief) var(--ease); }
+        .msg.collapsed .fold-content { opacity: 0; }
+        .msg-body { padding: 4px 0 22px 40px; overflow-wrap: anywhere; }
+        .mail-frame { display: block; width: 100%; border: 0; height: 60px; background: transparent; }
+        /* HTML mail is written for a light page, so in dark mode it sits on a white card. */
+        @media (prefers-color-scheme: dark) {
+          .mail-frame { background: #fff; border-radius: var(--radius-card); padding: 14px 16px; box-sizing: content-box;
+            width: calc(100% - 32px); }
+        }
+        .plain { white-space: pre-wrap; font-size: var(--size-reading); line-height: 1.6; }
+        .plain a, .ms-plain a { color: var(--accent); }
+        """
+
+        /// Markup the app puts in message bodies, styled alike in the page and in HTML mail frames.
+        static let mailContent = """
+        .ms-plain { white-space: pre-wrap; }
+        blockquote.ms-quote { margin: 6px 0; padding: 0 0 0 12px; border-left: 2px solid var(--line); color: var(--muted); }
+        .ms-fold-toggle { display: inline-flex; align-items: center; margin: 8px 0; padding: 0 9px; height: 18px;
+          border-radius: 9px; font-family: var(--font-ui); font-size: var(--size-footnote); letter-spacing: 1px;
+          color: var(--muted); background: var(--chip); cursor: default; transition: background-color var(--dur-quick) var(--ease); }
+        .ms-fold-toggle:hover { background: var(--line); }
+        .ms-fold-toggle.block { display: flex; width: fit-content; }
+        .ms-folded { display: none !important; }
+        .ms-attached-message { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-card); }
+        .ms-attached-headline { font-size: var(--size-footnote); color: var(--muted); margin-bottom: 8px; }
+        """
+
+        static let attachments = """
+        .attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 0 22px 40px; margin-top: -8px; }
+        .attachments:empty { display: none; }
+        .att { display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 6px; border-radius: var(--radius-card);
+          border: 1px solid var(--line); max-width: 280px; cursor: default; transition: background-color var(--dur-quick) var(--ease); }
+        .att:hover { background: var(--hover); }
+        .att.disabled { opacity: .55; }
+        .att .thumb { width: 34px; height: 34px; border-radius: var(--radius-control); flex: none; background: var(--chip);
+          display: flex; align-items: center; justify-content: center; font-size: var(--size-micro); font-weight: 700;
+          color: var(--muted); overflow: hidden; text-transform: uppercase; }
+        .att .thumb img { width: 100%; height: 100%; object-fit: cover; }
+        .att .meta-a { min-width: 0; }
+        .att .fname { font-size: var(--size-footnote); font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .att .fsize { font-size: var(--size-caption); color: var(--muted); }
+        .att .save { margin-left: 2px; padding: 2px 7px; color: var(--muted); }
+        """
+
+        /// A chat log, a mail thread's or a chat space's: a flat list, one row per message, no cards or folds.
+        static let chatLog = """
+        main.chat, main.chat-space { border-top: 0; }
+        .day { display: flex; align-items: center; gap: 12px; margin: 16px 0 6px; font-size: var(--size-caption); font-weight: 600;
+          color: var(--muted); user-select: none; -webkit-user-select: none; }
+        .day::before, .day::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+        .day.new { color: var(--accent); }
+        .day.new::before, .day.new::after { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+        .msg.chat { position: relative; display: flex; gap: 12px; margin: 0 -10px; padding: 8px 10px 6px;
+          border: 0; border-radius: var(--radius-card); scroll-margin-top: 14px;
+          transition: background-color var(--dur-quick) var(--ease); }
+        .msg.chat.continued { padding-top: 2px; }
+        .msg.chat:hover { background: var(--hover); }
+        .msg.static { animation: none; }
+        .chat-gutter { flex: none; width: 34px; display: flex; justify-content: center; }
+        .chat-time { font-size: var(--size-micro); line-height: 22px; color: var(--faint); white-space: nowrap;
+          font-variant-numeric: tabular-nums; opacity: 0; transition: opacity var(--dur-quick) var(--ease); }
+        .msg.chat.continued:hover .chat-time, .msg.chat.continued.unread .chat-time { opacity: 1; }
+        .msg.chat.continued.unread .chat-time { color: var(--accent); font-weight: 600; }
+        .chat-main { flex: 1; min-width: 0; }
+        .chat-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; margin-bottom: 1px; }
+        .chat-head .name { max-width: 60%; overflow: hidden; text-overflow: ellipsis; }
+        .chat-head .icon.star { align-self: center; }
+        .chat-head .recipients { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--faint); }
+        .msg.chat .msg-body { padding: 0 0 2px; }
+        .msg.chat .plain { line-height: 1.55; }
+        .msg.chat .attachments { padding: 8px 0 4px; margin: 0; }
+        .msg.chat .actions { position: absolute; top: -10px; right: 10px; padding: 1px; border-radius: var(--radius-control);
+          border: 1px solid var(--line); background: var(--bg); box-shadow: var(--shadow-popover); pointer-events: none; }
+        .msg.chat:hover .actions, .msg.chat .actions:focus-within { opacity: 1; transform: none; pointer-events: auto; }
+        .msg.chat.threaded .chat-text { padding-left: 10px; }
+        .msg.chat.pending .chat-main { opacity: .55; }
+        .msg.chat.failed .chat-text { color: var(--muted); }
+        .chat-log { display: flex; flex-direction: column; }
+        .chat-item { display: flex; flex-direction: column; }
+        .chat-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--size-reading); line-height: 1.55; }
+        .chat-text a { color: var(--accent); }
+        .chat-text code { font: var(--size-footnote) var(--font-mono); padding: 1px 4px; border-radius: var(--radius-small);
+          background: var(--chip); }
+        .chat-text pre { font: var(--size-footnote)/1.5 var(--font-mono); margin: 4px 0; padding: 8px 10px;
+          border-radius: var(--radius-control); background: var(--chip); white-space: pre-wrap; }
+        .chat-text .mention { color: var(--accent); font-weight: 550; }
+        .chat-card { color: var(--muted); font-style: italic; }
+        .chat-edited { color: var(--faint); font-size: var(--size-caption); white-space: nowrap; }
+        .chat-thread-ref { display: flex; gap: 5px; align-items: baseline; min-width: 0; font-size: var(--size-footnote);
+          color: var(--muted); margin: 1px 0 3px; padding-left: 8px;
+          border-left: 2px solid color-mix(in srgb, var(--accent) 45%, var(--line)); white-space: nowrap; }
+        .chat-thread-ref b { font-weight: 600; color: var(--text); }
+        .chat-thread-ref .q { overflow: hidden; text-overflow: ellipsis; min-width: 0; color: var(--faint); }
+        .chat-failed { display: flex; align-items: center; gap: 4px; margin-top: 2px; font-size: var(--size-footnote);
+          color: var(--danger); }
+        .chat-failed button { color: var(--accent); padding: 1px 6px; }
+        .chat-earlier { display: flex; justify-content: center; margin: 0 0 6px; }
+        .chat-earlier[hidden] { display: none; }
+        .chat-earlier button { color: var(--accent); }
+        .chat-status { color: var(--muted); font-size: var(--size-body); padding: 10px 0; }
+        .chat-status:empty { display: none; }
+        """
+
+        /// The dock at the column's foot: a mail thread's reply pill bar, which folds into the composer.
+        static let replyDock = """
+        .reply-dock { position: sticky; bottom: 0; margin-top: auto; padding: 28px 0 20px;
+          background: linear-gradient(to bottom, transparent, var(--bg) 38%); animation: rise var(--dur-long) var(--ease) .08s both; }
+        /* The pill bar folds away as the composer unfolds in its place, both on the same curve. */
+        .fold-y { display: grid; transition: grid-template-rows var(--dur-long) var(--ease); }
+        .fold-clip { min-height: 0; overflow: hidden; padding: 6px 4px 16px; margin: -6px -4px -16px; }
+        .bar-fold { grid-template-rows: 1fr; }
+        .composer-fold { grid-template-rows: 0fr; pointer-events: none; }
+        .reply-dock.composing .bar-fold { grid-template-rows: 0fr; pointer-events: none; }
+        .reply-dock.composing .composer-fold { grid-template-rows: 1fr; pointer-events: auto; }
+        .dock-bar { display: flex; gap: 6px; align-items: center; transition: opacity var(--dur-brief) var(--ease); }
+        .reply-dock.composing .dock-bar { opacity: 0; }
+        .reply-pill { flex: 1; display: flex; align-items: center; gap: 9px; height: 38px; padding: 0 16px;
+          border-radius: 19px; border: 1px solid var(--line); background: var(--bg); color: var(--muted);
+          font-size: var(--size-body); font-weight: 450; text-align: left; box-shadow: var(--shadow-raised); }
+        .reply-pill:hover { background: var(--bg); color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+          box-shadow: var(--shadow-lifted); }
+        .reply-pill .icon { color: var(--accent); }
+        .reply-dock.sent .reply-pill { color: var(--success); border-color: color-mix(in srgb, var(--success) 45%, var(--line)); }
+        .reply-dock.sent .reply-pill .icon { color: var(--success); }
+        .dock-icon { width: 38px; height: 38px; padding: 0; border-radius: 50%; display: flex; align-items: center;
+          justify-content: center; color: var(--muted); border: 1px solid var(--line); background: var(--bg); }
+        .dock-icon:hover { color: var(--text); background: var(--bg); border-color: var(--faint); }
+        """
+
+        /// The composer (`ReaderPage.composer`): a mail reply's, then where a chat space's differs.
+        static let composer = """
+        .composer { display: flex; flex-direction: column; max-height: min(62vh, 560px); border-radius: var(--radius-panel);
+          border: 1px solid var(--line); background: var(--bg); box-shadow: var(--shadow-floating);
+          transform: translateY(12px) scale(.985); transform-origin: 50% 100%; opacity: 0;
+          transition: transform var(--dur-long) var(--ease), opacity var(--dur-brief) var(--ease),
+            border-color var(--dur-quick) var(--ease); }
+        .reply-dock.composing .composer { transform: none; opacity: 1; }
+        .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+        .c-head { display: flex; align-items: center; gap: 2px; padding: 7px 6px 0 14px; font-size: var(--size-footnote);
+          color: var(--muted); }
+        .c-mode { display: flex; color: var(--accent); margin-right: 8px; }
+        .c-mode .icon:last-child, .reply-dock.all .c-mode .icon:first-child { display: none; }
+        .reply-dock.all .c-mode .icon:last-child { display: block; }
+        .c-to { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .c-to b { font-weight: 550; color: var(--text); }
+        .c-label { color: var(--faint); margin-right: 5px; }
+        .c-label:not(:first-child) { margin-left: 12px; }
+        .c-pending { display: inline-block; width: 120px; height: 9px; border-radius: 5px; background: var(--chip);
+          vertical-align: middle; animation: pulse 1.4s ease-in-out infinite; }
+        .c-btn { padding: 5px 7px; color: var(--muted); }
+        .c-btn:hover { color: var(--text); }
+        .c-btn.on { color: var(--accent); }
+        .c-btn[hidden], .c-quote[hidden] { display: none; }
+        .c-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+        #c-text { display: block; width: 100%; min-height: 68px; padding: 8px 14px 6px; border: 0; outline: 0; resize: none;
+          background: transparent; color: var(--text); font: var(--size-reading)/1.55 var(--font-ui); }
+        #c-text::placeholder { color: var(--faint); }
+        .c-quote { padding: 0 14px 4px; }
+        .c-quote .ms-fold-toggle { padding: 0 9px; margin: 2px 0 6px; }
+        .c-quote-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows var(--dur-standard) var(--ease); }
+        .c-quote.open .c-quote-fold { grid-template-rows: 1fr; }
+        .c-quote-fold > div { min-height: 0; overflow: hidden; }
+        .c-quote-body { padding: 2px 0 8px 12px; border-left: 2px solid var(--line); opacity: 0;
+          transition: opacity var(--dur-brief) var(--ease); }
+        .c-quote.open .c-quote-body { opacity: 1; }
+        .c-quote-attr { font-size: var(--size-footnote); color: var(--muted); margin-bottom: 6px; }
+        .c-foot { display: flex; align-items: center; gap: 10px; padding: 6px 8px 8px 14px; }
+        .c-status { flex: 1; min-width: 0; font-size: var(--size-footnote); color: var(--muted); white-space: nowrap;
+          overflow: hidden; text-overflow: ellipsis; }
+        .c-status.error { color: var(--danger); }
+        .c-send { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px; border-radius: var(--radius-control);
+          background: var(--accent); color: var(--on-accent); font-weight: 600; }
+        .c-send:hover { background: color-mix(in srgb, var(--accent) 86%, black); }
+        .c-send .icon { width: 13px; height: 13px; }
+        .c-send .kbd { font-weight: 500; font-size: var(--size-caption); opacity: .72; }
+        .composer.sending .c-send { opacity: .55; pointer-events: none; }
+        .composer.sending #c-text { opacity: .6; }
+        .chat-dock { padding-top: 18px; }
+        .chat-dock #c-text { min-height: 40px; padding-top: 10px; }
+        .chat-dock .c-head[hidden] { display: none; }
+        .chat-dock .c-status { color: var(--faint); }
+        """
+
+        static let reducedMotion = """
+        @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
+        """
+
+        /// Appended to every HTML mail frame, over the mail's own styles. The frame stays transparent
+        /// so a body takes on its card's surface (the chat hover tint; in dark mode the frame's own
+        /// white card).
+        static let frame = """
+        html, body { height: auto !important; min-height: 0 !important; }
+        body { margin: 0; padding: 2px 0; color: var(--text); font: var(--size-reading)/1.45 var(--font-ui);
+          overflow-wrap: break-word; }
+        img { max-width: 100%; }
+        pre { white-space: pre-wrap; }
+
+        """ + mailContent
+    }
 
     // MARK: - Script
 
     /// The mail thread page, run after `WebShell`'s script, whose `Shell` it uses.
     static let script = """
     (() => {
-      const { post, $, escapeHTML, show } = Shell;
-      const FRAME_CSS = \(jsString(frameCSS));
+      const { post, $, escapeHTML, show, autosize, bindComposer, focusAtEnd, interceptLinks } = Shell;
+      const FRAME_TOKENS = \(jsString(Design.stylesheet(fixedTo: .aqua)));
+      const FRAME_CSS = \(jsString(Style.frame));
+      // The reply's text field never gets shorter than this.
+      const TEXT_MIN = 68;
       // Chat threads fold signatures along with quotes.
       let chatMode = false;
       // Clears the "Reply sent" note on the composer pill.
@@ -794,17 +917,17 @@ enum ReaderPage {
       function prepareFrame(frame) {
         const doc = frame.contentDocument;
         if (!doc || !doc.documentElement) return;
+        // The tokens go first, so a mail's own custom properties of the same names keep winning in
+        // its markup; the rules go last, over the mail's.
+        const head = doc.head || doc.documentElement;
+        const tokens = doc.createElement('style');
+        tokens.textContent = FRAME_TOKENS;
+        head.insertBefore(tokens, head.firstChild);
         const style = doc.createElement('style');
         style.textContent = FRAME_CSS;
-        (doc.head || doc.documentElement).appendChild(style);
+        head.appendChild(style);
         if (doc.body) foldQuotes(doc, doc.body, () => fit(frame));
-        doc.addEventListener('click', (event) => {
-          const link = event.target.closest('a[href]');
-          if (link) {
-            event.preventDefault();
-            post({ action: 'link', href: link.href });
-          }
-        }, true);
+        interceptLinks(doc);
         let pending = false;
         const schedule = () => {
           if (pending) return;
@@ -831,12 +954,6 @@ enum ReaderPage {
         if (text) post({ action: 'reply-state', text: text.value, focused: document.activeElement === text });
       }
 
-      function growText() {
-        const text = $('c-text');
-        text.style.height = 'auto';
-        text.style.height = Math.max(68, text.scrollHeight) + 'px';
-      }
-
       function setStatus(state, message) {
         $('composer').classList.toggle('sending', state === 'sending');
         $('c-status').classList.toggle('error', state === 'error');
@@ -856,23 +973,9 @@ enum ReaderPage {
         $('dock').classList.remove('composing');
         text.blur();
         text.value = '';
-        growText();
+        autosize(text, TEXT_MIN);
         $('c-quote-wrap').classList.remove('open');
         setStatus('idle', '');
-      }
-
-      // The composer is rebuilt with every thread, so its listeners are bound per render.
-      function bindComposer() {
-        const text = $('c-text');
-        text.addEventListener('input', () => { growText(); reportReply(); });
-        text.addEventListener('focus', reportReply);
-        text.addEventListener('blur', reportReply);
-        text.addEventListener('keydown', (event) => {
-          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-            event.preventDefault();
-            post({ action: 'reply-send', text: text.value });
-          }
-        });
       }
 
       // An HTML body in an auto-sized frame, or plain text, with its quoted history folded.
@@ -903,7 +1006,12 @@ enum ReaderPage {
         render(state) {
           show(mail, state);
           chatMode = !!state.chat;
-          bindComposer();
+          // The composer is rebuilt with every thread, so its listeners are bound per render.
+          bindComposer($('c-text'), TEXT_MIN, {
+            report: reportReply,
+            isSend: (event) => event.metaKey || event.ctrlKey,
+            send: (text) => post({ action: 'reply-send', text: text.value }),
+          });
           for (const [index, payload] of state.bodies) MS.setBody(index, payload);
           if (chatMode && state.focus > 0) follow(state.focus);
         },
@@ -919,22 +1027,7 @@ enum ReaderPage {
             const rcpt = document.getElementById('rcpt-' + index);
             if (rcpt) rcpt.innerHTML = payload.recipients;
           }
-          const list = document.getElementById('att-' + index);
-          list.innerHTML = '';
-          for (const att of payload.attachments || []) {
-            const item = document.createElement('div');
-            item.className = 'att';
-            item.dataset.action = 'attachment';
-            item.dataset.index = String(index);
-            item.dataset.part = String(att.part);
-            item.title = att.name;
-            const thumb = att.thumb ? '<img src="' + escapeHTML(att.thumb) + '">' : escapeHTML(att.ext || 'file');
-            item.innerHTML = '<div class="thumb">' + thumb + '</div><div class="meta-a"><div class="fname">'
-              + escapeHTML(att.name) + '</div><div class="fsize">' + escapeHTML(att.size) + '</div></div>'
-              + '<button class="save" title="Save…" data-action="save-attachment" data-index="' + index
-              + '" data-part="' + att.part + '">↓</button>';
-            list.appendChild(item);
-          }
+          document.getElementById('att-' + index).innerHTML = payload.attachments || '';
           if (payload.remote) document.getElementById('remote-banner').hidden = false;
         },
         // A sender's picture arrived after the thread rendered.
@@ -962,14 +1055,9 @@ enum ReaderPage {
           all.title = options.all ? 'Reply to Sender Only' : 'Reply All';
           $('c-to').innerHTML = '<span class="c-label">To</span><span class="c-pending"></span>';
           if (!text.value && options.text) text.value = options.text;
-          growText();
+          autosize(text, TEXT_MIN);
           setStatus(options.sending ? 'sending' : 'idle', options.sending ? 'Sending…' : '');
-          if (options.focus) {
-            setTimeout(() => {
-              text.focus();
-              text.setSelectionRange(text.value.length, text.value.length);
-            }, 80);
-          }
+          if (options.focus) focusAtEnd(text);
         },
         setReplyInfo(info) {
           let html = '<span class="c-label">To</span><b>' + escapeHTML(info.to || '—') + '</b>';
@@ -1006,13 +1094,5 @@ enum ReaderPage {
 
     private static func jsString(_ text: String) -> String {
         String(decoding: (try? JSONEncoder().encode(text)) ?? Data("\"\"".utf8), as: UTF8.self)
-    }
-}
-
-extension NSColor {
-    nonisolated var cssHex: String {
-        guard let rgb = usingColorSpace(.sRGB) else { return "#888" }
-        return String(format: "#%02x%02x%02x", Int(rgb.redComponent * 255), Int(rgb.greenComponent * 255),
-                      Int(rgb.blueComponent * 255))
     }
 }

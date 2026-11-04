@@ -161,27 +161,18 @@ nonisolated enum ChatPage {
         for message in input.messages where !message.threadReply {
             if let thread = message.thread, starters[thread] == nil { starters[thread] = message }
         }
-        let calendar = Calendar.current
+        // The space opens on its first unread message, under a "New" line, starting a run.
+        let firstUnread = entries.first { unread.contains($0.id) }?.id
+        let runs = ReaderPage.chatRuns(entries, date: { $0.created }, sender: { $0.senderID },
+                                       opensRun: { $0.id == firstUnread })
         var items: [Item] = []
         items.reserveCapacity(entries.count)
-        var firstUnread: String?
-        var previous: Entry?
-        for entry in entries {
-            var html = "<div class=\"chat-item\" id=\"\(entry.id)\">"
-            let sameDay = previous.map { calendar.isDate($0.created, inSameDayAs: entry.created) } ?? false
-            if !sameDay { html += ReaderPage.dayDivider(entry.created, calendar: calendar) }
-            var opensUnread = false
-            if unread.contains(entry.id), firstUnread == nil {
-                firstUnread = entry.id
-                opensUnread = true
-                html += "<div class=\"day new\"><span>New</span></div>"
-            }
-            let continued = sameDay && !opensUnread && previous?.senderID == entry.senderID
-                && entry.created.timeIntervalSince(previous?.created ?? .distantPast) < ReaderPage.groupWindow
-            html += article(entry, continued: continued, unread: unread.contains(entry.id), input: input, starters: starters)
+        for (entry, run) in zip(entries, runs) {
+            var html = "<div class=\"chat-item\" id=\"\(entry.id)\">" + run.divider
+            if entry.id == firstUnread { html += "<div class=\"day new\"><span>New</span></div>" }
+            html += article(entry, continued: run.continued, unread: unread.contains(entry.id), input: input, starters: starters)
             html += "</div>"
             items.append(Item(id: entry.id, html: html))
-            previous = entry
         }
         return Input.Output(items: items, firstUnread: firstUnread)
     }
@@ -241,23 +232,23 @@ nonisolated enum ChatPage {
         if message?.threadReply == true { classes.append("threaded") }
         if let pending = entry.pending { classes.append(pending.failure == nil ? "pending" : "failed") }
         // A pending message's head says how sending goes; continued, it shows no time until sent.
-        return ReaderPage.chatMessage(classes: classes, style: "--avatar:\(Avatar.color(for: entry.senderKey).cssHex)",
+        return ReaderPage.chatMessage(classes: classes, style: "--avatar:\(Avatar.color(for: entry.senderKey).cssRGBA)",
                                       head: head, time: continued ? (entry.pending == nil ? time : "") : status ?? time,
                                       full: entry.created.formatted(date: .complete, time: .shortened),
                                       main: body, actions: actions)
     }
 
+    /// A link-only attachment, opened in the browser; one without a web link shows disabled.
     private static func attachment(_ attachment: ChatAttachment) -> String {
-        let ext = (attachment.name as NSString).pathExtension
-        let label = ext.isEmpty ? (attachment.contentType?.split(separator: "/").last.map(String.init) ?? "file") : ext
-        let inner = "<div class=\"thumb\">\(HTMLText.escape(String(label.prefix(4))))</div><div class=\"meta-a\">"
-            + "<div class=\"fname\">\(HTMLText.escape(attachment.name))</div>"
-            + "<div class=\"fsize\">\(HTMLText.escape(attachment.contentType ?? ""))</div></div>"
+        let subtype = attachment.contentType?.split(separator: "/").last.map(String.init)
+        let label = ReaderPage.attachmentLabel(pathExtension: (attachment.name as NSString).pathExtension,
+                                               fallback: subtype ?? "file")
+        let detail = attachment.contentType ?? ""
         guard let url = attachment.url, let scheme = URL(string: url)?.scheme?.lowercased(), ["http", "https"].contains(scheme) else {
-            return "<div class=\"att disabled\" title=\"\(HTMLText.escape(attachment.name))\">\(inner)</div>"
+            return ReaderPage.attachmentTile(name: attachment.name, detail: detail, label: label, disabled: true)
         }
-        return "<div class=\"att\" data-action=\"chat-open\" data-url=\"\(HTMLText.escape(url))\" "
-            + "title=\"\(HTMLText.escape(attachment.name))\">\(inner)</div>"
+        return ReaderPage.attachmentTile(name: attachment.name, detail: detail, label: label,
+                                         attributes: " data-action=\"chat-open\" data-url=\"\(HTMLText.escape(url))\"")
     }
 
     /// A DOM id for a resource name (`spaces/x/messages/y`) or pending id.
@@ -269,35 +260,24 @@ nonisolated enum ChatPage {
 
     /// Header, an empty log and the composer; the log fills in through `MS.chat.render`/`MS.chat.update`.
     static func page(title: String, kind: ChatSpaceKind, memberCount: Int, accountLabel: String, accountColor: String) -> String {
-        var meta = ["<span class=\"meta-item\">\(HTMLText.escape(kind.title))</span>",
-                    "<span class=\"meta-item\" style=\"--tint:\(HTMLText.escape(accountColor))\"><i class=\"mark bar\"></i>"
-                        + "\(HTMLText.escape(accountLabel))</span>"]
-        if kind == .group, memberCount > 0 { meta.append("<span class=\"meta-item\">\(memberCount + 1) people</span>") }
-        return """
-        <header class="thread-header">
-          <h1>\(HTMLText.escape(title))</h1>
-          <div class="thread-meta">\(meta.joined(separator: "<i class=\"sep\">·</i>"))</div>
-        </header>
+        var meta = [ReaderPage.meta(kind.title, tint: nil), ReaderPage.meta(accountLabel, tint: accountColor, mark: "bar")]
+        if kind == .group, memberCount > 0 { meta.append(ReaderPage.meta("\(memberCount + 1) people", tint: nil)) }
+        let composer = ReaderPage.composer(
+            head: """
+            <span class="c-mode">\(ReaderPage.Icon.reply)</span>
+            <div class="c-to" id="c-thread-label"></div>
+            <button class="c-btn" title="Cancel Thread Reply" data-action="chat-unthread">✕</button>
+            """,
+            headAttributes: " id=\"c-thread\" hidden", placeholder: "Message \(title)",
+            status: "Return to send · Shift-Return for a new line", send: "chat-send", sendKey: "↩")
+        return ReaderPage.threadHeader(title: title, meta: meta) + """
         <main id="thread" class="chat chat-space">
           <div id="chat-earlier" class="chat-earlier" hidden><button data-action="chat-earlier">Load earlier messages</button></div>
           <div id="chat-log" class="chat-log"></div>
           <div id="chat-status" class="chat-status"></div>
         </main>
         <footer class="reply-dock composing chat-dock" id="dock">
-          <section class="composer" id="composer">
-            <div class="c-head" id="c-thread" hidden>
-              <span class="c-mode">\(ReaderPage.Icon.reply)</span>
-              <div class="c-to" id="c-thread-label"></div>
-              <button class="c-btn" title="Cancel Thread Reply" data-action="chat-unthread">✕</button>
-            </div>
-            <div class="c-scroll">
-              <textarea id="c-text" rows="1" placeholder="Message \(HTMLText.escape(title))" spellcheck="true"></textarea>
-            </div>
-            <div class="c-foot">
-              <span class="c-status" id="c-status">Return to send · Shift-Return for a new line</span>
-              <button class="c-send" data-action="chat-send"><span>Send</span><span class="kbd">↩</span></button>
-            </div>
-          </section>
+          \(composer)
         </footer>
         """
     }
@@ -310,49 +290,13 @@ nonisolated enum ChatPage {
         return "No messages yet."
     }
 
-    static let css = """
-    main.chat-space { border-top: 0; }
-    .chat-log { display: flex; flex-direction: column; }
-    .chat-item { display: flex; flex-direction: column; }
-    .msg.static { animation: none; }
-    .chat-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.55; }
-    .chat-text a { color: var(--accent); }
-    .chat-text code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 4px; border-radius: 4px;
-      background: var(--chip); }
-    .chat-text pre { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 4px 0; padding: 8px 10px;
-      border-radius: 8px; background: var(--chip); white-space: pre-wrap; }
-    .chat-text .mention { color: var(--accent); font-weight: 550; }
-    .chat-card { color: var(--muted); font-style: italic; }
-    .chat-edited { color: var(--faint); font-size: 11px; white-space: nowrap; }
-    .chat-thread-ref { display: flex; gap: 5px; align-items: baseline; min-width: 0; font-size: 12px; color: var(--muted);
-      margin: 1px 0 3px; padding-left: 8px; border-left: 2px solid color-mix(in srgb, var(--accent) 45%, var(--line));
-      white-space: nowrap; }
-    .chat-thread-ref b { font-weight: 600; color: var(--text); }
-    .chat-thread-ref .q { overflow: hidden; text-overflow: ellipsis; min-width: 0; color: var(--faint); }
-    .msg.chat.threaded .chat-text { padding-left: 10px; }
-    .msg.chat.pending .chat-main { opacity: .55; }
-    .msg.chat.failed .chat-text { color: var(--muted); }
-    .chat-failed { display: flex; align-items: center; gap: 4px; margin-top: 2px; font-size: 12px; color: #d70015; }
-    .chat-failed button { color: var(--accent); padding: 1px 6px; }
-    .day.new { color: var(--accent); }
-    .day.new::before, .day.new::after { background: color-mix(in srgb, var(--accent) 45%, transparent); }
-    .chat-earlier { display: flex; justify-content: center; margin: 0 0 6px; }
-    .chat-earlier[hidden] { display: none; }
-    .chat-earlier button { color: var(--accent); }
-    .chat-status { color: var(--muted); font-size: 13px; padding: 10px 0; }
-    .chat-status:empty { display: none; }
-    .att.disabled { opacity: .55; }
-    .chat-dock { padding-top: 18px; }
-    .chat-dock #c-text { min-height: 40px; padding-top: 10px; }
-    .chat-dock .c-head[hidden] { display: none; }
-    .chat-dock .c-status { color: var(--faint); }
-    """
-
     /// The chat space page, run after `WebShell`'s script, whose `Shell` it uses: `MS.chat.render`
     /// puts a space in the column, `MS.chat.update` applies the log's changes.
     static let script = """
     (() => {
-      const { post, $, escapeHTML, show } = Shell;
+      const { post, $, escapeHTML, show, autosize, bindComposer, focusAtEnd } = Shell;
+      // The message field never gets shorter than this.
+      const TEXT_MIN = 40;
       // The thread the next message replies in, set from a message's reply button.
       let thread = null, who = null, positioned = false;
 
@@ -390,34 +334,14 @@ nonisolated enum ChatPage {
                          focused: document.activeElement === text });
       }
 
-      function grow() {
-        const text = $('c-text');
-        text.style.height = 'auto';
-        text.style.height = Math.max(40, text.scrollHeight) + 'px';
-      }
-
       function send() {
         const text = $('c-text');
         if (!text.value.trim()) return;
         post({ action: 'chat-send', text: text.value, thread: thread || '' });
         text.value = '';
-        grow();
+        autosize(text, TEXT_MIN);
         setThread(null, null);
         report();
-      }
-
-      function bindComposer() {
-        const text = $('c-text');
-        text.addEventListener('input', () => { grow(); report(); });
-        text.addEventListener('focus', report);
-        text.addEventListener('blur', report);
-        // Return sends, Shift-Return breaks the line; an input method's Return only commits its text.
-        text.addEventListener('keydown', (event) => {
-          if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.isComposing && event.keyCode !== 229) {
-            event.preventDefault();
-            send();
-          }
-        });
       }
 
       function fragment(html) {
@@ -456,17 +380,19 @@ nonisolated enum ChatPage {
           show(space, state);
           $('chat-log').innerHTML = state.log;
           chrome(state);
-          bindComposer();
           const text = $('c-text');
+          // Return sends, Shift-Return breaks the line; an input method's Return only commits its text.
+          bindComposer(text, TEXT_MIN, {
+            report,
+            isSend: (event) => !event.shiftKey && !event.altKey && !event.isComposing && event.keyCode !== 229,
+            send,
+          });
           text.value = state.draft.text || '';
-          grow();
+          autosize(text, TEXT_MIN);
           setThread(state.draft.thread, state.draft.who);
           positioned = false;
           if (state.log) position(state.focus);
-          setTimeout(() => {
-            text.focus();
-            text.setSelectionRange(text.value.length, text.value.length);
-          }, 80);
+          focusAtEnd(text);
         },
         // New messages append (and slide in); changed ones are replaced in place; anything else
         // replaces the log, keeping what is on screen where it was.

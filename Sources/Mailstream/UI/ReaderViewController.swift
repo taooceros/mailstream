@@ -228,10 +228,9 @@ final class ReaderViewController: NSViewController, WebShellClient {
         for card in cards where card.expanded {
             guard let content = store.contents.loaded(card.message.ref) else { continue }
             loaded.insert(card.index)
-            bodies.append([card.index, payload(for: content, message: card.message)])
+            bodies.append([card.index, payload(for: content, message: card.message, index: card.index)])
         }
-        shell.render("MS.render", ["accent": NSColor.controlAccentColor.cssHex, "html": html, "chat": chat,
-                                   "focus": focus, "bodies": bodies])
+        shell.render("MS.render", ["html": html, "chat": chat, "focus": focus, "bodies": bodies])
         if reply != nil { presentReply(focus: false) }
         // Collapsed messages load in the background so their previews fill in and expanding is instant.
         for card in cards { load(card.index, priority: card.expanded ? .interactive : .background) }
@@ -244,7 +243,8 @@ final class ReaderViewController: NSViewController, WebShellClient {
         Task {
             let payload: [String: Any]
             do {
-                payload = self.payload(for: try await store.contents.load(message.ref, priority: priority), message: message)
+                payload = self.payload(for: try await store.contents.load(message.ref, priority: priority), message: message,
+                                       index: index)
             } catch {
                 payload = ["kind": "error", "content": "Could not load this message: \(error.localizedDescription)"]
             }
@@ -253,26 +253,29 @@ final class ReaderViewController: NSViewController, WebShellClient {
         }
     }
 
-    private func payload(for loaded: LoadedContent, message: MailMessage) -> [String: Any] {
+    /// What `MS.setBody` shows for message `index`; the reply's quote (`index` nil) shows no attachments.
+    private func payload(for loaded: LoadedContent, message: MailMessage, index: Int?) -> [String: Any] {
         let content = loaded.content
         var payload: [String: Any] = [
             "recipients": ReaderPage.recipients(message.envelope.to, cc: content.cc, own: store.ownAddresses),
             "snippet": content.snippet,
-            "attachments": content.attachments.map { attachment -> [String: Any] in
-                let url = store.cache.attachmentURL(attachment, of: message.ref)
-                var item: [String: Any] = [
-                    "part": attachment.part,
-                    "name": attachment.filename,
-                    "size": ByteCountFormatter.string(fromByteCount: Int64(attachment.size), countStyle: .file),
-                    "ext": url.pathExtension.isEmpty ? "file" : String(url.pathExtension.prefix(4)),
-                ]
-                if attachment.mime.hasPrefix("image/") {
-                    item["thumb"] = store.cache.partURLBase(message.ref)
-                        + (attachment.storedName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? "")
-                }
-                return item
-            },
         ]
+        if let index {
+            payload["attachments"] = content.attachments.map { attachment -> String in
+                let url = store.cache.attachmentURL(attachment, of: message.ref)
+                let thumb = attachment.mime.hasPrefix("image/")
+                    ? store.cache.partURLBase(message.ref)
+                        + (attachment.storedName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? "")
+                    : nil
+                let data = " data-index=\"\(index)\" data-part=\"\(attachment.part)\""
+                return ReaderPage.attachmentTile(
+                    name: attachment.filename,
+                    detail: ByteCountFormatter.string(fromByteCount: Int64(attachment.size), countStyle: .file),
+                    label: ReaderPage.attachmentLabel(pathExtension: url.pathExtension, fallback: "file"), thumb: thumb,
+                    attributes: " data-action=\"attachment\"" + data,
+                    trailing: "<button class=\"save\" title=\"Save…\" data-action=\"save-attachment\"\(data)>↓</button>")
+            }.joined()
+        }
         if loaded.isHTML {
             payload["kind"] = "html"
             payload["content"] = allowRemote ? loaded.body : ReaderPage.blockingRemoteContent(loaded.body)
@@ -337,9 +340,8 @@ final class ReaderViewController: NSViewController, WebShellClient {
         case "resolve":
             if let conversation { store.tagging.setWaiting(conversation, waiting: false) }
         case "avatar":
-            guard let target, let from = target.envelope.from.first, let rect = body["rect"] as? [Double], rect.count == 4
-            else { return }
-            shell.showAvatar(of: store.withIdentityName(from), automated: isAutomated, at: rect)
+            guard let target, let from = target.envelope.from.first else { return }
+            shell.showAvatar(of: store.withIdentityName(from), automated: isAutomated, from: body)
         case "compose-to":
             if let email = body["email"] as? String, !email.isEmpty {
                 delegate?.reader(self, composeTo: Address(name: nil, email: email))
@@ -445,7 +447,7 @@ final class ReaderViewController: NSViewController, WebShellClient {
         Task {
             guard let content = try? await store.contents.load(source.ref), generation == shell.generation,
                   self.reply?.source.ref == source.ref else { return }
-            var quote = payload(for: content, message: source)
+            var quote = payload(for: content, message: source, index: nil)
             quote["attribution"] = MailStore.attribution(for: source)
             shell.call("MS.setReplyQuote(quote)", ["quote": quote])
         }
