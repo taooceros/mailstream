@@ -101,8 +101,8 @@ listed under `settingsIssues` in `mailstream status`.
 | `chat.pollSeconds` | `20` | Google Chat polling |
 
 Every other command goes to the running app over a Unix socket,
-`~/Library/Application Support/Mailstream/control.sock` (mode 0600; only your own
-processes are answered), and starts the app in the background if it is not
+`~/Library/Application Support/Mailstream/control.sock` (mode 0600 in that directory, which the
+app keeps at 0700, so only your own processes reach it), and starts the app in the background if it is not
 running. The protocol is one JSON line each way:
 `{"command": "mail.list", "args": {"unread": true}}` →
 `{"ok": true, "result": …}` or `{"ok": false, "error": {"code", "message"}}`.

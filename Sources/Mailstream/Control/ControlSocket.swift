@@ -1,9 +1,10 @@
 import Foundation
 import Network
 
-/// The app's control socket: `~/Library/Application Support/Mailstream/control.sock`, mode 0600,
-/// so only the user's own processes reach it. One request per connection: the client writes one
-/// JSON object and a newline, the app answers with one JSON object and closes.
+/// The app's control socket: `~/Library/Application Support/Mailstream/control.sock`, mode 0600
+/// inside that directory made 0700, so only the user's own processes reach it. One request per
+/// connection: the client writes one JSON object and a newline, the app answers with one JSON
+/// object and closes.
 ///
 /// Request: `{"command": "mail.list", "args": {…}}`.
 /// Answer: `{"ok": true, "result": …}` or `{"ok": false, "error": {"code": …, "message": …}}`.
@@ -92,11 +93,14 @@ nonisolated struct ControlServer: Sendable {
             return nil
         }
         try FileManager.default.createDirectory(at: SettingsFile.directory, withIntermediateDirectories: true)
+        // The kernel refuses other users at the private directory, from the moment the socket is
+        // bound: `NetworkConnection` exposes no peer credentials to check instead.
+        guard chmod(SettingsFile.directory.path, 0o700) == 0 else {
+            throw ControlError("socket", "Could not make \(SettingsFile.directory.path) private: \(String(cString: strerror(errno)))")
+        }
         unlink(ControlSocket.path)
         let listener = try NetworkListener(using: .parameters { TCP() }
             .localEndpoint(.unix(path: ControlSocket.path)))
-        // Bound with the default mode first; ~/Library is private to the user, so nobody else
-        // reaches the path before it is narrowed.
         listener.onStateUpdate { _, state in
             if case .ready = state { chmod(ControlSocket.path, 0o600) }
         }
