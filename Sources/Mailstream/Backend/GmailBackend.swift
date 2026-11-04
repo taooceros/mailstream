@@ -1,9 +1,9 @@
 import Foundation
 
 /// Gmail over its REST API. Mailbox ids are label ids plus the virtual `ALL` (All Mail: every
-/// message but spam and trash). Envelopes' immutable fields are cached by message id and their
-/// labels kept current through the mailbox history, so a refresh fetches metadata only for
-/// messages it has not seen.
+/// message but spam and trash). Envelopes' immutable fields are cached by message id on disk and
+/// their labels kept current through the mailbox history, so a refresh or a relaunch fetches
+/// metadata only for messages it has never seen.
 nonisolated final class GmailBackend: MailBackend {
     static let allMail = "ALL"
     private let api: API
@@ -11,7 +11,17 @@ nonisolated final class GmailBackend: MailBackend {
 
     init(api: API) {
         self.api = api
-        cache = GmailEnvelopeCache(api: api)
+        cache = GmailEnvelopeCache(api: api, file: Self.cacheFile(api.account))
+    }
+
+    private static func cacheFile(_ account: String) -> URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("dev.mailstream.Mailstream/gmail-envelopes-v1/\(MailCache.hash(account)).json")
+    }
+
+    /// Drops the signed-out `account`'s envelope cache, off the caller's actor.
+    @concurrent static func discardCache(account: String) async {
+        try? FileManager.default.removeItem(at: cacheFile(account))
     }
 
     private static let roles: [String: MailboxRole] = [
@@ -79,7 +89,7 @@ nonisolated final class GmailBackend: MailBackend {
 
     @concurrent func envelopes(mailbox: String, cursor: String?, pageSize: Int, priority: RequestPriority) async throws -> EnvelopePage {
         var query = Self.scope(mailbox) + [("maxResults", "\(min(max(pageSize, 1), 500))"),
-                                           ("fields", "messages(id),nextPageToken")]
+                                           ("fields", Self.listFields)]
         if let cursor { query.append(("pageToken", cursor)) }
         let (envelopes, next) = try await listing(Self.url("messages", query), priority: priority)
         return EnvelopePage(envelopes: envelopes, next: next)
@@ -87,9 +97,13 @@ nonisolated final class GmailBackend: MailBackend {
 
     @concurrent func search(mailbox: String, query: String, pageSize: Int) async throws -> [Envelope] {
         let parameters = Self.scope(mailbox) + [("q", query), ("maxResults", "\(min(max(pageSize, 1), 500))"),
-                                                ("fields", "messages(id),nextPageToken")]
+                                                ("fields", Self.listFields)]
         return try await listing(Self.url("messages", parameters), priority: .interactive).envelopes
     }
+
+    /// `resultSizeEstimate` is always present, so a list with no matches still answers `{…}`;
+    /// with only `messages` and `nextPageToken` Gmail sends an empty body, which is not JSON.
+    private static let listFields = "messages(id),nextPageToken,resultSizeEstimate"
 
     /// Lists, brings cached labels up to date meanwhile, then fills in the envelopes.
     private func listing(_ url: URL, priority: RequestPriority) async throws -> (envelopes: [Envelope], next: String?) {
@@ -297,9 +311,10 @@ private nonisolated struct GmailBody: Decodable, Sendable {
 
 /// Envelopes by message id. Immutable fields come from one metadata fetch; labels follow the
 /// mailbox history from the last history id seen, and a history too old to answer drops the
-/// cache so the next listing fetches metadata afresh.
+/// cache so the next listing fetches metadata afresh. The entries and their history id are kept
+/// on disk, so a relaunch costs one history pull instead of every listed message's metadata.
 private actor GmailEnvelopeCache {
-    private nonisolated struct Entry {
+    private nonisolated struct Entry: Codable {
         let envelope: Envelope
         var labels: Set<String>
 
@@ -313,7 +328,18 @@ private actor GmailEnvelopeCache {
         }
     }
 
+    private nonisolated struct Snapshot: Codable {
+        let historyID: UInt64
+        let entries: [String: Entry]
+    }
+
+    /// Newest messages kept on disk; older ones are fetched again if a listing reaches them.
+    private static let storedLimit = 10_000
+
     private let api: API
+    private let file: URL
+    private var loaded = false
+    private var saveScheduled = false
     private var entries: [String: Entry] = [:]
     /// Metadata fetches in flight, by the ids they fetch.
     private var loading: [String: Task<[String: Entry], any Error>] = [:]
@@ -326,13 +352,52 @@ private actor GmailEnvelopeCache {
     private var tickets = 0
     private var running: (covers: Int, task: Task<Void, any Error>)?
 
-    init(api: API) {
+    init(api: API, file: URL) {
         self.api = api
+        self.file = file
+    }
+
+    /// Reads the disk snapshot once, before anything else touches `entries`.
+    private func load() {
+        guard !loaded else { return }
+        loaded = true
+        guard let data = try? Data(contentsOf: file),
+              let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
+        historyID = snapshot.historyID
+        entries = snapshot.entries
+    }
+
+    /// Writes the snapshot a moment after a change, so a burst of changes is one write.
+    private func scheduleSave() {
+        guard !saveScheduled else { return }
+        saveScheduled = true
+        Task(name: "Gmail envelope cache save") { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            await self?.save()
+        }
+    }
+
+    private func save() {
+        saveScheduled = false
+        let fm = FileManager.default
+        guard let historyID else {
+            try? fm.removeItem(at: file)
+            return
+        }
+        var kept = entries
+        if kept.count > Self.storedLimit {
+            let newest = kept.sorted { ($0.value.envelope.date ?? .distantPast) > ($1.value.envelope.date ?? .distantPast) }
+            kept = Dictionary(uniqueKeysWithValues: newest.prefix(Self.storedLimit).map { ($0.key, $0.value) })
+        }
+        guard let data = try? JSONEncoder().encode(Snapshot(historyID: historyID, entries: kept)) else { return }
+        try? fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: file, options: .atomic)
     }
 
     /// Applies every label change and deletion since the last pull. A pull already running
     /// answers callers that arrived before it started; later ones get a pull of their own.
     func synchronize(priority: RequestPriority) async throws {
+        load()
         tickets += 1
         let ticket = tickets
         while let current = running {
@@ -398,7 +463,8 @@ private actor GmailEnvelopeCache {
                     }
                 }
                 historyID = latest
-                advance(ids)
+                // A pull that changed nothing leaves fetches in flight current.
+                if !ids.isEmpty { advance(ids) }
                 return
             }
             pageToken = next
@@ -411,6 +477,7 @@ private actor GmailEnvelopeCache {
     /// that no longer exist are left out. Ids another caller is already fetching share that
     /// fetch rather than costing quota twice.
     func envelopes(_ ids: [String], priority: RequestPriority) async throws -> [Envelope] {
+        load()
         let unknown = ids.filter { entries[$0] == nil }
         let missing = unknown.filter { loading[$0] == nil }
         if !missing.isEmpty {
@@ -431,28 +498,33 @@ private actor GmailEnvelopeCache {
             let baseline = try await GmailBackend.historyID(api: api, priority: priority)
             if historyID == nil { historyID = baseline }
         }
-        let since = generation
-        let messages = try await GmailBackend.metadata(ids, query: GmailBackend.metadataQuery, api: api,
-                                                       priority: priority)
-        // Metadata shows only the top MIME type; a multipart/mixed message has attachments
-        // only if a part carries a file name.
-        let mixed = messages.filter { $0.payload?.mimeType?.lowercased() == "multipart/mixed" }.map(\.id)
-        let withFiles = mixed.isEmpty ? [] : Set(try await GmailBackend.metadata(
-            mixed, query: GmailBackend.partsQuery, api: api, priority: priority)
-            .filter { $0.payload?.hasFile == true }.map(\.id))
-        let stale = changed(since: since)
+        // Fifty at a time, each stored as it lands: a refusal or quit midway keeps what came before.
         var fetched: [String: Entry] = [:]
-        for message in messages {
-            let entry = Self.entry(message, hasAttachment: withFiles.contains(message.id))
-            fetched[message.id] = entry
-            guard let stale, !stale.contains(message.id), entries[message.id] == nil else { continue }
-            entries[message.id] = entry
+        for chunk in ids.chunked(into: 50) {
+            let since = generation
+            let messages = try await GmailBackend.metadata(chunk, query: GmailBackend.metadataQuery, api: api,
+                                                           priority: priority)
+            // Metadata shows only the top MIME type; a multipart/mixed message has attachments
+            // only if a part carries a file name.
+            let mixed = messages.filter { $0.payload?.mimeType?.lowercased() == "multipart/mixed" }.map(\.id)
+            let withFiles = mixed.isEmpty ? [] : Set(try await GmailBackend.metadata(
+                mixed, query: GmailBackend.partsQuery, api: api, priority: priority)
+                .filter { $0.payload?.hasFile == true }.map(\.id))
+            let stale = changed(since: since)
+            for message in messages {
+                let entry = Self.entry(message, hasAttachment: withFiles.contains(message.id))
+                fetched[message.id] = entry
+                guard let stale, !stale.contains(message.id), entries[message.id] == nil else { continue }
+                entries[message.id] = entry
+            }
+            scheduleSave()
         }
         return fetched
     }
 
     /// Our own label change, ahead of the history reporting it.
     func relabel(_ ids: [String], add: [String], remove: [String]) {
+        load()
         for id in ids {
             entries[id]?.labels.formUnion(add)
             entries[id]?.labels.subtract(remove)
@@ -461,6 +533,7 @@ private actor GmailEnvelopeCache {
     }
 
     func forget(_ ids: [String]) {
+        load()
         for id in ids { entries[id] = nil }
         advance(Set(ids))
     }
@@ -475,6 +548,7 @@ private actor GmailEnvelopeCache {
         generation += 1
         touched.append((generation, ids))
         if touched.count > 32 { touched.removeFirst(touched.count - 32) }
+        scheduleSave()
     }
 
     /// Ids changed after generation `since`; nil when that is everything or no longer known.
@@ -539,29 +613,26 @@ extension GmailBackend {
     }
 
     /// `GET <collection>/<id>?<query>` for every id through Gmail's batch endpoint, 50 per
-    /// request, each answer keyed by id; ids that no longer exist are left out. `unitCost` is one
-    /// sub-request's quota units.
+    /// request and one batch at a time: each sub-request counts against the per-user quota, so
+    /// parallel batches were what Gmail refused. Answers are keyed by id; ids that no longer
+    /// exist are left out. `unitCost` is one sub-request's quota units.
     fileprivate static func batchGet<T: Decodable & Sendable>(_ type: T.Type, _ collection: String, ids: [String],
                                                              query: String, unitCost: Int, api: API,
                                                              priority: RequestPriority) async throws -> [String: T] {
-        try await withThrowingTaskGroup(of: [String: T].self) { group in
-            for chunk in ids.chunked(into: 50) {
-                group.addTask {
-                    try await batch(T.self, collection, ids: chunk, query: query, unitCost: unitCost, api: api,
-                                    priority: priority)
-                }
-            }
-            var found: [String: T] = [:]
-            for try await part in group { found.merge(part) { first, _ in first } }
-            return found
+        var found: [String: T] = [:]
+        for chunk in ids.chunked(into: 50) {
+            let part = try await batch(T.self, collection, ids: chunk, query: query, unitCost: unitCost, api: api,
+                                       priority: priority)
+            found.merge(part) { first, _ in first }
         }
+        return found
     }
 
     /// One batch request; sub-requests Gmail throttles or fails transiently are sent again.
     private static func batch<T: Decodable & Sendable>(_ type: T.Type, _ collection: String, ids: [String], query: String,
                                                       unitCost: Int, api: API, priority: RequestPriority) async throws -> [String: T] {
         var found: [String: T] = [:]
-        try await API.repeatingThrottled(Array(ids.indices), service: "Gmail") { pending in
+        try await api.repeatingThrottled(Array(ids.indices), service: "Gmail") { pending in
             let boundary = "batch_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
             var body = ""
             for index in pending {

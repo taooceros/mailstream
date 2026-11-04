@@ -50,7 +50,9 @@ final class AccountStore {
     func api(for id: String) -> API? {
         if let api = apis[id] { return api }
         guard let record = record(id) else { return nil }
-        let api = API(account: id, tokens: tokens, budget: record.provider == .google ? .gmail() : nil)
+        let api = record.provider == .google
+            ? API(account: id, tokens: tokens, budget: .gmail())
+            : API(account: id, tokens: tokens, interactive: 3, background: 1)
         apis[id] = api
         return api
     }
@@ -87,13 +89,15 @@ final class AccountStore {
         return record
     }
 
-    /// Signs out: deletes the record, then the Keychain item once `beforeSignOut` is done.
+    /// Signs out: deletes the record and the Gmail envelope cache, then the Keychain item once
+    /// `beforeSignOut` is done.
     func remove(_ id: String) {
         apis[id] = nil
         backends[id] = nil
         records.removeAll { $0.id == id }
         save()
         signOuts[id] = Task {
+            await GmailBackend.discardCache(account: id)
             await beforeSignOut?()
             guard !Task.isCancelled else { return }
             signOuts[id] = nil

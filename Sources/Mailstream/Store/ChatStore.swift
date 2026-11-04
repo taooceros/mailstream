@@ -38,7 +38,7 @@ nonisolated struct ChatThread: Equatable, Sendable {
 /// requests, JSON decoding, row formatting and the disk cache run off the main actor, like
 /// `MailStore`'s.
 ///
-/// Spaces are polled every 20 s (`Chat` refetches only spaces whose activity changed). Reading
+/// Spaces are polled every `chat.pollSeconds` (`Chat` refetches only spaces whose activity changed). Reading
 /// and sending are optimistic: opening a space clears its unread count at once, and a sent message
 /// shows as pending until Google returns it. A failed send is marked failed, never retried.
 ///
@@ -48,7 +48,6 @@ nonisolated struct ChatThread: Equatable, Sendable {
 final class ChatStore {
     nonisolated static let spacesPage = 60
     nonisolated static let messagesPage = 100
-    static let pollInterval: Duration = .seconds(20)
     /// Spaces whose messages stay on disk, most recently opened first.
     static let recentLimit = 20
     /// Messages kept on disk per recent space.
@@ -82,6 +81,8 @@ final class ChatStore {
     /// Bumped by each mark-read, so only the latest one may roll its optimistic mark back.
     @ObservationIgnored private var readRevisions: [ChatSpaceKey: Int] = [:]
     @ObservationIgnored private var pollTask: Task<Void, Never>?
+    /// The `chat.pollSeconds` timer and its interval.
+    @ObservationIgnored private var polling: (interval: Duration, task: Task<Void, Never>)?
     private var loadMoreTask: Task<Void, Never>?
     /// Newest-page fetches per space; one asked for during a fetch runs after it while the space is open.
     @ObservationIgnored private var fetches: [ChatSpaceKey: CoalescedTask] = [:]
@@ -109,6 +110,7 @@ final class ChatStore {
     isolated deinit {
         watchers.forEach { $0.cancel() }
         pollTask?.cancel()
+        polling?.task.cancel()
         loadMoreTask?.cancel()
         earlier.values.forEach { $0.cancel() }
         fetches.values.forEach { $0.cancel() }
@@ -136,13 +138,24 @@ final class ChatStore {
                     self?.poll(quiet: false)
                 }
             },
-            Task(name: "Chat polling") { [weak self] in
-                while true {
-                    do { try await Task.sleep(for: Self.pollInterval) } catch { return }
-                    self?.poll(quiet: true)
+            Task.immediate(name: "Chat poll interval") { [weak self] in
+                for await seconds in Observations({ Settings.shared.int(.chatPollSeconds) }) {
+                    self?.schedulePolling(every: .seconds(seconds))
                 }
             },
         ]
+    }
+
+    /// Polls every `chat.pollSeconds`; a changed setting starts the wait afresh.
+    private func schedulePolling(every interval: Duration) {
+        if polling?.interval == interval { return }
+        polling?.task.cancel()
+        polling = (interval, Task(name: "Chat polling") { [weak self] in
+            while true {
+                do { try await Task.sleep(for: interval) } catch { return }
+                self?.poll(quiet: true)
+            }
+        })
     }
 
     /// Paints the last known accounts and spaces before Google answers.

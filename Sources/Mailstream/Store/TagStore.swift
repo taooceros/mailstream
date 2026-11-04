@@ -2,15 +2,15 @@ import Foundation
 import Observation
 
 /// AI tags of the list's inbox conversations, from the user's `omp` CLI: one pass at a time,
-/// debounced after list changes, backing off after a failure.
+/// debounced after list changes, backing off after a failure. Runs as the `aiTagging.*` settings
+/// say, following edits of settings.json as they land.
 ///
 /// Observable: the list follows `tags`, `isEnabled` and `status`.
 @Observable
 final class TagStore {
-    private static let passLimit = 150
-    private static let batchSize = 20
-    private static let backoff: TimeInterval = 300
-    private static let enabledKey = "AITaggingEnabled"
+    /// Settings whose change deserves another try at once: a fixed omp or model.
+    private static let retrySettings: [Setting] = [.aiTaggingModel, .aiTaggingOmpPath, .aiTaggingPassLimit,
+                                                   .aiTaggingBackoffSeconds]
 
     /// Keyed by `key(_:)`, so a new message in a conversation re-tags it; read through `tag(for:)`.
     private(set) var tags: [String: ConversationTag] = [:]
@@ -20,6 +20,7 @@ final class TagStore {
 
     @ObservationIgnored private let cache: MailCache
     @ObservationIgnored private let contents: ContentStore
+    @ObservationIgnored private let problems: StoreProblems
     @ObservationIgnored private let tagger: OmpTagger
     /// What the last `schedule` offered.
     @ObservationIgnored private var candidates: [Conversation] = []
@@ -29,29 +30,73 @@ final class TagStore {
     @ObservationIgnored private lazy var passes = CoalescedTask("AI tagging") { [weak self] in await self?.pass() }
     @ObservationIgnored private var debounce: Task<Void, Never>?
     @ObservationIgnored private var backoffUntil: Date?
+    /// The `aiTagging.*` settings.
+    @ObservationIgnored private var watchers: [Task<Void, Never>] = []
 
-    init(cache: MailCache, tools: ToolEnvironment, contents: ContentStore) {
+    init(cache: MailCache, tools: ToolEnvironment, contents: ContentStore, problems: StoreProblems) {
         self.cache = cache
         self.contents = contents
+        self.problems = problems
         tagger = OmpTagger(tools: tools, workingDirectory: cache.root)
-        enabled = UserDefaults.standard.object(forKey: Self.enabledKey) as? Bool ?? true
+        enabled = Settings.shared.bool(.aiTaggingEnabled)
     }
 
+    isolated deinit {
+        watchers.forEach { $0.cancel() }
+        debounce?.cancel()
+    }
+
+    /// The `aiTagging.enabled` setting; setting it writes settings.json.
     var isEnabled: Bool {
         get { enabled }
         set {
-            enabled = newValue
-            UserDefaults.standard.set(newValue, forKey: Self.enabledKey)
-            attempted = []
-            backoffUntil = nil
-            debounce?.cancel()
-            if newValue {
-                passes.request()
-            } else {
-                passes.cancel()
-                status = nil
+            do {
+                try Settings.shared.set(.aiTaggingEnabled, .bool(newValue))
+                apply(enabled: newValue)
+            } catch {
+                problems.report(error, from: .mail, alert: true)
             }
         }
+    }
+
+    /// Follows the `aiTagging.*` settings, however settings.json is edited.
+    func start() {
+        watchers = [
+            Task.immediate(name: "AI tagging switch") { [weak self] in
+                for await enabled in Observations({ Settings.shared.bool(.aiTaggingEnabled) }) {
+                    self?.apply(enabled: enabled)
+                }
+            },
+            Task.immediate(name: "AI tagging settings") { [weak self] in
+                var last = Self.retryValues
+                for await values in Observations({ Self.retryValues }) where values != last {
+                    last = values
+                    self?.retry()
+                }
+            },
+        ]
+    }
+
+    private static var retryValues: [JSON] { retrySettings.map { Settings.shared[$0] } }
+
+    private func apply(enabled: Bool) {
+        guard enabled != self.enabled else { return }
+        self.enabled = enabled
+        attempted = []
+        backoffUntil = nil
+        debounce?.cancel()
+        if enabled {
+            passes.request()
+        } else {
+            passes.cancel()
+            status = nil
+        }
+    }
+
+    private func retry() {
+        attempted = []
+        backoffUntil = nil
+        if enabled { passes.request() }
     }
 
     /// Adds the tags saved on disk, keeping any already made.
@@ -78,6 +123,31 @@ final class TagStore {
         tag.toRespond = waiting
         tags[key] = tag
         cache.saveTags(tags)
+    }
+
+    /// Corrects the conversation's tag; nil leaves a part as it is. A conversation the tagger has
+    /// not judged needs a category, and only people conversations can wait on a reply.
+    func edit(_ conversation: Conversation, category: MailCategory?, waiting: Bool?,
+              labels: [String]?) throws -> ConversationTag {
+        guard enabled else { throw StoreError(message: "AI tagging is off (aiTagging.enabled).") }
+        let key = Self.key(conversation)
+        guard var tag = tags[key] ?? category.map({ ConversationTag(category: $0, toRespond: false, labels: []) }) else {
+            throw StoreError(message: "\(conversation.id) has no AI tag yet; give a category.")
+        }
+        if let category { tag.category = category }
+        if waiting == true, tag.category != .people {
+            throw StoreError(message: "Only people conversations can wait on a reply.")
+        }
+        if let waiting { tag.toRespond = waiting }
+        if tag.category != .people { tag.toRespond = false }
+        if let labels {
+            tag.labels = Array(labels.map { String($0.trimmingCharacters(in: .whitespaces).prefix(OmpTagger.maxLabelLength)) }
+                .filter { !$0.isEmpty }.prefix(2))
+        }
+        tags[key] = tag
+        attempted.insert(key)
+        cache.saveTags(tags)
+        return tag
     }
 
     /// Forgets every tag and tags the current list again, ignoring any failure backoff.
@@ -114,12 +184,15 @@ final class TagStore {
     private func pass() async {
         guard enabled else { return }
         if let until = backoffUntil, until > Date() { return }
-        let items = untaggedItems()
+        let settings = Settings.shared
+        let options = OmpTagger.Options(model: settings.string(.aiTaggingModel),
+                                        executable: settings.string(.aiTaggingOmpPath))
+        let items = untaggedItems(limit: settings.int(.aiTaggingPassLimit))
         var remaining = items.count
-        for batch in items.chunked(into: Self.batchSize) {
+        for batch in items.chunked(into: settings.int(.aiTaggingBatchSize)) {
             status = "Tagging \(remaining) conversation\(remaining == 1 ? "" : "s")…"
             do {
-                let result = try await tagger.tag(batch)
+                let result = try await tagger.tag(batch, options: options)
                 try Task.checkCancellation()
                 tags.merge(result) { _, new in new }
                 attempted.formUnion(batch.map(\.id))
@@ -130,7 +203,7 @@ final class TagStore {
                     status = nil
                 } else {
                     status = "AI tagging failed: \(error.localizedDescription)"
-                    backoffUntil = Date().addingTimeInterval(Self.backoff)
+                    backoffUntil = Date().addingTimeInterval(TimeInterval(settings.int(.aiTaggingBackoffSeconds)))
                 }
                 return
             }
@@ -138,10 +211,10 @@ final class TagStore {
         if status != nil { status = nil }
     }
 
-    private func untaggedItems() -> [OmpTagger.Item] {
+    private func untaggedItems(limit: Int) -> [OmpTagger.Item] {
         var keys = Set<String>()
         var items: [OmpTagger.Item] = []
-        for conversation in candidates where items.count < Self.passLimit {
+        for conversation in candidates where items.count < limit {
             let key = Self.key(conversation)
             guard tags[key] == nil, !attempted.contains(key), keys.insert(key).inserted else { continue }
             items.append(item(conversation, key: key))

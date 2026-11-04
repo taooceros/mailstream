@@ -258,7 +258,7 @@ nonisolated final class GraphBackend: MailBackend {
                          headers: headers, body: body)
         }
         for chunk in requests.chunked(into: 20) {
-            try await API.repeatingThrottled(chunk, service: "Microsoft Graph") { pending in
+            try await api.repeatingThrottled(chunk, service: "Microsoft Graph") { pending in
                 let answer = try await api.decode(BatchAnswer.self,
                                                   Self.request(Self.url("$batch"), method: "POST", json: BatchPayload(requests: pending)))
                 var retry = Set(pending.map(\.id))

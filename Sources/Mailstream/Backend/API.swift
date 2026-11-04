@@ -57,7 +57,8 @@ nonisolated protocol TokenSource: Sendable {
 }
 
 /// Authorized HTTPS requests for one account. A 401 refreshes the token and repeats once; rate
-/// limiting (429, or Google's 403 rate-limit reasons: never processed) backs off and repeats; 5xx
+/// limiting (429, or Google's 403 rate-limit reasons: never processed) backs off and repeats, and
+/// also pauses the account's `QuotaBudget` so its other requests stop adding to the overload; 5xx
 /// and dropped connections repeat only requests that may run twice. Concurrency is bounded per
 /// priority so background prefetch never starves interactive reads; a request with a `cost`
 /// spends it from the account's `QuotaBudget` on every attempt, once it holds a permit, so
@@ -67,8 +68,8 @@ nonisolated final class API: Sendable {
     let account: String
     private let tokens: any TokenSource
     private let budget: QuotaBudget?
-    private let interactive = AsyncSemaphore(6)
-    private let background = AsyncSemaphore(3)
+    private let interactive: AsyncSemaphore
+    private let background: AsyncSemaphore
 
     static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
@@ -78,10 +79,20 @@ nonisolated final class API: Sendable {
         return URLSession(configuration: configuration)
     }()
 
-    init(account: String, tokens: any TokenSource, budget: QuotaBudget? = nil) {
+    /// Outlook refuses more than four requests at once per mailbox (MailboxConcurrency), so Graph
+    /// accounts pass 3 + 1; Gmail takes 6 + 3.
+    init(account: String, tokens: any TokenSource, budget: QuotaBudget? = nil,
+         interactive: Int = 6, background: Int = 3) {
         self.account = account
         self.tokens = tokens
         self.budget = budget
+        self.interactive = AsyncSemaphore(interactive)
+        self.background = AsyncSemaphore(background)
+    }
+
+    /// The provider refused for load: no request of this account spends quota for `delay`.
+    func throttled(for delay: Duration) async {
+        await budget?.pause(for: delay)
     }
 
     /// A request with `body` encoded as JSON when given.
@@ -149,7 +160,9 @@ nonisolated final class API: Sendable {
                      403 where attempt < Self.rateLimitAttempts && APIError.Body(data)?.isRateLimit == true,
                      500..<600 where repeatable && attempt < 4:
                     let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
-                    try await Task.sleep(for: Self.backoff(attempt: attempt, retryAfter: retryAfter))
+                    let delay = Self.backoff(attempt: attempt, retryAfter: retryAfter)
+                    if http.statusCode < 500 { await throttled(for: delay) }
+                    try await Task.sleep(for: delay)
                     continue
                 default:
                     throw APIError(status: http.statusCode, body: data)
@@ -159,20 +172,23 @@ nonisolated final class API: Sendable {
     }
 
     /// Sends `items` through `send`, which answers the ones to send again (throttled or left
-    /// unanswered) and the longest Retry-After among them, and repeats those after `backoff`
-    /// until none are left. `service` names the provider when it keeps refusing.
-    static func repeatingThrottled<Item>(_ items: [Item], service: String,
-                                         _ send: ([Item]) async throws -> (retry: [Item], retryAfter: Double?)) async throws {
+    /// unanswered) and the longest Retry-After among them, and repeats those after `backoff`,
+    /// pausing the account's budget meanwhile, until none are left. `service` names the provider
+    /// when it keeps refusing.
+    func repeatingThrottled<Item>(_ items: [Item], service: String,
+                                  _ send: ([Item]) async throws -> (retry: [Item], retryAfter: Double?)) async throws {
         var pending = items
         var attempt = 0
         while !pending.isEmpty {
             attempt += 1
             let (retry, retryAfter) = try await send(pending)
             guard !retry.isEmpty else { return }
-            guard attempt < rateLimitAttempts else {
+            guard attempt < Self.rateLimitAttempts else {
                 throw APIError(status: 429, message: "\(service) is limiting requests; try again shortly")
             }
-            try await Task.sleep(for: backoff(attempt: attempt, retryAfter: retryAfter))
+            let delay = Self.backoff(attempt: attempt, retryAfter: retryAfter)
+            await throttled(for: delay)
+            try await Task.sleep(for: delay)
             pending = retry
         }
     }

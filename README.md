@@ -11,7 +11,8 @@ Cloudflare Worker relay (`Push/`).
 - A Google Cloud OAuth client and a Microsoft Entra app registration of your own
   (see First-time setup); their ids and secrets are entered in the app at sign-in
 - For push: a Cloudflare account (`wrangler`) and the Google Cloud CLI (`gcloud`)
-- Optional: the `omp` CLI on `PATH` with a working "smol" model role, for AI tagging
+- Optional: the `omp` CLI on `PATH` with a working "smol" model role (or the model set
+  in `aiTagging.model`), for AI tagging
 
 Accounts are added in the app: Mailstream ▸ Settings… (⌘,) ▸ Add Google Account… or
 Add Microsoft Account… first asks for the OAuth client ID and secret, then opens the
@@ -26,8 +27,8 @@ list (address, label, granted scopes) in
 `~/Library/Application Support/Mailstream/accounts.json`.
 With no account, Settings opens at launch. Labels can be renamed inline there.
 
-Mailstream resolves `PATH` from your login shell to find omp. It picks the newest
-version on `PATH`, or `MAILSTREAM_OMP=/path/to/omp`.
+Mailstream resolves `PATH` from your login shell to find omp and picks the newest
+version on it, unless `aiTagging.ompPath` names one (see Settings and agents).
 
 ## First-time setup
 
@@ -59,6 +60,65 @@ Everything is kept in the login keychain, service `dev.mailstream.build`.
 a warning; the OAuth clients are then entered at sign-in, and without the push items
 the app polls instead.
 
+## Settings and agents
+
+Mailstream is meant to be driven by AI agents as well as by hand. Everything the app
+can be told goes through one command, `mailstream`, which prints JSON:
+
+```sh
+ln -s /Applications/Mailstream.app/Contents/MacOS/Mailstream ~/.local/bin/mailstream
+mailstream help                     # overview and every command
+mailstream commands                 # every command and argument, as JSON
+mailstream status                   # accounts, sync, push, AI tagging
+mailstream config list              # every setting with value, default, description
+mailstream config set sync.pollSeconds 120
+mailstream mail list --mailbox inbox --unread --limit 10
+mailstream mail search "invoice" --account you@gmail.com
+mailstream mail show '<conversation id>'
+mailstream mail archive '<id>' '<id>'
+mailstream mail tag '<id>' --category newsletter
+mailstream mail reply '<id>' --body - --yes < reply.txt
+```
+
+Settings live in `~/Library/Application Support/Mailstream/settings.json`: a flat
+object of dotted keys holding only what differs from the defaults (`mailstream config
+schema` prints its JSON Schema). `mailstream config …` edits the file without the app;
+the app watches the file and applies any change at once, whether it came from the
+CLI, an editor or the View menu. Unknown keys and invalid values are ignored and
+listed under `settingsIssues` in `mailstream status`.
+
+| Setting | Default | |
+| --- | --- | --- |
+| `aiTagging.enabled` | `true` | Smart Inbox tagging (also View ▸ Auto-Tag with AI) |
+| `aiTagging.model` | `"smol"` | omp model role or id |
+| `aiTagging.ompPath` | `""` | omp to run; empty picks the newest on `PATH` |
+| `aiTagging.batchSize` | `20` | conversations per omp run |
+| `aiTagging.passLimit` | `150` | conversations one pass looks at |
+| `aiTagging.backoffSeconds` | `300` | pause after a failed run |
+| `remoteContent.trustedSenders` | `[]` | senders whose remote content always loads ("Always Load" adds here) |
+| `sync.pollSeconds` | `90` | polling while push is down |
+| `sync.pushPollSeconds` | `900` | safety-net polling while push is up |
+| `chat.pollSeconds` | `20` | Google Chat polling |
+
+Every other command goes to the running app over a Unix socket,
+`~/Library/Application Support/Mailstream/control.sock` (mode 0600; only your own
+processes are answered), and starts the app in the background if it is not
+running. The protocol is one JSON line each way:
+`{"command": "mail.list", "args": {"unread": true}}` →
+`{"ok": true, "result": …}` or `{"ok": false, "error": {"code", "message"}}`.
+
+Conversations are addressed by the ids `mail list`, `mail search` and `mail show`
+return; the app remembers them while it runs, with the mailboxes they were listed
+from, which is where `mail archive` moves them out of. Listing fetches from the
+providers without touching what the window shows. Actions answer once the provider
+confirmed them and report each id under `done` or `failed`. Sending (`mail send`,
+`mail reply`), signing an account out and deleting from the trash do nothing without
+`--yes`; the error says what would happen. `accounts add google` opens the browser
+sign-in and waits for the person to finish it.
+
+Failures print `{"error": {"code", "message"}}` on stderr and exit 1, 2 for usage
+errors, 3 when the app cannot be reached.
+
 ## Build and run
 
 ```sh
@@ -85,14 +145,15 @@ for mail and asks for your OAuth client at sign-in. Dragged to Applications, it 
 
 | Layer | Files | Role |
 | --- | --- | --- |
-| Accounts | `Backend/Accounts.swift`, `OAuth.swift`, `Tokens.swift`, `AppConfig.swift`, `UI/AccountsWindowController.swift` | Signed-in accounts, browser sign-in (authorization code with PKCE, loopback redirect), refresh tokens in the Keychain, build-time configuration from `Info.plist`, the Settings window |
-| Backend | `Backend/API.swift`, `MailBackend.swift`, `GmailBackend.swift`, `MIMEMessage.swift`, `GraphBackend.swift`, `MessageAssembly.swift`, `HTMLText.swift`, `AsyncSemaphore.swift`, `QuotaBudget.swift` | `API` sends authorized requests per account (token refresh on 401, backoff on 429 and 5xx, 6 interactive / 3 background requests at a time). Gmail and Graph implement one `MailBackend` protocol: mailboxes with roles, cursor-paged envelopes, search, message content (bodies, inline `cid:` parts and attachments written to the cache), flags, moves, sending |
+| Accounts | `Backend/Accounts.swift`, `OAuth.swift`, `Tokens.swift`, `AppConfig.swift`, `UI/AccountsWindowController.swift` | Signed-in accounts, browser sign-in (authorization code with PKCE, loopback redirect), refresh tokens in the Keychain, build-time defaults from `Info.plist`, the Settings window |
+| Control | `Control/Settings.swift`, `Commands.swift`, `CLI.swift`, `ControlSocket.swift`, `ControlService.swift`, `MailStore+Control.swift` | settings.json with live reload (an observable `Settings`), the `mailstream` command table, the CLI, the control socket (a `NetworkListener` on a Unix-domain path) and the app side of each command |
+| Backend | `Backend/API.swift`, `MailBackend.swift`, `GmailBackend.swift`, `MIMEMessage.swift`, `GraphBackend.swift`, `MessageAssembly.swift`, `HTMLText.swift`, `AsyncSemaphore.swift`, `QuotaBudget.swift` | `API` sends authorized requests per account (token refresh on 401, backoff on 429 and 5xx; a rate-limit refusal pauses the whole account's quota budget; Gmail runs 6 interactive / 3 background requests at a time within a 3,000-units-a-minute budget, Graph 3 / 1 for Outlook's limit of four per mailbox). Gmail and Graph implement one `MailBackend` protocol: mailboxes with roles, cursor-paged envelopes, search, message content (bodies, inline `cid:` parts and attachments written to the cache), flags, moves, sending |
 | Chat | `Backend/Chat.swift`, `ChatAPI.swift`, `Store/ChatStore.swift`, `UI/ChatPage.swift`, `UI/ChatReader.swift` | Google Chat REST API for Google accounts granted Chat access; main-actor spaces and message state with a disk cache, rendered into the reader's page |
 | Push | `Backend/PushService.swift`, `Push/` | One WebSocket to the relay; registers Gmail watches and Graph subscriptions for every account and asks the store to refresh the account a notification names |
 | Store | `Store/MailStore.swift`, `ContentStore.swift`, `TagStore.swift`, `StoreProblems.swift`, `CoalescedTask.swift`, `Replies.swift`, `Threader.swift`, `ConversationRow.swift`, `MailCache.swift` | `MailStore`: accounts, mailboxes, listings, selection, search and optimistic flag and move actions. It owns `ContentStore` (bodies and previews) and `TagStore` (AI tags). `StoreProblems` is the one error channel. Also reply planning and the async disk cache in `~/Library/Caches/dev.mailstream.Mailstream` |
 | Model | `Model/*` | Plain values: messages, conversations, tags, `Subject` (reply and forward prefixes, list tags) |
 | Support | `Support/*` | Small shared helpers: chunking, base64url, ISO 8601 dates |
-| Tagging | `Backend/OmpTagger.swift`, `Store/TagStore.swift` | Runs `omp -p --model smol` on batches of conversations and parses the JSON tags |
+| Tagging | `Backend/OmpTagger.swift`, `Store/TagStore.swift` | Runs `omp -p --model <aiTagging.model>` on batches of conversations and parses the JSON tags |
 | UI | `UI/*` | Sidebar plus a full-width content area that shows the list or one conversation; `WebShell` hosts the one web view that the mail reader and `ChatReader` render into; compose window |
 
 `Push/` is the relay, a Cloudflare Worker with one Durable Object: Gmail (through
@@ -128,12 +189,14 @@ Concurrency is Swift's own, with no GCD, locks, timers or Combine:
 - The target defaults to main-actor isolation (`defaultIsolation(MainActor.self)`, Swift 6 language mode).
 - Model and backend types are `nonisolated` or actors.
 - Off-main work runs in `@concurrent` functions.
-- Stores are `@Observable`. Each view controller follows them through `Observations` in a named task it owns and
-  cancels.
+- Stores and `Settings` are `@Observable`. Each view controller and store follows what it depends on through
+  `Observations` in a named task it owns and cancels.
 - Repeated work coalesces through `CoalescedTask`, which keeps one pass running and at most one waiting.
 - Polling, renewal and backoff are `Task.sleep` loops.
 - Cache writes go through one ordered stream.
-- The only dispatch queue left is the DNS-SD callback bridge for BIMI lookups.
+- The control socket is a `NetworkListener` on a Unix-domain path.
+- Two callback bridges remain, each with no async API: the DNS-SD bridge (a dispatch queue) for BIMI lookups
+  and the settings.json watch (a `DispatchSource` feeding an `AsyncStream`).
 
 The reader is one persistent WebKit page, loaded and warmed at launch. Opening
 a conversation replaces its content through JavaScript (no navigation), and the
@@ -154,7 +217,8 @@ seconds. A notification refreshes that account's mailboxes in view and its
 unread counts, bursts coalescing into one pass. While the socket is up the app
 still polls every 15 min as a safety net; while it is down (no network, relay
 unreachable, no push configuration) it polls every 90 s, and it catches up as
-soon as the socket reconnects. Unread counts also refresh every 5 min.
+soon as the socket reconnects (`sync.pushPollSeconds`, `sync.pollSeconds`). Unread
+counts also refresh every 5 min.
 
 ## Layout
 
@@ -223,8 +287,8 @@ List rows lay themselves out by hand (no Auto Layout) to keep scrolling cheap.
 
 ## Smart Inbox and AI tags
 
-In inboxes (and All Inboxes), each conversation is tagged by the omp "smol"
-model with one category plus up to two topic labels:
+In inboxes (and All Inboxes), each conversation is tagged by the omp model in
+`aiTagging.model` ("smol") with one category plus up to two topic labels:
 
 - **People**: written by a person. These stay in the main list, grouped by date.
 - **Notifications**, **Newsletters** and **Invitations**: three tiles above the
@@ -235,11 +299,13 @@ model with one category plus up to two topic labels:
 Tagging sends each conversation's sender, subject, preview snippet and a few
 flags (whether you are in To, whether you replied) to the model provider
 configured in omp. It runs in batches of 20, one omp process at a time, for up
-to 150 untagged conversations per pass.
+to 150 untagged conversations per pass (`aiTagging.batchSize`, `aiTagging.passLimit`).
 
 Tags are keyed by the latest message, so a new reply re-tags the conversation.
 They are cached in `tags-v1.json` in the cache directory. Turn tagging off, or
-re-tag everything, from the View menu. Without tags, the list is plain and dated.
+re-tag everything, from the View menu or with `mailstream config set
+aiTagging.enabled false` and `mailstream mail retag`; `mailstream mail tag` corrects
+one conversation's tag. Without tags, the list is plain and dated.
 
 ## Avatars
 
