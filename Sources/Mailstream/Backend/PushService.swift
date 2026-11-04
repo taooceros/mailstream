@@ -41,8 +41,7 @@ final class PushService {
     }
 
     private static let session = URLSession(configuration: .ephemeral)
-    private static let gmail = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me")!
-    private static let subscriptions = URL(string: "https://graph.microsoft.com/v1.0/subscriptions")!
+    private static let subscriptions = Endpoints.graph.appending(path: "subscriptions")
     private static let file = URL.applicationSupportDirectory.appending(path: "Mailstream/push.json")
     /// Requested lifetime of a Graph subscription (70 h); renewed with a day left.
     private static let graphLifetime: TimeInterval = 4200 * 60
@@ -52,7 +51,7 @@ final class PushService {
         self.onChange = onChange
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        registrations = (try? Data(contentsOf: Self.file)).flatMap { try? decoder.decode([String: Registration].self, from: $0) } ?? [:]
+        registrations = JSONFile.read([String: Registration].self, at: Self.file, decoder: decoder) ?? [:]
     }
 
     isolated deinit {
@@ -300,10 +299,10 @@ final class PushService {
         if let current = registrations[account], current.kind == .gmail, current.id == topic, !current.due { return }
         struct Body: Encodable { let topicName: String }
         nonisolated struct Answer: Decodable, Sendable { let expiration: String }
-        let request = API.request(Self.gmail.appending(path: "watch"), method: "POST", json: Body(topicName: topic))
+        let request = API.request(Endpoints.gmail.appending(path: "watch"), method: "POST", json: Body(topicName: topic))
         let answer = try await api.decode(Answer.self, request, priority: .background)
         guard let milliseconds = Double(answer.expiration) else {
-            throw APIError(status: 200, message: "Gmail watch answered no expiration")
+            throw APIError.malformed("Gmail watch answered no expiration")
         }
         registrations[account] = Registration(kind: .gmail, id: topic,
                                               expires: Date(timeIntervalSince1970: milliseconds / 1000))
@@ -358,7 +357,7 @@ final class PushService {
     /// Best effort: the account's token may already be gone, and registrations expire on their own.
     private func unregister(_ registration: Registration, api: API) async {
         let request = switch registration.kind {
-        case .gmail: API.request(Self.gmail.appending(path: "stop"), method: "POST")
+        case .gmail: API.request(Endpoints.gmail.appending(path: "stop"), method: "POST")
         case .graph: API.request(Self.subscriptions.appending(path: registration.id), method: "DELETE")
         }
         _ = try? await api.send(request, priority: .background, idempotent: true)
@@ -369,9 +368,7 @@ final class PushService {
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         do {
-            try FileManager.default.createDirectory(at: Self.file.deletingLastPathComponent(),
-                                                    withIntermediateDirectories: true)
-            try encoder.encode(registrations).write(to: Self.file, options: .atomic)
+            try JSONFile.write(registrations, to: Self.file, encoder: encoder, creatingDirectory: true)
         } catch {
             NSLog("Could not save push registrations: %@", error.localizedDescription)
         }

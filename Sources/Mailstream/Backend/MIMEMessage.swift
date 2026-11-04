@@ -4,15 +4,15 @@ import UniformTypeIdentifiers
 /// An outgoing message as RFC 5322 bytes with CRLF line ends: the raw message Gmail sends and
 /// Graph's MIME `sendMail` takes. Both providers drop the Bcc header when they send.
 nonisolated enum MIMEMessage {
-    /// `messageID` without angle brackets.
-    static func render(_ message: OutgoingMessage, messageID: String) throws -> Data {
+    /// The message under a fresh Message-ID.
+    static func render(_ message: OutgoingMessage) throws -> Data {
         var headers = [addressField("From", [message.from])]
         if !message.to.isEmpty { headers.append(addressField("To", message.to)) }
         if !message.cc.isEmpty { headers.append(addressField("Cc", message.cc)) }
         if !message.bcc.isEmpty { headers.append(addressField("Bcc", message.bcc)) }
         headers.append(textField("Subject", message.subject))
         headers.append("Date: " + date(Date()))
-        headers.append("Message-ID: " + angle(messageID))
+        headers.append("Message-ID: <\(UUID().uuidString.lowercased())@mailstream.local>")
         if let inReplyTo = message.inReplyTo, !inReplyTo.isEmpty {
             headers.append("In-Reply-To: " + angle(inReplyTo))
         }
@@ -48,9 +48,15 @@ nonisolated enum MIMEMessage {
         }
     }
 
+    /// A fresh multipart boundary: `prefix` and 32 random hex digits, lowercase unless not `lowercased`.
+    static func boundary(_ prefix: String, lowercased: Bool = true) -> String {
+        let digits = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        return prefix + (lowercased ? digits.lowercased() : digits)
+    }
+
     /// Boundaries start with `=_`, which neither quoted-printable nor base64 output contains.
     private static func multipart(_ subtype: String, _ parts: [Entity]) -> Entity {
-        let boundary = "=_ms_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let boundary = Self.boundary("=_ms_")
         var body = Data()
         for part in parts {
             body.append(Data("--\(boundary)\r\n".utf8))
@@ -101,17 +107,7 @@ nonisolated enum MIMEMessage {
         if !isPlainASCII(value) || value.contains("=?") {
             return name + ": " + encodedWords(value).joined(separator: "\r\n ")
         }
-        var lines: [String] = []
-        var line = name + ":"
-        for word in value.split(separator: " ", omittingEmptySubsequences: false) {
-            if line.count + 1 + word.count > 78, line.count > name.count + 1 {
-                lines.append(line)
-                line = ""
-            }
-            line += " " + word
-        }
-        lines.append(line)
-        return lines.joined(separator: "\r\n")
+        return listField(name, value.split(separator: " ", omittingEmptySubsequences: false).map(String.init), separator: "")
     }
 
     private static func mailbox(_ address: Address) -> String {

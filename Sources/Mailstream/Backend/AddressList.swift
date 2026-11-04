@@ -18,11 +18,11 @@ nonisolated enum AddressList {
                 let email = angle.hasPrefix("mailto:") ? String(angle.dropFirst("mailto:".count)) : angle
                 guard email.contains("@") else { return }
                 let display = name.isEmpty ? commentName : name
-                addresses.append(Address(name: display.isEmpty ? nil : display, email: email))
+                addresses.append(Address(name: display.nilIfEmpty, email: email))
             } else {
                 let email = phrase.filter { !$0.isWhitespace }
                 guard email.contains("@") else { return }
-                addresses.append(Address(name: commentName.isEmpty ? nil : commentName, email: email))
+                addresses.append(Address(name: commentName.nilIfEmpty, email: email))
             }
         }
 
@@ -137,7 +137,7 @@ nonisolated enum HeaderText {
             let pair = piece.split(separator: "=", maxSplits: 1)
             guard pair.count == 2, pair[0].trimmingCharacters(in: .whitespaces).lowercased() == name else { continue }
             let value = pair[1].trimmingCharacters(in: CharacterSet(charactersIn: "\" \t\r\n"))
-            return value.isEmpty ? nil : value
+            return value.nilIfEmpty
         }
         return nil
     }

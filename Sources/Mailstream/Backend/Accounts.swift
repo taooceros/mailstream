@@ -38,7 +38,7 @@ final class AccountStore {
 
     init(problems: StoreProblems) {
         self.problems = problems
-        let records = (try? Data(contentsOf: Self.file)).flatMap { try? JSONDecoder().decode([AccountRecord].self, from: $0) } ?? []
+        let records = JSONFile.read([AccountRecord].self, at: Self.file) ?? []
         self.records = records
         tokens = Tokens(providers: Dictionary(records.map { ($0.id, $0.provider) }) { first, _ in first })
     }
@@ -123,10 +123,8 @@ final class AccountStore {
     }
 
     private func persist() throws {
-        try FileManager.default.createDirectory(at: Self.file.deletingLastPathComponent(),
-                                                withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(records).write(to: Self.file, options: .atomic)
+        try JSONFile.write(records, to: Self.file, encoder: encoder, creatingDirectory: true)
     }
 }

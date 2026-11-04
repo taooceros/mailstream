@@ -178,7 +178,7 @@ actor OmpTagger {
             let from = name.isEmpty || name == item.senderEmail ? item.senderEmail : "\(name) <\(item.senderEmail)>"
             let snippet = item.snippet.prefix(maxSnippet)
             let entry = PromptItem(id: String(index + 1), from: from, toMe: item.userInTo, subject: item.subject,
-                                   snippet: snippet.isEmpty ? nil : String(snippet), count: item.messageCount,
+                                   snippet: String(snippet).nilIfEmpty, count: item.messageCount,
                                    replied: item.userReplied, lastFromMe: item.latestFromUser)
             return (try? encoder.encode(entry)).map { String(decoding: $0, as: UTF8.self) }
         }

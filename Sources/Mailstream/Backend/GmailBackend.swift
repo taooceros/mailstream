@@ -46,7 +46,7 @@ nonisolated final class GmailBackend: MailBackend {
         let primary = entries.first { $0.isPrimary == true }
             ?? entries.first { $0.sendAsEmail.caseInsensitiveCompare(email) == .orderedSame }
         let name = primary?.displayName?.trimmingCharacters(in: .whitespaces) ?? ""
-        return Address(name: name.isEmpty ? nil : name, email: email)
+        return Address(name: name.nilIfEmpty, email: email)
     }
 
     @concurrent func mailboxes(counts: Bool) async throws -> [Mailbox] {
@@ -81,14 +81,11 @@ nonisolated final class GmailBackend: MailBackend {
             }
         }
         boxes.append(Mailbox(account: account, id: Self.allMail, name: MailboxRole.all.title, role: .all, unread: nil, total: nil))
-        return boxes.sorted { a, b in
-            if a.role.sortOrder != b.role.sortOrder { return a.role.sortOrder < b.role.sortOrder }
-            return a.name.localizedStandardCompare(b.name) == .orderedAscending
-        }
+        return boxes
     }
 
     @concurrent func envelopes(mailbox: String, cursor: String?, pageSize: Int, priority: RequestPriority) async throws -> EnvelopePage {
-        var query = Self.scope(mailbox) + [("maxResults", "\(min(max(pageSize, 1), 500))"),
+        var query = Self.scope(mailbox) + [("maxResults", API.pageSize(pageSize, max: 500)),
                                            ("fields", Self.listFields)]
         if let cursor { query.append(("pageToken", cursor)) }
         let (ids, next) = try await listing(Self.url("messages", query), priority: priority)
@@ -97,7 +94,7 @@ nonisolated final class GmailBackend: MailBackend {
 
     /// No label filter: Gmail then searches everything but spam and trash, as its web search does.
     @concurrent func search(query: String, pageSize: Int) async throws -> [SearchHit] {
-        let parameters = [("q", query), ("maxResults", "\(min(max(pageSize, 1), 500))"), ("fields", Self.listFields)]
+        let parameters = [("q", query), ("maxResults", API.pageSize(pageSize, max: 500)), ("fields", Self.listFields)]
         let (ids, _) = try await listing(Self.url("messages", parameters), priority: .interactive)
         return try await cache.hits(ids, priority: .interactive)
     }
@@ -124,7 +121,7 @@ nonisolated final class GmailBackend: MailBackend {
         let message = try await api.get(GmailMessage.self, Self.url("messages/\(id.percentEncoded)", [("format", "full")]),
                                         priority: priority, cost: 5)
         guard let payload = message.payload else {
-            throw APIError(status: 200, message: "Gmail returned message \(id) without content")
+            throw APIError.malformed("Gmail returned message \(id) without content")
         }
         let fetched = try await attachmentData(in: payload, message: id, priority: priority)
         var renderer = try GmailContentRenderer(assembly: MessageAssembly(directory: directory, urlBase: urlBase),
@@ -208,14 +205,14 @@ nonisolated final class GmailBackend: MailBackend {
     /// Uploads through the media endpoint, which takes messages up to 35 MB with their thread.
     @concurrent func send(_ message: OutgoingMessage) async throws {
         struct Metadata: Encodable { let threadId: String? }
-        let raw = try MIMEMessage.render(message, messageID: "\(UUID().uuidString.lowercased())@mailstream.local")
-        let boundary = "ms_upload_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let raw = try MIMEMessage.render(message)
+        let boundary = MIMEMessage.boundary("ms_upload_")
         var body = Data("--\(boundary)\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".utf8)
         body.append(try JSONEncoder().encode(Metadata(threadId: message.thread)))
         body.append(Data("\r\n--\(boundary)\r\nContent-Type: message/rfc822\r\n\r\n".utf8))
         body.append(raw)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
-        var request = API.request(URL(string: "https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=multipart")!,
+        var request = API.request(API.url(Endpoints.gmailUpload, "messages/send", [("uploadType", "multipart")])!,
                                   method: "POST", headers: ["Content-Type": "multipart/related; boundary=\(boundary)"])
         request.httpBody = body
         _ = try await api.send(request, idempotent: false, cost: 100)
@@ -252,8 +249,6 @@ nonisolated final class GmailBackend: MailBackend {
 
     // MARK: Helpers
 
-    private static let base = "https://gmail.googleapis.com/gmail/v1/users/me/"
-
     /// Query parameters naming `mailbox`; All Mail is the unfiltered listing.
     private static func scope(_ mailbox: String) -> [(String, String)] {
         switch mailbox {
@@ -263,10 +258,9 @@ nonisolated final class GmailBackend: MailBackend {
         }
     }
 
+    /// Paths are percent-encoded where they carry ids, so the URL always parses.
     fileprivate static func url(_ path: String, _ query: [(String, String)] = []) -> URL {
-        var string = base + path
-        if !query.isEmpty { string += "?" + formEncoded(query) }
-        return URL(string: string)!
+        API.url(Endpoints.gmail, path, query)!
     }
 }
 
@@ -283,18 +277,14 @@ private nonisolated struct GmailMessage: Decodable, Sendable {
 }
 
 private nonisolated struct GmailPart: Decodable, Sendable {
-    struct Header: Decodable, Sendable {
-        let name: String
-        let value: String
-    }
     let mimeType: String?
     let filename: String?
-    let headers: [Header]?
+    let headers: [HeaderField]?
     let body: GmailBody?
     let parts: [GmailPart]?
 
     func header(_ name: String) -> String? {
-        headers?.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.value
+        headers?.value(of: name)
     }
 
     /// Whether some part below this one is a named file.
@@ -321,10 +311,8 @@ private actor GmailEnvelopeCache {
 
         var current: Envelope {
             var envelope = envelope
-            envelope.flags = []
-            if !labels.contains("UNREAD") { envelope.flags.insert("seen") }
-            if labels.contains("STARRED") { envelope.flags.insert("flagged") }
-            if labels.contains("DRAFT") { envelope.flags.insert("draft") }
+            envelope.flags = Envelope.flags(seen: !labels.contains("UNREAD"), flagged: labels.contains("STARRED"),
+                                            draft: labels.contains("DRAFT"))
             return envelope
         }
     }
@@ -362,8 +350,7 @@ private actor GmailEnvelopeCache {
     private func load() {
         guard !loaded else { return }
         loaded = true
-        guard let data = try? Data(contentsOf: file),
-              let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
+        guard let snapshot = JSONFile.read(Snapshot.self, at: file) else { return }
         historyID = snapshot.historyID
         entries = snapshot.entries
     }
@@ -380,9 +367,8 @@ private actor GmailEnvelopeCache {
 
     private func save() {
         saveScheduled = false
-        let fm = FileManager.default
         guard let historyID else {
-            try? fm.removeItem(at: file)
+            try? FileManager.default.removeItem(at: file)
             return
         }
         var kept = entries
@@ -390,9 +376,7 @@ private actor GmailEnvelopeCache {
             let newest = kept.sorted { ($0.value.envelope.date ?? .distantPast) > ($1.value.envelope.date ?? .distantPast) }
             kept = Dictionary(uniqueKeysWithValues: newest.prefix(Self.storedLimit).map { ($0.key, $0.value) })
         }
-        guard let data = try? JSONEncoder().encode(Snapshot(historyID: historyID, entries: kept)) else { return }
-        try? fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: file, options: .atomic)
+        try? JSONFile.write(Snapshot(historyID: historyID, entries: kept), to: file, creatingDirectory: true)
     }
 
     /// Applies every label change and deletion since the last pull. A pull already running
@@ -580,11 +564,10 @@ private actor GmailEnvelopeCache {
     private static func entry(_ message: GmailMessage, hasAttachment: Bool) -> Entry {
         let payload = message.payload
         let inReplyTo = parseMessageIDList(payload?.header("In-Reply-To"))
-        let messageID = payload?.header("Message-ID").map(normalizeMessageID)
         let envelope = Envelope(
             id: message.id,
             thread: message.threadId,
-            messageID: messageID?.isEmpty == false ? messageID : nil,
+            messageID: payload?.header("Message-ID").map(normalizeMessageID)?.nilIfEmpty,
             inReplyTo: inReplyTo.isEmpty ? Array(parseMessageIDList(payload?.header("References")).suffix(1)) : inReplyTo,
             flags: [],
             subject: HeaderText.decode(payload?.header("Subject") ?? ""),
@@ -628,33 +611,24 @@ extension GmailBackend {
 
     /// `GET <collection>/<id>?<query>` for every id through Gmail's batch endpoint, 50 per
     /// request and one batch at a time: each sub-request counts against the per-user quota, so
-    /// parallel batches were what Gmail refused. Answers are keyed by id; ids that no longer
-    /// exist are left out. `unitCost` is one sub-request's quota units.
+    /// parallel batches were what Gmail refused. Sub-requests Gmail throttles or fails transiently
+    /// are sent again. Answers are keyed by id; ids that no longer exist are left out. `unitCost`
+    /// is one sub-request's quota units.
     fileprivate static func batchGet<T: Decodable & Sendable>(_ type: T.Type, _ collection: String, ids: [String],
                                                              query: String, unitCost: Int, api: API,
                                                              priority: RequestPriority) async throws -> [String: T] {
+        // Sub-requests are numbered within their batch (`Content-ID: <m3>`), and answers matched by that number.
+        let numbered = ids.chunked(into: 50).flatMap { chunk in chunk.enumerated().map { (number: $0.offset, id: $0.element) } }
         var found: [String: T] = [:]
-        for chunk in ids.chunked(into: 50) {
-            let part = try await batch(T.self, collection, ids: chunk, query: query, unitCost: unitCost, api: api,
-                                       priority: priority)
-            found.merge(part) { first, _ in first }
-        }
-        return found
-    }
-
-    /// One batch request; sub-requests Gmail throttles or fails transiently are sent again.
-    private static func batch<T: Decodable & Sendable>(_ type: T.Type, _ collection: String, ids: [String], query: String,
-                                                      unitCost: Int, api: API, priority: RequestPriority) async throws -> [String: T] {
-        var found: [String: T] = [:]
-        try await api.repeatingThrottled(Array(ids.indices), service: "Gmail") { pending in
-            let boundary = "batch_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        try await api.batched(numbered, size: 50, service: "Gmail") { pending in
+            let boundary = MIMEMessage.boundary("batch_", lowercased: false)
             var body = ""
-            for index in pending {
-                body += "--\(boundary)\r\nContent-Type: application/http\r\nContent-ID: <m\(index)>\r\n\r\n"
-                    + "GET /gmail/v1/users/me/\(collection)/\(ids[index].percentEncoded)?\(query)\r\n\r\n"
+            for (number, id) in pending {
+                body += "--\(boundary)\r\nContent-Type: application/http\r\nContent-ID: <m\(number)>\r\n\r\n"
+                    + "GET \(Endpoints.gmail.path())\(collection)/\(id.percentEncoded)?\(query)\r\n\r\n"
             }
             body += "--\(boundary)--\r\n"
-            var request = API.request(URL(string: "https://gmail.googleapis.com/batch/gmail/v1")!, method: "POST",
+            var request = API.request(Endpoints.gmailBatch, method: "POST",
                                       headers: ["Content-Type": "multipart/mixed; boundary=\(boundary)"])
             request.httpBody = Data(body.utf8)
             let (data, response) = try await api.send(request, priority: priority, idempotent: true,
@@ -663,28 +637,27 @@ extension GmailBackend {
                 throw APIError(status: response.statusCode, message: "Gmail answered a batch request without parts")
             }
             // Whatever stays in `retry` (throttled, failed transiently, unanswered) is sent again.
-            var retry = Set(pending)
+            var retry = Dictionary(uniqueKeysWithValues: pending.map { ($0.number, $0.id) })
             for part in batchParts(data, boundary: responseBoundary) {
-                guard let index = part.index, retry.contains(index) else { continue }
+                guard let number = part.index, let id = retry[number] else { continue }
                 switch part.status {
                 case 200:
                     do {
-                        found[ids[index]] = try JSONDecoder().decode(T.self, from: part.body)
+                        found[id] = try JSONDecoder().decode(T.self, from: part.body)
                     } catch {
-                        throw APIError(status: 200, message: "Unexpected answer from gmail.googleapis.com: \(error)")
+                        throw APIError.unexpectedAnswer(from: Endpoints.gmailBatch.host(), error)
                     }
                 case 404:
                     break
-                case 429, 500..<600:
-                    continue
-                case 403 where APIError.Body(part.body)?.isRateLimit == true:
-                    continue
                 default:
-                    throw APIError(status: part.status, body: part.body)
+                    guard API.retry(status: part.status, body: part.body) != nil else {
+                        throw APIError(status: part.status, body: part.body)
+                    }
+                    continue
                 }
-                retry.remove(index)
+                retry[number] = nil
             }
-            return (retry.sorted(), nil)
+            return (pending.filter { retry[$0.number] != nil }, nil)
         }
         return found
     }
@@ -765,7 +738,7 @@ private nonisolated struct GmailContentRenderer {
         let index = nextIndex
         nextIndex += 1
         let contentID = part.header("Content-ID") ?? (placed ? "ms-part-\(index)" : nil)
-        let attachment = assembly.store(bytes, index: index, filename: filename.isEmpty ? nil : filename, mime: mime,
+        let attachment = assembly.store(bytes, index: index, filename: filename.nilIfEmpty, mime: mime,
                                         contentID: contentID, inline: inline)
         guard placed, let cid = attachment.contentID, HTMLText.escape(cid) == cid else { return nil }
         return Segment(html: "<p><img src=\"cid:\(cid)\" style=\"max-width:100%\"></p>", text: nil, primary: false)

@@ -82,3 +82,27 @@ nonisolated func parseMessageIDList(_ header: String?) -> [String] {
     let raw = bracketed.isEmpty ? header.split(whereSeparator: \.isWhitespace).map(String.init) : bracketed
     return raw.map(normalizeMessageID).filter { !$0.isEmpty }
 }
+
+nonisolated extension Envelope {
+    /// The flags of a message the provider reports as read, flagged and a draft.
+    static func flags(seen: Bool, flagged: Bool, draft: Bool) -> Set<String> {
+        var flags = Set<String>()
+        if seen { flags.insert("seen") }
+        if flagged { flags.insert("flagged") }
+        if draft { flags.insert("draft") }
+        return flags
+    }
+}
+
+/// A message header as Gmail and Graph spell one out in JSON.
+nonisolated struct HeaderField: Decodable, Sendable {
+    let name: String
+    let value: String
+}
+
+nonisolated extension [HeaderField] {
+    /// The first `name` header's value; header names compare case-insensitively.
+    func value(of name: String) -> String? {
+        first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.value
+    }
+}

@@ -54,7 +54,7 @@ final class ChatStore {
     static let cachedMessages = 150
 
     /// The scope that makes a Google account a chat account.
-    static let chatScope = "https://www.googleapis.com/auth/chat.messages.readonly"
+    static let chatScope = OAuthScope.chatMessages
 
     @ObservationIgnored private let chat: Chat
     @ObservationIgnored private let cache: MailCache

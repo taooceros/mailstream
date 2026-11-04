@@ -14,7 +14,7 @@ nonisolated final class GraphBackend: MailBackend {
     @concurrent func identity() async throws -> Address {
         let user = try await api.decode(User.self, Self.request(Self.url("me", [("$select", "displayName,mail,userPrincipalName")])))
         guard let email = [user.mail, user.userPrincipalName].compactMap({ $0 }).first(where: { !$0.isEmpty }) else {
-            throw APIError(status: 200, message: "Microsoft Graph returned no address for this account")
+            throw APIError.malformed("Microsoft Graph returned no address for this account")
         }
         return Address(name: user.displayName, email: email)
     }
@@ -34,9 +34,6 @@ nonisolated final class GraphBackend: MailBackend {
         return folders.map { folder, name in
             Mailbox(account: api.account, id: folder.id, name: name, role: roles[folder.id] ?? .other,
                     unread: counts ? folder.unreadItemCount : nil, total: counts ? folder.totalItemCount : nil)
-        }.sorted { a, b in
-            if a.role.sortOrder != b.role.sortOrder { return a.role.sortOrder < b.role.sortOrder }
-            return a.name.localizedStandardCompare(b.name) == .orderedAscending
         }
     }
 
@@ -139,16 +136,13 @@ nonisolated final class GraphBackend: MailBackend {
     }
 
     private static func envelope(_ message: Message) -> Envelope {
-        var flags = Set<String>()
-        if message.isRead == true { flags.insert("seen") }
-        if message.flag?.flagStatus == "flagged" { flags.insert("flagged") }
-        if message.isDraft == true { flags.insert("draft") }
-        let messageID = message.internetMessageId.map(normalizeMessageID)
-        return Envelope(id: message.id, thread: message.conversationId,
-                        messageID: messageID?.isEmpty == false ? messageID : nil, inReplyTo: [], flags: flags,
-                        subject: message.subject ?? "", from: message.from?.address.map { [$0] } ?? [],
-                        to: (message.toRecipients ?? []).compactMap(\.address),
-                        date: message.receivedDateTime.flatMap(parseISODate), size: 0, hasAttachment: message.hasAttachments)
+        Envelope(id: message.id, thread: message.conversationId,
+                 messageID: message.internetMessageId.map(normalizeMessageID)?.nilIfEmpty, inReplyTo: [],
+                 flags: Envelope.flags(seen: message.isRead == true, flagged: message.flag?.flagStatus == "flagged",
+                                       draft: message.isDraft == true),
+                 subject: message.subject ?? "", from: message.from?.address.map { [$0] } ?? [],
+                 to: (message.toRecipients ?? []).compactMap(\.address),
+                 date: message.receivedDateTime.flatMap(parseISODate), size: 0, hasAttachment: message.hasAttachments)
     }
 
     // MARK: Content
@@ -161,10 +155,7 @@ nonisolated final class GraphBackend: MailBackend {
                                                                  [("$select", "body,ccRecipients,replyTo,internetMessageHeaders,hasAttachments")]),
                                                         prefer: Self.htmlBody),
                                            priority: priority)
-        let body = message.body?.content ?? ""
-        let isText = message.body?.contentType?.lowercased() == "text"
-        var html: String? = isText ? nil : body
-        var text: String? = isText ? body : nil
+        var (html, text) = Body.split(message.body)
 
         var parts: [(Int, Part)] = []
         if message.hasAttachments == true || html?.range(of: "cid:", options: .caseInsensitive) != nil {
@@ -197,8 +188,7 @@ nonisolated final class GraphBackend: MailBackend {
             }
         }
 
-        let references = parseMessageIDList(message.internetMessageHeaders?
-            .first { $0.name.caseInsensitiveCompare("References") == .orderedSame }?.value)
+        let references = parseMessageIDList(message.internetMessageHeaders?.value(of: "References"))
         return assembly.finish(html: html, text: text, cc: (message.ccRecipients ?? []).compactMap(\.address),
                                replyTo: (message.replyTo ?? []).compactMap(\.address), references: references)
     }
@@ -222,11 +212,9 @@ nonisolated final class GraphBackend: MailBackend {
                                                              prefer: Self.htmlBody),
                                                 priority: priority)
             let attached = expanded.item
-            let content = attached?.body?.content ?? ""
-            let isText = attached?.body?.contentType?.lowercased() == "text"
+            let (html, text) = Body.split(attached?.body)
             return .message(MessageAssembly.AttachedMessage(from: attached?.from?.address, subject: attached?.subject ?? "",
-                                                            html: isText ? nil : content,
-                                                            text: isText ? content : HTMLText.strip(content)))
+                                                            html: html, text: text ?? html.map(HTMLText.strip) ?? ""))
         default:
             return nil
         }
@@ -260,31 +248,29 @@ nonisolated final class GraphBackend: MailBackend {
             BatchRequest(id: String(index + 1), method: method, url: "/me/messages/\(id.percentEncoded)\(path)",
                          headers: headers, body: body)
         }
-        for chunk in requests.chunked(into: 20) {
-            try await api.repeatingThrottled(chunk, service: "Microsoft Graph") { pending in
-                let answer = try await api.decode(BatchAnswer.self,
-                                                  Self.request(Self.url("$batch"), method: "POST", json: BatchPayload(requests: pending)))
-                var retry = Set(pending.map(\.id))
-                var retryAfter: Double?
-                for item in answer.responses.sorted(by: { (Int($0.id) ?? 0) < (Int($1.id) ?? 0) }) where retry.contains(item.id) {
-                    switch item.status {
-                    case 200..<300:
-                        retry.remove(item.id)
-                    case 429:
-                        if let seconds = item.retryAfter { retryAfter = max(retryAfter ?? 0, seconds) }
-                    default:
-                        throw APIError(status: item.status, message: item.body?.message ?? "Microsoft Graph answered \(item.status)")
-                    }
+        try await api.batched(requests, size: 20, service: "Microsoft Graph") { pending in
+            let answer = try await api.decode(BatchAnswer.self,
+                                              Self.request(Self.url("$batch"), method: "POST", json: BatchPayload(requests: pending)))
+            var retry = Set(pending.map(\.id))
+            var retryAfter: Double?
+            for item in answer.responses.sorted(by: { (Int($0.id) ?? 0) < (Int($1.id) ?? 0) }) where retry.contains(item.id) {
+                switch item.status {
+                case 200..<300:
+                    retry.remove(item.id)
+                case 429:
+                    if let seconds = item.retryAfter { retryAfter = max(retryAfter ?? 0, seconds) }
+                default:
+                    throw APIError(status: item.status, message: item.body?.message ?? "Microsoft Graph answered \(item.status)")
                 }
-                return (pending.filter { retry.contains($0.id) }, retryAfter)
             }
+            return (pending.filter { retry.contains($0.id) }, retryAfter)
         }
     }
 
     // MARK: Sending
 
     @concurrent func send(_ message: OutgoingMessage) async throws {
-        let mime = try MIMEMessage.render(message, messageID: "\(UUID().uuidString.lowercased())@mailstream.local")
+        let mime = try MIMEMessage.render(message)
         var request = try Self.request(Self.url("me/sendMail"), method: "POST")
         request.setValue("text/plain", forHTTPHeaderField: "Content-Type")
         request.httpBody = mime.base64EncodedData()
@@ -293,16 +279,15 @@ nonisolated final class GraphBackend: MailBackend {
 
     // MARK: Requests
 
-    private static let root = "https://graph.microsoft.com/v1.0/"
     private static let immutableIDs = "IdType=\"ImmutableId\""
     private static let htmlBody = "outlook.body-content-type=\"html\""
 
     /// `path` is relative to the v1.0 root with ids already percent-encoded; query values are
     /// percent-encoded here.
     private static func url(_ path: String, _ query: [(String, String)] = []) throws -> URL {
-        var string = root + path
-        if !query.isEmpty { string += "?" + formEncoded(query) }
-        guard let url = URL(string: string) else { throw APIError(status: 0, message: "Invalid Microsoft Graph URL: \(path)") }
+        guard let url = API.url(Endpoints.graph, path, query) else {
+            throw APIError(status: 0, message: "Invalid Microsoft Graph URL: \(path)")
+        }
         return url
     }
 
@@ -315,14 +300,9 @@ nonisolated final class GraphBackend: MailBackend {
 
     /// Pages through `first` and every `@odata.nextLink` after it.
     private func pages<Item: Decodable & Sendable>(_ type: Item.Type, _ first: URL, priority: RequestPriority) async throws -> [Item] {
-        var items: [Item] = []
-        var next: URL? = first
-        while let url = next {
-            let page = try await api.decode(Page<Item>.self, Self.request(url), priority: priority)
-            items += page.value
-            next = page.nextLink.flatMap(URL.init(string:))
-        }
-        return items
+        try await API.pages(from: first,
+                            fetch: { try await api.decode(Page<Item>.self, Self.request($0), priority: priority) },
+                            next: { $0.nextLink.flatMap(URL.init(string:)) }, items: \.value) ?? []
     }
 }
 
@@ -392,18 +372,19 @@ nonisolated extension GraphBackend {
     fileprivate struct Body: Decodable, Sendable {
         let contentType: String?
         let content: String?
+
+        /// `body` as an HTML body or a plain one, by its content type; absent is an empty HTML one.
+        static func split(_ body: Body?) -> (html: String?, text: String?) {
+            let content = body?.content ?? ""
+            return body?.contentType?.lowercased() == "text" ? (nil, content) : (content, nil)
+        }
     }
 
     fileprivate struct Full: Decodable, Sendable {
-        struct Header: Decodable, Sendable {
-            let name: String
-            let value: String
-        }
-
         let body: Body?
         let ccRecipients: [Recipient]?
         let replyTo: [Recipient]?
-        let internetMessageHeaders: [Header]?
+        let internetMessageHeaders: [HeaderField]?
         let hasAttachments: Bool?
     }
 

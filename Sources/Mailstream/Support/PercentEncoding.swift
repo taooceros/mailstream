@@ -13,3 +13,8 @@ nonisolated extension String {
 nonisolated func formEncoded(_ fields: [(String, String)]) -> String {
     fields.map { "\($0)=\($1.percentEncoded)" }.joined(separator: "&")
 }
+
+/// `fields` sorted by name, so the same fields always encode the same way.
+nonisolated func formEncoded(_ fields: [String: String]) -> String {
+    formEncoded(fields.sorted { $0.key < $1.key }.map { ($0.key, $0.value) })
+}

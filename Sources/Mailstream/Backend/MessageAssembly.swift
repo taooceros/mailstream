@@ -27,7 +27,7 @@ nonisolated struct MessageAssembly {
         let safe = name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ":", with: "_")
         let storedName = "\(index)-\(safe)"
         try? bytes.write(to: directory.appendingPathComponent(storedName))
-        let cid = contentID.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "<> ")) }.flatMap { $0.isEmpty ? nil : $0 }
+        let cid = contentID?.trimmingCharacters(in: CharacterSet(charactersIn: "<> ")).nilIfEmpty
         let attachment = Attachment(part: index, filename: name, mime: mime, size: bytes.count, contentID: cid,
                                     inline: inline, storedName: storedName)
         stored.append(attachment)

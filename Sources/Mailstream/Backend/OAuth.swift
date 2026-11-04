@@ -21,21 +21,12 @@ nonisolated extension Provider {
     var scopes: [String] {
         switch self {
         case .google:
-            ["openid", "email", "profile", "https://mail.google.com/",
-             "https://www.googleapis.com/auth/contacts.readonly",
-             "https://www.googleapis.com/auth/contacts.other.readonly",
-             "https://www.googleapis.com/auth/directory.readonly",
-             "https://www.googleapis.com/auth/chat.spaces.readonly",
-             "https://www.googleapis.com/auth/chat.messages.readonly",
-             "https://www.googleapis.com/auth/chat.messages.create",
-             "https://www.googleapis.com/auth/chat.memberships.readonly",
-             "https://www.googleapis.com/auth/chat.users.readstate"]
+            ["openid", "email", "profile", OAuthScope.gmail, OAuthScope.googleContacts, OAuthScope.googleOtherContacts,
+             OAuthScope.googleDirectory, OAuthScope.chatSpaces, OAuthScope.chatMessages, OAuthScope.chatCreate,
+             OAuthScope.chatMemberships, OAuthScope.chatReadState]
         case .microsoft:
             ["openid", "email", "profile", "offline_access",
-             "https://graph.microsoft.com/User.Read",
-             "https://graph.microsoft.com/Mail.ReadWrite",
-             "https://graph.microsoft.com/Mail.Send",
-             "https://graph.microsoft.com/Contacts.Read"]
+             OAuthScope.graphUser, OAuthScope.graphMail, OAuthScope.graphSend, OAuthScope.graphContacts]
         }
     }
 
@@ -131,7 +122,7 @@ nonisolated enum OAuth {
             "code_challenge": challenge,
             "code_challenge_method": "S256",
         ].merging(provider.authorizeExtras) { current, _ in current }
-        components?.percentEncodedQuery = formEncoded(parameters.sorted { $0.key < $1.key }.map { ($0.key, $0.value) })
+        components?.percentEncodedQuery = formEncoded(parameters)
         guard let url = components?.url else {
             throw OAuthError(code: "config", message: "Could not build the sign-in address.")
         }
@@ -181,7 +172,7 @@ nonisolated enum OAuth {
         if let secret = client.secret, !secret.isEmpty { credentials["client_secret"] = secret }
         let body = form.merging(credentials) { current, _ in current }
             .merging(provider.tokenExtras) { current, _ in current }
-        request.httpBody = Data(formEncoded(body.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }).utf8)
+        request.httpBody = Data(formEncoded(body).utf8)
         let (data, response) = try await API.session.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         let decoder = JSONDecoder()
@@ -337,7 +328,7 @@ private nonisolated struct RedirectListener: Sendable {
             try await respond(connection, status: "200 OK", text: nil)
             return .success(code)
         }
-        let reason = query["error_description"].flatMap { $0.isEmpty ? nil : $0 }
+        let reason = query["error_description"]?.nilIfEmpty
             ?? query["error"] ?? "The provider sent no authorization code."
         try await respond(connection, status: "200 OK", text: "Sign-in failed: \(reason)")
         return .failure(OAuthError(code: query["error"] ?? "response", message: "Sign-in failed: \(reason)"))

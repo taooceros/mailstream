@@ -3,11 +3,10 @@ import Foundation
 /// The Google Chat REST resources `Chat` reads and writes.
 /// Reference: <https://developers.google.com/workspace/chat/api/reference/rest>.
 nonisolated enum ChatAPI {
-    static let base = URL(string: "https://chat.googleapis.com/v1/")!
-
-    /// `path` under the API root, with `query` encoded.
+    /// `path` under the API root, with `query` added as `URLQueryItem`s. That is URLComponents'
+    /// encoding, which leaves characters `formEncoded` escapes (`:`, `/`, `?` and others) as they are.
     static func url(_ path: String, _ query: [(String, String)] = []) -> URL {
-        var url = base.appending(path: path)
+        var url = Endpoints.chat.appending(path: path)
         if !query.isEmpty { url.append(queryItems: query.map { URLQueryItem(name: $0.0, value: $0.1) }) }
         return url
     }
@@ -24,6 +23,11 @@ nonisolated enum ChatAPI {
         guard ok else { throw ChatError(message: "Invalid Google Chat resource name: \(name)") }
     }
 
+    /// Fails unless `name` is a space's resource name (`spaces/…`).
+    static func checkSpace(_ name: String) throws {
+        try check(name, shape: ["spaces"])
+    }
+
     struct Space: Decodable, Sendable {
         let name: String
         let spaceType: String
@@ -34,10 +38,10 @@ nonisolated enum ChatAPI {
         init(from decoder: any Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             name = try c.decode(String.self, forKey: .name)
-            spaceType = try c.decodeIfPresent(String.self, forKey: .spaceType) ?? ""
-            displayName = try c.decodeIfPresent(String.self, forKey: .displayName) ?? ""
+            spaceType = try c.decodeIfPresent(.spaceType, default: "")
+            displayName = try c.decodeIfPresent(.displayName, default: "")
             lastActiveTime = try c.decodeIfPresent(String.self, forKey: .lastActiveTime)
-            singleUserBotDm = try c.decodeIfPresent(Bool.self, forKey: .singleUserBotDm) ?? false
+            singleUserBotDm = try c.decodeIfPresent(.singleUserBotDm, default: false)
         }
 
         private enum CodingKeys: String, CodingKey { case name, spaceType, displayName, lastActiveTime, singleUserBotDm }
@@ -57,7 +61,7 @@ nonisolated enum ChatAPI {
 
         init(from decoder: any Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
-            name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+            name = try c.decodeIfPresent(.name, default: "")
             displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
             email = try c.decodeIfPresent(String.self, forKey: .email)
             avatarUrl = try c.decodeIfPresent(String.self, forKey: .avatarUrl)
@@ -97,7 +101,7 @@ nonisolated enum ChatAPI {
 
         init(from decoder: any Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
-            name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+            name = try c.decodeIfPresent(.name, default: "")
             sender = try c.decodeIfPresent(User.self, forKey: .sender)
             createTime = try c.decodeIfPresent(String.self, forKey: .createTime)
             lastUpdateTime = try c.decodeIfPresent(String.self, forKey: .lastUpdateTime)
@@ -105,8 +109,8 @@ nonisolated enum ChatAPI {
             formattedText = try c.decodeIfPresent(String.self, forKey: .formattedText)
             fallbackText = try c.decodeIfPresent(String.self, forKey: .fallbackText)
             thread = try c.decodeIfPresent(Thread.self, forKey: .thread)
-            threadReply = try c.decodeIfPresent(Bool.self, forKey: .threadReply) ?? false
-            attachment = try c.decodeIfPresent([Attachment].self, forKey: .attachment) ?? []
+            threadReply = try c.decodeIfPresent(.threadReply, default: false)
+            attachment = try c.decodeIfPresent(.attachment, default: [])
             cardsV2 = try c.decodeIfPresent(Present.self, forKey: .cardsV2)
             cards = try c.decodeIfPresent(Present.self, forKey: .cards)
         }
@@ -138,27 +142,25 @@ nonisolated enum ChatAPI {
             guard parts.count >= 2, parts[0] == "users", !parts[1].isEmpty, parts[1] != "me" else { return nil }
             return "users/\(parts[1])"
         }
+
+        /// When the caller last read the space.
+        var lastRead: Date? { lastReadTime.flatMap(parseISODate) }
     }
 
     // MARK: - Calls
 
     /// Every space the user is in. Pages are as large as the API allows, so this is one or two calls.
     static func spaces(_ api: API) async throws -> [Space] {
-        var spaces: [Space] = []
-        var token: String?
-        while true {
-            var query = [("pageSize", "1000")]
-            if let token { query.append(("pageToken", token)) }
-            let page = try await api.get(SpacesPage.self, url("spaces", query))
-            spaces += page.spaces ?? []
-            guard let next = page.nextPageToken, !next.isEmpty else { return spaces }
-            token = next
-        }
+        let query = [("pageSize", "1000")]
+        return try await API.pages(from: url("spaces", query),
+                                   fetch: { try await api.get(SpacesPage.self, $0) },
+                                   next: { page in page.nextPageToken?.nilIfEmpty.map { url("spaces", query + [("pageToken", $0)]) } },
+                                   items: { $0.spaces ?? [] }) ?? []
     }
 
     /// The newest `limit` messages created before `before` (RFC 3339), newest first.
     static func messages(_ api: API, space: String, limit: Int, before: String?) async throws -> MessagesPage {
-        var query = [("pageSize", String(min(max(limit, 1), 1000))), ("orderBy", "createTime desc")]
+        var query = [("pageSize", API.pageSize(limit, max: 1000)), ("orderBy", "createTime desc")]
         if let before { query.append(("filter", "createTime < \"\(before)\"")) }
         return try await api.get(MessagesPage.self, url("\(space)/messages", query))
     }

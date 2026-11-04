@@ -50,12 +50,12 @@ final class AvatarStore {
         accounts.records.compactMap { record -> PhotoAccount? in
             let scopes = Set(record.scopes)
             switch record.provider {
-            case .google where scopes.contains("https://www.googleapis.com/auth/contacts.readonly"):
+            case .google where scopes.contains(OAuthScope.googleContacts):
                 return accounts.api(for: record.id).map {
                     PhotoAccount(api: $0, provider: .google,
-                                 directory: scopes.contains("https://www.googleapis.com/auth/directory.readonly"))
+                                 directory: scopes.contains(OAuthScope.googleDirectory))
                 }
-            case .microsoft where scopes.contains("https://graph.microsoft.com/Contacts.Read"):
+            case .microsoft where scopes.contains(OAuthScope.graphContacts):
                 return accounts.api(for: record.id).map { PhotoAccount(api: $0, provider: .microsoft, directory: false) }
             default:
                 return nil
@@ -79,10 +79,7 @@ final class AvatarStore {
     /// already known; otherwise starts looking and returns nil, bumping `revision` if one turns up.
     /// `automated` allows the domain's site icon.
     func image(for key: String, automated: Bool) -> NSImage? {
-        let key = key.lowercased()
-        if let image = images.object(forKey: key as NSString) { return image }
-        request(key, automated: automated)
-        return nil
+        lookUp(images, key.lowercased(), automated: automated)
     }
 
     /// The picture for `key` if one is in memory, without looking for one.
@@ -92,21 +89,30 @@ final class AvatarStore {
 
     /// The same picture as a `data:` URL, for the reader page.
     func dataURL(for key: String, automated: Bool) -> String? {
-        let key = key.lowercased()
-        guard let png = pngs.object(forKey: key as NSString) else {
-            request(key, automated: automated)
-            return nil
-        }
-        return "data:image/png;base64," + (png as Data).base64EncodedString()
+        lookUp(pngs, key.lowercased(), automated: automated).map { "data:image/png;base64," + ($0 as Data).base64EncodedString() }
     }
 
-    /// The same picture at 512 px for an enlarged view, cached on disk like the row size.
+    /// The same picture at 512 px for an enlarged view, cached on disk like the row size. Not a
+    /// change to observe: only the view that asked shows it.
     func largeImage(for key: String, automated: Bool) async -> NSImage? {
         let key = key.lowercased()
         if let image = large.object(forKey: key as NSString) { return image }
-        guard let png = await resolver.avatar(for: key, published: published[key], automated: automated, side: 512),
-              let image = NSImage(data: png) else { return nil }
-        large.setObject(image, forKey: key as NSString)
+        guard let png = await resolver.avatar(for: key, published: published[key], automated: automated, side: 512)
+        else { return nil }
+        return keep(png, in: large, as: key)
+    }
+
+    /// `cache`'s entry for the lowercased `key`; a miss starts looking for the picture.
+    private func lookUp<Object: AnyObject>(_ cache: NSCache<NSString, Object>, _ key: String, automated: Bool) -> Object? {
+        if let object = cache.object(forKey: key as NSString) { return object }
+        request(key, automated: automated)
+        return nil
+    }
+
+    /// `png` decoded and kept in `cache` under `key`; nil when it does not decode.
+    private func keep(_ png: Data, in cache: NSCache<NSString, NSImage>, as key: String) -> NSImage? {
+        guard let image = NSImage(data: png) else { return nil }
+        cache.setObject(image, forKey: key as NSString)
         return image
     }
 
@@ -120,11 +126,10 @@ final class AvatarStore {
             // A picture published meanwhile outranks what this lookup could find: look again with it.
             let superseded = published[key] != photo
             if superseded { request(key, automated: automated) }
-            guard let png, let image = NSImage(data: png) else {
+            guard let png, keep(png, in: images, as: key) != nil else {
                 if !superseded { missing.insert(key) }
                 return
             }
-            images.setObject(image, forKey: key as NSString)
             pngs.setObject(png as NSData, forKey: key as NSString)
             revision += 1
         }
@@ -403,12 +408,11 @@ actor AvatarResolver {
     }
 
     @concurrent private nonisolated static func saved(at url: URL) async -> Directory? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(Directory.self, from: data)
+        JSONFile.read(Directory.self, at: url)
     }
 
     @concurrent private nonisolated static func save(_ directory: Directory, to url: URL) async {
-        if let data = try? JSONEncoder().encode(directory) { try? data.write(to: url, options: .atomic) }
+        try? JSONFile.write(directory, to: url)
     }
 
     /// `request`'s answer; nil when the provider refused it (no permission, no such list), thrown
@@ -434,29 +438,31 @@ actor AvatarResolver {
             lists.append(("people:listDirectoryPeople",
                           [readMask, URLQueryItem(name: "sources", value: "DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE")]))
         }
-        var photos: [String: PhotoSource] = [:]
+        var found: [(String, PhotoSource)] = []
         var answered = false
         for (path, query) in lists {
-            let base = URL(string: "https://people.googleapis.com/v1/" + path)!
+            let first = API.url(Endpoints.people, path)!
                 .appending(queryItems: query + [URLQueryItem(name: "pageSize", value: "1000")])
-            var pageToken: String?
-            for _ in 0..<30 {
-                let url = pageToken.map { base.appending(queryItems: [URLQueryItem(name: "pageToken", value: $0)]) } ?? base
-                guard let page = try await Self.unlessRefused({ try await api.get(PeoplePage.self, url, priority: .background) })
-                else { break }
-                answered = true
-                for person in page.people {
-                    guard let link = person.photos?.first(where: { $0.default != true })?.url.flatMap(URL.init(string:))
-                    else { continue }
-                    for address in person.emailAddresses ?? [] {
-                        if let email = address.value?.lowercased(), photos[email] == nil { photos[email] = .url(link) }
-                    }
-                }
-                pageToken = page.nextPageToken
-                if pageToken == nil { break }
-            }
+            let listed = try await API.pages(
+                from: first, limit: 30,
+                fetch: { url in try await Self.unlessRefused { try await api.get(PeoplePage.self, url, priority: .background) } },
+                next: { page in page.nextPageToken.map { first.appending(queryItems: [URLQueryItem(name: "pageToken", value: $0)]) } },
+                items: Self.photos)
+            guard let listed else { continue }
+            answered = true
+            found += listed
         }
-        return answered ? photos : nil
+        // The first list naming an address wins.
+        return answered ? Dictionary(found) { first, _ in first } : nil
+    }
+
+    /// Each person's addresses with their photo, when they have one of their own.
+    private nonisolated static func photos(_ page: PeoplePage) -> [(String, PhotoSource)] {
+        page.people.flatMap { person -> [(String, PhotoSource)] in
+            guard let link = person.photos?.first(where: { $0.default != true })?.url.flatMap(URL.init(string:))
+            else { return [] }
+            return (person.emailAddresses ?? []).compactMap { $0.value?.lowercased() }.map { ($0, .url(link)) }
+        }
     }
 
     /// One page of saved contacts, other contacts or directory people.
@@ -488,25 +494,20 @@ actor AvatarResolver {
 
     /// Outlook contacts. Nil when the request is refused; thrown when the account could not be asked.
     private func graphPhotos(api: API) async throws -> [String: PhotoSource]? {
-        var photos: [String: PhotoSource] = [:]
-        var answered = false
-        var next: URL? = URL(string: "https://graph.microsoft.com/v1.0/me/contacts")!
+        let first = API.url(Endpoints.graph, "me/contacts")!
             .appending(queryItems: [URLQueryItem(name: "$select", value: "emailAddresses"), URLQueryItem(name: "$top", value: "999")])
-        for _ in 0..<30 {
-            guard let url = next,
-                  let page = try await Self.unlessRefused({ try await api.get(GraphContacts.self, url, priority: .background) })
-            else { break }
-            answered = true
-            for contact in page.value {
-                for address in contact.emailAddresses ?? [] {
-                    if let email = address.address?.lowercased(), photos[email] == nil {
-                        photos[email] = .graphContact(account: api.account, id: contact.id)
-                    }
+        let account = api.account
+        let found = try await API.pages(
+            from: first, limit: 30,
+            fetch: { url in try await Self.unlessRefused { try await api.get(GraphContacts.self, url, priority: .background) } },
+            next: \.nextLink,
+            items: { page in
+                page.value.flatMap { contact in
+                    (contact.emailAddresses ?? []).compactMap { $0.address?.lowercased() }
+                        .map { ($0, PhotoSource.graphContact(account: account, id: contact.id)) }
                 }
-            }
-            next = page.nextLink
-        }
-        return answered ? photos : nil
+            })
+        return found.map { Dictionary($0) { first, _ in first } }
     }
 
     private nonisolated struct GraphContacts: Decodable {
@@ -532,7 +533,7 @@ actor AvatarResolver {
             fetched = await fetch(Self.sized(url, side: side))
         case .graphContact(let account, let id):
             guard let api = accounts.first(where: { $0.name == account })?.api,
-                  let url = URL(string: "https://graph.microsoft.com/v1.0/me/contacts/\(id)/photo/$value")
+                  let url = API.url(Endpoints.graph, "me/contacts/\(id)/photo/$value")
             else { return nil }
             fetched = await fetch(url, api: api)
         }
@@ -659,22 +660,25 @@ actor AvatarResolver {
     /// The body of a successful GET, as the account's user when `api` is given; nil on any failure
     /// or past `limit` bytes.
     private func fetch(_ url: URL, api: API? = nil, limit: Int = 2 * 1024 * 1024) async -> Data? {
-        let answer: (data: Data, response: HTTPURLResponse?)?
-        if let api {
-            answer = (try? await api.send(API.request(url), priority: .background)).map { ($0.0, $0.1) }
-        } else {
-            answer = (try? await session.data(for: URLRequest(url: url))).map { ($0.0, $0.1 as? HTTPURLResponse) }
-        }
-        guard let answer, let http = answer.response, http.statusCode == 200, answer.data.count <= limit
-        else { return nil }
-        return answer.data
+        guard let (data, _) = await get(url, api: api), data.count <= limit else { return nil }
+        return data
     }
 
+    /// A page's first 512 KB and the URL it ended up at, for resolving its relative links.
     private func fetchPage(_ url: URL) async -> (Data, URL)? {
-        guard let (data, response) = try? await session.data(from: url),
-              let http = response as? HTTPURLResponse, http.statusCode == 200
-        else { return nil }
+        guard let (data, http) = await get(url) else { return nil }
         return (data.prefix(512 * 1024), http.url ?? url)
+    }
+
+    /// A GET answered 200, through `api` when given, else anonymously.
+    private func get(_ url: URL, api: API? = nil) async -> (Data, HTTPURLResponse)? {
+        let answer: (data: Data, response: URLResponse)? = if let api {
+            (try? await api.send(API.request(url), priority: .background)).map { ($0.0, $0.1) }
+        } else {
+            try? await session.data(for: URLRequest(url: url))
+        }
+        guard let answer, let http = answer.response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+        return (answer.data, http)
     }
 
     // MARK: - Helpers

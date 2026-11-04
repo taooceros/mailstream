@@ -28,7 +28,7 @@ nonisolated struct ChatUser: Codable, Hashable, Sendable {
         displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
         email = try c.decodeIfPresent(String.self, forKey: .email)
         avatarUrl = try c.decodeIfPresent(String.self, forKey: .avatarUrl)
-        bot = try c.decodeIfPresent(Bool.self, forKey: .bot) ?? false
+        bot = try c.decodeIfPresent(.bot, default: false)
     }
 
     /// Display name, else address, else a generic label (Google withholds both for some people).
@@ -79,12 +79,12 @@ nonisolated struct ChatMessage: Codable, Hashable, Sendable {
         sender = try c.decode(ChatUser.self, forKey: .sender)
         created = try c.decode(Date.self, forKey: .created)
         edited = try c.decodeIfPresent(Date.self, forKey: .edited)
-        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        text = try c.decodeIfPresent(.text, default: "")
         thread = try c.decodeIfPresent(String.self, forKey: .thread)
-        threadReply = try c.decodeIfPresent(Bool.self, forKey: .threadReply) ?? false
-        mine = try c.decodeIfPresent(Bool.self, forKey: .mine) ?? false
-        card = try c.decodeIfPresent(Bool.self, forKey: .card) ?? false
-        attachments = try c.decodeIfPresent([ChatAttachment].self, forKey: .attachments) ?? []
+        threadReply = try c.decodeIfPresent(.threadReply, default: false)
+        mine = try c.decodeIfPresent(.mine, default: false)
+        card = try c.decodeIfPresent(.card, default: false)
+        attachments = try c.decodeIfPresent(.attachments, default: [])
     }
 }
 
@@ -119,20 +119,23 @@ nonisolated struct ChatSpace: Codable, Hashable, Sendable {
     var unread: Int
     var latest: ChatMessage?
 
+    /// Newest activity: `lastActive`, else the latest message's time.
+    var activity: Date? { lastActive ?? latest?.created }
+}
+
+/// Decoding lives in an extension so the struct keeps its memberwise init.
+nonisolated extension ChatSpace {
     init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
-        kind = try c.decodeIfPresent(ChatSpaceKind.self, forKey: .kind) ?? .space
-        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
-        members = try c.decodeIfPresent([ChatUser].self, forKey: .members) ?? []
+        kind = try c.decodeIfPresent(.kind, default: .space)
+        title = try c.decodeIfPresent(.title, default: "")
+        members = try c.decodeIfPresent(.members, default: [])
         lastActive = try c.decodeIfPresent(Date.self, forKey: .lastActive)
         lastRead = try c.decodeIfPresent(Date.self, forKey: .lastRead)
-        unread = try c.decodeIfPresent(Int.self, forKey: .unread) ?? 0
+        unread = try c.decodeIfPresent(.unread, default: 0)
         latest = try c.decodeIfPresent(ChatMessage.self, forKey: .latest)
     }
-
-    /// Newest activity: `lastActive`, else the latest message's time.
-    var activity: Date? { lastActive ?? latest?.created }
 }
 
 /// One `Chat.spaces` answer; also the disk cache of an account's space list.
@@ -170,8 +173,8 @@ nonisolated extension ChatUser {
     init(_ user: ChatAPI.User?) {
         name = user?.name ?? ""
         displayName = user?.displayName.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
-        email = user?.email.flatMap { $0.isEmpty ? nil : $0 }
-        avatarUrl = user?.avatarUrl.flatMap { $0.isEmpty ? nil : $0 }
+        email = user?.email?.nilIfEmpty
+        avatarUrl = user?.avatarUrl?.nilIfEmpty
         bot = user?.type == "BOT"
     }
 }
@@ -197,25 +200,11 @@ nonisolated extension ChatMessage {
         self.mine = mine ?? me.map { sender.name == $0 } ?? false
         card = message.cardsV2 != nil || message.cards != nil
         attachments = message.attachment.map { attachment in
-            let download = attachment.downloadUri.flatMap { $0.isEmpty ? nil : $0 }
+            let download = attachment.downloadUri?.nilIfEmpty
             let drive = attachment.driveDataRef?.driveFileId.map { "https://drive.google.com/open?id=\($0)" }
             return ChatAttachment(name: attachment.contentName ?? "Attachment", contentType: attachment.contentType ?? "",
                                   url: download ?? drive)
         }
-    }
-}
-
-nonisolated extension ChatSpace {
-    init(name: String, kind: ChatSpaceKind, title: String, members: [ChatUser], lastActive: Date?, lastRead: Date?,
-         unread: Int, latest: ChatMessage?) {
-        self.name = name
-        self.kind = kind
-        self.title = title
-        self.members = members
-        self.lastActive = lastActive
-        self.lastRead = lastRead
-        self.unread = unread
-        self.latest = latest
     }
 }
 
@@ -287,9 +276,9 @@ actor Chat {
             }
         }
         for (space, result) in zip(recheck, rechecked) {
-            guard case .success(let state) = result, let raw = state.lastReadTime,
+            guard case .success(let state) = result, state.lastReadTime != nil,
                   var summary = memory[account]?.summaries[space.name] else { continue }
-            let lastRead = parseISODate(raw)
+            let lastRead = state.lastRead
             guard lastRead != summary.space.lastRead else { continue }
             if let lastRead, lastRead >= (parseISODate(summary.lastActiveRaw) ?? .distantPast) {
                 summary.space.unread = 0
@@ -308,7 +297,7 @@ actor Chat {
 
     /// The newest `limit` messages created before `before` (default: now), ascending.
     func messages(account: String, space: String, limit: Int, before: Date? = nil) async throws -> ChatMessagePage {
-        try ChatAPI.check(space, shape: ["spaces"])
+        try ChatAPI.checkSpace(space)
         let api = try await resolve(account)
         async let readState = ChatAPI.readState(api, space: space)
         let page = try await ChatAPI.messages(api, space: space, limit: limit, before: before.map(formatChatDate))
@@ -316,16 +305,16 @@ actor Chat {
         let me = learnMe(state?.user, account: account)
         return ChatMessagePage(messages: (page.messages ?? []).reversed().map { ChatMessage($0, me: me) },
                                more: !(page.nextPageToken ?? "").isEmpty,
-                               lastRead: state?.lastReadTime.flatMap(parseISODate))
+                               lastRead: state?.lastRead)
     }
 
     /// Marks the space read up to now; returns the new read time.
     func markRead(account: String, space: String) async throws -> Date? {
-        try ChatAPI.check(space, shape: ["spaces"])
+        try ChatAPI.checkSpace(space)
         let api = try await resolve(account)
         let now = Date()
         let state = try await ChatAPI.markRead(api, space: space, time: formatChatDate(now))
-        let lastRead = state.lastReadTime.flatMap(parseISODate) ?? now
+        let lastRead = state.lastRead ?? now
         if var summary = memory[account]?.summaries[space] {
             summary.space.unread = 0
             summary.space.lastRead = lastRead
@@ -336,7 +325,7 @@ actor Chat {
 
     /// Sends as the user, in `thread` when given. Not idempotent: never retried here.
     func send(account: String, space: String, text: String, thread: String?) async throws -> ChatMessage {
-        try ChatAPI.check(space, shape: ["spaces"])
+        try ChatAPI.checkSpace(space)
         if let thread {
             try ChatAPI.check(thread, shape: ["spaces", "threads"])
             guard thread.hasPrefix(space + "/") else { throw ChatError(message: "Thread \(thread) is not in \(space)") }
@@ -363,7 +352,7 @@ actor Chat {
         let me = learnMe(state.user, account: account)
         let page = try await ChatAPI.messages(api, space: space.name, limit: Self.summaryMessages, before: nil)
         let messages = page.messages ?? []
-        let lastRead = state.lastReadTime.flatMap(parseISODate)
+        let lastRead = state.lastRead
         let unread = messages.filter { message in
             guard message.sender?.name != me else { return false }
             guard let lastRead else { return true }
