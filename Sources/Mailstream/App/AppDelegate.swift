@@ -121,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         message.addItem(.separator())
         entry(.archive, "a", [.command, .control])
         entry(.trash, "\u{8}")
+        entry(.restore, "")
         message.addItem(.separator())
         entry(.toggleRead, "u", [.command, .shift])
         entry(.toggleStar, "l", [.command, .shift])

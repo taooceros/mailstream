@@ -839,8 +839,10 @@ final class MailStore {
     }
 
     /// `primary` names the mailboxes the conversation was listed from, when not the screen's.
+    /// With `undoManager`, Undo puts the messages back.
     @discardableResult
-    func archive(_ conversation: Conversation, from primary: Set<MailboxKey>? = nil) -> Task<Void, any Error> {
+    func archive(_ conversation: Conversation, from primary: Set<MailboxKey>? = nil,
+                 undoManager: UndoManager? = nil) -> Task<Void, any Error> {
         guard let target = archiveMailbox(account: conversation.account) else {
             return Task { throw StoreError(message: "\(conversation.account) has no archive mailbox.") }
         }
@@ -848,12 +850,13 @@ final class MailStore {
         guard !targets.isEmpty else {
             return Task { throw StoreError(message: "Nothing in \(conversation.id) is in a mailbox Archive moves from.") }
         }
-        return move(targets, to: target)
+        return move(targets, to: target, undoManager: undoManager, name: "Archive")
     }
 
-    /// Moves the conversation to the trash; messages already there are deleted for good.
+    /// Moves the conversation to the trash; messages already there are deleted for good, which
+    /// Undo cannot take back.
     @discardableResult
-    func trash(_ conversation: Conversation) -> Task<Void, any Error> {
+    func trash(_ conversation: Conversation, undoManager: UndoManager? = nil) -> Task<Void, any Error> {
         guard let trash = mailbox(account: conversation.account, role: .trash) else {
             let error = StoreError(message: "No trash mailbox found.")
             report(error, context: conversation.account, alert: true)
@@ -861,7 +864,7 @@ final class MailStore {
         }
         let inTrash = conversation.messages.filter { $0.ref.mailbox == trash.id }
         let elsewhere = conversation.messages.filter { $0.ref.mailbox != trash.id && $0.role != .drafts }
-        var requests = [move(elsewhere, to: trash)]
+        var requests = [move(elsewhere, to: trash, undoManager: undoManager, name: "Move to Trash")]
         if !inTrash.isEmpty {
             removeEnvelopes(inTrash)
             requests.append(Task {
@@ -878,10 +881,39 @@ final class MailStore {
         return Self.all(requests)
     }
 
-    private func move(_ targets: [MailMessage], to destination: Mailbox) -> Task<Void, any Error> {
+    /// Messages of the conversation in the trash or junk, which "Move to Inbox" takes back.
+    private func restorable(_ conversation: Conversation) -> [MailMessage] {
+        conversation.messages.filter { $0.role == .trash || $0.role == .junk }
+    }
+
+    func canRestore(_ conversation: Conversation) -> Bool {
+        mailbox(account: conversation.account, role: .inbox) != nil && !restorable(conversation).isEmpty
+    }
+
+    /// Moves the conversation's trashed or junk messages to the inbox.
+    @discardableResult
+    func restore(_ conversation: Conversation, undoManager: UndoManager? = nil) -> Task<Void, any Error> {
+        guard let inbox = mailbox(account: conversation.account, role: .inbox) else {
+            return Task { throw StoreError(message: "\(conversation.account) has no inbox.") }
+        }
+        let targets = restorable(conversation)
+        guard !targets.isEmpty else {
+            return Task { throw StoreError(message: "Nothing in \(conversation.id) is in the trash or junk.") }
+        }
+        return move(targets, to: inbox, undoManager: undoManager, name: "Move to Inbox")
+    }
+
+    private func move(_ targets: [MailMessage], to destination: Mailbox, undoManager: UndoManager? = nil,
+                      name: String = "Move") -> Task<Void, any Error> {
         let targets = targets.filter { $0.ref.mailbox != destination.id }
         guard !targets.isEmpty else { return Task {} }
         removeEnvelopes(targets)
+        if let undoManager {
+            undoManager.registerUndo(withTarget: self) { store in
+                store.putBack(targets, from: destination, undoManager: undoManager, name: name)
+            }
+            undoManager.setActionName(name)
+        }
         let requests = Dictionary(grouping: targets, by: \.ref.mailboxKey).map { key, messages in
             Task {
                 do {
@@ -895,6 +927,44 @@ final class MailStore {
             }
         }
         return Self.all(requests)
+    }
+
+    /// Undo of `move`: `messages` (as they were listed before it) leave `destination` for the
+    /// mailboxes they came from, and show there again at once. Redo moves them again.
+    private func putBack(_ messages: [MailMessage], from destination: Mailbox, undoManager: UndoManager, name: String) {
+        removeEnvelopes(messages.map { message in
+            MailMessage(ref: MessageRef(account: message.ref.account, mailbox: destination.id, id: message.ref.id),
+                        envelope: message.envelope, role: destination.role)
+        })
+        let groups = Dictionary(grouping: messages, by: \.ref.mailboxKey)
+        for (key, group) in groups {
+            let envelopes = group.map(\.envelope)
+            if var listing = listings[key] {
+                let known = Set(listing.envelopes.map(\.id))
+                listing.envelopes += envelopes.filter { !known.contains($0.id) }
+                listing.envelopes.sort { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+                listings[key] = listing
+                persist(key)
+            }
+            if searchQuery != nil { searchResults[key, default: []] += envelopes }
+        }
+        adjustUnread(messages.filter { !$0.envelope.isSeen }, delta: 1)
+        rebuild.request()
+        undoManager.registerUndo(withTarget: self) { store in
+            _ = store.move(messages, to: destination, undoManager: undoManager, name: name)
+        }
+        undoManager.setActionName(name)
+        for (key, group) in groups {
+            Task {
+                do {
+                    try await backend(for: key.account).move(ids: group.map(\.ref.id), from: destination.id, to: key.mailbox)
+                } catch {
+                    report(error, context: key.account, alert: true)
+                    refresh()
+                    refreshCounts(account: key.account)
+                }
+            }
+        }
     }
 
     /// Sends from `account`, then picks up the sent copy.

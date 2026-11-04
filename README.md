@@ -366,7 +366,9 @@ recently opened spaces are cached in `chat-v2/` in the cache directory.
 | New message | ⌘N | |
 | Reply / Reply All / Forward | ⌘R / ⇧⌘R / ⇧⌘F | r / a / f |
 | Archive | ⌃⌘A | e |
-| Move to Trash | ⌘⌫ | ⌫ |
+| Move to Trash | ⌘⌫ (not while typing in a field) | ⌫ |
+| Move to Inbox (from Trash or Junk) | | |
+| Undo archive / trash / move to inbox | ⌘Z | |
 | Toggle read | ⇧⌘U | u |
 | Star | ⇧⌘L | s |
 | Get mail | ⇧⌘N | |

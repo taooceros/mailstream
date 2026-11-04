@@ -3,7 +3,7 @@ import Observation
 
 /// A command on one conversation, from the toolbar, the menus, the keyboard or a row's hover pill.
 nonisolated enum ConversationAction: CaseIterable {
-    case archive, trash, toggleRead, toggleStar, toggleWaiting, reply, replyAll, forward
+    case archive, trash, restore, toggleRead, toggleStar, toggleWaiting, reply, replyAll, forward
 
     /// What the toggles act on; without a conversation they read as read, unstarred and waiting.
     struct State {
@@ -17,6 +17,7 @@ nonisolated enum ConversationAction: CaseIterable {
         switch self {
         case .archive: ("Archive", "archivebox")
         case .trash: ("Move to Trash", "trash")
+        case .restore: ("Move to Inbox", "tray.and.arrow.up")
         case .toggleRead: state.unread ? ("Mark as Read", "envelope.open") : ("Mark as Unread", "envelope.badge")
         case .toggleStar: state.flagged ? ("Unstar", "star.slash") : ("Star", "star")
         case .toggleWaiting: state.waiting ? ("Resolve", "checkmark.circle") : ("Mark as Waiting on You", "clock.badge")
@@ -806,6 +807,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         if store.tagging.canMarkWaiting(conversation) { add(.toggleWaiting) }
         menu.addItem(.separator())
         if store.canArchive(conversation) { add(.archive) }
+        if store.canRestore(conversation) { add(.restore) }
         add(.trash)
     }
 

@@ -122,6 +122,8 @@ nonisolated struct CommandSpec: Sendable {
                     arguments: [conversationIDs]),
         CommandSpec(name: "mail trash", summary: "Moves conversations to the trash. Messages already in the trash are deleted for good, which needs --yes.",
                     arguments: [conversationIDs, yes]),
+        CommandSpec(name: "mail restore", summary: "Moves conversations' messages in the trash or junk back to the inbox.",
+                    arguments: [conversationIDs]),
         CommandSpec(name: "mail tag", summary: "Corrects the AI tag: category, waiting-on-you, topic labels.", arguments: [
             conversationIDs,
             Argument(name: "category", kind: .choice(MailCategory.allCases.map(\.rawValue)), summary: "New category."),

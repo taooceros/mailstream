@@ -467,13 +467,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     private func perform(_ action: ConversationAction, on conversation: Conversation) {
         switch action {
-        case .archive: store.archive(conversation)
+        case .archive: store.archive(conversation, undoManager: window?.undoManager)
         case .trash:
             if store.selectionRole == .trash {
                 confirmPermanentDelete(conversation)
             } else {
-                store.trash(conversation)
+                store.trash(conversation, undoManager: window?.undoManager)
             }
+        case .restore: store.restore(conversation, undoManager: window?.undoManager)
         case .toggleRead: store.setRead(conversation, read: conversation.isUnread)
         case .toggleStar: store.setFlagged(conversation, flagged: !conversation.isFlagged)
         case .toggleWaiting:
@@ -533,6 +534,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     @objc func archive(_ sender: Any?) { if let selected { perform(.archive, on: selected) } }
     @objc func trash(_ sender: Any?) { if let selected { perform(.trash, on: selected) } }
+    @objc func restore(_ sender: Any?) { if let selected { perform(.restore, on: selected) } }
     @objc func toggleRead(_ sender: Any?) { if let selected { perform(.toggleRead, on: selected) } }
     @objc func toggleStar(_ sender: Any?) { if let selected { perform(.toggleStar, on: selected) } }
     @objc func toggleWaiting(_ sender: Any?) { if let selected { perform(.toggleWaiting, on: selected) } }
@@ -545,6 +547,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             guard let selected else { return false }
             switch command {
             case .archive: return store.canArchive(selected)
+            case .restore: return store.canRestore(selected)
             case .toggleWaiting: return store.tagging.canMarkWaiting(selected)
             default: return true
             }
@@ -568,7 +571,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         } else if action == #selector(toggleAITagging(_:)) {
             menuItem.state = store.tagging.isEnabled ? .on : .off
         }
+        // ⌘⌫ belongs to the text being edited (delete to the line start), not to Move to Trash.
+        if action == #selector(trash(_:)), isEditingText { return false }
         return isEnabled(action)
+    }
+
+    /// A text field (search, a field editor) or the inline reply has keyboard focus.
+    private var isEditingText: Bool {
+        window?.firstResponder is NSTextView || (opened != nil && reader.isReplyFocused)
     }
 
     func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
@@ -669,6 +679,7 @@ extension ConversationAction {
         switch self {
         case .archive: #selector(MainWindowController.archive(_:))
         case .trash: #selector(MainWindowController.trash(_:))
+        case .restore: #selector(MainWindowController.restore(_:))
         case .toggleRead: #selector(MainWindowController.toggleRead(_:))
         case .toggleStar: #selector(MainWindowController.toggleStar(_:))
         case .toggleWaiting: #selector(MainWindowController.toggleWaiting(_:))

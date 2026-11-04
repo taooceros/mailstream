@@ -56,7 +56,7 @@ final class ReaderViewController: NSViewController, WebShellClient {
     /// Unsent inline replies of conversations not on screen, so leaving one keeps its text.
     private var drafts: [String: Reply] = [:]
     /// Whether the reply's text field has focus, as last reported by the page, so Escape can decide at once.
-    private var replyFocused = false
+    private(set) var isReplyFocused = false
     private var planning: (ref: MessageRef, all: Bool)?
     /// Senders whose picture the page has.
     private var avatarsSent = Set<String>()
@@ -180,7 +180,7 @@ final class ReaderViewController: NSViewController, WebShellClient {
     private func leaveConversation() {
         if let reply, reply.sending || !reply.isEmpty { drafts[reply.conversation] = reply }
         reply = nil
-        replyFocused = false
+        isReplyFocused = false
         conversation = nil
         messages = []
         loaded = []
@@ -310,7 +310,7 @@ final class ReaderViewController: NSViewController, WebShellClient {
             compose("forward", message: latest)
         case "reply-state":
             reply?.text = body["text"] as? String ?? ""
-            replyFocused = body["focused"] as? Bool ?? false
+            isReplyFocused = body["focused"] as? Bool ?? false
         case "reply-send":
             sendReply(body["text"] as? String ?? "")
         case "reply-discard":
@@ -479,7 +479,7 @@ final class ReaderViewController: NSViewController, WebShellClient {
                 drafts[key] = nil
                 guard self.reply?.conversation == key else { return }
                 self.reply = nil
-                replyFocused = false
+                isReplyFocused = false
                 shell.call("MS.replySent()")
             } catch {
                 withReply(in: key) { $0.sending = false }
@@ -493,7 +493,7 @@ final class ReaderViewController: NSViewController, WebShellClient {
         guard let reply, !reply.sending else { return }
         drafts[reply.conversation] = nil
         self.reply = nil
-        replyFocused = false
+        isReplyFocused = false
         shell.call("MS.closeReply()")
     }
 
@@ -514,8 +514,8 @@ final class ReaderViewController: NSViewController, WebShellClient {
             discardReply()
             return true
         }
-        guard replyFocused else { return false }
-        replyFocused = false
+        guard isReplyFocused else { return false }
+        isReplyFocused = false
         shell.call("MS.blurReply()")
         return true
     }

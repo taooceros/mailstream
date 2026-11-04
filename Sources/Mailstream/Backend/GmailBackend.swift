@@ -183,10 +183,11 @@ nonisolated final class GmailBackend: MailBackend {
             return
         }
         if from == "TRASH" {
-            // Untrash restores the labels the message had; then file it where it was sent.
+            // Untrash restores the labels the message had; then file it where asked, unless that
+            // is a label Gmail keeps to itself (Sent, Drafts, All Mail), which untrash restored.
             try await each(ids, "untrash")
             await cache.relabel(ids, add: [], remove: ["TRASH"])
-            if to != Self.allMail { try await modify(ids, add: [to], remove: to == "SPAM" ? ["INBOX"] : []) }
+            if !Self.fixed.contains(to) { try await modify(ids, add: [to], remove: to == "SPAM" ? ["INBOX"] : []) }
             return
         }
         // Leaving STARRED or IMPORTANT unstars or unmarks: the message leaves that mailbox.

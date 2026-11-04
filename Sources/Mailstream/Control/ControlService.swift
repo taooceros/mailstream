@@ -86,6 +86,11 @@ final class ControlService {
                 try await self.store.trash(known.conversation).value
                 return .forget
             }
+        case "mail.restore":
+            return try await each(args) { known in
+                try await self.store.restore(known.conversation).value
+                return .forget
+            }
         case "mail.tag": return try tag(args)
         case "mail.retag":
             guard store.tagging.isEnabled else { throw ControlError("disabled", "AI tagging is off (aiTagging.enabled).") }
