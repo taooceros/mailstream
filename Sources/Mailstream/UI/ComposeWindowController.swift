@@ -47,10 +47,6 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
     private var contacts: [Contact] = []
     /// Completion and editing labels (`Name <address>`) to the token they stand for.
     private var labels: [String: String] = [:]
-    /// Greetings, sign-offs and words the body offers after the caret.
-    private var suggester = BodySuggester()
-    /// Escape hid the suggestion; it stays hidden until the text changes.
-    private var suggestionDismissed = false
 
     private init(store: MailStore, mode: ComposeMode, account: String, source: MailMessage?,
                  replyAll: Bool, to: [Address], text: String, plan: ReplyPlan?) {
@@ -83,12 +79,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
             window.setFrameTopLeftPoint(NSPoint(x: parent.frame.midX - 340, y: parent.frame.maxY - 60))
         }
         prefill()
-        suggester.signature = senderName()
-        learnWords()
-        Task {
-            contacts = await store.contacts()
-            suggester.signature = senderName()
-        }
+        Task { contacts = await store.contacts() }
     }
 
     @available(*, unavailable)
@@ -155,16 +146,14 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         bodyView.isAutomaticQuoteSubstitutionEnabled = false
         bodyView.isAutomaticDashSubstitutionEnabled = false
         bodyView.isContinuousSpellCheckingEnabled = true
-        // The body's own suggestions (`BodySuggester`) take Tab; the system's would draw over them.
-        bodyView.inlinePredictionType = .no
+        // The system's grey inline predictions, whatever the user's keyboard setting; Tab takes one.
+        bodyView.inlinePredictionType = .yes
         bodyView.isVerticallyResizable = true
         bodyView.isHorizontallyResizable = false
         bodyView.autoresizingMask = [.width]
         bodyView.textContainer?.widthTracksTextView = true
         bodyView.delegate = self
         bodyView.onFiles = { [weak self] urls in self?.add(urls) }
-        bodyView.onRefresh = { [weak self] in self?.refreshSuggestion() }
-        bodyView.onDismiss = { [weak self] in self?.suggestionDismissed = true }
         let scroll = NSScrollView()
         scroll.documentView = bodyView
         scroll.hasVerticalScroller = true
@@ -284,7 +273,6 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
 
     @objc private func accountChanged() {
         if let name = fromPopup.selectedItem?.representedObject as? String { account = name }
-        suggester.signature = senderName()
     }
 
     // MARK: - Prefill
@@ -332,8 +320,6 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
                 let selection = bodyView.selectedRanges
                 bodyView.textStorage?.append(NSAttributedString(string: "\n\n" + quote, attributes: bodyView.typingAttributes))
                 bodyView.selectedRanges = selection
-                learnWords()
-                refreshSuggestion()
             } catch {
                 presentError(message: "Could not load the original message", error: error)
             }
@@ -465,7 +451,6 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         sendItem.isEnabled = enabled
         fromPopup.isEnabled = enabled && { if case .new = mode { true } else { false } }()
         bodyView.isEditable = enabled
-        if !enabled { bodyView.suggestion = nil }
     }
 
     private func presentError(message: String, error: (any Error)?) {
@@ -477,66 +462,13 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         alert.beginSheetModal(for: window)
     }
 
-    // MARK: - Body suggestions
-
-    /// The sender's first name, for sign-offs: from the sending account's identity, else another
-    /// account's, else a name the user's own addresses carry in mail. The sign-offs are English, so
-    /// a Latin-script name comes first.
-    private func senderName() -> String? {
-        let identities = [store.account(named: account)?.identity] + store.accounts.map(\.identity)
-        let named = (identities.compactMap { $0 } + contacts.filter(\.isOwn).map(\.address)).filter { $0.displayName != $0.email }
-        let latin = named.first { !$0.displayName.unicodeScalars.contains { $0.properties.isIdeographic } }
-        return (latin ?? named.first)?.shortName
-    }
-
-    /// Words for completion from the subject, the names on the message and the body.
-    private func learnWords() {
-        let names = [toField, ccField].flatMap(tokens).compactMap { Address.parse($0)?.name }
-        suggester.learn([subjectField.stringValue, bodyView.string] + names)
-        updateGreetingNames()
-    }
-
-    /// First names of the people on To, for a greeting; unnamed addresses and the user left out.
-    private func updateGreetingNames() {
-        let own = store.ownAddresses
-        suggester.recipients = tokens(toField).compactMap(Address.parse)
-            .filter { $0.displayName != $0.email && !own.contains($0.normalizedEmail) }
-            .map(\.shortName)
-    }
-
-    private func refreshSuggestion() {
-        let selection = bodyView.selectedRange()
-        guard window?.firstResponder === bodyView, !sending, !suggestionDismissed, selection.length == 0,
-              !bodyView.hasMarkedText() else {
-            bodyView.suggestion = nil
-            return
-        }
-        bodyView.suggestion = suggester.suggestion(in: bodyView.string, at: selection.location)
-    }
-
-    func textDidChange(_ notification: Notification) {
-        edited = true
-        suggestionDismissed = false
-        // Words are relearned as each one is finished.
-        let text = bodyView.string as NSString, caret = bodyView.selectedRange().location
-        if caret > 0, caret <= text.length, let last = text.substring(with: NSRange(location: caret - 1, length: 1)).first,
-           !last.isLetter {
-            learnWords()
-        }
-        refreshSuggestion()
-    }
-
-    func textViewDidChangeSelection(_ notification: Notification) { refreshSuggestion() }
+    func textDidChange(_ notification: Notification) { edited = true }
 
     // MARK: - Recipient completion
 
     func controlTextDidChange(_ obj: Notification) {
         edited = true
         if obj.object is NSTokenField { recipientsEdited = true }
-    }
-
-    func controlTextDidEndEditing(_ obj: Notification) {
-        if obj.object is NSTokenField || obj.object as? NSTextField === subjectField { learnWords() }
     }
 
     /// Addresses already in a recipient field, which completion leaves out.
@@ -658,72 +590,9 @@ private final class ComposeWindow: NSWindow {
     }
 }
 
-/// The message body: files dropped or pasted on it attach instead of inserting their paths, and a
-/// suggestion shows in grey after the caret until Tab takes it or Escape hides it.
+/// The message body: files dropped or pasted on it attach instead of inserting their paths.
 private final class ComposeTextView: NSTextView {
     var onFiles: (([URL]) -> Void)?
-    /// The suggestion may have changed: focus came or the text was rewrapped.
-    var onRefresh: (() -> Void)?
-    /// Escape hid the suggestion.
-    var onDismiss: (() -> Void)?
-
-    var suggestion: String? {
-        didSet { placeGhost() }
-    }
-
-    private let ghost = GhostText()
-
-    /// Positions the grey text just after the character before the caret.
-    private func placeGhost() {
-        let caret = selectedRange().location
-        guard let suggestion, !suggestion.isEmpty, let window, caret > 0 else {
-            ghost.isHidden = true
-            return
-        }
-        if ghost.superview == nil { addSubview(ghost) }
-        let screen = firstRect(forCharacterRange: NSRange(location: caret - 1, length: 1), actualRange: nil)
-        let rect = convert(window.convertFromScreen(screen), from: nil)
-        ghost.frame = bounds
-        ghost.lines = suggestion.components(separatedBy: "\n")
-        // Clear of the caret, which sits on the boundary.
-        ghost.start = NSPoint(x: rect.maxX + 1.5, y: rect.minY)
-        ghost.lineHeight = rect.height
-        ghost.margin = textContainerOrigin.x + (textContainer?.lineFragmentPadding ?? 0)
-        ghost.font = font ?? .systemFont(ofSize: 14)
-        ghost.isHidden = false
-        ghost.needsDisplay = true
-    }
-
-    override func doCommand(by selector: Selector) {
-        if let suggestion, !suggestion.isEmpty {
-            if selector == #selector(insertTab(_:)) {
-                self.suggestion = nil
-                insertText(suggestion, replacementRange: selectedRange())
-                return
-            }
-            if selector == #selector(cancelOperation(_:)) || selector == #selector(complete(_:)) {
-                self.suggestion = nil
-                onDismiss?()
-                return
-            }
-        }
-        super.doCommand(by: selector)
-    }
-
-    override func becomeFirstResponder() -> Bool {
-        defer { onRefresh?() }
-        return super.becomeFirstResponder()
-    }
-
-    override func resignFirstResponder() -> Bool {
-        suggestion = nil
-        return super.resignFirstResponder()
-    }
-
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        if suggestion != nil { placeGhost() }
-    }
 
     private func files(on pasteboard: NSPasteboard) -> [URL] {
         pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
@@ -771,41 +640,6 @@ private final class ChipBackground: NSView {
         layer.borderWidth = 1
         layer.borderColor = NSColor.separatorColor.cgColor
         layer.backgroundColor = NSColor.controlBackgroundColor.cgColor
-    }
-}
-
-/// Grey text drawn over the body at the caret, with a "tab" key cap after it. Clicks pass through.
-private final class GhostText: NSView {
-    var lines: [String] = []
-    /// Where the first line starts; later lines start at `margin`, `lineHeight` apart.
-    var start = NSPoint.zero
-    var margin: CGFloat = 0
-    var lineHeight: CGFloat = 0
-    var font = NSFont.systemFont(ofSize: 14)
-
-    override var isFlipped: Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.placeholderTextColor]
-        var end = start
-        for (index, line) in lines.enumerated() {
-            let origin = NSPoint(x: index == 0 ? start.x : margin, y: start.y + CGFloat(index) * lineHeight)
-            (line as NSString).draw(at: origin, withAttributes: attributes)
-            end = NSPoint(x: origin.x + (line as NSString).size(withAttributes: attributes).width, y: origin.y)
-        }
-        let hint = "tab" as NSString
-        let hintAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .medium), .foregroundColor: NSColor.secondaryLabelColor,
-        ]
-        let size = hint.size(withAttributes: hintAttributes)
-        let cap = NSRect(x: end.x + 6, y: end.y + (lineHeight - size.height - 3) / 2, width: size.width + 10, height: size.height + 3)
-        let path = NSBezierPath(roundedRect: cap, xRadius: 4, yRadius: 4)
-        NSColor.quaternarySystemFill.setFill()
-        path.fill()
-        NSColor.separatorColor.setStroke()
-        path.stroke()
-        hint.draw(at: NSPoint(x: cap.minX + 5, y: cap.minY + 1.5), withAttributes: hintAttributes)
     }
 }
 
