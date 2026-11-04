@@ -240,6 +240,8 @@ Clicking a row, or pressing Return or Space, opens the conversation; Esc, ⌘[,
 the toolbar back button or a mouse's Back button returns. A two-finger swipe
 left or right on the trackpad drags the reader off that side and goes back once
 past a third of its width or flicked (when "Swipe between pages" uses two fingers).
+The same swipe leaves a Smart Inbox bundle (Notifications, Newsletters, Invitations):
+its rows follow the fingers and the inbox returns past the same point.
 
 Search (⌘F) covers every mailbox of the accounts in view, not just the selected
 one, leaving out trash and junk unless one of them is selected. Matches among

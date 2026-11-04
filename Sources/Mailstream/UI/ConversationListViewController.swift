@@ -605,6 +605,31 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         delegate?.conversationListDidChangeBundle(self)
     }
 
+    /// A back swipe in a bundle: the rows follow the fingers sideways.
+    func dragBack(to offset: CGFloat) {
+        guard openBundle != nil, let layer = scroll.layer else { return }
+        if layer.animation(forKey: "swipe") == nil {
+            // A bundle still spreading out must not keep animating under the fingers.
+            scroll.contentView.layer?.removeAnimation(forKey: "unfold")
+        }
+        Motion.hold(layer, "transform", at: CATransform3DMakeTranslation(offset, 0, 0), key: "swipe")
+    }
+
+    /// Fingers lifted: past a third of the width, or flicked onward, the bundle closes as the rows
+    /// return to center; otherwise they only slide back.
+    func releaseBack(at offset: CGFloat, velocity: CGFloat) {
+        guard let layer = scroll.layer, layer.animation(forKey: "swipe") != nil else { return }
+        let width = max(scroll.bounds.width, 1)
+        let distance = abs(offset)
+        let onward = offset < 0 ? -velocity : velocity
+        let back = openBundle != nil && (distance > width / 3 || (onward > 400 && distance > 20))
+        let duration = min(0.3, max(0.16, Double(distance / max(abs(velocity), 1500))))
+        let slide = Motion.basic("transform", from: CATransform3DMakeTranslation(offset, 0, 0), to: CATransform3DIdentity,
+                                 duration: duration)
+        layer.add(slide, forKey: "swipe")
+        if back { leaveBundle() }
+    }
+
     // MARK: - Highlight and opening
 
     var highlightedConversation: Conversation? {

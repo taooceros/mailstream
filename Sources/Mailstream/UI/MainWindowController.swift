@@ -284,8 +284,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             goBack(nil)
             return true
         }
-        let page = reader.view
-        let canStart = opened != nil && NSEvent.isSwipeTrackingFromScrollEventsEnabled
+        // The swipe takes back whichever page is on top: the reader, else the open bundle.
+        let page = opened != nil ? reader.view : list.view
+        let canStart = canGoBack && NSEvent.isSwipeTrackingFromScrollEventsEnabled
             && page.bounds.contains(page.convert(event.locationInWindow, from: nil))
         switch swipe.feed(event, canStart: canStart) {
         case .pass:
@@ -293,10 +294,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         case .consume:
             return true
         case .drag(let offset):
-            dragReader(to: offset)
+            if opened != nil { dragReader(to: offset) } else { list.dragBack(to: offset) }
             return true
         case .release(let offset, let velocity):
-            releaseReader(at: offset, velocity: velocity)
+            if dragging { releaseReader(at: offset, velocity: velocity) } else { list.releaseBack(at: offset, velocity: velocity) }
             return true
         }
     }
