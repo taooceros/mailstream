@@ -34,4 +34,11 @@ extension View {
     func designShadow(_ shadow: Design.Shadow) -> some View {
         self.shadow(color: .black.opacity(Double(shadow.opacity)), radius: shadow.radius, y: shadow.offsetY)
     }
+
+    /// `CALayer.styleAsCard`: the control background inside a hairline edge.
+    func designCard(_ radius: Design.Radius) -> some View {
+        let shape = RoundedRectangle(cornerRadius: radius.rawValue)
+        return background(SwiftUI.Color(nsColor: .controlBackgroundColor), in: shape)
+            .overlay { shape.strokeBorder(SwiftUI.Color.design(.line), lineWidth: 1) }
+    }
 }
