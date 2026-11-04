@@ -90,7 +90,10 @@ struct ConversationListBundle: Identifiable {
 
 /// Where the list's scroll view stands, in content coordinates.
 struct ConversationListGeometry: Equatable {
+    /// The content at the scroll view's top edge, below the toolbar; the pointer is measured from here.
     var top: CGFloat = 0
+    /// Content scrolled under the toolbar above `top` still shows through it.
+    var topInset: CGFloat = 0
     var contentHeight: CGFloat = 0
     var containerHeight: CGFloat = 0
     var visibleMaxY: CGFloat { top + containerHeight }
@@ -559,11 +562,11 @@ final class ConversationListModel {
         }
     }
 
-    /// Items at least partly in view.
+    /// Items at least partly in view, the ones showing through the toolbar included.
     private var visibleRange: Range<Int> {
         guard !items.isEmpty, geometry.containerHeight > 0 else { return 0..<0 }
         let top = geometry.top - ConversationListView.inset
-        let first = index(at: max(top, 0)) ?? 0
+        let first = index(at: max(top - geometry.topInset, 0)) ?? 0
         let last = index(at: top + geometry.containerHeight) ?? first
         return first..<max(first, last) + 1
     }

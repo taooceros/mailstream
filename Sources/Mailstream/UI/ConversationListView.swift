@@ -59,7 +59,11 @@ struct ConversationListView: View {
         }
         .scrollPosition($position, anchor: anchor)
         .onScrollGeometryChange(for: ConversationListGeometry.self) { geometry in
-            ConversationListGeometry(top: geometry.visibleRect.minY, contentHeight: geometry.contentSize.height,
+            // The scroll view's frame starts below the toolbar, and hover measures from there; its
+            // visible rect also reaches up under the toolbar by the top inset.
+            ConversationListGeometry(top: geometry.contentOffset.y + geometry.contentInsets.top,
+                                     topInset: geometry.contentInsets.top,
+                                     contentHeight: geometry.contentSize.height,
                                      containerHeight: geometry.containerSize.height)
         } action: { _, new in
             model.geometryChanged(new)
