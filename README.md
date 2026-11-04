@@ -304,6 +304,14 @@ copy. Tab walks To, Cc, Subject and the body. The body takes typing at once; a
 reply's or forward's quote is appended under it when the original has loaded,
 and Send waits for that. Files dropped or pasted on the body are attached.
 
+The body suggests in grey after the caret, from the message itself (no model,
+nothing leaves the Mac): a greeting line ("Hi", "Dear", …) gets the To
+recipients' first names, a sign-off line ("Best", "Thanks", …) gets a comma and
+your first name on the next line, and a word being typed completes to a longer
+word from the subject, the names or the text and quote. Tab takes the
+suggestion and Esc hides it. Closing an edited message asks before discarding
+it: Return discards, Esc keeps editing.
+
 Motion: the reader and bundles open by spreading out from the middle of the list and close by
 settling back toward it, collapsed messages expand in place, archived or trashed rows
 slide out while the rest close the gap, and a status capsule rises only while
