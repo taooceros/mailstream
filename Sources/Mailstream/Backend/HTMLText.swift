@@ -101,37 +101,39 @@ nonisolated enum HTMLText {
         "emsp": " ", "thinsp": " ",
     ]
 
+    /// Works on scalars, not characters: a combining mark after `;` (LinkedIn pads previews with
+    /// `&nbsp;` + U+034F) joins it into one `Character` that a `";"` search misses.
     static func decodeEntities(_ text: String) -> String {
         guard text.contains("&") else { return text }
-        var out = ""
-        var index = text.startIndex
-        while let amp = text[index...].firstIndex(of: "&") {
-            out += text[index..<amp]
-            guard let semi = text[amp...].prefix(12).firstIndex(of: ";") else {
+        let scalars = text.unicodeScalars
+        var out = String.UnicodeScalarView()
+        var index = scalars.startIndex
+        while let amp = scalars[index...].firstIndex(of: "&") {
+            out.append(contentsOf: scalars[index..<amp])
+            index = scalars.index(after: amp)
+            guard let semi = scalars[index...].prefix(12).firstIndex(of: ";") else {
                 out.append("&")
-                index = text.index(after: amp)
                 continue
             }
-            let entity = text[text.index(after: amp)..<semi]
+            let entity = String(scalars[index..<semi])
             if entity.hasPrefix("#") {
                 let digits = entity.dropFirst()
                 let value = digits.first == "x" || digits.first == "X"
                     ? UInt32(digits.dropFirst(), radix: 16) : UInt32(digits)
                 if let value, let scalar = Unicode.Scalar(value) {
-                    out.unicodeScalars.append(scalar)
-                    index = text.index(after: semi)
+                    out.append(scalar)
+                    index = scalars.index(after: semi)
                     continue
                 }
             } else if let replacement = namedEntities[entity.lowercased()] {
-                out += replacement
-                index = text.index(after: semi)
+                out.append(contentsOf: replacement.unicodeScalars)
+                index = scalars.index(after: semi)
                 continue
             }
             out.append("&")
-            index = text.index(after: amp)
         }
-        out += text[index...]
-        return out
+        out.append(contentsOf: scalars[index...])
+        return String(out)
     }
 
     /// One-paragraph preview: quotes, attributions, link targets and preheader padding removed.

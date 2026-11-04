@@ -144,7 +144,11 @@ final class ContentStore {
 
     @concurrent private nonisolated static func load(_ ref: MessageRef, backend: (any MailBackend)?, cache: MailCache,
                                                      priority: RequestPriority) async throws -> LoadedContent {
-        if let cached = await cache.loadContent(ref) { return LoadedContent(cached) }
+        if var cached = await cache.loadContent(ref) {
+            // Previews follow the current `HTMLText.snippet`, not the one the cache was written with.
+            cached.snippet = HTMLText.snippet(from: cached.text ?? "")
+            return LoadedContent(cached)
+        }
         guard let backend else { throw StoreError.signedOut }
         let content = try await backend.content(id: ref.id, mailbox: ref.mailbox, directory: cache.messageDirectory(ref),
                                                 urlBase: cache.partURLBase(ref), priority: priority)
