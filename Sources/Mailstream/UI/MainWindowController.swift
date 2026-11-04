@@ -37,6 +37,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     private var swipe = BackSwipe()
     /// Whether a back swipe has the reader under the user's fingers.
     private var dragging = false
+    /// Shows the reader being opened, until it has slid in; a swipe calls it to skip the wait.
+    private var presentReader: (() -> Void)?
     /// Bumped per open/close so a late "page ready" callback cannot re-present a stale reader.
     private var navigation = 0
     private var transitions = 0
@@ -181,9 +183,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         let present = { [weak self] in
             guard let self, !presented, self.navigation == current else { return }
             presented = true
+            self.presentReader = nil
             if !wasOpen { self.swap(forward: true) }
             self.window?.makeFirstResponder(self.reader.view)
         }
+        presentReader = present
         // Slide in as soon as the target is in the page, so the reader never arrives blank. A shell
         // still loading (cold start, web process restart) gets a short fallback; a warm shell gets a
         // longer one that only matters when the web process stalls.
@@ -211,6 +215,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     private func leaveReader(_ animation: () -> Void) {
         guard let last = opened else { return }
         opened = nil
+        presentReader = nil
         navigation += 1
         switch last {
         case .conversation(let conversation):
@@ -307,6 +312,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     private func dragReader(to offset: CGFloat) {
         guard opened != nil, let page = reader.view.layer, let below = list.view.layer else { return }
         if !dragging {
+            // Swiped before the reader arrived: bring it up now, under the fingers, so a quick
+            // swipe right after opening still goes back.
+            presentReader?()
             dragging = true
             // An open still settling must not keep animating under the fingers.
             transitions += 1

@@ -95,7 +95,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
 
     private let store: MailStore
     private let table = ConversationTableView()
-    private let scroll = NSScrollView()
+    private let scroll = ListScrollView()
     private let emptyLabel = NSTextField(labelWithString: "")
     private let status = StatusPill()
     private var rows: [Row] = []
@@ -859,6 +859,15 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         guard let id = sender.representedObject as? String,
               let space = rows.lazy.compactMap(\.space).first(where: { $0.id == id }) else { return }
         store.chat.markRead(space.key)
+    }
+}
+
+/// The list's scroll view. Overriding `scrollWheel` opts it out of responsive scrolling, which
+/// otherwise tracks the rest of a gesture inside the scroll view, out of the window's local event
+/// monitor: the two-finger back swipe out of a bundle would then start only where the list isn't.
+final class ListScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)
     }
 }
 
