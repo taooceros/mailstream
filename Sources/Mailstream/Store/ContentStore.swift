@@ -83,13 +83,10 @@ final class ContentStore {
     /// Drops everything of `removed` accounts: bodies, previews and loads in flight.
     func forget(accounts removed: Set<String>) {
         generation += 1
-        for (ref, running) in tasks where removed.contains(ref.account) {
-            running.task.cancel()
-            tasks[ref] = nil
-        }
-        bodies = bodies.filter { !removed.contains($0.key.account) }
+        tasks.removeAll { removed.contains($0.account) } cancelling: { $0.task.cancel() }
+        bodies.removeAll { removed.contains($0.account) }
         order.removeAll { removed.contains($0.account) }
-        snippets = snippets.filter { !removed.contains($0.key.account) }
+        snippets.removeAll { removed.contains($0.account) }
     }
 
     /// One shared load per message, assembled and cached off the main actor; its preview is

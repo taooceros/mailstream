@@ -34,8 +34,7 @@ nonisolated struct ConversationRow: Hashable, Sendable {
         let subject = Subject(conversation.subject)
         subjectPrefix = subject.list
         subjectTitle = subject.displayTitle
-        date = conversation.latestDate.map { Self.format($0, calendar: calendar, now: now) } ?? ""
-        section = Self.section(conversation.latestDate, calendar: calendar, now: now)
+        (date, section) = Self.dateLabels(conversation.latestDate, calendar: calendar, now: now)
         isUnread = conversation.isUnread
         isFlagged = conversation.isFlagged
         hasAttachment = conversation.hasAttachment
@@ -80,7 +79,12 @@ nonisolated struct ConversationRow: Hashable, Sendable {
             ?? conversation.latest.envelope.from.first
     }
 
-    static func format(_ date: Date, calendar: Calendar = .current, now: Date = Date()) -> String {
+    /// A row's date and its group header, shared with chat rows; undated rows show none, under "Older".
+    static func dateLabels(_ date: Date?, calendar: Calendar, now: Date) -> (date: String, section: String) {
+        (date.map { format($0, calendar: calendar, now: now) } ?? "", section(date, calendar: calendar, now: now))
+    }
+
+    private static func format(_ date: Date, calendar: Calendar, now: Date) -> String {
         if calendar.isDateInToday(date) { return date.formatted(date: .omitted, time: .shortened) }
         if calendar.isDate(date, equalTo: now, toGranularity: .year) {
             return date.formatted(.dateTime.month(.abbreviated).day())
@@ -88,7 +92,7 @@ nonisolated struct ConversationRow: Hashable, Sendable {
         return date.formatted(date: .numeric, time: .omitted)
     }
 
-    static func section(_ date: Date?, calendar: Calendar = .current, now: Date = Date()) -> String {
+    private static func section(_ date: Date?, calendar: Calendar, now: Date) -> String {
         guard let date else { return "Older" }
         if calendar.isDateInToday(date) { return "Today" }
         if calendar.isDateInYesterday(date) { return "Yesterday" }

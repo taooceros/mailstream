@@ -37,34 +37,34 @@ nonisolated enum Threader {
         }
 
         // Message-ID links, scoped per account.
-        var byMessageID: [String: Int] = [:]
+        var byMessageID: [AccountScopedKey: Int] = [:]
         for (index, message) in messages.enumerated() {
             guard let id = message.envelope.messageID else { continue }
-            let key = message.ref.account + "\u{1}" + id
+            let key = AccountScopedKey(account: message.ref.account, value: id)
             if let existing = byMessageID[key] { union(existing, index) } else { byMessageID[key] = index }
         }
         for (index, message) in messages.enumerated() {
             for parentID in message.envelope.inReplyTo {
-                if let target = byMessageID[message.ref.account + "\u{1}" + parentID] { union(index, target) }
+                if let target = byMessageID[AccountScopedKey(account: message.ref.account, value: parentID)] { union(index, target) }
             }
         }
 
         // The provider's own threads, scoped per account.
-        var byThread: [String: Int] = [:]
+        var byThread: [AccountScopedKey: Int] = [:]
         for (index, message) in messages.enumerated() {
             guard let thread = message.envelope.thread else { continue }
-            let key = message.ref.account + "\u{1}" + thread
+            let key = AccountScopedKey(account: message.ref.account, value: thread)
             if let existing = byThread[key] { union(existing, index) } else { byThread[key] = index }
         }
 
         // Subject fallback, oldest first so a reply joins the latest earlier message on that subject.
         let order = messages.indices.sorted { (messages[$0].envelope.date ?? .distantPast) < (messages[$1].envelope.date ?? .distantPast) }
-        var lastBySubject: [String: Int] = [:]
+        var lastBySubject: [AccountScopedKey: Int] = [:]
         for index in order {
             let envelope = messages[index].envelope
             let (normalized, hadPrefix) = threadKey(envelope.subject)
             guard normalized.count >= 4 else { continue }
-            let key = messages[index].ref.account + "\u{1}" + normalized
+            let key = AccountScopedKey(account: messages[index].ref.account, value: normalized)
             if let previous = lastBySubject[key], hadPrefix || !envelope.inReplyTo.isEmpty {
                 let gap = (envelope.date ?? .distantPast).timeIntervalSince(messages[previous].envelope.date ?? .distantPast)
                 if gap < subjectWindow { union(index, previous) }
@@ -79,22 +79,17 @@ nonisolated enum Threader {
         for members in groups.values where members.contains(where: { isPrimary[$0] }) {
             // Collapse copies of one message living in several mailboxes (Gmail labels share the
             // provider id), preferring the primary copy.
-            var chosen = Set<String>()
+            var chosenIDs = Set<String>(), chosenMessageIDs = Set<String>()
             var unique: [Int] = []
             for index in members.sorted(by: { isPrimary[$0] && !isPrimary[$1] }) {
                 let envelope = messages[index].envelope
-                guard chosen.insert("id\u{1}" + envelope.id).inserted else { continue }
-                if let id = envelope.messageID, !chosen.insert(id).inserted { continue }
+                guard chosenIDs.insert(envelope.id).inserted else { continue }
+                if let id = envelope.messageID, !chosenMessageIDs.insert(id).inserted { continue }
                 unique.append(index)
             }
-            let sorted = unique.map { messages[$0] }.sorted {
-                ($0.envelope.date ?? .distantPast, $0.ref.id) < ($1.envelope.date ?? .distantPast, $1.ref.id)
-            }
-            let first = sorted[0]
-            let id = first.ref.account + "|" + (first.envelope.messageID ?? first.ref.id)
-            conversations.append(Conversation(id: id, account: first.ref.account, messages: sorted))
+            conversations.append(Conversation(thread: unique.map { messages[$0] }))
         }
-        conversations.sort { ($0.latestDate ?? .distantPast) > ($1.latestDate ?? .distantPast) }
+        conversations.sortNewestFirst(by: \.latestDate)
         return conversations
     }
 
@@ -103,7 +98,7 @@ nonisolated enum Threader {
     /// threads apart) into one, so the inbox shows that stream once at its latest message.
     /// Conversations with anyone else in them stay as they are.
     static func mergeRepeats(_ conversations: [Conversation]) -> [Conversation] {
-        var index: [String: Int] = [:]
+        var index: [RepeatKey: Int] = [:]
         var groups: [[Conversation]] = []
         for conversation in conversations {
             guard let key = repeatKey(conversation) else {
@@ -118,26 +113,24 @@ nonisolated enum Threader {
             }
         }
         // `conversations` is newest first, so each group sits where its latest member did.
-        return groups.map { group in
-            guard group.count > 1 else { return group[0] }
-            let messages = group.flatMap(\.messages).sorted {
-                ($0.envelope.date ?? .distantPast, $0.ref.id) < ($1.envelope.date ?? .distantPast, $1.ref.id)
-            }
-            let first = messages[0]
-            return Conversation(id: first.ref.account + "|" + (first.envelope.messageID ?? first.ref.id),
-                                account: first.ref.account, messages: messages)
-        }
+        return groups.map { $0.count > 1 ? Conversation(thread: $0.flatMap(\.messages)) : $0[0] }
+    }
+
+    private nonisolated struct RepeatKey: Hashable {
+        let account: String
+        let sender: String
+        let subject: String
     }
 
     /// Account, sender and subject of a conversation whose every message has that one sender.
-    private static func repeatKey(_ conversation: Conversation) -> String? {
+    private static func repeatKey(_ conversation: Conversation) -> RepeatKey? {
         guard let sender = conversation.messages.first?.envelope.from.first?.email.lowercased() else { return nil }
         for message in conversation.messages where message.envelope.from.first?.email.lowercased() != sender {
             return nil
         }
         let (subject, _) = threadKey(conversation.subject)
         guard !subject.isEmpty else { return nil }
-        return conversation.account + "\u{1}" + sender + "\u{1}" + subject
+        return RepeatKey(account: conversation.account, sender: sender, subject: subject)
     }
 
     /// The subject as threading compares it: list tags and title lowercased, whitespace collapsed;

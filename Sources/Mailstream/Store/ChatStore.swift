@@ -83,8 +83,8 @@ final class ChatStore {
     /// Bumped by each mark-read, so only the latest one may roll its optimistic mark back.
     @ObservationIgnored private var readRevisions: [ChatSpaceKey: Int] = [:]
     @ObservationIgnored private var pollTask: Task<Void, Never>?
-    /// The `chat.pollSeconds` timer and its interval.
-    @ObservationIgnored private var polling: (interval: Duration, task: Task<Void, Never>)?
+    /// The `chat.pollSeconds` timer.
+    @ObservationIgnored private var polling = PeriodicTask()
     private var loadMoreTask: Task<Void, Never>?
     /// Newest-page fetches per space; one asked for during a fetch runs after it while the space is open.
     @ObservationIgnored private var fetches: [ChatSpaceKey: CoalescedTask] = [:]
@@ -113,7 +113,7 @@ final class ChatStore {
     isolated deinit {
         watchers.forEach { $0.cancel() }
         pollTask?.cancel()
-        polling?.task.cancel()
+        polling.cancel()
         loadMoreTask?.cancel()
         earlier.values.forEach { $0.cancel() }
         fetches.values.forEach { $0.cancel() }
@@ -151,14 +151,7 @@ final class ChatStore {
 
     /// Polls every `chat.pollSeconds`; a changed setting starts the wait afresh.
     private func schedulePolling(every interval: Duration) {
-        if polling?.interval == interval { return }
-        polling?.task.cancel()
-        polling = (interval, Task(name: "Chat polling") { [weak self] in
-            while true {
-                do { try await Task.sleep(for: interval) } catch { return }
-                self?.poll(quiet: true)
-            }
-        })
+        polling.schedule(every: interval, name: "Chat polling", on: self) { $0.poll(quiet: true) }
     }
 
     /// Paints the last known accounts and spaces before Google answers.
@@ -174,17 +167,9 @@ final class ChatStore {
 
     private func loadCachedSpaces(_ names: [String]) async {
         let cache = cache
-        await withTaskGroup(of: (String, ChatSpaceList?).self) { group in
-            for name in names {
-                group.addTask {
-                    let list = await cache.loadChatSpaces(name)
-                    return (name, list)
-                }
-            }
-            for await (name, list) in group {
-                guard let list, listings[name] == nil, account(named: name) != nil else { continue }
-                listings[name] = Listing(list: list, limit: max(Self.spacesPage, list.spaces.count))
-            }
+        await forEachConcurrently(names) { await cache.loadChatSpaces($0) } consume: { name, result in
+            guard let list = try? result.get(), listings[name] == nil, account(named: name) != nil else { return }
+            listings[name] = Listing(list: list, limit: max(Self.spacesPage, list.spaces.count))
         }
     }
 
@@ -208,18 +193,12 @@ final class ChatStore {
     /// Drops whatever belongs to accounts no longer in `accounts`, including their cached messages.
     private func prune() {
         let names = Set(accounts.map(\.name))
-        listings = listings.filter { names.contains($0.key) }
-        threads = threads.filter { names.contains($0.key.account) }
-        for (key, fetch) in fetches where !names.contains(key.account) {
-            fetch.cancel()
-            fetches[key] = nil
-        }
-        for (key, task) in earlier where !names.contains(key.account) {
-            task.cancel()
-            earlier[key] = nil
-        }
-        readMarks = readMarks.filter { names.contains($0.key.account) }
-        readRevisions = readRevisions.filter { names.contains($0.key.account) }
+        listings.removeAll { !names.contains($0) }
+        threads.removeAll { !names.contains($0.account) }
+        fetches.removeAll { !names.contains($0.account) } cancelling: { $0.cancel() }
+        earlier.removeAll { !names.contains($0.account) } cancelling: { $0.cancel() }
+        readMarks.removeAll { !names.contains($0.account) }
+        readRevisions.removeAll { !names.contains($0.account) }
         let gone = recent.filter { !names.contains($0.account) }
         if !gone.isEmpty {
             gone.forEach(cache.removeChatMessages)
@@ -234,31 +213,21 @@ final class ChatStore {
 
     /// `quiet` polls (the poll loop's) show no progress.
     private func poll(quiet: Bool) {
-        let jobs = accounts.map { ($0.name, listings[$0.name]?.limit ?? Self.spacesPage) }
+        let jobs = accounts.map { (name: $0.name, limit: listings[$0.name]?.limit ?? Self.spacesPage) }
         guard !jobs.isEmpty else { return }
         if !quiet { setLoading(true) }
         guard pollTask == nil else { return }
         let chat = chat
         pollTask = Task(name: "Chat poll") {
             var failed = false
-            await withTaskGroup(of: (String, Int, Result<ChatSpaceList, any Error>).self) { group in
-                for (name, limit) in jobs {
-                    group.addTask {
-                        do {
-                            let list = try await chat.spaces(account: name, limit: limit)
-                            return (name, limit, .success(list))
-                        } catch {
-                            return (name, limit, .failure(error))
-                        }
-                    }
-                }
-                for await (name, limit, result) in group {
-                    switch result {
-                    case .success(let list): apply(list, account: name, limit: limit)
-                    case .failure(let error):
-                        failed = true
-                        report(error, context: name)
-                    }
+            await forEachConcurrently(jobs) { job in
+                try await chat.spaces(account: job.name, limit: job.limit)
+            } consume: { job, result in
+                switch result {
+                case .success(let list): apply(list, account: job.name, limit: job.limit)
+                case .failure(let error):
+                    failed = true
+                    report(error, context: job.name)
                 }
             }
             pollTask = nil
@@ -541,7 +510,7 @@ final class ChatStore {
         change(&listing.list.spaces[index])
         guard listing.list.spaces[index] != before else { return }
         if listing.list.spaces[index].activity != before.activity {
-            listing.list.spaces.sort { ($0.activity ?? .distantPast) > ($1.activity ?? .distantPast) }
+            listing.list.spaces.sortNewestFirst(by: \.activity)
         }
         listings[key.account] = listing
         cache.saveChatSpaces(listing.list, for: key.account)
@@ -599,8 +568,7 @@ nonisolated struct ChatRow: Hashable, Sendable {
         key = ChatSpaceKey(account: account, space: space.name)
         title = space.title.isEmpty ? space.members.map(\.label).joined(separator: ", ") : space.title
         activity = space.activity
-        date = activity.map { ConversationRow.format($0, calendar: calendar, now: now) } ?? ""
-        section = ConversationRow.section(activity, calendar: calendar, now: now)
+        (date, section) = ConversationRow.dateLabels(activity, calendar: calendar, now: now)
         isUnread = space.unread > 0
         let latest = space.latest
         hasAttachment = !(latest?.attachments.isEmpty ?? true)
@@ -653,7 +621,7 @@ nonisolated struct ChatListInput: Sendable {
         for source in sources {
             for space in source.spaces { rows.append(ChatRow(space, account: source.account, calendar: calendar, now: now)) }
         }
-        rows.sort { ($0.activity ?? .distantPast) > ($1.activity ?? .distantPast) }
+        rows.sortNewestFirst(by: \.activity)
         return rows
     }
 }

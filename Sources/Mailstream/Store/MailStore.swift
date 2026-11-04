@@ -93,6 +93,12 @@ final class MailStore {
         /// Cursor of the page after `envelopes`; nil at the end, or when the listing came from
         /// disk and no first page arrived yet.
         var next: String?
+
+        /// Adds the envelopes not listed yet after the listed ones, in the order given.
+        mutating func appendUnknown(_ more: [Envelope]) {
+            let known = Set(envelopes.map(\.id))
+            envelopes += more.filter { !known.contains($0.id) }
+        }
     }
 
     @ObservationIgnored private var listings: [MailboxKey: Listing] = [:]
@@ -115,7 +121,7 @@ final class MailStore {
     @ObservationIgnored private var firstPageRequests: [MailboxKey: Int] = [:]
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private var loadMoreTask: Task<Void, Never>?
-    @ObservationIgnored private var polling: (interval: Duration, task: Task<Void, Never>)?
+    @ObservationIgnored private var polling = PeriodicTask()
     /// Account changes, push connectivity and the counts refresh.
     @ObservationIgnored private var watchers: [Task<Void, Never>] = []
 
@@ -134,7 +140,7 @@ final class MailStore {
 
     isolated deinit {
         watchers.forEach { $0.cancel() }
-        polling?.task.cancel()
+        polling.cancel()
         refreshTask?.cancel()
         searchTask?.cancel()
         loadMoreTask?.cancel()
@@ -177,16 +183,9 @@ final class MailStore {
     /// Polls every `sync.pollSeconds` while push is down, every `sync.pushPollSeconds` while it
     /// delivers changes.
     private func schedulePolling() {
-        let interval = pollInterval
-        if polling?.interval == interval { return }
-        polling?.task.cancel()
-        polling = (interval, Task(name: "Mail polling") { [weak self] in
-            while true {
-                do { try await Task.sleep(for: interval) } catch { return }
-                guard let self else { return }
-                if !isLoading { refresh() }
-            }
-        })
+        polling.schedule(every: pollInterval, name: "Mail polling", on: self) { store in
+            if !store.isLoading { store.refresh() }
+        }
     }
 
     /// A socket that just connected catches up on whatever changed while it was down: the lists in
@@ -212,9 +211,7 @@ final class MailStore {
     }
 
     private func connect() async {
-        await withTaskGroup(of: Void.self) { group in
-            for account in accounts { group.addTask { await self.loadAccount(account.name) } }
-        }
+        await forEachConcurrently(accounts.map(\.name)) { await self.loadAccount($0) }
         cache.saveAccounts(accounts)
         connected = true
         refresh()
@@ -250,9 +247,7 @@ final class MailStore {
         guard !load.isEmpty else { return }
         Task {
             await loadCachedMailboxes(load)
-            await withTaskGroup(of: Void.self) { group in
-                for name in load { group.addTask { await self.loadAccount(name) } }
-            }
+            await forEachConcurrently(load) { await self.loadAccount($0) }
             cache.saveAccounts(accounts)
             refresh()
             refreshCounts()
@@ -260,15 +255,12 @@ final class MailStore {
     }
 
     private func forget(_ removed: Set<String>) {
-        mailboxes = mailboxes.filter { !removed.contains($0.key) }
-        listings = listings.filter { !removed.contains($0.key.account) }
-        searchResults = searchResults.filter { !removed.contains($0.key.account) }
-        for (key, read) in cacheReads where removed.contains(key.account) {
-            read.cancel()
-            cacheReads[key] = nil
-        }
-        for account in removed { accountRefreshes.removeValue(forKey: account)?.cancel() }
-        firstPageRequests = firstPageRequests.filter { !removed.contains($0.key.account) }
+        mailboxes.removeAll { removed.contains($0) }
+        listings.removeAll { removed.contains($0.account) }
+        searchResults.removeAll { removed.contains($0.account) }
+        cacheReads.removeAll { removed.contains($0.account) } cancelling: { $0.cancel() }
+        accountRefreshes.removeAll { removed.contains($0) } cancelling: { $0.cancel() }
+        firstPageRequests.removeAll { removed.contains($0.account) }
         contents.forget(accounts: removed)
         switch selection {
         case .mailbox(let key) where removed.contains(key.account): select(.allInboxes)
@@ -279,16 +271,8 @@ final class MailStore {
 
     private func loadCachedMailboxes(_ names: [String]) async {
         let cache = cache
-        await withTaskGroup(of: (String, [Mailbox]?).self) { group in
-            for name in names {
-                group.addTask {
-                    let list = await cache.loadMailboxes(name)
-                    return (name, list)
-                }
-            }
-            for await (name, list) in group {
-                if let list, mailboxes[name] == nil { applyMailboxes(list, account: name) }
-            }
+        await forEachConcurrently(names) { await cache.loadMailboxes($0) } consume: { name, result in
+            if let list = try? result.get(), mailboxes[name] == nil { applyMailboxes(list, account: name) }
         }
     }
 
@@ -528,8 +512,8 @@ final class MailStore {
     }
 
     /// `keys` paired with their account's backend; keys of signed-out accounts drop out.
-    private func backends(_ keys: [MailboxKey]) -> [(MailboxKey, any MailBackend)] {
-        keys.compactMap { key in accountStore.backend(for: key.account).map { (key, $0) } }
+    func backends<Key>(_ keys: [Key], account: (Key) -> String) -> [(key: Key, backend: any MailBackend)] {
+        keys.compactMap { key in accountStore.backend(for: account(key)).map { (key, $0) } }
     }
 
     /// First pages of `keys`. A key's answer counts only if no later request for it was made,
@@ -540,26 +524,16 @@ final class MailStore {
             firstPageRequests[key, default: 0] += 1
             tickets[key] = firstPageRequests[key]
         }
-        await withTaskGroup(of: (MailboxKey, Result<EnvelopePage, any Error>).self) { group in
-            for (key, backend) in backends(keys) {
-                group.addTask {
-                    do {
-                        let page = try await backend.envelopes(mailbox: key.mailbox, cursor: nil,
-                                                               pageSize: Self.pageSize, priority: .interactive)
-                        return (key, .success(page))
-                    } catch {
-                        return (key, .failure(error))
-                    }
-                }
-            }
-            for await (key, result) in group {
-                guard !Task.isCancelled, account(named: key.account) != nil,
-                      firstPageRequests[key] == tickets[key] else { continue }
-                switch result {
-                case .success(let page):
-                    if merge(firstPage: page, into: key) { rebuild.request() }
-                case .failure(let error): report(error, context: key.account)
-                }
+        await forEachConcurrently(backends(keys, account: \.account)) { job in
+            try await job.backend.envelopes(mailbox: job.key.mailbox, cursor: nil, pageSize: Self.pageSize, priority: .interactive)
+        } consume: { job, result in
+            let key = job.key
+            guard !Task.isCancelled, account(named: key.account) != nil,
+                  firstPageRequests[key] == tickets[key] else { return }
+            switch result {
+            case .success(let page):
+                if merge(firstPage: page, into: key) { rebuild.request() }
+            case .failure(let error): report(error, context: key.account)
             }
         }
     }
@@ -590,7 +564,7 @@ final class MailStore {
 
     func loadMore() {
         guard loadMoreTask == nil, canLoadMore else { return }
-        let jobs = backends(primaryKeys.filter { listings[$0]?.next != nil })
+        let jobs = backends(primaryKeys.filter { listings[$0]?.next != nil }, account: \.account)
         isLoading = true
         loadMoreTask = Task(name: "Mail load more") {
             defer { loadMoreTask = nil }
@@ -603,8 +577,7 @@ final class MailStore {
                     guard !Task.isCancelled else { return }
                     // The account was removed meanwhile.
                     guard var listing = listings[key] else { continue }
-                    let known = Set(listing.envelopes.map(\.id))
-                    listing.envelopes += page.envelopes.filter { !known.contains($0.id) }
+                    listing.appendUnknown(page.envelopes)
                     listing.next = page.next
                     listings[key] = listing
                 } catch {
@@ -637,7 +610,7 @@ final class MailStore {
         searchQuery = query
         isLoading = true
         let accounts = Set(primaryKeys.map(\.account))
-        let jobs = accounts.sorted().compactMap { account in accountStore.backend(for: account).map { (account, $0) } }
+        let jobs = backends(accounts.sorted(), account: \.self)
         let loaded = listings.filter { accounts.contains($0.key.account) && isSearchable($0.key) }.mapValues(\.envelopes)
         let snippets = contents.snippets
         searchTask = Task(name: "Mail search") {
@@ -647,27 +620,15 @@ final class MailStore {
             rebuild.request()
             try? await Task.sleep(for: .milliseconds(450))
             guard !Task.isCancelled else { return }
-            await withTaskGroup(of: (String, Result<[SearchHit], any Error>).self) { group in
-                for (account, backend) in jobs {
-                    group.addTask {
-                        // Bound before the tuple is built: Swift 6.3 at -O drops the first element
-                        // from `(account, .success(try await …))` on success.
-                        do {
-                            let hits = try await backend.search(query: query, pageSize: Self.pageSize)
-                            return (account, .success(hits))
-                        } catch {
-                            return (account, .failure(error))
-                        }
-                    }
+            await forEachConcurrently(jobs) { job in
+                try await job.backend.search(query: query, pageSize: Self.pageSize)
+            } consume: { job, result in
+                guard !Task.isCancelled else { return }
+                switch result {
+                case .success(let hits): merge(hits, account: job.key)
+                case .failure(let error): report(error, context: job.key)
                 }
-                for await (account, result) in group {
-                    guard !Task.isCancelled else { continue }
-                    switch result {
-                    case .success(let hits): merge(hits, account: account)
-                    case .failure(let error): report(error, context: account)
-                    }
-                    rebuild.request()
-                }
+                rebuild.request()
             }
             guard !Task.isCancelled else { return }
             isLoading = false
@@ -699,15 +660,15 @@ final class MailStore {
                                                         snippets: [MessageRef: String]) async -> [MailboxKey: [Envelope]] {
         let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
         guard !terms.contains(where: { $0.contains(":") }) else { return [:] }
-        var seen = Set<String>()
+        var seen = Set<AccountScopedKey>()
         var out: [MailboxKey: [Envelope]] = [:]
         for (key, envelopes) in loaded {
-            for envelope in envelopes where !seen.contains(key.account + "\u{1}" + envelope.id) {
+            for envelope in envelopes where !seen.contains(AccountScopedKey(account: key.account, value: envelope.id)) {
                 let people = (envelope.from + envelope.to).map { "\($0.name ?? "") \($0.email)" }.joined(separator: " ")
                 let text = [envelope.subject, people, snippets[MessageRef(account: key.account, mailbox: key.mailbox, id: envelope.id)] ?? ""]
                     .joined(separator: "\n")
                 guard terms.allSatisfy({ text.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }) else { continue }
-                seen.insert(key.account + "\u{1}" + envelope.id)
+                seen.insert(AccountScopedKey(account: key.account, value: envelope.id))
                 out[key, default: []].append(envelope)
             }
         }
@@ -723,7 +684,7 @@ final class MailStore {
 
     @concurrent private nonisolated static func rankContacts(_ listings: [(account: String, envelopes: [Envelope])],
                                                              own: Set<String>) async -> [Contact] {
-        var seenMessages = Set<String>()
+        var seenMessages = Set<AccountScopedKey>()
         var byEmail: [String: (address: Address, sent: Int, latest: Date)] = [:]
         func note(_ address: Address, date: Date?, sent: Bool) {
             let key = address.normalizedEmail
@@ -741,7 +702,7 @@ final class MailStore {
         }
         for (account, envelopes) in listings {
             // A message filed under several labels is listed once per label.
-            for envelope in envelopes where seenMessages.insert(account + "\u{1}" + envelope.id).inserted {
+            for envelope in envelopes where seenMessages.insert(AccountScopedKey(account: account, value: envelope.id)).inserted {
                 let fromMe = envelope.from.contains { own.contains($0.normalizedEmail) }
                 for address in envelope.from { note(address, date: envelope.date, sent: false) }
                 for address in envelope.to { note(address, date: envelope.date, sent: fromMe) }
@@ -792,7 +753,7 @@ final class MailStore {
         let targets = read
             ? conversation.messages.filter { !$0.envelope.isSeen }
             : [conversation.messages.last(where: { $0.role != .sent }) ?? conversation.latest]
-        guard !targets.isEmpty else { return Task {} }
+        guard !targets.isEmpty else { return .done }
         let task = mutateFlags(targets, flag: .seen, add: read)
         adjustUnread(targets, delta: read ? -1 : 1)
         return task
@@ -805,25 +766,37 @@ final class MailStore {
     }
 
     private func mutateFlags(_ targets: [MailMessage], flag: MessageFlag, add: Bool) -> Task<Void, any Error> {
-        let refs = Set(targets.map(\.ref))
-        updateEnvelopes(refs) { envelope in
-            if add { envelope.flags.insert(flag.rawValue) } else { envelope.flags.remove(flag.rawValue) }
-        }
+        updateEnvelopes(Set(targets.map(\.ref))) { $0.setFlag(flag, add) }
         let requests = Dictionary(grouping: targets, by: \.ref.mailboxKey).map { key, messages in
             let ids = messages.map(\.ref.id)
-            return Task {
-                do {
-                    try await backend(for: key.account).setFlag(flag, add, ids: ids, mailbox: key.mailbox)
-                } catch {
-                    updateEnvelopes(Set(messages.map(\.ref))) { envelope in
-                        if add { envelope.flags.remove(flag.rawValue) } else { envelope.flags.insert(flag.rawValue) }
-                    }
-                    report(error, context: key.account, alert: true)
-                    throw error
-                }
+            return providerRequest(key.account, resync: false) {
+                try await $0.setFlag(flag, add, ids: ids, mailbox: key.mailbox)
+            } rollback: { [self] in
+                updateEnvelopes(Set(messages.map(\.ref))) { $0.setFlag(flag, !add) }
             }
         }
         return Self.all(requests)
+    }
+
+    /// One request for a change already shown. A refusal (signing out included) is rolled back,
+    /// reported, and with `resync` the lists in view and the account's counts are fetched afresh;
+    /// the task throws it when `rethrowing`.
+    private func providerRequest(_ account: String, resync: Bool, rethrowing: Bool = true,
+                                 _ call: @escaping (any MailBackend) async throws -> Void,
+                                 rollback: @escaping () -> Void = {}) -> Task<Void, any Error> {
+        Task {
+            do {
+                try await call(backend(for: account))
+            } catch {
+                rollback()
+                report(error, context: account, alert: true)
+                if resync {
+                    refresh()
+                    refreshCounts(account: account)
+                }
+                if rethrowing { throw error }
+            }
+        }
     }
 
     /// Finishes when every request has; throws the first failure.
@@ -875,11 +848,11 @@ final class MailStore {
     func archive(_ conversation: Conversation, from primary: Set<MailboxKey>? = nil,
                  undoManager: UndoManager? = nil) -> Task<Void, any Error> {
         guard let target = archiveMailbox(account: conversation.account) else {
-            return Task { throw StoreError(message: "\(conversation.account) has no archive mailbox.") }
+            return .failed(StoreError(message: "\(conversation.account) has no archive mailbox."))
         }
         let targets = archivable(conversation, primary: primary)
         guard !targets.isEmpty else {
-            return Task { throw StoreError(message: "Nothing in \(conversation.id) is in a mailbox Archive moves from.") }
+            return .failed(StoreError(message: "Nothing in \(conversation.id) is in a mailbox Archive moves from."))
         }
         return move(targets, to: target, undoManager: undoManager, name: "Archive")
     }
@@ -891,22 +864,15 @@ final class MailStore {
         guard let trash = mailbox(account: conversation.account, role: .trash) else {
             let error = StoreError(message: "No trash mailbox found.")
             report(error, context: conversation.account, alert: true)
-            return Task { throw error }
+            return .failed(error)
         }
         let inTrash = conversation.messages.filter { $0.ref.mailbox == trash.id }
         let elsewhere = conversation.messages.filter { $0.ref.mailbox != trash.id && $0.role != .drafts }
         var requests = [move(elsewhere, to: trash, undoManager: undoManager, name: "Move to Trash")]
         if !inTrash.isEmpty {
             removeEnvelopes(inTrash)
-            requests.append(Task {
-                do {
-                    try await backend(for: trash.account).delete(ids: inTrash.map(\.ref.id), mailbox: trash.id)
-                } catch {
-                    report(error, context: trash.account, alert: true)
-                    refresh()
-                    refreshCounts(account: trash.account)
-                    throw error
-                }
+            requests.append(providerRequest(trash.account, resync: true) {
+                try await $0.delete(ids: inTrash.map(\.ref.id), mailbox: trash.id)
             })
         }
         return Self.all(requests)
@@ -925,11 +891,11 @@ final class MailStore {
     @discardableResult
     func restore(_ conversation: Conversation, undoManager: UndoManager? = nil) -> Task<Void, any Error> {
         guard let inbox = mailbox(account: conversation.account, role: .inbox) else {
-            return Task { throw StoreError(message: "\(conversation.account) has no inbox.") }
+            return .failed(StoreError(message: "\(conversation.account) has no inbox."))
         }
         let targets = restorable(conversation)
         guard !targets.isEmpty else {
-            return Task { throw StoreError(message: "Nothing in \(conversation.id) is in the trash or junk.") }
+            return .failed(StoreError(message: "Nothing in \(conversation.id) is in the trash or junk."))
         }
         return move(targets, to: inbox, undoManager: undoManager, name: "Move to Inbox")
     }
@@ -937,7 +903,7 @@ final class MailStore {
     private func move(_ targets: [MailMessage], to destination: Mailbox, undoManager: UndoManager? = nil,
                       name: String = "Move") -> Task<Void, any Error> {
         let targets = targets.filter { $0.ref.mailbox != destination.id }
-        guard !targets.isEmpty else { return Task {} }
+        guard !targets.isEmpty else { return .done }
         removeEnvelopes(targets)
         if let undoManager {
             undoManager.registerUndo(withTarget: self) { store in
@@ -946,15 +912,8 @@ final class MailStore {
             undoManager.setActionName(name)
         }
         let requests = Dictionary(grouping: targets, by: \.ref.mailboxKey).map { key, messages in
-            Task {
-                do {
-                    try await backend(for: key.account).move(ids: messages.map(\.ref.id), from: key.mailbox, to: destination.id)
-                } catch {
-                    report(error, context: key.account, alert: true)
-                    refresh()
-                    refreshCounts(account: key.account)
-                    throw error
-                }
+            providerRequest(key.account, resync: true) {
+                try await $0.move(ids: messages.map(\.ref.id), from: key.mailbox, to: destination.id)
             }
         }
         return Self.all(requests)
@@ -971,9 +930,8 @@ final class MailStore {
         for (key, group) in groups {
             let envelopes = group.map(\.envelope)
             if var listing = listings[key] {
-                let known = Set(listing.envelopes.map(\.id))
-                listing.envelopes += envelopes.filter { !known.contains($0.id) }
-                listing.envelopes.sort { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+                listing.appendUnknown(envelopes)
+                listing.envelopes.sortNewestFirst(by: \.date)
                 listings[key] = listing
                 persist(key)
             }
@@ -986,14 +944,8 @@ final class MailStore {
         }
         undoManager.setActionName(name)
         for (key, group) in groups {
-            Task {
-                do {
-                    try await backend(for: key.account).move(ids: group.map(\.ref.id), from: destination.id, to: key.mailbox)
-                } catch {
-                    report(error, context: key.account, alert: true)
-                    refresh()
-                    refreshCounts(account: key.account)
-                }
+            _ = providerRequest(key.account, resync: true, rethrowing: false) {
+                try await $0.move(ids: group.map(\.ref.id), from: destination.id, to: key.mailbox)
             }
         }
     }
@@ -1009,8 +961,7 @@ final class MailStore {
 
     /// Flags never change threading, so the visible list is patched in place instead of rebuilt.
     private func updateEnvelopes(_ refs: Set<MessageRef>, _ change: (inout Envelope) -> Void) {
-        for key in Set(refs.map(\.mailboxKey)) {
-            let ids = Set(refs.filter { $0.mailboxKey == key }.map(\.id))
+        for (key, ids) in Self.ids(byMailbox: refs) {
             if var listing = listings[key] {
                 for index in listing.envelopes.indices where ids.contains(listing.envelopes[index].id) {
                     change(&listing.envelopes[index])
@@ -1031,8 +982,7 @@ final class MailStore {
     private func removeEnvelopes(_ targets: [MailMessage]) {
         let refs = Set(targets.map(\.ref))
         adjustUnread(targets.filter { !$0.envelope.isSeen }, delta: -1)
-        for key in Set(refs.map(\.mailboxKey)) {
-            let ids = Set(refs.filter { $0.mailboxKey == key }.map(\.id))
+        for (key, ids) in Self.ids(byMailbox: refs) {
             listings[key]?.envelopes.removeAll { ids.contains($0.id) }
             searchResults[key]?.removeAll { ids.contains($0.id) }
             persist(key)
@@ -1044,6 +994,10 @@ final class MailStore {
             return Conversation(id: conversation.id, account: conversation.account, messages: remaining)
         }
         rebuild.request()
+    }
+
+    private static func ids(byMailbox refs: Set<MessageRef>) -> [MailboxKey: Set<String>] {
+        Dictionary(grouping: refs, by: \.mailboxKey).mapValues { Set($0.map(\.id)) }
     }
 
     /// Replaces (or with nil, removes) the visible conversations holding any of `refs`, reformats
@@ -1078,6 +1032,13 @@ final class MailStore {
     private func report(_ error: any Error, context: String? = nil, alert: Bool = false) {
         problems.report(error, from: .mail, context: context, alert: alert)
     }
+}
+
+/// Mutations hand back a task the caller may await; these are the ones settled before any request.
+private extension Task where Success == Void, Failure == any Error {
+    static var done: Task { Task {} }
+
+    static func failed(_ error: any Error) -> Task { Task { throw error } }
 }
 
 /// Everything a list rebuild reads, copied out of the store so threading and row formatting run

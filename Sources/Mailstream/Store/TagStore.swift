@@ -11,6 +11,8 @@ final class TagStore {
     /// Settings whose change deserves another try at once: a fixed omp or model.
     private static let retrySettings: [Setting] = [.aiTaggingModel, .aiTaggingOmpPath, .aiTaggingPassLimit,
                                                    .aiTaggingBackoffSeconds]
+    /// Why tag edits and retagging are refused while tagging is off.
+    static let offMessage = "AI tagging is off (aiTagging.enabled)."
 
     /// Keyed by `key(_:)`, so a new message in a conversation re-tags it; read through `tag(for:)`.
     private(set) var tags: [String: ConversationTag] = [:]
@@ -129,7 +131,7 @@ final class TagStore {
     /// not judged needs a category, and only people conversations can wait on a reply.
     func edit(_ conversation: Conversation, category: MailCategory?, waiting: Bool?,
               labels: [String]?) throws -> ConversationTag {
-        guard enabled else { throw StoreError(message: "AI tagging is off (aiTagging.enabled).") }
+        guard enabled else { throw StoreError(message: Self.offMessage) }
         let key = Self.key(conversation)
         guard var tag = tags[key] ?? category.map({ ConversationTag(category: $0, toRespond: false, labels: []) }) else {
             throw StoreError(message: "\(conversation.id) has no AI tag yet; give a category.")

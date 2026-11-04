@@ -167,6 +167,13 @@ nonisolated struct MessageRef: Hashable, Sendable, Codable {
     var mailboxKey: MailboxKey { MailboxKey(account: account, mailbox: mailbox) }
 }
 
+/// An in-memory lookup key for a value (Message-ID, provider thread, subject) that is only unique
+/// within one account.
+nonisolated struct AccountScopedKey: Hashable, Sendable {
+    let account: String
+    let value: String
+}
+
 nonisolated struct MailMessage: Hashable, Sendable, Identifiable {
     let ref: MessageRef
     var envelope: Envelope
@@ -215,6 +222,17 @@ nonisolated struct Conversation: Identifiable, Hashable, Sendable {
         isFlagged = flagged
         hasAttachment = attachment
         hasDraft = draft
+    }
+
+    /// The thread of `messages` in date order (ties by provider id), identified by its first
+    /// message, so the id stays put as later messages join.
+    init(thread messages: [MailMessage]) {
+        let sorted = messages.sorted {
+            ($0.envelope.date ?? .distantPast, $0.ref.id) < ($1.envelope.date ?? .distantPast, $1.ref.id)
+        }
+        let first = sorted[0]
+        self.init(id: first.ref.account + "|" + (first.envelope.messageID ?? first.ref.id), account: first.ref.account,
+                  messages: sorted)
     }
 
     var latest: MailMessage { messages[messages.count - 1] }

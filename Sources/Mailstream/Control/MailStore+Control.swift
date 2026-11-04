@@ -12,26 +12,16 @@ extension MailStore {
     }
 
     func agentListing(_ keys: [MailboxKey], pageSize: Int) async -> AgentListing {
-        let jobs = keys.compactMap { key in accountStore.backend(for: key.account).map { (key, $0) } }
+        let jobs = backends(keys, account: \.account)
         var fetched: [MailboxKey: [Envelope]] = [:]
-        var failures = keys.filter { key in !jobs.contains { $0.0 == key } }.map { "\($0.account): signed out" }
-        await withTaskGroup(of: (MailboxKey, Result<[Envelope], any Error>).self) { group in
-            for (key, backend) in jobs {
-                group.addTask {
-                    do {
-                        let list = try await backend.envelopes(mailbox: key.mailbox, cursor: nil, pageSize: pageSize,
-                                                               priority: .interactive).envelopes
-                        return (key, .success(list))
-                    } catch {
-                        return (key, .failure(error))
-                    }
-                }
-            }
-            for await (key, result) in group {
-                switch result {
-                case .success(let list): fetched[key] = list
-                case .failure(let error): failures.append("\(key.account) \(mailbox(key)?.displayName ?? key.mailbox): \(error.localizedDescription)")
-                }
+        var failures = keys.filter { key in !jobs.contains { $0.key == key } }.map { "\($0.account): signed out" }
+        await forEachConcurrently(jobs) { job in
+            try await job.backend.envelopes(mailbox: job.key.mailbox, cursor: nil, pageSize: pageSize, priority: .interactive).envelopes
+        } consume: { job, result in
+            let key = job.key
+            switch result {
+            case .success(let list): fetched[key] = list
+            case .failure(let error): failures.append("\(key.account) \(mailbox(key)?.displayName ?? key.mailbox): \(error.localizedDescription)")
             }
         }
         let inboxes = !keys.isEmpty && keys.allSatisfy { mailbox($0)?.role == .inbox }
@@ -40,30 +30,21 @@ extension MailStore {
 
     /// The providers' search over every mailbox of `accounts` but trash and junk, as in the window.
     func agentSearch(_ accounts: [String], query: String, pageSize: Int) async -> AgentListing {
-        let jobs = accounts.compactMap { account in accountStore.backend(for: account).map { (account, $0) } }
+        let jobs = backends(accounts, account: \.self)
         var fetched: [MailboxKey: [Envelope]] = [:]
-        var failures = accounts.filter { account in !jobs.contains { $0.0 == account } }.map { "\($0): signed out" }
-        await withTaskGroup(of: (String, Result<[SearchHit], any Error>).self) { group in
-            for (account, backend) in jobs {
-                group.addTask {
-                    do {
-                        let hits = try await backend.search(query: query, pageSize: pageSize)
-                        return (account, .success(hits))
-                    } catch {
-                        return (account, .failure(error))
-                    }
+        var failures = accounts.filter { account in !jobs.contains { $0.key == account } }.map { "\($0): signed out" }
+        await forEachConcurrently(jobs) { job in
+            try await job.backend.search(query: query, pageSize: pageSize)
+        } consume: { job, result in
+            let account = job.key
+            switch result {
+            case .success(let hits):
+                for hit in hits {
+                    let key = MailboxKey(account: account, mailbox: hit.mailbox)
+                    guard let role = mailbox(key)?.role, role != .trash, role != .junk else { continue }
+                    fetched[key, default: []].append(hit.envelope)
                 }
-            }
-            for await (account, result) in group {
-                switch result {
-                case .success(let hits):
-                    for hit in hits {
-                        let key = MailboxKey(account: account, mailbox: hit.mailbox)
-                        guard let role = mailbox(key)?.role, role != .trash, role != .junk else { continue }
-                        fetched[key, default: []].append(hit.envelope)
-                    }
-                case .failure(let error): failures.append("\(account): \(error.localizedDescription)")
-                }
+            case .failure(let error): failures.append("\(account): \(error.localizedDescription)")
             }
         }
         return await threads(fetched, failures: failures, mergeRepeats: false)

@@ -44,18 +44,11 @@ nonisolated final class MailCache: Sendable {
     }
 
     @concurrent private func read<T: Decodable & Sendable>(_ type: T.Type, at url: URL) async -> T? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(T.self, from: data)
+        JSONFile.read(type, at: url)
     }
 
     private func write<T: Encodable & Sendable>(_ value: T, to url: URL, creatingDirectory: Bool = false) {
-        writes.yield {
-            guard let data = try? JSONEncoder().encode(value) else { return }
-            if creatingDirectory {
-                try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            }
-            try? data.write(to: url, options: .atomic)
-        }
+        writes.yield { try? JSONFile.write(value, to: url, creatingDirectory: creatingDirectory) }
     }
 
     // MARK: Accounts
