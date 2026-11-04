@@ -97,9 +97,10 @@ final class AvatarStore {
     func largeImage(for key: String, automated: Bool) async -> NSImage? {
         let key = key.lowercased()
         if let image = large.object(forKey: key as NSString) { return image }
-        guard let png = await resolver.avatar(for: key, published: published[key], automated: automated, side: 512)
+        guard let png = await resolver.avatar(for: key, published: published[key], automated: automated, side: 512),
+              let decoded = await Self.decode(png)
         else { return nil }
-        return keep(png, in: large, as: key)
+        return keep(decoded, in: large, as: key)
     }
 
     /// `cache`'s entry for the lowercased `key`; a miss starts looking for the picture.
@@ -109,11 +110,18 @@ final class AvatarStore {
         return nil
     }
 
-    /// `png` decoded and kept in `cache` under `key`; nil when it does not decode.
-    private func keep(_ png: Data, in cache: NSCache<NSString, NSImage>, as key: String) -> NSImage? {
-        guard let image = NSImage(data: png) else { return nil }
+    @discardableResult
+    private func keep(_ image: CGImage, in cache: NSCache<NSString, NSImage>, as key: String) -> NSImage {
+        let image = NSImage(cgImage: image, size: .zero)
         cache.setObject(image, forKey: key as NSString)
         return image
+    }
+
+    /// `png` decoded in full off the main actor, so drawing it never inflates a PNG on the main
+    /// thread; nil when it does not decode.
+    @concurrent private nonisolated static func decode(_ png: Data) async -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(png as CFData, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
     }
 
     private func request(_ key: String, automated: Bool) {
@@ -122,14 +130,16 @@ final class AvatarStore {
         let resolver = resolver
         Task {
             let png = await resolver.avatar(for: key, published: photo, automated: automated)
+            let decoded = if let png { await Self.decode(png) } else { CGImage?.none }
             pending.remove(key)
             // A picture published meanwhile outranks what this lookup could find: look again with it.
             let superseded = published[key] != photo
             if superseded { request(key, automated: automated) }
-            guard let png, keep(png, in: images, as: key) != nil else {
+            guard let png, let decoded else {
                 if !superseded { missing.insert(key) }
                 return
             }
+            keep(decoded, in: images, as: key)
             pngs.setObject(png as NSData, forKey: key as NSString)
             revision += 1
         }

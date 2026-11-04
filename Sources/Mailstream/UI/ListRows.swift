@@ -4,16 +4,28 @@ import SwiftUI
 extension Color {
     /// `token` with its alpha replaced by `alpha`, as AppKit's `withAlphaComponent` does; SwiftUI's
     /// `opacity` would multiply into the system color's own alpha and come out lighter. Resolved
-    /// per appearance, since a system color with a new alpha otherwise keeps the light one.
+    /// per appearance, since a system color with a new alpha otherwise keeps the light one. Made
+    /// once per token and alpha: rows ask for these every time they draw.
     static func listTone(_ token: Design.Color, alpha: CGFloat) -> Color {
-        Color(nsColor: NSColor(name: nil) { appearance in
+        let key = ListToneKey(token: token, alpha: alpha)
+        if let color = listTones[key] { return color }
+        let color = Color(nsColor: NSColor(name: nil) { appearance in
             var resolved = token.color
             appearance.performAsCurrentDrawingAppearance {
                 resolved = token.color.usingColorSpace(.sRGB)?.withAlphaComponent(alpha) ?? token.color
             }
             return resolved
         })
+        listTones[key] = color
+        return color
     }
+
+    private static var listTones: [ListToneKey: Color] = [:]
+}
+
+private struct ListToneKey: Hashable {
+    let token: Design.Color
+    let alpha: CGFloat
 }
 
 /// Fixed horizontal stops, so every row's columns read as straight vertical lines.
@@ -57,7 +69,7 @@ enum Avatar {
 struct ListRowContent {
     var unread: Bool
     var initials: String
-    var avatarColor: NSColor
+    var avatarColor: Color
     var photo: NSImage?
     /// Whose picture the row shows, for the enlarged preview.
     var person: Address
@@ -68,7 +80,8 @@ struct ListRowContent {
     var hasAttachment: Bool
     var flagged: Bool
     var topic: String?
-    var account: (name: String, color: NSColor)?
+    var topicColor: Color?
+    var account: (name: String, color: Color)?
     /// The hover pill's buttons, in order; empty for chat rows, which keep their date on hover.
     var actions: [(action: ConversationAction, state: ConversationAction.State)]
 
@@ -79,7 +92,7 @@ struct ListRowContent {
                      unread: Bool, flagged: Bool, hasAttachment: Bool, date: String, initials: String,
                      person: Address, avatarKey: String, photo: NSImage?, automated: Bool,
                      archivable: Bool, waiting: Bool, topic: String?,
-                     account: (name: String, color: NSColor)?) -> ListRowContent {
+                     account: (name: String, color: Color)?) -> ListRowContent {
         var name = senderText(participants, unread: unread)
         if count > 1 {
             var suffix = AttributedString("  \(count)")
@@ -99,7 +112,8 @@ struct ListRowContent {
         title.foregroundColor = unread ? .design(.text) : Color.listTone(.text, alpha: 0.8)
         line += title
         if let snippet, !snippet.isEmpty {
-            var preview = AttributedString("   " + snippet)
+            // One line shows a fraction of a long preview; laying out the rest costs every draw.
+            var preview = AttributedString("   " + snippet.prefix(Self.snippetLength))
             preview.font = .design(.body)
             preview.foregroundColor = Color.listTone(.muted, alpha: 0.75)
             line += preview
@@ -109,14 +123,14 @@ struct ListRowContent {
         if waiting { actions.append((.toggleWaiting, ConversationAction.State())) }
         if archivable { actions.append((.archive, state)) }
         actions += [(.trash, state), (.toggleRead, state), (.toggleStar, state)]
-        return ListRowContent(unread: unread, initials: initials, avatarColor: Avatar.color(for: avatarKey), photo: photo,
+        return ListRowContent(unread: unread, initials: initials, avatarColor: Self.avatarColor(for: avatarKey), photo: photo,
                               person: person, automated: automated, sender: name, line: line, date: date,
                               hasAttachment: hasAttachment, flagged: flagged, topic: topic, account: account,
                               actions: actions)
     }
 
     /// A store conversation row.
-    init(_ row: ConversationRow, snippet: String?, archivable: Bool, account: (name: String, color: NSColor)?,
+    init(_ row: ConversationRow, snippet: String?, archivable: Bool, account: (name: String, color: Color)?,
          tag: ConversationTag?, photo: NSImage?) {
         self = Self.mail(participants: row.participants, count: row.count, subjectPrefix: row.subjectPrefix,
                          subjectTitle: row.subjectTitle, snippet: snippet, unread: row.isUnread, flagged: row.isFlagged,
@@ -130,26 +144,26 @@ struct ListRowContent {
     /// A chat space in the same columns: title where the senders go, "Sender: text" as the line.
     static func chat(title: String, preview: String, unread: Bool, hasAttachment: Bool, date: String, initials: String,
                      person: Address, colorKey: String, photo: NSImage?,
-                     account: (name: String, color: NSColor)?) -> ListRowContent {
+                     account: (name: String, color: Color)?) -> ListRowContent {
         var line = AttributedString(preview)
         line.font = .design(.body, weight: unread ? .medium : .regular)
         line.foregroundColor = unread ? .design(.text) : .design(.muted)
-        return ListRowContent(unread: unread, initials: initials, avatarColor: Avatar.color(for: colorKey), photo: photo,
+        return ListRowContent(unread: unread, initials: initials, avatarColor: Self.avatarColor(for: colorKey), photo: photo,
                               person: person, automated: false, sender: senderText(title, unread: unread), line: line,
                               date: date, hasAttachment: hasAttachment, flagged: false, topic: nil, account: account,
                               actions: [])
     }
 
-    init(_ row: ChatRow, account: (name: String, color: NSColor)?, photo: NSImage?) {
+    init(_ row: ChatRow, account: (name: String, color: Color)?, photo: NSImage?) {
         self = Self.chat(title: row.title, preview: row.preview, unread: row.isUnread, hasAttachment: row.hasAttachment,
                          date: row.date, initials: row.avatarInitials,
                          person: Address(name: row.avatarName, email: row.avatarKey), colorKey: row.avatarColorKey,
                          photo: photo, account: account)
     }
 
-    private init(unread: Bool, initials: String, avatarColor: NSColor, photo: NSImage?, person: Address, automated: Bool,
+    private init(unread: Bool, initials: String, avatarColor: Color, photo: NSImage?, person: Address, automated: Bool,
                  sender: AttributedString, line: AttributedString, date: String, hasAttachment: Bool, flagged: Bool,
-                 topic: String?, account: (name: String, color: NSColor)?,
+                 topic: String?, account: (name: String, color: Color)?,
                  actions: [(action: ConversationAction, state: ConversationAction.State)]) {
         self.unread = unread
         self.initials = initials
@@ -163,9 +177,14 @@ struct ListRowContent {
         self.hasAttachment = hasAttachment
         self.flagged = flagged
         self.topic = topic
+        self.topicColor = topic.map { Color(nsColor: TagPalette.color(for: $0)) }
         self.account = account
         self.actions = actions
     }
+
+    private static let snippetLength = 240
+
+    private static func avatarColor(for key: String) -> Color { Color(nsColor: Avatar.color(for: key)) }
 
     /// The sender column: bold while unread, softened once read.
     private static func senderText(_ text: String, unread: Bool) -> AttributedString {
@@ -274,8 +293,8 @@ struct ListRowConversation: View {
                     .accessibilityLabel("Starred")
                     .padding(.trailing, 10)
             }
-            if let topic = content.topic {
-                ListRowTopic(text: topic, color: Color(nsColor: TagPalette.color(for: topic)))
+            if let topic = content.topic, let color = content.topicColor {
+                ListRowTopic(text: topic, color: color)
                     .padding(.trailing, 10)
             }
             Text(content.date)
@@ -284,10 +303,15 @@ struct ListRowConversation: View {
                 .lineLimit(1)
                 .frame(width: ListMetrics.dateWidth, alignment: .trailing)
                 .padding(.trailing, 8)
-            RoundedRectangle(cornerRadius: 1)
-                .fill(content.account.map { Color(nsColor: $0.color) } ?? .clear)
-                .frame(width: 2.5, height: 12)
-                .help(content.account?.name ?? "")
+            // The account tick, its tooltip only where there is an account to name.
+            if let account = content.account {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(account.color)
+                    .frame(width: 2.5, height: 12)
+                    .help(account.name)
+            } else {
+                Color.clear.frame(width: 2.5, height: 12)
+            }
         }
         .opacity(showsPill ? 0 : 1)
     }
@@ -313,7 +337,7 @@ struct ListRowTopic: View {
 /// Initials on a tint of the person's color, or their picture once one is known.
 struct ListRowAvatar: View {
     let initials: String
-    let color: NSColor
+    let color: Color
     let photo: NSImage?
     /// Only a picture takes the click (to enlarge it); otherwise the row underneath gets it.
     var preview: ((NSImage) -> AvatarPreviewItem)?
@@ -321,30 +345,33 @@ struct ListRowAvatar: View {
 
     var body: some View {
         let size = ListMetrics.avatarSize
+        // Only a picture is clipped and takes clicks: a mask and a popover per row cost every
+        // line laid out while scrolling.
         ZStack {
-            Circle().fill(Color(nsColor: color).opacity(0.15))
+            Circle().fill(color.opacity(0.15))
             if let photo {
                 Image(nsImage: photo)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
+                    .frame(width: size, height: size)
+                    .clipShape(Circle())
                     .transition(.opacity.animation(.house(.brief)))
             } else {
                 Text(initials)
                     .font(.design(.body, weight: .semibold))
-                    .foregroundStyle(Color(nsColor: color))
+                    .foregroundStyle(color)
             }
         }
         .frame(width: size, height: size)
-        .clipShape(Circle())
         .overlay {
             if let photo, let preview {
                 Color.clear
                     .contentShape(Circle())
                     .onTapGesture { shown = preview(photo) }
                     .pointerStyle(.link)
+                    .popover(item: $shown, arrowEdge: .trailing) { AvatarPreviewView(item: $0) }
             }
         }
-        .popover(item: $shown, arrowEdge: .trailing) { AvatarPreviewView(item: $0) }
     }
 }
 

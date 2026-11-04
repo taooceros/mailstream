@@ -64,7 +64,6 @@ struct ConversationListView: View {
         } action: { _, new in
             model.geometryChanged(new)
         }
-        .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.99) { model.visibilityChanged($0) }
         .onScrollPhaseChange { _, phase in
             model.scrollingChanged(phase == .tracking || phase == .interacting || phase == .decelerating)
         }
@@ -137,19 +136,21 @@ struct ConversationListView: View {
     }
 
     @ViewBuilder private func row(_ item: ConversationListItem) -> some View {
-        let hovered = model.hoveredID == item.id
-        let highlighted = item.selectionID != nil && model.highlightedID == item.selectionID
         switch item {
         case .section(let title, let count, let accent):
             ListRowSectionHeader(title: title, count: count, accent: accent)
         case .shelf(let bundles):
-            ListRowShelf(bundles: bundles, own: model.store.ownAddresses, hovered: hovered) { model.enterBundle($0) }
+            ConversationListShelfRow(state: model.rowState(for: item), bundles: bundles, own: model.store.ownAddresses) {
+                model.enterBundle($0)
+            }
         case .conversation(let conversation):
-            ConversationListMailRow(model: model, conversation: conversation, highlighted: highlighted,
-                                    emphasized: emphasized, hovered: hovered) { click(item.id) }
+            ConversationListMailRow(model: model, conversation: conversation, state: model.rowState(for: item),
+                                    emphasized: emphasized) { click(item.id) }
+                .equatable()
         case .space(let space):
-            ConversationListChatRow(model: model, space: space, highlighted: highlighted, emphasized: emphasized,
-                                    hovered: hovered) { click(item.id) }
+            ConversationListChatRow(model: model, space: space, state: model.rowState(for: item),
+                                    emphasized: emphasized) { click(item.id) }
+                .equatable()
         }
     }
 
@@ -187,38 +188,42 @@ struct ConversationListBundlePage: View {
     }
 }
 
-/// A conversation's row, reading its content from the store so snippets, pictures, tags and
-/// account names redraw it in place.
-struct ConversationListMailRow: View {
-    let model: ConversationListModel
-    let conversation: Conversation
-    let highlighted: Bool
-    let emphasized: Bool
-    let hovered: Bool
-    let onClick: () -> Void
+/// The Smart Inbox shelf, lifting its tiles while the pointer is over it.
+struct ConversationListShelfRow: View {
+    let state: ListRowState
+    let bundles: [ConversationListBundle]
+    let own: Set<String>
+    let onOpen: (MailCategory) -> Void
 
     var body: some View {
-        let store = model.store
-        let context = store.listContext
-        let row = store.row(for: conversation)
-        let tag = store.tagging.tag(for: conversation)
-        let automated = tag.map { $0.category != .people } ?? false
-        let photo = store.avatars.image(for: row.avatarKey, automated: automated)
-        // Still on initials: look again when pictures arrive.
-        if photo == nil { _ = store.avatars.revision }
-        let content = ListRowContent(
-            row, snippet: store.contents.snippet(for: conversation.latest.ref),
-            archivable: ![.archive, .all, .trash].contains(context.role),
-            account: context.selection.isUnified
-                ? (store.label(account: conversation.account), AccountStyle.color(for: conversation.account, in: store)) : nil,
-            tag: tag, photo: photo)
-        let id = conversation.id
-        return ListRowConversation(content: content, hovered: hovered, onAction: { model.perform($0, id: id) },
-                                   avatars: store.avatars)
-            .modifier(ListRowChrome(highlighted: highlighted, emphasized: emphasized, hovered: hovered))
-            .contentShape(Rectangle())
-            .onTapGesture(perform: onClick)
-            .contextMenu { menu }
+        ListRowShelf(bundles: bundles, own: own, hovered: state.hovered, onOpen: onOpen)
+    }
+}
+
+/// A conversation's row, drawing the content its state holds: a snippet, picture or hover
+/// redraws this row alone. Equal while its state and conversation are; the click is the same
+/// line's either way.
+struct ConversationListMailRow: View, Equatable {
+    let model: ConversationListModel
+    let conversation: Conversation
+    let state: ListRowState
+    let emphasized: Bool
+    let onClick: () -> Void
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.state === rhs.state && lhs.emphasized == rhs.emphasized && lhs.conversation == rhs.conversation
+    }
+
+    var body: some View {
+        if let content = state.content {
+            let id = conversation.id
+            ListRowConversation(content: content, hovered: state.hovered, onAction: { model.perform($0, id: id) },
+                                avatars: model.store.avatars)
+                .modifier(ListRowChrome(highlighted: state.highlighted, emphasized: emphasized, hovered: state.hovered))
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onClick)
+                .contextMenu { menu }
+        }
     }
 
     @ViewBuilder private var menu: some View {
@@ -245,33 +250,31 @@ struct ConversationListMailRow: View {
 }
 
 /// A chat space's row.
-struct ConversationListChatRow: View {
+struct ConversationListChatRow: View, Equatable {
     let model: ConversationListModel
     let space: ChatRow
-    let highlighted: Bool
+    let state: ListRowState
     let emphasized: Bool
-    let hovered: Bool
     let onClick: () -> Void
 
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.state === rhs.state && lhs.emphasized == rhs.emphasized && lhs.space == rhs.space
+    }
+
     var body: some View {
-        let store = model.store
-        let photo = space.avatarKey.isEmpty ? nil : store.avatars.image(for: space.avatarKey, automated: false)
-        if photo == nil, !space.avatarKey.isEmpty { _ = store.avatars.revision }
-        let content = ListRowContent(
-            space, account: store.listContext.selection == .allChats
-                ? (store.label(account: space.key.account), AccountStyle.chatColor(for: space.key.account, in: store)) : nil,
-            photo: photo)
-        let key = space.key
-        return ListRowConversation(content: content, hovered: hovered, avatars: store.avatars)
-        .modifier(ListRowChrome(highlighted: highlighted, emphasized: emphasized, hovered: hovered))
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onClick)
-        .contextMenu {
-            Button("Open") { model.openChat(key) }
-            if space.isUnread {
-                let label = ConversationAction.toggleRead.label(in: .init(unread: true))
-                Button { model.markChatRead(key) } label: { Label(label.title, systemImage: label.symbol) }
-            }
+        if let content = state.content {
+            let key = space.key
+            ListRowConversation(content: content, hovered: state.hovered, avatars: model.store.avatars)
+                .modifier(ListRowChrome(highlighted: state.highlighted, emphasized: emphasized, hovered: state.hovered))
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onClick)
+                .contextMenu {
+                    Button("Open") { model.openChat(key) }
+                    if space.isUnread {
+                        let label = ConversationAction.toggleRead.label(in: .init(unread: true))
+                        Button { model.markChatRead(key) } label: { Label(label.title, systemImage: label.symbol) }
+                    }
+                }
         }
     }
 }

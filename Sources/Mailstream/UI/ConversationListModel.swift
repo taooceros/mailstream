@@ -96,6 +96,51 @@ struct ConversationListGeometry: Equatable {
     var visibleMaxY: CGFloat { top + containerHeight }
 }
 
+/// What one line draws and how it stands, observed by that line alone: a snippet, picture, hover
+/// or highlight reaching one line redraws that line, not every line in view.
+@Observable
+final class ListRowState {
+    /// Nil for headers and the shelf, which draw from their item.
+    fileprivate(set) var content: ListRowContent?
+    fileprivate(set) var hovered = false
+    fileprivate(set) var highlighted = false
+    /// What `content` was made from; a refresh that finds the same keeps the line as it is.
+    @ObservationIgnored fileprivate var inputs: ListRowInputs?
+
+    fileprivate func setHovered(_ hovered: Bool) { if self.hovered != hovered { self.hovered = hovered } }
+    fileprivate func setHighlighted(_ highlighted: Bool) {
+        if self.highlighted != highlighted { self.highlighted = highlighted }
+    }
+}
+
+/// Everything a line's content is made from.
+private struct ListRowInputs: Equatable {
+    enum Source: Equatable {
+        case mail(ConversationRow, snippet: String?, tag: ConversationTag?, archivable: Bool)
+        case chat(ChatRow)
+    }
+
+    var source: Source
+    /// The account's label and color hex, in lists that mix accounts.
+    var account: (name: String, hex: String)?
+    var photo: NSImage?
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.source == rhs.source && lhs.account?.name == rhs.account?.name && lhs.account?.hex == rhs.account?.hex
+            && lhs.photo === rhs.photo
+    }
+
+    var content: ListRowContent {
+        let account = account.map { (name: $0.name, color: Color(nsColor: NSColor(hex: $0.hex))) }
+        switch source {
+        case .mail(let row, let snippet, let tag, let archivable):
+            return ListRowContent(row, snippet: snippet, archivable: archivable, account: account, tag: tag, photo: photo)
+        case .chat(let space):
+            return ListRowContent(space, account: account, photo: photo)
+        }
+    }
+}
+
 /// A request for the view to bring a line into sight, pinned at `anchor`.
 struct ConversationListReveal: Equatable {
     let id: String
@@ -145,7 +190,16 @@ final class ConversationListModel {
     private(set) var items: [ConversationListItem] = []
     /// Top of each item in the stack, for mapping the pointer to a line.
     @ObservationIgnored private var tops: [CGFloat] = []
-    private(set) var highlightedID: String?
+    /// Each item's line state by item id, made and refreshed with the items.
+    @ObservationIgnored private var rowStates: [String: ListRowState] = [:]
+    private(set) var highlightedID: String? {
+        didSet {
+            guard highlightedID != oldValue else { return }
+            for item in items where item.selectionID != nil && (item.selectionID == oldValue || item.selectionID == highlightedID) {
+                rowStates[item.id]?.setHighlighted(item.selectionID == highlightedID)
+            }
+        }
+    }
     @ObservationIgnored private var lastHighlightedIndex = 0
     @ObservationIgnored private var lastContext: ListContext?
     @ObservationIgnored private var preloadTask: Task<Void, Never>?
@@ -154,10 +208,17 @@ final class ConversationListModel {
     @ObservationIgnored private var memberCounts: (total: Int, unread: Int) = (0, 0)
 
     /// The line under the pointer, as the pointer and scroll position place it.
-    private(set) var hoveredID: String?
+    private(set) var hoveredID: String? {
+        didSet {
+            guard hoveredID != oldValue else { return }
+            if let oldValue { rowStates[oldValue]?.setHovered(false) }
+            if let hoveredID { rowStates[hoveredID]?.setHovered(true) }
+        }
+    }
     @ObservationIgnored private var pointer: CGPoint?
     @ObservationIgnored private(set) var geometry = ConversationListGeometry()
-    @ObservationIgnored private var visibleIDs: [String] = []
+    /// The lines `requestVisibleContent` last asked content for; nil after the items change.
+    @ObservationIgnored private var requestedRange: Range<Int>?
     /// The user is scrolling: rows passing under the pointer don't flash.
     private(set) var isScrolling = false
     /// The window is key: hover follows the pointer only then.
@@ -210,14 +271,21 @@ final class ConversationListModel {
         let store = store
         storeWatches = [
             // What the rows are built from: the published list, its tags and loading state, and the
-            // chat spaces while the list shows them. Row content (snippets, pictures, account names)
-            // is read by the rows themselves and redraws them in place.
+            // chat spaces while the list shows them.
             Task.immediate(name: "List rows") { [weak self] in
                 let built = Observations {
                     _ = (store.listContext, store.conversations, store.isLoading, store.tagging.isEnabled, store.tagging.tags)
                     if store.listContext.selection.isChat { _ = (store.chat.rows, store.chat.isLoading) }
                 }
                 for await _ in built { self?.listChanged() }
+            },
+            // What lines show beyond their items: previews, pictures, account names. Each line's
+            // state takes only its own change.
+            Task.immediate(name: "List row content") { [weak self] in
+                let content = Observations {
+                    _ = (store.contents.snippets, store.avatars.revision, store.accounts, store.chat.accounts)
+                }
+                for await _ in content { self?.refreshRowStates() }
             },
         ]
     }
@@ -357,6 +425,63 @@ final class ConversationListModel {
             defer { top += item.height }
             return top
         }
+        requestedRange = nil
+        var states: [String: ListRowState] = [:]
+        states.reserveCapacity(newItems.count)
+        for item in newItems {
+            let state = rowStates[item.id] ?? ListRowState()
+            refresh(state, for: item)
+            state.setHovered(item.id == hoveredID)
+            state.setHighlighted(item.selectionID != nil && item.selectionID == highlightedID)
+            states[item.id] = state
+        }
+        rowStates = states
+    }
+
+    /// The state `item`'s line draws from.
+    func rowState(for item: ConversationListItem) -> ListRowState {
+        if let state = rowStates[item.id] { return state }
+        // Not reached: `setItems` makes every item's state with the items.
+        let state = ListRowState()
+        rowStates[item.id] = state
+        return state
+    }
+
+    /// Previews, pictures or account names changed: lines whose inputs moved make new content.
+    private func refreshRowStates() {
+        for item in items {
+            if let state = rowStates[item.id] { refresh(state, for: item) }
+        }
+    }
+
+    private func refresh(_ state: ListRowState, for item: ConversationListItem) {
+        guard let inputs = rowInputs(for: item), inputs != state.inputs else { return }
+        state.inputs = inputs
+        state.content = inputs.content
+    }
+
+    /// What `item`'s line shows, from the store; nil for headers and the shelf. Pictures only as
+    /// far as they are in memory: looking for missing ones is left to the lines in view.
+    private func rowInputs(for item: ConversationListItem) -> ListRowInputs? {
+        let context = store.listContext
+        switch item {
+        case .section, .shelf:
+            return nil
+        case .conversation(let conversation):
+            let row = store.row(for: conversation)
+            let account = context.selection.isUnified
+                ? (store.label(account: conversation.account), AccountStyle.hex(for: conversation.account, in: store)) : nil
+            return ListRowInputs(
+                source: .mail(row, snippet: store.contents.snippet(for: conversation.latest.ref),
+                              tag: store.tagging.tag(for: conversation),
+                              archivable: ![.archive, .all, .trash].contains(context.role)),
+                account: account, photo: store.avatars.cachedImage(for: row.avatarKey))
+        case .space(let space):
+            let account = context.selection == .allChats
+                ? (store.label(account: space.key.account), AccountStyle.chatHex(for: space.key.account, in: store)) : nil
+            return ListRowInputs(source: .chat(space), account: account,
+                                 photo: space.avatarKey.isEmpty ? nil : store.avatars.cachedImage(for: space.avatarKey))
+        }
     }
 
     /// What the list shows when it has no lines.
@@ -382,7 +507,7 @@ final class ConversationListModel {
     }
 
     private func afterReload() {
-        requestVisibleSnippets()
+        requestVisibleContent()
         autoFill()
     }
 
@@ -412,11 +537,43 @@ final class ConversationListModel {
         }
     }
 
-    private func requestVisibleSnippets() {
-        let indexes = visibleIDs.compactMap { id in items.firstIndex { $0.id == id } }
-        guard let first = indexes.min(), let last = indexes.max() else { return }
-        let upper = min(items.count, last + 1 + 10)
-        store.contents.prefetchSnippets(for: items[first..<upper].compactMap(\.conversation))
+    /// Starts loading previews and pictures for the lines in view and the next few, once per
+    /// stretch of lines.
+    private func requestVisibleContent() {
+        let range = visibleRange
+        guard !range.isEmpty, range != requestedRange else { return }
+        requestedRange = range
+        let lines = items[range.lowerBound..<min(items.count, range.upperBound + 10)]
+        store.contents.prefetchSnippets(for: lines.compactMap(\.conversation))
+        for item in lines {
+            guard let state = rowStates[item.id], let inputs = state.inputs, inputs.photo == nil else { continue }
+            let found: NSImage? = switch inputs.source {
+            case .mail(let row, _, let tag, _):
+                store.avatars.image(for: row.avatarKey, automated: tag.map { $0.category != .people } ?? false)
+            case .chat(let space):
+                space.avatarKey.isEmpty ? nil : store.avatars.image(for: space.avatarKey, automated: false)
+            }
+            if found != nil { refresh(state, for: item) }
+        }
+    }
+
+    /// Items at least partly in view.
+    private var visibleRange: Range<Int> {
+        guard !items.isEmpty, geometry.containerHeight > 0 else { return 0..<0 }
+        let top = geometry.top - ConversationListView.inset
+        let first = index(at: max(top, 0)) ?? 0
+        let last = index(at: top + geometry.containerHeight) ?? first
+        return first..<max(first, last) + 1
+    }
+
+    /// The item whose span holds `y` (stack coordinates): the last one starting at or above it.
+    private func index(at y: CGFloat) -> Int? {
+        var low = 0, high = tops.count
+        while low < high {
+            let mid = (low + high) / 2
+            if tops[mid] <= y { low = mid + 1 } else { high = mid }
+        }
+        return low == 0 ? nil : low - 1
     }
 
     private func nearestSelectableIndex(to index: Int) -> Int? {
@@ -434,19 +591,13 @@ final class ConversationListModel {
         let old = geometry
         geometry = new
         refreshHover()
+        requestVisibleContent()
         if new.top != old.top {
             // Scrolled: page in before the bottom comes into view.
-            requestVisibleSnippets()
             if canLoadMore, !isLoadingList, new.visibleMaxY > new.contentHeight - Self.pagingMargin { loadMore() }
         } else if new.contentHeight != old.contentHeight || new.containerHeight != old.containerHeight {
             autoFill()
         }
-    }
-
-    /// Lines at least mostly in view, in any order.
-    func visibilityChanged(_ ids: [String]) {
-        visibleIDs = ids
-        requestVisibleSnippets()
     }
 
     /// The user started (true) or stopped (false) scrolling.
@@ -471,7 +622,7 @@ final class ConversationListModel {
         var under: String?
         if !hoverSuspended, !isScrolling, windowActive, bundleList == nil, let pointer {
             let y = geometry.top + pointer.y - ConversationListView.inset
-            if y >= 0, let index = tops.lastIndex(where: { $0 <= y }), y < tops[index] + items[index].height {
+            if y >= 0, let index = index(at: y), y < tops[index] + items[index].height {
                 under = items[index].id
             }
         }
@@ -641,9 +792,10 @@ final class ConversationListModel {
     /// Scrolls `index` into view the least distance, unless it is already in view.
     private func revealItem(at index: Int) {
         let id = items[index].id
-        let visible = visibleIDs.compactMap { id in items.firstIndex { $0.id == id } }
-        if visible.contains(index) { return }
-        let anchor: UnitPoint = (visible.min().map { index < $0 } ?? true) ? .top : .bottom
+        let top = geometry.top - ConversationListView.inset
+        let line = tops[index]..<tops[index] + items[index].height
+        if geometry.containerHeight > 0, line.lowerBound >= top, line.upperBound <= top + geometry.containerHeight { return }
+        let anchor: UnitPoint = geometry.containerHeight == 0 || line.lowerBound < top ? .top : .bottom
         revealSerial += 1
         reveal = ConversationListReveal(id: id, anchor: anchor, serial: revealSerial)
     }
