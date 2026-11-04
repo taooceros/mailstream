@@ -239,6 +239,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         let page = reader.view
         page.layer?.removeAnimation(forKey: "fold")
         page.layer?.removeAnimation(forKey: "swipe")
+        page.layer?.shadowOpacity = 0
         list.view.layer?.removeAnimation(forKey: "swipe")
         dragging = false
         page.isHidden = false
@@ -303,12 +304,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             return true
         case .release(let offset, let velocity):
             if dragging { releaseReader(at: offset, velocity: velocity) } else { list.releaseBack(at: offset, velocity: velocity) }
-            return true
+            // The view under the fingers saw this gesture begin: let it see the end too, or a
+            // scroll view stays in a live scroll (hover suspended) until the next one.
+            return false
         }
     }
 
-    /// The reader follows the fingers sideways, uncovering the list, which settles from slightly
-    /// enlarged as it does on close.
+    /// The reader follows the fingers sideways like a page, uncovering the list where it lies.
     private func dragReader(to offset: CGFloat) {
         guard opened != nil, let page = reader.view.layer, let below = list.view.layer else { return }
         if !dragging {
@@ -321,41 +323,35 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             for key in ["unfold", "fold", "opacity", "swipe"] { page.removeAnimation(forKey: key) }
             below.removeAnimation(forKey: "unfold")
             reader.view.alphaValue = 1
+            page.masksToBounds = false
+            page.shadowColor = NSColor.black.cgColor
+            page.shadowOpacity = 0.12
+            page.shadowRadius = 14
+            page.shadowOffset = .zero
+            page.shadowPath = CGPath(rect: page.bounds, transform: nil)
         }
-        let progress = min(abs(offset) / max(reader.view.bounds.width, 1), 1)
         Motion.hold(page, "transform", at: CATransform3DMakeTranslation(offset, 0, 0), key: "swipe")
-        Motion.hold(below, "transform", at: Motion.centered(1 + 0.03 * (1 - progress), in: below), key: "swipe")
     }
 
     /// Past a third of the width, or flicked onward, the reader slides off the side it was swiped
-    /// toward and the list stays; otherwise it slides back into place.
+    /// toward and the list stays; otherwise it slides back into place. The slide starts at the
+    /// fingers' speed.
     private func releaseReader(at offset: CGFloat, velocity: CGFloat) {
-        guard dragging, let page = reader.view.layer, let below = list.view.layer else { return }
+        guard dragging, let page = reader.view.layer else { return }
         dragging = false
         let width = max(reader.view.bounds.width, 1)
         let distance = abs(offset)
         let onward = offset < 0 ? -velocity : velocity
         let back = opened != nil && (distance > width / 3 || (onward > 400 && distance > 20))
-        let remaining = back ? width - distance : distance
-        let duration = min(0.3, max(0.16, Double(remaining / max(abs(velocity), 1500))))
-        let progress = min(distance / width, 1)
-        let away = offset < 0 ? -width : width
+        let target: CGFloat = back ? (offset < 0 ? -width : width) : 0
         transitions += 1
         let current = transitions
         Motion.group({
-            for (layer, from, to) in [
-                (page, CATransform3DMakeTranslation(offset, 0, 0), back ? CATransform3DMakeTranslation(away, 0, 0) : CATransform3DIdentity),
-                (below, Motion.centered(1 + 0.03 * (1 - progress), in: below), back ? CATransform3DIdentity : Motion.centered(1.03, in: below)),
-            ] {
-                let slide = Motion.basic("transform", from: from, to: to, duration: duration)
-                slide.fillMode = .forwards
-                slide.isRemovedOnCompletion = false
-                layer.add(slide, forKey: "swipe")
-            }
+            page.add(Motion.slide(from: offset, to: target, velocity: velocity), forKey: "swipe")
         }, completion: { [weak self] in
             guard let self, self.transitions == current else { return }
             page.removeAnimation(forKey: "swipe")
-            below.removeAnimation(forKey: "swipe")
+            page.shadowOpacity = 0
             if back {
                 self.reader.view.isHidden = true
                 (self.list.tableView as? ConversationTableView)?.refreshHover()

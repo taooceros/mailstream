@@ -581,6 +581,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
 
     func enterBundle(_ category: MailCategory) {
         savedScroll["top"] = scroll.contentView.bounds.origin.y
+        // What a back swipe uncovers, taken now so the swipe itself never stops to draw.
+        inboxSnapshot = snapshot()
         openBundle = category
         autoFillPages = 0
         highlightedID = nil
@@ -605,29 +607,129 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         delegate?.conversationListDidChangeBundle(self)
     }
 
-    /// A back swipe in a bundle: the rows follow the fingers sideways.
+    /// The inbox as it was when the bundle opened, which a back swipe uncovers.
+    private var inboxSnapshot: (image: CGImage, size: CGSize)?
+    /// Under the bundle while a back swipe moves it: the inbox snapshot on the page background.
+    private var swipeUnder: CALayer?
+    /// Bumped per drag step, so a slide that a new drag interrupts does not clean up under it.
+    private var swipeStep = 0
+
+    /// A back swipe in a bundle: the bundle slides with the fingers like a page, over the inbox.
     func dragBack(to offset: CGFloat) {
-        guard openBundle != nil, let layer = scroll.layer else { return }
-        if layer.animation(forKey: "swipe") == nil {
+        guard openBundle != nil, let host = view.layer, let layer = scroll.layer else { return }
+        swipeStep += 1
+        if swipeUnder == nil {
+            let under = CALayer()
+            under.frame = view.bounds
+            under.backgroundColor = pageColor
+            if let inboxSnapshot, inboxSnapshot.size == view.bounds.size {
+                under.contents = inboxSnapshot.image
+                under.contentsGravity = .resize
+            }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            host.insertSublayer(under, below: layer)
+            // The list draws no background of its own; as a page it needs one, and an edge.
+            layer.backgroundColor = pageColor
+            layer.masksToBounds = false
+            layer.shadowColor = NSColor.black.cgColor
+            layer.shadowOpacity = 0.12
+            layer.shadowRadius = 14
+            layer.shadowOffset = .zero
+            layer.shadowPath = CGPath(rect: layer.bounds, transform: nil)
+            CATransaction.commit()
+            swipeUnder = under
             // A bundle still spreading out must not keep animating under the fingers.
+            layer.removeAnimation(forKey: "contentFade")
             scroll.contentView.layer?.removeAnimation(forKey: "unfold")
         }
         Motion.hold(layer, "transform", at: CATransform3DMakeTranslation(offset, 0, 0), key: "swipe")
     }
 
-    /// Fingers lifted: past a third of the width, or flicked onward, the bundle closes as the rows
-    /// return to center; otherwise they only slide back.
+    /// Fingers lifted: past a third of the width, or flicked onward, the bundle slides off and the
+    /// inbox stays; otherwise it slides back. The slide starts at the fingers' speed.
+    ///
+    /// Going back, the bundle becomes a picture of itself where the fingers left it and the real
+    /// inbox fills the list at once, so the inbox under the sliding page is live, never waiting
+    /// for the slide to end.
     func releaseBack(at offset: CGFloat, velocity: CGFloat) {
-        guard let layer = scroll.layer, layer.animation(forKey: "swipe") != nil else { return }
-        let width = max(scroll.bounds.width, 1)
+        guard let under = swipeUnder, let layer = scroll.layer, let host = view.layer else { return }
+        let step = swipeStep
+        let width = max(view.bounds.width, 1)
         let distance = abs(offset)
         let onward = offset < 0 ? -velocity : velocity
         let back = openBundle != nil && (distance > width / 3 || (onward > 400 && distance > 20))
-        let duration = min(0.3, max(0.16, Double(distance / max(abs(velocity), 1500))))
-        let slide = Motion.basic("transform", from: CATransform3DMakeTranslation(offset, 0, 0), to: CATransform3DIdentity,
-                                 duration: duration)
-        layer.add(slide, forKey: "swipe")
-        if back { leaveBundle() }
+        let target: CGFloat = back ? (offset < 0 ? -width : width) : 0
+        var moving = layer
+        if back, let picture = snapshot() {
+            let cover = CALayer()
+            cover.frame = view.bounds
+            cover.contents = picture.image
+            cover.contentsGravity = .resize
+            cover.backgroundColor = pageColor
+            cover.shadowColor = NSColor.black.cgColor
+            cover.shadowOpacity = 0.12
+            cover.shadowRadius = 14
+            cover.shadowOffset = .zero
+            cover.shadowPath = CGPath(rect: CGRect(origin: .zero, size: view.bounds.size), transform: nil)
+            cover.transform = CATransform3DMakeTranslation(offset, 0, 0)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            host.addSublayer(cover)
+            endSwipe(on: layer, under: under)
+            CATransaction.commit()
+            moving = cover
+        }
+        if back {
+            openBundle = nil
+            highlightedID = nil
+            apply(buildRows(), animated: false)
+            table.deselectAll(nil)
+            if let y = savedScroll["top"] { scroll.contentView.scroll(to: NSPoint(x: 0, y: y)) }
+            delegate?.conversationListDidChangeBundle(self)
+            guard moving !== layer else {
+                // No picture to slide away: the inbox is simply there.
+                endSwipe(on: layer, under: under)
+                table.refreshHover()
+                return
+            }
+        }
+        Motion.group({
+            moving.add(Motion.slide(from: offset, to: target, velocity: velocity), forKey: "swipe")
+        }, completion: { [weak self] in
+            guard let self else { return }
+            if moving !== layer {
+                moving.removeFromSuperlayer()
+            } else if self.swipeUnder === under, self.swipeStep == step {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                self.endSwipe(on: layer, under: under)
+                CATransaction.commit()
+            }
+            self.table.refreshHover()
+        })
+    }
+
+    /// The list is itself again: in place, without the page background, shadow or what lay under it.
+    private func endSwipe(on layer: CALayer, under: CALayer) {
+        layer.removeAnimation(forKey: "swipe")
+        layer.backgroundColor = nil
+        layer.shadowOpacity = 0
+        under.removeFromSuperlayer()
+        swipeUnder = nil
+    }
+
+    /// The reader's page background (`--bg` in the reader page), which a sliding list shows.
+    private var pageColor: CGColor {
+        view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? CGColor(srgbRed: 0x1e / 255, green: 0x1e / 255, blue: 0x1e / 255, alpha: 1) : .white
+    }
+
+    /// The list as it is on screen.
+    private func snapshot() -> (image: CGImage, size: CGSize)? {
+        guard view.window != nil, let rep = scroll.bitmapImageRepForCachingDisplay(in: scroll.bounds) else { return nil }
+        scroll.cacheDisplay(in: scroll.bounds, to: rep)
+        return rep.cgImage.map { ($0, scroll.bounds.size) }
     }
 
     // MARK: - Highlight and opening

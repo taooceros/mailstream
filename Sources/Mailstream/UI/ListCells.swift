@@ -101,6 +101,21 @@ enum Motion {
         return animation
     }
 
+    /// A sideways slide of `transform` from `from` to `to` points that picks up a gesture's
+    /// `velocity` (points per second), critically damped so it never overshoots, and holds the end
+    /// until removed. Speed away from `to` is dropped rather than carried past the start.
+    static func slide(from: CGFloat, to: CGFloat, velocity: CGFloat) -> CASpringAnimation {
+        let animation = spring("transform", from: CATransform3DMakeTranslation(from, 0, 0),
+                               to: CATransform3DMakeTranslation(to, 0, 0), stiffness: 440, damping: 42)
+        // In units of the whole change per second.
+        if to != from { animation.initialVelocity = max(0, velocity / (to - from)) }
+        // Within half a point by then; the rest of the settling tail only delays the completion.
+        animation.duration = min(animation.settlingDuration, 0.5)
+        animation.fillMode = .forwards
+        animation.isRemovedOnCompletion = false
+        return animation
+    }
+
     /// Runs `animations`, then `completion` once everything they added has finished or been replaced.
     static func group(_ animations: () -> Void, completion: @escaping @MainActor () -> Void) {
         CATransaction.begin()
