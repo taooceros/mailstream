@@ -65,12 +65,14 @@ final class AvatarStore {
 
     /// Makes `url`, the picture a person publishes (Google Chat's `avatarUrl`), a source for `key`:
     /// their lowercased address, or their Chat user id when there is none. A new picture for a key
-    /// that had none is looked for again.
+    /// that had none is looked for again, and one already shown, found without it (a domain's
+    /// logo, say), is looked up again behind it.
     func publish(_ url: URL, for key: String) {
         let key = key.lowercased()
         guard !key.isEmpty, published[key] != url else { return }
         published[key] = url
         missing.remove(key)
+        if images.object(forKey: key as NSString) != nil { request(key, automated: false) }
     }
 
     /// The picture for `key` (an address, or a Chat user id with a published picture) when it is
@@ -115,9 +117,11 @@ final class AvatarStore {
         Task {
             let png = await resolver.avatar(for: key, published: photo, automated: automated)
             pending.remove(key)
+            // A picture published meanwhile outranks what this lookup could find: look again with it.
+            let superseded = published[key] != photo
+            if superseded { request(key, automated: automated) }
             guard let png, let image = NSImage(data: png) else {
-                // A picture published meanwhile is worth another look.
-                if published[key] == photo { missing.insert(key) }
+                if !superseded { missing.insert(key) }
                 return
             }
             images.setObject(image, forKey: key as NSString)
@@ -198,10 +202,11 @@ actor AvatarResolver {
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
-    /// `key` is an address, or a Chat user id when `published` is the only source.
+    /// `key` is an address, or a Chat user id when `published` is the only source. The cache entry
+    /// is per published picture: one found without it may be a lower source, such as a domain logo.
     func avatar(for key: String, published: URL?, automated: Bool, side: Int = AvatarResolver.side) async -> Data? {
         let automated = automated || Self.looksAutomated(key)
-        let cacheKey = (side == Self.side ? "p-" : "p\(side)-") + Self.hash(key)
+        let cacheKey = (side == Self.side ? "p-" : "p\(side)-") + Self.hash(published.map { key + "|" + $0.absoluteString } ?? key)
         let missStamp: String?
         switch await cached(cacheKey) {
         case .hit(let png, let fresh):
