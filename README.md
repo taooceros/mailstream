@@ -294,15 +294,19 @@ editable quote; a forward carries the original's text under a "Forwarded
 message" header, not its attachments. Replies and forwards carry `In-Reply-To`
 and `References` and stay in the provider's thread.
 
-In the compose window, recipients complete from everyone in loaded mail: people
-you have written to first, then by recency, your own addresses last, no-reply
-senders left out, and anyone already on the message skipped. Typing matches the
-start of a name, any word of it, the address or a part of its local part; a
-comma, Return or Tab after a partial name commits the best match, while an
-address typed out in full is kept as typed. Someone listed twice is sent one
-copy. Tab walks To, Cc, Subject and the body. The body takes typing at once; a
-reply's or forward's quote is appended under it when the original has loaded,
-and Send waits for that. Files dropped or pasted on the body are attached.
+In the compose window, recipients complete from everyone in loaded mail and in
+the accounts' contact lists (the same Google and Outlook lists the contact
+photos below come from, fetched once a day): people you have written to first,
+then the contact lists' people, then by recency, your own addresses last,
+no-reply senders the lists don't name left out, and anyone already on the
+message skipped. A contact list's name for someone wins over a mail header's.
+Typing matches the start of a name, any word of it, the address or a part of
+its local part; a comma, Return or Tab after a partial name commits the best
+match, while an address typed out in full is kept as typed. Someone listed twice
+is sent one copy. Tab walks To, Cc, Subject and the body. The body takes typing
+at once; a reply's or forward's quote is appended under it when the original
+has loaded, and Send waits for that. Files dropped or pasted on the body are
+attached.
 
 The body shows macOS's own grey inline predictions (Tab takes one). Closing an
 edited message asks before discarding it: Return discards, Esc keeps editing.

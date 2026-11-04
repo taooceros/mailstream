@@ -103,6 +103,10 @@ final class AvatarStore {
         return keep(decoded, in: large, as: key)
     }
 
+    /// Everyone the accounts' contact lists name, for completing addresses; none until the
+    /// contact directory has been fetched once.
+    func directoryPeople() async -> [DirectoryPerson] { await resolver.people() }
+
     /// `cache`'s entry for the lowercased `key`; a miss starts looking for the picture.
     private func lookUp<Object: AnyObject>(_ cache: NSCache<NSString, Object>, _ key: String, automated: Bool) -> Object? {
         if let object = cache.object(forKey: key as NSString) { return object }
@@ -187,20 +191,24 @@ actor AvatarResolver {
         case graphContact(account: String, id: String)
     }
 
-    /// Contact address → where its photo is.
+    /// Contact address → where its photo is, plus every listed person for address completion.
     private nonisolated struct Directory: Codable {
         let built: Date
         /// The accounts it asked, whether they answered or refused; any difference from the current
         /// photo accounts (one added, removed, or unreachable last time) rebuilds it at once.
         let accounts: [String]
         let photos: [String: PhotoSource]
+        /// Everyone the lists named, photo or not; nil in a directory saved before it kept them,
+        /// which is rebuilt at once.
+        let people: [DirectoryPerson]?
         /// A digest of `photos`: changes whenever any contact photo does, retiring cached misses.
         let stamp: String
 
-        init(built: Date, accounts: [String], photos: [String: PhotoSource]) {
+        init(built: Date, accounts: [String], photos: [String: PhotoSource], people: [DirectoryPerson]) {
             self.built = built
             self.accounts = accounts
             self.photos = photos
+            self.people = people
             let encoder = JSONEncoder()
             encoder.outputFormatting = .sortedKeys
             stamp = AvatarResolver.hash((try? encoder.encode(photos)) ?? Data())
@@ -350,6 +358,20 @@ actor AvatarResolver {
     /// that is a day old or was built for other accounts answers while a refresh replaces it; only
     /// a lookup with nothing saved at all waits for the providers.
     private func contacts() async -> Directory {
+        if let directory = await current() { return directory }
+        return await (refresh ?? startRefresh()).value
+    }
+
+    /// Everyone the contact lists name, for address completion, without waiting on the providers:
+    /// with no directory in hand or on disk yet, a refresh starts and this lists no one.
+    func people() async -> [DirectoryPerson] {
+        if let directory = await current() { return directory.people ?? [] }
+        if refresh == nil { startRefresh() }
+        return []
+    }
+
+    /// The directory in hand or saved, starting a refresh when it is due.
+    private func current() async -> Directory? {
         if directory == nil {
             let file = directoryFile
             let task = saved ?? Task { await Self.saved(at: file) }
@@ -357,15 +379,13 @@ actor AvatarResolver {
             let loaded = await task.value
             if directory == nil { directory = loaded }
         }
-        if let directory {
-            if refresh == nil, needsRefresh(directory) { startRefresh() }
-            return directory
-        }
-        return await (refresh ?? startRefresh()).value
+        guard let directory else { return nil }
+        if refresh == nil, needsRefresh(directory) { startRefresh() }
+        return directory
     }
 
     private func needsRefresh(_ directory: Directory) -> Bool {
-        guard Set(directory.accounts) != Set(accounts.map(\.name))
+        guard directory.people == nil || Set(directory.accounts) != Set(accounts.map(\.name))
                 || Date().timeIntervalSince(directory.built) >= Self.directoryAge else { return false }
         // Not on every lookup while the providers cannot be reached.
         return lastIncomplete.map { Date().timeIntervalSince($0) >= Self.directoryRetry } ?? true
@@ -400,21 +420,25 @@ actor AvatarResolver {
     private func fetchDirectory() async -> Directory {
         let accounts = accounts
         var photos: [String: PhotoSource] = [:]
+        var people: [DirectoryPerson] = []
         var asked: [String] = []
         for account in accounts {
-            let found: [String: PhotoSource]?
+            let found: (photos: [String: PhotoSource], people: [DirectoryPerson])?
             do {
                 found = switch account.provider {
-                case .google: try await googlePhotos(api: account.api, directory: account.directory)
-                case .microsoft: try await graphPhotos(api: account.api)
+                case .google: try await googleContacts(api: account.api, directory: account.directory)
+                case .microsoft: try await graphContacts(api: account.api)
                 }
             } catch {
                 continue
             }
             asked.append(account.name)
-            if let found { photos.merge(found) { current, _ in current } }
+            if let found {
+                photos.merge(found.photos) { current, _ in current }
+                people += found.people
+            }
         }
-        return Directory(built: Date(), accounts: asked, photos: photos)
+        return Directory(built: Date(), accounts: asked, photos: photos, people: people)
     }
 
     @concurrent private nonisolated static func saved(at url: URL) async -> Directory? {
@@ -436,19 +460,21 @@ actor AvatarResolver {
     }
 
     /// Saved contacts, "other contacts" (people the user has written with) and, on Workspace
-    /// accounts, the organization's directory. Nil when every one of them is refused; thrown when
-    /// the account could not be asked.
-    private func googlePhotos(api: API, directory: Bool) async throws -> [String: PhotoSource]? {
-        let readMask = URLQueryItem(name: "readMask", value: "emailAddresses,photos")
+    /// accounts, the organization's directory: their photos and everyone named. Nil when every
+    /// one of them is refused; thrown when the account could not be asked.
+    private func googleContacts(api: API, directory: Bool) async throws
+        -> (photos: [String: PhotoSource], people: [DirectoryPerson])? {
+        let fields = "names,emailAddresses,photos"
+        let readMask = URLQueryItem(name: "readMask", value: fields)
         var lists = [
-            ("people/me/connections", [URLQueryItem(name: "personFields", value: "emailAddresses,photos")]),
+            ("people/me/connections", [URLQueryItem(name: "personFields", value: fields)]),
             ("otherContacts", [readMask]),
         ]
         if directory {
             lists.append(("people:listDirectoryPeople",
                           [readMask, URLQueryItem(name: "sources", value: "DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE")]))
         }
-        var found: [(String, PhotoSource)] = []
+        var found: [PeoplePage.Person] = []
         var answered = false
         for (path, query) in lists {
             let first = API.url(Endpoints.people, path)!
@@ -457,22 +483,27 @@ actor AvatarResolver {
                 from: first, limit: 30,
                 fetch: { url in try await Self.unlessRefused { try await api.get(PeoplePage.self, url, priority: .background) } },
                 next: { page in page.nextPageToken.map { first.appending(queryItems: [URLQueryItem(name: "pageToken", value: $0)]) } },
-                items: Self.photos)
+                items: \.people)
             guard let listed else { continue }
             answered = true
             found += listed
         }
+        guard answered else { return nil }
         // The first list naming an address wins.
-        return answered ? Dictionary(found) { first, _ in first } : nil
+        let photos = Dictionary(found.flatMap(Self.photos)) { first, _ in first }
+        let people = found.compactMap { person -> DirectoryPerson? in
+            let emails = (person.emailAddresses ?? []).compactMap { $0.value?.lowercased() }
+            guard !emails.isEmpty else { return nil }
+            return DirectoryPerson(name: person.names?.lazy.compactMap(\.displayName).first { !$0.isEmpty }, emails: emails)
+        }
+        return (photos, people)
     }
 
-    /// Each person's addresses with their photo, when they have one of their own.
-    private nonisolated static func photos(_ page: PeoplePage) -> [(String, PhotoSource)] {
-        page.people.flatMap { person -> [(String, PhotoSource)] in
-            guard let link = person.photos?.first(where: { $0.default != true })?.url.flatMap(URL.init(string:))
-            else { return [] }
-            return (person.emailAddresses ?? []).compactMap { $0.value?.lowercased() }.map { ($0, .url(link)) }
-        }
+    /// A person's addresses with their photo, when they have one of their own.
+    private nonisolated static func photos(_ person: PeoplePage.Person) -> [(String, PhotoSource)] {
+        guard let link = person.photos?.first(where: { $0.default != true })?.url.flatMap(URL.init(string:))
+        else { return [] }
+        return (person.emailAddresses ?? []).compactMap { $0.value?.lowercased() }.map { ($0, .url(link)) }
     }
 
     /// One page of saved contacts, other contacts or directory people.
@@ -483,8 +514,10 @@ actor AvatarResolver {
                 let `default`: Bool?
             }
             struct Email: Decodable { let value: String? }
+            struct Name: Decodable { let displayName: String? }
             let photos: [Photo]?
             let emailAddresses: [Email]?
+            let names: [Name]?
         }
 
         let people: [Person]
@@ -502,28 +535,39 @@ actor AvatarResolver {
         }
     }
 
-    /// Outlook contacts. Nil when the request is refused; thrown when the account could not be asked.
-    private func graphPhotos(api: API) async throws -> [String: PhotoSource]? {
+    /// Outlook contacts: their photos and everyone named. Nil when the request is refused; thrown
+    /// when the account could not be asked.
+    private func graphContacts(api: API) async throws -> (photos: [String: PhotoSource], people: [DirectoryPerson])? {
         let first = API.url(Endpoints.graph, "me/contacts")!
-            .appending(queryItems: [URLQueryItem(name: "$select", value: "emailAddresses"), URLQueryItem(name: "$top", value: "999")])
-        let account = api.account
+            .appending(queryItems: [URLQueryItem(name: "$select", value: "displayName,emailAddresses"),
+                                    URLQueryItem(name: "$top", value: "999")])
         let found = try await API.pages(
             from: first, limit: 30,
             fetch: { url in try await Self.unlessRefused { try await api.get(GraphContacts.self, url, priority: .background) } },
             next: \.nextLink,
-            items: { page in
-                page.value.flatMap { contact in
-                    (contact.emailAddresses ?? []).compactMap { $0.address?.lowercased() }
-                        .map { ($0, PhotoSource.graphContact(account: account, id: contact.id)) }
-                }
-            })
-        return found.map { Dictionary($0) { first, _ in first } }
+            items: \.value)
+        guard let found else { return nil }
+        let account = api.account
+        var photos: [String: PhotoSource] = [:]
+        var people: [DirectoryPerson] = []
+        for contact in found {
+            let emails = (contact.emailAddresses ?? []).compactMap { $0.address?.lowercased() }
+            guard !emails.isEmpty else { continue }
+            for email in emails where photos[email] == nil { photos[email] = .graphContact(account: account, id: contact.id) }
+            let name = contact.displayName?.nilIfEmpty ?? contact.emailAddresses?.lazy.compactMap { $0.name?.nilIfEmpty }.first
+            people.append(DirectoryPerson(name: name, emails: emails))
+        }
+        return (photos, people)
     }
 
     private nonisolated struct GraphContacts: Decodable {
         struct Contact: Decodable {
-            struct Email: Decodable { let address: String? }
+            struct Email: Decodable {
+                let name: String?
+                let address: String?
+            }
             let id: String
+            let displayName: String?
             let emailAddresses: [Email]?
         }
 
@@ -872,4 +916,12 @@ nonisolated struct PhotoAccount: Sendable {
     let directory: Bool
 
     var name: String { api.account }
+}
+
+/// Someone the contact directory lists (a saved contact, an other contact, a directory profile),
+/// whom recipient fields complete to.
+nonisolated struct DirectoryPerson: Codable, Sendable {
+    let name: String?
+    /// Lowercased.
+    let emails: [String]
 }

@@ -675,21 +675,25 @@ final class MailStore {
         return out
     }
 
-    /// Everyone in loaded listings, best recipient first: people the user writes to, then the rest
-    /// by how recently they appeared; the user's own addresses last and no-reply senders left out.
+    /// Everyone in loaded listings and in the accounts' contact lists (saved contacts, other
+    /// contacts, the Workspace directory), best recipient first: people the user writes to, then
+    /// the contact lists' people, then the rest by how recently they appeared; the user's own
+    /// addresses last and no-reply senders the lists don't name left out. A contact list's name
+    /// wins over a header's.
     func contacts() async -> [Contact] {
         let envelopes = listings.map { ($0.key.account, $0.value.envelopes) }
-        return await Self.rankContacts(envelopes, own: ownAddresses)
+        let people = await avatars.directoryPeople()
+        return await Self.rankContacts(envelopes, people: people, own: ownAddresses)
     }
 
     @concurrent private nonisolated static func rankContacts(_ listings: [(account: String, envelopes: [Envelope])],
-                                                             own: Set<String>) async -> [Contact] {
+                                                             people: [DirectoryPerson], own: Set<String>) async -> [Contact] {
         var seenMessages = Set<AccountScopedKey>()
-        var byEmail: [String: (address: Address, sent: Int, latest: Date)] = [:]
+        var byEmail: [String: (address: Address, sent: Int, latest: Date, listed: Bool)] = [:]
         func note(_ address: Address, date: Date?, sent: Bool) {
             let key = address.normalizedEmail
             guard key.contains("@") else { return }
-            var entry = byEmail[key] ?? (Address(name: nil, email: address.email), 0, .distantPast)
+            var entry = byEmail[key] ?? (Address(name: nil, email: address.email), 0, .distantPast, false)
             let date = date ?? .distantPast
             // The newest name a header gave them.
             if let name = address.name, !name.isEmpty, name.caseInsensitiveCompare(address.email) != .orderedSame,
@@ -708,15 +712,29 @@ final class MailStore {
                 for address in envelope.to { note(address, date: envelope.date, sent: fromMe) }
             }
         }
+        for person in people {
+            let name = person.name?.trimmingCharacters(in: .whitespaces)
+            for email in person.emails {
+                let address = Address(name: nil, email: email)
+                let key = address.normalizedEmail
+                guard key.contains("@") else { continue }
+                var entry = byEmail[key] ?? (address, 0, .distantPast, false)
+                entry.listed = true
+                if let name, !name.isEmpty, name.caseInsensitiveCompare(email) != .orderedSame { entry.address.name = name }
+                byEmail[key] = entry
+            }
+        }
         return byEmail.values
-            .filter { $0.sent > 0 || !Contact.isNoReply($0.address.email) }
-            .map { Contact(address: $0.address, sent: $0.sent, latest: $0.latest, isOwn: own.contains($0.address.normalizedEmail)) }
+            .filter { $0.sent > 0 || $0.listed || !Contact.isNoReply($0.address.email) }
             .sorted { a, b in
-                if a.isOwn != b.isOwn { return !a.isOwn }
+                let aOwn = own.contains(a.address.normalizedEmail), bOwn = own.contains(b.address.normalizedEmail)
+                if aOwn != bOwn { return !aOwn }
                 if a.sent != b.sent { return a.sent > b.sent }
+                if a.listed != b.listed { return a.listed }
                 if a.latest != b.latest { return a.latest > b.latest }
                 return a.address.email < b.address.email
             }
+            .map { Contact(address: $0.address, sent: $0.sent, latest: $0.latest, isOwn: own.contains($0.address.normalizedEmail)) }
     }
 
     /// Lowercased addresses the user has written to in loaded listings: recipients of sent mail.
