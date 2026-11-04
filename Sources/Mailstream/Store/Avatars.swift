@@ -98,7 +98,7 @@ final class AvatarStore {
         return "data:image/png;base64," + (png as Data).base64EncodedString()
     }
 
-    /// The same picture at 512 px for an enlarged view, fetched from its source on demand.
+    /// The same picture at 512 px for an enlarged view, cached on disk like the row size.
     func largeImage(for key: String, automated: Bool) async -> NSImage? {
         let key = key.lowercased()
         if let image = large.object(forKey: key as NSString) { return image }
@@ -127,21 +127,36 @@ final class AvatarStore {
     }
 }
 
-/// Finds and caches one normalized 96 px PNG per sender. Results, including misses, live on disk
-/// so a relaunch paints from cache; a miss is retried once the contact directory changes. Other
-/// sizes, for enlarged views, go to the same source uncached.
+/// Finds and caches one normalized PNG per sender and size: 96 px for rows and the reader, 512 px
+/// for enlarged views. A cached picture answers before anything else is read or asked, so a
+/// relaunch paints from disk at once; one older than `hit` still shows while it is looked up again
+/// in the background. A miss (96 px only) holds until the contact directory changes.
 actor AvatarResolver {
-    /// The cached size: rows and the reader draw at most 34 pt, so 96 px covers Retina.
+    /// The row size: rows and the reader draw at most 34 pt, so 96 px covers Retina.
     static let side = 96
+    /// Age after which a cached picture is looked up again, behind the one shown.
     private static let hit: TimeInterval = 14 * 86_400
     private static let miss: TimeInterval = 3 * 86_400
     private static let directoryAge: TimeInterval = 86_400
+    /// Wait after a directory refresh that could not ask every account before trying again.
+    private static let directoryRetry: TimeInterval = 300
 
     private var accounts: [PhotoAccount]
     private let root: URL
     private let session: URLSession
     private let permits = AsyncSemaphore(6)
-    private var directory: Task<Directory, Never>?
+    /// The directory lookups use; an old one, or one built for other accounts, keeps answering
+    /// while `refresh` replaces it.
+    private var directory: Directory?
+    /// Reading the saved directory, shared by the lookups that start before it is in.
+    private var saved: Task<Directory?, Never>?
+    private var refresh: Task<Directory, Never>?
+    /// Bumped when the photo accounts change, so a refresh against the old ones is dropped.
+    private var generation = 0
+    /// When a refresh last failed to ask every account.
+    private var lastIncomplete: Date?
+    /// Pictures past their age being looked up again.
+    private var revalidating = Set<String>()
     /// Domain-wide lookups in flight; finished ones live in the disk cache.
     private var domains: [String: Task<Data?, Never>] = [:]
 
@@ -186,29 +201,62 @@ actor AvatarResolver {
     /// `key` is an address, or a Chat user id when `published` is the only source.
     func avatar(for key: String, published: URL?, automated: Bool, side: Int = AvatarResolver.side) async -> Data? {
         let automated = automated || Self.looksAutomated(key)
+        let cacheKey = (side == Self.side ? "p-" : "p\(side)-") + Self.hash(key)
+        let missStamp: String?
+        switch await cached(cacheKey) {
+        case .hit(let png, let fresh):
+            if !fresh { revalidate(key, published: published, automated: automated, side: side, cacheKey: cacheKey) }
+            return png
+        case .miss(let stamp): missStamp = stamp
+        case .unknown: missStamp = nil
+        }
         let directory = await contacts()
-        guard side == Self.side else {
-            return await find(key, published: published, automated: automated, side: side, in: directory)
-        }
-        let cacheKey = "p-" + Self.hash(key)
-        // A miss made without the published picture, or with another one, does not stand for this lookup.
-        let stamp = directory.stamp + (published.map { "|" + Self.hash($0.absoluteString) } ?? "")
-        switch await cached(cacheKey, stamp: stamp) {
-        case .hit(let png): return png
-        case .miss: return nil
-        case .unknown: break
-        }
+        if missStamp == Self.stamp(directory, published) { return nil }
+        return await lookUp(key, published: published, automated: automated, side: side, cacheKey: cacheKey,
+                            in: directory, replacing: false)
+    }
+
+    /// What a miss is made against: the directory, and the published picture if any, since a miss
+    /// made without it, or with another one, does not stand for a lookup with it.
+    private static func stamp(_ directory: Directory, _ published: URL?) -> String {
+        directory.stamp + (published.map { "|" + hash($0.absoluteString) } ?? "")
+    }
+
+    /// Looks `key` up and caches what it finds at `cacheKey`. A miss is cached only at the row size
+    /// and only when nothing was there: a picture being replaced stays rather than give way to a
+    /// failed fetch.
+    private func lookUp(_ key: String, published: URL?, automated: Bool, side: Int, cacheKey: String,
+                        in directory: Directory, replacing: Bool) async -> Data? {
         let png: Data?
-        do {
-            png = try await permits.withPermit {
-                await find(key, published: published, automated: automated, side: side, in: directory)
+        if side == Self.side {
+            do {
+                png = try await permits.withPermit {
+                    await find(key, published: published, automated: automated, side: side, in: directory)
+                }
+            } catch {
+                // Cancelled while waiting for a permit: nothing was looked up, so no miss is cached.
+                return nil
             }
-        } catch {
-            // Cancelled while waiting for a permit: nothing was looked up, so no miss is cached.
-            return nil
+        } else {
+            // An enlarged view, opened by hand, does not queue behind the rows' lookups.
+            png = await find(key, published: published, automated: automated, side: side, in: directory)
         }
-        await store(png, at: cacheKey, stamp: stamp)
+        if png != nil || (side == Self.side && !replacing) {
+            await store(png, at: cacheKey, stamp: Self.stamp(directory, published))
+        }
         return png
+    }
+
+    /// Looks up again a picture past its age, which keeps showing meanwhile; a new one shows once
+    /// it is next read from disk.
+    private func revalidate(_ key: String, published: URL?, automated: Bool, side: Int, cacheKey: String) {
+        guard revalidating.insert(cacheKey).inserted else { return }
+        Task(name: "Avatar refresh", priority: .background) {
+            let directory = await contacts()
+            _ = await lookUp(key, published: published, automated: automated, side: side, cacheKey: cacheKey,
+                             in: directory, replacing: true)
+            revalidating.remove(cacheKey)
+        }
     }
 
     private func find(_ key: String, published: URL?, automated: Bool, side: Int, in directory: Directory) async -> Data? {
@@ -228,17 +276,19 @@ actor AvatarResolver {
 
     // MARK: - Disk cache
 
-    private nonisolated enum Cached { case hit(Data), miss, unknown }
+    /// A picture, whether younger than `hit`; or a miss younger than `miss` with the stamp it was
+    /// made against.
+    private nonisolated enum Cached { case hit(Data, fresh: Bool), miss(stamp: String), unknown }
 
-    @concurrent private nonisolated func cached(_ key: String, stamp: String?) async -> Cached {
+    @concurrent private nonisolated func cached(_ key: String) async -> Cached {
         let png = root.appendingPathComponent(key + ".png")
-        if let date = Self.modified(png), Date().timeIntervalSince(date) < Self.hit, let data = try? Data(contentsOf: png) {
-            return .hit(data)
+        if let data = try? Data(contentsOf: png) {
+            let age = Self.modified(png).map { Date().timeIntervalSince($0) } ?? .infinity
+            return .hit(data, fresh: age < Self.hit)
         }
         let none = root.appendingPathComponent(key + ".none")
-        if let date = Self.modified(none), Date().timeIntervalSince(date) < Self.miss,
-           stamp == nil || (try? String(contentsOf: none, encoding: .utf8)) == stamp {
-            return .miss
+        if let date = Self.modified(none), Date().timeIntervalSince(date) < Self.miss {
+            return .miss(stamp: (try? String(contentsOf: none, encoding: .utf8)) ?? "")
         }
         return .unknown
     }
@@ -263,31 +313,72 @@ actor AvatarResolver {
 
     // MARK: - Contacts
 
-    /// Takes the current photo accounts; a different set reloads the directory.
+    private var directoryFile: URL { root.appendingPathComponent("directory.json") }
+
+    /// Takes the current photo accounts; the directory in hand keeps answering until one built for
+    /// them replaces it.
     func use(_ fresh: [PhotoAccount]) {
         guard fresh.map(\.name) != accounts.map(\.name) || fresh.map(\.directory) != accounts.map(\.directory) else { return }
         accounts = fresh
-        directory = nil
+        generation += 1
+        refresh?.cancel()
+        refresh = nil
+        lastIncomplete = nil
     }
 
-    /// The contact directory, shared while it loads. One that could not ask every account
-    /// (offline, not signed in yet) is not kept: the next lookup tries again.
+    /// The contact directory: the one in hand, else the one saved on disk, whatever its age. One
+    /// that is a day old or was built for other accounts answers while a refresh replaces it; only
+    /// a lookup with nothing saved at all waits for the providers.
     private func contacts() async -> Directory {
-        if let directory { return await directory.value }
-        let task = Task { await loadDirectory() }
-        directory = task
-        let loaded = await task.value
-        if Set(loaded.accounts) != Set(accounts.map(\.name)), directory == task { directory = nil }
-        return loaded
+        if directory == nil {
+            let file = directoryFile
+            let task = saved ?? Task { await Self.saved(at: file) }
+            saved = task
+            let loaded = await task.value
+            if directory == nil { directory = loaded }
+        }
+        if let directory {
+            if refresh == nil, needsRefresh(directory) { startRefresh() }
+            return directory
+        }
+        return await (refresh ?? startRefresh()).value
     }
 
-    private func loadDirectory() async -> Directory {
-        let url = root.appendingPathComponent("directory.json")
-        let accounts = accounts
-        if let saved = await Self.saved(at: url), Set(accounts.map(\.name)) == Set(saved.accounts),
-           Date().timeIntervalSince(saved.built) < Self.directoryAge {
-            return saved
+    private func needsRefresh(_ directory: Directory) -> Bool {
+        guard Set(directory.accounts) != Set(accounts.map(\.name))
+                || Date().timeIntervalSince(directory.built) >= Self.directoryAge else { return false }
+        // Not on every lookup while the providers cannot be reached.
+        return lastIncomplete.map { Date().timeIntervalSince($0) >= Self.directoryRetry } ?? true
+    }
+
+    @discardableResult
+    private func startRefresh() -> Task<Directory, Never> {
+        let mine = generation
+        let task = Task(name: "Contact photos", priority: .background) { await refreshDirectory(generation: mine) }
+        refresh = task
+        return task
+    }
+
+    /// Asks every photo account; a directory that reached them all replaces the one in hand and is
+    /// saved, one that did not is used only when there is nothing else.
+    private func refreshDirectory(generation mine: Int) async -> Directory {
+        let fresh = await fetchDirectory()
+        // The accounts changed meanwhile: `use` dropped this refresh.
+        guard mine == generation else { return fresh }
+        refresh = nil
+        if Set(fresh.accounts) == Set(accounts.map(\.name)) {
+            lastIncomplete = nil
+            directory = fresh
+            await Self.save(fresh, to: directoryFile)
+        } else {
+            lastIncomplete = Date()
+            if directory == nil { directory = fresh }
         }
+        return fresh
+    }
+
+    private func fetchDirectory() async -> Directory {
+        let accounts = accounts
         var photos: [String: PhotoSource] = [:]
         var asked: [String] = []
         for account in accounts {
@@ -303,9 +394,7 @@ actor AvatarResolver {
             asked.append(account.name)
             if let found { photos.merge(found) { current, _ in current } }
         }
-        let fresh = Directory(built: Date(), accounts: asked, photos: photos)
-        if asked.count == accounts.count { await Self.save(fresh, to: url) }
-        return fresh
+        return Directory(built: Date(), accounts: asked, photos: photos)
     }
 
     @concurrent private nonisolated static func saved(at url: URL) async -> Directory? {
@@ -474,19 +563,25 @@ actor AvatarResolver {
     }
 
     /// One lookup per domain and kind, in memory while it runs and on disk; other sizes are fetched
-    /// each time.
+    /// each time. A logo past its age is fetched again, and kept if that finds nothing.
     private func sharedPerDomain(_ kind: String, _ domain: String, side: Int,
                                  _ body: @escaping @Sendable () async -> Data?) async -> Data? {
         guard side == Self.side else { return await body() }
         let key = kind + Self.hash(domain)
         if let task = domains[key] { return await task.value }
         let task = Task { () async -> Data? in
-            switch await cached(key, stamp: nil) {
-            case .hit(let png): return png
+            var old: Data?
+            switch await cached(key) {
+            case .hit(let png, let fresh):
+                if fresh { return png }
+                old = png
             case .miss: return nil
             case .unknown: break
             }
-            let png = await body()
+            guard let png = await body() else {
+                if old == nil { await store(nil, at: key, stamp: nil) }
+                return old
+            }
             await store(png, at: key, stamp: nil)
             return png
         }

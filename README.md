@@ -324,8 +324,8 @@ one conversation's tag. Without tags, the list is plain and dated.
 
 Each list row and reader message shows the sender's picture when one is found,
 and their first letter otherwise. Click a picture to enlarge it: a popover
-shows it at 512 px, fetched again from the same source, with the name and
-address. Sources, best first:
+shows it at 512 px, from the same source, with the name and address. Sources,
+best first:
 
 1. **Contact photos** from the signed-in accounts: Google (People API: saved
    contacts, "other contacts" and, on Workspace, the domain directory) and
@@ -338,10 +338,14 @@ address. Sources, best first:
 5. **Site icon** of the domain, for automated mail only (tagged non-people, or a
    `noreply`-style address). Icons smaller than 32 px are skipped.
 
-Free-mail domains (gmail.com, outlook.com, …) never get a domain logo. Results,
-including misses, are cached as 96 px PNGs in
-`~/Library/Caches/dev.mailstream.Mailstream/avatars` (hits 14 days, misses 3 days).
-A change in the contact directory, rebuilt daily, retires cached misses.
+Free-mail domains (gmail.com, outlook.com, …) never get a domain logo. Results
+are cached as PNGs in `~/Library/Caches/dev.mailstream.Mailstream/avatars`: 96 px
+for rows and the reader, including misses (3 days), and 512 px for enlarged
+pictures. A cached picture is read from disk before anything else, so launch
+paints it without waiting on the network. After 14 days it is looked up again in
+the background, and keeps showing if that lookup finds nothing. The contact
+directory is saved too; once a day old it keeps answering while a fresh one
+is fetched, and a change in it retires cached misses.
 
 ## Google Chat
 
