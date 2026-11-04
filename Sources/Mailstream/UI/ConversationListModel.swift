@@ -109,6 +109,8 @@ final class ListRowState {
     fileprivate(set) var highlighted = false
     /// What `content` was made from; a refresh that finds the same keeps the line as it is.
     @ObservationIgnored fileprivate var inputs: ListRowInputs?
+    /// The model's `contentGeneration` at this line's last refresh; behind it, the line is stale.
+    @ObservationIgnored fileprivate var generation = -1
 
     fileprivate func setHovered(_ hovered: Bool) { if self.hovered != hovered { self.hovered = hovered } }
     fileprivate func setHighlighted(_ highlighted: Bool) {
@@ -144,11 +146,18 @@ private struct ListRowInputs: Equatable {
     }
 }
 
-/// A request for the view to bring a line into sight, pinned at `anchor`.
+/// A request for the view to scroll so the scroll view's top edge (below the toolbar) shows
+/// content at `top`.
 struct ConversationListReveal: Equatable {
-    let id: String
-    let anchor: UnitPoint
+    let top: CGFloat
     let serial: Int
+}
+
+/// A line the view lays out, at its place in the stack.
+struct ConversationListPlacedItem: Identifiable {
+    let item: ConversationListItem
+    let top: CGFloat
+    let id: String
 }
 
 /// The open bundle's list as laid over the inbox: it stays shown while it slides or folds away
@@ -194,8 +203,19 @@ final class ConversationListModel {
     private(set) var items: [ConversationListItem] = []
     /// Top of each item in the stack, for mapping the pointer to a line.
     @ObservationIgnored private var tops: [CGFloat] = []
+    /// The lines the view lays out: those in view and `placedMargin` either side. Only these have
+    /// views, so scrolling and list changes cost what is near the viewport, not the whole list.
+    private(set) var placed: [ConversationListPlacedItem] = []
+    @ObservationIgnored private var placedRange: Range<Int> = 0..<0
+    /// Height of all lines together.
+    private(set) var stackHeight: CGFloat = 0
+    private static let placedMargin = 8
     /// Each item's line state by item id, made and refreshed with the items.
     @ObservationIgnored private var rowStates: [String: ListRowState] = [:]
+    /// Bumped whenever what lines show may have changed; a line refreshed under an older one is stale.
+    @ObservationIgnored private var contentGeneration = 0
+    /// Lines either side of the viewport kept current as content arrives.
+    private static let liveMargin = 30
     private(set) var highlightedID: String? {
         didSet {
             guard highlightedID != oldValue else { return }
@@ -430,36 +450,64 @@ final class ConversationListModel {
             defer { top += item.height }
             return top
         }
+        if stackHeight != top { stackHeight = top }
         requestedRange = nil
         var states: [String: ListRowState] = [:]
         states.reserveCapacity(newItems.count)
-        for item in newItems {
+        // Lines change with the items: those near the viewport refresh now, the rest when the
+        // view asks for them, so a page or a tag landing costs what is on screen.
+        contentGeneration += 1
+        let live = liveRange
+        for (index, item) in newItems.enumerated() {
             let state = rowStates[item.id] ?? ListRowState()
-            refresh(state, for: item)
+            if live.contains(index) { refresh(state, for: item) }
             state.setHovered(item.id == hoveredID)
             state.setHighlighted(item.selectionID != nil && item.selectionID == highlightedID)
             states[item.id] = state
         }
         rowStates = states
+        place(force: true)
     }
 
-    /// The state `item`'s line draws from.
+    /// Lays out the lines in view and `placedMargin` either side, when that stretch moved or
+    /// (`force`) the items changed.
+    private func place(force: Bool) {
+        let visible = visibleRange.isEmpty ? 0..<min(items.count, 30) : visibleRange
+        let range = max(0, visible.lowerBound - Self.placedMargin)..<min(items.count, visible.upperBound + Self.placedMargin)
+        guard force || range != placedRange else { return }
+        placedRange = range
+        placed = range.map { ConversationListPlacedItem(item: items[$0], top: tops[$0], id: items[$0].id) }
+    }
+
+    /// The state `item`'s line draws from, brought up to date if it fell behind while out of view.
     func rowState(for item: ConversationListItem) -> ListRowState {
-        if let state = rowStates[item.id] { return state }
-        // Not reached: `setItems` makes every item's state with the items.
-        let state = ListRowState()
-        rowStates[item.id] = state
+        let state = rowStates[item.id] ?? {
+            // Not reached: `setItems` makes every item's state with the items.
+            let state = ListRowState()
+            rowStates[item.id] = state
+            return state
+        }()
+        if state.generation != contentGeneration { refresh(state, for: item) }
         return state
     }
 
-    /// Previews, pictures or account names changed: lines whose inputs moved make new content.
+    /// Previews, pictures or account names changed: lines near the viewport whose inputs moved
+    /// make new content; the others are stale until they come into view.
     private func refreshRowStates() {
-        for item in items {
+        contentGeneration += 1
+        for item in items[liveRange] {
             if let state = rowStates[item.id] { refresh(state, for: item) }
         }
     }
 
+    /// Lines kept current as their content changes: those in view and `liveMargin` either side.
+    private var liveRange: Range<Int> {
+        let visible = visibleRange.isEmpty ? 0..<min(items.count, 1) : visibleRange
+        return max(0, visible.lowerBound - Self.liveMargin)..<min(items.count, visible.upperBound + Self.liveMargin)
+    }
+
     private func refresh(_ state: ListRowState, for item: ConversationListItem) {
+        state.generation = contentGeneration
         guard let inputs = rowInputs(for: item), inputs != state.inputs else { return }
         state.inputs = inputs
         state.content = inputs.content
@@ -543,7 +591,7 @@ final class ConversationListModel {
     }
 
     /// Starts loading previews and pictures for the lines in view and the next few, once per
-    /// stretch of lines.
+    /// stretch of lines, and brings those that went stale out of view up to date.
     private func requestVisibleContent() {
         let range = visibleRange
         guard !range.isEmpty, range != requestedRange else { return }
@@ -551,7 +599,9 @@ final class ConversationListModel {
         let lines = items[range.lowerBound..<min(items.count, range.upperBound + 10)]
         store.contents.prefetchSnippets(for: lines.compactMap(\.conversation))
         for item in lines {
-            guard let state = rowStates[item.id], let inputs = state.inputs, inputs.photo == nil else { continue }
+            guard let state = rowStates[item.id] else { continue }
+            if state.generation != contentGeneration { refresh(state, for: item) }
+            guard let inputs = state.inputs, inputs.photo == nil else { continue }
             let found: NSImage? = switch inputs.source {
             case .mail(let row, _, let tag, _):
                 store.avatars.image(for: row.avatarKey, automated: tag.map { $0.category != .people } ?? false)
@@ -596,6 +646,7 @@ final class ConversationListModel {
         let old = geometry
         geometry = new
         refreshHover()
+        place(force: false)
         requestVisibleContent()
         if new.top != old.top {
             // Scrolled: page in before the bottom comes into view.
@@ -794,15 +845,19 @@ final class ConversationListModel {
         preload(index)
     }
 
-    /// Scrolls `index` into view the least distance, unless it is already in view.
+    /// Scrolls `index` into view the least distance, unless it is already in view; the line lands
+    /// one inset in from the edge it came in at.
     private func revealItem(at index: Int) {
-        let id = items[index].id
-        let top = geometry.top - ConversationListView.inset
+        let inset = ConversationListView.inset
+        let top = geometry.top - inset
         let line = tops[index]..<tops[index] + items[index].height
         if geometry.containerHeight > 0, line.lowerBound >= top, line.upperBound <= top + geometry.containerHeight { return }
-        let anchor: UnitPoint = geometry.containerHeight == 0 || line.lowerBound < top ? .top : .bottom
+        let target = geometry.containerHeight == 0 || line.lowerBound < top
+            ? line.lowerBound
+            : line.upperBound + 2 * inset - geometry.containerHeight
+        let limit = max(0, geometry.contentHeight - geometry.containerHeight)
         revealSerial += 1
-        reveal = ConversationListReveal(id: id, anchor: anchor, serial: revealSerial)
+        reveal = ConversationListReveal(top: min(max(target, 0), limit), serial: revealSerial)
     }
 
     /// A click on a line: highlights it as the user's, then opens it.

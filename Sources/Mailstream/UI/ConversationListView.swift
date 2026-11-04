@@ -1,8 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// The conversation list: a lazy stack in a scroll view, the floating status capsule, the empty
-/// label, and the open bundle's list laid over it.
+/// The conversation list: the lines near the viewport placed in a scroll view, the floating
+/// status capsule, the empty label, and the open bundle's list laid over it.
 struct ConversationListView: View {
     /// The margin the AppKit table's inset style put around its rows.
     static let inset: CGFloat = 10
@@ -10,8 +10,7 @@ struct ConversationListView: View {
     let model: ConversationListModel
     @FocusState private var focused: Bool
     @Environment(\.appearsActive) private var appearsActive
-    @State private var position = ScrollPosition(idType: String.self)
-    @State private var anchor: UnitPoint = .top
+    @State private var position = ScrollPosition()
     /// A new context's content drifts up into place from here.
     @State private var drift: CGFloat = 0
     @State private var fade: Double = 1
@@ -46,18 +45,12 @@ struct ConversationListView: View {
 
     private var list: some View {
         ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(model.items) { item in
-                    row(item)
-                        .transition(.opacity)
-                }
-            }
-            .scrollTargetLayout()
-            .padding(Self.inset)
-            .offset(y: drift)
-            .opacity(fade)
+            ConversationListStack(model: model) { row($0) }
+                .padding(Self.inset)
+                .offset(y: drift)
+                .opacity(fade)
         }
-        .scrollPosition($position, anchor: anchor)
+        .scrollPosition($position)
         .onScrollGeometryChange(for: ConversationListGeometry.self) { geometry in
             // The scroll view's frame starts below the toolbar, and hover measures from there; its
             // visible rect also reaches up under the toolbar by the top inset.
@@ -107,8 +100,7 @@ struct ConversationListView: View {
         .onChange(of: appearsActive, initial: true) { model.windowActive = appearsActive }
         .onChange(of: model.reveal) { _, reveal in
             guard let reveal else { return }
-            anchor = reveal.anchor
-            position.scrollTo(id: reveal.id)
+            position.scrollTo(y: reveal.top)
         }
         .onChange(of: model.contextGeneration) { driftIn() }
     }
@@ -174,6 +166,45 @@ struct ConversationListView: View {
         .padding(.horizontal, 20)
         .padding(.bottom, 14)
         .animation(.house(.brief), value: model.statusLine != nil)
+    }
+}
+
+/// The lines near the viewport, each at its place in a stack as tall as all of them. Lines
+/// further out have no views: scrolling, a page landing or a tag changing costs what is on
+/// screen, however long the list.
+private struct ConversationListStack<Row: View>: View {
+    let model: ConversationListModel
+    @ViewBuilder let row: (ConversationListItem) -> Row
+
+    var body: some View {
+        ConversationListStackLayout(height: model.stackHeight) {
+            ForEach(model.placed) { placed in
+                row(placed.item)
+                    .layoutValue(key: ConversationListStackLayout.Top.self, value: placed.top)
+                    .transition(.opacity)
+            }
+        }
+    }
+}
+
+/// Places each line at its known top and height without measuring it: the list knows every
+/// line's size, so a line coming or going costs only its own placement.
+private struct ConversationListStackLayout: Layout {
+    struct Top: LayoutValueKey {
+        static let defaultValue: CGFloat = 0
+    }
+
+    let height: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        CGSize(width: proposal.width ?? 0, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let width = ProposedViewSize(width: bounds.width, height: nil)
+        for subview in subviews {
+            subview.place(at: CGPoint(x: bounds.minX, y: bounds.minY + subview[Top.self]), proposal: width)
+        }
     }
 }
 
