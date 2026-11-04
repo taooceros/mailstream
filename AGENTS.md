@@ -16,6 +16,8 @@ This repo is a colocated jj repo (`.jj` + `.git`), pushed to `github.com/taoocer
 - Check with `swift build` and launch with `scripts/run.sh`: both use the incremental debug build
   (seconds per edit). A release build (`scripts/bundle.sh`, `CONFIG=release`) re-optimizes the
   whole module single-threaded, ~30 s per edit; build it only to check performance or ship.
+- Deploying to `/Applications/Mailstream.app` is always a release build: `CONFIG=release
+  ./scripts/bundle.sh`, then replace the bundle (the running copy keeps working until relaunched).
 - Test only what you changed: build, then exercise the parts your change touches (the view, flow or command you edited). Do not re-run the whole app checklist or every CLI case after each change; we iterate in small steps.
 
 ## Swift: concurrency and state
