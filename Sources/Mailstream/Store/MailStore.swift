@@ -488,7 +488,8 @@ final class MailStore {
         await loadCachedListings(primaryKeys + contextKeys, inRebuild: true)
         let context = ListContext(selection: selection, search: searchQuery, role: selectionRole)
         let input = ListInput(primary: sources(listedKeys, primary: true), context: sources(contextKeys, primary: false),
-                              own: ownAddresses, recipients: context.role.showsRecipients)
+                              own: ownAddresses, recipients: context.role.showsRecipients,
+                              mergeRepeats: context.role == .inbox && searchQuery == nil)
         let output = await input.build()
         // Inputs changed meanwhile: the next pass shows them.
         guard !rebuild.isPending else { return }
@@ -1062,6 +1063,8 @@ nonisolated struct ListInput: Sendable {
     let context: [Source]
     let own: Set<String>
     let recipients: Bool
+    /// Folds one sender's repeats on a subject into one conversation (`Threader.mergeRepeats`).
+    let mergeRepeats: Bool
 
     struct Output: Sendable {
         let conversations: [Conversation]
@@ -1081,7 +1084,8 @@ nonisolated struct ListInput: Sendable {
             }
             return out
         }
-        let conversations = Threader.conversations(primary: messages(primary), context: messages(context))
+        let threaded = Threader.conversations(primary: messages(primary), context: messages(context))
+        let conversations = mergeRepeats ? Threader.mergeRepeats(threaded) : threaded
         return Output(conversations: conversations,
                       rows: ConversationRow.rows(for: conversations, own: own, recipients: recipients))
     }

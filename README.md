@@ -167,7 +167,11 @@ ids so a message keeps its id when it moves.
 Threading groups messages from the Inbox and Sent of each account by the
 provider's thread (Gmail thread, Outlook conversation) and by `Message-ID` and
 `In-Reply-To`. When those are missing, it falls back to normalized subjects
-within a 45-day window.
+within a 45-day window. In the Inbox, conversations that are one sender
+repeating a subject (security alerts, listing digests, SMS forwards that the
+provider threads apart) fold into one row at the latest message; opening it
+shows all of them, and archive or trash acts on the whole row. Search results
+and other mailboxes keep them apart.
 
 The reader loads remote content only from known senders: your own addresses,
 people you have written to, and senders you chose "Always Load" for. Junk and

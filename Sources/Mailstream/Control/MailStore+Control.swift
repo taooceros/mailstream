@@ -34,7 +34,8 @@ extension MailStore {
                 }
             }
         }
-        return await threads(fetched, failures: failures)
+        let inboxes = !keys.isEmpty && keys.allSatisfy { mailbox($0)?.role == .inbox }
+        return await threads(fetched, failures: failures, mergeRepeats: inboxes)
     }
 
     /// The providers' search over every mailbox of `accounts` but trash and junk, as in the window.
@@ -65,10 +66,10 @@ extension MailStore {
                 }
             }
         }
-        return await threads(fetched, failures: failures)
+        return await threads(fetched, failures: failures, mergeRepeats: false)
     }
 
-    private func threads(_ fetched: [MailboxKey: [Envelope]], failures: [String]) async -> AgentListing {
+    private func threads(_ fetched: [MailboxKey: [Envelope]], failures: [String], mergeRepeats: Bool) async -> AgentListing {
         let primary = fetched.keys.sorted { ($0.account, $0.mailbox) < ($1.account, $1.mailbox) }
         let roles = Set(primary.map { mailbox($0)?.role ?? .other })
         var context: [MailboxKey] = []
@@ -84,7 +85,7 @@ extension MailStore {
         }
         let input = ListInput(primary: primary.map { source($0, fetched[$0] ?? []) },
                               context: context.map { source($0, loadedEnvelopes($0)) },
-                              own: ownAddresses, recipients: false)
+                              own: ownAddresses, recipients: false, mergeRepeats: mergeRepeats)
         let output = await input.build()
         return AgentListing(conversations: output.conversations, primary: Set(primary), failures: failures.sorted())
     }

@@ -98,6 +98,48 @@ nonisolated enum Threader {
         return conversations
     }
 
+    /// Folds conversations that are one sender repeating itself (every message from the same
+    /// address, on the same subject, such as security alerts or listing digests the provider
+    /// threads apart) into one, so the inbox shows that stream once at its latest message.
+    /// Conversations with anyone else in them stay as they are.
+    static func mergeRepeats(_ conversations: [Conversation]) -> [Conversation] {
+        var index: [String: Int] = [:]
+        var groups: [[Conversation]] = []
+        for conversation in conversations {
+            guard let key = repeatKey(conversation) else {
+                groups.append([conversation])
+                continue
+            }
+            if let existing = index[key] {
+                groups[existing].append(conversation)
+            } else {
+                index[key] = groups.count
+                groups.append([conversation])
+            }
+        }
+        // `conversations` is newest first, so each group sits where its latest member did.
+        return groups.map { group in
+            guard group.count > 1 else { return group[0] }
+            let messages = group.flatMap(\.messages).sorted {
+                ($0.envelope.date ?? .distantPast, $0.ref.id) < ($1.envelope.date ?? .distantPast, $1.ref.id)
+            }
+            let first = messages[0]
+            return Conversation(id: first.ref.account + "|" + (first.envelope.messageID ?? first.ref.id),
+                                account: first.ref.account, messages: messages)
+        }
+    }
+
+    /// Account, sender and subject of a conversation whose every message has that one sender.
+    private static func repeatKey(_ conversation: Conversation) -> String? {
+        guard let sender = conversation.messages.first?.envelope.from.first?.email.lowercased() else { return nil }
+        for message in conversation.messages where message.envelope.from.first?.email.lowercased() != sender {
+            return nil
+        }
+        let (subject, _) = threadKey(conversation.subject)
+        guard !subject.isEmpty else { return nil }
+        return conversation.account + "\u{1}" + sender + "\u{1}" + subject
+    }
+
     /// The subject as threading compares it: list tags and title lowercased, whitespace collapsed;
     /// and whether it had a reply/forward prefix.
     private static func threadKey(_ raw: String) -> (String, Bool) {
