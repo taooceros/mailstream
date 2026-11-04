@@ -41,17 +41,14 @@ private final class AvatarPreviewController: NSViewController {
     override func loadView() {
         picture.imageScaling = .scaleProportionallyUpOrDown
         picture.wantsLayer = true
-        picture.layer?.cornerRadius = 14
+        picture.layer?.cornerRadius = Design.Radius.panel.rawValue
         picture.layer?.cornerCurve = .continuous
         picture.layer?.masksToBounds = true
 
-        let name = NSTextField(labelWithString: address.displayName)
-        name.font = .systemFont(ofSize: 15, weight: .semibold)
+        let name = NSTextField.label(address.displayName, font: Design.font(.headline, weight: .semibold))
         name.alignment = .center
         name.lineBreakMode = .byTruncatingTail
-        let email = NSTextField(labelWithString: address.email)
-        email.font = .systemFont(ofSize: 12)
-        email.textColor = .secondaryLabelColor
+        let email = NSTextField.label(address.email, font: Design.font(.footnote), color: .muted)
         email.alignment = .center
         email.lineBreakMode = .byTruncatingMiddle
         email.isSelectable = true
@@ -73,11 +70,7 @@ private final class AvatarPreviewController: NSViewController {
     }
 
     func show(_ image: NSImage) {
-        let fade = CATransition()
-        fade.type = .fade
-        fade.duration = 0.2
-        fade.preferredFrameRateRange = Motion.frameRate
-        picture.layer?.add(fade, forKey: "sharpen")
+        if let layer = picture.layer { Motion.crossfade(layer, duration: .brief, key: "sharpen") }
         picture.image = image
     }
 }

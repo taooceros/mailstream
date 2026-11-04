@@ -64,12 +64,11 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
     private func buildUI() {
         guard let content = window?.contentView else { return }
 
-        let title = NSTextField(labelWithString: "Accounts")
-        title.font = .systemFont(ofSize: 20, weight: .semibold)
+        let title = NSTextField.label("Accounts", font: Design.font(.title, weight: .semibold))
         let subtitle = NSTextField(wrappingLabelWithString:
             "Mailstream signs in to Google and Microsoft in your browser, with an OAuth client you registered. Sign-ins stay in your Keychain.")
-        subtitle.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        subtitle.textColor = .secondaryLabelColor
+        subtitle.font = Design.font(.caption)
+        subtitle.textColor = Design.Color.muted.color
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("account"))
         column.resizingMask = .autoresizingMask
@@ -95,8 +94,6 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
         scroll.borderType = .noBorder
 
         listBox.wantsLayer = true
-        listBox.layer?.cornerRadius = 10
-        listBox.layer?.borderWidth = 1
         listBox.layer?.masksToBounds = true
 
         configureEmptyState()
@@ -114,25 +111,20 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
             button.action = action
             button.widthAnchor.constraint(equalToConstant: 28).isActive = true
         }
-        let barSeparator = NSBox()
-        barSeparator.boxType = .separator
-        let buttonDivider = NSBox()
-        buttonDivider.boxType = .separator
+        let barSeparator = NSBox.separator()
+        let buttonDivider = NSBox.separator()
         let bar = NSStackView(views: [addButton, buttonDivider, removeButton])
         bar.orientation = .horizontal
         bar.spacing = 0
         bar.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
         buttonDivider.heightAnchor.constraint(equalToConstant: 14).isActive = true
 
-        for view in [scroll, emptyState, barSeparator, bar] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            listBox.addSubview(view)
-        }
+        listBox.addConstrained([scroll, emptyState, barSeparator, bar])
 
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
-        statusField.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        statusField.font = Design.font(.caption)
         statusField.lineBreakMode = .byTruncatingTail
         statusField.isSelectable = true
         statusField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -144,10 +136,7 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
         statusRow.orientation = .horizontal
         statusRow.spacing = 6
 
-        for view in [title, subtitle, listBox, statusRow] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            content.addSubview(view)
-        }
+        content.addConstrained([title, subtitle, listBox, statusRow])
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: content.topAnchor, constant: 38),
             title.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
@@ -186,12 +175,10 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
         let icon = NSImageView(image: NSImage(systemSymbolName: "person.crop.circle.badge.plus",
                                               accessibilityDescription: nil) ?? NSImage())
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 34, weight: .light)
-        icon.contentTintColor = .tertiaryLabelColor
-        let heading = NSTextField(labelWithString: "No Accounts")
-        heading.font = .systemFont(ofSize: 15, weight: .semibold)
-        let detail = NSTextField(labelWithString: "Sign in to bring in mail, contacts and Google Chat.")
-        detail.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        detail.textColor = .secondaryLabelColor
+        icon.contentTintColor = Design.Color.faint.color
+        let heading = NSTextField.label("No Accounts", font: Design.font(.headline, weight: .semibold))
+        let detail = NSTextField.label("Sign in to bring in mail, contacts and Google Chat.", font: Design.font(.caption),
+                                       color: .muted)
         let google = NSButton(title: "Sign in with Google…", target: self, action: #selector(addGoogle))
         let microsoft = NSButton(title: "Sign in with Microsoft…", target: self, action: #selector(addMicrosoft))
         google.image = ProviderBadge.image(.google, color: NSColor(hex: AccountStyle.hex(at: 0)), side: 16)
@@ -212,8 +199,7 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
 
     private func updateBoxColors() {
         window?.contentView?.effectiveAppearance.performAsCurrentDrawingAppearance {
-            listBox.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-            listBox.layer?.borderColor = NSColor.separatorColor.cgColor
+            listBox.layer?.styleAsCard(radius: .card)
         }
     }
 
@@ -228,7 +214,7 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
         let text = status?.text ?? ""
         statusField.stringValue = text
         statusField.toolTip = text.isEmpty ? nil : text
-        statusField.textColor = status?.isError == true ? .systemRed : .secondaryLabelColor
+        statusField.textColor = status?.isError == true ? Design.Color.danger.color : Design.Color.muted.color
     }
 
     func windowDidChangeEffectiveAppearance(_ notification: Notification) { updateBoxColors() }
@@ -330,9 +316,8 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
         secretField.widthAnchor.constraint(equalToConstant: 260).isActive = true
         grid.frame.size = grid.fittingSize
 
-        let alert = NSAlert()
-        alert.messageText = provider == .google ? "Sign in with Google" : "Sign in with Microsoft"
-        alert.informativeText = switch provider {
+        let title = provider == .google ? "Sign in with Google" : "Sign in with Microsoft"
+        let detail = switch provider {
         case .google:
             "Enter the client ID and secret of your Google Cloud OAuth client (type Desktop app). "
                 + "Mailstream then opens Google's sign-in in your browser."
@@ -340,12 +325,11 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
             "Enter the application ID of your Microsoft Entra app, and its secret unless it is a public client. "
                 + "Its redirect URI must be \(OAuth.redirect)."
         }
-        alert.accessoryView = grid
-        alert.addButton(withTitle: "Continue in Browser")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = idField.stringValue.isEmpty ? idField : secretField
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn, let self else { return }
+        window.confirm(title, detail: detail, confirm: "Continue in Browser", prepare: { alert in
+            alert.accessoryView = grid
+            alert.window.initialFirstResponder = idField.stringValue.isEmpty ? idField : secretField
+        }) { [weak self] in
+            guard let self else { return }
             let id = idField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let secret = secretField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if id.isEmpty {
@@ -402,15 +386,11 @@ final class AccountsWindowController: NSWindowController, NSWindowDelegate, NSTa
     @objc private func confirmRemove() {
         guard let window, rows.indices.contains(table.selectedRow) else { return }
         let record = rows[table.selectedRow]
-        let alert = NSAlert()
-        alert.messageText = "Remove \(record.label)?"
-        alert.informativeText = "Mailstream signs out of \(record.id) and deletes its saved sign-in. "
-            + "Mail on the server is not affected; you can add the account again later."
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = true
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn, let self else { return }
+        window.confirm("Remove \(record.label)?",
+                       detail: "Mailstream signs out of \(record.id) and deletes its saved sign-in. "
+                           + "Mail on the server is not affected; you can add the account again later.",
+                       confirm: "Remove", destructive: true) { [weak self] in
+            guard let self else { return }
             status = nil
             accounts.remove(record.id)
         }
@@ -428,23 +408,18 @@ private final class AccountCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("AccountCell")
 
     private let badge = NSImageView()
-    private let address = NSTextField(labelWithString: "")
-    private let services = NSTextField(labelWithString: "")
-    private let separator = NSBox()
+    private let address = NSTextField.label(font: Design.font(.caption), color: .muted)
+    private let services = NSTextField.label(font: Design.font(.caption), color: .faint)
+    private let separator = NSBox.separator()
 
     init() {
         super.init(frame: .zero)
         identifier = Self.identifier
-        let label = NSTextField(labelWithString: "")
-        label.font = .systemFont(ofSize: 13, weight: .semibold)
+        let label = NSTextField.label(font: Design.font(.body, weight: .semibold))
         label.lineBreakMode = .byTruncatingTail
         label.focusRingType = .none
         textField = label
-        address.font = .systemFont(ofSize: 11.5)
-        address.textColor = .secondaryLabelColor
         address.lineBreakMode = .byTruncatingMiddle
-        services.font = .systemFont(ofSize: 11)
-        services.textColor = .tertiaryLabelColor
         services.alignment = .right
         services.setContentCompressionResistancePriority(.required, for: .horizontal)
         services.setContentHuggingPriority(.required, for: .horizontal)
@@ -455,13 +430,7 @@ private final class AccountCell: NSTableCellView {
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 1
-        for view in [badge, text, services] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(view)
-        }
-        separator.boxType = .separator
-        separator.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(separator)
+        addConstrained([badge, text, services, separator])
         NSLayoutConstraint.activate([
             separator.leadingAnchor.constraint(equalTo: text.leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: trailingAnchor),

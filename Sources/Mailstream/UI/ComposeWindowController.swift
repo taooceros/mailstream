@@ -99,7 +99,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         fromPopup.target = self
         fromPopup.action = #selector(accountChanged)
         fromPopup.isBordered = false
-        fromPopup.font = .systemFont(ofSize: 13)
+        fromPopup.font = Design.font(.body)
         if case .new = mode {} else { fromPopup.isEnabled = false }
 
         for field in [toField, ccField, bccField] {
@@ -109,14 +109,14 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
             field.isBordered = false
             field.drawsBackground = false
             field.focusRingType = .none
-            field.font = .systemFont(ofSize: 13)
+            field.font = Design.font(.body)
             field.placeholderString = ""
             field.completionDelay = 0.05
         }
         subjectField.isBordered = false
         subjectField.drawsBackground = false
         subjectField.focusRingType = .none
-        subjectField.font = .systemFont(ofSize: 15, weight: .semibold)
+        subjectField.font = Design.font(.headline, weight: .semibold)
         subjectField.placeholderString = "Subject"
         subjectField.delegate = self
 
@@ -140,7 +140,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
 
         bodyView.isRichText = false
         bodyView.allowsUndo = true
-        bodyView.font = .systemFont(ofSize: 14)
+        bodyView.font = Design.font(.reading)
         // Text lines up with the header's labels (the container pads 5 pt).
         bodyView.textContainerInset = NSSize(width: Self.margin - 5, height: 14)
         bodyView.isAutomaticQuoteSubstitutionEnabled = false
@@ -170,10 +170,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         progress.isDisplayedWhenStopped = false
 
         let content = NSView()
-        for view in [header, scroll, attachmentsStack, progress] as [NSView] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            content.addSubview(view)
-        }
+        content.addConstrained([header, scroll, attachmentsStack, progress])
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: content.safeAreaLayoutGuide.topAnchor, constant: 4),
             header.leadingAnchor.constraint(equalTo: content.leadingAnchor),
@@ -196,18 +193,11 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         toolbar.delegate = toolbarDelegate
         toolbar.displayMode = .iconOnly
         let attach = NSToolbarItem(itemIdentifier: .init("attach"))
-        attach.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Attach")
-        attach.label = "Attach"
-        attach.toolTip = "Attach Files (or drop them on the message)"
-        attach.target = self
-        attach.action = #selector(self.attach)
-        sendItem.image = NSImage(systemSymbolName: "paperplane.fill", accessibilityDescription: "Send")
-        sendItem.label = "Send"
-        sendItem.toolTip = "Send (⌘↩)"
+        attach.makeButton(label: "Attach", symbol: "paperclip", toolTip: "Attach Files (or drop them on the message)",
+                          target: self, action: #selector(self.attach))
+        sendItem.makeButton(label: "Send", symbol: "paperplane.fill", toolTip: "Send (⌘↩)", target: self, action: #selector(send))
         sendItem.style = .prominent
         sendItem.autovalidates = false
-        sendItem.target = self
-        sendItem.action = #selector(send)
         toolbarDelegate.items = [attach.itemIdentifier: attach, sendItem.itemIdentifier: sendItem]
         window.toolbar = toolbar
     }
@@ -220,8 +210,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
     /// One header line: a label, the field and an optional trailing control over a hairline.
     private func headerRow(_ title: String?, _ field: NSView, trailing: NSView? = nil, height: CGFloat = 34) -> NSView {
         let row = NSView()
-        let separator = NSBox()
-        separator.boxType = .separator
+        let separator = NSBox.separator()
         var views: [NSView] = [field, separator]
         var constraints = [
             row.heightAnchor.constraint(equalToConstant: height),
@@ -231,9 +220,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
             separator.bottomAnchor.constraint(equalTo: row.bottomAnchor),
         ]
         if let title {
-            let label = NSTextField(labelWithString: title + ":")
-            label.textColor = .secondaryLabelColor
-            label.font = .systemFont(ofSize: 13)
+            let label = NSTextField.label(title + ":", font: Design.font(.body), color: .muted)
             label.alignment = .right
             views.append(label)
             constraints += [
@@ -258,10 +245,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         } else {
             constraints.append(field.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -Self.margin))
         }
-        for view in views {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            row.addSubview(view)
-        }
+        row.addConstrained(views)
         NSLayoutConstraint.activate(constraints)
         return row
     }
@@ -357,21 +341,19 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         let icon = NSImageView(image: NSWorkspace.shared.icon(forFile: url.path))
         icon.widthAnchor.constraint(equalToConstant: 16).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 16).isActive = true
-        let name = NSTextField(labelWithString: url.lastPathComponent)
-        name.font = .systemFont(ofSize: 12)
+        let name = NSTextField.label(url.lastPathComponent, font: Design.font(.footnote))
         name.lineBreakMode = .byTruncatingMiddle
         name.widthAnchor.constraint(lessThanOrEqualToConstant: 180).isActive = true
         var views: [NSView] = [icon, name]
         if let bytes = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-            let size = NSTextField(labelWithString: ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
-            size.font = .systemFont(ofSize: 11)
-            size.textColor = .secondaryLabelColor
+            let size = NSTextField.label(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file),
+                                         font: Design.font(.caption), color: .muted)
             views.append(size)
         }
         let remove = NSButton(image: NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Remove")!,
                               target: self, action: #selector(removeAttachment(_:)))
         remove.isBordered = false
-        remove.contentTintColor = .tertiaryLabelColor
+        remove.contentTintColor = Design.Color.faint.color
         remove.tag = index
         remove.toolTip = "Remove \(url.lastPathComponent)"
         views.append(remove)
@@ -379,14 +361,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         stack.spacing = 6
         stack.edgeInsets = NSEdgeInsets(top: 5, left: 8, bottom: 5, right: 6)
         let chip = ChipBackground()
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        chip.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: chip.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: chip.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: chip.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: chip.trailingAnchor),
-        ])
+        chip.addFilling(stack)
         return chip
     }
 
@@ -454,12 +429,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
     }
 
     private func presentError(message: String, error: (any Error)?) {
-        guard let window else { return }
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = message
-        alert.informativeText = error?.localizedDescription ?? ""
-        alert.beginSheetModal(for: window)
+        window?.showWarning(message, detail: error?.localizedDescription ?? "")
     }
 
     func textDidChange(_ notification: Notification) { edited = true }
@@ -537,13 +507,11 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
     /// Asks before throwing away what was written; Return discards, Escape keeps editing.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard edited, !sending else { return true }
-        let alert = NSAlert()
         let kind = switch mode {
         case .new: "message"
         case .reply: "reply"
         case .forward: "forward"
         }
-        alert.messageText = "Discard this \(kind)?"
         var summary: [String] = []
         let people = [toField, ccField, bccField].flatMap(tokens).compactMap(Address.parse)
         if let first = people.first {
@@ -551,17 +519,17 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
             summary.append("To \(first.displayName)" + (others == 0 ? "" : " and \(others) other\(others == 1 ? "" : "s")"))
         }
         if !attachments.isEmpty { summary.append("\(attachments.count) attachment\(attachments.count == 1 ? "" : "s")") }
-        alert.informativeText = (summary.isEmpty ? "" : summary.joined(separator: " · ") + "\n\n")
+        let detail = (summary.isEmpty ? "" : summary.joined(separator: " · ") + "\n\n")
             + "It isn't kept as a draft, so it can't be brought back."
-        alert.icon = NSImage(systemSymbolName: "trash.circle.fill", accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 56, weight: .regular)
-                .applying(NSImage.SymbolConfiguration(paletteColors: [.white, .systemRed])))
-        // Discard is the default button, so Return takes it: closing already asked for it, and a
-        // button marked destructive never answers Return. The red icon carries the warning.
-        alert.addButton(withTitle: "Discard").keyEquivalent = "\r"
-        alert.addButton(withTitle: "Keep Editing").keyEquivalent = "\u{1b}"
-        alert.beginSheetModal(for: sender) { [weak self] response in
-            guard response == .alertFirstButtonReturn else { return }
+        sender.confirm("Discard this \(kind)?", detail: detail, confirm: "Discard", cancel: "Keep Editing", prepare: { alert in
+            alert.icon = NSImage(systemSymbolName: "trash.circle.fill", accessibilityDescription: nil)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 56, weight: .regular)
+                    .applying(NSImage.SymbolConfiguration(paletteColors: [.white, Design.Color.danger.color])))
+            // Discard is the default button, so Return takes it: closing already asked for it, and a
+            // button marked destructive never answers Return. The red icon carries the warning.
+            alert.buttons[0].keyEquivalent = "\r"
+            alert.buttons[1].keyEquivalent = "\u{1b}"
+        }) { [weak self] in
             self?.edited = false
             sender.close()
         }
@@ -580,8 +548,7 @@ private final class ComposeWindow: NSWindow {
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        let returnKey = event.keyCode == 36 || event.keyCode == 76  // Return, keypad Enter
-        if (modifiers == .command && returnKey)
+        if (modifiers == .command && event.isReturnKey)
             || (modifiers == [.command, .shift] && event.charactersIgnoringModifiers?.lowercased() == "d") {
             onSend?()
             return true
@@ -635,11 +602,7 @@ private final class ChipBackground: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        guard let layer else { return }
-        layer.cornerRadius = 8
-        layer.borderWidth = 1
-        layer.borderColor = NSColor.separatorColor.cgColor
-        layer.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        layer?.styleAsCard(radius: .control)
     }
 }
 

@@ -22,6 +22,8 @@ enum Design {
         /// Quiet fill for chips, skeletons, code and thumbnails.
         case chip
         case accent, danger, success, star, waiting
+        /// Text and symbols on an accent fill (the Send button).
+        case onAccent = "on-accent"
 
         var color: NSColor {
             switch self {
@@ -37,10 +39,18 @@ enum Design {
             case .success: .systemGreen
             case .star: .systemYellow
             case .waiting: .systemOrange
+            case .onAccent: .alternateSelectedControlTextColor
             }
         }
 
         var cgColor: CGColor { color.cgColor }
+
+        /// The color as `appearance` draws it, for layers set outside `updateLayer`.
+        func cgColor(in appearance: NSAppearance) -> CGColor {
+            var resolved = color.cgColor
+            appearance.performAsCurrentDrawingAppearance { resolved = color.cgColor }
+            return resolved
+        }
 
         /// `var(--name)`, for CSS written in Swift.
         var css: String { "var(--\(rawValue))" }
@@ -71,6 +81,11 @@ enum Design {
 
     static func monospacedFont(_ size: TextSize, weight: NSFont.Weight = .regular) -> NSFont {
         .monospacedSystemFont(ofSize: size.rawValue, weight: weight)
+    }
+
+    /// Digits of equal width, for counts and dates that line up in columns.
+    static func monospacedDigitFont(_ size: TextSize, weight: NSFont.Weight = .regular) -> NSFont {
+        .monospacedDigitSystemFont(ofSize: size.rawValue, weight: weight)
     }
 
     /// CSS font stacks; AppKit uses the system fonts they name first.
@@ -190,20 +205,65 @@ enum Design {
     }
 }
 
-private extension CGFloat {
+/// Muted topic colors shared by the list (AppKit) and the reader (CSS). Known topics keep fixed hues.
+enum TagPalette {
+    private static let known: [String: (String, String)] = [
+        "work": ("#3B82F6", "#60A5FA"), "education": ("#A855F7", "#C084FC"), "finance": ("#10B981", "#34D399"),
+        "shopping": ("#F59E0B", "#FBBF24"), "tech": ("#06B6D4", "#22D3EE"), "travel": ("#EC4899", "#F472B6"),
+        "food": ("#F97316", "#FB923C"), "health": ("#14B8A6", "#2DD4BF"), "social": ("#8B5CF6", "#A78BFA"),
+    ]
+    private static let fallback: [(String, String)] = [("#64748B", "#94A3B8"), ("#6366F1", "#818CF8"),
+                                                       ("#84CC16", "#A3E635"), ("#E11D48", "#FB7185")]
+
+    private static func pair(for label: String) -> (String, String) {
+        let key = label.lowercased()
+        return known[key] ?? fallback[stableIndex(of: key, in: fallback.count)]
+    }
+
+    /// Light-appearance hex, for CSS (the reader derives its dark variant).
+    static func hex(for label: String) -> String { pair(for: label).0 }
+
+    static func color(for label: String) -> NSColor {
+        let (light, dark) = pair(for: label)
+        return .dynamic(light: light, dark: dark)
+    }
+}
+
+/// A slot in `0..<count` for `key` that is the same on every launch (FNV-1a; `hashValue` is seeded).
+nonisolated func stableIndex(of key: String, in count: Int) -> Int {
+    var hash: UInt64 = 1469598103934665603
+    for byte in key.utf8 { hash = (hash ^ UInt64(byte)) &* 1099511628211 }
+    return Int(hash % UInt64(count))
+}
+
+nonisolated private extension CGFloat {
     /// `13`, `10.5`: no trailing zeros.
     var css: String { Double(self).css }
 }
 
-private extension Double {
+nonisolated private extension Double {
     var css: String {
         self == rounded() ? String(Int(self)) : String(self)
     }
 }
 
 extension NSColor {
+    /// `#RRGGBB` in sRGB.
+    convenience init(hex: String) {
+        let value = UInt32(hex.dropFirst(), radix: 16) ?? 0
+        self.init(srgbRed: CGFloat((value >> 16) & 0xFF) / 255, green: CGFloat((value >> 8) & 0xFF) / 255,
+                  blue: CGFloat(value & 0xFF) / 255, alpha: 1)
+    }
+
+    /// One color for light appearances and another for dark ones.
+    static func dynamic(light: String, dark: String) -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(hex: dark) : NSColor(hex: light)
+        }
+    }
+
     /// `rgba(r, g, b, a)` in sRGB, as the current drawing appearance resolves the color.
-    var cssRGBA: String {
+    nonisolated var cssRGBA: String {
         guard let rgb = usingColorSpace(.sRGB) else { return "transparent" }
         let channel = { (value: CGFloat) in Int((min(max(value, 0), 1) * 255).rounded()) }
         let alpha = (Double(rgb.alphaComponent) * 1000).rounded() / 1000

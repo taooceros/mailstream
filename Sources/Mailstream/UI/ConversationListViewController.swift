@@ -96,7 +96,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     private let store: MailStore
     private let table = ConversationTableView()
     private let scroll = ListScrollView()
-    private let emptyLabel = NSTextField(labelWithString: "")
+    private let emptyLabel = NSTextField.label(font: Design.font(.headline, weight: .medium), color: .faint)
     private let status = StatusPill()
     private var rows: [Row] = []
     /// What each row's cell shows (see `signature`), as of its last configuration.
@@ -176,19 +176,11 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         scroll.wantsLayer = true
         scroll.contentView.postsBoundsChangedNotifications = true
 
-        emptyLabel.font = .systemFont(ofSize: 15, weight: .medium)
-        emptyLabel.textColor = .tertiaryLabelColor
         emptyLabel.alignment = .center
 
-        for view in [scroll, emptyLabel, status] as [NSView] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            container.addSubview(view)
-        }
+        container.addFilling(scroll)
+        container.addConstrained([emptyLabel, status])
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: container.topAnchor),
-            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             status.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             status.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -14),
             status.widthAnchor.constraint(lessThanOrEqualTo: container.widthAnchor, constant: -40),
@@ -282,18 +274,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     }
 
     private func dated(_ conversations: [Conversation]) -> [Row] {
-        var rows: [Row] = []
-        rows.reserveCapacity(conversations.count + 8)
-        var current: String?
-        for conversation in conversations {
-            let title = store.row(for: conversation).section
-            if title != current {
-                rows.append(.section(title, count: nil, accent: false))
-                current = title
-            }
-            rows.append(.conversation(conversation))
-        }
-        return rows
+        let store = store
+        return Self.sectioned(conversations, section: { store.row(for: $0).section }, row: Row.conversation)
     }
 
     private func chatRows() -> [Row] {
@@ -302,15 +284,21 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         if let filter = chatFilter?.trimmingCharacters(in: .whitespaces), !filter.isEmpty {
             spaces = spaces.filter { $0.title.localizedCaseInsensitiveContains(filter) || $0.preview.localizedCaseInsensitiveContains(filter) }
         }
+        return Self.sectioned(spaces, section: \.section, row: Row.space)
+    }
+
+    /// `items` in order, under a header wherever their section changes.
+    private static func sectioned<Item>(_ items: [Item], section: (Item) -> String, row: (Item) -> Row) -> [Row] {
         var rows: [Row] = []
-        rows.reserveCapacity(spaces.count + 8)
+        rows.reserveCapacity(items.count + 8)
         var current: String?
-        for space in spaces {
-            if space.section != current {
-                rows.append(.section(space.section, count: nil, accent: false))
-                current = space.section
+        for item in items {
+            let title = section(item)
+            if title != current {
+                rows.append(.section(title, count: nil, accent: false))
+                current = title
             }
-            rows.append(.space(space))
+            rows.append(row(item))
         }
         return rows
     }
@@ -430,7 +418,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         }
         if !removals.isEmpty || !insertions.isEmpty {
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.24
+                context.duration = Design.Duration.brief.rawValue
                 context.timingFunction = Motion.ease
                 table.beginUpdates()
                 table.removeRows(at: removals, withAnimation: [.effectFade, .slideUp])
@@ -445,12 +433,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     /// cross-fades away.
     private func transition(_ change: () -> Void) {
         guard view.window != nil, let layer = scroll.layer else { change(); return }
-        let fade = CATransition()
-        fade.type = .fade
-        fade.duration = 0.22
-        fade.timingFunction = Motion.ease
-        fade.preferredFrameRateRange = Motion.frameRate
-        layer.add(fade, forKey: "contentFade")
+        Motion.crossfade(layer, duration: .brief, key: "contentFade")
         change()
         Motion.slideIn(table, dy: 10)
     }
@@ -591,7 +574,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         if view.window?.firstResponder === table { view.window?.makeFirstResponder(list.table) }
         page.alphaValue = 0
         Motion.unfold(page, from: 0.94)
-        Motion.fade(page, to: 1, duration: Motion.standard)
+        Motion.fade(page, to: 1, duration: .standard)
         delegate?.conversationListDidChangeBundle(self)
     }
 
@@ -602,11 +585,11 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         page.shadowOpacity = 0
         Motion.group({
             let fold = Motion.basic("transform", from: CATransform3DIdentity, to: Motion.centered(0.96, in: page),
-                                    duration: 0.24)
+                                    duration: .brief)
             fold.fillMode = .forwards
             fold.isRemovedOnCompletion = false
             page.add(fold, forKey: "fold")
-            Motion.fade(list.view, to: 0, duration: 0.24)
+            Motion.fade(list.view, to: 0, duration: .brief)
         }, completion: { [weak self] in self?.remove(list) })
     }
 
@@ -645,25 +628,16 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             for key in ["unfold", "opacity"] { page.removeAnimation(forKey: key) }
             list.view.alphaValue = 1
             page.masksToBounds = false
-            page.shadowColor = NSColor.black.cgColor
-            page.shadowOpacity = 0.12
-            page.shadowRadius = 14
-            page.shadowOffset = .zero
-            page.shadowPath = CGPath(rect: page.bounds, transform: nil)
+            Design.Shadow.page.apply(to: page, path: CGPath(rect: page.bounds, transform: nil))
         }
         Motion.hold(page, "transform", at: CATransform3DMakeTranslation(offset, 0, 0), key: "swipe")
     }
 
-    /// Fingers lifted: past a third of the width, or flicked onward, the bundle slides off and the
-    /// inbox, already there beneath it, stays; otherwise it slides back. The slide starts at the
-    /// fingers' speed.
+    /// Fingers lifted: the bundle slides off and the inbox, already there beneath it, stays, or it
+    /// slides back (see `BackSwipe.settle`). The slide starts at the fingers' speed.
     func releaseBack(at offset: CGFloat, velocity: CGFloat) {
         guard let list = bundleList, let page = list.view.layer, page.animation(forKey: "swipe") != nil else { return }
-        let width = max(view.bounds.width, 1)
-        let distance = abs(offset)
-        let onward = offset < 0 ? -velocity : velocity
-        let back = distance > width / 3 || (onward > 400 && distance > 20)
-        let target: CGFloat = back ? (offset < 0 ? -width : width) : 0
+        let (back, target) = BackSwipe.settle(offset: offset, velocity: velocity, width: view.bounds.width, canGoBack: true)
         if back { _ = detachBundle() }
         let step = swipeStep
         Motion.group({
@@ -691,18 +665,18 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     func highlight(_ conversation: Conversation) {
         if let bundleList { return bundleList.highlight(conversation) }
         guard let row = rows.firstIndex(where: { $0.conversation?.id == conversation.id }) else { return }
-        suppressSelection = true
-        table.selectRowIndexes([row], byExtendingSelection: false)
-        suppressSelection = false
-        highlightedID = conversation.id
-        lastHighlightedRow = row
-        table.scrollRowToVisible(row)
+        highlightRow(row, id: conversation.id)
     }
 
     /// Moves the keyboard highlight to a chat space's row (used after Back).
     func highlight(space key: ChatSpaceKey) {
         let id = "h:" + key.id
         guard let row = rows.firstIndex(where: { $0.id == id }) else { return }
+        highlightRow(row, id: id)
+    }
+
+    /// Selects `row` without the selection counting as the user's.
+    private func highlightRow(_ row: Int, id: String) {
         suppressSelection = true
         table.selectRowIndexes([row], byExtendingSelection: false)
         suppressSelection = false
@@ -787,21 +761,18 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         switch rows[row] {
         case .section(let title, let count, let accent):
-            let cell = tableView.makeView(withIdentifier: SectionHeaderCell.identifier, owner: nil) as? SectionHeaderCell
-                ?? SectionHeaderCell()
+            let cell = tableView.dequeue(SectionHeaderCell.self)
             cell.configure(title, count: count, accent: accent)
             return cell
         case .shelf(let bundles):
-            let cell = tableView.makeView(withIdentifier: BundleShelfCell.identifier, owner: nil) as? BundleShelfCell
-                ?? BundleShelfCell()
+            let cell = tableView.dequeue(BundleShelfCell.self)
             cell.configure(bundles, own: store.ownAddresses)
             cell.onOpen = { [weak self] category in self?.enterBundle(category) }
             return cell
         case .conversation(let conversation):
             // What the cell now shows, so content arriving later reloads it only if it differs.
             signatures[row] = signature(rows[row])
-            let cell = tableView.makeView(withIdentifier: ConversationRowCell.identifier, owner: nil) as? ConversationRowCell
-                ?? ConversationRowCell()
+            let cell = tableView.dequeue(ConversationRowCell.self)
             let context = store.listContext
             let row = store.row(for: conversation)
             let tag = store.tagging.tag(for: conversation)
@@ -815,29 +786,27 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
                            photo: store.avatars.image(for: row.avatarKey, automated: automated))
             let id = conversation.id
             cell.onAction = { [weak self] action in self?.perform(action, id: id) }
-            let person = Address(name: row.avatarName, email: row.avatarKey)
-            cell.onAvatar = { [weak self] anchor, photo in
-                guard let self else { return }
-                AvatarPreview.show(person, small: photo, automated: automated, avatars: self.store.avatars,
-                                   relativeTo: anchor.bounds, of: anchor)
-            }
+            wireAvatar(cell, person: Address(name: row.avatarName, email: row.avatarKey), automated: automated)
             return cell
         case .space(let space):
-            let cell = tableView.makeView(withIdentifier: ConversationRowCell.identifier, owner: nil) as? ConversationRowCell
-                ?? ConversationRowCell()
+            let cell = tableView.dequeue(ConversationRowCell.self)
             let photo = space.avatarKey.isEmpty ? nil : store.avatars.image(for: space.avatarKey, automated: false)
             cell.configure(space, account: store.listContext.selection == .allChats
                                ? (store.label(account: space.key.account),
                                   AccountStyle.chatColor(for: space.key.account, in: store)) : nil,
                            photo: photo)
             cell.onAction = nil
-            let person = Address(name: space.avatarName, email: space.avatarKey)
-            cell.onAvatar = { [weak self] anchor, photo in
-                guard let self else { return }
-                AvatarPreview.show(person, small: photo, automated: false, avatars: self.store.avatars,
-                                   relativeTo: anchor.bounds, of: anchor)
-            }
+            wireAvatar(cell, person: Address(name: space.avatarName, email: space.avatarKey), automated: false)
             return cell
+        }
+    }
+
+    /// A click on the row's picture enlarges it.
+    private func wireAvatar(_ cell: ConversationRowCell, person: Address, automated: Bool) {
+        cell.onAvatar = { [weak self] anchor, photo in
+            guard let self else { return }
+            AvatarPreview.show(person, small: photo, automated: automated, avatars: self.store.avatars,
+                               relativeTo: anchor.bounds, of: anchor)
         }
     }
 
@@ -853,16 +822,10 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         let row = table.clickedRow
         guard row >= 0, row < rows.count else { return }
         if let space = rows[row].space {
-            let open = NSMenuItem(title: "Open", action: #selector(openChatFromMenu(_:)), keyEquivalent: "")
-            open.target = self
-            open.representedObject = row
-            menu.addItem(open)
+            menu.addItem(menuItem("Open", symbol: nil, action: #selector(openChatFromMenu(_:)), payload: row))
             if space.isUnread {
-                let read = NSMenuItem(title: "Mark as Read", action: #selector(markChatRead(_:)), keyEquivalent: "")
-                read.image = NSImage(systemSymbolName: "envelope.open", accessibilityDescription: nil)
-                read.target = self
-                read.representedObject = space.key.id
-                menu.addItem(read)
+                let label = ConversationAction.toggleRead.label(in: .init(unread: true))
+                menu.addItem(menuItem(label.title, symbol: label.symbol, action: #selector(markChatRead(_:)), payload: space.key.id))
             }
             return
         }
@@ -870,11 +833,8 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         let state = ConversationAction.State(conversation, tag: store.tagging.tag(for: conversation))
         func add(_ action: ConversationAction) {
             let label = action.label(in: state)
-            let item = NSMenuItem(title: label.title, action: #selector(contextAction(_:)), keyEquivalent: "")
-            item.image = NSImage(systemSymbolName: label.symbol, accessibilityDescription: nil)
-            item.target = self
-            item.representedObject = ContextPayload(action: action, id: conversation.id)
-            menu.addItem(item)
+            menu.addItem(menuItem(label.title, symbol: label.symbol, action: #selector(contextAction(_:)),
+                                  payload: ContextPayload(action: action, id: conversation.id)))
         }
         for action in [ConversationAction.reply, .replyAll, .forward] { add(action) }
         menu.addItem(.separator())
@@ -885,6 +845,14 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         if store.canArchive(conversation) { add(.archive) }
         if store.canRestore(conversation) { add(.restore) }
         add(.trash)
+    }
+
+    private func menuItem(_ title: String, symbol: String?, action: Selector, payload: Any) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.image = symbol.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }
+        item.target = self
+        item.representedObject = payload
+        return item
     }
 
     private final class ContextPayload: NSObject {
@@ -1052,11 +1020,8 @@ final class ConversationTableView: NSTableView {
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.numericPad, .function])
         if modifiers.isEmpty {
-            switch event.keyCode {
-            case 36, 76, 49: onOpen?(); return  // return, enter, space
-            case 51, 117: onKey?(.trash); return  // delete, forward delete
-            default: break
-            }
+            if event.isReturnKey || event.keyCode == 49 { onOpen?(); return }  // or space
+            if event.keyCode == 51 || event.keyCode == 117 { onKey?(.trash); return }  // delete, forward delete
             switch event.charactersIgnoringModifiers {
             case "e": onKey?(.archive); return
             case "s": onKey?(.toggleStar); return

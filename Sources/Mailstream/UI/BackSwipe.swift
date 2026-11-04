@@ -83,4 +83,14 @@ struct BackSwipe {
             return .drag(offset)
         }
     }
+
+    /// Where released fingers send a page `width` wide: past a third of the width, or flicked
+    /// onward, off the side it was swiped toward (when `canGoBack`); otherwise back to 0.
+    static func settle(offset: CGFloat, velocity: CGFloat, width: CGFloat, canGoBack: Bool) -> (back: Bool, target: CGFloat) {
+        let width = max(width, 1)
+        let distance = abs(offset)
+        let onward = offset < 0 ? -velocity : velocity
+        let back = canGoBack && (distance > width / 3 || (onward > 400 && distance > 20))
+        return (back, back ? (offset < 0 ? -width : width) : 0)
+    }
 }

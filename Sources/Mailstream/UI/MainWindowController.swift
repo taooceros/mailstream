@@ -69,14 +69,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         container.wantsLayer = true
         for child in [list, reader] as [NSViewController] {
             content.addChild(child)
-            child.view.translatesAutoresizingMaskIntoConstraints = false
-            container.addSubview(child.view)
-            NSLayoutConstraint.activate([
-                child.view.topAnchor.constraint(equalTo: container.topAnchor),
-                child.view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-                child.view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-                child.view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            ])
+            container.addFilling(child.view)
         }
         reader.view.wantsLayer = true
         list.view.wantsLayer = true
@@ -250,14 +243,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             Motion.unfold(list.view, from: 1.03)
             if let layer = page.layer {
                 let fold = Motion.basic("transform", from: CATransform3DIdentity, to: Motion.centered(0.96, in: layer),
-                                        duration: 0.24)
+                                        duration: .brief)
                 fold.fillMode = .forwards
                 fold.isRemovedOnCompletion = false
                 layer.add(fold, forKey: "fold")
             }
         }
         Motion.group({
-            Motion.fade(page, to: forward ? 1 : 0, duration: forward ? Motion.standard : 0.24)
+            Motion.fade(page, to: forward ? 1 : 0, duration: forward ? .standard : .brief)
         }, completion: { [weak self] in
             guard let self, self.transitions == current else { return }
             page.layer?.removeAnimation(forKey: "fold")
@@ -324,26 +317,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             below.removeAnimation(forKey: "unfold")
             reader.view.alphaValue = 1
             page.masksToBounds = false
-            page.shadowColor = NSColor.black.cgColor
-            page.shadowOpacity = 0.12
-            page.shadowRadius = 14
-            page.shadowOffset = .zero
-            page.shadowPath = CGPath(rect: page.bounds, transform: nil)
+            Design.Shadow.page.apply(to: page, path: CGPath(rect: page.bounds, transform: nil))
         }
         Motion.hold(page, "transform", at: CATransform3DMakeTranslation(offset, 0, 0), key: "swipe")
     }
 
-    /// Past a third of the width, or flicked onward, the reader slides off the side it was swiped
-    /// toward and the list stays; otherwise it slides back into place. The slide starts at the
-    /// fingers' speed.
+    /// The reader slides off the side it was swiped toward and the list stays, or it slides back
+    /// into place (see `BackSwipe.settle`). The slide starts at the fingers' speed.
     private func releaseReader(at offset: CGFloat, velocity: CGFloat) {
         guard dragging, let page = reader.view.layer else { return }
         dragging = false
-        let width = max(reader.view.bounds.width, 1)
-        let distance = abs(offset)
-        let onward = offset < 0 ? -velocity : velocity
-        let back = opened != nil && (distance > width / 3 || (onward > 400 && distance > 20))
-        let target: CGFloat = back ? (offset < 0 ? -width : width) : 0
+        let (back, target) = BackSwipe.settle(offset: offset, velocity: velocity, width: reader.view.bounds.width,
+                                              canGoBack: opened != nil)
         transitions += 1
         let current = transitions
         Motion.group({
@@ -392,11 +377,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         guard let window, window.isVisible || window.isMiniaturized, window.attachedSheet == nil,
               !pendingAlerts.isEmpty else { return }
         let problem = pendingAlerts.removeFirst()
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "The action could not be completed"
-        alert.informativeText = problem.message
-        alert.beginSheetModal(for: window)
+        window.showWarning("The action could not be completed", detail: problem.message)
     }
 
     /// Alerts raised before the window first appears, or while it was closed, show now.
@@ -503,15 +484,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     private func confirmPermanentDelete(_ conversation: Conversation) {
         guard let window else { return }
-        let alert = NSAlert()
-        alert.messageText = "Delete this conversation permanently?"
-        alert.informativeText = "Messages already in the trash are removed for good."
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = true
-        alert.beginSheetModal(for: window) { [store] response in
-            if response == .alertFirstButtonReturn { store.trash(conversation) }
-        }
+        window.confirm("Delete this conversation permanently?", detail: "Messages already in the trash are removed for good.",
+                       confirm: "Delete", destructive: true) { [store] in store.trash(conversation) }
     }
 
     // MARK: - Actions
@@ -667,13 +641,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     private func button(_ identifier: NSToolbarItem.Identifier, _ label: String, _ symbol: String,
                         _ action: Selector) -> NSToolbarItem {
         let item = NSToolbarItem(itemIdentifier: identifier)
-        item.label = label
-        item.paletteLabel = label
-        item.toolTip = label
-        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        item.makeButton(label: label, symbol: symbol, target: self, action: action)
         item.isBordered = true
-        item.target = self
-        item.action = action
         return item
     }
 }

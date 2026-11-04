@@ -245,10 +245,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         guard let node = item as? Node else { return nil }
         let cell: NSView
         if case .section = node.kind {
-            cell = outlineView.makeView(withIdentifier: SidebarHeaderCell.identifier, owner: nil) as? SidebarHeaderCell
-                ?? SidebarHeaderCell()
+            cell = outlineView.dequeue(SidebarHeaderCell.self)
         } else {
-            cell = outlineView.makeView(withIdentifier: SidebarCell.identifier, owner: nil) as? SidebarCell ?? SidebarCell()
+            cell = outlineView.dequeue(SidebarCell.self)
         }
         configure(cell, for: node)
         return cell
@@ -306,18 +305,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 }
 
-final class SidebarHeaderCell: NSTableCellView {
+final class SidebarHeaderCell: NSTableCellView, ReusableCell {
     static let identifier = NSUserInterfaceItemIdentifier("SidebarHeader")
 
     init() {
         super.init(frame: .zero)
         identifier = Self.identifier
-        let label = NSTextField(labelWithString: "")
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = .tertiaryLabelColor
+        let label = NSTextField.label(font: Design.font(.caption, weight: .semibold), color: .faint)
         label.lineBreakMode = .byTruncatingTail
-        label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(label)
+        addConstrained([label])
         textField = label
         NSLayoutConstraint.activate([
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
@@ -330,7 +326,7 @@ final class SidebarHeaderCell: NSTableCellView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-final class SidebarCell: NSTableCellView {
+final class SidebarCell: NSTableCellView, ReusableCell {
     static let identifier = NSUserInterfaceItemIdentifier("SidebarCell")
 
     enum Leading {
@@ -348,16 +344,13 @@ final class SidebarCell: NSTableCellView {
     init() {
         super.init(frame: .zero)
         identifier = Self.identifier
-        icon.symbolConfiguration = .init(pointSize: 13, weight: .regular)
+        icon.symbolConfiguration = .init(pointSize: Design.TextSize.body.rawValue, weight: .regular)
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        badge.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        badge.font = Design.monospacedDigitFont(.caption, weight: .medium)
         badge.alignment = .right
         badge.setContentCompressionResistancePriority(.required, for: .horizontal)
-        for view in [icon, marker, label, badge] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(view)
-        }
+        addConstrained([icon, marker, label, badge])
         imageView = icon
         textField = label
         NSLayoutConstraint.activate([
@@ -407,10 +400,10 @@ final class SidebarCell: NSTableCellView {
 
     private func applyColors() {
         let emphasized = backgroundStyle == .emphasized
-        icon.contentTintColor = emphasized ? .alternateSelectedControlTextColor : .secondaryLabelColor
-        label.font = .systemFont(ofSize: secondary ? 12 : 13, weight: .regular)
-        label.textColor = emphasized ? .alternateSelectedControlTextColor : (secondary ? .secondaryLabelColor : .labelColor)
-        badge.textColor = emphasized ? .alternateSelectedControlTextColor : .tertiaryLabelColor
+        icon.contentTintColor = (emphasized ? Design.Color.onAccent : .muted).color
+        label.font = Design.font(secondary ? .footnote : .body)
+        label.textColor = (emphasized ? Design.Color.onAccent : secondary ? .muted : .text).color
+        badge.textColor = (emphasized ? Design.Color.onAccent : .faint).color
     }
 }
 
@@ -432,9 +425,10 @@ final class SidebarMarker: NSView {
         case .avatar(let address, let color):
             let rect = bounds.insetBy(dx: 1, dy: 1)
             color.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5).fill()
+            let radius = Design.Radius.small.rawValue
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
             let text = NSAttributedString(string: String(Avatar.initials(for: address).prefix(1)), attributes: [
-                .font: NSFont.systemFont(ofSize: 10, weight: .bold),
+                .font: Design.font(.micro, weight: .bold),
                 .foregroundColor: NSColor.white,
             ])
             let size = text.size()

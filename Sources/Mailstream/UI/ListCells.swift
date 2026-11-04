@@ -9,46 +9,6 @@ extension NSParagraphStyle {
     }()
 }
 
-extension NSColor {
-    /// `#RRGGBB` in sRGB.
-    convenience init(hex: String) {
-        let value = UInt32(hex.dropFirst(), radix: 16) ?? 0
-        self.init(srgbRed: CGFloat((value >> 16) & 0xFF) / 255, green: CGFloat((value >> 8) & 0xFF) / 255,
-                  blue: CGFloat(value & 0xFF) / 255, alpha: 1)
-    }
-
-    /// One color for light appearances and another for dark ones.
-    static func dynamic(light: String, dark: String) -> NSColor {
-        NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(hex: dark) : NSColor(hex: light)
-        }
-    }
-}
-
-/// Muted topic colors shared by the list (AppKit) and the reader (CSS). Known topics keep fixed hues.
-enum TagPalette {
-    private static let known: [String: (String, String)] = [
-        "work": ("#3B82F6", "#60A5FA"), "education": ("#A855F7", "#C084FC"), "finance": ("#10B981", "#34D399"),
-        "shopping": ("#F59E0B", "#FBBF24"), "tech": ("#06B6D4", "#22D3EE"), "travel": ("#EC4899", "#F472B6"),
-        "food": ("#F97316", "#FB923C"), "health": ("#14B8A6", "#2DD4BF"), "social": ("#8B5CF6", "#A78BFA"),
-    ]
-    private static let fallback: [(String, String)] = [("#64748B", "#94A3B8"), ("#6366F1", "#818CF8"),
-                                                       ("#84CC16", "#A3E635"), ("#E11D48", "#FB7185")]
-
-    private static func pair(for label: String) -> (String, String) {
-        let key = label.lowercased()
-        return known[key] ?? fallback[stableIndex(of: key, in: fallback.count)]
-    }
-
-    /// Light-appearance hex, for CSS (the reader derives its dark variant).
-    static func hex(for label: String) -> String { pair(for: label).0 }
-
-    static func color(for label: String) -> NSColor {
-        let (light, dark) = pair(for: label)
-        return .dynamic(light: light, dark: dark)
-    }
-}
-
 /// Fixed horizontal stops, so every row's columns read as straight vertical lines.
 enum ListMetrics {
     static let rowHeight: CGFloat = 38
@@ -65,24 +25,25 @@ enum ListMetrics {
     static let dateWidth: CGFloat = 62
 }
 
-/// The house motion: one easing curve, a few durations, and every animation asks for ProMotion's
+/// The house motion: `Design`'s easing curve and durations, and every animation asks for ProMotion's
 /// full rate. Animations are explicit layer animations that start from what is on screen, so a
 /// reversal mid-flight (hover in, then out) turns around instead of jumping.
 @MainActor
 enum Motion {
-    /// The house easing curve: quick start, long soft landing.
-    static let ease = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)
-    static let quick: TimeInterval = 0.14
-    static let standard: TimeInterval = 0.28
+    /// The house easing curve, the CSS pages' `--ease`.
+    static let ease: CAMediaTimingFunction = {
+        let (x1, y1, x2, y2) = Design.easeControlPoints
+        return CAMediaTimingFunction(controlPoints: x1, y1, x2, y2)
+    }()
     /// 120 Hz on ProMotion displays; Core Animation otherwise caps animations at 60.
     static let frameRate = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
 
     /// An eased animation at the house frame rate.
-    static func basic(_ keyPath: String, from: Any?, to: Any?, duration: TimeInterval) -> CABasicAnimation {
+    static func basic(_ keyPath: String, from: Any?, to: Any?, duration: Design.Duration) -> CABasicAnimation {
         let animation = CABasicAnimation(keyPath: keyPath)
         animation.fromValue = from
         animation.toValue = to
-        animation.duration = duration
+        animation.duration = duration.rawValue
         animation.timingFunction = ease
         animation.preferredFrameRateRange = frameRate
         return animation
@@ -127,14 +88,11 @@ enum Motion {
 
     /// Moves `layer`'s `keyPaths` to the model values `change` sets, animating each from its on-screen
     /// value; a key already at its target just drops any animation still heading elsewhere.
-    static func animate(_ layer: CALayer, _ keyPaths: [String], duration: TimeInterval = quick, _ change: () -> Void) {
+    static func animate(_ layer: CALayer, _ keyPaths: [String], duration: Design.Duration = .quick, _ change: () -> Void) {
         let shown = keyPaths.map { key in
             ((layer.animation(forKey: key) != nil ? layer.presentation() : nil) ?? layer).value(forKeyPath: key)
         }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        change()
-        CATransaction.commit()
+        withoutActions(change)
         for (key, from) in zip(keyPaths, shown) {
             let to = layer.value(forKeyPath: key)
             if (from as AnyObject?)?.isEqual(to) ?? (to == nil) {
@@ -146,7 +104,7 @@ enum Motion {
     }
 
     /// Fades a view to `alpha`; `alphaValue` holds the target at once. Views without a layer just jump.
-    static func fade(_ view: NSView, to alpha: CGFloat, duration: TimeInterval = quick) {
+    static func fade(_ view: NSView, to alpha: CGFloat, duration: Design.Duration = .quick) {
         guard let layer = view.layer else { view.alphaValue = alpha; return }
         animate(layer, ["opacity"], duration: duration) {
             view.alphaValue = alpha
@@ -155,11 +113,11 @@ enum Motion {
     }
 
     /// Slides a layer-backed view's content by `dx`/`dy` back to rest, without touching its frame.
-    static func slideIn(_ view: NSView, dx: CGFloat = 0, dy: CGFloat = 0, duration: TimeInterval = standard) {
+    static func slideIn(_ view: NSView, dx: CGFloat = 0, dy: CGFloat = 0, duration: Design.Duration = .standard) {
         guard let layer = view.layer else { return }
         let animation = spring("transform", from: CATransform3DMakeTranslation(dx, dy, 0), to: CATransform3DIdentity,
                                stiffness: 320, damping: 34)
-        animation.duration = max(duration, animation.settlingDuration)
+        animation.duration = max(duration.rawValue, animation.settlingDuration)
         layer.add(animation, forKey: "slideIn")
     }
 
@@ -192,18 +150,29 @@ enum Motion {
         transform = CATransform3DScale(transform, scale, scale, 1)
         return CATransform3DTranslate(transform, -dx, -dy, 0)
     }
+
+    /// Applies `change` at once: no implicit layer animation picks it up.
+    static func withoutActions(_ change: () -> Void) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        change()
+        CATransaction.commit()
+    }
+
+    /// Cross-fades whatever `layer` shows next from what it shows now, under `key`.
+    static func crossfade(_ layer: CALayer, duration: Design.Duration, key: String) {
+        let fade = CATransition()
+        fade.type = .fade
+        fade.duration = duration.rawValue
+        fade.timingFunction = ease
+        fade.preferredFrameRateRange = frameRate
+        layer.add(fade, forKey: key)
+    }
 }
 
 extension NSFont {
     /// Height of one line of text in this font, as a one-line label sizes itself.
     var lineHeight: CGFloat { ceil(NSAttributedString(string: "Ag", attributes: [.font: self]).size().height) }
-}
-
-/// A slot in `0..<count` for `key` that is the same on every launch (FNV-1a; `hashValue` is seeded).
-nonisolated private func stableIndex(of key: String, in count: Int) -> Int {
-    var hash: UInt64 = 1469598103934665603
-    for byte in key.utf8 { hash = (hash ^ UInt64(byte)) &* 1099511628211 }
-    return Int(hash % UInt64(count))
 }
 
 /// Puts `view`'s alignment rect of `size` at `x`, centered in `height`, pixel-aligned in its
@@ -230,8 +199,8 @@ final class ListRowView: NSTableRowView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wash.fill = NSColor.labelColor.withAlphaComponent(0.045)
-        wash.radius = 8
+        wash.fill = Design.Color.hover.color
+        wash.radius = Design.Radius.control.rawValue
         wash.alphaValue = 0
         addSubview(wash, positioned: .below, relativeTo: nil)
     }
@@ -278,8 +247,9 @@ final class ListRowView: NSTableRowView {
 
     override func drawSelection(in dirtyRect: NSRect) {
         let alpha: CGFloat = isEmphasized ? 0.16 : 0.09
-        NSColor.controlAccentColor.withAlphaComponent(alpha).setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 1), xRadius: 8, yRadius: 8).fill()
+        Design.Color.accent.color.withAlphaComponent(alpha).setFill()
+        let radius = Design.Radius.control.rawValue
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 1), xRadius: radius, yRadius: radius).fill()
     }
 }
 
@@ -311,17 +281,17 @@ final class FillView: NSView {
 
 /// One line, five quiet columns: unread dot · avatar and sender · subject and preview · topic · date and account.
 /// Hovering cross-fades the trailing metadata into a floating action pill.
-final class ConversationRowCell: NSTableCellView, HoverableCell {
+final class ConversationRowCell: NSTableCellView, HoverableCell, ReusableCell {
     static let identifier = NSUserInterfaceItemIdentifier("ConversationRowCell")
 
     var onAction: ((ConversationAction) -> Void)?
     /// A click on the sender's picture, with the view to anchor an enlarged one to.
     var onAvatar: ((NSView, NSImage) -> Void)?
 
-    private static let textHeight = NSFont.systemFont(ofSize: 13).lineHeight
+    private static let textHeight = Design.font(.body).lineHeight
     private static let dateHeight = dateFont.lineHeight
-    private static let dateFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-    private static let unreadDateFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+    private static let dateFont = Design.monospacedDigitFont(.footnote)
+    private static let unreadDateFont = Design.monospacedDigitFont(.footnote, weight: .medium)
     private static let paperclipImage = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Attachment")
     private static let starredImage = NSImage(systemSymbolName: "star.fill", accessibilityDescription: "Starred")
 
@@ -359,11 +329,11 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
         date.font = Self.dateFont
 
         paperclip.image = Self.paperclipImage
-        paperclip.symbolConfiguration = .init(pointSize: 11, weight: .medium)
-        paperclip.contentTintColor = .tertiaryLabelColor
+        paperclip.symbolConfiguration = .init(pointSize: Design.TextSize.caption.rawValue, weight: .medium)
+        paperclip.contentTintColor = Design.Color.faint.color
         star.image = Self.starredImage
-        star.symbolConfiguration = .init(pointSize: 10, weight: .semibold)
-        star.contentTintColor = .systemYellow
+        star.symbolConfiguration = .init(pointSize: Design.TextSize.micro.rawValue, weight: .semibold)
+        star.contentTintColor = Design.Color.star.color
         accountTick.radius = 1
         trailing.wantsLayer = true
         for view in [paperclip, star, topic, date, accountTick] as [NSView] { trailing.addSubview(view) }
@@ -391,49 +361,38 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
                    account: (name: String, color: NSColor)?, tag: ConversationTag?, photo: NSImage?) {
         let unread = row.isUnread
         showsActions = true
-        unreadDot.isHidden = !unread
-        avatarKey = row.avatarKey
-        avatar.configure(initials: row.avatarInitials, color: Avatar.color(for: row.avatarKey), photo: photo)
+        showCommon(unread: unread, avatarKey: row.avatarKey, initials: row.avatarInitials,
+                   avatarColor: Avatar.color(for: row.avatarKey), photo: photo, hasAttachment: row.hasAttachment,
+                   account: account, date: row.date)
         star.isHidden = !row.isFlagged
-        paperclip.isHidden = !row.hasAttachment
-        accountTick.fill = account?.color ?? .clear
-        accountTick.toolTip = account?.name
         topic.isHidden = tag?.labels.first == nil
         if let label = tag?.labels.first { topic.configure(label, color: TagPalette.color(for: label)) }
-        date.stringValue = row.date
-        date.textColor = unread ? .labelColor : .secondaryLabelColor
-        date.font = unread ? Self.unreadDateFont : Self.dateFont
 
-        let name = NSMutableAttributedString(string: row.participants, attributes: [
-            .font: NSFont.systemFont(ofSize: 13, weight: unread ? .semibold : .regular),
-            .foregroundColor: unread ? NSColor.labelColor : NSColor.labelColor.withAlphaComponent(0.72),
-        ])
+        let name = Self.name(row.participants, unread: unread)
         if row.count > 1 {
             name.append(NSAttributedString(string: "  \(row.count)", attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
-                .foregroundColor: NSColor.tertiaryLabelColor,
+                .font: Design.monospacedDigitFont(.caption, weight: .medium),
+                .foregroundColor: Design.Color.faint.color,
             ]))
         }
-        name.addAttribute(.paragraphStyle, value: NSParagraphStyle.truncatingTail, range: NSRange(location: 0, length: name.length))
-        sender.attributedStringValue = name
+        sender.attributedStringValue = Self.truncating(name)
 
         let text = NSMutableAttributedString()
         if !row.subjectPrefix.isEmpty {
             text.append(NSAttributedString(string: row.subjectPrefix + " ", attributes: [
-                .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.tertiaryLabelColor,
+                .font: Design.font(.footnote), .foregroundColor: Design.Color.faint.color,
             ]))
         }
         text.append(NSAttributedString(string: row.subjectTitle, attributes: [
-            .font: NSFont.systemFont(ofSize: 13, weight: unread ? .medium : .regular),
-            .foregroundColor: unread ? NSColor.labelColor : NSColor.labelColor.withAlphaComponent(0.8),
+            .font: Design.font(.body, weight: unread ? .medium : .regular),
+            .foregroundColor: unread ? Design.Color.text.color : Design.Color.text.color.withAlphaComponent(0.8),
         ]))
         if let snippet, !snippet.isEmpty {
             text.append(NSAttributedString(string: "   " + snippet, attributes: [
-                .font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor.withAlphaComponent(0.75),
+                .font: Design.font(.body), .foregroundColor: Design.Color.muted.color.withAlphaComponent(0.75),
             ]))
         }
-        text.addAttribute(.paragraphStyle, value: NSParagraphStyle.truncatingTail, range: NSRange(location: 0, length: text.length))
-        line.attributedStringValue = text
+        line.attributedStringValue = Self.truncating(text)
 
         let state = ConversationAction.State(unread: unread, flagged: row.isFlagged)
         readButton.show(state)
@@ -448,30 +407,46 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
         let unread = row.isUnread
         showsActions = false
         setHovering(false, animated: false)
-        unreadDot.isHidden = !unread
-        avatarKey = row.avatarKey
-        avatar.configure(initials: row.avatarInitials, color: Avatar.color(for: row.avatarColorKey), photo: photo)
+        showCommon(unread: unread, avatarKey: row.avatarKey, initials: row.avatarInitials,
+                   avatarColor: Avatar.color(for: row.avatarColorKey), photo: photo, hasAttachment: row.hasAttachment,
+                   account: account, date: row.date)
         star.isHidden = true
-        paperclip.isHidden = !row.hasAttachment
         topic.isHidden = true
+        sender.attributedStringValue = Self.truncating(Self.name(row.title, unread: unread))
+        line.attributedStringValue = Self.truncating(NSMutableAttributedString(string: row.preview, attributes: [
+            .font: Design.font(.body, weight: unread ? .medium : .regular),
+            .foregroundColor: unread ? Design.Color.text.color : Design.Color.muted.color,
+        ]))
+        needsLayout = true
+    }
+
+    /// What mail and chat rows both show: the unread dot, the picture, the paperclip, the account
+    /// bar and the date. The picture's color key is the caller's: a chat space colors by its own key.
+    private func showCommon(unread: Bool, avatarKey: String, initials: String, avatarColor: NSColor, photo: NSImage?,
+                            hasAttachment: Bool, account: (name: String, color: NSColor)?, date: String) {
+        unreadDot.isHidden = !unread
+        self.avatarKey = avatarKey
+        avatar.configure(initials: initials, color: avatarColor, photo: photo)
+        paperclip.isHidden = !hasAttachment
         accountTick.fill = account?.color ?? .clear
         accountTick.toolTip = account?.name
-        date.stringValue = row.date
-        date.textColor = unread ? .labelColor : .secondaryLabelColor
-        date.font = unread ? Self.unreadDateFont : Self.dateFont
+        self.date.stringValue = date
+        self.date.textColor = unread ? Design.Color.text.color : Design.Color.muted.color
+        self.date.font = unread ? Self.unreadDateFont : Self.dateFont
+    }
 
-        let name = NSMutableAttributedString(string: row.title, attributes: [
-            .font: NSFont.systemFont(ofSize: 13, weight: unread ? .semibold : .regular),
-            .foregroundColor: unread ? NSColor.labelColor : NSColor.labelColor.withAlphaComponent(0.72),
-            .paragraphStyle: NSParagraphStyle.truncatingTail,
+    /// The sender column: bold while unread, softened once read.
+    private static func name(_ text: String, unread: Bool) -> NSMutableAttributedString {
+        NSMutableAttributedString(string: text, attributes: [
+            .font: Design.font(.body, weight: unread ? .semibold : .regular),
+            .foregroundColor: unread ? Design.Color.text.color : Design.Color.text.color.withAlphaComponent(0.72),
         ])
-        sender.attributedStringValue = name
-        line.attributedStringValue = NSAttributedString(string: row.preview, attributes: [
-            .font: NSFont.systemFont(ofSize: 13, weight: unread ? .medium : .regular),
-            .foregroundColor: unread ? NSColor.labelColor : NSColor.secondaryLabelColor,
-            .paragraphStyle: NSParagraphStyle.truncatingTail,
-        ])
-        needsLayout = true
+    }
+
+    /// One line ending in an ellipsis, whatever its runs.
+    private static func truncating(_ text: NSMutableAttributedString) -> NSAttributedString {
+        text.addAttribute(.paragraphStyle, value: NSParagraphStyle.truncatingTail, range: NSRange(location: 0, length: text.length))
+        return text
     }
 
     /// The address whose picture the row waits for, while it shows initials.
@@ -546,7 +521,7 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
             guard let self, !self.hovering else { return }
             self.pill.isHidden = true
         })
-        if hovering { Motion.slideIn(pill, dx: 6, duration: 0.2) }
+        if hovering { Motion.slideIn(pill, dx: 6, duration: .brief) }
     }
 
     /// A recycled cell must not carry the previous row's action pill.
@@ -559,7 +534,7 @@ final class ConversationRowCell: NSTableCellView, HoverableCell {
 // MARK: - Bundle shelf
 
 /// The Smart Inbox's automated mail as a shelf of equal tiles above the people.
-final class BundleShelfCell: NSTableCellView {
+final class BundleShelfCell: NSTableCellView, ReusableCell {
     static let identifier = NSUserInterfaceItemIdentifier("BundleShelfCell")
     var onOpen: ((MailCategory) -> Void)?
     private let stack = NSStackView()
@@ -571,8 +546,7 @@ final class BundleShelfCell: NSTableCellView {
         stack.orientation = .horizontal
         stack.distribution = .fillEqually
         stack.spacing = 10
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        addConstrained([stack])
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
@@ -617,9 +591,9 @@ final class BundleTile: NSView {
     var onOpen: ((MailCategory) -> Void)?
     private var category: MailCategory = .notification
     private let icon = NSImageView()
-    private let title = NSTextField(labelWithString: "")
-    private let senders = NSTextField(labelWithString: "")
-    private let badge = NSTextField(labelWithString: "")
+    private let title = NSTextField.label(font: Design.font(.body, weight: .semibold))
+    private let senders = NSTextField.label(font: Design.font(.footnote), color: .muted)
+    private let badge = NSTextField.label(font: Design.monospacedDigitFont(.caption, weight: .semibold), color: .accent)
     private let badgeBack = FillView()
     private var hovering = false
     /// The tile's frame in its window when the press began.
@@ -637,24 +611,16 @@ final class BundleTile: NSView {
     init() {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 11
+        layer?.cornerRadius = Design.Radius.card.rawValue
         layer?.cornerCurve = .continuous
         layer?.borderWidth = 1
-        icon.symbolConfiguration = .init(pointSize: 15, weight: .medium)
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
-        senders.font = .systemFont(ofSize: 12)
-        senders.textColor = .secondaryLabelColor
+        icon.symbolConfiguration = .init(pointSize: Design.TextSize.headline.rawValue, weight: .medium)
         senders.lineBreakMode = .byTruncatingTail
         senders.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        badge.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
-        badge.textColor = .controlAccentColor
         badge.alignment = .center
-        badgeBack.fill = NSColor.controlAccentColor.withAlphaComponent(0.12)
+        badgeBack.fill = Design.Color.accent.color.withAlphaComponent(0.12)
         badgeBack.radius = 9
-        for view in [icon, title, senders, badgeBack, badge] as [NSView] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(view)
-        }
+        addConstrained([icon, title, senders, badgeBack, badge])
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -684,8 +650,8 @@ final class BundleTile: NSView {
         title.stringValue = category.title
         let unread = conversations.filter(\.isUnread).count
         badge.stringValue = unread > 0 ? unread.formatted() : conversations.count.formatted()
-        badge.textColor = unread > 0 ? .controlAccentColor : .secondaryLabelColor
-        badgeBack.fill = unread > 0 ? NSColor.controlAccentColor.withAlphaComponent(0.12) : NSColor.labelColor.withAlphaComponent(0.06)
+        badge.textColor = unread > 0 ? Design.Color.accent.color : Design.Color.muted.color
+        badgeBack.fill = unread > 0 ? Design.Color.accent.color.withAlphaComponent(0.12) : Design.Color.chip.color
         var seen = Set<String>()
         var names: [String] = []
         for conversation in conversations {
@@ -703,8 +669,8 @@ final class BundleTile: NSView {
 
     override func updateLayer() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(hovering ? 0.065 : 0.035).cgColor
-            layer?.borderColor = NSColor.labelColor.withAlphaComponent(hovering ? 0.1 : 0.06).cgColor
+            layer?.backgroundColor = Design.Color.text.color.withAlphaComponent(hovering ? 0.065 : 0.035).cgColor
+            layer?.borderColor = Design.Color.text.color.withAlphaComponent(hovering ? 0.1 : 0.06).cgColor
         }
     }
 
@@ -713,7 +679,7 @@ final class BundleTile: NSView {
         guard value != hovering else { return }
         hovering = value
         guard let layer else { return }
-        Motion.animate(layer, ["backgroundColor", "borderColor"], duration: 0.18) { updateLayer() }
+        Motion.animate(layer, ["backgroundColor", "borderColor"], duration: .brief) { updateLayer() }
     }
 
     /// The tile is one button: its icon and labels never take the click themselves.
@@ -736,13 +702,10 @@ final class BundleTile: NSView {
         if let pressFrame, pressFrame.contains(event.locationInWindow) { onOpen?(category) }
     }
 
-    /// Scales about the center; layer-backed views anchor at their corner, so translate around it.
+    /// Scales about the center, springing from wherever the last press left it.
     private func press(scale: CGFloat) {
         guard let layer else { return }
-        let w = bounds.width / 2, h = bounds.height / 2
-        var transform = CATransform3DMakeTranslation(w, h, 0)
-        transform = CATransform3DScale(transform, scale, scale, 1)
-        transform = CATransform3DTranslate(transform, -w, -h, 0)
+        let transform = Motion.centered(scale, in: layer)
         let spring = Motion.spring("transform", from: layer.presentation()?.transform ?? layer.transform, to: transform,
                                    stiffness: 500, damping: 30)
         layer.transform = transform
@@ -752,16 +715,17 @@ final class BundleTile: NSView {
 
 // MARK: - Section header
 
-final class SectionHeaderCell: NSTableCellView {
+final class SectionHeaderCell: NSTableCellView, ReusableCell {
     static let identifier = NSUserInterfaceItemIdentifier("SectionHeaderCell")
-    private static let textHeight = NSFont.systemFont(ofSize: 11, weight: .semibold).lineHeight
+    private static let font = Design.font(.caption, weight: .semibold)
+    private static let textHeight = font.lineHeight
     private let label = NSTextField(labelWithString: "")
     private let dot = DotView()
 
     init() {
         super.init(frame: .zero)
         identifier = Self.identifier
-        dot.color = .systemOrange
+        dot.color = Design.Color.waiting.color
         addSubview(label)
         addSubview(dot)
     }
@@ -771,14 +735,14 @@ final class SectionHeaderCell: NSTableCellView {
 
     func configure(_ title: String, count: Int?, accent: Bool) {
         let text = NSMutableAttributedString(string: title.uppercased(), attributes: [
-            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-            .foregroundColor: accent ? NSColor.labelColor.withAlphaComponent(0.75) : NSColor.secondaryLabelColor,
+            .font: Self.font,
+            .foregroundColor: accent ? Design.Color.text.color.withAlphaComponent(0.75) : Design.Color.muted.color,
             .kern: 0.6,
         ])
         if let count {
             text.append(NSAttributedString(string: "   \(count)", attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
-                .foregroundColor: NSColor.tertiaryLabelColor,
+                .font: Design.monospacedDigitFont(.caption, weight: .medium),
+                .foregroundColor: Design.Color.faint.color,
             ]))
         }
         label.attributedStringValue = text
@@ -808,16 +772,14 @@ final class SectionHeaderCell: NSTableCellView {
 
 /// "● Work": a topic as a tiny colored dot and quiet text, no pill.
 final class TopicLabel: NSView {
-    private static let font = NSFont.systemFont(ofSize: 11.5)
+    private static let font = Design.font(.caption)
     private static let textHeight = font.lineHeight
     private let dot = DotView()
-    private let label = NSTextField(labelWithString: "")
+    private let label = NSTextField.label(font: TopicLabel.font, color: .muted)
     private var textWidth: CGFloat = 0
 
     init() {
         super.init(frame: .zero)
-        label.font = Self.font
-        label.textColor = .secondaryLabelColor
         addSubview(dot)
         addSubview(label)
     }
@@ -864,9 +826,7 @@ final class ActionPill: NSView {
     init() {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 8
         layer?.cornerCurve = .continuous
-        layer?.borderWidth = 1
         layer?.shadowOpacity = 1
         layer?.shadowRadius = 4
         layer?.shadowOffset = CGSize(width: 0, height: -1)
@@ -898,8 +858,7 @@ final class ActionPill: NSView {
 
     override func updateLayer() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-            layer?.borderColor = NSColor.separatorColor.cgColor
+            layer?.styleAsCard(radius: .control)
             layer?.shadowColor = NSColor.black.withAlphaComponent(0.08).cgColor
         }
     }
@@ -914,9 +873,9 @@ final class HoverActionButton: NSButton {
     init(_ action: ConversationAction) {
         quickAction = action
         super.init(frame: .zero)
-        symbolConfiguration = .init(pointSize: 12, weight: .regular)
+        symbolConfiguration = .init(pointSize: Design.TextSize.footnote.rawValue, weight: .regular)
         isBordered = false
-        contentTintColor = .secondaryLabelColor
+        contentTintColor = Design.Color.muted.color
         setButtonType(.momentaryChange)
         target = self
         self.action = #selector(fire)
@@ -948,18 +907,18 @@ final class HoverActionButton: NSButton {
     /// The pill hides on row exit, which may skip this button's own exit; start plain next time.
     override func viewDidHide() {
         super.viewDidHide()
-        contentTintColor = .secondaryLabelColor
+        contentTintColor = Design.Color.muted.color
     }
 
-    override func mouseEntered(with event: NSEvent) { contentTintColor = .labelColor }
-    override func mouseExited(with event: NSEvent) { contentTintColor = .secondaryLabelColor }
+    override func mouseEntered(with event: NSEvent) { contentTintColor = Design.Color.text.color }
+    override func mouseExited(with event: NSEvent) { contentTintColor = Design.Color.muted.color }
 
     @objc private func fire() { handler?(quickAction) }
 }
 
 /// A filled circle drawn by its layer.
 final class DotView: NSView {
-    var color: NSColor = .controlAccentColor { didSet { needsDisplay = true } }
+    var color: NSColor = Design.Color.accent.color { didSet { needsDisplay = true } }
 
     init() {
         super.init(frame: .zero)
@@ -985,7 +944,7 @@ final class DotView: NSView {
 /// Initials on a tint of the person's color, or their picture once one is known: the reader's
 /// avatar in miniature, drawn by its layer.
 final class AvatarView: NSView {
-    private static let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    private static let font = Design.font(.body, weight: .semibold)
     private static let lineHeight = font.lineHeight
 
     private let label = NSTextField(labelWithString: "")
@@ -1021,27 +980,25 @@ final class AvatarView: NSView {
 
     func show(_ photo: NSImage, animated: Bool) {
         self.photo = photo
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        picture.contents = photo
-        picture.contentsScale = window?.backingScaleFactor ?? 2
-        picture.isHidden = false
-        CATransaction.commit()
+        Motion.withoutActions {
+            picture.contents = photo
+            picture.contentsScale = window?.backingScaleFactor ?? 2
+            picture.isHidden = false
+        }
         label.isHidden = true
         window?.invalidateCursorRects(for: self)
         if animated {
-            let fade = Motion.basic("opacity", from: 0, to: 1, duration: 0.2)
+            let fade = Motion.basic("opacity", from: 0, to: 1, duration: .brief)
             picture.add(fade, forKey: "fade")
         }
     }
 
     private func hidePhoto() {
         photo = nil
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        picture.contents = nil
-        picture.isHidden = true
-        CATransaction.commit()
+        Motion.withoutActions {
+            picture.contents = nil
+            picture.isHidden = true
+        }
         label.isHidden = false
         window?.invalidateCursorRects(for: self)
     }
@@ -1057,10 +1014,7 @@ final class AvatarView: NSView {
     override func layout() {
         super.layout()
         place(label, x: 0, size: NSSize(width: bounds.width, height: Self.lineHeight), height: bounds.height)
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        picture.frame = bounds
-        CATransaction.commit()
+        Motion.withoutActions { picture.frame = bounds }
     }
 
     override func updateLayer() {
@@ -1128,21 +1082,14 @@ final class StatusPill: NSVisualEffectView {
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
-        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.font = Design.font(.footnote, weight: .medium)
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let stack = NSStackView(views: [spinner, label])
         stack.spacing = 7
         stack.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 14)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            heightAnchor.constraint(equalToConstant: 28),
-        ])
+        addFilling(stack)
+        heightAnchor.constraint(equalToConstant: 28).isActive = true
     }
 
     @available(*, unavailable)
@@ -1151,13 +1098,13 @@ final class StatusPill: NSVisualEffectView {
     override func updateLayer() {
         super.updateLayer()
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.borderColor = NSColor.separatorColor.cgColor
+            layer?.borderColor = Design.Color.line.cgColor
         }
     }
 
     func show(_ text: String, busy: Bool, warning: Bool = false) {
         label.stringValue = warning ? "⚠︎  " + text : text
-        label.textColor = warning ? .systemOrange : .secondaryLabelColor
+        label.textColor = warning ? .systemOrange : Design.Color.muted.color
         toolTip = text
         busy ? spinner.startAnimation(nil) : spinner.stopAnimation(nil)
         spinner.isHidden = !busy
@@ -1165,7 +1112,7 @@ final class StatusPill: NSVisualEffectView {
         shown = true
         generation += 1
         isHidden = false
-        Motion.fade(self, to: 1, duration: 0.22)
+        Motion.fade(self, to: 1, duration: .brief)
         Motion.slideIn(self, dy: -8)
     }
 
@@ -1174,7 +1121,7 @@ final class StatusPill: NSVisualEffectView {
         shown = false
         generation += 1
         let current = generation
-        Motion.group({ Motion.fade(self, to: 0, duration: 0.3) }, completion: { [weak self] in
+        Motion.group({ Motion.fade(self, to: 0, duration: .standard) }, completion: { [weak self] in
             guard let self, self.generation == current else { return }
             self.isHidden = true
             self.spinner.stopAnimation(nil)
