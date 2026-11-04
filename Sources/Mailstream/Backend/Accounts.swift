@@ -83,11 +83,12 @@ final class AccountStore {
         return record
     }
 
-    /// Signs out: deletes the Keychain item and the record.
+    /// Signs out: deletes the Keychain item, the record and the Gmail envelope cache.
     func remove(_ id: String) {
         tokens.forget(id)
         apis[id] = nil
         backends[id] = nil
+        GmailBackend.discardCache(account: id)
         records.removeAll { $0.id == id }
         save()
     }
