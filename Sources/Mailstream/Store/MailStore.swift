@@ -69,7 +69,7 @@ final class MailStore {
     @ObservationIgnored let tagging: TagStore
     @ObservationIgnored private(set) lazy var avatars = AvatarStore(accounts: accountStore, root: cache.root)
     /// Google Chat accounts, spaces and messages; selected through `Selection.chat`.
-    @ObservationIgnored private(set) lazy var chat = ChatStore(cache: cache, accounts: accountStore)
+    @ObservationIgnored private(set) lazy var chat = ChatStore(cache: cache, accounts: accountStore, avatars: avatars)
     @ObservationIgnored private lazy var push = PushService(accounts: accountStore) { [weak self] id in
         self?.refresh(account: id)
     }

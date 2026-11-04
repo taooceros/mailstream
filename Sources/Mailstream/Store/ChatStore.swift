@@ -59,6 +59,8 @@ final class ChatStore {
     @ObservationIgnored private let chat: Chat
     @ObservationIgnored private let cache: MailCache
     @ObservationIgnored private let accountStore: AccountStore
+    /// Takes the pictures Google Chat publishes for the people the rows show.
+    @ObservationIgnored private let avatars: AvatarStore
 
     private(set) var accounts: [ChatAccount] = []
     /// Every account's spaces as list rows, newest first.
@@ -98,9 +100,10 @@ final class ChatStore {
     /// Account changes and the poll.
     @ObservationIgnored private var watchers: [Task<Void, Never>] = []
 
-    init(cache: MailCache, accounts: AccountStore) {
+    init(cache: MailCache, accounts: AccountStore, avatars: AvatarStore) {
         self.cache = cache
         accountStore = accounts
+        self.avatars = avatars
         chat = Chat { id in
             guard accounts.record(id).map(ChatStore.isChat) == true else { return nil }
             return accounts.api(for: id)
@@ -294,6 +297,7 @@ final class ChatStore {
         let output = await input.build()
         // Spaces changed meanwhile: the next pass shows them.
         guard !rebuild.isPending else { return }
+        for row in output { if let photo = row.avatarPhoto { avatars.publish(photo, for: row.avatarKey) } }
         rows = output
     }
 
@@ -581,8 +585,11 @@ nonisolated struct ChatRow: Hashable, Sendable {
     let hasAttachment: Bool
     let avatarInitials: String
     let avatarName: String
-    /// AvatarStore key: the person's lowercased address; empty when there is none.
+    /// AvatarStore key: the person's lowercased address, else their Chat user id; empty when the
+    /// row shows no one.
     let avatarKey: String
+    /// The picture Google Chat publishes for that person.
+    let avatarPhoto: URL?
     /// Seed of the initials' color.
     let avatarColorKey: String
 
@@ -605,12 +612,14 @@ nonisolated struct ChatRow: Hashable, Sendable {
         case .space: incoming
         }
         if let person {
-            avatarKey = person.email?.lowercased() ?? ""
+            avatarKey = person.avatarKey
+            avatarPhoto = person.avatarUrl.flatMap(URL.init(string:))
             avatarColorKey = person.avatarKey
             avatarName = person.label
             avatarInitials = Avatar.initials(for: Address(name: person.label, email: person.email ?? ""))
         } else {
             avatarKey = ""
+            avatarPhoto = nil
             avatarColorKey = space.name
             avatarName = title
             avatarInitials = Avatar.initials(for: Address(name: title, email: ""))

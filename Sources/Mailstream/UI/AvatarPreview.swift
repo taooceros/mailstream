@@ -55,6 +55,8 @@ private final class AvatarPreviewController: NSViewController {
         email.alignment = .center
         email.lineBreakMode = .byTruncatingMiddle
         email.isSelectable = true
+        // Chat apps and people Google withholds the address of are keyed by their user id.
+        email.isHidden = !address.email.contains("@")
 
         let stack = NSStackView(views: [picture, name, email])
         stack.orientation = .vertical

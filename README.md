@@ -330,9 +330,12 @@ address. Sources, best first:
 1. **Contact photos** from the signed-in accounts: Google (People API: saved
    contacts, "other contacts" and, on Workspace, the domain directory) and
    Outlook (Graph contacts).
-2. **BIMI logo** of the sender's domain (DNS `default._bimi.<domain>`).
-3. **Gravatar**, requested with the SHA-256 of the address and `d=404`.
-4. **Site icon** of the domain, for automated mail only (tagged non-people, or a
+2. **Google Chat's picture** of the person (the `avatarUrl` the Chat API reports
+   for senders and DM members), for anyone Chat has shown. Chat apps, which
+   have no address, are keyed by their user id and get their logo this way.
+3. **BIMI logo** of the sender's domain (DNS `default._bimi.<domain>`).
+4. **Gravatar**, requested with the SHA-256 of the address and `d=404`.
+5. **Site icon** of the domain, for automated mail only (tagged non-people, or a
    `noreply`-style address). Icons smaller than 32 px are skipped.
 
 Free-mail domains (gmail.com, outlook.com, …) never get a domain logo. Results,

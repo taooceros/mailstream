@@ -7,8 +7,9 @@ import Synchronization
 /// Sender pictures for the list and the reader, looked up lazily for what is on screen.
 ///
 /// Sources, best first: the photo of a Google or Outlook contact (accounts granted contacts
-/// access), the sender domain's BIMI logo, Gravatar, and for automated mail the
-/// domain's site icon. Anything without a picture keeps its initials.
+/// access), the picture a person publishes themselves (Google Chat's `avatarUrl`, handed in through
+/// `publish`), the sender domain's BIMI logo, Gravatar, and for automated mail the domain's site
+/// icon. Anything without a picture keeps its initials.
 ///
 /// Observable through `revision`: views showing initials look again when it changes.
 @Observable
@@ -22,6 +23,8 @@ final class AvatarStore {
     @ObservationIgnored private let large = NSCache<NSString, NSImage>()
     @ObservationIgnored private var missing = Set<String>()
     @ObservationIgnored private var pending = Set<String>()
+    /// Address or Chat user id (`users/…`) → the picture that person publishes.
+    @ObservationIgnored private var published: [String: URL] = [:]
     /// Follows the photo accounts as accounts are added, removed or regranted.
     @ObservationIgnored private var accountWatch: Task<Void, Never>?
 
@@ -60,23 +63,34 @@ final class AvatarStore {
         }
     }
 
-    /// The picture for `email` when it is already known; otherwise starts looking and returns nil,
-    /// bumping `revision` if one turns up. `automated` allows the domain's site icon.
-    func image(for email: String, automated: Bool) -> NSImage? {
-        let key = email.lowercased()
+    /// Makes `url`, the picture a person publishes (Google Chat's `avatarUrl`), a source for `key`:
+    /// their lowercased address, or their Chat user id when there is none. A new picture for a key
+    /// that had none is looked for again.
+    func publish(_ url: URL, for key: String) {
+        let key = key.lowercased()
+        guard !key.isEmpty, published[key] != url else { return }
+        published[key] = url
+        missing.remove(key)
+    }
+
+    /// The picture for `key` (an address, or a Chat user id with a published picture) when it is
+    /// already known; otherwise starts looking and returns nil, bumping `revision` if one turns up.
+    /// `automated` allows the domain's site icon.
+    func image(for key: String, automated: Bool) -> NSImage? {
+        let key = key.lowercased()
         if let image = images.object(forKey: key as NSString) { return image }
         request(key, automated: automated)
         return nil
     }
 
-    /// The picture for `email` if one is in memory, without looking for one.
-    func cachedImage(for email: String) -> NSImage? {
-        images.object(forKey: email.lowercased() as NSString)
+    /// The picture for `key` if one is in memory, without looking for one.
+    func cachedImage(for key: String) -> NSImage? {
+        images.object(forKey: key.lowercased() as NSString)
     }
 
     /// The same picture as a `data:` URL, for the reader page.
-    func dataURL(for email: String, automated: Bool) -> String? {
-        let key = email.lowercased()
+    func dataURL(for key: String, automated: Bool) -> String? {
+        let key = key.lowercased()
         guard let png = pngs.object(forKey: key as NSString) else {
             request(key, automated: automated)
             return nil
@@ -85,23 +99,25 @@ final class AvatarStore {
     }
 
     /// The same picture at 512 px for an enlarged view, fetched from its source on demand.
-    func largeImage(for email: String, automated: Bool) async -> NSImage? {
-        let key = email.lowercased()
+    func largeImage(for key: String, automated: Bool) async -> NSImage? {
+        let key = key.lowercased()
         if let image = large.object(forKey: key as NSString) { return image }
-        guard let png = await resolver.avatar(for: key, automated: automated, side: 512),
+        guard let png = await resolver.avatar(for: key, published: published[key], automated: automated, side: 512),
               let image = NSImage(data: png) else { return nil }
         large.setObject(image, forKey: key as NSString)
         return image
     }
 
     private func request(_ key: String, automated: Bool) {
-        guard key.contains("@"), !missing.contains(key), pending.insert(key).inserted else { return }
+        let photo = published[key]
+        guard key.contains("@") || photo != nil, !missing.contains(key), pending.insert(key).inserted else { return }
         let resolver = resolver
         Task {
-            let png = await resolver.avatar(for: key, automated: automated)
+            let png = await resolver.avatar(for: key, published: photo, automated: automated)
             pending.remove(key)
             guard let png, let image = NSImage(data: png) else {
-                missing.insert(key)
+                // A picture published meanwhile is worth another look.
+                if published[key] == photo { missing.insert(key) }
                 return
             }
             images.setObject(image, forKey: key as NSString)
@@ -167,33 +183,45 @@ actor AvatarResolver {
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
-    func avatar(for email: String, automated: Bool, side: Int = AvatarResolver.side) async -> Data? {
-        let automated = automated || Self.looksAutomated(email)
+    /// `key` is an address, or a Chat user id when `published` is the only source.
+    func avatar(for key: String, published: URL?, automated: Bool, side: Int = AvatarResolver.side) async -> Data? {
+        let automated = automated || Self.looksAutomated(key)
         let directory = await contacts()
-        guard side == Self.side else { return await find(email, automated: automated, side: side, in: directory) }
-        let key = "p-" + Self.hash(email)
-        switch await cached(key, stamp: directory.stamp) {
+        guard side == Self.side else {
+            return await find(key, published: published, automated: automated, side: side, in: directory)
+        }
+        let cacheKey = "p-" + Self.hash(key)
+        // A miss made without the published picture, or with another one, does not stand for this lookup.
+        let stamp = directory.stamp + (published.map { "|" + Self.hash($0.absoluteString) } ?? "")
+        switch await cached(cacheKey, stamp: stamp) {
         case .hit(let png): return png
         case .miss: return nil
         case .unknown: break
         }
         let png: Data?
         do {
-            png = try await permits.withPermit { await find(email, automated: automated, side: side, in: directory) }
+            png = try await permits.withPermit {
+                await find(key, published: published, automated: automated, side: side, in: directory)
+            }
         } catch {
             // Cancelled while waiting for a permit: nothing was looked up, so no miss is cached.
             return nil
         }
-        await store(png, at: key, stamp: directory.stamp)
+        await store(png, at: cacheKey, stamp: stamp)
         return png
     }
 
-    private func find(_ email: String, automated: Bool, side: Int, in directory: Directory) async -> Data? {
-        if let source = directory.photos[email], let png = await contactPhoto(source, side: side) { return png }
-        let domain = email.split(separator: "@").last.map(String.init) ?? ""
+    private func find(_ key: String, published: URL?, automated: Bool, side: Int, in directory: Directory) async -> Data? {
+        if let source = directory.photos[key], let png = await contactPhoto(source, side: side) { return png }
+        if let published, let fetched = await fetch(Self.sized(published, side: side)),
+           let png = await Self.normalize(fetched, style: .logo, side: side) {
+            return png
+        }
+        guard key.contains("@") else { return nil }
+        let domain = key.split(separator: "@").last.map(String.init) ?? ""
         let company = !domain.isEmpty && !Self.freemail.contains(domain)
         if automated, company, let png = await domainLogo(domain, side: side) { return png }
-        if let png = await gravatar(email, side: side) { return png }
+        if let png = await gravatar(key, side: side) { return png }
         if !automated, company, let png = await bimi(domain, side: side) { return png }
         return nil
     }
@@ -407,11 +435,7 @@ actor AvatarResolver {
         let fetched: Data?
         switch source {
         case .url(let url):
-            // Google serves any size; ask for the one drawn.
-            var link = url.absoluteString
-            if let range = link.range(of: #"=s\d+(-c)?$"#, options: .regularExpression) { link.removeSubrange(range) }
-            guard let sized = URL(string: link + "=s\(side)-c") else { return nil }
-            fetched = await fetch(sized)
+            fetched = await fetch(Self.sized(url, side: side))
         case .graphContact(let account, let id):
             guard let api = accounts.first(where: { $0.name == account })?.api,
                   let url = URL(string: "https://graph.microsoft.com/v1.0/me/contacts/\(id)/photo/$value")
@@ -420,6 +444,15 @@ actor AvatarResolver {
         }
         guard let fetched else { return nil }
         return await Self.normalize(fetched, style: .photo, side: side)
+    }
+
+    /// Google serves its pictures at any size (`=s96-c` after the path, replacing whatever options
+    /// the link has, such as Chat's `=k-no`): ask for the one drawn. Other links stay as they are.
+    private static func sized(_ url: URL, side: Int) -> URL {
+        guard url.host()?.hasSuffix("googleusercontent.com") == true else { return url }
+        var link = url.absoluteString
+        if let range = link.range(of: #"=[^/=]*$"#, options: .regularExpression) { link.removeSubrange(range) }
+        return URL(string: link + "=s\(side)-c") ?? url
     }
 
     // MARK: - Public sources

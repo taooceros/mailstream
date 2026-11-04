@@ -134,10 +134,9 @@ final class ChatReader: WebShellClient {
         for user in (store.chat.space(key)?.members ?? []) + thread.messages.map(\.sender) {
             names[user.name] = user.label
             guard seen.insert(user.avatarKey).inserted else { continue }
-            if let email = user.email {
-                if let url = store.avatars.dataURL(for: email, automated: user.bot) { avatars[user.avatarKey] = url }
-            } else if let url = user.avatarUrl {
-                // No address to look the person up by: the page loads Google's picture itself.
+            if let photo = user.avatarUrl.flatMap(URL.init(string:)) { store.avatars.publish(photo, for: user.avatarKey) }
+            // Until AvatarStore has the picture, the page loads Google's link itself.
+            if let url = store.avatars.dataURL(for: user.avatarKey, automated: user.bot) ?? user.avatarUrl {
                 avatars[user.avatarKey] = url
             }
         }
