@@ -35,6 +35,22 @@ macOS 26, Swift 6.2 language mode; `Package.swift` sets `defaultIsolation(MainAc
   whose inputs changed is dropped.
 - Failures go to `problems.report(_:from:context:)` (`StoreProblems`), the one problem channel.
 - Write existentials as `any Error`, `any MailBackend`.
-- In task groups, bind an awaited value before building a tuple
-  (`let hits = try await …; return (key, .success(hits))`): Swift 6.3 at `-O` drops elements of
-  `(key, .success(try await …))`.
+- Concurrent per-key work (accounts, mailboxes) goes through `forEachConcurrently`
+  (`Store/Concurrency.swift`), which consumes each result on the caller's actor as it completes;
+  restartable polling is a `PeriodicTask`. Hand-written task groups must bind an awaited value
+  before building a tuple (`let hits = try await …; return (key, .success(hits))`): Swift 6.3 at
+  `-O` drops elements of `(key, .success(try await …))`.
+
+## Shared layers
+
+Reuse these instead of writing another copy:
+
+- Network: paging is `API.pages`, chunked batch requests with throttled retries are `API.batched`,
+  status classification is `API.retry(status:body:)`; provider roots and OAuth scopes live in
+  `Backend/Endpoints.swift`.
+- Disk: JSON files are read and written with `JSONFile`; `MailCache` queues its writes.
+- Style: every color, type size, radius, shadow and duration comes from `Design`
+  (`UI/Design.swift`). AppKit reads the tokens directly; the pages' CSS uses them as custom
+  properties (`var(--muted)`, `var(--size-body)`, `var(--dur-quick)`) from `Design.stylesheet`,
+  so native and HTML surfaces match. Add a token rather than a literal; use the nearest step of a
+  scale. AppKit boilerplate (labels, sheets, pinning, toolbar buttons) is in `UI/ViewKit.swift`.
