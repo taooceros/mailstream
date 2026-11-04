@@ -20,6 +20,8 @@ nonisolated enum OAuthScope {
     static let googleOtherContacts = "https://www.googleapis.com/auth/contacts.other.readonly"
     static let googleDirectory = "https://www.googleapis.com/auth/directory.readonly"
     static let chatSpaces = "https://www.googleapis.com/auth/chat.spaces.readonly"
+    /// Starting direct messages and group chats (`spaces.setup`).
+    static let chatSpacesCreate = "https://www.googleapis.com/auth/chat.spaces.create"
     /// The one that makes a Google account a chat account.
     static let chatMessages = "https://www.googleapis.com/auth/chat.messages.readonly"
     static let chatCreate = "https://www.googleapis.com/auth/chat.messages.create"

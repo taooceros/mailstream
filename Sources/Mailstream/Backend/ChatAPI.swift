@@ -4,11 +4,14 @@ import Foundation
 /// Reference: <https://developers.google.com/workspace/chat/api/reference/rest>.
 nonisolated enum ChatAPI {
     /// `path` under the API root, with `query` added as `URLQueryItem`s. That is URLComponents'
-    /// encoding, which leaves characters `formEncoded` escapes (`:`, `/`, `?` and others) as they are.
+    /// encoding, which leaves characters `formEncoded` escapes (`:`, `/`, `?` and others) as they
+    /// are, except `+`, which Google would read as a space (`users/a+b@example.com`).
     static func url(_ path: String, _ query: [(String, String)] = []) -> URL {
-        var url = Endpoints.chat.appending(path: path)
-        if !query.isEmpty { url.append(queryItems: query.map { URLQueryItem(name: $0.0, value: $0.1) }) }
-        return url
+        let url = Endpoints.chat.appending(path: path)
+        guard !query.isEmpty, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        components.queryItems = query.map { URLQueryItem(name: $0.0, value: $0.1) }
+        components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        return components.url ?? url
     }
 
     /// Fails unless `name` is a resource name of the given shape (`spaces/…`, `spaces/…/threads/…`),
@@ -26,6 +29,17 @@ nonisolated enum ChatAPI {
     /// Fails unless `name` is a space's resource name (`spaces/…`).
     static func checkSpace(_ name: String) throws {
         try check(name, shape: ["spaces"])
+    }
+
+    /// `users/<address>`, the name the API takes for a person by email; fails for anything that
+    /// isn't a plain address, so a typed one can't reach another path or query of the API.
+    static func user(email: String) throws -> String {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.+'@")
+        let parts = email.split(separator: "@", omittingEmptySubsequences: false)
+        guard parts.count == 2, !parts[0].isEmpty, parts[1].contains("."), email.allSatisfy(allowed.contains) else {
+            throw ChatError(message: "Not an email address: \(email)")
+        }
+        return "users/" + email
     }
 
     struct Space: Decodable, Sendable {
@@ -193,5 +207,45 @@ nonisolated enum ChatAPI {
         let request = API.request(url("\(space)/messages", query), method: "POST",
                                   json: Body(text: text, thread: thread.map { Message.Thread(name: $0) }))
         return try await api.decode(Message.self, request)
+    }
+
+    /// The user's direct message with `user` (`users/…`); nil when they have none yet.
+    static func findDirectMessage(_ api: API, user: String) async throws -> Space? {
+        do {
+            return try await api.get(Space.self, url("spaces:findDirectMessage", [("name", user)]))
+        } catch let error as APIError where error.status == 404 {
+            return nil
+        } catch let error as APIError where error.status == 400 {
+            // What Google answers for an address no Chat user has ("malformed user resource name").
+            throw ChatError(message: "No Google Chat user has the address \(user.dropFirst("users/".count)).")
+        }
+    }
+
+    /// Creates a direct message with one of `users` (`users/…`) or a group chat with several; for
+    /// a direct message that exists already Google returns it. `request` makes a repeat return
+    /// the space the first one created, so this is safe to send again.
+    static func setUpSpace(_ api: API, users: [String], request: String) async throws -> Space {
+        struct Body: Encodable {
+            struct NewSpace: Encodable { let spaceType: String }
+            struct Membership: Encodable {
+                struct Member: Encodable {
+                    let name: String
+                    let type: String
+                }
+                let member: Member
+            }
+            let space: NewSpace
+            let requestId: String
+            let memberships: [Membership]
+        }
+        let body = Body(space: .init(spaceType: users.count == 1 ? "DIRECT_MESSAGE" : "GROUP_CHAT"), requestId: request,
+                        memberships: users.map { .init(member: .init(name: $0, type: "HUMAN")) })
+        let request = API.request(url("spaces:setup"), method: "POST", json: body)
+        let (data, _) = try await api.send(request, idempotent: true)
+        do {
+            return try JSONDecoder().decode(Space.self, from: data)
+        } catch {
+            throw APIError.unexpectedAnswer(from: request.url?.host(), error)
+        }
     }
 }

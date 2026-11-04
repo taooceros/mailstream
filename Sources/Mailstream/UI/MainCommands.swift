@@ -1,9 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// The menu bar beyond the system's standard items: Settings, New Message, Find, the View menu's
-/// navigation and tagging commands, and the Message menu. Window commands are live only while the
-/// main window is key, as they were when the responder chain routed them.
+/// The menu bar beyond the system's standard items: Settings, New Message, New Chat, Find, the View
+/// menu's navigation and tagging commands, and the Message menu. Window commands are live only
+/// while the main window is key, as they were when the responder chain routed them.
 struct MainCommands: Commands {
     let model: MainModel
     let showSettings: () -> Void
@@ -16,6 +16,9 @@ struct MainCommands: Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Message") { model.compose() }
                 .keyboardShortcut("n")
+            Button("New Chat") { model.startChat() }
+                .keyboardShortcut("n", modifiers: [.command, .option])
+                .disabled(!model.isKeyWindow || !model.canStartChat)
         }
         CommandGroup(after: .pasteboard) {
             // AppKit's plain-text paste; the responder chain decides whether it applies.

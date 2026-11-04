@@ -46,7 +46,7 @@ struct ComposeAlert {
 /// original so they are visible and editable; what the window shows is what is sent. The body takes
 /// typing at once: the quote is appended under it when the original has loaded.
 @Observable
-final class ComposeModel {
+final class ComposeModel: RecipientSource {
     let request: ComposeRequest
     @ObservationIgnored let store: MailStore
 

@@ -340,6 +340,32 @@ actor Chat {
         return ChatMessage(message, me: me, mine: true)
     }
 
+    /// The user's direct message with the person at `email`, summarized; nil when they have none.
+    func directMessage(account: String, with email: String) async throws -> ChatSpace? {
+        let user = try ChatAPI.user(email: email)
+        let api = try await resolve(account)
+        guard let space = try await ChatAPI.findDirectMessage(api, user: user) else { return nil }
+        return try await remember(api, account: account, space: space)
+    }
+
+    /// Creates a direct message with one of `emails` or a group chat with several, summarized.
+    /// `request` makes a repeat return the space the first one created.
+    func setUp(account: String, with emails: [String], request: String) async throws -> ChatSpace {
+        let users = try emails.map(ChatAPI.user(email:))
+        guard !users.isEmpty else { throw ChatError(message: "Add someone to chat with") }
+        let api = try await resolve(account)
+        let space = try await ChatAPI.setUpSpace(api, users: users, request: request)
+        return try await remember(api, account: account, space: space)
+    }
+
+    /// Summarizes a space the user just found or made and keeps it like a polled one.
+    private func remember(_ api: API, account: String, space: ChatAPI.Space) async throws -> ChatSpace {
+        try ChatAPI.checkSpace(space.name)
+        let summary = try await summarize(api, account: account, space: space)
+        memory[account, default: Memory()].summaries[space.name] = summary
+        return summary.space
+    }
+
     /// Forgets an account's summaries (it was removed).
     func forget(account: String) {
         memory[account] = nil

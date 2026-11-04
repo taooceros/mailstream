@@ -392,6 +392,13 @@ an open space marks new messages read as they arrive. Search filters the loaded
 spaces by title and latest message. The last 150 messages of the 20 most
 recently opened spaces are cached in `chat-v2/` in the cache directory.
 
+New Chat (⌥⌘N, or the compose button while Chat is selected) asks for the chat
+account and the people, completing to the account's chat partners and then mail
+contacts. One person opens your direct message with them, several the group chat
+with exactly them; when there is none, Google creates it (`spaces.setup`, which
+needs the `chat.spaces.create` scope: accounts signed in before it was asked for
+sign in again in Settings > Accounts). The space opens with the composer focused.
+
 ## Shortcuts
 
 | Action | Menu | List key |
@@ -399,6 +406,7 @@ recently opened spaces are cached in `chat-v2/` in the cache directory.
 | Open conversation or bundle | | Return / Space |
 | Back to list | ⌘[ | Esc, two-finger swipe left or right |
 | New message | ⌘N | |
+| New chat | ⌥⌘N | |
 | Reply / Reply All / Forward | ⌘R / ⇧⌘R / ⇧⌘F | r / a / f |
 | Archive | ⌃⌘A | e |
 | Move to Trash | ⌘⌫ (not while typing in a field) | ⌫ |

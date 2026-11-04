@@ -4,10 +4,26 @@ import SwiftUI
 // The compose window's two AppKit fields. SwiftUI has no token field, and `TextEditor` cannot set
 // inline predictions, spell checking, quote and dash substitution, the text inset or the font.
 
-/// A To, Cc or Bcc field: an `NSTokenField` completing to the user's contacts. SwiftUI has no token
+/// What a `RecipientField` edits: the compose window's To, Cc and Bcc, or the New Chat sheet's
+/// people.
+protocol RecipientSource: AnyObject {
+    /// Completion and editing labels (`Name <address>`) to the token they stand for.
+    var labels: [String: String] { get set }
+    func recipients(_ field: ComposeField) -> [String]
+    func setRecipients(_ tokens: [String], in field: ComposeField)
+    /// The user typed in the field.
+    func recipientsTyped(_ tokens: [String], in field: ComposeField)
+    /// People whose name, a word of it, or address starts with `typed`, best first.
+    func suggestions(for typed: String) -> [Contact]
+    func attach(_ view: NSView, as field: ComposeField)
+    /// `field`'s view joined its window, which is when focus asked for earlier can move to it.
+    func moved(toWindow field: ComposeField)
+}
+
+/// A recipient field: an `NSTokenField` completing to the user's contacts. SwiftUI has no token
 /// field with a completion menu.
 struct RecipientField: NSViewRepresentable {
-    let model: ComposeModel
+    let model: any RecipientSource
     let field: ComposeField
 
     func makeCoordinator() -> Coordinator { Coordinator(model: model, field: field) }
@@ -42,10 +58,10 @@ struct RecipientField: NSViewRepresentable {
     }
 
     final class Coordinator: NSObject, NSTokenFieldDelegate {
-        let model: ComposeModel
+        let model: any RecipientSource
         let field: ComposeField
 
-        init(model: ComposeModel, field: ComposeField) {
+        init(model: any RecipientSource, field: ComposeField) {
             self.model = model
             self.field = field
         }

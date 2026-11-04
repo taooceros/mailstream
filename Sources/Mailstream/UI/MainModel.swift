@@ -67,6 +67,8 @@ final class MainModel {
     @ObservationIgnored private var pendingAlerts: [StoreProblem] = []
     /// The conversation awaiting the permanent-delete confirmation.
     var pendingDelete: Conversation?
+    /// The New Chat sheet, while it is open.
+    var newChat: NewChatModel?
 
     @ObservationIgnored private var storeWatches: [Task<Void, Never>] = []
     @ObservationIgnored private var monitors: [Any] = []
@@ -494,6 +496,32 @@ final class MainModel {
 
     func compose(to addresses: [Address] = []) {
         ComposeWindowController.open(store: store, mode: .new, account: preferredAccount, to: addresses)
+    }
+
+    var canStartChat: Bool { !store.chat.accounts.isEmpty }
+
+    /// Opens the New Chat sheet for the chat account in view, else the selected mail account's,
+    /// else the first.
+    func startChat() {
+        guard let first = store.chat.accounts.first else { return }
+        let account: String
+        if case .chat(let name?) = store.selection {
+            account = name
+        } else if let preferred = preferredAccount, store.chat.account(named: preferred) != nil {
+            account = preferred
+        } else {
+            account = first.name
+        }
+        let model = NewChatModel(store: store, account: account)
+        model.onStarted = { [weak self] key in self?.openStartedChat(key) }
+        newChat = model
+    }
+
+    /// Shows the chat list the space belongs to, then the space with its composer.
+    private func openStartedChat(_ key: ChatSpaceKey) {
+        newChat = nil
+        if store.selection != .allChats, store.selection != .chat(key.account) { store.select(.chat(key.account)) }
+        open(.chat(key))
     }
 
     func refresh() {

@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// The main window's toolbar: back; archive, trash, read, star; reply, reply all, forward; refresh
-/// and compose, each group on its own glass. Search comes from `.searchable` on MainView. Labels,
-/// symbols and enabled states follow the selection through `ConversationAction.State`.
+/// and compose (a new chat while Chat is selected), each group on its own glass. Search comes from
+/// `.searchable` on MainView. Labels, symbols and enabled states follow the selection through
+/// `ConversationAction.State`.
 struct MainToolbar: ToolbarContent {
     let model: MainModel
 
@@ -27,7 +28,12 @@ struct MainToolbar: ToolbarContent {
         ToolbarSpacer(.fixed)
         ToolbarItemGroup {
             Button("Get New Mail", systemImage: "arrow.clockwise") { model.refresh() }
-            Button("New Message", systemImage: "square.and.pencil") { model.compose() }
+            if model.store.selection.isChat {
+                Button("New Chat", systemImage: "square.and.pencil") { model.startChat() }
+                    .disabled(!model.canStartChat)
+            } else {
+                Button("New Message", systemImage: "square.and.pencil") { model.compose() }
+            }
         }
     }
 

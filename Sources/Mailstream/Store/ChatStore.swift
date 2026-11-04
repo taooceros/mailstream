@@ -502,6 +502,74 @@ final class ChatStore {
         threads[key]?.pending.removeAll { $0.id == id }
     }
 
+    // MARK: - Starting
+
+    /// Whether `account`'s sign-in lets it create direct messages and group chats; accounts signed
+    /// in before Mailstream asked for that can only reopen the direct messages they have.
+    func canStartChats(account: String) -> Bool {
+        accountStore.record(account)?.scopes.contains(OAuthScope.chatSpacesCreate) == true
+    }
+
+    /// People `account` chats with, most recently active first: the other members of its direct
+    /// messages and group chats that Google names by address.
+    func people(account: String) -> [(user: ChatUser, activity: Date?)] {
+        var seen = Set<String>()
+        var out: [(user: ChatUser, activity: Date?)] = []
+        for space in listings[account]?.list.spaces ?? [] where space.kind == .dm || space.kind == .group {
+            for member in space.members where !member.bot {
+                guard let email = member.email?.lowercased(), seen.insert(email).inserted else { continue }
+                out.append((member, space.activity))
+            }
+        }
+        return out
+    }
+
+    /// The conversation with exactly `emails` in `account`: the direct message with one person or
+    /// the group chat with several, found in the list or at Google, else a new one Google creates.
+    /// It joins the list; the returned key opens it.
+    func start(account: String, with emails: [String]) async throws -> ChatSpaceKey {
+        guard self.account(named: account) != nil else { throw ChatError(message: "\(account) has no Google Chat") }
+        let own = account.lowercased()
+        var seen = Set<String>()
+        let people = emails.map { $0.lowercased() }.filter { $0 != own && seen.insert($0).inserted }
+        guard !people.isEmpty else { throw ChatError(message: "Add someone to chat with") }
+        guard people.count <= 49 else { throw ChatError(message: "A group chat holds at most 49 other people") }
+        if let known = listings[account]?.list.spaces.first(where: { Self.space($0, isWith: people) }) {
+            return ChatSpaceKey(account: account, space: known.name)
+        }
+        if people.count == 1, let found = try await chat.directMessage(account: account, with: people[0]) {
+            return insert(found, account: account)
+        }
+        guard canStartChats(account: account) else {
+            throw ChatError(message: "To start new chats, sign in to \(account) again in Settings > Accounts and allow "
+                + "Mailstream to create Google Chat conversations.")
+        }
+        let space = try await chat.setUp(account: account, with: people, request: UUID().uuidString)
+        return insert(space, account: account)
+    }
+
+    /// A direct message or unnamed group chat whose other members are exactly `people`.
+    private static func space(_ space: ChatSpace, isWith people: [String]) -> Bool {
+        guard space.kind == (people.count == 1 ? .dm : .group), space.members.count == people.count else { return false }
+        return Set(space.members.compactMap { $0.email?.lowercased() }) == Set(people)
+    }
+
+    /// Puts a space the user just found or made into its account's list, newest first. One
+    /// without activity yet (made just now) counts as active now, so it shows at the top.
+    private func insert(_ found: ChatSpace, account: String) -> ChatSpaceKey {
+        guard self.account(named: account) != nil else { return ChatSpaceKey(account: account, space: found.name) }
+        var space = found
+        if space.activity == nil { space.lastActive = Date() }
+        var listing = listings[account] ?? Listing(list: ChatSpaceList(me: nil, more: false, spaces: []), limit: Self.spacesPage)
+        listing.list.spaces.removeAll { $0.name == space.name }
+        listing.list.spaces.append(space)
+        listing.list.spaces.sortNewestFirst(by: \.activity)
+        listings[account] = listing
+        cache.saveChatSpaces(listing.list, for: account)
+        rebuild.request()
+        return ChatSpaceKey(account: account, space: space.name)
+    }
+
     /// Changes one space in its listing, keeping the list newest first, and republishes the rows.
     private func updateSpace(_ key: ChatSpaceKey, _ change: (inout ChatSpace) -> Void) {
         guard var listing = listings[key.account],

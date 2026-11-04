@@ -33,6 +33,7 @@ struct MainView: View {
         } message: {
             Text("Messages already in the trash are removed for good.")
         }
+        .sheet(item: $model.newChat) { NewChatView(model: $0) }
         .frame(minWidth: 760, minHeight: 480)
         .background(MainWindowReader { model.attach($0) })
         .onAppear {

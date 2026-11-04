@@ -22,8 +22,8 @@ nonisolated extension Provider {
         switch self {
         case .google:
             ["openid", "email", "profile", OAuthScope.gmail, OAuthScope.googleContacts, OAuthScope.googleOtherContacts,
-             OAuthScope.googleDirectory, OAuthScope.chatSpaces, OAuthScope.chatMessages, OAuthScope.chatCreate,
-             OAuthScope.chatMemberships, OAuthScope.chatReadState]
+             OAuthScope.googleDirectory, OAuthScope.chatSpaces, OAuthScope.chatSpacesCreate, OAuthScope.chatMessages,
+             OAuthScope.chatCreate, OAuthScope.chatMemberships, OAuthScope.chatReadState]
         case .microsoft:
             ["openid", "email", "profile", "offline_access",
              OAuthScope.graphUser, OAuthScope.graphMail, OAuthScope.graphSend, OAuthScope.graphContacts]
