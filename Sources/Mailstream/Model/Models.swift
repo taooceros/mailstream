@@ -153,6 +153,10 @@ nonisolated struct Envelope: Codable, Hashable, Sendable {
     var isSeen: Bool { flags.contains("seen") }
     var isFlagged: Bool { flags.contains("flagged") }
     var isDraft: Bool { flags.contains("draft") }
+
+    mutating func setFlag(_ flag: MessageFlag, _ on: Bool) {
+        if on { flags.insert(flag.rawValue) } else { flags.remove(flag.rawValue) }
+    }
 }
 
 nonisolated struct MessageRef: Hashable, Sendable, Codable {
