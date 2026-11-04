@@ -1,23 +1,22 @@
 import AppKit
 import SwiftUI
 
-/// The conversation list: the lines near the viewport placed in a scroll view, the floating
-/// status capsule, the empty label, and the open bundle's list laid over it.
+/// The conversation list: its lines in an AppKit scroll view, the floating status capsule, the
+/// empty label, and the open bundle's list laid over it.
 struct ConversationListView: View {
     /// The margin the AppKit table's inset style put around its rows.
     static let inset: CGFloat = 10
 
     let model: ConversationListModel
-    @FocusState private var focused: Bool
     @Environment(\.appearsActive) private var appearsActive
-    @State private var position = ScrollPosition()
     /// A new context's content drifts up into place from here.
     @State private var drift: CGFloat = 0
     @State private var fade: Double = 1
 
     var body: some View {
         ZStack {
-            list
+            Color.clear
+                .background { list }
                 .overlay {
                     if let empty = model.emptyText {
                         Text(empty)
@@ -41,80 +40,16 @@ struct ConversationListView: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { model.pageWidth = $0 }
     }
 
-    private var emphasized: Bool { focused && appearsActive }
-
+    /// The scroll view runs up under the toolbar, which the lines show through; the overlays stay
+    /// below it.
     private var list: some View {
-        ScrollView {
-            ConversationListStack(model: model) { row($0) }
-                .padding(Self.inset)
-                .offset(y: drift)
-                .opacity(fade)
-        }
-        .scrollPosition($position)
-        .onScrollGeometryChange(for: ConversationListGeometry.self) { geometry in
-            // The scroll view's frame starts below the toolbar, and hover measures from there; its
-            // visible rect also reaches up under the toolbar by the top inset.
-            ConversationListGeometry(top: geometry.contentOffset.y + geometry.contentInsets.top,
-                                     topInset: geometry.contentInsets.top,
-                                     contentHeight: geometry.contentSize.height,
-                                     containerHeight: geometry.containerSize.height)
-        } action: { _, new in
-            model.geometryChanged(new)
-        }
-        .onScrollPhaseChange { _, phase in
-            model.scrollingChanged(phase == .tracking || phase == .interacting || phase == .decelerating)
-        }
-        .onContinuousHover(coordinateSpace: .local) { phase in
-            switch phase {
-            case .active(let point): model.pointerMoved(point)
-            case .ended: model.pointerMoved(nil)
-            }
-        }
-        .focusable()
-        .focusEffectDisabled()
-        .focused($focused)
-        .onKeyPress(keys: [.return, .space, KeyEquivalent("\u{3}")]) { press in
-            guard Self.plain(press) else { return .ignored }
-            model.openHighlighted()
-            return .handled
-        }
-        .onKeyPress(keys: [.delete, .deleteForward]) { press in
-            guard Self.plain(press) else { return .ignored }
-            model.performOnHighlight(.trash)
-            return .handled
-        }
-        .onKeyPress(characters: CharacterSet(charactersIn: "esudraf")) { press in
-            guard Self.plain(press), let action = Self.singleKey[press.characters] else { return .ignored }
-            model.performOnHighlight(action)
-            return .handled
-        }
-        .onMoveCommand { direction in
-            switch direction {
-            case .up: model.moveHighlight(by: -1)
-            case .down: model.moveHighlight(by: 1)
-            default: break
-            }
-        }
-        .onChange(of: model.focusRequest) { focused = true }
-        .onChange(of: focused, initial: true) { model.isFocused = focused }
-        .onChange(of: appearsActive, initial: true) { model.windowActive = appearsActive }
-        .onChange(of: model.reveal) { _, reveal in
-            guard let reveal else { return }
-            position.scrollTo(y: reveal.top)
-        }
-        .onChange(of: model.contextGeneration) { driftIn() }
-    }
-
-    /// Mail-style single-key commands.
-    private static let singleKey: [String: ConversationAction] = [
-        "e": .archive, "s": .toggleStar, "u": .toggleRead, "d": .toggleWaiting,
-        "r": .reply, "a": .replyAll, "f": .forward,
-    ]
-
-    /// No modifier keys held, as the AppKit list read them (the keypad flag doesn't count; SwiftUI
-    /// reports no function flag).
-    private static func plain(_ press: KeyPress) -> Bool {
-        press.modifiers.subtracting(.numericPad).isEmpty
+        ConversationListScroller(model: model, itemsSerial: model.itemsSerial, reveal: model.reveal,
+                                 focusRequest: model.focusRequest, appearsActive: appearsActive)
+            .ignoresSafeArea(.container, edges: .top)
+            .offset(y: drift)
+            .opacity(fade)
+            .onChange(of: appearsActive, initial: true) { model.windowActive = appearsActive }
+            .onChange(of: model.contextGeneration) { driftIn() }
     }
 
     /// A different mailbox or search: the new content fades and drifts up into place.
@@ -131,30 +66,6 @@ struct ConversationListView: View {
         }
     }
 
-    @ViewBuilder private func row(_ item: ConversationListItem) -> some View {
-        switch item {
-        case .section(let title, let count, let accent):
-            ListRowSectionHeader(title: title, count: count, accent: accent)
-        case .shelf(let bundles):
-            ConversationListShelfRow(state: model.rowState(for: item), bundles: bundles, own: model.store.ownAddresses) {
-                model.enterBundle($0)
-            }
-        case .conversation(let conversation):
-            ConversationListMailRow(model: model, conversation: conversation, state: model.rowState(for: item),
-                                    emphasized: emphasized) { click(item.id) }
-                .equatable()
-        case .space(let space):
-            ConversationListChatRow(model: model, space: space, state: model.rowState(for: item),
-                                    emphasized: emphasized) { click(item.id) }
-                .equatable()
-        }
-    }
-
-    private func click(_ id: String) {
-        focused = true
-        model.click(id)
-    }
-
     @ViewBuilder private var status: some View {
         ZStack {
             if let line = model.statusLine {
@@ -166,45 +77,6 @@ struct ConversationListView: View {
         .padding(.horizontal, 20)
         .padding(.bottom, 14)
         .animation(.house(.brief), value: model.statusLine != nil)
-    }
-}
-
-/// The lines near the viewport, each at its place in a stack as tall as all of them. Lines
-/// further out have no views: scrolling, a page landing or a tag changing costs what is on
-/// screen, however long the list.
-private struct ConversationListStack<Row: View>: View {
-    let model: ConversationListModel
-    @ViewBuilder let row: (ConversationListItem) -> Row
-
-    var body: some View {
-        ConversationListStackLayout(height: model.stackHeight) {
-            ForEach(model.placed) { placed in
-                row(placed.item)
-                    .layoutValue(key: ConversationListStackLayout.Top.self, value: placed.top)
-                    .transition(.opacity)
-            }
-        }
-    }
-}
-
-/// Places each line at its known top and height without measuring it: the list knows every
-/// line's size, so a line coming or going costs only its own placement.
-private struct ConversationListStackLayout: Layout {
-    struct Top: LayoutValueKey {
-        static let defaultValue: CGFloat = 0
-    }
-
-    let height: CGFloat
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        CGSize(width: proposal.width ?? 0, height: height)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let width = ProposedViewSize(width: bounds.width, height: nil)
-        for subview in subviews {
-            subview.place(at: CGPoint(x: bounds.minX, y: bounds.minY + subview[Top.self]), proposal: width)
-        }
     }
 }
 
@@ -225,36 +97,37 @@ struct ConversationListBundlePage: View {
 
 /// The Smart Inbox shelf, lifting its tiles while the pointer is over it.
 struct ConversationListShelfRow: View {
-    let state: ListRowState
     let bundles: [ConversationListBundle]
     let own: Set<String>
+    let hovered: Bool
     let onOpen: (MailCategory) -> Void
 
     var body: some View {
-        ListRowShelf(bundles: bundles, own: own, hovered: state.hovered, onOpen: onOpen)
+        ListRowShelf(bundles: bundles, own: own, hovered: hovered, onOpen: onOpen)
     }
 }
 
-/// A conversation's row, drawing the content its state holds: a snippet, picture or hover
-/// redraws this row alone. Equal while its state and conversation are; the click is the same
-/// line's either way.
+/// A conversation's row, drawing the content its state holds. Equal while its state, hover and
+/// conversation are; the click is the same line's either way.
 struct ConversationListMailRow: View, Equatable {
     let model: ConversationListModel
     let conversation: Conversation
     let state: ListRowState
     let emphasized: Bool
+    let hovered: Bool
     let onClick: () -> Void
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.state === rhs.state && lhs.emphasized == rhs.emphasized && lhs.conversation == rhs.conversation
+        lhs.state === rhs.state && lhs.emphasized == rhs.emphasized && lhs.hovered == rhs.hovered
+            && lhs.conversation == rhs.conversation
     }
 
     var body: some View {
         if let content = state.content {
             let id = conversation.id
-            ListRowConversation(content: content, hovered: state.hovered, onAction: { model.perform($0, id: id) },
+            ListRowConversation(content: content, hovered: hovered, onAction: { model.perform($0, id: id) },
                                 avatars: model.store.avatars)
-                .modifier(ListRowChrome(highlighted: state.highlighted, emphasized: emphasized, hovered: state.hovered))
+                .modifier(ListRowChrome(highlighted: state.highlighted, emphasized: emphasized, hovered: hovered))
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onClick)
                 .contextMenu { menu }
@@ -290,17 +163,19 @@ struct ConversationListChatRow: View, Equatable {
     let space: ChatRow
     let state: ListRowState
     let emphasized: Bool
+    let hovered: Bool
     let onClick: () -> Void
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.state === rhs.state && lhs.emphasized == rhs.emphasized && lhs.space == rhs.space
+        lhs.state === rhs.state && lhs.emphasized == rhs.emphasized && lhs.hovered == rhs.hovered
+            && lhs.space == rhs.space
     }
 
     var body: some View {
         if let content = state.content {
             let key = space.key
-            ListRowConversation(content: content, hovered: state.hovered, avatars: model.store.avatars)
-                .modifier(ListRowChrome(highlighted: state.highlighted, emphasized: emphasized, hovered: state.hovered))
+            ListRowConversation(content: content, hovered: hovered, avatars: model.store.avatars)
+                .modifier(ListRowChrome(highlighted: state.highlighted, emphasized: emphasized, hovered: hovered))
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onClick)
                 .contextMenu {

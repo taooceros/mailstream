@@ -37,7 +37,7 @@ nonisolated extension ConversationAction.State {
 }
 
 /// One line of the conversation list.
-enum ConversationListItem: Identifiable {
+enum ConversationListItem: Identifiable, Equatable {
     case section(String, count: Int?, accent: Bool)
     case shelf([ConversationListBundle])
     case conversation(Conversation)
@@ -82,7 +82,7 @@ enum ConversationListItem: Identifiable {
 }
 
 /// One tile of the Smart Inbox shelf.
-struct ConversationListBundle: Identifiable {
+struct ConversationListBundle: Identifiable, Equatable {
     let category: MailCategory
     let members: [Conversation]
     var id: MailCategory { category }
@@ -136,7 +136,7 @@ private struct ListRowInputs: Equatable {
     }
 
     var content: ListRowContent {
-        let account = account.map { (name: $0.name, color: Color(nsColor: NSColor(hex: $0.hex))) }
+        let account = account.map { (name: $0.name, color: NSColor(hex: $0.hex)) }
         switch source {
         case .mail(let row, let snippet, let tag, let archivable):
             return ListRowContent(row, snippet: snippet, archivable: archivable, account: account, tag: tag, photo: photo)
@@ -205,10 +205,14 @@ final class ConversationListModel {
     @ObservationIgnored private var tops: [CGFloat] = []
     /// The lines the view lays out: those in view and `placedMargin` either side. Only these have
     /// views, so scrolling and list changes cost what is near the viewport, not the whole list.
-    private(set) var placed: [ConversationListPlacedItem] = []
+    /// Not observed: the view lays them out itself as it scrolls, without a SwiftUI update.
+    @ObservationIgnored private(set) var placed: [ConversationListPlacedItem] = []
     @ObservationIgnored private var placedRange: Range<Int> = 0..<0
     /// Height of all lines together.
-    private(set) var stackHeight: CGFloat = 0
+    @ObservationIgnored private(set) var stackHeight: CGFloat = 0
+    /// Bumped when the items change, inside their transaction, so the view lays out the new
+    /// `placed` with the change's animation.
+    private(set) var itemsSerial = 0
     private static let placedMargin = 8
     /// Each item's line state by item id, made and refreshed with the items.
     @ObservationIgnored private var rowStates: [String: ListRowState] = [:]
@@ -450,7 +454,7 @@ final class ConversationListModel {
             defer { top += item.height }
             return top
         }
-        if stackHeight != top { stackHeight = top }
+        stackHeight = top
         requestedRange = nil
         var states: [String: ListRowState] = [:]
         states.reserveCapacity(newItems.count)
@@ -467,6 +471,7 @@ final class ConversationListModel {
         }
         rowStates = states
         place(force: true)
+        itemsSerial += 1
     }
 
     /// Lays out the lines in view and `placedMargin` either side, when that stretch moved or
