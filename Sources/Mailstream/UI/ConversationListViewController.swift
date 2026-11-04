@@ -109,20 +109,30 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     private var preloadTask: Task<Void, Never>?
     /// Account order and labels the visible cells' account bars were drawn with.
     private var accountNames: [String] = []
-    private var savedScroll: [String: CGFloat] = [:]
     /// Pages fetched without the user scrolling, to fill a Smart Inbox whose rows were mostly bundled.
     private var autoFillPages = 0
     private static let autoFillLimit = 6
     /// The published list, row content, account names and the status line.
     private var storeWatches: [Task<Void, Never>] = []
 
-    /// The Smart Inbox bundle being browsed, nil at the top level.
-    private(set) var openBundle: MailCategory?
-    /// Conversations in the open bundle and how many are unread.
-    private(set) var bundleCounts: (total: Int, unread: Int) = (0, 0)
+    /// Set on a bundle's own list, which lies over the inbox's list: it shows only that bundle.
+    private let bundle: MailCategory?
+    /// The open bundle's list, laid over this one. The inbox beneath stays shown and live, so going
+    /// back only takes the bundle away: nothing has to be rebuilt or redrawn to uncover it.
+    private var bundleList: ConversationListViewController?
+    /// Bumped per back-swipe step, so a slide that a new drag interrupts does not clean up under it.
+    private var swipeStep = 0
+    /// A bundle's list: its members and how many are unread.
+    private var memberCounts: (total: Int, unread: Int) = (0, 0)
 
-    init(store: MailStore) {
+    /// The Smart Inbox bundle being browsed, nil at the top level.
+    var openBundle: MailCategory? { bundle ?? bundleList?.bundle }
+    /// Conversations in the open bundle and how many are unread.
+    var bundleCounts: (total: Int, unread: Int) { bundleList?.memberCounts ?? memberCounts }
+
+    init(store: MailStore, bundle: MailCategory? = nil) {
         self.store = store
+        self.bundle = bundle
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -131,10 +141,12 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
 
     isolated deinit { storeWatches.forEach { $0.cancel() } }
 
-    var tableView: NSTableView { table }
+    /// The list on top: the open bundle's, else this one.
+    var tableView: NSTableView { bundleList?.table ?? table }
 
     override func loadView() {
-        let container = NSView()
+        // A bundle's list is a page over the inbox, so it must hide what lies beneath.
+        let container = bundle == nil ? NSView() : OpaquePage()
         container.wantsLayer = true
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("conversation"))
@@ -236,15 +248,16 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
     }
 
     private func buildRows() -> [Row] {
-        if isChat {
-            openBundle = nil
-            return chatRows()
-        }
         let conversations = store.conversations
-        guard isSmart else {
-            openBundle = nil
-            return dated(conversations)
+        if let bundle {
+            // Left in another list, the inbox closes this page; until then it shows nothing.
+            guard !isChat, isSmart else { return [] }
+            let members = conversations.filter { store.tagging.tag(for: $0)?.category == bundle }
+            memberCounts = (members.count, members.filter(\.isUnread).count)
+            return dated(members)
         }
+        if isChat { return chatRows() }
+        guard isSmart else { return dated(conversations) }
         var buckets: [MailCategory: [Conversation]] = [:]
         var waiting: [Conversation] = []
         var people: [Conversation] = []
@@ -257,11 +270,6 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             } else {
                 people.append(conversation)
             }
-        }
-        if let openBundle {
-            let members = buckets[openBundle] ?? []
-            bundleCounts = (members.count, members.filter(\.isUnread).count)
-            return dated(members)
         }
         var rows: [Row] = []
         let shelf = Self.bundled.compactMap { category in buckets[category].map { (category, $0) } }
@@ -338,19 +346,17 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
             context = lastContext != nil
             lastContext = store.listContext
             autoFillPages = 0
-            if openBundle != nil {
-                openBundle = nil
-                delegate?.conversationListDidChangeBundle(self)
-            }
             highlightedID = nil
         }
+        // Another mailbox, a search, chat or tagging turned off: no bundle to be in.
+        if bundleList != nil, context || isChat || !isSmart { closeBundle() }
         let previousRow = table.selectedRow >= 0 ? table.selectedRow : lastHighlightedRow
-        let hadBundle = openBundle, hadCounts = bundleCounts
+        let hadCounts = memberCounts
         let newRows = buildRows()
-        // Only this rebuild knows the open bundle's counts, which the window's subtitle shows.
-        if hadBundle != openBundle || hadCounts != bundleCounts { delegate?.conversationListDidChangeBundle(self) }
+        // Only this rebuild knows the bundle's counts, which the window's subtitle shows.
+        if bundle != nil, hadCounts != memberCounts { delegate?.conversationListDidChangeBundle(self) }
         if context {
-            transition(.rise) { self.apply(newRows, animated: false) }
+            transition { self.apply(newRows, animated: false) }
         } else {
             apply(newRows, animated: true)
         }
@@ -435,17 +441,9 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         reloadChanged(changed)
     }
 
-    /// How new list content arrives while the old cross-fades away.
-    private enum Entrance {
-        /// A different mailbox or search: drifts up into place.
-        case rise
-        /// Into a bundle: spreads out from the middle.
-        case open
-        /// Back out of a bundle: settles in from slightly larger.
-        case close
-    }
-
-    private func transition(_ entrance: Entrance, _ change: () -> Void) {
+    /// A different mailbox or search: the new content drifts up into place while the old
+    /// cross-fades away.
+    private func transition(_ change: () -> Void) {
         guard view.window != nil, let layer = scroll.layer else { change(); return }
         let fade = CATransition()
         fade.type = .fade
@@ -454,12 +452,7 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         fade.preferredFrameRateRange = Motion.frameRate
         layer.add(fade, forKey: "contentFade")
         change()
-        switch entrance {
-        case .rise: Motion.slideIn(table, dy: 10)
-        // The clip view, not the tall table: its center is the middle of what is on screen.
-        case .open: Motion.unfold(scroll.contentView, from: 0.94)
-        case .close: Motion.unfold(scroll.contentView, from: 1.04)
-        }
+        Motion.slideIn(table, dy: 10)
     }
 
     private func afterReload() {
@@ -579,162 +572,111 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
 
     // MARK: - Bundles
 
+    /// Opens `category` as its own list laid over this one, spreading out from the middle as the
+    /// reader does. The inbox beneath keeps its rows, scroll position and updates.
     func enterBundle(_ category: MailCategory) {
-        savedScroll["top"] = scroll.contentView.bounds.origin.y
-        // What a back swipe uncovers, taken now so the swipe itself never stops to draw.
-        inboxSnapshot = snapshot()
-        openBundle = category
-        autoFillPages = 0
+        guard bundle == nil, bundleList == nil else { return }
+        let list = ConversationListViewController(store: store, bundle: category)
+        list.delegate = delegate
+        addChild(list)
+        let page = list.view
+        page.frame = view.bounds
+        page.autoresizingMask = [.width, .height]
+        view.addSubview(page)
+        bundleList = list
+        // The inbox's highlight is not what toolbar commands act on while the bundle is open.
         highlightedID = nil
-        transition(.open) {
-            self.apply(self.buildRows(), animated: false)
-            self.table.deselectAll(nil)
-            self.table.scrollRowToVisible(0)
-        }
+        table.deselectAll(nil)
+        table.refreshHover()
+        if view.window?.firstResponder === table { view.window?.makeFirstResponder(list.table) }
+        page.alphaValue = 0
+        Motion.unfold(page, from: 0.94)
+        Motion.fade(page, to: 1, duration: Motion.standard)
         delegate?.conversationListDidChangeBundle(self)
-        Task { [weak self] in self?.afterReload() }
     }
 
+    /// Back to the inbox: the bundle shrinks back toward the middle and fades away.
     func leaveBundle() {
-        guard openBundle != nil else { return }
-        openBundle = nil
-        highlightedID = nil
-        transition(.close) {
-            self.apply(self.buildRows(), animated: false)
-            self.table.deselectAll(nil)
-            if let y = self.savedScroll["top"] { self.scroll.contentView.scroll(to: NSPoint(x: 0, y: y)) }
-        }
-        delegate?.conversationListDidChangeBundle(self)
+        guard let list = detachBundle(), let page = list.view.layer else { return }
+        page.removeAnimation(forKey: "swipe")
+        page.shadowOpacity = 0
+        Motion.group({
+            let fold = Motion.basic("transform", from: CATransform3DIdentity, to: Motion.centered(0.96, in: page),
+                                    duration: 0.24)
+            fold.fillMode = .forwards
+            fold.isRemovedOnCompletion = false
+            page.add(fold, forKey: "fold")
+            Motion.fade(list.view, to: 0, duration: 0.24)
+        }, completion: { [weak self] in self?.remove(list) })
     }
 
-    /// The inbox as it was when the bundle opened, which a back swipe uncovers.
-    private var inboxSnapshot: (image: CGImage, size: CGSize)?
-    /// Under the bundle while a back swipe moves it: the inbox snapshot on the page background.
-    private var swipeUnder: CALayer?
-    /// Bumped per drag step, so a slide that a new drag interrupts does not clean up under it.
-    private var swipeStep = 0
+    /// The bundle at once, without animation (the list beneath is changing to something else).
+    private func closeBundle() {
+        if let list = detachBundle() { remove(list) }
+    }
 
-    /// A back swipe in a bundle: the bundle slides with the fingers like a page, over the inbox.
-    func dragBack(to offset: CGFloat) {
-        guard openBundle != nil, let host = view.layer, let layer = scroll.layer else { return }
+    /// The bundle stops being the open one: commands, focus and the title go back to the inbox. Its
+    /// list stays on screen for the caller to take away.
+    private func detachBundle() -> ConversationListViewController? {
+        guard let list = bundleList else { return nil }
+        bundleList = nil
+        list.delegate = nil
         swipeStep += 1
-        if swipeUnder == nil {
-            let under = CALayer()
-            under.frame = scroll.frame
-            under.backgroundColor = pageColor
-            if let inboxSnapshot {
-                under.contents = inboxSnapshot.image
-                // Same size: exact. Resized since: keep the top of the inbox in place, never stretch.
-                under.contentsGravity = inboxSnapshot.size == table.visibleRect.size ? .resize : .topLeft
-                under.contentsScale = view.window?.backingScaleFactor ?? 2
-            }
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            host.insertSublayer(under, below: layer)
-            // The list draws no background of its own; as a page it needs one, and an edge.
-            layer.backgroundColor = pageColor
-            layer.masksToBounds = false
-            layer.shadowColor = NSColor.black.cgColor
-            layer.shadowOpacity = 0.12
-            layer.shadowRadius = 14
-            layer.shadowOffset = .zero
-            layer.shadowPath = CGPath(rect: layer.bounds, transform: nil)
-            CATransaction.commit()
-            swipeUnder = under
-            // A bundle still spreading out must not keep animating under the fingers.
-            layer.removeAnimation(forKey: "contentFade")
-            scroll.contentView.layer?.removeAnimation(forKey: "unfold")
+        if let window = view.window, let responder = window.firstResponder as? NSView, responder.isDescendant(of: list.view) {
+            window.makeFirstResponder(table)
         }
-        Motion.hold(layer, "transform", at: CATransform3DMakeTranslation(offset, 0, 0), key: "swipe")
+        delegate?.conversationList(self, didHighlight: highlightedConversation)
+        delegate?.conversationListDidChangeBundle(self)
+        return list
+    }
+
+    private func remove(_ list: ConversationListViewController) {
+        list.view.removeFromSuperview()
+        list.removeFromParent()
+        table.refreshHover()
+    }
+
+    /// A back swipe in a bundle: its list slides with the fingers like a page, over the inbox.
+    func dragBack(to offset: CGFloat) {
+        guard let list = bundleList, let page = list.view.layer else { return }
+        swipeStep += 1
+        if page.animation(forKey: "swipe") == nil {
+            // An open still settling must not keep animating under the fingers.
+            for key in ["unfold", "opacity"] { page.removeAnimation(forKey: key) }
+            list.view.alphaValue = 1
+            page.masksToBounds = false
+            page.shadowColor = NSColor.black.cgColor
+            page.shadowOpacity = 0.12
+            page.shadowRadius = 14
+            page.shadowOffset = .zero
+            page.shadowPath = CGPath(rect: page.bounds, transform: nil)
+        }
+        Motion.hold(page, "transform", at: CATransform3DMakeTranslation(offset, 0, 0), key: "swipe")
     }
 
     /// Fingers lifted: past a third of the width, or flicked onward, the bundle slides off and the
-    /// inbox stays; otherwise it slides back. The slide starts at the fingers' speed.
-    ///
-    /// Going back, the bundle becomes a picture of itself where the fingers left it and the real
-    /// inbox fills the list at once, so the inbox under the sliding page is live, never waiting
-    /// for the slide to end.
+    /// inbox, already there beneath it, stays; otherwise it slides back. The slide starts at the
+    /// fingers' speed.
     func releaseBack(at offset: CGFloat, velocity: CGFloat) {
-        guard let under = swipeUnder, let layer = scroll.layer, let host = view.layer else { return }
-        let step = swipeStep
+        guard let list = bundleList, let page = list.view.layer, page.animation(forKey: "swipe") != nil else { return }
         let width = max(view.bounds.width, 1)
         let distance = abs(offset)
         let onward = offset < 0 ? -velocity : velocity
-        let back = openBundle != nil && (distance > width / 3 || (onward > 400 && distance > 20))
+        let back = distance > width / 3 || (onward > 400 && distance > 20)
         let target: CGFloat = back ? (offset < 0 ? -width : width) : 0
-        var moving = layer
-        if back, let picture = snapshot() {
-            let cover = CALayer()
-            cover.frame = view.bounds
-            cover.contents = picture.image
-            cover.contentsGravity = .resize
-            cover.backgroundColor = pageColor
-            cover.shadowColor = NSColor.black.cgColor
-            cover.shadowOpacity = 0.12
-            cover.shadowRadius = 14
-            cover.shadowOffset = .zero
-            cover.shadowPath = CGPath(rect: CGRect(origin: .zero, size: view.bounds.size), transform: nil)
-            cover.transform = CATransform3DMakeTranslation(offset, 0, 0)
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            host.addSublayer(cover)
-            endSwipe(on: layer, under: under)
-            CATransaction.commit()
-            moving = cover
-        }
-        if back {
-            openBundle = nil
-            highlightedID = nil
-            apply(buildRows(), animated: false)
-            table.deselectAll(nil)
-            if let y = savedScroll["top"] { scroll.contentView.scroll(to: NSPoint(x: 0, y: y)) }
-            delegate?.conversationListDidChangeBundle(self)
-            guard moving !== layer else {
-                // No picture to slide away: the inbox is simply there.
-                endSwipe(on: layer, under: under)
-                table.refreshHover()
-                return
-            }
-        }
+        if back { _ = detachBundle() }
+        let step = swipeStep
         Motion.group({
-            moving.add(Motion.slide(from: offset, to: target, velocity: velocity), forKey: "swipe")
+            page.add(Motion.slide(from: offset, to: target, velocity: velocity), forKey: "swipe")
         }, completion: { [weak self] in
             guard let self else { return }
-            if moving !== layer {
-                moving.removeFromSuperlayer()
-            } else if self.swipeUnder === under, self.swipeStep == step {
-                CATransaction.begin()
-                CATransaction.setDisableActions(true)
-                self.endSwipe(on: layer, under: under)
-                CATransaction.commit()
+            if back {
+                self.remove(list)
+            } else if self.swipeStep == step {
+                page.removeAnimation(forKey: "swipe")
+                page.shadowOpacity = 0
             }
-            self.table.refreshHover()
         })
-    }
-
-    /// The list is itself again: in place, without the page background, shadow or what lay under it.
-    private func endSwipe(on layer: CALayer, under: CALayer) {
-        layer.removeAnimation(forKey: "swipe")
-        layer.backgroundColor = nil
-        layer.shadowOpacity = 0
-        under.removeFromSuperlayer()
-        swipeUnder = nil
-    }
-
-    /// The reader's page background (`--bg` in the reader page), which a sliding list shows.
-    private var pageColor: CGColor {
-        view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            ? CGColor(srgbRed: 0x1e / 255, green: 0x1e / 255, blue: 0x1e / 255, alpha: 1) : .white
-    }
-
-    /// The list as it is on screen. Drawn from the table: the scroll view's own cache comes back
-    /// blank (its clip view's layer draws nothing through `cacheDisplay`).
-    private func snapshot() -> (image: CGImage, size: CGSize)? {
-        guard view.window != nil else { return nil }
-        let visible = table.visibleRect
-        guard !visible.isEmpty, let rep = table.bitmapImageRepForCachingDisplay(in: visible) else { return nil }
-        table.cacheDisplay(in: visible, to: rep)
-        return rep.cgImage.map { ($0, visible.size) }
     }
 
     // MARK: - Highlight and opening
@@ -744,8 +686,10 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
         return rows[table.selectedRow].conversation
     }
 
-    /// Moves the keyboard highlight to `conversation` without opening it (used after Back).
+    /// Moves the keyboard highlight to `conversation` without opening it (used after Back), in the
+    /// open bundle's list when there is one.
     func highlight(_ conversation: Conversation) {
+        if let bundleList { return bundleList.highlight(conversation) }
         guard let row = rows.firstIndex(where: { $0.conversation?.id == conversation.id }) else { return }
         suppressSelection = true
         table.selectRowIndexes([row], byExtendingSelection: false)
@@ -967,6 +911,12 @@ final class ConversationListViewController: NSViewController, NSTableViewDataSou
               let space = rows.lazy.compactMap(\.space).first(where: { $0.id == id }) else { return }
         store.chat.markRead(space.key)
     }
+}
+
+/// A bundle's list: painted in the page color, following the appearance, so it covers the inbox.
+private final class OpaquePage: NSView {
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() { layer?.backgroundColor = Design.Color.page.cgColor }
 }
 
 /// The list's scroll view. Overriding `scrollWheel` opts it out of responsive scrolling, which
