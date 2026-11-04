@@ -1,7 +1,8 @@
 import AppKit
 
 /// New message, reply and forward. Reply and forward prefill the recipients, subject and quoted
-/// original so they are visible and editable; what the window shows is what is sent.
+/// original so they are visible and editable; what the window shows is what is sent. The body takes
+/// typing at once: the quote is appended under it when the original has loaded.
 @MainActor
 final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTokenFieldDelegate, NSTextViewDelegate {
     private static var open: Set<ComposeWindowController> = []
@@ -15,7 +16,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
                                                  replyAll: replyAll, to: to, text: text, plan: plan)
         open.insert(controller)
         controller.showWindow(nil)
-        controller.window?.makeFirstResponder(to.isEmpty && source == nil ? controller.toField : controller.bodyView)
+        controller.window?.makeFirstResponder(controller.tokens(controller.toField).isEmpty ? controller.toField : controller.bodyView)
     }
 
     private let store: MailStore
@@ -31,7 +32,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
     private let ccField = NSTokenField()
     private let bccField = NSTokenField()
     private let subjectField = NSTextField()
-    private let bodyView = NSTextView()
+    private let bodyView = ComposeTextView()
     private let attachmentsStack = NSStackView()
     private let progress = NSProgressIndicator()
     private let sendButton = NSButton()
@@ -39,6 +40,14 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
     private var attachments: [URL] = []
     private var edited = false
     private var sending = false
+    /// Whether the user changed To or Cc, which a reply's worked-out recipients then leave alone.
+    private var recipientsEdited = false
+    /// Loading the original for the quote (and a reply's recipients); Send waits for it.
+    private var prefillTask: Task<Void, Never>?
+    /// People to complete recipients to, best first; filled just after the window opens.
+    private var contacts: [Contact] = []
+    /// Completion and editing labels (`Name <address>`) to the token they stand for.
+    private var labels: [String: String] = [:]
 
     private init(store: MailStore, mode: ComposeMode, account: String, source: MailMessage?,
                  replyAll: Bool, to: [Address], text: String, plan: ReplyPlan?) {
@@ -49,13 +58,14 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         self.replyAll = replyAll
         self.initialText = text
         self.plan = plan
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 600),
-                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                              backing: .buffered, defer: false)
+        let window = ComposeWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 600),
+                                   styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                                   backing: .buffered, defer: false)
         window.minSize = NSSize(width: 480, height: 360)
         window.toolbarStyle = .unified
         super.init(window: window)
         window.delegate = self
+        window.onSend = { [weak self] in self?.send() }
         buildUI()
         toField.objectValue = to.map(\.rfc5322)
 
@@ -70,6 +80,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
             window.setFrameTopLeftPoint(NSPoint(x: parent.frame.midX - 340, y: parent.frame.maxY - 60))
         }
         prefill()
+        Task { contacts = await store.contacts() }
     }
 
     @available(*, unavailable)
@@ -81,8 +92,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         guard let window else { return }
 
         for account in store.accounts {
-            let title = account.identity.map { "\($0.displayName) <\($0.email)>" } ?? account.name
-            fromPopup.addItem(withTitle: title)
+            fromPopup.addItem(withTitle: account.identity.map(Contact.label) ?? account.name)
             fromPopup.lastItem?.representedObject = account.name
             fromPopup.lastItem?.toolTip = account.name
         }
@@ -100,7 +110,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
             field.focusRingType = .none
             field.font = .systemFont(ofSize: 13)
             field.placeholderString = ""
-            field.completionDelay = 0.1
+            field.completionDelay = 0.05
         }
         subjectField.isBordered = false
         subjectField.drawsBackground = false
@@ -154,6 +164,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         bodyView.autoresizingMask = [.width]
         bodyView.textContainer?.widthTracksTextView = true
         bodyView.delegate = self
+        bodyView.onFiles = { [weak self] urls in self?.add(urls) }
         let scroll = NSScrollView()
         scroll.documentView = bodyView
         scroll.hasVerticalScroller = true
@@ -194,17 +205,17 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
             progress.topAnchor.constraint(equalTo: scroll.topAnchor, constant: 40),
         ])
         window.contentView = content
+        // Tab walks the fields top to bottom: To, Cc, (Bcc,) Subject, body.
+        window.autorecalculatesKeyViewLoop = true
 
         sendButton.title = "Send"
         sendButton.image = NSImage(systemSymbolName: "paperplane.fill", accessibilityDescription: "Send")
         sendButton.imagePosition = .imageLeading
         sendButton.bezelStyle = .push
         sendButton.bezelColor = .controlAccentColor
-        sendButton.keyEquivalent = "d"
-        sendButton.keyEquivalentModifierMask = [.command, .shift]
         sendButton.target = self
         sendButton.action = #selector(send)
-        sendButton.toolTip = "Send (⇧⌘D)"
+        sendButton.toolTip = "Send (⌘↩)"
 
         let toolbar = NSToolbar(identifier: "ComposeToolbar")
         toolbar.delegate = toolbarDelegate
@@ -214,7 +225,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
                 let item = NSToolbarItem(itemIdentifier: .init("attach"))
                 item.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Attach")
                 item.label = "Attach"
-                item.toolTip = "Attach Files"
+                item.toolTip = "Attach Files (or drop them on the message)"
                 item.target = self
                 item.action = #selector(self.attach)
                 return item
@@ -250,41 +261,51 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
 
     // MARK: - Prefill
 
+    /// Fills what is known at once (subject, a reply's recipients from what is loaded) and appends
+    /// the quote when the original has loaded, leaving the user's typing and caret alone.
     private func prefill() {
-        guard let source else {
-            bodyView.string = initialText
+        bodyView.string = initialText
+        bodyView.setSelectedRange(NSRange(location: (initialText as NSString).length, length: 0))
+        edited = !initialText.isEmpty
+        guard let source else { return }
+        var fillsRecipients = false
+        switch mode {
+        case .new:
             return
-        }
-        progress.startAnimation(nil)
-        bodyView.isEditable = false
-        Task {
-            defer {
-                progress.stopAnimation(nil)
-                bodyView.isEditable = true
+        case .reply:
+            subjectField.stringValue = plan?.subject ?? Subject.reply(to: source.envelope.subject)
+            if tokens(toField).isEmpty {
+                fillsRecipients = true
+                let recipients = plan.map { ($0.to, $0.cc) }
+                    ?? MailStore.replyRecipients(for: source, content: store.contents.loaded(source.ref)?.content,
+                                                 own: store.ownAddresses, all: replyAll)
+                toField.objectValue = recipients.0.map(\.rfc5322)
+                ccField.objectValue = recipients.1.map(\.rfc5322)
             }
+        case .forward:
+            subjectField.stringValue = Subject.forward(source.envelope.subject)
+        }
+        prefillTask = Task {
             do {
                 let quote: String
                 if case .reply = mode {
                     let plan: ReplyPlan
                     if let ready = self.plan { plan = ready } else { plan = try await store.replyPlan(for: source, all: replyAll) }
-                    subjectField.stringValue = plan.subject
-                    if (toField.objectValue as? [String])?.isEmpty ?? true { toField.objectValue = plan.to.map(\.rfc5322) }
-                    ccField.objectValue = plan.cc.map(\.rfc5322)
+                    if fillsRecipients, !recipientsEdited {
+                        toField.objectValue = plan.to.map(\.rfc5322)
+                        ccField.objectValue = plan.cc.map(\.rfc5322)
+                    }
                     quote = plan.quotedText.hasPrefix(">") ? plan.attribution + "\n" + plan.quotedText : plan.quotedText
                 } else {
-                    let draft = try await store.forwardDraft(for: source)
-                    subjectField.stringValue = draft.subject
-                    quote = draft.body
+                    quote = try await store.forwardDraft(for: source).body
                 }
-                bodyView.string = initialText + "\n\n" + quote
-                let caret = NSRange(location: (initialText as NSString).length, length: 0)
-                bodyView.setSelectedRange(caret)
-                bodyView.scrollRangeToVisible(NSRange(location: 0, length: 0))
-                edited = !initialText.isEmpty
+                guard !quote.isEmpty else { return }
+                // Appended past everything typed, so the selection and undo history stay valid.
+                let selection = bodyView.selectedRanges
+                bodyView.textStorage?.append(NSAttributedString(string: "\n\n" + quote, attributes: bodyView.typingAttributes))
+                bodyView.selectedRanges = selection
             } catch {
-                subjectField.stringValue = source.envelope.subject
-                bodyView.string = initialText
-                presentError(message: "Could not prepare the reply", error: error)
+                presentError(message: "Could not load the original message", error: error)
             }
         }
     }
@@ -298,10 +319,15 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         panel.canChooseDirectories = false
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let self else { return }
-            attachments += panel.urls
-            edited = true
-            rebuildAttachments()
+            add(panel.urls)
         }
+    }
+
+    private func add(_ urls: [URL]) {
+        guard !sending else { return }
+        attachments += urls.filter { !attachments.contains($0) }
+        edited = true
+        rebuildAttachments()
     }
 
     private func rebuildAttachments() {
@@ -327,44 +353,52 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
 
     // MARK: - Sending
 
-    private func recipients(_ field: NSTokenField) -> [String] {
-        let tokens = (field.objectValue as? [Any] ?? []).compactMap { $0 as? String }
-        return tokens.flatMap { $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
+    private func tokens(_ field: NSTokenField) -> [String] {
+        (field.objectValue as? [Any] ?? []).compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
     }
 
     @objc private func send() {
-        guard !sending else { return }
-        let to = recipients(toField), cc = recipients(ccField), bcc = bccRow?.isHidden == false ? recipients(bccField) : []
-        let invalid = (to + cc + bcc).filter { Address.parse($0) == nil }
-        guard !to.isEmpty || !cc.isEmpty || !bcc.isEmpty else {
-            presentError(message: "Add at least one recipient", error: nil)
-            return
-        }
-        guard invalid.isEmpty else {
-            presentError(message: "Invalid address: \(invalid.joined(separator: ", "))", error: nil)
-            return
-        }
-        let subject = subjectField.stringValue, text = bodyView.string, files = attachments
+        guard !sending, let window else { return }
+        // A recipient still being typed becomes a token first.
+        if let editor = window.firstResponder as? NSText, editor.isFieldEditor { window.makeFirstResponder(nil) }
         sending = true
         setControlsEnabled(false)
         progress.startAnimation(nil)
         Task {
+            await prefillTask?.value
+            let fields = [toField, ccField] + (bccRow?.isHidden == false ? [bccField] : [])
+            if let field = fields.first(where: { tokens($0).contains { Address.parse($0) == nil } }) {
+                stopSending("Invalid address: \(tokens(field).filter { Address.parse($0) == nil }.joined(separator: ", "))",
+                            error: nil, focus: field)
+                return
+            }
+            // Someone listed twice gets one copy, in the first field naming them.
+            var seen = Set<String>()
+            let lists = fields.map { field in tokens(field).compactMap(Address.parse).filter { seen.insert($0.normalizedEmail).inserted } }
+            guard !seen.isEmpty else {
+                stopSending("Add at least one recipient", error: nil, focus: toField)
+                return
+            }
             do {
-                let message = await store.outgoing(account: account, source: source,
-                                                   to: to.compactMap(Address.parse), cc: cc.compactMap(Address.parse),
-                                                   bcc: bcc.compactMap(Address.parse), subject: subject, text: text,
-                                                   attachments: files)
+                let message = await store.outgoing(account: account, source: source, to: lists[0], cc: lists[1],
+                                                   bcc: lists.count > 2 ? lists[2] : [], subject: subjectField.stringValue,
+                                                   text: bodyView.string, attachments: attachments)
                 try await store.send(message, account: account)
                 edited = false
                 close()
             } catch {
-                sending = false
-                setControlsEnabled(true)
-                progress.stopAnimation(nil)
-                presentError(message: "The message could not be sent", error: error)
+                stopSending("The message could not be sent", error: error, focus: nil)
             }
         }
+    }
+
+    private func stopSending(_ message: String, error: (any Error)?, focus field: NSTokenField?) {
+        sending = false
+        setControlsEnabled(true)
+        progress.stopAnimation(nil)
+        if let field { window?.makeFirstResponder(field) }
+        presentError(message: message, error: error)
     }
 
     private func setControlsEnabled(_ enabled: Bool) {
@@ -382,18 +416,60 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         alert.beginSheetModal(for: window)
     }
 
-    // MARK: - Edits and closing
+    // MARK: - Recipient completion
 
     func textDidChange(_ notification: Notification) { edited = true }
-    func controlTextDidChange(_ obj: Notification) { edited = true }
+
+    func controlTextDidChange(_ obj: Notification) {
+        edited = true
+        if obj.object is NSTokenField { recipientsEdited = true }
+    }
+
+    /// Addresses already in a recipient field, which completion leaves out.
+    private func takenAddresses() -> Set<String> {
+        Set([toField, ccField, bccField].flatMap(tokens).compactMap { Address.parse($0)?.normalizedEmail })
+    }
+
+    /// People whose name, a word of it, or address starts with `typed`, best first; an address
+    /// typed out in full first of all.
+    private func suggestions(for typed: String) -> [Contact] {
+        let needle = Contact.fold(typed.trimmingCharacters(in: .whitespaces))
+        guard !needle.isEmpty else { return [] }
+        let taken = takenAddresses()
+        var matches = Array(contacts.lazy.filter { !taken.contains($0.address.normalizedEmail) && $0.matches(needle) }.prefix(12))
+        if let exact = matches.firstIndex(where: { Contact.fold($0.address.email) == needle }) {
+            matches.insert(matches.remove(at: exact), at: 0)
+        }
+        return matches
+    }
 
     func tokenField(_ tokenField: NSTokenField, completionsForSubstring substring: String, indexOfToken tokenIndex: Int,
                     indexOfSelectedItem selectedIndex: UnsafeMutablePointer<Int>?) -> [Any]? {
-        let needle = substring.lowercased()
-        guard !needle.isEmpty else { return [] }
-        return store.knownAddresses()
-            .filter { $0.email.lowercased().hasPrefix(needle) || ($0.name?.lowercased().contains(needle) ?? false) }
-            .prefix(12).map(\.rfc5322)
+        let shown = suggestions(for: substring).map { contact in
+            let label = Contact.label(contact.address)
+            labels[label] = contact.address.rfc5322
+            return label
+        }
+        // The token field writes the selected completion over the typed text, which garbles it
+        // unless the completion starts with that text; otherwise the list shows with nothing
+        // selected, and committing the typed text still picks the first (`shouldAdd`).
+        let needle = Contact.fold(substring.trimmingCharacters(in: .whitespaces))
+        if let first = shown.first, !Contact.fold(first).hasPrefix(needle) { selectedIndex?.pointee = -1 }
+        return shown
+    }
+
+    func tokenField(_ tokenField: NSTokenField, representedObjectForEditing editingString: String) -> Any? {
+        labels[editingString] ?? editingString
+    }
+
+    /// A comma, Return or Tab after a partial name commits the typed text, not the completion
+    /// shown: it becomes the best match. An address typed out in full is kept as typed.
+    func tokenField(_ tokenField: NSTokenField, shouldAdd tokens: [Any], at index: Int) -> [Any] {
+        tokens.map { token in
+            guard let typed = token as? String, Address.parse(typed) == nil,
+                  let best = suggestions(for: typed).first else { return token }
+            return best.address.rfc5322
+        }
     }
 
     func tokenField(_ tokenField: NSTokenField, displayStringForRepresentedObject representedObject: Any) -> String? {
@@ -401,9 +477,16 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
         return address.displayName
     }
 
+    /// `Name <address>` without the quotes and commas of the stored form, so editing a token and
+    /// committing it again gives the same recipient.
     func tokenField(_ tokenField: NSTokenField, editingStringForRepresentedObject representedObject: Any) -> String? {
-        representedObject as? String
+        guard let raw = representedObject as? String, let address = Address.parse(raw) else { return representedObject as? String }
+        let label = Contact.label(address)
+        labels[label] = raw
+        return label
     }
+
+    // MARK: - Closing
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard edited, !sending else { return true }
@@ -422,7 +505,56 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSTok
     }
 
     func windowWillClose(_ notification: Notification) {
+        prefillTask?.cancel()
         Self.open.remove(self)
+    }
+}
+
+/// Sends on ⌘↩, as the inline reply does, and on ⇧⌘D, as Mail does.
+private final class ComposeWindow: NSWindow {
+    var onSend: (() -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let returnKey = event.keyCode == 36 || event.keyCode == 76  // Return, keypad Enter
+        if (modifiers == .command && returnKey)
+            || (modifiers == [.command, .shift] && event.charactersIgnoringModifiers?.lowercased() == "d") {
+            onSend?()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+/// The message body: files dropped or pasted on it attach instead of inserting their paths.
+private final class ComposeTextView: NSTextView {
+    var onFiles: (([URL]) -> Void)?
+
+    private func files(on pasteboard: NSPasteboard) -> [URL] {
+        pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    }
+
+    override var acceptableDragTypes: [NSPasteboard.PasteboardType] { super.acceptableDragTypes + [.fileURL] }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        files(on: sender.draggingPasteboard).isEmpty ? super.draggingEntered(sender) : .copy
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        files(on: sender.draggingPasteboard).isEmpty ? super.draggingUpdated(sender) : .copy
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        let urls = files(on: sender.draggingPasteboard)
+        guard !urls.isEmpty else { return super.performDragOperation(sender) }
+        onFiles?(urls)
+        return true
+    }
+
+    override func paste(_ sender: Any?) {
+        let urls = files(on: .general)
+        guard !urls.isEmpty else { return super.paste(sender) }
+        onFiles?(urls)
     }
 }
 

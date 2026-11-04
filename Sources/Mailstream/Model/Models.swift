@@ -38,7 +38,13 @@ nonisolated struct Address: Codable, Hashable, Sendable {
         if let lt = trimmed.lastIndex(of: "<"), let gt = trimmed.lastIndex(of: ">"), lt < gt {
             let email = String(trimmed[trimmed.index(after: lt)..<gt]).trimmingCharacters(in: .whitespaces)
             var name = String(trimmed[..<lt]).trimmingCharacters(in: .whitespaces)
-            name = name.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            if name.count >= 2, name.hasPrefix("\""), name.hasSuffix("\"") {
+                // The quoted form `rfc5322` writes, escapes undone.
+                name = String(name.dropFirst().dropLast())
+                    .replacingOccurrences(of: "\\\"", with: "\"").replacingOccurrences(of: "\\\\", with: "\\")
+            } else {
+                name = name.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            }
             guard email.contains("@") else { return nil }
             return Address(name: name.isEmpty ? nil : name, email: email)
         }

@@ -294,6 +294,16 @@ editable quote; a forward carries the original's text under a "Forwarded
 message" header, not its attachments. Replies and forwards carry `In-Reply-To`
 and `References` and stay in the provider's thread.
 
+In the compose window, recipients complete from everyone in loaded mail: people
+you have written to first, then by recency, your own addresses last, no-reply
+senders left out, and anyone already on the message skipped. Typing matches the
+start of a name, any word of it, the address or a part of its local part; a
+comma, Return or Tab after a partial name commits the best match, while an
+address typed out in full is kept as typed. Someone listed twice is sent one
+copy. Tab walks To, Cc, Subject and the body. The body takes typing at once; a
+reply's or forward's quote is appended under it when the original has loaded,
+and Send waits for that. Files dropped or pasted on the body are attached.
+
 Motion: the reader and bundles open by spreading out from the middle of the list and close by
 settling back toward it, collapsed messages expand in place, archived or trashed rows
 slide out while the rest close the gap, and a status capsule rises only while
@@ -391,7 +401,7 @@ recently opened spaces are cached in `chat-v2/` in the cache directory.
 | Star | ⇧⌘L | s |
 | Get mail | ⇧⌘N | |
 | Search | ⌘F | |
-| Send (compose window / inline reply) | ⇧⌘D / ⌘↩ | |
+| Send (compose window / inline reply) | ⌘↩ (or ⇧⌘D in the window) | |
 | Settings | ⌘, | |
 
 ## Limitations

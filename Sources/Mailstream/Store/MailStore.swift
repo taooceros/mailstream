@@ -714,18 +714,48 @@ final class MailStore {
         return out
     }
 
-    /// Every sender and recipient in loaded listings, for recipient autocompletion.
-    func knownAddresses() -> [Address] {
-        var seen = Set<String>()
-        var out: [Address] = []
-        for listing in listings.values {
-            for envelope in listing.envelopes {
-                for address in envelope.from + envelope.to where seen.insert(address.normalizedEmail).inserted {
-                    out.append(address)
-                }
+    /// Everyone in loaded listings, best recipient first: people the user writes to, then the rest
+    /// by how recently they appeared; the user's own addresses last and no-reply senders left out.
+    func contacts() async -> [Contact] {
+        let envelopes = listings.map { ($0.key.account, $0.value.envelopes) }
+        return await Self.rankContacts(envelopes, own: ownAddresses)
+    }
+
+    @concurrent private nonisolated static func rankContacts(_ listings: [(account: String, envelopes: [Envelope])],
+                                                             own: Set<String>) async -> [Contact] {
+        var seenMessages = Set<String>()
+        var byEmail: [String: (address: Address, sent: Int, latest: Date)] = [:]
+        func note(_ address: Address, date: Date?, sent: Bool) {
+            let key = address.normalizedEmail
+            guard key.contains("@") else { return }
+            var entry = byEmail[key] ?? (Address(name: nil, email: address.email), 0, .distantPast)
+            let date = date ?? .distantPast
+            // The newest name a header gave them.
+            if let name = address.name, !name.isEmpty, name.caseInsensitiveCompare(address.email) != .orderedSame,
+               entry.address.name == nil || date >= entry.latest {
+                entry.address.name = name
+            }
+            if sent { entry.sent += 1 }
+            entry.latest = max(entry.latest, date)
+            byEmail[key] = entry
+        }
+        for (account, envelopes) in listings {
+            // A message filed under several labels is listed once per label.
+            for envelope in envelopes where seenMessages.insert(account + "\u{1}" + envelope.id).inserted {
+                let fromMe = envelope.from.contains { own.contains($0.normalizedEmail) }
+                for address in envelope.from { note(address, date: envelope.date, sent: false) }
+                for address in envelope.to { note(address, date: envelope.date, sent: fromMe) }
             }
         }
-        return out
+        return byEmail.values
+            .filter { $0.sent > 0 || !Contact.isNoReply($0.address.email) }
+            .map { Contact(address: $0.address, sent: $0.sent, latest: $0.latest, isOwn: own.contains($0.address.normalizedEmail)) }
+            .sorted { a, b in
+                if a.isOwn != b.isOwn { return !a.isOwn }
+                if a.sent != b.sent { return a.sent > b.sent }
+                if a.latest != b.latest { return a.latest > b.latest }
+                return a.address.email < b.address.email
+            }
     }
 
     /// Lowercased addresses the user has written to in loaded listings: recipients of sent mail.

@@ -29,6 +29,61 @@ struct ForwardDraft: Sendable {
     var body: String
 }
 
+/// Someone recipient fields complete to.
+nonisolated struct Contact: Sendable {
+    let address: Address
+    /// Messages the user sent them.
+    let sent: Int
+    /// When they last appeared on a message.
+    let latest: Date
+    /// One of the user's own addresses.
+    let isOwn: Bool
+    /// Folded name and its words, address and the parts of its local part: typing matches their start.
+    private let keys: [String]
+
+    init(address: Address, sent: Int, latest: Date, isOwn: Bool) {
+        self.address = address
+        self.sent = sent
+        self.latest = latest
+        self.isOwn = isOwn
+        let email = Contact.fold(address.email)
+        var keys = [email]
+        keys += (email.split(separator: "@").first ?? "").split(whereSeparator: { ".-_+".contains($0) }).map(String.init)
+        if address.displayName != address.email {
+            let name = Contact.fold(address.displayName)
+            keys.append(name)
+            keys += name.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+        }
+        self.keys = keys
+    }
+
+    /// `no-reply@…`, `notifications@…`: senders nobody writes to.
+    static func isNoReply(_ email: String) -> Bool {
+        let local = email.lowercased().split(separator: "@").first.map(String.init) ?? ""
+        let squashed = local.filter(\.isLetter)
+        return squashed.hasPrefix("noreply") || squashed.hasPrefix("donotreply")
+            || ["mailerdaemon", "notification", "notifications", "bounce", "bounces"].contains(squashed)
+    }
+
+    /// Whether typing `needle`, already `Contact.fold`ed, offers this contact.
+    func matches(_ needle: String) -> Bool {
+        keys.contains { $0.hasPrefix(needle) }
+    }
+
+    /// `Name <address>` as a completion shows it, without the characters that end a token, so
+    /// picking it gives one token.
+    static func label(_ address: Address) -> String {
+        let name = address.displayName.components(separatedBy: CharacterSet(charactersIn: ",;\"<>"))
+            .joined(separator: " ").split(separator: " ").joined(separator: " ")
+        return name.isEmpty || address.displayName == address.email ? address.email : "\(name) <\(address.email)>"
+    }
+
+    /// Case- and accent-insensitive form completions compare.
+    static func fold(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+    }
+}
+
 extension MailStore {
     /// Recipients the way mail clients derive them: `Reply-To`, else `From`, or for one of the
     /// user's own messages its recipients; reply-all copies everyone else on the source except
