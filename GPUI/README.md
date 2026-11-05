@@ -21,6 +21,7 @@ cargo test           # subject splitting, the house curve
 | `src/state.rs` | `MailApp`: selection, lists served from memory for 90 s (polled when stale), paging, search, layers over the list, threads, optimistic actions that roll back on failure, key bindings |
 | `src/ui.rs` | Sidebar, toolbar, the lazy conversation list (`uniform_list`, fixed 38 pt rows), Smart Inbox bundles, the reader |
 | `src/design.rs` | The native `Design` tokens: both palettes, type scale, radii, durations, house curve, list metrics, avatar/topic colors |
+| `src/chat.rs` | `ChatPane`: Google Chat spaces (`chat.accounts`/`chat.spaces`, polled every 5 s), a space's log (`list` bottom-aligned, runs and day dividers, markup and links), sending, earlier pages, threads, New Chat with `contacts.search` completion; hidden when the app lacks `chat.*` |
 | `src/input.rs` | Single-line text field (IME, selection, clipboard) for search, adapted from gpui's input example |
 
 Keys: ↑/↓ or J/K move (in the reader they page through conversations), Return or Space opens,

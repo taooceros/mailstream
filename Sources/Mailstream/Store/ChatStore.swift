@@ -431,6 +431,13 @@ final class ChatStore {
         }
     }
 
+    /// A page of `key`'s messages straight from Google, ascending: the newest `limit`, or the
+    /// newest before `before`. For the control socket; the reader's thread is left alone.
+    func page(_ key: ChatSpaceKey, limit: Int, before: Date?) async throws -> ChatMessagePage {
+        guard account(named: key.account) != nil else { throw ChatError(message: "\(key.account) has no Google Chat") }
+        return try await chat.messages(account: key.account, space: key.space, limit: limit, before: before)
+    }
+
     // MARK: - Reading and sending
 
     /// Clears the unread count at once; restores it if Google refuses.
@@ -464,30 +471,39 @@ final class ChatStore {
         guard !trimmed.isEmpty else { return }
         let pending = ChatPending(id: "pending-" + UUID().uuidString, text: trimmed, thread: thread, created: Date())
         threads[key, default: ChatThread()].pending.append(pending)
-        let chat = chat
         Task {
             do {
-                let message = try await chat.send(account: key.account, space: key.space, text: pending.text,
-                                                    thread: pending.thread)
-                // A send that outlived its account's sign-out.
-                guard account(named: key.account) != nil else { return }
-                var thread = threads[key] ?? ChatThread()
-                thread.pending.removeAll { $0.id == pending.id }
-                if !thread.messages.contains(where: { $0.name == message.name }) {
-                    thread.messages.append(message)
-                    thread.messages.sort { $0.created < $1.created }
-                }
-                threads[key] = thread
-                persist(key)
-                updateSpace(key) { space in
-                    if (space.latest?.created ?? .distantPast) <= message.created { space.latest = message }
-                    space.lastActive = max(space.lastActive ?? message.created, message.created)
-                }
+                try await deliver(pending.text, thread: pending.thread, in: key, replacing: pending.id)
             } catch {
                 guard let index = threads[key]?.pending.firstIndex(where: { $0.id == pending.id }) else { return }
                 threads[key]?.pending[index].failure = error.localizedDescription
             }
         }
+    }
+
+    /// Sends `text` and waits for Google's answer, which takes the place of the pending message
+    /// `replacing` in the loaded thread and becomes the row's latest message. Not idempotent: never
+    /// retried. The control socket sends through this too.
+    @discardableResult
+    func deliver(_ text: String, thread: String?, in key: ChatSpaceKey, replacing pending: String? = nil) async throws
+        -> ChatMessage {
+        let message = try await chat.send(account: key.account, space: key.space, text: text, thread: thread)
+        // A send that outlived its account's sign-out.
+        guard account(named: key.account) != nil else { return message }
+        if var loaded = threads[key] {
+            loaded.pending.removeAll { $0.id == pending }
+            if !loaded.messages.contains(where: { $0.name == message.name }) {
+                loaded.messages.append(message)
+                loaded.messages.sort { $0.created < $1.created }
+            }
+            threads[key] = loaded
+            persist(key)
+        }
+        updateSpace(key) { space in
+            if (space.latest?.created ?? .distantPast) <= message.created { space.latest = message }
+            space.lastActive = max(space.lastActive ?? message.created, message.created)
+        }
+        return message
     }
 
     /// Sends a failed message again, on the user's request only.

@@ -103,6 +103,13 @@ final class AvatarStore {
         return keep(decoded, in: large, as: key)
     }
 
+    /// The PNG the app shows for `key` at `side` pixels (96 or 512, the sizes the resolver
+    /// caches), waiting for the lookup; nil when there is none. For the control socket.
+    func png(for key: String, automated: Bool, side: Int) async -> Data? {
+        let key = key.lowercased()
+        return await resolver.avatar(for: key, published: published[key], automated: automated, side: side)
+    }
+
     /// Everyone the accounts' contact lists name, for completing addresses; none until the
     /// contact directory has been fetched once.
     func directoryPeople() async -> [DirectoryPerson] { await resolver.people() }

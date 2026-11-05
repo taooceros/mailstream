@@ -37,6 +37,15 @@ nonisolated enum CommandID: Sendable, Equatable {
         case mailSend = "mail.send"
         case mailReply = "mail.reply"
         case refresh
+        case contactsSearch = "contacts.search"
+        case avatars
+        case chatAccounts = "chat.accounts"
+        case chatSpaces = "chat.spaces"
+        case chatMessages = "chat.messages"
+        case chatSend = "chat.send"
+        case chatRead = "chat.read"
+        case chatStart = "chat.start"
+        case chatRefresh = "chat.refresh"
     }
 
     /// The request's `command`: `mail.list`.
@@ -109,6 +118,10 @@ nonisolated struct CommandSpec: Sendable {
     private static let limit = Argument(name: "limit", kind: .int, summary: "Most conversations returned (1-100).", defaultValue: 25)
 
     private static let settingKey = Argument(name: "key", kind: .string, summary: "Setting key.", positional: true, required: true)
+
+    private static let chatAccount = Argument(name: "account", kind: .string, summary: "Chat account (its address).", required: true)
+
+    private static let chatSpace = Argument(name: "space", kind: .string, summary: "Space id from `chat spaces` (spaces/…).", positional: true, required: true)
 
     static let all: [CommandSpec] = [
         CommandSpec(command: .app(.status), summary: "The app's state: version, accounts, sync, push, AI tagging, settings problems."),
@@ -206,6 +219,37 @@ nonisolated struct CommandSpec: Sendable {
         ], confirm: true),
 
         CommandSpec(command: .app(.refresh), summary: "Fetches new mail and counts for the list on screen now."),
+
+        CommandSpec(command: .app(.contactsSearch), summary: "People whose name or address starts with the query, best first, as compose completes them: the accounts' Google and Outlook directories and recent correspondents.", arguments: [
+            Argument(name: "query", kind: .string, summary: "The start of a name, a word of it, or an address.", positional: true, required: true),
+            Argument(name: "limit", kind: .int, summary: "Most people returned (1-12).", defaultValue: 10),
+        ]),
+        CommandSpec(command: .app(.avatars), summary: "The picture the app shows for each address (directory photo, published picture, BIMI, Gravatar, site icon), as PNG file paths; null when there is none. Waits for lookups.", arguments: [
+            Argument(name: "emails", kind: .list, summary: "Addresses.", positional: true, variadic: true, required: true),
+            Argument(name: "size", kind: .int, summary: "Smallest side wanted, in pixels; the file is 96 px up to 96, else 512 px.", defaultValue: 64),
+        ]),
+
+        CommandSpec(command: .app(.chatAccounts), summary: "Google Chat accounts: address, label, whether they can start chats, spaces with unread messages."),
+        CommandSpec(command: .app(.chatSpaces), summary: "Chat spaces (direct messages, group chats, spaces), most recently active first, with unread count, last activity, preview and members.", arguments: [
+            Argument(name: "account", kind: .string, summary: "Only this chat account (its address)."),
+        ]),
+        CommandSpec(command: .app(.chatMessages), summary: "A space's messages, oldest first: the newest page, or with --before the page before a message.", arguments: [
+            chatSpace, chatAccount,
+            Argument(name: "before", kind: .string, summary: "Only messages created before this time (a message's `created`)."),
+            Argument(name: "limit", kind: .int, summary: "Most messages returned (1-100).", defaultValue: 50),
+        ]),
+        CommandSpec(command: .app(.chatSend), summary: "Sends a text message to a space, as the user.", arguments: [
+            chatSpace, chatAccount,
+            Argument(name: "body", kind: .string, summary: "Message text (Google Chat markup); `-` reads standard input.", required: true),
+            Argument(name: "thread", kind: .string, summary: "Reply in this thread (a message's `thread`)."),
+            yes,
+        ], confirm: true),
+        CommandSpec(command: .app(.chatRead), summary: "Marks a space read up to now.", arguments: [chatSpace, chatAccount]),
+        CommandSpec(command: .app(.chatStart), summary: "Finds or starts the direct message with one person, or the group chat with several, and returns its space.", arguments: [
+            chatAccount,
+            Argument(name: "emails", kind: .list, summary: "The other people's addresses.", positional: true, variadic: true, required: true),
+        ]),
+        CommandSpec(command: .app(.chatRefresh), summary: "Fetches every chat account's spaces now."),
     ]
 
     static let overview = """
@@ -220,8 +264,9 @@ nonisolated struct CommandSpec: Sendable {
 
         Conversations are addressed by the `id` that `mail list`, `mail search` and `mail show`
         return (e.g. "you@gmail.com|<message-id>"). Accounts are addressed by their email address.
-        Sending mail and signing accounts out require --yes; without it the error says what would
-        happen.
+        Google Chat spaces are addressed by their account and the `id` that `chat spaces` returns
+        (e.g. "spaces/AAAA…"). Sending mail or chat messages and signing accounts out require
+        --yes; without it the error says what would happen.
 
         `mailstream commands` prints every command and argument as JSON.
         `mailstream help <command>` describes one command.

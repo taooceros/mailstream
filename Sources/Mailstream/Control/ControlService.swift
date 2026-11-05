@@ -3,8 +3,8 @@ import Foundation
 /// Runs control-socket requests against the app's stores, on the main actor like the UI.
 @MainActor
 final class ControlService {
-    private let accounts: AccountStore
-    private let store: MailStore
+    let accounts: AccountStore
+    let store: MailStore
 
     /// Conversations handed out by `mail list`/`search`/`show`, so later commands can address them
     /// by id while the app runs, with the mailboxes they were listed from.
@@ -16,6 +16,8 @@ final class ControlService {
     private var known: [String: Known] = [:]
     private var knownOrder: [String] = []
     private static let knownLimit = 5000
+    /// `contacts.search`'s people (`MailStore.contacts()`), loaded again after `contactsAge`.
+    var contactsLoad: (task: Task<[Contact], Never>, started: ContinuousClock.Instant)?
 
     init(accounts: AccountStore, store: MailStore) {
         self.accounts = accounts
@@ -94,6 +96,17 @@ final class ControlService {
         case .refresh:
             store.refresh()
             store.refreshCounts()
+            return ["started": true]
+        case .contactsSearch: return await searchContacts(args)
+        case .avatars: return try await avatars(args)
+        case .chatAccounts: return chatAccounts()
+        case .chatSpaces: return try chatSpaces(args)
+        case .chatMessages: return try await chatMessages(args)
+        case .chatSend: return try await chatSend(args)
+        case .chatRead: return try chatRead(args)
+        case .chatStart: return try await chatStart(args)
+        case .chatRefresh:
+            store.chat.refresh()
             return ["started": true]
         }
     }
@@ -390,7 +403,7 @@ final class ControlService {
     }
 
     /// Refuses unless the request carries `yes`; `message` says what would have happened.
-    private func requireYes(_ args: Arguments, _ message: @autoclosure () -> String) throws {
+    func requireYes(_ args: Arguments, _ message: @autoclosure () -> String) throws {
         guard args.bool("yes") else { throw ControlError("confirm", message()) }
     }
 

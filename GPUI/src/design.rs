@@ -153,6 +153,29 @@ pub mod layout {
     pub const MENU_ROW: f32 = 26.0;
 }
 
+/// The chat log (`ReaderPage.chatLog`): a flat list, one row per message, runs under one head.
+pub mod chat {
+    /// The column the head's avatar sits in.
+    pub const GUTTER: f32 = 34.0;
+    pub const AVATAR: f32 = 30.0;
+    /// Gap between the gutter and the text.
+    pub const GAP: f32 = 12.0;
+    /// Text line height, relative to its size.
+    pub const LINE: f32 = 1.55;
+    /// Messages from one person within this many seconds of the last one continue its run.
+    pub const RUN_SECONDS: i64 = 3600;
+    /// The composer's field.
+    pub const COMPOSER_HEIGHT: f32 = 40.0;
+    /// The space header above the log.
+    pub const HEADER_HEIGHT: f32 = 56.0;
+    /// Width of the new-chat form.
+    pub const FORM_WIDTH: f32 = 520.0;
+    /// The per-account mark in rows when several accounts are listed.
+    pub const ACCOUNT_DOT: f32 = 6.0;
+    /// A message still being sent.
+    pub const PENDING_OPACITY: f32 = 0.55;
+}
+
 /// The house easing curve, `cubic-bezier(0.2, 0.9, 0.25, 1)`: quick start, long soft landing.
 pub fn house_curve(progress: f32) -> f32 {
     const X1: f32 = 0.2;

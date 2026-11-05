@@ -2,6 +2,7 @@
 //! it over the control socket. See README.md.
 
 mod avatars;
+mod chat;
 mod control;
 mod design;
 mod format;
@@ -28,6 +29,7 @@ fn main() {
     Application::new().with_assets(icons::Assets).run(|cx: &mut App| {
         avatars::init(cx);
         input::bind_keys(cx);
+        chat::bind_keys(cx);
         state::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(menus());
