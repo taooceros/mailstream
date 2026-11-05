@@ -192,7 +192,10 @@ prompt: add any Apple ID in Xcode ▸ Settings ▸ Accounts, then Manage Certifi
 
 GitHub Actions (`.github/workflows/build.yml`) builds every push and pull request on
 macOS 26 with Xcode 26.4 (Swift 6.3), with warnings as errors, and keeps the app as a
-disk image (`Mailstream.dmg`) in the run's artifacts. Each build of `main` replaces the `nightly` prerelease. CI has no
+disk image (`Mailstream.dmg`) in the run's artifacts. Builds of `main` (and manual runs) also
+build the newest `gpui-ui` and `flutter-ui` commits into `Mailstream-GPUI.dmg` and
+`Mailstream-Flutter.dmg`, and each build of `main` replaces the `nightly` prerelease with all
+three. CI has no
 OAuth clients, push settings or signing identity, so that app is signed ad hoc, polls
 for mail and asks for your OAuth client at sign-in. Dragged to Applications, it needs
 `xattr -dr com.apple.quarantine /Applications/Mailstream.app` before the first launch.

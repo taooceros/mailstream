@@ -58,9 +58,125 @@ jobs:
           path: Mailstream.dmg
           retention-days: 14
 
+  # The GPUI and Flutter front ends live on their own lines (gpui-ui, flutter-ui); each build of
+  # main also builds the newest commit of both, so the prerelease carries all three apps.
+  gpui:
+    if: github.event_name != 'pull_request'
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: gpui-ui
+
+      - uses: actions/cache@v4
+        with:
+          path: .turso/lib
+          key: turso-${{ runner.os }}-${{ hashFiles('scripts/turso.sh', 'scripts/turso-multiprocess.patch', 'Sources/CTurso/sqlite3.h') }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            GPUI/target
+          key: gpui-cargo-${{ runner.os }}-${{ hashFiles('GPUI/Cargo.lock', 'FFI/Cargo.toml') }}
+          restore-keys: gpui-cargo-${{ runner.os }}-
+
+      - name: Engine (release)
+        run: |
+          ./scripts/turso.sh
+          swift build -c release --product MailstreamKit
+
+      - name: GPUI (release)
+        run: cd GPUI && MAILSTREAM_KIT_CONFIG=release cargo build --release
+
+      # An app bundle: the binary in Contents/MacOS finds the engine in Contents/Frameworks
+      # (GPUI/build.rs adds that rpath). Signed ad hoc, like the other two.
+      - name: App bundle and disk image
+        run: |
+          APP="build/dmg/Mailstream GPUI.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks"
+          cp GPUI/target/release/mailstream-gpui "$APP/Contents/MacOS/"
+          cp "$(swift build -c release --show-bin-path)/libMailstreamKit.dylib" "$APP/Contents/Frameworks/"
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>Mailstream GPUI</string>
+            <key>CFBundleExecutable</key><string>mailstream-gpui</string>
+            <key>CFBundleIdentifier</key><string>dev.mailstream.MailstreamGPUI</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>0.1.0</string>
+            <key>LSMinimumSystemVersion</key><string>26.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          codesign --force --sign - "$APP/Contents/Frameworks/libMailstreamKit.dylib"
+          codesign --force --sign - --identifier dev.mailstream.Mailstream "$APP"
+          ln -s /Applications build/dmg/Applications
+          hdiutil create -volname "Mailstream GPUI" -srcfolder build/dmg -fs HFS+ -format UDZO -ov Mailstream-GPUI.dmg
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Mailstream-GPUI-${{ github.sha }}
+          path: Mailstream-GPUI.dmg
+          retention-days: 14
+
+  flutter:
+    if: github.event_name != 'pull_request'
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: flutter-ui
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - uses: actions/cache@v4
+        with:
+          path: .turso/lib
+          key: turso-${{ runner.os }}-${{ hashFiles('scripts/turso.sh', 'scripts/turso-multiprocess.patch', 'Sources/CTurso/sqlite3.h') }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            FFI/target
+          key: ffi-cargo-${{ runner.os }}-${{ hashFiles('FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml') }}
+          restore-keys: ffi-cargo-${{ runner.os }}-
+
+      - name: Engine and Dart bindings (release)
+        run: CONFIG=release DART_OUT=$PWD/Flutter/packages/mailstream/lib/src ./scripts/ffi.sh
+
+      - name: Flutter (release)
+        run: cd Flutter && flutter build macos --release
+
+      - name: Disk image
+        run: |
+          mkdir -p build/dmg
+          cp -R "Flutter/build/macos/Build/Products/Release/Mailstream Flutter.app" build/dmg/
+          ln -s /Applications build/dmg/Applications
+          hdiutil create -volname "Mailstream Flutter" -srcfolder build/dmg -fs HFS+ -format UDZO -ov Mailstream-Flutter.dmg
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Mailstream-Flutter-${{ github.sha }}
+          path: Mailstream-Flutter.dmg
+          retention-days: 14
+
   # One rolling prerelease, "nightly", replaced by every build of main.
   prerelease:
-    needs: build
+    needs: [build, gpui, flutter]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     permissions:
@@ -75,16 +191,17 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: Mailstream-${{ github.sha }}
+          pattern: Mailstream-*${{ github.sha }}
+          merge-multiple: true
 
       - name: Publish
         run: |
           SHORT=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
-          NOTES="Built from $GITHUB_SHA by run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID.
+          NOTES="Built from $GITHUB_SHA by run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID: Mailstream.dmg from main, Mailstream-GPUI.dmg from gpui-ui and Mailstream-Flutter.dmg from flutter-ui at that time.
 
-          Signed ad hoc and built without OAuth clients or push settings: it opens, but signing in needs a build from \`scripts/bundle.sh\` on a set-up Mac. After dragging the app to Applications, run \`xattr -dr com.apple.quarantine /Applications/Mailstream.app\` before the first launch."
+          Signed ad hoc and built without OAuth clients or push settings: they open, but signing in needs a build from \`scripts/bundle.sh\` (or each front end's README) on a set-up Mac. After dragging an app to Applications, run \`xattr -dr com.apple.quarantine \"/Applications/<app name>.app\"\` before the first launch."
           # Delete the old release and tag, then publish again at this commit, so the tag,
           # the date and the asset all match the newest build.
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$TAG" Mailstream.dmg --prerelease --target "$GITHUB_SHA" \
+          gh release create "$TAG" Mailstream.dmg Mailstream-GPUI.dmg Mailstream-Flutter.dmg --prerelease --target "$GITHUB_SHA" \
             --title "Nightly ($SHORT)" --notes "$NOTES"
