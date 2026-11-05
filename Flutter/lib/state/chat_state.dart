@@ -24,6 +24,12 @@ class ChatState extends ChangeNotifier {
   /// Chat is in view instead of mail.
   bool active = false;
 
+  /// Notifies only when chat comes into or out of view or another space opens: all the window's
+  /// layout reads of chat. Spaces, threads and loading notify this state alone, which only the
+  /// chat panes and the navigation's chat item listen to, so they do not rebuild the mail list.
+  Listenable get layout => _layout;
+  final _layout = _Signal();
+
   List<engine.ChatAccount> accounts = const [];
   List<engine.ChatSpace> spaces = const [];
   bool loading = false;
@@ -71,6 +77,7 @@ class ChatState extends ChangeNotifier {
   @override
   void dispose() {
     _spacesChange?.cancel();
+    _layout.dispose();
     super.dispose();
   }
 
@@ -105,6 +112,7 @@ class ChatState extends ChangeNotifier {
     if (!active) {
       active = true;
       notifyListeners();
+      _layout.notify();
     }
     unawaited(reload());
     unawaited(_quiet(mail.chatRefresh()));
@@ -116,6 +124,7 @@ class ChatState extends ChangeNotifier {
     active = false;
     close();
     notifyListeners();
+    _layout.notify();
   }
 
   Future<void> refresh() => _quiet(mail.chatRefresh());
@@ -137,6 +146,7 @@ class ChatState extends ChangeNotifier {
   Future<void> open(SpaceKey key) async {
     opened = key;
     notifyListeners();
+    _layout.notify();
     try {
       final thread = await mail.chatOpen(account: key.account, space: key.space);
       _threads[key] = thread;
@@ -150,6 +160,7 @@ class ChatState extends ChangeNotifier {
     if (opened == null) return;
     opened = null;
     notifyListeners();
+    _layout.notify();
     unawaited(_quiet(mail.chatClose()));
   }
 
@@ -219,4 +230,9 @@ class ChatState extends ChangeNotifier {
 
   static String _describe(engine.MailException error) =>
       error is engine.FailedMailException ? error.message : '$error';
+}
+
+/// A listenable fired by its owner, for a part of a state that changes apart from the rest.
+class _Signal extends ChangeNotifier {
+  void notify() => notifyListeners();
 }

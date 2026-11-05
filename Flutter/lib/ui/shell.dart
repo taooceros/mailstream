@@ -284,8 +284,10 @@ class _MailShellState extends State<MailShell> {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
+    // Chat's spaces and messages rebuild only the parts that show them (`_onChat`); the window
+    // follows chat coming into view and the open space.
     return ListenableBuilder(
-      listenable: Listenable.merge([state, state.chat]),
+      listenable: Listenable.merge([state, state.chat.layout]),
       builder: (context, _) {
         _items = listItems(state.conversations, bundles: state.bundlesEnabled, sections: state.searchQuery == null);
         final bundle = state.openBundle;
@@ -319,11 +321,11 @@ class _MailShellState extends State<MailShell> {
   Widget _layout(BuildContext context, double width) {
     final drawer = width >= 1200 || _drawerOpen;
     _twoPane = width >= 1000;
-    final navigation = drawer
+    final navigation = _onChat(() => drawer
         ? Sidebar(state: state, onCompose: _compose, onCollapse: width >= 1200 ? null : () => setState(() => _drawerOpen = false))
-        : Rail(state: state, onCompose: _compose, onMenu: () => setState(() => _drawerOpen = true));
+        : Rail(state: state, onCompose: _compose, onMenu: () => setState(() => _drawerOpen = true)));
     final chat = state.chat;
-    final listPane = _Pane(child: chat.active ? ChatListPane(state: state) : _listPane(context));
+    final listPane = _Pane(child: chat.active ? _onChat(() => ChatListPane(state: state)) : _listPane(context));
     final opened = chat.active ? null : state.opened;
     final space = chat.active ? chat.opened : null;
     final open = opened != null || space != null;
@@ -448,14 +450,15 @@ class _MailShellState extends State<MailShell> {
       opacity: animation,
       child: ScaleTransition(scale: Tween(begin: 0.98, end: 1.0).animate(animation), child: child),
     ),
-    child: ChatReader(
+    child: _onChat(
       key: ValueKey(space),
-      state: state,
-      space: space,
-      twoPane: _twoPane,
-      onBack: _back,
+      () => ChatReader(state: state, space: space, twoPane: _twoPane, onBack: _back),
     ),
   );
+
+  /// `build`'s widget, rebuilt as chat's spaces and messages change.
+  Widget _onChat(Widget Function() build, {Key? key}) =>
+      ListenableBuilder(key: key, listenable: state.chat, builder: (context, _) => build());
 
   Widget _detailPane(BuildContext context, Conversation opened) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
