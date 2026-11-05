@@ -3,14 +3,23 @@
 # The engine reads the sign-ins from the Keychain item macOS pins to Mailstream's signature;
 # a binary signed any other way makes macOS ask, and "Always Allow" there re-pins the item to
 # that one build. So this refuses to start a binary that did not get the app's signature.
-# Usage: GPUI/run.sh [cargo build arguments]
+# Usage: [CONFIG=release] GPUI/run.sh
+#   CONFIG=release builds the engine and the window optimized (the engine's release build takes
+#   about a minute per Swift edit); the default debug engine runs its main-actor work unoptimized
+#   on the window's main thread.
 set -eu
 cd "$(dirname "$0")/.."
+CONFIG=${CONFIG:-debug}
 
 ./scripts/turso.sh
-swift build --product MailstreamKit
-(cd GPUI && cargo build "$@")
-case " $* " in *" --release "*) BINARY=GPUI/target/release/mailstream-gpui ;; *) BINARY=GPUI/target/debug/mailstream-gpui ;; esac
+swift build -c "$CONFIG" --product MailstreamKit
+if [ "$CONFIG" = release ]; then
+  (cd GPUI && MAILSTREAM_KIT_CONFIG=release cargo build --release)
+  BINARY=GPUI/target/release/mailstream-gpui
+else
+  (cd GPUI && cargo build)
+  BINARY=GPUI/target/debug/mailstream-gpui
+fi
 
 ./scripts/sign.sh "$BINARY"
 SIGNATURE=$(codesign -dv "$BINARY" 2>&1)

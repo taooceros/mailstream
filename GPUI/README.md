@@ -9,10 +9,14 @@ reloads; nothing polls the mail list. The Mailstream app need not be running; wh
 share `mail.db` (see "Front ends in other languages" in the top-level README).
 
 ```sh
-GPUI/run.sh            # from the repo root: Turso, libMailstreamKit, cargo build, sign, launch
-GPUI/run.sh --release  # the same with a release build
+GPUI/run.sh                 # from the repo root: Turso, libMailstreamKit, cargo build, sign, launch
+CONFIG=release GPUI/run.sh  # engine and window optimized: use this to judge smoothness
 (cd GPUI && cargo test)
 ```
+
+The engine's main-actor work (listing a mailbox, encoding answers) runs on the window's main
+thread. In the debug engine a `mail.list` takes 5–18 ms there and drops frames while scrolling;
+the release engine takes under 8 ms. The release Swift build takes about a minute per edit.
 
 Always start it through `run.sh`. The engine reads the sign-ins from the Keychain item that macOS
 pins to Mailstream's signature (identifier `dev.mailstream.Mailstream`, the Apple Development
