@@ -35,7 +35,12 @@ impl fmt::Display for ControlError {
     }
 }
 
+/// The app's socket. `MAILSTREAM_CONTROL_SOCKET` points this UI at another one instead, e.g. a
+/// test server that answers commands the running app does not offer yet.
 static SOCKET: LazyLock<PathBuf> = LazyLock::new(|| {
+    if let Some(path) = std::env::var_os("MAILSTREAM_CONTROL_SOCKET") {
+        return PathBuf::from(path);
+    }
     let home = std::env::var_os("HOME").unwrap_or_default();
     PathBuf::from(home).join("Library/Application Support/Mailstream/control.sock")
 });

@@ -1,6 +1,7 @@
 //! Mailstream's GPUI front end (experiment). The Swift app stays the backend; this window talks to
 //! it over the control socket. See README.md.
 
+mod avatars;
 mod control;
 mod design;
 mod format;
@@ -25,6 +26,7 @@ use crate::state::{
 
 fn main() {
     Application::new().with_assets(icons::Assets).run(|cx: &mut App| {
+        avatars::init(cx);
         input::bind_keys(cx);
         state::bind_keys(cx);
         settings::init(|cx| cx.refresh_windows(), cx);
