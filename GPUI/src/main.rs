@@ -3,6 +3,9 @@
 
 mod avatars;
 mod chat;
+// Remove both `expect`s when `ui.rs`/`state.rs` open the compose window and mount `ReplyBox`.
+#[expect(dead_code, reason = "the compose window and inline reply are not wired into the main window yet")]
+mod compose;
 mod control;
 mod design;
 mod format;
@@ -12,6 +15,8 @@ mod model;
 mod settings;
 mod state;
 mod swipe;
+#[expect(dead_code, reason = "only the compose window, not wired yet, uses the editor")]
+mod textarea;
 mod ui;
 
 use gpui::{
@@ -30,6 +35,8 @@ fn main() {
         avatars::init(cx);
         input::bind_keys(cx);
         chat::bind_keys(cx);
+        textarea::bind_keys(cx);
+        compose::bind_keys(cx);
         state::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(menus());

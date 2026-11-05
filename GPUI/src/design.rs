@@ -274,3 +274,62 @@ pub mod settings {
     /// `accounts.add` waits this long on the browser.
     pub const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(5 * 60 + 10);
 }
+
+/// The multi-line text editor (`textarea.rs`).
+pub mod editor {
+    pub const CARET_WIDTH: f32 = 1.5;
+    /// The accent's opacity behind selected text.
+    pub const SELECTION_ALPHA: f32 = 0.3;
+    /// How wide a selected line break shows.
+    pub const NEWLINE_SELECTION: f32 = 5.0;
+    /// Line height of written text, as a multiple of its size (the composer's `1.55`).
+    pub const LEADING: f32 = 1.55;
+}
+
+/// The compose window and the reader's inline reply.
+pub mod compose {
+    use std::time::Duration;
+
+    pub const WINDOW_WIDTH: f32 = 640.0;
+    pub const WINDOW_HEIGHT: f32 = 560.0;
+    pub const MIN_WIDTH: f32 = 480.0;
+    pub const MIN_HEIGHT: f32 = 360.0;
+    /// Where the traffic lights sit in the window's title bar row.
+    pub const TRAFFIC_LIGHT_X: f32 = 16.0;
+    pub const TRAFFIC_LIGHT_Y: f32 = 19.0;
+    /// The title's start, clear of the traffic lights.
+    pub const TITLE_INSET: f32 = 84.0;
+    /// Leading inset of the header's labels and the body's text.
+    pub const MARGIN: f32 = 20.0;
+    /// The header's right-aligned `To:` labels.
+    pub const LABEL_WIDTH: f32 = 52.0;
+    pub const ROW_HEIGHT: f32 = 34.0;
+    pub const SUBJECT_HEIGHT: f32 = 44.0;
+    pub const BODY_MIN_ROWS: usize = 10;
+    pub const BODY_PADDING: f32 = 14.0;
+    /// The Send button and the confirm bar's buttons.
+    pub const BUTTON_HEIGHT: f32 = 28.0;
+    /// Recipient completion: how many people, the menu's width, a row's height and avatar.
+    pub const SUGGESTIONS: usize = 6;
+    pub const MENU_WIDTH: f32 = 340.0;
+    pub const MENU_ROW: f32 = 44.0;
+    pub const MENU_AVATAR: f32 = 24.0;
+    /// Typing pauses this long before the directory is asked.
+    pub const COMPLETION_DELAY: Duration = Duration::from_millis(120);
+    /// The inline reply: rows the text starts with and the most the card grows to.
+    pub const REPLY_MIN_ROWS: usize = 3;
+    pub const REPLY_MAX_HEIGHT: f32 = 360.0;
+    pub const REPLY_PADDING: f32 = 14.0;
+    /// The reply card's border while it has the keyboard: the accent at this opacity.
+    pub const FOCUS_RING_ALPHA: f32 = 0.45;
+    /// The reply card's floating shadow.
+    pub const CARD_SHADOW_Y: f32 = 2.0;
+    pub const CARD_SHADOW_BLUR: f32 = 14.0;
+    /// The Send button while a send is in flight.
+    pub const SENDING_OPACITY: f32 = 0.55;
+    /// Text being sent.
+    pub const SENT_TEXT_OPACITY: f32 = 0.6;
+    /// The Send button under the pointer, and its ⌘↩ hint.
+    pub const SEND_HOVER_OPACITY: f32 = 0.9;
+    pub const KEY_HINT_OPACITY: f32 = 0.72;
+}
