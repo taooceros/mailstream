@@ -38,4 +38,12 @@ nonisolated struct ConversationTag: Codable, Sendable, Hashable {
     var toRespond: Bool
     /// At most two short topic labels, e.g. "Finance", "Travel".
     var labels: [String]
+    /// When the ask lapses: the day after its deadline or event, or after a routine ask goes stale.
+    /// Nil keeps it waiting until resolved or answered.
+    var waitingUntil: Date?
+
+    /// `toRespond`, unless the ask has lapsed by `now`.
+    func isWaiting(at now: Date = .now) -> Bool {
+        toRespond && (waitingUntil.map { now < $0 } ?? true)
+    }
 }
