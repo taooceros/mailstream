@@ -162,6 +162,10 @@ class MailState extends ChangeNotifier {
   final Map<String, bool> _avatarQueue = {};
   bool _avatarsRunning = false;
 
+  /// Senders asked for only for conversations folded into a closed bundle: their pictures
+  /// arrive without a rebuild.
+  final Set<String> _foldedSenders = {};
+
   /// The picture for `email`, once the engine found one.
   String? avatar(String email) => _avatars[email.toLowerCase()];
 
@@ -258,7 +262,9 @@ class MailState extends ChangeNotifier {
 
   ListEntry get _current => searchQuery != null ? _search : (_lists[selection.key] ??= ListEntry());
 
-  bool get isLoading => _current.loading || _current.loadingMore;
+  /// A first page is loading (the bar over the list). An older page shows the list's footer
+  /// spinner instead, so loading one rebuilds nothing until it lands.
+  bool get isLoading => _current.loading;
   String? get listError => _current.error;
 
   /// Whether the list in view has older pages to load.
@@ -379,7 +385,6 @@ class MailState extends ChangeNotifier {
     if (cursor == null || entry.loadingMore || entry.loading) return;
     final generation = entry.generation;
     entry.loadingMore = true;
-    notifyListeners();
     try {
       final listing = await mail.list(query: selection.query(limit: pageSize, cursor: cursor));
       // A first page landed meanwhile and decided the cursor.
@@ -415,10 +420,16 @@ class MailState extends ChangeNotifier {
     _previewsRunning = true;
     try {
       final previews = await mail.previews(ids: ids);
-      _patchAll({
+      final changes = {
         for (final MapEntry(key: id, value: snippet) in previews.entries)
-          if (snippet != null && snippet.isNotEmpty) id: (c) => c.copyWith(snippet: snippet),
-      });
+          if (snippet != null && snippet.isNotEmpty) id: (Conversation c) => c.copyWith(snippet: snippet),
+      };
+      // A bundle's row shows no previews: ones only for conversations folded into a closed
+      // bundle are kept without rebuilding the window (pages loaded near the list's end often
+      // fold whole into bundles).
+      final shown = opened != null && changes.containsKey(opened!.id) ||
+          conversations.any((c) => changes.containsKey(c.id) && !_folded(c));
+      _patchAll(changes, rebuild: shown);
     } on engine.MailException {
       // Rows keep their subject alone; a later listing asks again.
       _previewRequested.removeAll(ids);
@@ -428,16 +439,33 @@ class MailState extends ChangeNotifier {
     await _sendPreviews();
   }
 
+  /// Whether `c` sits folded in a closed Smart Inbox bundle, which shows none of its preview or
+  /// sender picture.
+  bool _folded(Conversation c) => bundlesEnabled && c.bundle != null && c.bundle != openBundle;
+
   /// Pictures of the senders `conversations` show, from the engine's avatar cache (it looks up
   /// the ones it has not cached yet).
-  void _loadAvatars(List<Conversation> conversations) => requestAvatars([
-    for (final c in conversations)
-      if (c.from != null) (c.from!.email, c.category != null && c.category != MailCategory.people),
-  ]);
+  void _loadAvatars(List<Conversation> conversations) {
+    final shown = {for (final c in conversations) if (c.from != null && !_folded(c)) c.from!.email.toLowerCase()};
+    _foldedSenders.removeAll(shown);
+    for (final c in conversations) {
+      final key = c.from?.email.toLowerCase();
+      if (key != null && !shown.contains(key) && !_avatars.containsKey(key)) _foldedSenders.add(key);
+    }
+    _queueAvatars([
+      for (final c in conversations)
+        if (c.from != null) (c.from!.email, c.category != null && c.category != MailCategory.people),
+    ]);
+  }
 
   /// Asks the engine for the pictures of `senders` not asked for yet; automated senders may take
   /// their site's icon. Senders asked for while a request runs go together in the next one.
   void requestAvatars(Iterable<(String, bool)> senders) {
+    _foldedSenders.removeAll([for (final (email, _) in senders) email.toLowerCase()]);
+    _queueAvatars(senders);
+  }
+
+  void _queueAvatars(Iterable<(String, bool)> senders) {
     for (final (email, isAutomated) in senders) {
       final key = email.toLowerCase();
       if (!key.contains('@') || _avatars.containsKey(key)) continue;
@@ -457,13 +485,15 @@ class MailState extends ChangeNotifier {
         addresses: batch.keys.toList(),
         automated: [for (final MapEntry(:key, :value) in batch.entries) if (value) key],
       );
-      var found = false;
+      // Pictures only of senders folded into closed bundles are kept without a rebuild.
+      var shown = false;
       for (final MapEntry(key: email, value: url) in pictures.entries) {
         if (url == null) continue;
         _avatars[email] = Uri.parse(url).toFilePath();
-        found = true;
+        shown |= !_foldedSenders.contains(email);
       }
-      if (found) notifyListeners();
+      _foldedSenders.removeAll(batch.keys);
+      if (shown) notifyListeners();
     } on engine.MailException {
       // Initials stay; the next listing asks again.
       batch.keys.forEach(_avatars.remove);
@@ -572,15 +602,16 @@ class MailState extends ChangeNotifier {
   /// Every list's copy of `id`, replaced; the reader's too.
   void _patch(String id, Conversation Function(Conversation) change) => _patchAll({id: change});
 
-  /// Each changed conversation replaced in every list and the reader, in one pass and one rebuild.
-  void _patchAll(Map<String, Conversation Function(Conversation)> changes) {
+  /// Each changed conversation replaced in every list and the reader, in one pass and one rebuild
+  /// (none with `rebuild: false`, for changes the window does not show).
+  void _patchAll(Map<String, Conversation Function(Conversation)> changes, {bool rebuild = true}) {
     if (changes.isEmpty) return;
     for (final entry in [..._lists.values, _search]) {
       if (!entry.items.any((c) => changes.containsKey(c.id))) continue;
       entry.items = [for (final c in entry.items) changes[c.id]?.call(c) ?? c];
     }
     if (opened case final open?) opened = changes[open.id]?.call(open) ?? open;
-    notifyListeners();
+    if (rebuild) notifyListeners();
   }
 
   /// Takes `id` out of every list; returns a function that puts it back where it was.
