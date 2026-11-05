@@ -450,7 +450,7 @@ final class MailStore {
     /// Reads the disk cache of mailboxes not loaded yet, off the main actor, all at once, and
     /// awaits reads already in flight. A listing landing in view outside a rebuild pass (which
     /// reads it anyway) requests one.
-    private func loadCachedListings(_ keys: [MailboxKey], inRebuild: Bool = false) async {
+    func loadCachedListings(_ keys: [MailboxKey], inRebuild: Bool = false) async {
         let cache = cache
         for key in keys where listings[key] == nil && cacheReads[key] == nil {
             cacheReads[key] = Task {
@@ -518,14 +518,16 @@ final class MailStore {
         keys.compactMap { key in accountStore.backend(for: account(key)).map { (key, $0) } }
     }
 
-    /// First pages of `keys`. A key's answer counts only if no later request for it was made,
-    /// so a slow older pass never overwrites a newer one.
-    private func fetchFirstPages(_ keys: [MailboxKey]) async {
+    /// First pages of `keys`, and the keys that failed. A key's answer counts only if no later
+    /// request for it was made, so a slow older pass never overwrites a newer one.
+    @discardableResult
+    func fetchFirstPages(_ keys: [MailboxKey]) async -> [MailboxKey: any Error] {
         var tickets: [MailboxKey: Int] = [:]
         for key in keys {
             firstPageRequests[key, default: 0] += 1
             tickets[key] = firstPageRequests[key]
         }
+        var failures: [MailboxKey: any Error] = [:]
         await forEachConcurrently(backends(keys, account: \.account)) { job in
             try await job.backend.envelopes(mailbox: job.key.mailbox, cursor: nil, pageSize: Self.pageSize, priority: .interactive)
         } consume: { job, result in
@@ -534,10 +536,14 @@ final class MailStore {
                   firstPageRequests[key] == tickets[key] else { return }
             switch result {
             case .success(let page):
-                if merge(firstPage: page, into: key) { rebuild.request() }
-            case .failure(let error): report(error, context: key.account)
+                // Mailboxes listed only for the control socket leave the window's list alone.
+                if merge(firstPage: page, into: key), (primaryKeys + contextKeys).contains(key) { rebuild.request() }
+            case .failure(let error):
+                failures[key] = error
+                report(error, context: key.account)
             }
         }
+        return failures
     }
 
     /// Returns whether anything changed, so an unchanged mailbox costs no rebuild.
@@ -564,53 +570,62 @@ final class MailStore {
         return true
     }
 
-    /// Writes the listing to disk, at most `cachedEnvelopes` of it; a listing cut short is kept
-    /// without its cursor, and paging then goes on from the first page's.
+    /// Writes the whole listing with its cursor: mail fetched once stays listed on later launches.
     private func persist(_ key: MailboxKey) {
         guard let listing = listings[key] else { return }
-        let kept = Array(listing.envelopes.prefix(Self.cachedEnvelopes))
-        let next = kept.count == listing.envelopes.count ? listing.next : nil
-        cache.saveListing(CachedListing(envelopes: kept, next: next), for: key)
+        cache.saveListing(CachedListing(envelopes: listing.envelopes, next: listing.next), for: key)
     }
-
-    private static let cachedEnvelopes = 2000
 
     /// The next page of every mailbox in view that has one, fetched at once.
     func loadMore() {
         guard loadMoreTask == nil, canLoadMore else { return }
-        let jobs = backends(primaryKeys.compactMap { key in listings[key]?.next.map { (key, $0) } }, account: \.0.account)
-            .map { (key: $0.key.0, cursor: $0.key.1, backend: $0.backend) }
+        let keys = primaryKeys
         isLoading = true
         loadMoreTask = Task(name: "Mail load more") {
             defer { loadMoreTask = nil }
-            await forEachConcurrently(jobs) { job in
-                try await job.backend.envelopes(mailbox: job.key.mailbox, cursor: job.cursor,
-                                                pageSize: Self.pageSize, priority: .interactive)
-            } consume: { job, result in
-                // `select` cancelled it and resets `isLoading`; a first page or another page
-                // moved the cursor meanwhile; or the account was removed.
-                guard !Task.isCancelled, var listing = listings[job.key], listing.next == job.cursor else { return }
-                switch result {
-                case .success(let page):
-                    listing.appendUnknown(page.envelopes)
-                    listing.next = page.next
-                    listings[job.key] = listing
-                    persist(job.key)
-                case .failure(let error):
-                    // A cursor kept on disk went stale: page on from the first page's instead.
-                    if let api = error as? APIError, [400, 404, 410].contains(api.status),
-                       let restart = listing.restart, restart != job.cursor {
-                        listings[job.key]?.next = restart
-                    } else {
-                        report(error, context: job.key.account)
-                    }
-                }
-            }
+            await fetchNextPages(keys)
+            // `select` cancelled it and resets `isLoading`.
             guard !Task.isCancelled else { return }
             isLoading = false
-            rebuild.request()
         }
     }
+
+    /// The next page of each of `keys` that has one, fetched at once and kept on disk with the
+    /// cursor after it; a list in view that gained mail rebuilds.
+    func fetchNextPages(_ keys: [MailboxKey]) async {
+        let jobs = backends(keys.compactMap { key in listings[key]?.next.map { (key, $0) } }, account: \.0.account)
+            .map { (key: $0.key.0, cursor: $0.key.1, backend: $0.backend) }
+        var grew = false
+        await forEachConcurrently(jobs) { job in
+            try await job.backend.envelopes(mailbox: job.key.mailbox, cursor: job.cursor,
+                                            pageSize: Self.pageSize, priority: .interactive)
+        } consume: { job, result in
+            // Cancelled by `select`; a first page or another page moved the cursor meanwhile; or
+            // the account was removed.
+            guard !Task.isCancelled, var listing = listings[job.key], listing.next == job.cursor else { return }
+            switch result {
+            case .success(let page):
+                let count = listing.envelopes.count
+                listing.appendUnknown(page.envelopes)
+                listing.next = page.next
+                listings[job.key] = listing
+                persist(job.key)
+                if listing.envelopes.count != count { grew = true }
+            case .failure(let error):
+                // A cursor kept on disk went stale: page on from the first page's instead.
+                if let api = error as? APIError, [400, 404, 410].contains(api.status),
+                   let restart = listing.restart, restart != job.cursor {
+                    listings[job.key]?.next = restart
+                } else {
+                    report(error, context: job.key.account)
+                }
+            }
+        }
+        if grew, !Set(primaryKeys + contextKeys).isDisjoint(with: keys) { rebuild.request() }
+    }
+
+    /// Whether `key`'s listing has a page after the mail kept.
+    func hasNextPage(_ key: MailboxKey) -> Bool { listings[key]?.next != nil }
 
     // MARK: - Search
 

@@ -1,34 +1,38 @@
 import CryptoKit
 import Foundation
 
-/// On-disk cache under ~/Library/Caches so launches paint from the last known state before the
-/// network answers. Everything here is disposable.
+/// What Mailstream has fetched and worked out, kept so launches paint the last known state before
+/// the network answers and mail once fetched stays: accounts, mailboxes, every listed envelope
+/// with its paging cursor, message content, AI tags and chat, in a Turso database
+/// (`MailDatabase`, Application Support/Mailstream/mail.db). Attachments and inline parts are files
+/// under ~/Library/Caches, which the content refers to.
 ///
-/// Reads are `@concurrent`, so they always run on the concurrent executor, never on the caller's
-/// (main) thread. Writes are queued in call order to one writer task off the main actor, which
-/// also encodes, so the last write for a file always wins and callers never wait.
+/// Reads are `@concurrent`, so decoding never runs on the caller's (main) thread. Writes are
+/// queued in call order to one writer task off the main actor, which also encodes, so the last
+/// write for a row always wins and callers never wait.
 nonisolated final class MailCache: Sendable {
     static let contentVersion = 3
     static let scheme = "mscid"
 
+    /// Files: attachments, inline parts, avatars, the tagger's working directory.
     let root: URL
-    private let writes: AsyncStream<@Sendable () -> Void>.Continuation
+    private let database: MailDatabase
+    private let writes: AsyncStream<@Sendable () async -> Void>.Continuation
 
     init() {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         root = caches.appendingPathComponent("dev.mailstream.Mailstream", isDirectory: true)
-        let (queue, writes) = AsyncStream.makeStream(of: (@Sendable () -> Void).self)
+        database = MailDatabase(url: URL.applicationSupportDirectory.appending(path: "Mailstream/mail.db"), files: root)
+        let (queue, writes) = AsyncStream.makeStream(of: (@Sendable () async -> Void).self)
         self.writes = writes
         Task(name: "Cache writer", priority: .utility) {
-            for await write in queue { write() }
+            for await write in queue { await write() }
         }
         let root = root
         writes.yield {
             let fm = FileManager.default
             for legacy in Self.legacy { try? fm.removeItem(at: root.appendingPathComponent(legacy)) }
-            for sub in ["envelopes-v3", "messages-v2", "mailboxes-v2", "chat-v2"] {
-                try? fm.createDirectory(at: root.appendingPathComponent(sub), withIntermediateDirectories: true)
-            }
+            try? fm.createDirectory(at: root.appendingPathComponent("messages-v2"), withIntermediateDirectories: true)
         }
     }
 
@@ -45,49 +49,67 @@ nonisolated final class MailCache: Sendable {
         return digest.prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 
-    @concurrent private func read<T: Decodable & Sendable>(_ type: T.Type, at url: URL) async -> T? {
-        JSONFile.read(type, at: url)
+    @concurrent private func read<T: Decodable & Sendable>(_ type: T.Type, _ table: MailDatabase.Table, _ key: String) async -> T? {
+        guard let data = await database.value(table, key) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
     }
 
-    private func write<T: Encodable & Sendable>(_ value: T, to url: URL, creatingDirectory: Bool = false) {
-        writes.yield { try? JSONFile.write(value, to: url, creatingDirectory: creatingDirectory) }
+    private func write<T: Encodable & Sendable>(_ value: T, _ table: MailDatabase.Table, _ key: String) {
+        let database = database
+        writes.yield {
+            guard let data = try? JSONEncoder().encode(value) else { return }
+            await database.setValue(data, table, key)
+        }
     }
 
     // MARK: Accounts
 
-    private var accountsURL: URL { root.appendingPathComponent("accounts-v2.json") }
+    func loadAccounts() async -> [Account]? { await read([Account].self, .state, "accounts") }
 
-    func loadAccounts() async -> [Account]? { await read([Account].self, at: accountsURL) }
-
-    func saveAccounts(_ accounts: [Account]) { write(accounts, to: accountsURL) }
+    func saveAccounts(_ accounts: [Account]) { write(accounts, .state, "accounts") }
 
     // MARK: Tags
 
-    private var tagsURL: URL { root.appendingPathComponent("tags-v2.json") }
+    @concurrent func loadTags() async -> [String: ConversationTag]? {
+        let rows = await database.tags()
+        guard !rows.isEmpty else { return nil }
+        let decoder = JSONDecoder()
+        return rows.compactMapValues { try? decoder.decode(ConversationTag.self, from: $0) }
+    }
 
-    func loadTags() async -> [String: ConversationTag]? { await read([String: ConversationTag].self, at: tagsURL) }
-
-    func saveTags(_ tags: [String: ConversationTag]) { write(tags, to: tagsURL) }
+    func saveTags(_ tags: [String: ConversationTag]) {
+        let database = database
+        writes.yield {
+            let encoder = JSONEncoder()
+            await database.replaceTags(tags.compactMapValues { try? encoder.encode($0) })
+        }
+    }
 
     // MARK: Listings
 
-    private func listingURL(_ key: MailboxKey) -> URL {
-        root.appendingPathComponent("envelopes-v3/\(Self.hash(key.account, key.mailbox)).json")
+    private func listingKey(_ key: MailboxKey) -> String { Self.hash(key.account, key.mailbox) }
+
+    @concurrent func loadListing(_ key: MailboxKey) async -> CachedListing? {
+        guard let stored = await database.listing(listingKey(key)) else { return nil }
+        let decoder = JSONDecoder()
+        return CachedListing(envelopes: stored.envelopes.compactMap { try? decoder.decode(Envelope.self, from: $0) },
+                             next: stored.next)
     }
 
-    func loadListing(_ key: MailboxKey) async -> CachedListing? { await read(CachedListing.self, at: listingURL(key)) }
-
-    func saveListing(_ listing: CachedListing, for key: MailboxKey) { write(listing, to: listingURL(key)) }
+    func saveListing(_ listing: CachedListing, for key: MailboxKey) {
+        let database = database, key = listingKey(key)
+        writes.yield {
+            let encoder = JSONEncoder()
+            let rows = listing.envelopes.compactMap { envelope in (try? encoder.encode(envelope)).map { (envelope.id, $0) } }
+            await database.replaceListing(key, next: listing.next, envelopes: rows)
+        }
+    }
 
     // MARK: Mailboxes
 
-    private func mailboxesURL(_ account: String) -> URL {
-        root.appendingPathComponent("mailboxes-v2/\(Self.hash(account)).json")
-    }
+    func loadMailboxes(_ account: String) async -> [Mailbox]? { await read([Mailbox].self, .mailboxes, Self.hash(account)) }
 
-    func loadMailboxes(_ account: String) async -> [Mailbox]? { await read([Mailbox].self, at: mailboxesURL(account)) }
-
-    func saveMailboxes(_ mailboxes: [Mailbox], for account: String) { write(mailboxes, to: mailboxesURL(account)) }
+    func saveMailboxes(_ mailboxes: [Mailbox], for account: String) { write(mailboxes, .mailboxes, Self.hash(account)) }
 
     // MARK: Message content
 
@@ -104,15 +126,11 @@ nonisolated final class MailCache: Sendable {
     /// Base URL inline parts of `ref` are served from by the reader's scheme handler.
     func partURLBase(_ ref: MessageRef) -> String { "\(Self.scheme)://\(messageKey(ref))/" }
 
-    private func contentURL(_ ref: MessageRef) -> URL {
-        messageDirectory(ref).appendingPathComponent("content-v\(Self.contentVersion).json")
-    }
+    private func contentKey(_ ref: MessageRef) -> String { MailDatabase.contentKey(messageKey(ref), version: Self.contentVersion) }
 
-    func loadContent(_ ref: MessageRef) async -> MessageContent? { await read(MessageContent.self, at: contentURL(ref)) }
+    func loadContent(_ ref: MessageRef) async -> MessageContent? { await read(MessageContent.self, .contents, contentKey(ref)) }
 
-    func saveContent(_ content: MessageContent, for ref: MessageRef) {
-        write(content, to: contentURL(ref), creatingDirectory: true)
-    }
+    func saveContent(_ content: MessageContent, for ref: MessageRef) { write(content, .contents, contentKey(ref)) }
 
     func attachmentURL(_ attachment: Attachment, of ref: MessageRef) -> URL {
         messageDirectory(ref).appendingPathComponent(attachment.storedName)
@@ -120,45 +138,37 @@ nonisolated final class MailCache: Sendable {
 
     // MARK: Chat
 
-    private var chatAccountsURL: URL { root.appendingPathComponent("chat-accounts-v2.json") }
+    func loadChatAccounts() async -> [ChatAccount]? { await read([ChatAccount].self, .state, "chatAccounts") }
 
-    func loadChatAccounts() async -> [ChatAccount]? { await read([ChatAccount].self, at: chatAccountsURL) }
+    func saveChatAccounts(_ accounts: [ChatAccount]) { write(accounts, .state, "chatAccounts") }
 
-    func saveChatAccounts(_ accounts: [ChatAccount]) { write(accounts, to: chatAccountsURL) }
-
-    private func chatSpacesURL(_ account: String) -> URL {
-        root.appendingPathComponent("chat-v2/spaces-\(Self.hash(account)).json")
+    func loadChatSpaces(_ account: String) async -> ChatSpaceList? {
+        await read(ChatSpaceList.self, .chatSpaces, Self.hash(account))
     }
 
-    func loadChatSpaces(_ account: String) async -> ChatSpaceList? { await read(ChatSpaceList.self, at: chatSpacesURL(account)) }
+    func saveChatSpaces(_ list: ChatSpaceList, for account: String) { write(list, .chatSpaces, Self.hash(account)) }
 
-    func saveChatSpaces(_ list: ChatSpaceList, for account: String) { write(list, to: chatSpacesURL(account)) }
+    /// Spaces whose messages are kept, most recently opened first.
+    func loadChatRecent() async -> [ChatSpaceKey]? { await read([ChatSpaceKey].self, .state, "chatRecent") }
 
-    private var chatRecentURL: URL { root.appendingPathComponent("chat-v2/recent-v1.json") }
+    func saveChatRecent(_ keys: [ChatSpaceKey]) { write(keys, .state, "chatRecent") }
 
-    /// Spaces whose messages are kept on disk, most recently opened first.
-    func loadChatRecent() async -> [ChatSpaceKey]? { await read([ChatSpaceKey].self, at: chatRecentURL) }
-
-    func saveChatRecent(_ keys: [ChatSpaceKey]) { write(keys, to: chatRecentURL) }
-
-    private func chatMessagesURL(_ key: ChatSpaceKey) -> URL {
-        root.appendingPathComponent("chat-v2/messages-\(Self.hash(key.account, key.space)).json")
-    }
+    private func chatMessagesKey(_ key: ChatSpaceKey) -> String { Self.hash(key.account, key.space) }
 
     func loadChatMessages(_ key: ChatSpaceKey) async -> ChatMessagePage? {
-        await read(ChatMessagePage.self, at: chatMessagesURL(key))
+        await read(ChatMessagePage.self, .chatMessages, chatMessagesKey(key))
     }
 
-    func saveChatMessages(_ page: ChatMessagePage, for key: ChatSpaceKey) { write(page, to: chatMessagesURL(key)) }
+    func saveChatMessages(_ page: ChatMessagePage, for key: ChatSpaceKey) { write(page, .chatMessages, chatMessagesKey(key)) }
 
     func removeChatMessages(_ key: ChatSpaceKey) {
-        let url = chatMessagesURL(key)
-        writes.yield { try? FileManager.default.removeItem(at: url) }
+        let database = database, key = chatMessagesKey(key)
+        writes.yield { await database.remove(.chatMessages, key) }
     }
 }
 
 /// A mailbox's listing as last loaded: its envelopes, newest first, and the cursor of the page
-/// after them, so paging resumes past what is on disk instead of fetching it again.
+/// after them, so paging resumes past what is kept instead of fetching it again.
 nonisolated struct CachedListing: Codable, Sendable {
     var envelopes: [Envelope]
     var next: String?

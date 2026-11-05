@@ -13,6 +13,9 @@ This repo is a colocated jj repo (`.jj` + `.git`), pushed to `github.com/taoocer
 
 ## Building
 
+- The app links the Turso database engine (`.turso/lib/libturso_sqlite3.a`). Run `scripts/turso.sh`
+  once before `swift build` (it needs rustup; `bundle.sh` runs it too). It builds the pinned version
+  with cargo in a few minutes and returns at once after that.
 - Check with `swift build` and launch with `scripts/run.sh`: both use the incremental debug build
   (seconds per edit). A release build (`scripts/bundle.sh`, `CONFIG=release`) re-optimizes the
   whole module single-threaded, ~30 s per edit; build it only to check performance or ship.
@@ -51,7 +54,9 @@ Reuse these instead of writing another copy:
 - Network: paging is `API.pages`, chunked batch requests with throttled retries are `API.batched`,
   status classification is `API.retry(status:body:)`; provider roots and OAuth scopes live in
   `Backend/Endpoints.swift`.
-- Disk: JSON files are read and written with `JSONFile`; `MailCache` queues its writes.
+- Disk: mail data (accounts, mailboxes, listings, content, tags, chat) lives in the Turso database
+  behind `MailCache` (`MailDatabase`, `Support/SQLite.swift`), in Application Support/Mailstream/mail.db;
+  `MailCache` queues its writes. Other JSON files are read and written with `JSONFile`.
 - Style: every color, type size, radius, shadow and duration comes from `Design`
   (`UI/Design.swift`). AppKit reads the tokens directly; the pages' CSS uses them as custom
   properties (`var(--muted)`, `var(--size-body)`, `var(--dur-quick)`) from `Design.stylesheet`,
