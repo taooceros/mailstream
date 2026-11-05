@@ -33,6 +33,9 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
 - Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work),
   move it to In Review and comment what changed, how it was verified and what remains. The user
   moves it to Done.
+- UI changes (a new or changed view, flow or interaction, in any front end): take screenshots
+  of the running app showing the change, every state it adds included, and attach them to the
+  finishing comment. Work without them is not ready for review.
 - Questions only the user can decide: move the issue to Todo and ask in a comment instead of
   guessing.
 - Problems found outside the current change: file a Backlog issue with labels; do not fix them
