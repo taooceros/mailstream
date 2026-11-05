@@ -40,4 +40,49 @@ void main() {
     expect(await swipe(tester, 60), 0);
     expect(tester.getSize(find.byKey(const Key('list'))).width, moreOrLessEquals(400, epsilon: 0.5));
   });
+
+  testWidgets('closing without a swipe moves at once and eases into the full width', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    Widget split(bool open) => MaterialApp(
+      home: SplitDetail(
+        list: const SizedBox.expand(key: Key('list')),
+        listWidth: 400,
+        onDismiss: () {},
+        detail: open ? const ColoredBox(key: Key('detail'), color: Colors.white) : null,
+      ),
+    );
+    double list() => tester.getSize(find.byKey(const Key('list'))).width;
+    await tester.pumpWidget(split(true));
+    await tester.pumpWidget(split(false));
+    await tester.pump(const Duration(milliseconds: 16));
+    // The close button responds within the first frame instead of creeping off.
+    expect(list(), greaterThan(420));
+    final widths = <double>[];
+    while (tester.binding.hasScheduledFrame) {
+      await tester.pump(const Duration(milliseconds: 16));
+      widths.add(list());
+    }
+    expect(widths.last, moreOrLessEquals(1200, epsilon: 0.5));
+    // It slows into the edge: the last frame of motion moves far less than the fastest one.
+    final steps = [for (var i = 1; i < widths.length; i++) widths[i] - widths[i - 1]];
+    expect(steps.reduce((a, b) => a > b ? a : b), greaterThan(steps.where((s) => s > 0).last * 10));
+    expect(find.byKey(const Key('detail')), findsNothing);
+  });
+
+  testWidgets('the narrow layer slides out at once when closed', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(800, 800));
+    Widget layer(bool open) => MaterialApp(
+      home: SlideLayer(
+        onDismiss: () {},
+        child: open ? const SizedBox.expand(key: Key('page')) : null,
+      ),
+    );
+    await tester.pumpWidget(layer(true));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(layer(false));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(tester.getTopLeft(find.byKey(const Key('page'))).dx, greaterThan(20));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('page')), findsNothing);
+  });
 }

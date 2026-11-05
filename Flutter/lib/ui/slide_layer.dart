@@ -19,9 +19,10 @@ class SlideLayer extends StatefulWidget {
 }
 
 class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
-  late final _presence = AnimationController(vsync: this, duration: Motion.enter, reverseDuration: Motion.exit);
+  late final _presence = AnimationController(vsync: this, duration: Motion.enter);
 
-  /// Horizontal offset in pixels while swiping, and while it settles back or flies off.
+  /// Horizontal offset in pixels while swiping, while it settles back or flies off, and while the
+  /// layer slides out.
   late final _drag = AnimationController.unbounded(vsync: this);
   Widget? _shown;
 
@@ -29,6 +30,9 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
   bool _swipedAway = false;
 
   final _swipe = HorizontalSwipe();
+
+  /// The layer's width at the last layout, which closing slides it by.
+  double _width = 0;
 
   @override
   void initState() {
@@ -43,18 +47,27 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
     final child = widget.child;
     if (child != null) {
       final entering = old.child == null;
-      _shown = child;
       if (entering) {
         _swipedAway = false;
-        _drag.value = 0;
-        _presence.forward(from: _presence.value);
+        if (_shown == null) {
+          _drag.value = 0;
+          _presence.forward(from: 0);
+        } else {
+          // Reopened while still sliding out: it springs back from where it is.
+          _drag.animateWith(_settle(_drag.value, 0, _drag.velocity));
+        }
       }
+      _shown = child;
     } else if (old.child != null) {
       if (_swipedAway) {
         _presence.value = 0;
         _shown = null;
       } else {
-        _presence.reverse().whenComplete(() {
+        // Slides out on the spring a swipe settles on, from wherever the entrance has got to, so
+        // it moves at once and glides out instead of creeping off first.
+        _drag.value += (1 - Motion.curve.transform(_presence.value)) * _width;
+        _presence.value = 1;
+        _drag.animateWith(_settle(_drag.value, _width, 0)).whenComplete(() {
           if (mounted && widget.child == null) setState(() => _shown = null);
         });
       }
@@ -95,7 +108,7 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
     if (shown == null) return const SizedBox.shrink();
     return LayoutBuilder(
       builder: (context, constraints) {
-        final width = constraints.maxWidth;
+        final width = _width = constraints.maxWidth;
         return Listener(
           onPointerPanZoomStart: _start,
           onPointerPanZoomUpdate: _update,
@@ -205,6 +218,9 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
   /// Set once a swipe closed the split, which is already springing shut: closing follows on its own.
   bool _swipedAway = false;
 
+  /// How far the page travels between open and closed, at the last layout.
+  double _travel = 1;
+
   @override
   void initState() {
     super.initState();
@@ -223,7 +239,9 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
         _split.animateTo(1, duration: Motion.enter, curve: Motion.curve);
       }
     } else if (old.detail != null && !_swipedAway) {
-      _split.animateTo(0, duration: Motion.exit, curve: Easing.emphasizedAccelerate).whenComplete(_hide);
+      // Closes on the spring a swipe settles on, carrying whatever speed the split has, so it moves
+      // at once and the list eases into the full width rather than hitting it at top speed.
+      _split.animateWith(_settle(_split.value, 0, _split.velocity, pixels: _travel)).whenComplete(_hide);
     }
   }
 
@@ -272,7 +290,7 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
       builder: (context, constraints) {
         final full = constraints.maxWidth;
         final detailWidth = full - widget.listWidth - Panes.spacer;
-        final travel = full - widget.listWidth;
+        final travel = _travel = full - widget.listWidth;
         return AnimatedBuilder(
           animation: _split,
           builder: (context, _) {

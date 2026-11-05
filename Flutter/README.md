@@ -27,7 +27,7 @@ from 1000 dp opening a conversation splits it into the list-detail layout, list 
 conversation in two rounded panes side by side, and closing it gives the list the width
 back. Narrower windows slide the conversation over the list. Either way a two-finger swipe to
 the right on the trackpad drags the conversation out and closes it, springing from the fingers'
-velocity.
+velocity; the close button and Esc slide it out on the same spring.
 
 HTML mail is drawn by WebKit: `macos/Runner/MailHtmlView.swift` is a platform view
 (`mailstream/html`) that runs none of the mail's scripts, opens links in the browser, loads
