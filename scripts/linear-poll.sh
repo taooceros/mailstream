@@ -17,7 +17,8 @@
 #     workspace member (not an app, a guest or a GitHub sync) posted on any team issue in the last
 #     7 days, each once. The caller routes it to the issue's subagent or starts one.
 # Claims are kept in ~/.local/state/linear-poll/: `launched` (issue ids), `comments` (comment ids).
-# DRY_RUN=1 prints without claiming.
+# DRY_RUN=1 prints without claiming. `linear-poll.sh seen comment|issue <id>` puts omp's 👀 on a
+# comment or issue once the caller has handed it to a subagent, so the user sees it was picked up.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TEAM_ID=${TEAM_ID:-9f8fe59f-3788-4542-8c18-4e5c5dd5ddc2} # Mailstream; the id survives key renames
@@ -52,6 +53,13 @@ gql() {
     return 0
   done
 }
+
+if [ "${1:-}" = seen ]; then
+  case "${2:-}" in comment) field=commentId ;; issue) field=issueId ;; *) echo "usage: $0 seen comment|issue <id>" >&2; exit 2 ;; esac
+  gql "mutation(\$id: String!) { reactionCreate(input: { $field: \$id, emoji: \"eyes\" }) { success } }" \
+    "$(jq -nc --arg id "$3" '{id: $id}')" >/dev/null
+  exit 0
+fi
 
 # Areas with their own workspace (../mailstream-<area>); every other issue runs in this repo.
 WORKSPACES=$(for d in "$ROOT"/../mailstream-*/; do [ -d "$d.jj" ] && basename "$d"; done |
