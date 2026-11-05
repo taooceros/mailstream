@@ -9,8 +9,9 @@ import '../state/mail_state.dart';
 import 'design.dart';
 import 'format.dart';
 
-/// The window's files (`MainFlutterWindow`): `accept` turns drops on the window on or off and
-/// `pick` shows an open panel; the window calls back with `hover` and `drop`.
+/// The window's files (`MainFlutterWindow`): `accept` turns drops on the window on or off,
+/// `pick` shows an open panel and `pasted` answers the files on the clipboard; the window calls
+/// back with `hover` and `drop`.
 const _files = MethodChannel('mailstream/files');
 
 /// Opens the compose window for a new message (⌘N, the Compose button), from the account whose
@@ -80,7 +81,7 @@ bool _validEmail(String email) {
 }
 
 /// A new message: From, To, Cc (Bcc on request), Subject, a plain-text body and attachments
-/// (the Attach button, or files dropped anywhere on the window). ⌘Return sends; Esc or ⌘W closes,
+/// (the Attach button, files dropped anywhere on the window or pasted). ⌘Return sends; Esc or ⌘W closes,
 /// asking first when something is written. A failed send keeps the window open with the
 /// engine's reason underneath.
 class ComposeWindow extends StatefulWidget {
@@ -147,6 +148,18 @@ class _ComposeWindowState extends State<ComposeWindow> {
   }
 
   Future<void> _pick() async => _attach(await _files.invokeListMethod<String>('pick') ?? const []);
+
+  /// ⌘V: files on the clipboard (copied in Finder) attach, as in the native compose window;
+  /// anything else pastes as text where the cursor is.
+  Future<void> _paste() async {
+    final focused = primaryFocus?.context;
+    final files = await _files.invokeListMethod<String>('pasted') ?? const [];
+    if (!mounted) return;
+    if (files.isNotEmpty) return _attach(files);
+    if (focused != null && focused.mounted) {
+      Actions.maybeInvoke(focused, const PasteTextIntent(SelectionChangedCause.keyboard));
+    }
+  }
 
   /// Adds the files not attached yet; nothing changes while sending.
   void _attach(List<String> paths) {
@@ -241,6 +254,7 @@ class _ComposeWindowState extends State<ComposeWindow> {
         bindings: {
           const SingleActivator(LogicalKeyboardKey.enter, meta: true): _send,
           const SingleActivator(LogicalKeyboardKey.keyW, meta: true): _requestClose,
+          const SingleActivator(LogicalKeyboardKey.keyV, meta: true): _paste,
           const SingleActivator(LogicalKeyboardKey.escape): _escape,
         },
         child: Dialog(

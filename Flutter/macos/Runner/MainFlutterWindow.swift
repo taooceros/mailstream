@@ -40,8 +40,9 @@ class MainFlutterWindow: NSWindow {
     }
     self.chrome = chrome
 
-    // `accept` turns drops on and off; `pick` answers the paths chosen in an open panel. Flutter
-    // hears `hover` (a drag of files over the window starts or ends) and `drop` (their paths).
+    // `accept` turns drops on and off; `pick` answers the paths chosen in an open panel, `pasted`
+    // the files on the clipboard. Flutter hears `hover` (a drag of files over the window starts or
+    // ends) and `drop` (their paths).
     let files = FlutterMethodChannel(name: "mailstream/files", binaryMessenger: flutterViewController.engine.binaryMessenger)
     files.setMethodCallHandler { [weak self] call, result in
       switch call.method {
@@ -56,6 +57,8 @@ class MainFlutterWindow: NSWindow {
         panel.beginSheetModal(for: self) { response in
           result(response == .OK ? panel.urls.map(\.path) : [String]())
         }
+      case "pasted":
+        result(self?.files(on: .general).map(\.path) ?? [String]())
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -76,13 +79,15 @@ class MainFlutterWindow: NSWindow {
     chrome?.invokeMethod("settings", arguments: nil)
   }
 
-  // MARK: - Dropped files
+  // MARK: - Dropped and pasted files
 
-  /// The dragged files, without folders.
-  private func droppedFiles(_ info: any NSDraggingInfo) -> [URL] {
-    let urls = info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+  /// The files on a pasteboard, without folders.
+  private func files(on pasteboard: NSPasteboard) -> [URL] {
+    let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
     return urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) != true }
   }
+
+  private func droppedFiles(_ info: any NSDraggingInfo) -> [URL] { files(on: info.draggingPasteboard) }
 
   // NSWindow declares no implementations of these, so they need `@objc` to reach AppKit.
   @objc func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
