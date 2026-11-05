@@ -23,16 +23,19 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
   label. Area names match the jj workspaces (`chat`, `concurrency`, `flutter`, `gpui`, `motion`,
   `ui-shell`) or the layer (`sync`, `cache`, `ffi`); an issue is worked in its area's workspace.
 - Claim before working: every agent, subagents included, works under an issue it has claimed.
-  With no issue for the work yet, create one first (a sub-issue of the issue it serves, if any)
-  and claim it. The start comment names the agent doing the work (its subagent/roster id), so
-  each issue shows which subagent owns it.
+  With no issue for the work yet, create one first and claim it. Work that serves another issue
+  is a sub-issue of it: set Linear's parent field (`parentId`) when creating it, so Linear shows
+  it as a sub-issue; naming the parent only in the text does not count. The start comment names
+  the agent doing the work (its subagent/roster id), so each issue shows which subagent owns it.
 - Start: read the issue and its comments. Skip issues already In Progress unless the user hands
   one over. Move it to In Progress and comment `[omp @ <workspace>] start (<agent id>): <plan>`.
 - Progress: record decisions, blockers and dead ends as comments; the next session only sees
   what is on the issue.
 - Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work),
   move it to In Review and comment what changed, how it was verified and what remains. The user
-  moves it to Done.
+  moves it to Done. If the issue has a parent, check its other sub-issues: when none is left in
+  Backlog, Todo or In Progress, finish the parent too (a summary comment listing each sub-issue
+  and what remains, then In Review). Nobody else picks up a parent an agent filed.
 - UI changes (a new or changed view, flow or interaction, in any front end): take screenshots
   of the running app showing the change, every state it adds included, and attach them to the
   finishing comment. Work without them is not ready for review.
@@ -63,6 +66,28 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
   front ends load: `scripts/ffi.sh` builds it with the UniFFI crate in `FFI/`. New commands go in
   `CommandSpec`/`ControlService`, then get a typed method in `FFI/src/lib.rs`.
 - Test only what you changed: build, then exercise the parts your change touches (the view, flow or command you edited). Do not re-run the whole app checklist or every CLI case after each change; we iterate in small steps.
+
+## Performance: 120 fps
+
+The front ends aim at 120 fps. Measure frame rate one way, so numbers compare across front ends
+and changes: `scripts/bench.sh flutter|gpui [RUNS]` on a release build.
+
+- Setup: the window (1240×800) is parked on a private 120 Hz virtual display (`scripts/vdisplay.m`;
+  the front ends draw at the rate of the display they are on, so a 60 Hz display caps them at
+  60). Each run waits for the 1-minute load average to fall below 4 (other workspaces' builds
+  skew frame times) and records it.
+- Scenario `scroll` (`MAILSTREAM_BENCH=scroll`, log to `MAILSTREAM_BENCH_OUT`): 12 s after launch,
+  once the list has rows, the app scrolls its conversation list itself, setting the offset each
+  frame from the time: 8 legs of 3 s, down 4000 px and back (less while the list is shorter;
+  pages load as in normal use). It logs every frame, then quits.
+- Per frame: start (Flutter: `FrameTiming` vsync start; GPUI: the window's render on the display
+  link tick) and work, the longest single-thread stage (Flutter: build or raster; GPUI: render
+  to the end of paint on the main thread).
+- `scripts/frame-stats.swift` reports fps, dropped vsyncs, the interval p50/p95/p99/max and work
+  percentiles. A run passes at 120 Hz when at most 1% of vsyncs are dropped and the interval p99
+  is at most 12.5 ms (1.5 frames). Report 3 runs with their load; work over 8.3 ms shows where
+  time goes.
+- Other scenarios get their own `MAILSTREAM_BENCH` value and the same log format.
 
 ## Swift: concurrency and state
 
