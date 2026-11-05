@@ -13,7 +13,7 @@ This repo is a colocated jj repo (`.jj` + `.git`), pushed to `github.com/taoocer
 
 ## Work tracking: Linear
 
-Work is tracked in Linear: team `TAO`, project `Mailstream`. Issue IDs look like `TAO-12`. Use
+Work is tracked in Linear: team `MS`, project `Mailstream`. Issue IDs look like `MS-12`. Use
 omp's Linear tools; the issue, not the session, is the record other sessions read.
 
 - Language: write everything on Linear (issue titles, descriptions, comments) in Chinese, plainly
@@ -26,13 +26,18 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
   one over. Move it to In Progress and comment `[omp @ <workspace>] start: <plan>`.
 - Progress: record decisions, blockers and dead ends as comments; the next session only sees
   what is on the issue.
-- Finish: reference the issue in the commit (`Fixes TAO-12`, or `Refs TAO-12` for partial work),
+- Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work),
   move it to In Review and comment what changed, how it was verified and what remains. The user
   moves it to Done.
 - Questions only the user can decide: move the issue to Todo and ask in a comment instead of
   guessing.
 - Problems found outside the current change: file a Backlog issue with labels; do not fix them
   in passing.
+- An omp session polls `scripts/linear-poll.sh` every minute and hands each issue it claims to a
+  subagent working in the area's workspace, one issue per workspace at a time. It claims Todo
+  issues the user created, once each, and any issue labelled `omp` (then removes the label). Only
+  the user adds `omp`; file your own issues in Backlog. `scripts/linear-omp.sh MS-12` opens one
+  issue in a new Tern tab instead (Linear's "Work on issue → Custom script").
 
 ## Building
 
