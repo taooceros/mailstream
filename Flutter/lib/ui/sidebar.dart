@@ -111,11 +111,6 @@ class _SidebarState extends State<Sidebar> {
             ),
           ),
           Expanded(child: ListView(padding: const EdgeInsets.fromLTRB(12, 4, 12, 16), children: rows)),
-          if (state.unreachable != null)
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(state.unreachable!, style: context.text.bodySmall?.copyWith(color: colors.error)),
-            ),
         ],
       ),
     );

@@ -222,6 +222,30 @@ pub struct BatchResult {
     pub failed: Vec<BatchFailure>,
 }
 
+/// A conversation's AI tag after [`Mailstream::tag`] corrected it.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct Tagged {
+    pub id: String,
+    /// `people`, `newsletter`, `notification`, …
+    pub category: String,
+    pub waiting: bool,
+    pub labels: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct TagResult {
+    pub done: Vec<Tagged>,
+    pub failed: Vec<BatchFailure>,
+}
+
+/// A sent reply: the account it went from, its recipients (`Name <address>`) and subject.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct Sent {
+    pub from: String,
+    pub to: Vec<String>,
+    pub subject: String,
+}
+
 /// What changed in the engine; a front end re-reads what it shows of it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Event {
@@ -252,10 +276,18 @@ impl Event {
     }
 }
 
+/// One change, as [`EventListener::on_event`] gets it. A record rather than the bare [`Event`]:
+/// uniffi-dart passes an enum argument of a foreign callback as an integer, which does not match
+/// the buffer Rust sends, and the Dart side fails to read it; records cross intact.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Change {
+    pub event: Event,
+}
+
 /// Implemented by the front end (in Rust, Dart, …) to hear about changes.
 #[uniffi::export(with_foreign)]
 pub trait EventListener: Send + Sync {
-    fn on_event(&self, event: Event);
+    fn on_event(&self, change: Change);
 }
 
 /// The engine of this process.
@@ -344,6 +376,25 @@ impl Mailstream {
         call("mail.restore", json!({ "ids": ids })).await
     }
 
+    /// Corrects the AI tag; each of `category`, `waiting` and `labels` (at most two) changes
+    /// only when given.
+    pub async fn tag(
+        &self,
+        ids: Vec<String>,
+        category: Option<String>,
+        waiting: Option<bool>,
+        labels: Option<Vec<String>>,
+    ) -> Result<TagResult, MailError> {
+        let waiting = waiting.map(|waiting| if waiting { "true" } else { "false" });
+        call("mail.tag", json!({ "ids": ids, "category": category, "waiting": waiting, "labels": labels })).await
+    }
+
+    /// Replies to the conversation's latest message, quoting it, to its sender or with `all` to
+    /// everyone. Sends at once: `confirm` is the person's go-ahead.
+    pub async fn reply(&self, id: String, body: String, all: bool, confirm: bool) -> Result<Sent, MailError> {
+        call("mail.reply", json!({ "id": id, "body": body, "all": all, "yes": confirm })).await
+    }
+
     /// Fetches new mail and counts now.
     pub async fn refresh(&self) -> Result<(), MailError> {
         call::<Value>("refresh", json!({})).await.map(drop)
@@ -409,7 +460,7 @@ extern "C" fn deliver_event(context: *mut c_void, bytes: *const u8, length: usiz
         event: String,
     }
     if let Ok(message) = serde_json::from_slice::<Message>(unsafe { bytes_of(bytes, length) }) {
-        listener.on_event(Event::named(&message.event));
+        listener.on_event(Change { event: Event::named(&message.event) });
     }
 }
 

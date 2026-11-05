@@ -11,6 +11,8 @@ dependencies:
     sdk: flutter
   html: ^0.15.7
   intl: ^0.20.3
+  mailstream:
+    path: packages/mailstream
 
 dev_dependencies:
   flutter_test:

@@ -1,5 +1,7 @@
-/// Plain values decoded from the control socket's JSON answers.
+/// The window's values, made from the engine's typed answers (`package:mailstream`).
 library;
+
+import 'package:mailstream/mailstream.dart' as engine;
 
 enum MailboxRole { inbox, starred, important, sent, drafts, archive, all, junk, trash, other }
 
@@ -34,8 +36,7 @@ extension MailCategoryTitle on MailCategory {
 class Account {
   const Account({required this.id, required this.label, required this.provider});
 
-  factory Account.fromJson(Map<String, Object?> json) =>
-      Account(id: json['id'] as String, label: json['label'] as String? ?? '', provider: json['provider'] as String? ?? '');
+  factory Account.of(engine.Account account) => Account(id: account.id, label: account.label, provider: account.provider);
 
   /// The address; accounts are addressed by it.
   final String id;
@@ -48,13 +49,13 @@ class Account {
 class Mailbox {
   const Mailbox({required this.account, required this.id, required this.name, required this.role, this.unread, this.total});
 
-  factory Mailbox.fromJson(String account, Map<String, Object?> json) => Mailbox(
+  factory Mailbox.of(String account, engine.Mailbox mailbox) => Mailbox(
     account: account,
-    id: json['id'] as String,
-    name: json['name'] as String? ?? '',
-    role: roleNamed(json['role'] as String?),
-    unread: json['unread'] as int?,
-    total: json['total'] as int?,
+    id: mailbox.id,
+    name: mailbox.name,
+    role: roleNamed(mailbox.role),
+    unread: mailbox.unread,
+    total: mailbox.total,
   );
 
   final String account;
@@ -68,7 +69,7 @@ class Mailbox {
 class Address {
   const Address({this.name, required this.email});
 
-  /// `Name <email>` or a bare address, as the control socket writes them.
+  /// `Name <email>` or a bare address, as the engine writes them.
   factory Address.parse(String raw) {
     final match = RegExp(r'^\s*(.*?)\s*<([^>]+)>\s*$').firstMatch(raw);
     if (match == null) return Address(email: raw.trim());
@@ -92,7 +93,7 @@ class Address {
   }
 }
 
-/// One row of `mail list` / `mail search`.
+/// One row of a listing or a search.
 class Conversation {
   const Conversation({
     required this.id,
@@ -112,22 +113,22 @@ class Conversation {
     required this.labels,
   });
 
-  factory Conversation.fromJson(Map<String, Object?> json) => Conversation(
-    id: json['id'] as String,
-    account: json['account'] as String,
-    subject: json['subject'] as String? ?? '',
-    date: DateTime.tryParse(json['date'] as String? ?? '')?.toLocal(),
-    from: (json['from'] as String?).let(Address.parse),
-    participants: (json['participants'] as List?)?.cast<String>() ?? const [],
-    messageCount: json['messageCount'] as int? ?? 1,
-    unread: json['unread'] as bool? ?? false,
-    starred: json['starred'] as bool? ?? false,
-    hasAttachment: json['hasAttachment'] as bool? ?? false,
-    mailboxes: ((json['mailboxes'] as List?)?.cast<String>() ?? const []).map(roleNamed).toSet(),
-    snippet: json['snippet'] as String?,
-    category: MailCategory.values.where((c) => c.name == json['category']).firstOrNull,
-    waiting: json['waiting'] as bool? ?? false,
-    labels: (json['labels'] as List?)?.cast<String>() ?? const [],
+  factory Conversation.of(engine.Conversation c) => Conversation(
+    id: c.id,
+    account: c.account,
+    subject: c.subject,
+    date: _date(c.date),
+    from: c.from.let(Address.parse),
+    participants: c.participants,
+    messageCount: c.messageCount,
+    unread: c.unread,
+    starred: c.starred,
+    hasAttachment: c.hasAttachment,
+    mailboxes: c.mailboxes.map(roleNamed).toSet(),
+    snippet: c.snippet,
+    category: MailCategory.values.where((category) => category.name == c.category).firstOrNull,
+    waiting: c.waiting,
+    labels: c.labels,
   );
 
   final String id;
@@ -176,12 +177,8 @@ class Conversation {
 class AttachmentInfo {
   const AttachmentInfo({required this.filename, required this.mime, required this.size, required this.path});
 
-  factory AttachmentInfo.fromJson(Map<String, Object?> json) => AttachmentInfo(
-    filename: json['filename'] as String? ?? 'attachment',
-    mime: json['mime'] as String? ?? '',
-    size: json['size'] as int? ?? 0,
-    path: json['path'] as String? ?? '',
-  );
+  factory AttachmentInfo.of(engine.Attachment a) =>
+      AttachmentInfo(filename: a.filename.isEmpty ? 'attachment' : a.filename, mime: a.mime, size: a.size, path: a.path);
 
   final String filename;
   final String mime;
@@ -189,7 +186,7 @@ class AttachmentInfo {
   final String path;
 }
 
-/// One message of `mail show --html`.
+/// One message of a conversation, with its HTML body.
 class MessageDetail {
   const MessageDetail({
     required this.id,
@@ -207,22 +204,22 @@ class MessageDetail {
     required this.error,
   });
 
-  factory MessageDetail.fromJson(Map<String, Object?> json) {
-    List<Address> addresses(String key) => ((json[key] as List?)?.cast<String>() ?? const []).map(Address.parse).toList();
+  factory MessageDetail.of(engine.Message m) {
+    List<Address> addresses(List<String> raw) => raw.map(Address.parse).toList();
     return MessageDetail(
-      id: json['id'] as String,
-      role: roleNamed(json['role'] as String?),
-      from: addresses('from'),
-      to: addresses('to'),
-      cc: addresses('cc'),
-      date: DateTime.tryParse(json['date'] as String? ?? '')?.toLocal(),
-      subject: json['subject'] as String? ?? '',
-      unread: json['unread'] as bool? ?? false,
-      starred: json['starred'] as bool? ?? false,
-      text: json['text'] as String?,
-      html: json['html'] as String?,
-      attachments: ((json['attachments'] as List?) ?? const []).map((a) => AttachmentInfo.fromJson(a as Map<String, Object?>)).toList(),
-      error: json['error'] as String?,
+      id: m.id,
+      role: roleNamed(m.role),
+      from: addresses(m.from),
+      to: addresses(m.to),
+      cc: addresses(m.cc),
+      date: _date(m.date),
+      subject: m.subject,
+      unread: m.unread,
+      starred: m.starred,
+      text: m.text,
+      html: m.html,
+      attachments: m.attachments.map(AttachmentInfo.of).toList(),
+      error: m.error,
     );
   }
 
@@ -242,6 +239,9 @@ class MessageDetail {
 
   Address get sender => from.isEmpty ? const Address(email: 'unknown') : from.first;
 }
+
+/// The engine's ISO 8601 dates, in local time.
+DateTime? _date(String? iso) => iso == null ? null : DateTime.tryParse(iso)?.toLocal();
 
 extension Let<T extends Object> on T? {
   R? let<R>(R Function(T) transform) {

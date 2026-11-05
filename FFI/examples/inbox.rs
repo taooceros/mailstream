@@ -6,13 +6,13 @@ use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
 
 use futures_executor::block_on;
-use mailstream::{Event, EventListener, ListQuery, Mailstream, run_main_loop};
+use mailstream::{Change, Event, EventListener, ListQuery, Mailstream, run_main_loop};
 
 struct Forward(Sender<Event>);
 
 impl EventListener for Forward {
-    fn on_event(&self, event: Event) {
-        let _ = self.0.send(event);
+    fn on_event(&self, change: Change) {
+        let _ = self.0.send(change.event);
     }
 }
 

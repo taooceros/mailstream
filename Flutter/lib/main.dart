@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
 
-import 'backend/control_client.dart';
+import 'package:mailstream/mailstream.dart' as engine;
+
 import 'state/mail_state.dart';
 import 'ui/design.dart';
 import 'ui/shell.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  final state = MailState(ControlClient())..start();
+  // The engine starts in this process: it paints from the shared cache and syncs every account.
+  final state = MailState(engine.Mailstream())..start();
   runApp(MailstreamApp(state: state));
 }
 

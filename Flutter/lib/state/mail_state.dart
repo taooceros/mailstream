@@ -3,7 +3,8 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
-import '../backend/control_client.dart';
+import 'package:mailstream/mailstream.dart' as engine;
+
 import '../backend/models.dart';
 
 /// What the list shows: one role across every account, or one account's mailbox.
@@ -12,7 +13,9 @@ sealed class Selection {
 
   String get key;
   MailboxRole get role;
-  Map<String, Object?> get listArgs;
+
+  /// The engine's listing of it.
+  engine.ListQuery query({required int limit, String? cursor});
 }
 
 final class UnifiedSelection extends Selection {
@@ -25,7 +28,8 @@ final class UnifiedSelection extends Selection {
   String get key => 'unified:${role.name}';
 
   @override
-  Map<String, Object?> get listArgs => {'mailbox': [role.name]};
+  engine.ListQuery query({required int limit, String? cursor}) =>
+      engine.ListQuery(mailboxes: [role.name], limit: limit, cursor: cursor);
 
   @override
   bool operator ==(Object other) => other is UnifiedSelection && other.role == role;
@@ -46,7 +50,8 @@ final class MailboxSelection extends Selection {
   String get key => 'mailbox:${mailbox.account}:${mailbox.id}';
 
   @override
-  Map<String, Object?> get listArgs => {'mailbox': [mailbox.id], 'account': mailbox.account};
+  engine.ListQuery query({required int limit, String? cursor}) =>
+      engine.ListQuery(mailboxes: [mailbox.id], account: mailbox.account, limit: limit, cursor: cursor);
 
   @override
   bool operator ==(Object other) => other is MailboxSelection && other.key == key;
@@ -87,16 +92,30 @@ class Toast {
   final bool error;
 }
 
-/// The UI's single source of truth. The Swift app behind the control socket owns sync, caching,
-/// threading and tagging; this keeps what the window shows, serves it from memory while fresh, and
-/// applies the user's actions optimistically, rolling them back when the app reports a failure.
+/// The engine's change events, handed to the state.
+class _Changes implements engine.EventListener {
+  _Changes(this.deliver);
+
+  final void Function(engine.Event) deliver;
+
+  @override
+  void onEvent(engine.Change change) => deliver(change.event);
+}
+
+/// What a failed engine call says.
+String describe(Object error) => error is engine.FailedMailException ? error.message : '$error';
+
+/// The UI's single source of truth. Mailstream's engine runs in this process (`package:mailstream`)
+/// and owns accounts, sync, caching, threading and tagging; this keeps what the window shows,
+/// reads it again when the engine reports a change, and applies the user's actions optimistically,
+/// rolling them back when the engine reports a failure.
 class MailState extends ChangeNotifier {
-  MailState(this.client);
+  MailState(this.mail);
 
-  final ControlClient client;
+  final engine.Mailstream mail;
 
-  /// A list fetched within this long serves reads without asking again; the native app polls at
-  /// the same pace while push is down.
+  /// A list not in view fetched within this long serves reads without asking again; the one in
+  /// view follows the engine's change events.
   static const listLifetime = Duration(seconds: 90);
   static const pageSize = 60;
 
@@ -114,22 +133,24 @@ class MailState extends ChangeNotifier {
   final ListEntry _search = ListEntry();
   Timer? _searchDebounce;
 
-  /// Nil while the app answers; else why it does not.
-  String? unreachable;
   Toast? toast;
 
   final Map<String, ListEntry> _lists = {};
   final Map<String, ThreadEntry> _threads = {};
-  Timer? _poll;
 
-  /// Conversations whose preview `mail.previews` is loading or has answered.
+  /// Change events gathered for one re-read: the engine sends bursts while it syncs.
+  Timer? _changes;
+  bool _accountsChanged = false;
+  bool _listsChanged = false;
+
+  /// Conversations whose preview `previews` is loading or has answered.
   final Set<String> _previewRequested = {};
 
-  /// Sender address → the file of their picture in the app's cache, or null when they have none.
-  /// An address absent here has not been asked for yet.
+  /// Sender address → the file of their picture in the engine's cache, or null when they have
+  /// none. An address absent here has not been asked for yet.
   final Map<String, String?> _avatars = {};
 
-  /// The picture for `email`, once the app found one.
+  /// The picture for `email`, once the engine found one.
   String? avatar(String email) => _avatars[email.toLowerCase()];
 
   /// Inline reply drafts by conversation, kept until sent or discarded (in memory, like the app).
@@ -138,39 +159,63 @@ class MailState extends ChangeNotifier {
   // MARK: - Startup
 
   Future<void> start() async {
+    mail.subscribe(listener: _Changes(_changed));
     await reloadAccounts();
     await _fetch(selection);
-    _poll = Timer.periodic(listLifetime, (_) => refresh(quiet: true));
   }
 
   @override
   void dispose() {
-    _poll?.cancel();
+    _changes?.cancel();
     _searchDebounce?.cancel();
     super.dispose();
   }
 
+  void _changed(engine.Event event) {
+    switch (event) {
+      case engine.AccountsEvent() || engine.MailboxesEvent():
+        _accountsChanged = true;
+      case engine.ConversationsEvent() || engine.TagsEvent():
+        _listsChanged = true;
+      default:
+        return;
+    }
+    _changes ??= Timer(const Duration(milliseconds: 400), () {
+      _changes = null;
+      if (_accountsChanged) unawaited(reloadAccounts());
+      if (_listsChanged) {
+        // Lists out of view are read again when they come back into view.
+        for (final MapEntry(:key, value: entry) in _lists.entries) {
+          if (key != selection.key) entry.fetchedAt = null;
+        }
+        unawaited(_fetch(selection, quiet: true));
+      }
+      _accountsChanged = _listsChanged = false;
+    });
+  }
+
   Future<void> reloadAccounts() async {
     try {
-      final list = await client.call('accounts.list') as List;
-      final boxes = await client.call('mailboxes') as Map<String, Object?>;
-      accounts = list.map((a) => Account.fromJson(a as Map<String, Object?>)).toList();
+      final list = await mail.accounts();
+      final boxes = await mail.mailboxes(account: null);
+      accounts = list.map(Account.of).toList();
       mailboxes = {
-        for (final entry in boxes.entries)
-          entry.key: (entry.value as List).map((b) => Mailbox.fromJson(entry.key, b as Map<String, Object?>)).toList(),
+        for (final MapEntry(key: account, value: boxes) in boxes.entries)
+          account: [for (final box in boxes) Mailbox.of(account, box)],
       };
-      unreachable = null;
-    } on ControlException catch (error) {
-      if (error.code == 'unreachable') unreachable = error.message;
-      _report(error.message);
+    } on engine.MailException catch (error) {
+      _report(describe(error));
     }
     notifyListeners();
   }
 
-  /// Fetches the list in view and the counts again.
-  Future<void> refresh({bool quiet = false}) async {
-    if (!quiet) unawaited(client.call('refresh').then((_) {}, onError: (_) {}));
-    await Future.wait([reloadAccounts(), _fetch(selection)]);
+  /// Fetches new mail and counts now; the engine's change events bring them in.
+  Future<void> refresh() async {
+    try {
+      await mail.refresh();
+    } on engine.MailException catch (error) {
+      _report('Could not refresh: ${describe(error)}');
+    }
   }
 
   // MARK: - Accounts and mailboxes
@@ -241,20 +286,21 @@ class MailState extends ChangeNotifier {
     if (!fresh) _fetch(next);
   }
 
-  static List<Conversation> _decode(Map<String, Object?> result) =>
-      (result['conversations'] as List).map((c) => Conversation.fromJson(c as Map<String, Object?>)).toList();
+  static List<Conversation> _decode(engine.Listing listing) => listing.conversations.map(Conversation.of).toList();
 
   /// The first page. A refresh keeps the older pages already loaded below it: their cursor still
-  /// points past them.
-  Future<void> _fetch(Selection target) async {
+  /// points past them. `quiet` (a change the engine reported) shows no progress.
+  Future<void> _fetch(Selection target, {bool quiet = false}) async {
     final entry = _lists[target.key] ??= ListEntry();
     final generation = ++entry.generation;
-    entry.loading = true;
-    notifyListeners();
+    if (!quiet) {
+      entry.loading = true;
+      notifyListeners();
+    }
     try {
-      final result = await client.call('mail.list', {...target.listArgs, 'limit': pageSize}) as Map<String, Object?>;
+      final listing = await mail.list(query: target.query(limit: pageSize));
       if (generation != entry.generation) return;
-      final page = _decode(result);
+      final page = _decode(listing);
       final ids = {for (final c in page) c.id};
       final oldest = page.lastOrNull?.date;
       final kept = oldest == null
@@ -262,17 +308,14 @@ class MailState extends ChangeNotifier {
           : entry.items.where((c) => !ids.contains(c.id) && c.date != null && c.date!.isBefore(oldest)).toList();
       entry
         ..items = [...page, ...kept]
-        ..next = kept.isEmpty ? result['next'] as String? : entry.next
-        ..fetchedAt = DateTime.now();
-      final failures = (result['failures'] as List?)?.cast<String>() ?? const [];
-      entry.error = failures.isEmpty ? null : failures.join('\n');
-      unreachable = null;
+        ..next = kept.isEmpty ? listing.next : entry.next
+        ..fetchedAt = DateTime.now()
+        ..error = listing.failures.isEmpty ? null : listing.failures.join('\n');
       _loadPreviews(page);
       _loadAvatars(page);
-    } on ControlException catch (error) {
+    } on engine.MailException catch (error) {
       if (generation != entry.generation) return;
-      entry.error = error.message;
-      if (error.code == 'unreachable') unreachable = error.message;
+      entry.error = describe(error);
     } finally {
       if (generation == entry.generation) {
         entry.loading = false;
@@ -292,26 +335,25 @@ class MailState extends ChangeNotifier {
     entry.loadingMore = true;
     notifyListeners();
     try {
-      final result =
-          await client.call('mail.list', {...selection.listArgs, 'limit': pageSize, 'cursor': cursor}) as Map<String, Object?>;
+      final listing = await mail.list(query: selection.query(limit: pageSize, cursor: cursor));
       // A first page landed meanwhile and decided the cursor.
       if (generation != entry.generation || entry.next != cursor) return;
       final ids = {for (final c in entry.items) c.id};
-      final page = _decode(result).where((c) => !ids.contains(c.id)).toList();
+      final page = _decode(listing).where((c) => !ids.contains(c.id)).toList();
       entry
         ..items = [...entry.items, ...page]
-        ..next = result['next'] as String?;
+        ..next = listing.next;
       _loadPreviews(page);
       _loadAvatars(page);
-    } on ControlException catch (error) {
-      _report('Could not load more: ${error.message}');
+    } on engine.MailException catch (error) {
+      _report('Could not load more: ${describe(error)}');
     } finally {
       entry.loadingMore = false;
       notifyListeners();
     }
   }
 
-  /// Previews of conversations listed without one: the app loads their latest messages.
+  /// Previews of conversations listed without one: the engine loads their latest messages.
   Future<void> _loadPreviews(List<Conversation> conversations) async {
     final missing = [
       for (final c in conversations)
@@ -320,25 +362,25 @@ class MailState extends ChangeNotifier {
     for (var i = 0; i < missing.length; i += 20) {
       final chunk = missing.sublist(i, (i + 20).clamp(0, missing.length));
       try {
-        final result = await _call('mail.previews', {'ids': chunk});
-        for (final MapEntry(key: id, value: snippet) in result.entries) {
-          if (snippet is String && snippet.isNotEmpty) _patch(id, (c) => c.copyWith(snippet: snippet));
+        final previews = await mail.previews(ids: chunk);
+        for (final MapEntry(key: id, value: snippet) in previews.entries) {
+          if (snippet != null && snippet.isNotEmpty) _patch(id, (c) => c.copyWith(snippet: snippet));
         }
-      } on ControlException {
+      } on engine.MailException {
         // Rows keep their subject alone; a later listing asks again.
         _previewRequested.removeAll(chunk);
       }
     }
   }
 
-  /// Pictures of the senders `conversations` show, from the app's avatar cache (it looks up the
-  /// ones it has not cached yet).
+  /// Pictures of the senders `conversations` show, from the engine's avatar cache (it looks up
+  /// the ones it has not cached yet).
   void _loadAvatars(List<Conversation> conversations) => requestAvatars([
     for (final c in conversations)
       if (c.from != null) (c.from!.email, c.category != null && c.category != MailCategory.people),
   ]);
 
-  /// Asks the app for the pictures of `senders` not asked for yet; automated senders may take
+  /// Asks the engine for the pictures of `senders` not asked for yet; automated senders may take
   /// their site's icon.
   Future<void> requestAvatars(Iterable<(String, bool)> senders) async {
     final automated = <String>{};
@@ -355,18 +397,18 @@ class MailState extends ChangeNotifier {
     for (var i = 0; i < missing.length; i += 30) {
       final chunk = missing.sublist(i, (i + 30).clamp(0, missing.length));
       try {
-        final result = await client.call('mail.avatars', {
-          'addresses': chunk,
-          'automated': [for (final key in chunk) if (automated.contains(key)) key],
-        }) as Map<String, Object?>;
+        final pictures = await mail.avatars(
+          addresses: chunk,
+          automated: [for (final key in chunk) if (automated.contains(key)) key],
+        );
         var found = false;
-        for (final MapEntry(key: email, value: url) in result.entries) {
-          if (url is! String) continue;
+        for (final MapEntry(key: email, value: url) in pictures.entries) {
+          if (url == null) continue;
           _avatars[email] = Uri.parse(url).toFilePath();
           found = true;
         }
         if (found) notifyListeners();
-      } on ControlException {
+      } on engine.MailException {
         // Initials stay; the next listing asks again.
         for (final key in chunk) {
           _avatars.remove(key);
@@ -401,17 +443,17 @@ class MailState extends ChangeNotifier {
     // Local matches show at once; the providers' search runs once typing pauses.
     _searchDebounce = Timer(const Duration(milliseconds: 450), () async {
       try {
-        final result = await client.call('mail.search', {'query': text, 'limit': 60}) as Map<String, Object?>;
+        final listing = await mail.search(query: text, account: null, limit: 60);
         if (generation != _search.generation) return;
-        final found = _decode(result);
+        final found = _decode(listing);
         _search
           ..items = found
           ..fetchedAt = DateTime.now();
         _loadPreviews(found);
         _loadAvatars(found);
-      } on ControlException catch (error) {
+      } on engine.MailException catch (error) {
         if (generation != _search.generation) return;
-        _search.error = error.message;
+        _search.error = describe(error);
       }
       _search.loading = false;
       notifyListeners();
@@ -451,13 +493,13 @@ class MailState extends ChangeNotifier {
     late final ThreadEntry entry;
     entry = ThreadEntry(() async {
       try {
-        final result = await _show(id);
-        final messages = (result['messages'] as List).map((m) => MessageDetail.fromJson(m as Map<String, Object?>)).toList();
+        final thread = await mail.show_(id: id, maxChars: 400000, html: true);
+        final messages = thread.messages.map(MessageDetail.of).toList();
         entry.messages = messages;
         requestAvatars([for (final m in messages) (m.sender.email, false)]);
         return messages;
-      } on ControlException catch (error) {
-        entry.error = error.message;
+      } on engine.MailException catch (error) {
+        entry.error = describe(error);
         rethrow;
       } finally {
         notifyListeners();
@@ -465,52 +507,6 @@ class MailState extends ChangeNotifier {
     }());
     entry.future.ignore();
     return _threads[id] = entry;
-  }
-
-  Future<Map<String, Object?>> _show(String id) => _call('mail.show', {'id': id, 'max-chars': 400000, 'html': true});
-
-  /// A command on conversation ids. The app remembers ids only while it runs: after it restarts,
-  /// the list in view is fetched again, which registers them anew, and the command runs once more.
-  Future<Map<String, Object?>> _call(String command, Map<String, Object?> args) async {
-    for (var attempt = 0;; attempt++) {
-      try {
-        final result = await client.call(command, args) as Map<String, Object?>;
-        final failed = ((result['failed'] as List?) ?? const []).cast<Map<String, Object?>>();
-        if (attempt == 0 && failed.any(_unknownID)) {
-          await _reregister();
-          continue;
-        }
-        return result;
-      } on ControlException catch (error) {
-        if (attempt > 0 || error.code != 'unknown_conversation') rethrow;
-        await _reregister();
-      }
-    }
-  }
-
-  /// `mail.tag` reports failures without codes.
-  static bool _unknownID(Map<String, Object?> failure) =>
-      failure['code'] == 'unknown_conversation' || (failure['message'] as String? ?? '').startsWith('Unknown conversation');
-
-  /// Lists again, as deep as the list in view goes, so the app knows its ids once more.
-  Future<void> _reregister() async {
-    try {
-      final query = searchQuery;
-      if (query != null) {
-        await client.call('mail.search', {'query': query, 'limit': 60});
-        return;
-      }
-      final want = _current.items.length;
-      var listed = 0;
-      String? cursor;
-      do {
-        final result = await client.call('mail.list', {...selection.listArgs, 'limit': 100, 'cursor': ?cursor}) as Map<String, Object?>;
-        listed += (result['conversations'] as List).length;
-        cursor = result['next'] as String?;
-      } while (cursor != null && listed < want);
-    } on ControlException {
-      // The retry reports the failure.
-    }
   }
 
   void prefetch(Conversation conversation) => thread(conversation.id);
@@ -547,53 +543,72 @@ class MailState extends ChangeNotifier {
     };
   }
 
-  /// Runs a batch command on one id: `{"done": […], "failed": [{id, message}]}`.
-  Future<void> _command(String command, Conversation c, Map<String, Object?> args, VoidCallback undo, String verb) async {
+  /// Runs an action on one conversation; a failure puts the window back with `undo`.
+  Future<void> _command(
+    Conversation c,
+    Future<List<engine.BatchFailure>> Function(List<String> ids) action,
+    VoidCallback undo,
+    String verb,
+  ) async {
     try {
-      final result = await _call(command, {'ids': [c.id], ...args});
-      final failed = (result['failed'] as List?) ?? const [];
+      final failed = await action([c.id]);
       if (failed.isNotEmpty) {
         undo();
-        _report('Could not $verb: ${(failed.first as Map)['message']}');
-      } else {
-        unawaited(reloadAccounts());
+        _report('Could not $verb: ${failed.first.message}');
       }
-    } on ControlException catch (error) {
+    } on engine.MailException catch (error) {
       undo();
-      _report('Could not $verb: ${error.message}');
+      _report('Could not $verb: ${describe(error)}');
     }
   }
 
-  void archive(Conversation c) => _command('mail.archive', c, const {}, _remove(c.id), 'archive');
+  void archive(Conversation c) =>
+      _command(c, (ids) async => (await mail.archive(ids: ids)).failed, _remove(c.id), 'archive');
 
-  void trash(Conversation c) => _command('mail.trash', c, const {}, _remove(c.id), 'move to the trash');
+  /// Moves to the trash; conversations already there stay, as deleting for good needs a confirmation.
+  void trash(Conversation c) =>
+      _command(c, (ids) async => (await mail.trash(ids: ids, confirm: false)).failed, _remove(c.id), 'move to the trash');
 
   void setRead(Conversation c, {required bool read}) {
     _patch(c.id, (x) => x.copyWith(unread: !read));
-    _command('mail.read', c, {'unread': !read}, () => _patch(c.id, (x) => x.copyWith(unread: read)), read ? 'mark read' : 'mark unread');
+    _command(
+      c,
+      (ids) async => (await mail.setRead(ids: ids, read: read)).failed,
+      () => _patch(c.id, (x) => x.copyWith(unread: read)),
+      read ? 'mark read' : 'mark unread',
+    );
   }
 
   void setStarred(Conversation c, {required bool starred}) {
     _patch(c.id, (x) => x.copyWith(starred: starred));
-    _command('mail.star', c, {'off': !starred}, () => _patch(c.id, (x) => x.copyWith(starred: !starred)), starred ? 'star' : 'unstar');
+    _command(
+      c,
+      (ids) async => (await mail.setStarred(ids: ids, starred: starred)).failed,
+      () => _patch(c.id, (x) => x.copyWith(starred: !starred)),
+      starred ? 'star' : 'unstar',
+    );
   }
 
   /// Clears "waiting on you": the user has dealt with it.
   void resolveWaiting(Conversation c) {
     _patch(c.id, (x) => x.copyWith(waiting: false));
-    _command('mail.tag', c, {'waiting': 'false'}, () => _patch(c.id, (x) => x.copyWith(waiting: true)), 'update the tag');
+    _command(
+      c,
+      (ids) async => (await mail.tag(ids: ids, category: null, waiting: false, labels: null)).failed,
+      () => _patch(c.id, (x) => x.copyWith(waiting: true)),
+      'update the tag',
+    );
   }
 
-  /// Sends a plain-text reply; the app plans the recipients and quotes the original. The Send
-  /// button is the person's confirmation, hence `yes`.
+  /// Sends a plain-text reply; the engine plans the recipients and quotes the original. The Send
+  /// button is the person's confirmation.
   Future<bool> reply(Conversation c, String body, {required bool all}) async {
     try {
-      final result = await _call('mail.reply', {'id': c.id, 'body': body, 'all': all, 'yes': true});
-      final to = (result['to'] as List?)?.cast<String>().map((a) => Address.parse(a).displayName).join(', ') ?? '';
-      showToast('Sent to $to');
+      final sent = await mail.reply(id: c.id, body: body, all: all, confirm: true);
+      showToast('Sent to ${sent.to.map((a) => Address.parse(a).displayName).join(', ')}');
       return true;
-    } on ControlException catch (error) {
-      _report('Could not send: ${error.message}');
+    } on engine.MailException catch (error) {
+      _report('Could not send: ${describe(error)}');
       return false;
     }
   }
