@@ -7,6 +7,7 @@ mod format;
 mod icons;
 mod input;
 mod model;
+mod settings;
 mod state;
 mod swipe;
 mod ui;
@@ -26,6 +27,7 @@ fn main() {
     Application::new().with_assets(icons::Assets).run(|cx: &mut App| {
         input::bind_keys(cx);
         state::bind_keys(cx);
+        settings::init(|cx| cx.refresh_windows(), cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(menus());
         cx.on_window_closed(|cx| {
@@ -62,7 +64,14 @@ fn main() {
 /// they show the shortcuts bound in `state::bind_keys`.
 fn menus() -> Vec<Menu> {
     vec![
-        Menu { name: "Mailstream".into(), items: vec![MenuItem::action("Quit Mailstream", Quit)] },
+        Menu {
+            name: "Mailstream".into(),
+            items: vec![
+                MenuItem::action("Settings…", settings::ShowSettings),
+                MenuItem::separator(),
+                MenuItem::action("Quit Mailstream", Quit),
+            ],
+        },
         Menu {
             name: "Edit".into(),
             items: vec![

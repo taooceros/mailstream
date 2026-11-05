@@ -55,14 +55,19 @@ struct ErrorBody {
 
 /// Sends `command` with `args` and decodes the answer's `result` as `T`. Blocking.
 pub fn call<T: DeserializeOwned>(command: &str, args: Value) -> Result<T, ControlError> {
+    // Listing a mailbox the app has not cached yet waits on the provider.
+    call_waiting(command, args, Duration::from_secs(120))
+}
+
+/// `call`, waiting up to `wait` for the answer (signing in waits on the browser for minutes).
+pub fn call_waiting<T: DeserializeOwned>(command: &str, args: Value, wait: Duration) -> Result<T, ControlError> {
     let mut stream = UnixStream::connect(&*SOCKET).map_err(|_| {
         ControlError::new("unreachable", "Mailstream is not running: nothing listens on its control socket.")
     })?;
     let broken = |error: std::io::Error| {
         ControlError::new("unreachable", format!("The connection to Mailstream broke: {error}"))
     };
-    // Listing a mailbox the app has not cached yet waits on the provider.
-    stream.set_read_timeout(Some(Duration::from_secs(120))).map_err(broken)?;
+    stream.set_read_timeout(Some(wait)).map_err(broken)?;
     stream.set_write_timeout(Some(Duration::from_secs(5))).map_err(broken)?;
 
     let mut request = serde_json::to_vec(&json!({ "command": command, "args": args }))

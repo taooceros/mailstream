@@ -239,3 +239,15 @@ mod tests {
         assert!(house_curve(0.33) > 0.8);
     }
 }
+
+/// The Settings window.
+pub mod settings {
+    pub const WIDTH: f32 = 560.0;
+    pub const HEIGHT: f32 = 620.0;
+    pub const PADDING: f32 = 24.0;
+    /// The account color dot.
+    pub const DOT: f32 = 10.0;
+    pub const ROW_HEIGHT: f32 = 56.0;
+    /// `accounts.add` waits this long on the browser.
+    pub const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(5 * 60 + 10);
+}
