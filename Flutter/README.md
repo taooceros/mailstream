@@ -50,6 +50,7 @@ content height so the body scrolls with the conversation.
 | `lib/ui/compose.dart` | The compose window for a new plain-text message (`mail.send`): From, To, Cc, Bcc, Subject, body, attachments (the Attach button's open panel, files dropped on the window or pasted with ⌘V: `mailstream/files` in `macos/Runner/MainFlutterWindow.swift`) |
 | `lib/ui/settings.dart` | Settings (⌘,): accounts (browser sign-in, rename, remove) and every key of the settings.json Mailstream.app and `mailstream config` share (`config.*` over FFI), following edits made elsewhere |
 | `lib/ui/slide_layer.dart` | Bundles (and, in one pane, the reader) slide over the list, which stays mounted; trackpad swipe back |
+| `lib/bench.dart` | The frame measurement `scripts/bench.sh flutter` runs (`MAILSTREAM_BENCH=scroll`): the list scrolls itself and every frame's `FrameTiming` is logged |
 
 Keys: ↑/↓ or J/K move (beside an open conversation they open the next one), Return or Space
 opens, Esc or ⌘[ goes back, E archives, ⌫ trashes, S stars, U toggles read, R replies (⇧R or

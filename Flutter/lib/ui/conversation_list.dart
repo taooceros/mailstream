@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../backend/models.dart';
+import '../bench.dart';
 import '../state/mail_state.dart';
 import 'common.dart';
 import 'design.dart';
@@ -110,6 +111,7 @@ class ConversationListState extends State<ConversationList> {
     super.initState();
     widget.highlight.addListener(_reveal);
     _scroll.addListener(_pageIfNearEnd);
+    ScrollBench.attach(_scroll);
   }
 
   @override
