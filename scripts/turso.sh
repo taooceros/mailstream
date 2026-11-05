@@ -24,7 +24,9 @@ patch -s -d "$SRC" -p1 < "$PATCH"
 # The header the app compiles against must be this version's.
 cmp -s "$SRC/bindings/c/include/sqlite3.h" Sources/CTurso/sqlite3.h ||
   { echo "Sources/CTurso/sqlite3.h differs from Turso $TAG's; copy it over" >&2; exit 1; }
-(cd "$SRC" && MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --release -p turso_sqlite3)
+# turso_core's build.rs embeds the build time and git commit unless SOURCE_DATE_EPOCH is set; a
+# fixed one makes every workspace's build identical, so rcache hits after the first.
+(cd "$SRC" && MACOSX_DEPLOYMENT_TARGET=26.0 SOURCE_DATE_EPOCH=0 cargo build --release -p turso_sqlite3)
 mkdir -p .turso/lib
 rm -f .turso/lib/v*
 cp "$SRC/target/release/libturso_sqlite3.a" "$LIB"
