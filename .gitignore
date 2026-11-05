@@ -7,3 +7,5 @@ node_modules/
 Engine/
 .turso/
 FFI/target/
+GPUI/target/
+Flutter/.dart_tool/
