@@ -54,7 +54,21 @@ impl MailApp {
                                 .gap(px(6.))
                                 .text_size(px(text::FOOTNOTE))
                                 .text_color(p.muted)
-                                .when(conversation.waiting, |d| d.child(chip("Waiting on you".into(), p.waiting)))
+                                .when(conversation.waiting, |d| {
+                                    d.child(chip("Waiting on you".into(), p.waiting)).child(
+                                        div()
+                                            .id("reader-resolve")
+                                            .px(px(6.))
+                                            .rounded(px(radius::SMALL))
+                                            .cursor_pointer()
+                                            .text_color(p.accent)
+                                            .hover(|s| s.bg(p.hover))
+                                            .child("Resolve")
+                                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                                this.toggle_waiting(&ToggleWaiting, window, cx)
+                                            })),
+                                    )
+                                })
                                 .children(
                                     conversation
                                         .labels

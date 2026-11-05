@@ -683,13 +683,14 @@ class MailState extends ChangeNotifier {
     );
   }
 
-  /// Clears "waiting on you": the user has dealt with it.
-  void resolveWaiting(Conversation c) {
-    _patch(c.id, (x) => x.copyWith(waiting: false));
+  /// Resolves "Waiting on you" (`waiting: false`: the user has dealt with it) or puts the
+  /// conversation back on it.
+  void setWaiting(Conversation c, {required bool waiting}) {
+    _patch(c.id, (x) => x.copyWith(waiting: waiting));
     _command(
       c,
-      (ids) async => (await mail.tag(ids: ids, category: null, waiting: false, labels: null)).failed,
-      () => _patch(c.id, (x) => x.copyWith(waiting: true)),
+      (ids) async => (await mail.tag(ids: ids, category: null, waiting: waiting, labels: null)).failed,
+      () => _patch(c.id, (x) => x.copyWith(waiting: !waiting)),
       'update the tag',
     );
   }

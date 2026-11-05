@@ -110,7 +110,7 @@ impl MailApp {
             .iter()
             .enumerate()
             .filter_map(|(position, item)| match item {
-                Item::Section(_) => None,
+                Item::Section(_) | Item::Waiting(_) => None,
                 _ => Some((self.item_id(item), position)),
             })
             .collect();
@@ -120,6 +120,7 @@ impl MailApp {
     pub fn item_id(&self, item: &Item) -> SharedString {
         match item {
             Item::Section(title) => format!("section:{title}").into(),
+            Item::Waiting(_) => "section:waiting".into(),
             Item::Row(index) => self.list().map(|l| l.conversations[*index].id.clone()).unwrap_or_default(),
             Item::Bundle(bundle) => format!("bundle:{}", bundle.category.key()).into(),
         }

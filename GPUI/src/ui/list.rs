@@ -51,6 +51,18 @@ impl MailApp {
                 .text_color(p.muted)
                 .child(title.clone())
                 .into_any_element(),
+            Item::Waiting(count) => div()
+                .h(px(metrics::ROW_HEIGHT))
+                .flex()
+                .items_end()
+                .gap(px(6.))
+                .pb(px(6.))
+                .pl(px(metrics::SENDER_X))
+                .text_size(px(text::CAPTION))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(div().text_color(p.waiting).child("Waiting on you"))
+                .child(div().text_color(p.muted).child(count.to_string()))
+                .into_any_element(),
             Item::Row(index) => {
                 let conversation = &list.conversations[*index];
                 let highlighted = self.highlight.as_ref() == Some(&conversation.id);

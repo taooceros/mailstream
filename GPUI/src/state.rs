@@ -199,6 +199,8 @@ pub enum PagedView {
 #[derive(Clone)]
 pub enum Item {
     Section(SharedString),
+    /// The Smart Inbox's "Waiting on you" header, over this many conversations.
+    Waiting(usize),
     /// An index into the list's conversations.
     Row(usize),
     /// Service mail of one category, folded at its newest member's place.
@@ -608,7 +610,9 @@ impl MailApp {
         );
     }
 
-    /// The current list's lines: bundles folded at their newest member's place, date headers.
+    /// The current list's lines: in the Smart Inbox, what waits on the user's reply or action
+    /// first under its own header, as in the native app's Smart Inbox; then bundles
+    /// folded at their newest member's place, and date headers.
     pub fn rebuild_items(&mut self) {
         let key = self.key();
         let bundles = key.bundles();
@@ -619,7 +623,12 @@ impl MailApp {
         };
         let mut lines: Vec<(usize, Option<Category>)> = Vec::with_capacity(list.conversations.len());
         let mut members: HashMap<Category, Vec<usize>> = HashMap::new();
+        let mut waiting = Vec::new();
         for (index, conversation) in list.conversations.iter().enumerate() {
+            if bundles && conversation.waiting {
+                waiting.push(index);
+                continue;
+            }
             match conversation.bundle().filter(|_| bundles) {
                 None => lines.push((index, None)),
                 Some(category) => {
@@ -632,7 +641,11 @@ impl MailApp {
             }
         }
         let now = Local::now();
-        let mut items = Vec::with_capacity(lines.len() + 8);
+        let mut items = Vec::with_capacity(lines.len() + waiting.len() + 9);
+        if !waiting.is_empty() {
+            items.push(Item::Waiting(waiting.len()));
+            items.extend(waiting.into_iter().map(Item::Row));
+        }
         let mut current: Option<String> = None;
         for (index, bundle) in lines {
             if sections {

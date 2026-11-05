@@ -45,7 +45,7 @@ content height so the body scrolls with the conversation.
 | `lib/ui/design.dart` | `MailTheme` (Material 3 from one seed color), motion, list and pane metrics, stable account/topic/avatar colors |
 | `lib/ui/shell.dart` | Adaptive layout, panes, search bar, keys, snackbars |
 | `lib/ui/sidebar.dart` | Navigation drawer and rail, each with the Compose button |
-| `lib/ui/conversation_list.dart` | Fixed-height lazy list that loads the next page near its end, Smart Inbox bundles, hover actions |
+| `lib/ui/conversation_list.dart` | Fixed-height lazy list that loads the next page near its end, Smart Inbox bundles and its "Waiting on you" group, hover actions |
 | `lib/ui/reader.dart` | Reading column, message cards and chat log, HTML bodies (quoted history cut out and folded), inline reply |
 | `lib/ui/compose.dart` | The compose window for a new plain-text message (`mail.send`): From, To, Cc, Bcc, Subject, body, attachments (the Attach button's open panel, files dropped on the window or pasted with ⌘V: `mailstream/files` in `macos/Runner/MainFlutterWindow.swift`) |
 | `lib/ui/settings.dart` | Settings (⌘,): accounts (browser sign-in, rename, remove) and every key of the settings.json Mailstream.app and `mailstream config` share (`config.*` over FFI), following edits made elsewhere |
@@ -53,7 +53,7 @@ content height so the body scrolls with the conversation.
 | `lib/bench.dart` | The frame measurement `scripts/bench.sh flutter` runs (`MAILSTREAM_BENCH=scroll`): the list scrolls itself and every frame's `FrameTiming` is logged |
 
 Keys: ↑/↓ or J/K move (beside an open conversation they open the next one), Return or Space
-opens, Esc or ⌘[ goes back, E archives, ⌫ trashes, S stars, U toggles read, R replies (⇧R or
+opens, Esc or ⌘[ goes back, E archives, ⌫ trashes, S stars, U toggles read, D resolves "Waiting on you" (or puts it back), R replies (⇧R or
 A replies to all), ⌘N writes a new message, ⌘F searches, ⌘R refreshes, ⌘, opens Settings. In the compose window
 ⌘Return sends, ⌘V with files on the clipboard (copied in Finder) attaches them, and Esc or ⌘W
 closes (asking first when something is written).

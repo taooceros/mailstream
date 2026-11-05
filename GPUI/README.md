@@ -33,7 +33,7 @@ that one build, so the app and every other host get asked again.
 | `src/model.rs` | Accounts, mailboxes, conversations and messages converted from the crate's records; display strings derived once per answer, off the main thread |
 | `src/state.rs` | `MailApp`: selection, lists served from memory for 90 s and reloaded on change events, paging, search, previews, layers over the list, key bindings |
 | `src/state/nav.rs`, `src/state/actions.rs` | Navigation (sources, bundles, the reader, refresh) and optimistic actions (archive, trash, restore, star, read, waiting, tags) that roll back on failure |
-| `src/ui/` | Sidebar tree (`sidebar.rs`), toolbar, the lazy conversation list with Smart Inbox bundles (`list.rs`), the reader with its reply card (`reader.rs`), the context menu (`menu.rs`) |
+| `src/ui/` | Sidebar tree (`sidebar.rs`), toolbar, the lazy conversation list with Smart Inbox bundles and its "Waiting on you" group (`list.rs`), the reader with its reply card and Resolve (`reader.rs`), the context menu (`menu.rs`) |
 | `src/webview.rs` | HTML bodies in native `WKWebView`s laid over the reader: placed and clipped each frame, sized to their page, page scripts off, links opened in the browser, wheel events handed back to the reader |
 | `src/swipe.rs` | Two-finger back swipe over the bundle and reader layers, following the system's swipe-between-pages setting |
 | `src/chat.rs` | `ChatPane`: Google Chat spaces, a space's log (bottom-aligned, runs and day dividers, markup and links), sending, earlier pages, threads, New Chat with contact completion; the engine keeps the open space (`chat_open`) and the pane re-reads the list and the space on its `Chat`/`ChatMessages` events |

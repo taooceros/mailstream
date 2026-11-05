@@ -160,6 +160,9 @@ class Conversation {
     _ => null,
   };
 
+  /// Whether it can be put on "Waiting on you" or resolved: tagged mail other than newsletters.
+  bool get canMarkWaiting => category != null && category != MailCategory.newsletter;
+
   /// Whether `other` shows the same: a re-read that changed nothing keeps the row it had.
   bool sameAs(Conversation other) =>
       id == other.id &&

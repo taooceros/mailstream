@@ -13,8 +13,11 @@ sealed class ListItem {
 }
 
 final class SectionItem extends ListItem {
-  const SectionItem(this.title);
+  const SectionItem(this.title, {this.count});
   final String title;
+
+  /// Set on the Smart Inbox's "Waiting on you" header: how many conversations it heads.
+  final int? count;
 }
 
 final class RowItem extends ListItem {
@@ -30,15 +33,22 @@ final class BundleItem extends ListItem {
   final List<Conversation> conversations;
 }
 
-/// The list's lines for `conversations`: bundles fold service mail and sit pinned above the rest,
-/// newest bundle first; headers group the remaining rows by date.
+/// The list's lines for `conversations`. In the Smart Inbox (`bundles`) service mail folds into
+/// bundles pinned above the rest, newest bundle first, and what waits on the user's reply or
+/// action follows under its own "Waiting on you" header, as in the native app. Headers group the
+/// remaining rows by date.
 List<ListItem> listItems(List<Conversation> conversations, {required bool bundles, required bool sections}) {
   final now = DateTime.now();
   final grouped = <MailCategory, List<Conversation>>{};
   final pinned = <ListItem>[];
+  final waiting = <ListItem>[];
   final out = <ListItem>[];
   String? current;
   for (final c in conversations) {
+    if (bundles && c.waiting) {
+      waiting.add(RowItem(c));
+      continue;
+    }
     final bundle = bundles ? c.bundle : null;
     if (bundle != null) {
       if (grouped.containsKey(bundle)) {
@@ -57,7 +67,12 @@ List<ListItem> listItems(List<Conversation> conversations, {required bool bundle
     }
     out.add(RowItem(c));
   }
-  return [...pinned, ...out];
+  return [
+    ...pinned,
+    if (waiting.isNotEmpty) SectionItem(waitingTitle, count: waiting.length),
+    ...waiting,
+    ...out,
+  ];
 }
 
 /// The keyboard highlight, shared by the list and the window's key handling.
@@ -71,6 +86,8 @@ class ListHighlight extends ChangeNotifier {
     notifyListeners();
   }
 }
+
+const waitingTitle = 'Waiting on you';
 
 String itemId(ListItem item) => switch (item) {
   RowItem(:final conversation) => conversation.id,
@@ -190,7 +207,7 @@ class ConversationListState extends State<ConversationList> {
           }
           final item = items[index];
           return switch (item) {
-            SectionItem(:final title) => SectionHeader(title),
+            SectionItem(:final title, :final count) => SectionHeader(title, count: count),
             RowItem(:final conversation) => ConversationRow(
               key: ValueKey(conversation.id),
               conversation: conversation,
@@ -215,23 +232,37 @@ class ConversationListState extends State<ConversationList> {
 
 /// A date group's header in a list.
 class SectionHeader extends StatelessWidget {
-  const SectionHeader(this.title, {super.key});
+  const SectionHeader(this.title, {super.key, this.count});
 
   final String title;
 
+  /// Shown after the title, which then takes the "Waiting on you" accent.
+  final int? count;
+
   @override
-  Widget build(BuildContext context) => Container(
-    alignment: Alignment.bottomLeft,
-    padding: const EdgeInsets.fromLTRB(24, 0, 16, 6),
-    child: Text(
-      title.toUpperCase(),
-      style: context.text.labelSmall?.copyWith(
-        color: context.colors.onSurfaceVariant,
-        fontWeight: FontWeight.w700,
-        letterSpacing: 0.8,
+  Widget build(BuildContext context) {
+    final style = context.text.labelSmall?.copyWith(
+      color: context.colors.onSurfaceVariant,
+      fontWeight: FontWeight.w700,
+      letterSpacing: 0.8,
+    );
+    return Container(
+      alignment: Alignment.bottomLeft,
+      padding: const EdgeInsets.fromLTRB(24, 0, 16, 6),
+      child: Text.rich(
+        TextSpan(
+          children: [
+            TextSpan(
+              text: title.toUpperCase(),
+              style: count == null ? null : TextStyle(color: context.colors.tertiary),
+            ),
+            if (count != null) TextSpan(text: '  $count'),
+          ],
+        ),
+        style: style,
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// A Material list item's surface: rounded, hover and keyboard highlight as state layers.
@@ -417,7 +448,11 @@ class _ConversationRowState extends State<ConversationRow> {
           mainAxisSize: MainAxisSize.min,
           children: [
             if (c.waiting)
-              IconButton(tooltip: 'Done', icon: const Icon(Icons.task_alt), onPressed: () => state.resolveWaiting(c)),
+              IconButton(
+                tooltip: 'Resolve (D)',
+                icon: const Icon(Icons.task_alt),
+                onPressed: () => state.setWaiting(c, waiting: false),
+              ),
             if (archivable)
               IconButton(
                 tooltip: 'Archive',

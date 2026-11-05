@@ -245,6 +245,10 @@ class _MailShellState extends State<MailShell> {
         _act((c) => state.setStarred(c, starred: !c.starred));
       case LogicalKeyboardKey.keyU:
         _act((c) => state.setRead(c, read: c.unread));
+      case LogicalKeyboardKey.keyD:
+        _act((c) {
+          if (c.canMarkWaiting) state.setWaiting(c, waiting: !c.waiting);
+        });
       case LogicalKeyboardKey.keyR when reading:
         _reader.currentState?.reply(all: keyboard.isShiftPressed);
       case LogicalKeyboardKey.keyA when reading:
@@ -464,7 +468,11 @@ class _MailShellState extends State<MailShell> {
         ),
         const Spacer(),
         if (opened.waiting)
-          IconButton(tooltip: 'Done (no longer waiting)', icon: Icon(Icons.task_alt, color: colors.tertiary), onPressed: () => _act(state.resolveWaiting)),
+          IconButton(
+            tooltip: 'Resolve (D)',
+            icon: Icon(Icons.task_alt, color: colors.tertiary),
+            onPressed: () => state.setWaiting(opened, waiting: false),
+          ),
         IconButton(tooltip: 'Archive (E)', icon: const Icon(Icons.archive_outlined), onPressed: () => _act(state.archive)),
         IconButton(tooltip: 'Delete (⌫)', icon: const Icon(Icons.delete_outline), onPressed: () => _act(state.trash)),
         IconButton(
