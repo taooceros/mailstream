@@ -30,6 +30,8 @@ pub struct Palette {
     pub on_accent: Hsla,
     /// The shadow under a page sliding over another.
     pub shadow: Hsla,
+    /// Menus and tooltips floating over the window.
+    pub popover: Hsla,
 }
 
 /// `0xAARRGGBB`, as the native tokens are written.
@@ -54,6 +56,7 @@ static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
     waiting: argb(0xFFFF9500),
     on_accent: argb(0xFFFFFFFF),
     shadow: argb(0x1F000000),
+    popover: argb(0xFFFCFCFD),
 });
 
 static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
@@ -73,6 +76,7 @@ static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
     waiting: argb(0xFFFF9F0A),
     on_accent: argb(0xFFFFFFFF),
     shadow: argb(0x59000000),
+    popover: argb(0xFF2C2C2E),
 });
 
 pub fn palette(appearance: WindowAppearance) -> &'static Palette {
@@ -126,13 +130,27 @@ pub mod list {
     pub const TRAILING_INSET: f32 = 14.0;
 }
 
+/// Icon sizes.
+pub mod icon {
+    pub const SMALL: f32 = 16.0;
+    pub const TOOLBAR: f32 = 18.0;
+    pub const BUTTON: f32 = 30.0;
+}
+
 /// The window's fixed regions.
 pub mod layout {
     pub const SIDEBAR_WIDTH: f32 = 220.0;
+    pub const SIDEBAR_ROW: f32 = 28.0;
+    /// How far each level of the sidebar tree steps in.
+    pub const SIDEBAR_INDENT: f32 = 14.0;
     /// The toolbar, which is also the title bar the traffic lights sit in.
     pub const TOOLBAR_HEIGHT: f32 = 52.0;
+    /// Room for the traffic lights when the sidebar is hidden.
+    pub const TRAFFIC_LIGHTS: f32 = 78.0;
     /// The reader's text column.
     pub const READING_WIDTH: f32 = 720.0;
+    pub const MENU_WIDTH: f32 = 236.0;
+    pub const MENU_ROW: f32 = 26.0;
 }
 
 /// The house easing curve, `cubic-bezier(0.2, 0.9, 0.25, 1)`: quick start, long soft landing.

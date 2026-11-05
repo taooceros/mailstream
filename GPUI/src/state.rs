@@ -2,14 +2,17 @@
 //! memory, the layers over the list, the reader's threads, and the optimistic actions that roll
 //! back when the app refuses them. Rendering is in `ui`.
 
+mod actions;
+mod nav;
+
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use chrono::Local;
 use gpui::{
-    App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, ScrollHandle, ScrollStrategy, SharedString,
-    Subscription, UniformListScrollHandle, Window, actions,
+    App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, Pixels, Point, ScrollHandle, ScrollStrategy,
+    SharedString, Subscription, UniformListScrollHandle, Window, actions,
 };
 use serde_json::{Value, json};
 
@@ -17,17 +20,35 @@ use crate::control::{self, ControlError};
 use crate::format;
 use crate::input::{InputEvent, TextInput};
 use crate::model::{Account, Category, Conversation, Listing, Mailbox, Message, Role, Thread};
+use crate::swipe::{BackSwipe, Preferences};
 
 actions!(
     mail,
-    [Next, Previous, Open, Back, Archive, Trash, Star, ToggleRead, FocusSearch, Refresh, Quit]
+    [
+        Next,
+        Previous,
+        Open,
+        Back,
+        Archive,
+        Trash,
+        Restore,
+        Star,
+        ToggleRead,
+        ToggleWaiting,
+        FocusSearch,
+        Refresh,
+        ToggleSidebar,
+        Retag,
+        CloseMenu,
+        Quit
+    ]
 );
 
 pub const CONTEXT: &str = "Mail";
 
 pub fn bind_keys(cx: &mut App) {
-    // Single keys act on the list, never while the search field has focus.
-    let list = Some("Mail && !TextInput");
+    // Single keys act on the list, never while a text field has focus.
+    let list = Some("Mail && !TextInput && !TextArea");
     let window = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("j", Next, list),
@@ -39,13 +60,21 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", Back, list),
         KeyBinding::new("cmd-[", Back, window),
         KeyBinding::new("e", Archive, list),
+        KeyBinding::new("ctrl-cmd-a", Archive, window),
         KeyBinding::new("backspace", Trash, list),
         KeyBinding::new("delete", Trash, list),
+        KeyBinding::new("cmd-backspace", Trash, list),
         KeyBinding::new("s", Star, list),
+        KeyBinding::new("cmd-shift-l", Star, window),
         KeyBinding::new("u", ToggleRead, list),
+        KeyBinding::new("cmd-shift-u", ToggleRead, window),
+        KeyBinding::new("d", ToggleWaiting, list),
+        KeyBinding::new("cmd-shift-d", ToggleWaiting, window),
         KeyBinding::new("/", FocusSearch, list),
         KeyBinding::new("cmd-f", FocusSearch, window),
-        KeyBinding::new("cmd-r", Refresh, window),
+        KeyBinding::new("cmd-shift-n", Refresh, window),
+        KeyBinding::new("ctrl-cmd-s", ToggleSidebar, window),
+        KeyBinding::new("escape", CloseMenu, Some("ContextMenu")),
         KeyBinding::new("cmd-q", Quit, None),
     ]);
 }
@@ -186,6 +215,15 @@ pub enum Layer {
     Reader(Box<Conversation>),
 }
 
+impl Layer {
+    pub fn id(&self) -> SharedString {
+        match self {
+            Layer::Bundle(category) => format!("bundle:{}", category.key()).into(),
+            Layer::Reader(conversation) => format!("reader:{}", conversation.id).into(),
+        }
+    }
+}
+
 pub enum ThreadState {
     Loading,
     Loaded(Rc<[Message]>),
@@ -201,6 +239,25 @@ pub struct ThreadEntry {
 pub struct Toast {
     pub text: SharedString,
     generation: u64,
+}
+
+/// How the top layer sits over what lies beneath.
+#[derive(Clone, Copy)]
+pub enum Slide {
+    Rest,
+    /// Sliding in from the right since then.
+    Opening(Instant),
+    /// Under the user's fingers, `offset` points to the right.
+    Drag(f32),
+    /// Released (or sent back by a key): from `from` to `to`; `back` pops the layer on arrival.
+    Settle { from: f32, to: f32, start: Instant, back: bool },
+}
+
+/// A right-click menu over a row.
+pub struct ContextMenu {
+    pub id: SharedString,
+    pub position: Point<Pixels>,
+    pub focus: FocusHandle,
 }
 
 pub struct MailApp {
@@ -234,6 +291,16 @@ pub struct MailApp {
     pub list_scroll: UniformListScrollHandle,
     pub bundle_scroll: UniformListScrollHandle,
     pub reader_scroll: ScrollHandle,
+    /// Sidebar nodes the user opened, by key.
+    pub expanded: HashSet<SharedString>,
+    pub sidebar_open: bool,
+    pub swipe: BackSwipe,
+    pub slide: Slide,
+    /// The top layer `slide` belongs to; a different top layer rests.
+    pub slide_layer: Option<SharedString>,
+    /// The content area's width, as last laid out: how far a layer slides.
+    pub content_width: f32,
+    pub context_menu: Option<ContextMenu>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -268,11 +335,19 @@ impl MailApp {
             list_scroll: UniformListScrollHandle::new(),
             bundle_scroll: UniformListScrollHandle::new(),
             reader_scroll: ScrollHandle::new(),
+            expanded: ["unified:inbox", "chat", "section:accounts"].into_iter().map(SharedString::from).collect(),
+            sidebar_open: true,
+            swipe: BackSwipe::default(),
+            slide: Slide::Rest,
+            slide_layer: None,
+            content_width: 0.0,
+            context_menu: None,
             _subscriptions: subscriptions,
         };
         this.load_mailboxes(cx);
         this.load_list(this.key(), false, cx);
         this.poll(cx);
+        this.background(cx, Preferences::read, |this, preferences, _| this.swipe.preferences = preferences);
         this
     }
 
@@ -568,414 +643,6 @@ impl MailApp {
                 cx.notify();
             },
         );
-    }
-
-    // MARK: - Selection and navigation
-
-    pub fn select(&mut self, source: Source, window: &mut Window, cx: &mut Context<Self>) {
-        let same = self.source == source && self.query.is_none();
-        self.source = source;
-        self.query = None;
-        self.search.update(cx, |search, cx| search.clear(cx));
-        self.layers.clear();
-        if !same {
-            self.highlight = None;
-            self.list_scroll = UniformListScrollHandle::new();
-        }
-        self.rebuild_items();
-        self.load_list(self.key(), false, cx);
-        window.focus(&self.focus);
-        cx.notify();
-    }
-
-    fn on_search_event(
-        &mut self,
-        search: &Entity<TextInput>,
-        event: &InputEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            InputEvent::Submit => {
-                let text = search.read(cx).text().trim().to_owned();
-                if text.is_empty() {
-                    self.end_search(cx);
-                } else {
-                    self.query = Some(text.into());
-                    self.layers.clear();
-                    self.highlight = None;
-                    self.list_scroll = UniformListScrollHandle::new();
-                    self.rebuild_items();
-                    self.load_list(self.key(), false, cx);
-                }
-                window.focus(&self.focus);
-            }
-            InputEvent::Cancel => {
-                search.update(cx, |search, cx| search.clear(cx));
-                self.end_search(cx);
-                window.focus(&self.focus);
-            }
-            InputEvent::Changed => {
-                if search.read(cx).text().is_empty() && self.query.is_some() {
-                    self.end_search(cx);
-                }
-            }
-        }
-        cx.notify();
-    }
-
-    fn end_search(&mut self, cx: &mut Context<Self>) {
-        if self.query.take().is_some() {
-            self.layers.clear();
-            self.highlight = None;
-            self.list_scroll = UniformListScrollHandle::new();
-            self.rebuild_items();
-            self.load_list(self.key(), false, cx);
-        }
-    }
-
-    pub fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
-        let focus = self.search.focus_handle(cx);
-        window.focus(&focus);
-        self.search.update(cx, |search, cx| search.select_everything(cx));
-    }
-
-    pub fn refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
-        // The app syncs every account; the lists are asked again once it has had a moment.
-        self.background(
-            cx,
-            || {
-                let started = control::call::<Value>("refresh", json!({}));
-                std::thread::sleep(Duration::from_secs(2));
-                started
-            },
-            |this, result, cx| {
-                if let Err(error) = result {
-                    this.show_toast(format!("Couldn't refresh: {error}"), cx);
-                }
-                this.load_mailboxes(cx);
-                this.load_list(this.key(), true, cx);
-            },
-        );
-        self.load_list(self.key(), true, cx);
-    }
-
-    /// The list the keyboard moves in: the open bundle's, else the main one. Each line is an id
-    /// and the row's index in its list view.
-    fn active_lines(&self) -> (Vec<(SharedString, usize)>, bool) {
-        if let Some(bundle) = self.open_bundle_members() {
-            let Some(list) = self.list() else { return (Vec::new(), true) };
-            let lines =
-                bundle.members.iter().enumerate().map(|(row, &ix)| (list.conversations[ix].id.clone(), row)).collect();
-            return (lines, true);
-        }
-        let lines = self
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(position, item)| match item {
-                Item::Section(_) => None,
-                _ => Some((self.item_id(item), position)),
-            })
-            .collect();
-        (lines, false)
-    }
-
-    pub fn item_id(&self, item: &Item) -> SharedString {
-        match item {
-            Item::Section(title) => format!("section:{title}").into(),
-            Item::Row(index) => self.list().map(|l| l.conversations[*index].id.clone()).unwrap_or_default(),
-            Item::Bundle(bundle) => format!("bundle:{}", bundle.category.key()).into(),
-        }
-    }
-
-    pub fn open_bundle(&self) -> Option<Category> {
-        self.layers.iter().rev().find_map(|l| match l {
-            Layer::Bundle(category) => Some(*category),
-            Layer::Reader(_) => None,
-        })
-    }
-
-    /// The bundle lying over the list.
-    pub fn open_bundle_members(&self) -> Option<Rc<Bundle>> {
-        let category = self.open_bundle()?;
-        self.items.iter().find_map(|item| match item {
-            Item::Bundle(bundle) if bundle.category == category => Some(bundle.clone()),
-            _ => None,
-        })
-    }
-
-    pub fn reader(&self) -> Option<&Conversation> {
-        match self.layers.last() {
-            Some(Layer::Reader(conversation)) => Some(conversation),
-            _ => None,
-        }
-    }
-
-    fn step(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let (lines, in_bundle) = self.active_lines();
-        if lines.is_empty() {
-            return;
-        }
-        let current = if in_bundle { &self.bundle_highlight } else { &self.highlight };
-        let position = current.as_ref().and_then(|id| lines.iter().position(|(line, _)| line == id));
-        let target = match position {
-            None => if delta > 0 { 0 } else { lines.len() - 1 },
-            Some(at) => (at as isize + delta).clamp(0, lines.len() as isize - 1) as usize,
-        };
-        let (id, scroll_index) = lines[target].clone();
-        let reading = self.reader().is_some();
-        if in_bundle {
-            self.bundle_highlight = Some(id.clone());
-            self.bundle_scroll.scroll_to_item(scroll_index, ScrollStrategy::Top);
-        } else {
-            self.highlight = Some(id.clone());
-            self.list_scroll.scroll_to_item(scroll_index, ScrollStrategy::Top);
-        }
-        // In the reader, the keys page through the conversations under it.
-        if reading && Some(target) != position {
-            self.layers.pop();
-            self.activate(&id, window, cx);
-        }
-        cx.notify();
-    }
-
-    pub fn next(&mut self, _: &Next, window: &mut Window, cx: &mut Context<Self>) {
-        self.step(1, window, cx);
-    }
-
-    pub fn previous(&mut self, _: &Previous, window: &mut Window, cx: &mut Context<Self>) {
-        self.step(-1, window, cx);
-    }
-
-    pub fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
-        if self.reader().is_some() {
-            return;
-        }
-        let current = if self.open_bundle().is_some() { &self.bundle_highlight } else { &self.highlight };
-        if let Some(id) = current.clone() {
-            self.activate(&id, window, cx);
-        }
-    }
-
-    /// Opens a row: a conversation in the reader, or a bundle over the list.
-    pub fn activate(&mut self, id: &SharedString, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus);
-        if let Some(category) = id.strip_prefix("bundle:") {
-            let Some(category) = self.items.iter().find_map(|item| match item {
-                Item::Bundle(bundle) if bundle.category.key() == category => Some(bundle.category),
-                _ => None,
-            }) else {
-                return;
-            };
-            self.highlight = Some(id.clone());
-            self.bundle_highlight = None;
-            self.bundle_scroll = UniformListScrollHandle::new();
-            self.layers.push(Layer::Bundle(category));
-            cx.notify();
-            return;
-        }
-        let Some(conversation) = self.list().and_then(|l| l.conversations.iter().find(|c| &c.id == id)).cloned() else {
-            return;
-        };
-        if self.open_bundle().is_some() {
-            self.bundle_highlight = Some(id.clone());
-        } else {
-            self.highlight = Some(id.clone());
-        }
-        self.reader_scroll = ScrollHandle::new();
-        self.load_thread(&conversation, cx);
-        let unread = conversation.unread;
-        self.layers.push(Layer::Reader(Box::new(conversation.clone())));
-        if unread {
-            self.set_unread(&conversation, false, cx);
-        }
-        cx.notify();
-    }
-
-    pub fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
-        if self.layers.pop().is_none() && self.query.is_some() {
-            self.search.update(cx, |search, cx| search.clear(cx));
-            self.end_search(cx);
-        }
-        window.focus(&self.focus);
-        cx.notify();
-    }
-
-    pub fn toggle_fold(&mut self, message: &SharedString, cx: &mut Context<Self>) {
-        if !self.unfolded.remove(message) {
-            self.unfolded.insert(message.clone());
-        }
-        cx.notify();
-    }
-
-    // MARK: - Actions
-
-    /// What an action applies to: the open conversation, else the highlighted row.
-    fn target(&self) -> Option<Conversation> {
-        if let Some(conversation) = self.reader() {
-            return Some(conversation.clone());
-        }
-        let id = if self.open_bundle().is_some() { self.bundle_highlight.as_ref() } else { self.highlight.as_ref() }?;
-        self.list()?.conversations.iter().find(|c| &c.id == id).cloned()
-    }
-
-    pub fn archive(&mut self, _: &Archive, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(conversation) = self.target() {
-            self.remove(conversation, "mail.archive", "archive", window, cx);
-        }
-    }
-
-    pub fn trash(&mut self, _: &Trash, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(conversation) = self.target() {
-            self.remove(conversation, "mail.trash", "move it to the Trash", window, cx);
-        }
-    }
-
-    pub fn star(&mut self, _: &Star, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(conversation) = self.target() {
-            self.set_starred(&conversation, !conversation.starred, cx);
-        }
-    }
-
-    pub fn toggle_read(&mut self, _: &ToggleRead, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(conversation) = self.target() {
-            self.set_unread(&conversation, !conversation.unread, cx);
-        }
-    }
-
-    /// Takes the conversation out of every list at once; puts it back if the app refuses.
-    pub fn remove(
-        &mut self,
-        conversation: Conversation,
-        command: &'static str,
-        verb: &'static str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let id = conversation.id.clone();
-        // The highlight moves to the row after, as in the native list.
-        let (lines, in_bundle) = self.active_lines();
-        let next = lines
-            .iter()
-            .position(|(line, _)| line == &id)
-            .and_then(|at| lines.get(at + 1).or_else(|| at.checked_sub(1).and_then(|before| lines.get(before))))
-            .map(|(line, _)| line.clone());
-        if in_bundle {
-            self.bundle_highlight = next;
-        } else {
-            self.highlight = next;
-        }
-
-        let mut removed: Vec<(ListKey, usize, Conversation)> = Vec::new();
-        for (key, list) in &mut self.lists {
-            if let Some(at) = list.conversations.iter().position(|c| c.id == id) {
-                removed.push((key.clone(), at, list.conversations.remove(at)));
-            }
-        }
-        self.layers.retain(|layer| !matches!(layer, Layer::Reader(c) if c.id == id));
-        self.removing.insert(id.clone());
-        self.rebuild_items();
-        self.refresh_layers();
-        window.focus(&self.focus);
-        cx.notify();
-
-        let arg = id.to_string();
-        self.background(
-            cx,
-            move || control::batch(command, json!({ "ids": [arg] })),
-            move |this, result, cx| {
-                this.removing.remove(&id);
-                let Err(error) = result else { return };
-                for (key, at, conversation) in removed {
-                    let list = this.lists.entry(key).or_default();
-                    if !list.conversations.iter().any(|c| c.id == conversation.id) {
-                        list.conversations.insert(at.min(list.conversations.len()), conversation);
-                    }
-                }
-                this.rebuild_items();
-                let message = if error.code == "confirm" {
-                    "It is already in the Trash; deleting for good is left to the app.".to_owned()
-                } else {
-                    format!("Couldn't {verb}: {error}")
-                };
-                this.show_toast(message, cx);
-                cx.notify();
-            },
-        );
-    }
-
-    /// Applies `change` to the conversation wherever it is shown.
-    fn patch(&mut self, id: &SharedString, change: impl Fn(&mut Conversation)) {
-        for list in self.lists.values_mut() {
-            for conversation in list.conversations.iter_mut().filter(|c| &c.id == id) {
-                change(conversation);
-            }
-        }
-        for layer in &mut self.layers {
-            if let Layer::Reader(conversation) = layer
-                && &conversation.id == id
-            {
-                change(conversation);
-            }
-        }
-    }
-
-    pub fn set_starred(&mut self, conversation: &Conversation, starred: bool, cx: &mut Context<Self>) {
-        let id = conversation.id.clone();
-        self.patch(&id, |c| c.starred = starred);
-        cx.notify();
-        let arg = id.to_string();
-        self.background(
-            cx,
-            move || control::batch("mail.star", json!({ "ids": [arg], "off": !starred })),
-            move |this, result, cx| {
-                if let Err(error) = result {
-                    this.patch(&id, |c| c.starred = !starred);
-                    this.show_toast(format!("Couldn't update the star: {error}"), cx);
-                }
-            },
-        );
-    }
-
-    pub fn set_unread(&mut self, conversation: &Conversation, unread: bool, cx: &mut Context<Self>) {
-        let id = conversation.id.clone();
-        self.patch(&id, |c| c.unread = unread);
-        cx.notify();
-        let arg = id.to_string();
-        self.background(
-            cx,
-            move || control::batch("mail.read", json!({ "ids": [arg], "unread": unread })),
-            move |this, result, cx| {
-                if let Err(error) = result {
-                    this.patch(&id, |c| c.unread = !unread);
-                    this.show_toast(format!("Couldn't mark it {}: {error}", if unread { "unread" } else { "read" }), cx);
-                }
-            },
-        );
-    }
-
-    pub fn show_toast(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.toast_generation += 1;
-        let generation = self.toast_generation;
-        self.toast = Some(Toast { text: text.into(), generation });
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST).await;
-            this.update(cx, |this, cx| {
-                if this.toast.as_ref().is_some_and(|t| t.generation == generation) {
-                    this.toast = None;
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    pub fn retry(&mut self, cx: &mut Context<Self>) {
-        self.load_mailboxes(cx);
-        self.load_list(self.key(), true, cx);
     }
 }
 

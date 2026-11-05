@@ -24,9 +24,9 @@ pub enum Role {
 }
 
 impl Role {
-    /// The unified mailboxes the sidebar offers, in order.
+    /// The unified mailboxes the sidebar offers, in order (`MailStore.unifiedMailboxes`).
     pub const UNIFIED: [Role; 7] =
-        [Role::Inbox, Role::Starred, Role::Sent, Role::Drafts, Role::Archive, Role::Junk, Role::Trash];
+        [Role::Inbox, Role::Starred, Role::Drafts, Role::Sent, Role::Archive, Role::Junk, Role::Trash];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -104,11 +104,26 @@ pub struct Account {
     pub id: SharedString,
     #[serde(default)]
     pub label: SharedString,
+    /// `google` or `microsoft`.
+    #[serde(default)]
+    pub provider: SharedString,
+    /// The person's name, when the provider gave one.
+    #[serde(default)]
+    pub name: Option<SharedString>,
 }
 
 impl Account {
     pub fn title(&self) -> SharedString {
         if self.label.is_empty() { self.id.clone() } else { self.label.clone() }
+    }
+
+    /// Gmail calls its user folders labels.
+    pub fn folders_title(&self) -> &'static str {
+        if self.provider.as_ref() == "google" { "Labels" } else { "Folders" }
+    }
+
+    pub fn address(&self) -> Address {
+        Address { name: Some(self.name.clone().unwrap_or_else(|| self.title())), email: self.id.clone() }
     }
 }
 
@@ -119,6 +134,19 @@ pub struct Mailbox {
     pub name: SharedString,
     pub role: Role,
     pub unread: Option<u32>,
+    pub total: Option<u32>,
+}
+
+impl Mailbox {
+    /// The sidebar badge (`MailStore.badgeCount`): unread mail, every draft; none for mailboxes
+    /// whose unread mail is not news.
+    pub fn badge(&self) -> u32 {
+        match self.role {
+            Role::Drafts => self.total.unwrap_or(0),
+            Role::Inbox | Role::Other | Role::Important | Role::Starred => self.unread.unwrap_or(0),
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -205,6 +233,9 @@ pub struct Conversation {
     pub waiting: bool,
     #[serde(default)]
     pub labels: Vec<SharedString>,
+    /// The roles of the mailboxes its messages sit in.
+    #[serde(default)]
+    pub mailboxes: Vec<Role>,
 
     /// The subject without reply prefixes; `tag` holds leading `[list]` tags.
     #[serde(skip)]
@@ -244,6 +275,23 @@ impl Conversation {
     /// The address the avatar is drawn for.
     pub fn avatar(&self) -> Address {
         self.from.clone().unwrap_or_else(|| Address { name: Some(self.sender.clone()), email: self.sender.clone() })
+    }
+
+    /// Something sits in an inbox-like mailbox (`MailStore.canArchive`).
+    pub fn can_archive(&self) -> bool {
+        self.mailboxes
+            .iter()
+            .any(|role| !matches!(role, Role::Sent | Role::All | Role::Archive | Role::Trash | Role::Drafts))
+    }
+
+    /// Something sits in the trash or junk (`MailStore.canRestore`).
+    pub fn can_restore(&self) -> bool {
+        self.mailboxes.iter().any(|role| matches!(role, Role::Trash | Role::Junk))
+    }
+
+    /// "Waiting on you" can be set or cleared: tagged, and not a newsletter (`canMarkWaiting`).
+    pub fn can_mark_waiting(&self) -> bool {
+        self.category.is_some_and(|c| c != Category::Newsletter)
     }
 }
 
