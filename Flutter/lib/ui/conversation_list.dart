@@ -188,7 +188,7 @@ class ConversationListState extends State<ConversationList> {
           }
           final item = items[index];
           return switch (item) {
-            SectionItem(:final title) => _SectionHeader(title),
+            SectionItem(:final title) => SectionHeader(title),
             RowItem(:final conversation) => ConversationRow(
               key: ValueKey(conversation.id),
               conversation: conversation,
@@ -211,8 +211,9 @@ class ConversationListState extends State<ConversationList> {
   }
 }
 
-class _SectionHeader extends StatelessWidget {
-  const _SectionHeader(this.title);
+/// A date group's header in a list.
+class SectionHeader extends StatelessWidget {
+  const SectionHeader(this.title, {super.key});
 
   final String title;
 

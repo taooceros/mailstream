@@ -39,6 +39,16 @@ nonisolated enum CommandID: Sendable, Equatable {
         case mailSend = "mail.send"
         case mailReply = "mail.reply"
         case refresh
+        case chatSpaces = "chat.spaces"
+        case chatMore = "chat.more"
+        case chatRefresh = "chat.refresh"
+        case chatOpen = "chat.open"
+        case chatClose = "chat.close"
+        case chatMessages = "chat.messages"
+        case chatEarlier = "chat.earlier"
+        case chatSend = "chat.send"
+        case chatPeople = "chat.people"
+        case chatStart = "chat.start"
     }
 
     /// The request's `command`: `mail.list`.
@@ -111,6 +121,10 @@ nonisolated struct CommandSpec: Sendable {
     private static let limit = Argument(name: "limit", kind: .int, summary: "Most conversations returned (1-100).", defaultValue: 25)
 
     private static let settingKey = Argument(name: "key", kind: .string, summary: "Setting key.", positional: true, required: true)
+
+    private static let chatAccount = Argument(name: "account", kind: .string, summary: "Chat account (its address).", positional: true, required: true)
+
+    private static let chatSpace = Argument(name: "space", kind: .string, summary: "Space name from `chat spaces` (spaces/…).", positional: true, required: true)
 
     static let all: [CommandSpec] = [
         CommandSpec(command: .app(.status), summary: "The app's state: version, accounts, sync, push, AI tagging, settings problems."),
@@ -217,6 +231,26 @@ nonisolated struct CommandSpec: Sendable {
         ], confirm: true),
 
         CommandSpec(command: .app(.refresh), summary: "Fetches new mail and counts for the list on screen now."),
+
+        CommandSpec(command: .app(.chatSpaces), summary: "Google Chat: the chat accounts and their spaces (direct messages, group chats, spaces) as the list shows them, most recently active first, from what the app has loaded.", arguments: [account]),
+        CommandSpec(command: .app(.chatMore), summary: "Loads another page of older spaces for one chat account, or all of them.", arguments: [account]),
+        CommandSpec(command: .app(.chatRefresh), summary: "Fetches every chat account's spaces now."),
+        CommandSpec(command: .app(.chatOpen), summary: "Opens a space as the reader does: its cached messages at once, the newest from Google after, kept current and read while it stays open. Answers what is loaded now.", arguments: [chatAccount, chatSpace]),
+        CommandSpec(command: .app(.chatClose), summary: "Closes the open space: it is no longer kept current."),
+        CommandSpec(command: .app(.chatMessages), summary: "A space's loaded messages, oldest first, with those being sent from here.", arguments: [chatAccount, chatSpace]),
+        CommandSpec(command: .app(.chatEarlier), summary: "Loads the page of messages before the oldest loaded one.", arguments: [chatAccount, chatSpace]),
+        CommandSpec(command: .app(.chatSend), summary: "Sends a plain-text message to a space and waits for Google to take it.", arguments: [
+            chatAccount, chatSpace,
+            Argument(name: "text", kind: .string, summary: "Message text; `-` reads standard input.", required: true),
+            Argument(name: "thread", kind: .string, summary: "Reply in this thread (`spaces/…/threads/…`)."),
+            yes,
+        ], confirm: true),
+        CommandSpec(command: .app(.chatPeople), summary: "People a chat account talks with, most recently active first, and whether it may start new conversations.",
+                    arguments: [accountAddress]),
+        CommandSpec(command: .app(.chatStart), summary: "Finds or starts the direct message with one person, or the group chat with several, and answers its space.", arguments: [
+            accountAddress,
+            Argument(name: "people", kind: .list, summary: "Email addresses of the people to chat with.", positional: true, variadic: true, required: true),
+        ]),
     ]
 
     static let overview = """

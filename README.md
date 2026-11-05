@@ -81,6 +81,10 @@ mailstream mail show '<conversation id>' --html
 mailstream mail archive '<id>' '<id>'
 mailstream mail tag '<id>' --category newsletter
 mailstream mail reply '<id>' --body - --yes < reply.txt
+mailstream chat spaces
+mailstream chat messages you@gmail.com spaces/AAAA
+mailstream chat send you@gmail.com spaces/AAAA --text "On my way" --yes
+mailstream chat start you@gmail.com friend@example.com
 ```
 
 Settings live in `~/Library/Application Support/Mailstream/settings.json`: a flat
@@ -123,6 +127,13 @@ confirmed them and report each id under `done` or `failed`. Sending (`mail send`
 `mail reply`), signing an account out and deleting from the trash do nothing without
 `--yes`; the error says what would happen. `accounts add google` opens the browser
 sign-in and waits for the person to finish it.
+
+`chat …` works on the Google Chat spaces the app has loaded (`chat spaces`, from its last poll;
+`chat more` loads older ones). `chat open` makes a space the one the app keeps current and reads
+as messages arrive, like opening it in the window; `chat messages` answers what is loaded without
+that, and `chat earlier` loads the page before it. `chat send` (with `--yes`) answers once Google
+took the message. `chat start` finds or starts the direct message with one person or the group
+chat with several; `chat people` lists who an account already chats with.
 
 Failures print `{"error": {"code", "message"}}` on stderr and exit 1, 2 for usage
 errors, 3 when the app cannot be reached.

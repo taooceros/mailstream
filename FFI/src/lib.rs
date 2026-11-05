@@ -351,6 +351,132 @@ pub struct Settings {
     pub issues: Vec<String>,
 }
 
+/// A Google Chat account: a Google account signed in with Chat access.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatAccount {
+    pub id: String,
+    /// Whether its sign-in lets it create direct messages and group chats.
+    pub can_start: bool,
+    /// Spaces with unread messages.
+    pub unread: u32,
+}
+
+/// One space as the chat list shows it.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSpace {
+    pub account: String,
+    /// `spaces/…`.
+    pub space: String,
+    /// `dm`, `group`, `space` or `bot`.
+    pub kind: Option<String>,
+    pub title: String,
+    /// "Brent: see you" / "You: thanks".
+    pub preview: String,
+    /// The date as lists show it, and its date group.
+    pub date: String,
+    pub section: String,
+    pub activity: Option<String>,
+    pub unread: bool,
+    pub attachment: bool,
+    /// The person the row shows: their lowercased address, else their Chat user id; empty for none.
+    pub avatar_key: String,
+    pub avatar_name: String,
+    /// The picture Google Chat publishes for them.
+    pub avatar_url: Option<String>,
+}
+
+/// The chat accounts and every space loaded, most recently active first.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct ChatSpaces {
+    pub accounts: Vec<ChatAccount>,
+    pub loading: bool,
+    /// Older spaces exist beyond these ([`Mailstream::chat_more`]).
+    pub more: bool,
+    pub spaces: Vec<ChatSpace>,
+}
+
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatUser {
+    /// `users/…`.
+    pub id: String,
+    pub name: String,
+    pub email: Option<String>,
+    pub avatar_key: String,
+    pub avatar_url: Option<String>,
+    pub bot: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct ChatAttachment {
+    pub name: String,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessage {
+    pub id: String,
+    pub sender: ChatUser,
+    pub created: Option<String>,
+    pub edited: Option<String>,
+    /// Plain text.
+    pub text: String,
+    pub thread: Option<String>,
+    pub thread_reply: bool,
+    pub mine: bool,
+    /// Carries a card the text does not show.
+    pub card: bool,
+    pub attachments: Vec<ChatAttachment>,
+}
+
+/// A message sent from here that Google has not taken yet, or that it refused (`failure`).
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct ChatPending {
+    pub id: String,
+    pub text: String,
+    pub created: Option<String>,
+    pub failure: Option<String>,
+}
+
+/// The loaded part of a space's history.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatThread {
+    pub account: String,
+    pub space: String,
+    pub title: Option<String>,
+    /// The user's `users/…` in this account.
+    pub me: Option<String>,
+    /// Oldest first.
+    pub messages: Vec<ChatMessage>,
+    pub pending: Vec<ChatPending>,
+    /// Older messages exist ([`Mailstream::chat_earlier`]).
+    pub more: bool,
+    /// Google answered this session; until then the messages are the cached ones.
+    pub loaded: bool,
+    /// Why fetching failed, while there is nothing to show.
+    pub failure: Option<String>,
+    pub loading_earlier: bool,
+}
+
+/// People a chat account talks with, and whether it may start new conversations.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatPeople {
+    pub can_start: bool,
+    pub people: Vec<ChatUser>,
+}
+
+/// A space to open.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct ChatSpaceRef {
+    pub account: String,
+    pub space: String,
+}
+
 /// What changed in the engine; a front end re-reads what it shows of it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Event {
@@ -364,6 +490,10 @@ pub enum Event {
     Problems,
     /// settings.json changed, from any front end, the CLI or an editor.
     Settings,
+    /// Chat accounts or their spaces changed.
+    Chat,
+    /// The open space's messages changed.
+    ChatMessages,
     /// A kind this build does not know yet.
     Other { name: String },
 }
@@ -379,6 +509,8 @@ impl Event {
             "sync" => Self::Sync,
             "problems" => Self::Problems,
             "settings" => Self::Settings,
+            "chat" => Self::Chat,
+            "chatMessages" => Self::ChatMessages,
             _ => Self::Other { name: name.into() },
         }
     }
@@ -562,6 +694,69 @@ impl Mailstream {
     /// Fetches new mail and counts now.
     pub async fn refresh(&self) -> Result<(), MailError> {
         call::<Value>("refresh", json!({})).await.map(drop)
+    }
+
+    /// Google Chat accounts and their spaces, from what the engine has loaded.
+    pub async fn chat_spaces(&self, account: Option<String>) -> Result<ChatSpaces, MailError> {
+        call("chat.spaces", json!({ "account": account })).await
+    }
+
+    /// Loads another page of older spaces; [`Event::Chat`] follows.
+    pub async fn chat_more(&self, account: Option<String>) -> Result<(), MailError> {
+        call::<Value>("chat.more", json!({ "account": account })).await.map(drop)
+    }
+
+    /// Fetches every chat account's spaces now.
+    pub async fn chat_refresh(&self) -> Result<(), MailError> {
+        call::<Value>("chat.refresh", json!({})).await.map(drop)
+    }
+
+    /// Opens a space: its cached messages now, the newest from Google after
+    /// ([`Event::ChatMessages`]), kept current and read while it stays open.
+    pub async fn chat_open(&self, account: String, space: String) -> Result<ChatThread, MailError> {
+        call("chat.open", json!({ "account": account, "space": space })).await
+    }
+
+    pub async fn chat_close(&self) -> Result<(), MailError> {
+        call::<Value>("chat.close", json!({})).await.map(drop)
+    }
+
+    /// What is loaded of a space's history.
+    pub async fn chat_messages(&self, account: String, space: String) -> Result<ChatThread, MailError> {
+        call("chat.messages", json!({ "account": account, "space": space })).await
+    }
+
+    /// Loads the page before the oldest loaded message.
+    pub async fn chat_earlier(&self, account: String, space: String) -> Result<ChatThread, MailError> {
+        call("chat.earlier", json!({ "account": account, "space": space })).await
+    }
+
+    /// Sends `text` (shown pending at once) and returns once Google took it. `confirm` is the
+    /// person's go-ahead.
+    pub async fn chat_send(
+        &self,
+        account: String,
+        space: String,
+        text: String,
+        thread: Option<String>,
+        confirm: bool,
+    ) -> Result<(), MailError> {
+        call::<Value>(
+            "chat.send",
+            json!({ "account": account, "space": space, "text": text, "thread": thread, "yes": confirm }),
+        )
+        .await
+        .map(drop)
+    }
+
+    /// People `account` chats with, most recently active first.
+    pub async fn chat_people(&self, account: String) -> Result<ChatPeople, MailError> {
+        call("chat.people", json!({ "account": account })).await
+    }
+
+    /// The direct message with one person or the group chat with several, found or started.
+    pub async fn chat_start(&self, account: String, people: Vec<String>) -> Result<ChatSpaceRef, MailError> {
+        call("chat.start", json!({ "account": account, "people": people })).await
     }
 
     /// Calls `listener` on the main thread for every change from now on, while the process runs.

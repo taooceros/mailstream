@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../backend/models.dart';
+import '../state/chat_state.dart';
 import '../state/mail_state.dart';
+import 'chat.dart';
 import 'common.dart';
 import 'compose.dart';
 import 'conversation_list.dart';
@@ -45,6 +47,9 @@ class _MailShellState extends State<MailShell> {
 
   /// The conversation last open, kept to slide out beside the list as the split closes.
   Conversation? _lastOpened;
+
+  /// The chat space last open, kept the same way.
+  SpaceKey? _lastSpace;
 
   MailState get state => widget.state;
 
@@ -129,6 +134,11 @@ class _MailShellState extends State<MailShell> {
   }
 
   void _back() {
+    if (state.chat.active) {
+      state.chat.close();
+      _focus.requestFocus();
+      return;
+    }
     if (state.opened == null && state.openBundle == null && state.searchQuery != null) {
       _search.clear();
       state.search(null);
@@ -206,7 +216,7 @@ class _MailShellState extends State<MailShell> {
         _searchFocus.requestFocus();
         _search.selection = TextSelection(baseOffset: 0, extentOffset: _search.text.length);
       } else if (key == LogicalKeyboardKey.keyR) {
-        state.refresh();
+        state.chat.active ? state.chat.refresh() : state.refresh();
       } else if (key == LogicalKeyboardKey.keyN) {
         _compose();
       } else if (key == LogicalKeyboardKey.bracketLeft) {
@@ -217,6 +227,11 @@ class _MailShellState extends State<MailShell> {
       return KeyEventResult.handled;
     }
     if (_editing) return KeyEventResult.ignored;
+    if (state.chat.active) {
+      if (key != LogicalKeyboardKey.escape) return KeyEventResult.ignored;
+      _back();
+      return KeyEventResult.handled;
+    }
     final reading = state.opened != null;
     final listInView = !reading || _twoPane;
     switch (key) {
@@ -270,7 +285,7 @@ class _MailShellState extends State<MailShell> {
   Widget build(BuildContext context) {
     final colors = context.colors;
     return ListenableBuilder(
-      listenable: state,
+      listenable: Listenable.merge([state, state.chat]),
       builder: (context, _) {
         _items = listItems(state.conversations, bundles: state.bundlesEnabled, sections: state.searchQuery == null);
         final bundle = state.openBundle;
@@ -307,18 +322,30 @@ class _MailShellState extends State<MailShell> {
     final navigation = drawer
         ? Sidebar(state: state, onCompose: _compose, onCollapse: width >= 1200 ? null : () => setState(() => _drawerOpen = false))
         : Rail(state: state, onCompose: _compose, onMenu: () => setState(() => _drawerOpen = true));
-    final listPane = _Pane(child: _listPane(context));
-    final opened = state.opened;
+    final chat = state.chat;
+    final listPane = _Pane(child: chat.active ? ChatListPane(state: state) : _listPane(context));
+    final opened = chat.active ? null : state.opened;
+    final space = chat.active ? chat.opened : null;
+    final open = opened != null || space != null;
     if (opened != null) _lastOpened = opened;
+    if (space != null) _lastSpace = space;
+    // The pane that slides out as the split closes is the kind that was in view.
+    if (chat.active) _lastOpened = null;
+    if (!chat.active) _lastSpace = null;
     final Widget content;
     if (_twoPane) {
       final listWidth = (width * 0.36).clamp(400.0, 520.0);
       // While the split closes, the conversation that was open slides out.
+      final shownSpace = space ?? _lastSpace;
       final shown = opened ?? _lastOpened;
-      final detail = shown == null ? null : _Pane(child: _detailPane(context, shown));
+      final detail = shownSpace != null
+          ? _Pane(child: _chatPane(shownSpace))
+          : shown == null
+          ? null
+          : _Pane(child: _detailPane(context, shown));
       content = TweenAnimationBuilder<double>(
-        tween: Tween(end: opened == null ? 0 : 1),
-        duration: opened == null ? Motion.exit : Motion.enter,
+        tween: Tween(end: open ? 1 : 0),
+        duration: open ? Motion.enter : Motion.exit,
         curve: Motion.curve,
         builder: (context, split, _) => LayoutBuilder(builder: (context, constraints) {
           final full = constraints.maxWidth;
@@ -339,8 +366,12 @@ class _MailShellState extends State<MailShell> {
         children: [
           listPane,
           SlideLayer(
-            onDismiss: state.close,
-            child: opened == null ? null : _Pane(child: _detailPane(context, opened)),
+            onDismiss: chat.active ? chat.close : state.close,
+            child: space != null
+                ? _Pane(child: _chatPane(space))
+                : opened == null
+                ? null
+                : _Pane(child: _detailPane(context, opened)),
           ),
         ],
       );
@@ -408,6 +439,23 @@ class _MailShellState extends State<MailShell> {
       ],
     );
   }
+
+  /// The open chat space, a fresh reader (and composer) per space, fading through like mail.
+  Widget _chatPane(SpaceKey space) => AnimatedSwitcher(
+    duration: Durations.medium2,
+    switchInCurve: Motion.curve,
+    transitionBuilder: (child, animation) => FadeTransition(
+      opacity: animation,
+      child: ScaleTransition(scale: Tween(begin: 0.98, end: 1.0).animate(animation), child: child),
+    ),
+    child: ChatReader(
+      key: ValueKey(space),
+      state: state,
+      space: space,
+      twoPane: _twoPane,
+      onBack: _back,
+    ),
+  );
 
   Widget _detailPane(BuildContext context, Conversation opened) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,

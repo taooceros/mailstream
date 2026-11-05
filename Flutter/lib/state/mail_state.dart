@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:mailstream/mailstream.dart' as engine;
 
 import '../backend/models.dart';
+import 'chat_state.dart';
 
 /// What the list shows: one role across every account, or one account's mailbox.
 sealed class Selection {
@@ -123,6 +124,9 @@ class MailState extends ChangeNotifier {
   Map<String, List<Mailbox>> mailboxes = const {};
   Selection selection = const UnifiedSelection(MailboxRole.inbox);
 
+  /// Google Chat, which the window shows instead of mail while `chat.active`.
+  late final ChatState chat = ChatState(mail, report: _report);
+
   /// Set while the Smart Inbox bundle of that category lies over the list.
   MailCategory? openBundle;
 
@@ -170,6 +174,7 @@ class MailState extends ChangeNotifier {
     mail.subscribe(listener: _Changes(_changed));
     await reloadAccounts();
     unawaited(reloadSettings());
+    unawaited(chat.reload());
     await _fetch(selection);
   }
 
@@ -181,6 +186,7 @@ class MailState extends ChangeNotifier {
   }
 
   void _changed(engine.Event event) {
+    chat.changed(event);
     switch (event) {
       case engine.AccountsEvent() || engine.MailboxesEvent():
         _accountsChanged = true;
@@ -283,6 +289,7 @@ class MailState extends ChangeNotifier {
   List<Conversation> bundleItems(MailCategory category) => conversations.where((c) => c.bundle == category).toList();
 
   void select(Selection next) {
+    chat.hide();
     _searchDebounce?.cancel();
     searchQuery = null;
     openBundle = null;

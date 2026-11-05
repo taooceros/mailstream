@@ -146,7 +146,7 @@ enum CLI {
     private static func convert(_ raw: String, _ argument: CommandSpec.Argument, _ spec: CommandSpec) throws -> JSON {
         switch argument.kind {
         case .string:
-            if raw == "-" && argument.name == "body" {
+            if raw == "-" && (argument.name == "body" || argument.name == "text") {
                 let data = FileHandle.standardInput.readDataToEndOfFile()
                 return .string(String(decoding: data, as: UTF8.self))
             }

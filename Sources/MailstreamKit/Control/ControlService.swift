@@ -110,7 +110,134 @@ final class ControlService {
             store.refresh()
             store.refreshCounts()
             return ["started": true]
+        case .chatSpaces: return try chatSpaces(args)
+        case .chatMore:
+            let account = try args.string("account").map { try chatAccount($0) }
+            store.chat.loadMore(account: account)
+            return ["started": true]
+        case .chatRefresh:
+            store.chat.refresh()
+            return ["started": true]
+        case .chatOpen:
+            let key = try chatSpace(args)
+            store.chat.open(key)
+            return chatThread(key)
+        case .chatClose:
+            store.chat.close()
+            return ["closed": true]
+        case .chatMessages: return chatThread(try chatSpace(args))
+        case .chatEarlier:
+            let key = try chatSpace(args)
+            store.chat.loadEarlier(key)
+            return chatThread(key)
+        case .chatSend: return try await chatSend(args)
+        case .chatPeople: return try chatPeople(args)
+        case .chatStart:
+            let account = try chatAccount(try args.required("account"))
+            let key = try await store.chat.start(account: account, with: args.list("people") ?? [])
+            return ["account": .string(key.account), "space": .string(key.space)]
         }
+    }
+
+    // MARK: - Google Chat
+
+    private func chatAccount(_ id: String) throws -> String {
+        let id = id.lowercased()
+        guard store.chat.account(named: id) != nil else {
+            throw ControlError("unknown_account", "No chat account \(id); `mailstream chat spaces` lists them.")
+        }
+        return id
+    }
+
+    private func chatSpace(_ args: Arguments) throws -> ChatSpaceKey {
+        ChatSpaceKey(account: try chatAccount(try args.required("account")), space: try args.required("space"))
+    }
+
+    private func chatSpaces(_ args: Arguments) throws -> JSON {
+        let account = try args.string("account").map { try chatAccount($0) }
+        let chat = store.chat
+        let accounts = chat.accounts.map(\.name).filter { account == nil || $0 == account }
+        return [
+            "accounts": .array(accounts.map { name in
+                ["id": .string(name), "canStart": .bool(chat.canStartChats(account: name)),
+                 "unread": .int(chat.unreadSpaces(account: name))]
+            }),
+            "loading": .bool(chat.isLoading),
+            "more": .bool(chat.canLoadMore(account: account)),
+            "spaces": .array(chat.rows(account: account).map { row in
+                let space = chat.space(row.key)
+                return [
+                    "account": .string(row.key.account), "space": .string(row.key.space),
+                    "kind": (space?.kind.rawValue).json, "title": .string(row.title), "preview": .string(row.preview),
+                    "date": .string(row.date), "section": .string(row.section), "activity": .date(row.activity),
+                    "unread": .bool(row.isUnread), "attachment": .bool(row.hasAttachment),
+                    "avatarKey": .string(row.avatarKey), "avatarName": .string(row.avatarName),
+                    "avatarUrl": (row.avatarPhoto?.absoluteString).json,
+                ]
+            }),
+        ]
+    }
+
+    private func chatUser(_ user: ChatUser) -> JSON {
+        [
+            "id": .string(user.name), "name": .string(user.label), "email": user.email.json,
+            "avatarKey": .string(user.avatarKey), "avatarUrl": user.avatarUrl.json, "bot": .bool(user.bot),
+        ]
+    }
+
+    /// What the store holds of `key`'s history. Senders' pictures go to the avatar store, so
+    /// `mail avatars` finds them by address.
+    private func chatThread(_ key: ChatSpaceKey) -> JSON {
+        let chat = store.chat
+        let thread = chat.thread(key) ?? ChatThread()
+        for message in thread.messages {
+            if let photo = message.sender.avatarUrl.flatMap(URL.init(string:)) {
+                store.avatars.publish(photo, for: message.sender.avatarKey)
+            }
+        }
+        return [
+            "account": .string(key.account), "space": .string(key.space),
+            "title": (chat.space(key)?.title).json, "me": chat.me(account: key.account).json,
+            "messages": .array(thread.messages.map { message in
+                [
+                    "id": .string(message.name), "sender": chatUser(message.sender), "created": .date(message.created),
+                    "edited": .date(message.edited), "text": .string(ChatMarkup.plain(message.text)),
+                    "thread": message.thread.json, "threadReply": .bool(message.threadReply), "mine": .bool(message.mine),
+                    "card": .bool(message.card),
+                    "attachments": .array(message.attachments.map { ["name": .string($0.name), "url": $0.url.json] }),
+                ]
+            }),
+            "pending": .array(thread.pending.map { pending in
+                ["id": .string(pending.id), "text": .string(pending.text), "created": .date(pending.created),
+                 "failure": pending.failure.json]
+            }),
+            "more": .bool(thread.more), "loaded": .bool(thread.loaded), "failure": thread.failure.json,
+            "loadingEarlier": .bool(chat.isLoadingEarlier(key)),
+        ]
+    }
+
+    private func chatSend(_ args: Arguments) async throws -> JSON {
+        let key = try chatSpace(args)
+        let text = try args.required("text")
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ControlError.usage("--text is empty.") }
+        try requireYes(args, "Would send \(text.count) characters to \(key.space) from \(key.account). Re-run with --yes.")
+        guard let sending = store.chat.send(text, thread: args.string("thread"), in: key) else {
+            throw ControlError.usage("--text is empty.")
+        }
+        await sending.task.value
+        if let failure = store.chat.thread(key)?.pending.first(where: { $0.id == sending.pending })?.failure {
+            store.chat.discard(sending.pending, in: key)
+            throw ControlError("provider", failure)
+        }
+        return ["sent": true, "account": .string(key.account), "space": .string(key.space)]
+    }
+
+    private func chatPeople(_ args: Arguments) throws -> JSON {
+        let account = try chatAccount(try args.required("account"))
+        return [
+            "canStart": .bool(store.chat.canStartChats(account: account)),
+            "people": .array(store.chat.people(account: account).map { chatUser($0.user) }),
+        ]
     }
 
     // MARK: - Status and accounts

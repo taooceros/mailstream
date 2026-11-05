@@ -43,7 +43,7 @@ class _SidebarState extends State<Sidebar> {
       if (boxes.isEmpty) continue;
       final selection = UnifiedSelection(role);
       final expandable = role == MailboxRole.inbox && boxes.length > 1;
-      final selected = state.selection == selection;
+      final selected = !state.chat.active && state.selection == selection;
       rows.add(_Destination(
         leading: Icon(roleIcon(role, selected: selected)),
         label: role.title,
@@ -60,11 +60,21 @@ class _SidebarState extends State<Sidebar> {
             leading: _AccountDot(color: _accountColor(box.account)),
             label: state.account(box.account)?.title ?? box.account,
             badge: box.unread ?? 0,
-            selected: state.selection == MailboxSelection(box),
+            selected: !state.chat.active && state.selection == MailboxSelection(box),
             onTap: () => state.select(MailboxSelection(box)),
           ));
         }
       }
+    }
+    final chat = state.chat;
+    if (chat.accounts.isNotEmpty) {
+      rows.add(_Destination(
+        leading: Icon(chat.active ? Icons.chat_bubble : Icons.chat_bubble_outline),
+        label: 'Chat',
+        badge: chat.unreadSpaces,
+        selected: chat.active,
+        onTap: chat.show,
+      ));
     }
     rows.add(const Padding(padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: Divider()));
     rows.add(Padding(
@@ -83,7 +93,7 @@ class _SidebarState extends State<Sidebar> {
       ));
       if (!open) continue;
       for (final box in state.mailboxes[account.id] ?? const <Mailbox>[]) {
-        final selected = state.selection == MailboxSelection(box);
+        final selected = !state.chat.active && state.selection == MailboxSelection(box);
         rows.add(_Destination(
           indent: true,
           leading: Icon(roleIcon(box.role, selected: selected)),
@@ -165,7 +175,9 @@ class Rail extends StatelessWidget {
   Widget build(BuildContext context) {
     final roles = Sidebar.unifiedRoles.where((r) => state.unified(r).isNotEmpty).toList();
     final selection = state.selection;
-    final selected = selection is UnifiedSelection ? roles.indexOf(selection.role) : -1;
+    final chat = state.chat;
+    final hasChat = chat.accounts.isNotEmpty;
+    final selected = chat.active ? roles.length : (selection is UnifiedSelection ? roles.indexOf(selection.role) : -1);
     return NavigationRail(
       backgroundColor: Colors.transparent,
       minWidth: 88,
@@ -188,7 +200,7 @@ class Rail extends StatelessWidget {
         ),
       ),
       selectedIndex: selected < 0 ? null : selected,
-      onDestinationSelected: (i) => state.select(UnifiedSelection(roles[i])),
+      onDestinationSelected: (i) => i == roles.length ? chat.show() : state.select(UnifiedSelection(roles[i])),
       destinations: [
         for (final role in roles)
           NavigationRailDestination(
@@ -196,12 +208,20 @@ class Rail extends StatelessWidget {
             selectedIcon: _badged(role, Icon(roleIcon(role, selected: true))),
             label: Text(role.title),
           ),
+        if (hasChat)
+          NavigationRailDestination(
+            icon: _count(chat.unreadSpaces, const Icon(Icons.chat_bubble_outline)),
+            selectedIcon: _count(chat.unreadSpaces, const Icon(Icons.chat_bubble)),
+            label: const Text('Chat'),
+          ),
       ],
     );
   }
 
-  Widget _badged(MailboxRole role, Widget icon) {
-    final count = badgeRole(role) ? state.unreadCount(UnifiedSelection(role)) : 0;
+  Widget _badged(MailboxRole role, Widget icon) =>
+      _count(badgeRole(role) ? state.unreadCount(UnifiedSelection(role)) : 0, icon);
+
+  static Widget _count(int count, Widget icon) {
     if (count == 0) return icon;
     return Badge(label: Text(count > 999 ? '999+' : '$count'), child: icon);
   }

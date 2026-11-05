@@ -6,14 +6,18 @@ import 'package:flutter/services.dart';
 import '../backend/models.dart';
 import 'design.dart';
 
-/// A sender's picture from the app's avatar cache, else their initial on a stable tonal color.
+/// A sender's picture from the app's avatar cache (else one at `photoUrl`, such as the picture
+/// Google Chat publishes), else their initial on a stable tonal color.
 class PersonAvatar extends StatelessWidget {
-  const PersonAvatar({super.key, required this.address, this.photo, this.size = ListMetrics.avatarSize});
+  const PersonAvatar({super.key, required this.address, this.photo, this.photoUrl, this.size = ListMetrics.avatarSize});
 
   final Address address;
 
   /// The picture's file, when the app has one.
   final String? photo;
+
+  /// A picture on the web, shown while there is no file.
+  final String? photoUrl;
   final double size;
 
   @override
@@ -24,7 +28,9 @@ class PersonAvatar extends StatelessWidget {
       style: TextStyle(color: colors.foreground, fontSize: size * 0.42, fontWeight: FontWeight.w500, height: 1),
     );
     final photo = this.photo;
-    if (photo == null) return CircleAvatar(radius: size / 2, backgroundColor: colors.background, child: initials);
+    final photoUrl = this.photoUrl;
+    if (photo == null && photoUrl == null) return CircleAvatar(radius: size / 2, backgroundColor: colors.background, child: initials);
+    final cacheWidth = (size * MediaQuery.devicePixelRatioOf(context)).round();
     return Container(
       width: size,
       height: size,
@@ -34,15 +40,25 @@ class PersonAvatar extends StatelessWidget {
         border: Border.all(color: context.colors.outlineVariant.withValues(alpha: 0.6), width: 0.5),
       ),
       child: ClipOval(
-        child: Image.file(
-          File(photo),
-          width: size,
-          height: size,
-          fit: BoxFit.cover,
-          cacheWidth: (size * MediaQuery.devicePixelRatioOf(context)).round(),
-          filterQuality: FilterQuality.medium,
-          errorBuilder: (_, _, _) => Center(child: initials),
-        ),
+        child: photo != null
+            ? Image.file(
+                File(photo),
+                width: size,
+                height: size,
+                fit: BoxFit.cover,
+                cacheWidth: cacheWidth,
+                filterQuality: FilterQuality.medium,
+                errorBuilder: (_, _, _) => Center(child: initials),
+              )
+            : Image.network(
+                photoUrl!,
+                width: size,
+                height: size,
+                fit: BoxFit.cover,
+                cacheWidth: cacheWidth,
+                filterQuality: FilterQuality.medium,
+                errorBuilder: (_, _, _) => Center(child: initials),
+              ),
       ),
     );
   }

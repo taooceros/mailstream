@@ -6,7 +6,9 @@ process: `packages/mailstream` is the Dart binding of the `FFI/` crate (generate
 uniffi-dart), and its build hook bundles `libmailstream.dylib` and `libMailstreamKit.dylib`.
 The UI lists accounts, mailboxes and conversations, reads previews, sender avatars and
 messages (with their HTML), searches, marks, archives, trashes, tags, replies and sends new mail through it,
-manages accounts and settings, and follows the engine's change events instead of polling. Mailstream.app need not run.
+does Google Chat (the spaces of every chat account, their messages, sending and starting new
+chats), manages accounts and settings, and follows the engine's change events instead of polling.
+Mailstream.app need not run.
 
 ```sh
 # at the repository root: release dylibs and the Dart bindings (packages/mailstream/lib/src, not committed)
@@ -36,6 +38,8 @@ content height so the body scrolls with the conversation.
 | `lib/backend/models.dart` | Accounts, mailboxes, conversations and messages, built from the engine's records |
 | `macos/Runner/MailHtmlView.swift` | The WebKit platform view for HTML bodies |
 | `lib/state/mail_state.dart` | `MailState`: selection, paged lists served from memory for 90 s, previews, search, the reader, and optimistic actions that roll back on failure |
+| `lib/state/chat_state.dart` | `ChatState`: chat accounts and spaces, the open space's messages, sending and starting chats; re-read on the engine's `chat`/`chatMessages` events |
+| `lib/ui/chat.dart` | The chat list, the open space (newest at the bottom, older pages loading at the top, a composer: Return sends, ⇧Return a new line) and the New chat dialog |
 | `lib/ui/design.dart` | `MailTheme` (Material 3 from one seed color), motion, list and pane metrics, stable account/topic/avatar colors |
 | `lib/ui/shell.dart` | Adaptive layout, panes, search bar, keys, snackbars |
 | `lib/ui/sidebar.dart` | Navigation drawer and rail, each with the Compose button |
@@ -50,6 +54,7 @@ opens, Esc or ⌘[ goes back, E archives, ⌫ trashes, S stars, U toggles read, 
 A replies to all), ⌘N writes a new message, ⌘F searches, ⌘R refreshes, ⌘, opens Settings. In the compose window
 ⌘Return sends and Esc or ⌘W closes (asking first when something is written).
 
-Not here: Google Chat, forwarding, attachments on send and recipient completion.
+Not here: forwarding, attachments on send and recipient completion; in Chat, threads,
+reactions, editing and attachments on send.
 Reply recipients shown in the composer are a preview; the app plans the real ones when it
 sends.
