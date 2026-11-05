@@ -10,9 +10,28 @@ class MainFlutterWindow: NSWindow {
   /// Whether a drop attaches: Flutter turns it on while the compose window is open.
   private var takesFiles = false
 
+  /// The navigation's Liquid Glass panel. It sits under the Flutter view, which paints the
+  /// window's surface everywhere but the panel's rect (`GlassPanel` in `lib/ui/glass.dart`), so
+  /// the desktop shows through it, blurred by the system's glass.
+  private let panel = BackdropGlass()
+
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
-    self.contentViewController = flutterViewController
+    flutterViewController.backgroundColor = .clear
+    let container = NSViewController()
+    container.view = NSView()
+    container.addChild(flutterViewController)
+    flutterViewController.view.frame = container.view.bounds
+    flutterViewController.view.autoresizingMask = [.width, .height]
+    panel.isHidden = true
+    // Fixed left edge, width and distance to the top and bottom: it follows the window's height
+    // as the window resizes, before Flutter lays out again.
+    panel.autoresizingMask = [.height, .maxXMargin]
+    container.view.addSubview(panel)
+    container.view.addSubview(flutterViewController.view)
+    self.contentViewController = container
+    isOpaque = false
+    backgroundColor = .clear
     // Content runs under the title bar, as in the native app: the sidebar reaches the top and the
     // traffic lights sit over it.
     styleMask.insert(.fullSizeContentView)
@@ -33,6 +52,11 @@ class MainFlutterWindow: NSWindow {
         result(nil)
       case "zoom":
         self?.performZoom(nil)
+        result(nil)
+      case "panel":
+        // The panel's rect in Flutter's coordinates (top-left origin) and its corner radius;
+        // no arguments hide it.
+        self?.placePanel(call.arguments as? [String: Double])
         result(nil)
       default:
         result(FlutterMethodNotImplemented)
@@ -79,6 +103,18 @@ class MainFlutterWindow: NSWindow {
     chrome?.invokeMethod("settings", arguments: nil)
   }
 
+  private func placePanel(_ rect: [String: Double]?) {
+    guard let rect, let x = rect["x"], let y = rect["y"], let width = rect["width"], let height = rect["height"],
+          let container = panel.superview
+    else {
+      panel.isHidden = true
+      return
+    }
+    panel.frame = NSRect(x: x, y: container.bounds.height - y - height, width: width, height: height)
+    panel.cornerRadius = rect["radius"] ?? 0
+    panel.isHidden = false
+  }
+
   // MARK: - Dropped and pasted files
 
   /// The files on a pasteboard, without folders.
@@ -111,4 +147,9 @@ class MainFlutterWindow: NSWindow {
     files?.invokeMethod("drop", arguments: urls.map(\.path))
     return true
   }
+}
+
+/// The glass under the navigation: only a backdrop, so clicks go to the Flutter view over it.
+private final class BackdropGlass: NSGlassEffectView {
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

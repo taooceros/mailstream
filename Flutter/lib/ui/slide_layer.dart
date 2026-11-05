@@ -289,7 +289,7 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
     return LayoutBuilder(
       builder: (context, constraints) {
         final full = constraints.maxWidth;
-        final detailWidth = full - widget.listWidth - Panes.spacer;
+        final detailWidth = full - widget.listWidth;
         final travel = _travel = full - widget.listWidth;
         return AnimatedBuilder(
           animation: _split,
@@ -304,7 +304,7 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
                   // The page keeps its final width, so its text does not reflow as it slides.
                   if (split > 0 && shown != null)
                     Positioned(
-                      left: list + Panes.spacer,
+                      left: list,
                       top: 0,
                       bottom: 0,
                       width: detailWidth,

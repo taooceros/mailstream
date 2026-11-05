@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/material.dart';
 
 import '../backend/models.dart';
@@ -5,20 +6,17 @@ import '../state/mail_state.dart';
 import 'common.dart';
 import 'design.dart';
 
-/// A standard Material 3 navigation drawer: the Compose button, unified mailboxes first (Inbox
-/// expands into each account's inbox, each marked with its color), then every account's folders.
+/// Mail's sidebar, on the window's glass panel: unified mailboxes first (Inbox expands into each
+/// account's inbox, each marked with its color), Chat, then every account's folders.
 class Sidebar extends StatefulWidget {
-  const Sidebar({super.key, required this.state, required this.onCompose, this.onCollapse});
+  const Sidebar({super.key, required this.state, this.onCollapse});
 
   final MailState state;
 
-  /// Opens a new message.
-  final VoidCallback onCompose;
-
-  /// Folds the drawer back into the rail; nil where the drawer is the layout's navigation.
+  /// Folds the sidebar back into the rail; nil where the sidebar is the layout's navigation.
   final VoidCallback? onCollapse;
 
-  static const width = 248.0;
+  static const width = 232.0;
   static const unifiedRoles = [
     MailboxRole.inbox, MailboxRole.starred, MailboxRole.drafts, MailboxRole.sent, MailboxRole.archive, MailboxRole.junk, MailboxRole.trash,
   ];
@@ -36,7 +34,6 @@ class _SidebarState extends State<Sidebar> {
   @override
   Widget build(BuildContext context) {
     final state = widget.state;
-    final colors = context.colors;
     final rows = <Widget>[];
     for (final role in Sidebar.unifiedRoles) {
       final boxes = state.unified(role);
@@ -45,7 +42,7 @@ class _SidebarState extends State<Sidebar> {
       final expandable = role == MailboxRole.inbox && boxes.length > 1;
       final selected = !state.chat.active && state.selection == selection;
       rows.add(_Destination(
-        leading: Icon(roleIcon(role, selected: selected)),
+        leading: Icon(roleIcon(role)),
         label: role.title,
         badge: _badge(role) ? state.unreadCount(selection) : 0,
         selected: selected,
@@ -69,18 +66,14 @@ class _SidebarState extends State<Sidebar> {
     final chat = state.chat;
     if (chat.accounts.isNotEmpty) {
       rows.add(_Destination(
-        leading: Icon(chat.active ? Icons.chat_bubble : Icons.chat_bubble_outline),
+        leading: const Icon(CupertinoIcons.chat_bubble_2),
         label: 'Chat',
         badge: chat.unreadSpaces,
         selected: chat.active,
         onTap: chat.show,
       ));
     }
-    rows.add(const Padding(padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: Divider()));
-    rows.add(Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-      child: Text('Accounts', style: context.text.titleSmall?.copyWith(color: colors.onSurfaceVariant)),
-    ));
+    rows.add(const _SectionHeader('Accounts'));
     for (final account in state.accounts) {
       final open = _openAccounts.contains(account.id);
       void toggle() => setState(() => open ? _openAccounts.remove(account.id) : _openAccounts.add(account.id));
@@ -96,7 +89,7 @@ class _SidebarState extends State<Sidebar> {
         final selected = !state.chat.active && state.selection == MailboxSelection(box);
         rows.add(_Destination(
           indent: true,
-          leading: Icon(roleIcon(box.role, selected: selected)),
+          leading: Icon(roleIcon(box.role)),
           label: box.name,
           badge: _badge(box.role) ? (box.unread ?? 0) : 0,
           selected: selected,
@@ -112,32 +105,18 @@ class _SidebarState extends State<Sidebar> {
         children: [
           // Room for the traffic lights; drags the window like a title bar.
           WindowDragArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 40, 12, 12),
+            child: SizedBox(
+              height: 44,
               child: Row(children: [
-                const AppMark(),
-                const SizedBox(width: 12),
-                Expanded(child: Text('Mailstream', style: context.text.titleMedium?.copyWith(fontWeight: FontWeight.w600))),
+                const Spacer(),
                 if (widget.onCollapse != null)
-                  IconButton(tooltip: 'Collapse', icon: const Icon(Icons.menu_open), onPressed: widget.onCollapse),
+                  IconButton(tooltip: 'Hide sidebar', icon: const Icon(CupertinoIcons.sidebar_left), onPressed: widget.onCollapse),
+                const SizedBox(width: 8),
               ]),
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: FloatingActionButton.extended(
-                heroTag: null,
-                elevation: 1,
-                tooltip: 'New message (⌘N)',
-                onPressed: widget.onCompose,
-                icon: const Icon(Icons.edit_outlined),
-                label: const Text('Compose'),
-              ),
-            ),
-          ),
-          Expanded(child: ListView(padding: const EdgeInsets.fromLTRB(12, 4, 12, 16), children: rows)),
+          const _SectionHeader('Mailboxes'),
+          Expanded(child: ListView(padding: const EdgeInsets.fromLTRB(10, 0, 10, 12), children: rows)),
         ],
       ),
     );
@@ -149,26 +128,25 @@ class _SidebarState extends State<Sidebar> {
 bool badgeRole(MailboxRole role) =>
     const {MailboxRole.inbox, MailboxRole.other, MailboxRole.important, MailboxRole.starred, MailboxRole.drafts}.contains(role);
 
-/// The app's mark: a mail glyph on the primary container.
-class AppMark extends StatelessWidget {
-  const AppMark({super.key});
+/// A sidebar section's title: small, bold, secondary, as the Mac's sidebars head their groups.
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader(this.title);
+
+  final String title;
 
   @override
-  Widget build(BuildContext context) => Container(
-    width: 36,
-    height: 36,
-    decoration: BoxDecoration(color: context.colors.primaryContainer, borderRadius: BorderRadius.circular(12)),
-    child: Icon(Icons.all_inbox_rounded, size: 20, color: context.colors.onPrimaryContainer),
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(20, 14, 16, 4),
+    child: Text(title, style: context.text.labelSmall?.copyWith(color: context.colors.onSurfaceVariant, fontWeight: FontWeight.w600)),
   );
 }
 
-/// The navigation rail for medium windows: a menu button that opens the full drawer with every
-/// account's folders, the Compose button, and the unified mailboxes.
+/// The rail for medium windows: a button that opens the full sidebar with every account's
+/// folders, then the unified mailboxes.
 class Rail extends StatelessWidget {
-  const Rail({super.key, required this.state, required this.onCompose, required this.onMenu});
+  const Rail({super.key, required this.state, required this.onMenu});
 
   final MailState state;
-  final VoidCallback onCompose;
   final VoidCallback onMenu;
 
   @override
@@ -179,39 +157,23 @@ class Rail extends StatelessWidget {
     final hasChat = chat.accounts.isNotEmpty;
     final selected = chat.active ? roles.length : (selection is UnifiedSelection ? roles.indexOf(selection.role) : -1);
     return NavigationRail(
-      backgroundColor: Colors.transparent,
-      minWidth: 88,
+      minWidth: 72,
       labelType: NavigationRailLabelType.all,
       groupAlignment: -1,
       leading: WindowDragArea(
         child: Padding(
           padding: const EdgeInsets.only(top: 36, bottom: 8),
-          child: Column(children: [
-            IconButton(tooltip: 'All folders', icon: const Icon(Icons.menu), onPressed: onMenu),
-            const SizedBox(height: 8),
-            FloatingActionButton(
-              heroTag: null,
-              elevation: 1,
-              tooltip: 'New message (⌘N)',
-              onPressed: onCompose,
-              child: const Icon(Icons.edit_outlined),
-            ),
-          ]),
+          child: IconButton(tooltip: 'Show sidebar', icon: const Icon(CupertinoIcons.sidebar_left), onPressed: onMenu),
         ),
       ),
       selectedIndex: selected < 0 ? null : selected,
       onDestinationSelected: (i) => i == roles.length ? chat.show() : state.select(UnifiedSelection(roles[i])),
       destinations: [
         for (final role in roles)
-          NavigationRailDestination(
-            icon: _badged(role, Icon(roleIcon(role))),
-            selectedIcon: _badged(role, Icon(roleIcon(role, selected: true))),
-            label: Text(role.title),
-          ),
+          NavigationRailDestination(icon: _badged(role, Icon(roleIcon(role))), label: Text(role.title)),
         if (hasChat)
           NavigationRailDestination(
-            icon: _count(chat.unreadSpaces, const Icon(Icons.chat_bubble_outline)),
-            selectedIcon: _count(chat.unreadSpaces, const Icon(Icons.chat_bubble)),
+            icon: _count(chat.unreadSpaces, const Icon(CupertinoIcons.chat_bubble_2)),
             label: const Text('Chat'),
           ),
       ],
@@ -234,12 +196,13 @@ class _AccountDot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => SizedBox(
-    width: 24,
-    child: Center(child: Container(width: 10, height: 10, decoration: BoxDecoration(color: color, shape: BoxShape.circle))),
+    width: 20,
+    child: Center(child: Container(width: 9, height: 9, decoration: BoxDecoration(color: color, shape: BoxShape.circle))),
   );
 }
 
-/// A navigation drawer destination: a 56 dp pill, secondary container when selected.
+/// A sidebar row: an accent glyph and the name, the unread count at the trailing end, a
+/// rounded gray highlight when selected.
 class _Destination extends StatelessWidget {
   const _Destination({
     required this.leading,
@@ -266,50 +229,47 @@ class _Destination extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    final foreground = selected ? colors.onSecondaryContainer : colors.onSurfaceVariant;
+    final light = colors.brightness == Brightness.light;
     return Padding(
-      padding: EdgeInsets.only(left: indent ? 16 : 0),
+      padding: EdgeInsets.only(left: indent ? 18 : 0, bottom: 1),
       child: SizedBox(
-        height: 40,
+        height: 30,
         child: Material(
-          color: selected ? colors.secondaryContainer : Colors.transparent,
-          shape: const StadiumBorder(),
+          color: selected ? colors.onSurface.withValues(alpha: light ? 0.09 : 0.14) : Colors.transparent,
+          borderRadius: BorderRadius.circular(8),
           clipBehavior: Clip.antiAlias,
           child: InkWell(
             onTap: onTap,
             child: Padding(
-              padding: const EdgeInsets.only(left: 16, right: 12),
-              child: IconTheme.merge(
-                data: IconThemeData(color: foreground, size: 22),
-                child: Row(
-                  children: [
-                    leading,
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: context.text.labelLarge?.copyWith(
-                          color: selected ? colors.onSecondaryContainer : colors.onSurface,
-                          fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+              padding: const EdgeInsets.only(left: 8, right: 6),
+              child: Row(
+                children: [
+                  IconTheme.merge(data: IconThemeData(color: colors.primary, size: 17), child: leading),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: context.text.bodyMedium?.copyWith(color: colors.onSurface, fontWeight: selected ? FontWeight.w600 : null),
+                    ),
+                  ),
+                  if (badge > 0) Text(_count(badge), style: context.text.labelMedium?.copyWith(color: colors.onSurfaceVariant)),
+                  if (expanded != null)
+                    GestureDetector(
+                      onTap: onToggle,
+                      behavior: HitTestBehavior.opaque,
+                      child: SizedBox(
+                        width: 22,
+                        height: 30,
+                        child: AnimatedRotation(
+                          turns: expanded! ? 0.25 : 0,
+                          duration: Durations.short4,
+                          child: Icon(CupertinoIcons.chevron_right, size: 11, color: colors.onSurfaceVariant),
                         ),
                       ),
                     ),
-                    if (badge > 0) Text(_count(badge), style: context.text.labelLarge?.copyWith(color: foreground)),
-                    if (expanded != null)
-                      IconButton(
-                        visualDensity: VisualDensity.compact,
-                        iconSize: 20,
-                        onPressed: onToggle,
-                        icon: AnimatedRotation(
-                          turns: expanded! ? 0.5 : 0,
-                          duration: Durations.short4,
-                          child: const Icon(Icons.expand_more),
-                        ),
-                      ),
-                  ],
-                ),
+                ],
               ),
             ),
           ),

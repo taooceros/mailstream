@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -7,7 +8,7 @@ import '../backend/models.dart';
 import 'design.dart';
 
 /// A sender's picture from the app's avatar cache (else one at `photoUrl`, such as the picture
-/// Google Chat publishes), else their initial on a stable tonal color.
+/// Google Chat publishes), else their initials on the gray monogram of Contacts.
 class PersonAvatar extends StatelessWidget {
   const PersonAvatar({super.key, required this.address, this.photo, this.photoUrl, this.size = ListMetrics.avatarSize});
 
@@ -25,11 +26,26 @@ class PersonAvatar extends StatelessWidget {
     final colors = avatarColors(address.email, context.brightness);
     final initials = Text(
       address.initials,
-      style: TextStyle(color: colors.foreground, fontSize: size * 0.42, fontWeight: FontWeight.w500, height: 1),
+      style: TextStyle(color: colors.foreground, fontSize: size * 0.4, fontWeight: FontWeight.w600, height: 1),
     );
     final photo = this.photo;
     final photoUrl = this.photoUrl;
-    if (photo == null && photoUrl == null) return CircleAvatar(radius: size / 2, backgroundColor: colors.background, child: initials);
+    if (photo == null && photoUrl == null) {
+      return Container(
+        width: size,
+        height: size,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color.lerp(colors.background, Colors.white, 0.18)!, colors.background],
+          ),
+        ),
+        child: initials,
+      );
+    }
     final cacheWidth = (size * MediaQuery.devicePixelRatioOf(context)).round();
     return Container(
       width: size,
@@ -122,29 +138,34 @@ class WindowDragArea extends StatelessWidget {
   );
 }
 
-IconData roleIcon(MailboxRole role, {bool selected = false}) => switch (role) {
-  MailboxRole.inbox => selected ? Icons.inbox : Icons.inbox_outlined,
-  MailboxRole.starred => selected ? Icons.star : Icons.star_outline,
-  MailboxRole.important => selected ? Icons.label_important : Icons.label_important_outline,
-  MailboxRole.sent => selected ? Icons.send : Icons.send_outlined,
-  MailboxRole.drafts => selected ? Icons.insert_drive_file : Icons.insert_drive_file_outlined,
-  MailboxRole.archive => selected ? Icons.archive : Icons.archive_outlined,
-  MailboxRole.all => selected ? Icons.mail : Icons.mail_outline,
-  MailboxRole.junk => selected ? Icons.report : Icons.report_outlined,
-  MailboxRole.trash => selected ? Icons.delete : Icons.delete_outline,
-  MailboxRole.other => selected ? Icons.label : Icons.label_outline,
+/// SF Symbols' mailbox glyphs, as Mail's sidebar shows them.
+IconData roleIcon(MailboxRole role) => switch (role) {
+  MailboxRole.inbox => CupertinoIcons.tray,
+  MailboxRole.starred => CupertinoIcons.star,
+  MailboxRole.important => CupertinoIcons.exclamationmark_circle,
+  MailboxRole.sent => CupertinoIcons.paperplane,
+  MailboxRole.drafts => CupertinoIcons.doc,
+  MailboxRole.archive => CupertinoIcons.archivebox,
+  MailboxRole.all => CupertinoIcons.envelope,
+  MailboxRole.junk => CupertinoIcons.xmark_octagon,
+  MailboxRole.trash => CupertinoIcons.trash,
+  MailboxRole.other => CupertinoIcons.folder,
 };
 
 IconData categoryIcon(MailCategory category) => switch (category) {
-  MailCategory.people => Icons.people_outline,
-  MailCategory.notification => Icons.notifications_outlined,
-  MailCategory.newsletter => Icons.newspaper_outlined,
-  MailCategory.invitation => Icons.event_outlined,
+  MailCategory.people => CupertinoIcons.person_2_fill,
+  MailCategory.notification => CupertinoIcons.bell_fill,
+  MailCategory.newsletter => CupertinoIcons.news_solid,
+  MailCategory.invitation => CupertinoIcons.calendar,
 };
 
-/// A bundle's tonal pair from the scheme.
-({Color background, Color foreground}) categoryColors(MailCategory category, ColorScheme colors) => switch (category) {
-  MailCategory.newsletter => (background: colors.primaryContainer, foreground: colors.onPrimaryContainer),
-  MailCategory.invitation => (background: colors.tertiaryContainer, foreground: colors.onTertiaryContainer),
-  _ => (background: colors.secondaryContainer, foreground: colors.onSecondaryContainer),
-};
+/// A bundle's colors: a white glyph on a system color, as Mail marks its categories.
+({Color background, Color foreground}) categoryColors(MailCategory category, ColorScheme colors) => (
+  background: switch (category) {
+    MailCategory.people => colors.primary,
+    MailCategory.notification => const Color(0xFF5AC8FA),
+    MailCategory.newsletter => const Color(0xFFFF2D55),
+    MailCategory.invitation => const Color(0xFFFF9500),
+  },
+  foreground: Colors.white,
+);

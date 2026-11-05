@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -9,16 +10,17 @@ import 'common.dart';
 import 'compose.dart';
 import 'conversation_list.dart';
 import 'design.dart';
+import 'glass.dart';
 import 'reader.dart';
 import 'settings.dart';
 import 'sidebar.dart';
 import 'slide_layer.dart';
 
-/// The window, laid out by Material's large-screen guidance: navigation on the leading edge
-/// (a drawer when there is room, else a rail), then panes on the surface container. Wide windows
-/// show the list-detail canonical layout, list and conversation side by side; narrow ones show
-/// one pane, the conversation sliding over the list. Bundles slide over the list either way and
-/// leave it mounted underneath.
+/// The window, laid out as macOS 26 Mail: the navigation on a Liquid Glass panel at the leading
+/// edge (the sidebar when there is room, else a rail), the content on the window's surface. Wide
+/// windows show the list and the conversation side by side, split by a hairline; narrow ones show
+/// one, the conversation sliding over the list. Bundles slide over the list either way and leave
+/// it mounted underneath.
 class MailShell extends StatefulWidget {
   const MailShell({super.key, required this.state});
 
@@ -281,7 +283,6 @@ class _MailShellState extends State<MailShell> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.colors;
     // Chat's spaces and messages rebuild only the parts that show them (`_onChat`); the window
     // follows chat coming into view and the open space.
     return ListenableBuilder(
@@ -304,7 +305,9 @@ class _MailShellState extends State<MailShell> {
               if (isBackButton(event)) _back();
             },
             child: Scaffold(
-              backgroundColor: colors.surfaceContainer,
+              // The window's surface is painted around the navigation's glass panel, which stays
+              // open (`GlassPanel`).
+              backgroundColor: Colors.transparent,
               body: LayoutBuilder(builder: (context, constraints) => _layout(context, constraints.maxWidth)),
             ),
           ),
@@ -313,17 +316,18 @@ class _MailShellState extends State<MailShell> {
     );
   }
 
-  /// Breakpoints: a drawer from 1200 dp (large), a rail below. The list fills the content area;
-  /// from 1000 dp an opened conversation splits it, list-detail, the list narrowing as the
-  /// conversation slides in beside it. Narrower windows slide the conversation over the list.
+  /// Breakpoints: the full sidebar from 1200 dp, a rail below, either on a glass panel. The list
+  /// fills the content area; from 1000 dp an opened conversation splits it, list-detail, the
+  /// list narrowing as the conversation slides in beside it. Narrower windows slide the
+  /// conversation over the list.
   Widget _layout(BuildContext context, double width) {
     final drawer = width >= 1200 || _drawerOpen;
     _twoPane = width >= 1000;
     final navigation = _onChat(() => drawer
-        ? Sidebar(state: state, onCompose: _compose, onCollapse: width >= 1200 ? null : () => setState(() => _drawerOpen = false))
-        : Rail(state: state, onCompose: _compose, onMenu: () => setState(() => _drawerOpen = true)));
+        ? Sidebar(state: state, onCollapse: width >= 1200 ? null : () => setState(() => _drawerOpen = false))
+        : Rail(state: state, onMenu: () => setState(() => _drawerOpen = true)));
     final chat = state.chat;
-    final listPane = _Pane(child: chat.active ? _onChat(() => ChatListPane(state: state)) : _listPane(context));
+    final listPane = chat.active ? _onChat(() => ChatListPane(state: state)) : _listPane(context);
     final opened = chat.active ? null : state.opened;
     final space = chat.active ? chat.opened : null;
     final Widget content;
@@ -358,59 +362,73 @@ class _MailShellState extends State<MailShell> {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        navigation,
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(0, Panes.margin, Panes.margin, Panes.margin),
-            child: content,
-          ),
-        ),
+        GlassPanel(child: navigation),
+        Expanded(child: ColoredBox(color: context.colors.surface, child: content)),
       ],
     );
   }
 
+  /// The list's toolbar: the title row, the search field, the progress line.
+  static const _listHeaderHeight = _ListHeader.height + 40.0 + 2;
+
+  /// The list scrolls under its toolbar, a frosted glass bar.
   Widget _listPane(BuildContext context) {
     final bundle = state.openBundle;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return Stack(
+      fit: StackFit.expand,
       children: [
-        WindowDragArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
-            child: _SearchField(controller: _search, focus: _searchFocus, onChanged: state.search, onEscape: _back, onRefresh: state.refresh),
+        ClipRect(
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              ConversationList(
+                state: state,
+                items: _items,
+                highlight: _highlight,
+                onActivate: _activate,
+                topInset: _listHeaderHeight,
+                emptyText: state.searchQuery != null ? 'No matches' : 'No conversations',
+              ),
+              SlideLayer(
+                onDismiss: () => state.showBundle(null),
+                child: bundle == null
+                    ? null
+                    : ConversationList(
+                        key: ValueKey('bundle:${bundle.name}'),
+                        state: state,
+                        items: _bundleItems,
+                        highlight: _bundleHighlight,
+                        onActivate: _activate,
+                        topInset: _listHeaderHeight,
+                        emptyText: 'Nothing left in ${bundle.title}',
+                      ),
+              ),
+            ],
           ),
         ),
-        _ListHeader(
-          title: bundle?.title ?? _title,
-          subtitle: _subtitle,
-          onBack: bundle != null || state.searchQuery != null ? _back : null,
-        ),
-        SizedBox(height: 3, child: state.isLoading ? const LinearProgressIndicator() : null),
-        Expanded(
-          child: ClipRect(
-            child: Stack(
-              fit: StackFit.expand,
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          height: _listHeaderHeight,
+          child: GlassBar(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                ConversationList(
-                  state: state,
-                  items: _items,
-                  highlight: _highlight,
-                  onActivate: _activate,
-                  emptyText: state.searchQuery != null ? 'No matches' : 'No conversations',
+                WindowDragArea(
+                  child: _ListHeader(
+                    title: bundle?.title ?? _title,
+                    subtitle: _subtitle,
+                    onBack: bundle != null || state.searchQuery != null ? _back : null,
+                    onRefresh: state.refresh,
+                    onCompose: _compose,
+                  ),
                 ),
-                SlideLayer(
-                  onDismiss: () => state.showBundle(null),
-                  child: bundle == null
-                      ? null
-                      : ConversationList(
-                          key: ValueKey('bundle:${bundle.name}'),
-                          state: state,
-                          items: _bundleItems,
-                          highlight: _bundleHighlight,
-                          onActivate: _activate,
-                          emptyText: 'Nothing left in ${bundle.title}',
-                        ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                  child: _SearchField(controller: _search, focus: _searchFocus, onChanged: state.search, onEscape: _back),
                 ),
+                SizedBox(height: 2, child: state.isLoading ? const LinearProgressIndicator() : null),
               ],
             ),
           ),
@@ -440,12 +458,12 @@ class _MailShellState extends State<MailShell> {
   Widget _detailPane(BuildContext context, Conversation opened) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      WindowDragArea(child: SizedBox(height: 54, child: _readerToolbar(context, opened))),
+      WindowDragArea(child: SizedBox(height: 52, child: _readerToolbar(context, opened))),
       Expanded(
         child: AnimatedSwitcher(
           duration: Durations.medium2,
           switchInCurve: Motion.curve,
-          // Material fade through: the old conversation fades out as the next one scales in.
+          // Fade through: the old conversation fades out as the next one scales in.
           transitionBuilder: (child, animation) => FadeTransition(
             opacity: animation,
             child: ScaleTransition(scale: Tween(begin: 0.98, end: 1.0).animate(animation), child: child),
@@ -456,117 +474,161 @@ class _MailShellState extends State<MailShell> {
     ],
   );
 
+  /// The toolbar's groups are glass capsules, as in macOS 26 Mail.
   Widget _readerToolbar(BuildContext context, Conversation opened) {
     final colors = context.colors;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12),
       child: Row(children: [
-        IconButton(
-          tooltip: _twoPane ? 'Close (Esc)' : 'Back (Esc)',
-          icon: Icon(_twoPane ? Icons.close : Icons.arrow_back),
-          onPressed: _back,
+        GlassCapsule(
+          child: IconButton(
+            tooltip: _twoPane ? 'Close (Esc)' : 'Back (Esc)',
+            icon: Icon(_twoPane ? CupertinoIcons.xmark : CupertinoIcons.chevron_left),
+            onPressed: _back,
+          ),
         ),
         const Spacer(),
-        if (opened.waiting)
-          IconButton(
-            tooltip: 'Resolve (D)',
-            icon: Icon(Icons.task_alt, color: colors.tertiary),
-            onPressed: () => state.setWaiting(opened, waiting: false),
-          ),
-        IconButton(tooltip: 'Archive (E)', icon: const Icon(Icons.archive_outlined), onPressed: () => _act(state.archive)),
-        IconButton(tooltip: 'Delete (⌫)', icon: const Icon(Icons.delete_outline), onPressed: () => _act(state.trash)),
-        IconButton(
-          tooltip: opened.unread ? 'Mark as read (U)' : 'Mark as unread (U)',
-          icon: Icon(opened.unread ? Icons.drafts_outlined : Icons.mark_email_unread_outlined),
-          onPressed: () => state.setRead(opened, read: opened.unread),
+        GlassCapsule(
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            if (opened.waiting)
+              IconButton(
+                tooltip: 'Resolve (D)',
+                icon: Icon(CupertinoIcons.checkmark_circle, color: colors.tertiary),
+                onPressed: () => state.setWaiting(opened, waiting: false),
+              ),
+            IconButton(tooltip: 'Archive (E)', icon: const Icon(CupertinoIcons.archivebox), onPressed: () => _act(state.archive)),
+            IconButton(tooltip: 'Delete (⌫)', icon: const Icon(CupertinoIcons.trash), onPressed: () => _act(state.trash)),
+            IconButton(
+              tooltip: opened.unread ? 'Mark as read (U)' : 'Mark as unread (U)',
+              icon: Icon(opened.unread ? CupertinoIcons.envelope_open : CupertinoIcons.envelope_badge),
+              onPressed: () => state.setRead(opened, read: opened.unread),
+            ),
+            IconButton(
+              tooltip: opened.starred ? 'Unstar (S)' : 'Star (S)',
+              icon: Icon(opened.starred ? CupertinoIcons.star_fill : CupertinoIcons.star, color: opened.starred ? starColor : null),
+              onPressed: () => state.setStarred(opened, starred: !opened.starred),
+            ),
+          ]),
         ),
-        IconButton(
-          tooltip: opened.starred ? 'Unstar (S)' : 'Star (S)',
-          icon: Icon(opened.starred ? Icons.star_rounded : Icons.star_outline_rounded, color: opened.starred ? const Color(0xFFF4B400) : null),
-          onPressed: () => state.setStarred(opened, starred: !opened.starred),
+        const SizedBox(width: 8),
+        GlassCapsule(
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            IconButton(tooltip: 'Reply (R)', icon: const Icon(CupertinoIcons.arrowshape_turn_up_left), onPressed: () => _reader.currentState?.reply()),
+            IconButton(
+              tooltip: 'Reply all (A)',
+              icon: const Icon(CupertinoIcons.arrowshape_turn_up_left_2),
+              onPressed: () => _reader.currentState?.reply(all: true),
+            ),
+          ]),
         ),
-        const SizedBox(height: 24, child: VerticalDivider(width: 16)),
-        IconButton(tooltip: 'Reply (R)', icon: const Icon(Icons.reply), onPressed: () => _reader.currentState?.reply()),
-        IconButton(tooltip: 'Reply all (A)', icon: const Icon(Icons.reply_all), onPressed: () => _reader.currentState?.reply(all: true)),
       ]),
     );
   }
 }
 
-/// A pane: a rounded surface on the window's surface container.
+/// The conversation beside the list: the window's surface, a hairline on its leading edge.
 class _Pane extends StatelessWidget {
   const _Pane({required this.child});
 
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => Material(
-    color: context.colors.surface,
-    borderRadius: BorderRadius.circular(Panes.corner),
-    clipBehavior: Clip.antiAlias,
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: context.colors.surface,
+      border: Border(left: BorderSide(color: context.colors.outlineVariant, width: 0.5)),
+    ),
     child: child,
   );
 }
 
+/// The list toolbar's title row: the mailbox and its count, as Mail titles its toolbar, with
+/// refresh and compose on a glass capsule.
 class _ListHeader extends StatelessWidget {
-  const _ListHeader({required this.title, required this.subtitle, required this.onBack});
+  const _ListHeader({
+    required this.title,
+    required this.subtitle,
+    required this.onBack,
+    required this.onRefresh,
+    required this.onCompose,
+  });
+
+  static const height = 56.0;
 
   final String title;
   final String? subtitle;
   final VoidCallback? onBack;
+  final VoidCallback onRefresh;
+  final VoidCallback onCompose;
 
   @override
-  Widget build(BuildContext context) => SizedBox(
-    height: 44,
-    child: Row(children: [
-      if (onBack != null)
-        Padding(padding: const EdgeInsets.only(left: 8), child: IconButton(tooltip: 'Back (Esc)', icon: const Icon(Icons.arrow_back), onPressed: onBack))
-      else
-        const SizedBox(width: 24),
-      const SizedBox(width: 4),
-      Flexible(child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.titleLarge)),
-      if (subtitle != null && subtitle!.isNotEmpty) ...[
-        const SizedBox(width: 10),
-        Padding(
-          padding: const EdgeInsets.only(top: 3),
-          child: Text(subtitle!, style: context.text.labelLarge?.copyWith(color: context.colors.onSurfaceVariant)),
+  Widget build(BuildContext context) {
+    final subtitle = this.subtitle;
+    return SizedBox(
+      height: height,
+      child: Row(children: [
+        const SizedBox(width: 12),
+        if (onBack != null) ...[
+          GlassCapsule(child: IconButton(tooltip: 'Back (Esc)', icon: const Icon(CupertinoIcons.chevron_left), onPressed: onBack)),
+          const SizedBox(width: 10),
+        ] else
+          const SizedBox(width: 6),
+        Expanded(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+              if (subtitle != null && subtitle.isNotEmpty)
+                Text(subtitle, maxLines: 1, style: context.text.bodySmall?.copyWith(color: context.colors.onSurfaceVariant)),
+            ],
+          ),
         ),
-      ],
-      const SizedBox(width: 16),
-    ]),
-  );
+        GlassCapsule(
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            IconButton(tooltip: 'Refresh (⌘R)', icon: const Icon(CupertinoIcons.arrow_clockwise), onPressed: onRefresh),
+            IconButton(tooltip: 'New message (⌘N)', icon: const Icon(CupertinoIcons.square_pencil), onPressed: onCompose),
+          ]),
+        ),
+        const SizedBox(width: 12),
+      ]),
+    );
+  }
 }
 
-/// A Material 3 search bar with refresh at its trailing end.
+/// The Mac's search field: a gray capsule with a magnifying glass.
 class _SearchField extends StatelessWidget {
   const _SearchField({
     required this.controller,
     required this.focus,
     required this.onChanged,
     required this.onEscape,
-    required this.onRefresh,
   });
 
   final TextEditingController controller;
   final FocusNode focus;
   final ValueChanged<String> onChanged;
   final VoidCallback onEscape;
-  final VoidCallback onRefresh;
 
   @override
-  Widget build(BuildContext context) => CallbackShortcuts(
-    bindings: {const SingleActivator(LogicalKeyboardKey.escape): onEscape},
-    child: SearchBar(
-      controller: controller,
-      focusNode: focus,
-      onChanged: onChanged,
-      hintText: 'Search mail',
-      constraints: const BoxConstraints(minHeight: 44, maxHeight: 44),
-      elevation: const WidgetStatePropertyAll(0),
-      backgroundColor: WidgetStatePropertyAll(context.colors.surfaceContainerHigh),
-      padding: const WidgetStatePropertyAll(EdgeInsets.only(left: 16, right: 4)),
-      leading: const Icon(Icons.search),
-      trailing: [IconButton(tooltip: 'Refresh (⌘R)', icon: const Icon(Icons.refresh), onPressed: onRefresh)],
-    ),
-  );
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return CallbackShortcuts(
+      bindings: {const SingleActivator(LogicalKeyboardKey.escape): onEscape},
+      child: SearchBar(
+        controller: controller,
+        focusNode: focus,
+        onChanged: onChanged,
+        hintText: 'Search',
+        constraints: const BoxConstraints(minHeight: 32, maxHeight: 32),
+        elevation: const WidgetStatePropertyAll(0),
+        backgroundColor: WidgetStatePropertyAll(colors.onSurface.withValues(alpha: colors.brightness == Brightness.light ? 0.06 : 0.1)),
+        overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+        textStyle: WidgetStatePropertyAll(context.text.bodyMedium),
+        hintStyle: WidgetStatePropertyAll(context.text.bodyMedium?.copyWith(color: colors.onSurfaceVariant)),
+        padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 10)),
+        leading: Icon(CupertinoIcons.search, size: 15, color: colors.onSurfaceVariant),
+      ),
+    );
+  }
 }

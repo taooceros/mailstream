@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/cupertino.dart' show CupertinoActivityIndicator, CupertinoIcons;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -261,7 +262,7 @@ class _ComposeWindowState extends State<ComposeWindow> {
           insetPadding: const EdgeInsets.all(32),
           clipBehavior: Clip.antiAlias,
           backgroundColor: colors.surface,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Panes.corner)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Panes.sheetCorner)),
           child: _droppable(context, SizedBox(
             width: 680,
             height: 620,
@@ -346,11 +347,11 @@ class _ComposeWindowState extends State<ComposeWindow> {
       margin: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: colors.primaryContainer.withValues(alpha: 0.92),
-        borderRadius: BorderRadius.circular(Panes.corner - 4),
+        borderRadius: BorderRadius.circular(Panes.sheetCorner - 8),
         border: Border.all(color: colors.primary, width: 2),
       ),
       child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Icon(Icons.attach_file, size: 40, color: colors.onPrimaryContainer),
+        Icon(CupertinoIcons.paperclip, size: 36, color: colors.onPrimaryContainer),
         const SizedBox(height: 12),
         Text('Drop files to attach', style: context.text.titleMedium?.copyWith(color: colors.onPrimaryContainer)),
       ]),
@@ -362,7 +363,7 @@ class _ComposeWindowState extends State<ComposeWindow> {
     final size = _sizes[path];
     final name = path.substring(path.lastIndexOf('/') + 1);
     return InputChip(
-      avatar: const Icon(Icons.attach_file, size: 18),
+      avatar: const Icon(CupertinoIcons.paperclip, size: 14),
       label: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 260),
         child: Text(size == null ? name : '$name  ·  ${fileSize(size)}', maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -379,14 +380,14 @@ class _ComposeWindowState extends State<ComposeWindow> {
   }
 
   Widget _titleBar(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(8, 10, 16, 6),
+    padding: const EdgeInsets.fromLTRB(12, 10, 16, 6),
     child: Row(children: [
-      IconButton(tooltip: 'Close (Esc)', icon: const Icon(Icons.close), onPressed: _sending ? null : _requestClose),
-      const SizedBox(width: 4),
-      Expanded(child: Text('New Message', style: context.text.titleLarge)),
+      IconButton(tooltip: 'Close (Esc)', icon: const Icon(CupertinoIcons.xmark), onPressed: _sending ? null : _requestClose),
+      const SizedBox(width: 8),
+      Expanded(child: Text('New Message', style: context.text.titleMedium?.copyWith(fontWeight: FontWeight.w700))),
       IconButton(
         tooltip: 'Attach files (or drop them on the message)',
-        icon: const Icon(Icons.attach_file),
+        icon: const Icon(CupertinoIcons.paperclip),
         onPressed: _sending ? null : _pick,
       ),
       const SizedBox(width: 8),
@@ -395,8 +396,8 @@ class _ComposeWindowState extends State<ComposeWindow> {
         child: FilledButton.icon(
           onPressed: _sending ? null : _send,
           icon: _sending
-              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-              : const Icon(Icons.send),
+              ? const CupertinoActivityIndicator(radius: 7, color: Colors.white)
+              : const Icon(CupertinoIcons.paperplane_fill),
           label: Text(_sending ? 'Sending' : 'Send'),
         ),
       ),
@@ -410,7 +411,7 @@ class _ComposeWindowState extends State<ComposeWindow> {
       height: 44,
       margin: const EdgeInsets.only(left: 20),
       padding: const EdgeInsets.only(right: 16),
-      decoration: BoxDecoration(border: Border(bottom: BorderSide(color: colors.outlineVariant))),
+      decoration: BoxDecoration(border: Border(bottom: BorderSide(color: colors.outlineVariant, width: 0.5))),
       child: Row(children: [
         if (label != null) ...[
           SizedBox(
@@ -471,14 +472,14 @@ class _ComposeWindowState extends State<ComposeWindow> {
   Widget _discardBar(BuildContext context) {
     final colors = context.colors;
     return Container(
-      color: colors.surfaceContainerHigh,
+      color: colors.surfaceContainerLow,
       padding: const EdgeInsets.fromLTRB(20, 8, 12, 8),
       child: Row(children: [
         Expanded(child: Text('Discard this message?', style: context.text.bodyMedium)),
         TextButton(onPressed: () => setState(() => _confirmingDiscard = false), child: const Text('Keep Editing')),
         const SizedBox(width: 8),
-        FilledButton.tonal(
-          style: FilledButton.styleFrom(backgroundColor: colors.errorContainer, foregroundColor: colors.onErrorContainer),
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: colors.error, foregroundColor: colors.onError),
           onPressed: _close,
           child: const Text('Discard'),
         ),

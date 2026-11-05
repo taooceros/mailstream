@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart' show CupertinoActivityIndicator, CupertinoIcons;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -10,6 +11,7 @@ import 'common.dart';
 import 'conversation_list.dart';
 import 'design.dart';
 import 'format.dart';
+import 'glass.dart';
 
 /// A Chat person's picture: the engine's cached file for an address (Google Chat publishes it
 /// there), else Google's own link, else their initial.
@@ -107,7 +109,7 @@ class _ChatListPaneState extends State<ChatListPane> {
     final Widget body;
     if (entries.isEmpty) {
       body = !chat.listed || chat.loading
-          ? const Center(child: CircularProgressIndicator())
+          ? const Center(child: CupertinoActivityIndicator())
           : Center(
               child: Padding(
                 padding: const EdgeInsets.all(24),
@@ -136,7 +138,7 @@ class _ChatListPaneState extends State<ChatListPane> {
               : (index == entries.length && footer == 1 ? 56 : null),
           itemBuilder: (context, index) {
             if (index == entries.length) {
-              return const Center(child: SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 3)));
+              return const Center(child: CupertinoActivityIndicator());
             }
             return switch (entries[index]) {
               _Section(:final title) => SectionHeader(title),
@@ -156,29 +158,35 @@ class _ChatListPaneState extends State<ChatListPane> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         WindowDragArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(24, 14, 10, 4),
+          child: SizedBox(
+            height: 56,
             child: Row(children: [
-              Text('Chat', style: context.text.titleLarge),
-              if (unread > 0) ...[
-                const SizedBox(width: 10),
-                Padding(
-                  padding: const EdgeInsets.only(top: 3),
-                  child: Text('$unread unread', style: context.text.labelLarge?.copyWith(color: colors.onSurfaceVariant)),
+              const SizedBox(width: 18),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Chat', style: context.text.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+                    if (unread > 0) Text('$unread unread', style: context.text.bodySmall?.copyWith(color: colors.onSurfaceVariant)),
+                  ],
                 ),
-              ],
-              const Spacer(),
-              IconButton(tooltip: 'Refresh (⌘R)', icon: const Icon(Icons.refresh), onPressed: chat.refresh),
-              const SizedBox(width: 4),
-              FilledButton.tonalIcon(
-                onPressed: chat.accounts.isEmpty ? null : () => openNewChat(context, widget.state),
-                icon: const Icon(Icons.add_comment_outlined),
-                label: const Text('New chat'),
               ),
+              GlassCapsule(
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  IconButton(tooltip: 'Refresh (⌘R)', icon: const Icon(CupertinoIcons.arrow_clockwise), onPressed: chat.refresh),
+                  IconButton(
+                    tooltip: 'New chat',
+                    icon: const Icon(CupertinoIcons.square_pencil),
+                    onPressed: chat.accounts.isEmpty ? null : () => openNewChat(context, widget.state),
+                  ),
+                ]),
+              ),
+              const SizedBox(width: 12),
             ]),
           ),
         ),
-        SizedBox(height: 3, child: chat.loading ? const LinearProgressIndicator() : null),
+        SizedBox(height: 2, child: chat.loading ? const LinearProgressIndicator() : null),
         Expanded(child: ClipRect(child: body)),
       ],
     );
@@ -208,7 +216,7 @@ class _ChatRowState extends State<_ChatRow> {
       padding: const EdgeInsets.symmetric(horizontal: ListMetrics.inset, vertical: 1),
       child: Material(
         color: widget.selected ? colors.secondaryContainer : Colors.transparent,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(8),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: widget.onTap,
@@ -216,7 +224,7 @@ class _ChatRowState extends State<_ChatRow> {
             padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Row(children: [
               space.kind == 'space' && space.avatarKey.isEmpty
-                  ? IconAvatar(icon: Icons.groups_outlined, background: colors.tertiaryContainer, foreground: colors.onTertiaryContainer)
+                  ? IconAvatar(icon: CupertinoIcons.person_3_fill, background: colors.tertiary, foreground: Colors.white)
                   : ChatAvatar(state: widget.state, avatarKey: space.avatarKey.isEmpty ? space.space : space.avatarKey,
                       name: space.avatarName, url: space.avatarUrl),
               const SizedBox(width: 12),
@@ -247,7 +255,7 @@ class _ChatRowState extends State<_ChatRow> {
                     ]),
                     Row(children: [
                       if (space.attachment) ...[
-                        Icon(Icons.attach_file, size: 14, color: colors.onSurfaceVariant),
+                        Icon(CupertinoIcons.paperclip, size: 13, color: colors.onSurfaceVariant),
                         const SizedBox(width: 2),
                       ],
                       Expanded(
@@ -341,6 +349,9 @@ class _ChatReaderState extends State<ChatReader> {
     if (position.maxScrollExtent - position.pixels < 400) chat.loadEarlier(widget.space);
   }
 
+  static OutlineInputBorder _capsule(Color color) =>
+      OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: color, width: 0.5));
+
   Future<void> _send() async {
     final text = _text.text.trim();
     if (text.isEmpty || _sending) return;
@@ -392,7 +403,7 @@ class _ChatReaderState extends State<ChatReader> {
             ? Text(thread!.failure!, style: context.text.bodyLarge?.copyWith(color: colors.error))
             : thread != null && thread.loaded
             ? Text('No messages yet', style: context.text.bodyLarge?.copyWith(color: colors.onSurfaceVariant))
-            : const CircularProgressIndicator(),
+            : const CupertinoActivityIndicator(),
       );
     } else {
       final items = _log(thread).reversed.toList();
@@ -408,7 +419,7 @@ class _ChatReaderState extends State<ChatReader> {
             if (index == items.length) {
               return const Padding(
                 padding: EdgeInsets.all(12),
-                child: Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5))),
+                child: Center(child: CupertinoActivityIndicator()),
               );
             }
             return switch (items[index]) {
@@ -431,17 +442,19 @@ class _ChatReaderState extends State<ChatReader> {
       children: [
         WindowDragArea(
           child: SizedBox(
-            height: 54,
+            height: 52,
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Row(children: [
-                IconButton(
-                  tooltip: widget.twoPane ? 'Close (Esc)' : 'Back (Esc)',
-                  icon: Icon(widget.twoPane ? Icons.close : Icons.arrow_back),
-                  onPressed: widget.onBack,
+                GlassCapsule(
+                  child: IconButton(
+                    tooltip: widget.twoPane ? 'Close (Esc)' : 'Back (Esc)',
+                    icon: Icon(widget.twoPane ? CupertinoIcons.xmark : CupertinoIcons.chevron_left),
+                    onPressed: widget.onBack,
+                  ),
                 ),
-                const SizedBox(width: 8),
-                Expanded(child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.titleMedium)),
+                const SizedBox(width: 12),
+                Expanded(child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.titleSmall)),
                 if (chat.accounts.length > 1)
                   Text(widget.space.account, style: context.text.labelMedium?.copyWith(color: colors.onSurfaceVariant)),
                 const SizedBox(width: 8),
@@ -465,19 +478,21 @@ class _ChatReaderState extends State<ChatReader> {
               maxLines: 6,
               keyboardType: TextInputType.multiline,
               textInputAction: TextInputAction.newline,
+              // Messages' field: a capsule with a hairline, the send arrow at its end.
               decoration: InputDecoration(
                 hintText: title.isEmpty ? 'Message' : 'Message $title',
-                filled: true,
-                fillColor: colors.surfaceContainerHigh,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                fillColor: colors.surface,
+                border: _capsule(colors.outline),
+                enabledBorder: _capsule(colors.outline),
+                focusedBorder: _capsule(colors.primary),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
                 suffixIcon: Padding(
-                  padding: const EdgeInsets.only(right: 4),
+                  padding: const EdgeInsets.only(right: 2),
                   child: ListenableBuilder(
                     listenable: _text,
                     builder: (context, _) => IconButton(
                       tooltip: 'Send (Return)',
-                      icon: const Icon(Icons.send),
+                      icon: Icon(CupertinoIcons.arrow_up_circle_fill, size: 24, color: _text.text.trim().isEmpty ? null : colors.primary),
                       onPressed: _text.text.trim().isEmpty || _sending ? null : _send,
                     ),
                   ),
@@ -539,7 +554,7 @@ class _MessageRow extends StatelessWidget {
           padding: const EdgeInsets.only(top: 4),
           child: Chip(
             visualDensity: VisualDensity.compact,
-            avatar: const Icon(Icons.attach_file, size: 16),
+            avatar: const Icon(CupertinoIcons.paperclip, size: 14),
             label: Text(attachment.name),
           ),
         ),
@@ -733,7 +748,7 @@ class _NewChatDialogState extends State<_NewChatDialog> {
             if (chat.accounts.length > 1) ...[
               DropdownButtonFormField<String>(
                 initialValue: _account,
-                decoration: const InputDecoration(labelText: 'Account', border: OutlineInputBorder()),
+                decoration: const InputDecoration(labelText: 'Account'),
                 items: [for (final a in chat.accounts) DropdownMenuItem(value: a.id, child: Text(a.id))],
                 onChanged: _starting
                     ? null
@@ -774,7 +789,6 @@ class _NewChatDialogState extends State<_NewChatDialog> {
                 decoration: const InputDecoration(
                   labelText: 'People',
                   hintText: 'Name or email address',
-                  border: OutlineInputBorder(),
                 ),
               ),
             ),
@@ -821,7 +835,7 @@ class _NewChatDialogState extends State<_NewChatDialog> {
         FilledButton(
           onPressed: _starting || (_people.isEmpty && _field.text.trim().isEmpty) ? null : _start,
           child: _starting
-              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+              ? const CupertinoActivityIndicator(radius: 7, color: Colors.white)
               : Text(_people.length > 1 ? 'Start group chat' : 'Start chat'),
         ),
       ],

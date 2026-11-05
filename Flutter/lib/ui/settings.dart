@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart' show CupertinoActivityIndicator, CupertinoIcons;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -52,7 +53,7 @@ class SettingsWindow extends StatelessWidget {
         insetPadding: const EdgeInsets.all(32),
         clipBehavior: Clip.antiAlias,
         backgroundColor: colors.surface,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Panes.corner)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Panes.sheetCorner)),
         child: SizedBox(
           width: 720,
           height: 680,
@@ -67,10 +68,10 @@ class SettingsWindow extends StatelessWidget {
                     padding: const EdgeInsets.fromLTRB(24, 16, 12, 8),
                     child: Row(
                       children: [
-                        Expanded(child: Text('Settings', style: text.titleLarge)),
+                        Expanded(child: Text('Settings', style: text.titleMedium?.copyWith(fontWeight: FontWeight.w700))),
                         IconButton(
                           tooltip: 'Close',
-                          icon: const Icon(Icons.close),
+                          icon: const Icon(CupertinoIcons.xmark),
                           onPressed: () => Navigator.of(context).pop(),
                         ),
                       ],
@@ -85,7 +86,7 @@ class SettingsWindow extends StatelessWidget {
                         if (settings == null)
                           const Padding(
                             padding: EdgeInsets.all(24),
-                            child: Center(child: CircularProgressIndicator()),
+                            child: Center(child: CupertinoActivityIndicator()),
                           )
                         else ...[
                           for (final issue in settings.issues) _Issue(issue),
@@ -134,11 +135,12 @@ class _Heading extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.fromLTRB(8, 16, 8, 6),
-    child: Text(title, style: context.text.titleSmall?.copyWith(color: context.colors.primary)),
+    child: Text(title, style: context.text.labelMedium?.copyWith(color: context.colors.onSurfaceVariant, fontWeight: FontWeight.w600)),
   );
 }
 
-/// A rounded card of rows divided by hairlines; nothing when it has none.
+/// A rounded card of rows divided by hairlines, as System Settings groups them; nothing when it
+/// has none.
 class _Group extends StatelessWidget {
   const _Group({required this.children});
 
@@ -152,6 +154,10 @@ class _Group extends StatelessWidget {
       margin: EdgeInsets.zero,
       color: colors.surfaceContainerLow,
       clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(Panes.corner),
+        side: BorderSide(color: colors.outlineVariant, width: 0.5),
+      ),
       child: Column(
         children: [
           for (final (index, child) in children.indexed) ...[
@@ -179,7 +185,7 @@ class _Issue extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         child: ListTile(
           dense: true,
-          leading: Icon(Icons.error_outline, color: colors.onErrorContainer),
+          leading: Icon(CupertinoIcons.exclamationmark_circle, color: colors.onErrorContainer),
           title: Text(message, style: TextStyle(color: colors.onErrorContainer)),
         ),
       ),
@@ -275,7 +281,7 @@ class _AccountsState extends State<_Accounts> {
       children: [
         if (state.accounts.isEmpty)
           ListTile(
-            leading: const Icon(Icons.person_add_alt),
+            leading: const Icon(CupertinoIcons.person_badge_plus),
             title: const Text('No accounts'),
             subtitle: const Text('Sign in to bring in mail, contacts and Google Chat.'),
           ),
@@ -314,12 +320,12 @@ class _AccountsState extends State<_Accounts> {
               children: [
                 IconButton(
                   tooltip: 'Rename',
-                  icon: const Icon(Icons.edit_outlined, size: 20),
+                  icon: const Icon(CupertinoIcons.pencil),
                   onPressed: () => _rename(account),
                 ),
                 IconButton(
                   tooltip: 'Remove',
-                  icon: const Icon(Icons.remove_circle_outline, size: 20),
+                  icon: const Icon(CupertinoIcons.minus_circle),
                   onPressed: _signingIn == null ? () => _remove(account) : null,
                 ),
               ],
@@ -332,13 +338,13 @@ class _AccountsState extends State<_Accounts> {
               for (final provider in ['google', 'microsoft']) ...[
                 OutlinedButton.icon(
                   onPressed: _signingIn == null ? () => _add(provider) : null,
-                  icon: const Icon(Icons.add, size: 18),
+                  icon: const Icon(CupertinoIcons.plus, size: 14),
                   label: Text('${_providerName(provider)} account…'),
                 ),
                 const SizedBox(width: 8),
               ],
               if (_signingIn != null)
-                const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                const CupertinoActivityIndicator(radius: 8),
               if (status != null) ...[
                 const SizedBox(width: 8),
                 Expanded(
@@ -416,7 +422,6 @@ class _ClientDialogState extends State<_ClientDialog> {
             autofocus: true,
             decoration: InputDecoration(
               isDense: true,
-              border: const OutlineInputBorder(),
               labelText: _google ? 'Client ID' : 'Application (client) ID',
             ),
             onSubmitted: (_) => _submit(),
@@ -427,7 +432,6 @@ class _ClientDialogState extends State<_ClientDialog> {
             obscureText: true,
             decoration: InputDecoration(
               isDense: true,
-              border: const OutlineInputBorder(),
               labelText: _google ? 'Client secret' : 'Client secret (empty for a public client)',
               errorText: _error,
               errorMaxLines: 3,
@@ -472,7 +476,6 @@ class _RenameDialogState extends State<_RenameDialog> {
         autofocus: true,
         decoration: InputDecoration(
           isDense: true,
-          border: const OutlineInputBorder(),
           hintText: widget.account.id,
           helperText: 'Shown in the sidebar; empty shows the address.',
         ),
@@ -570,7 +573,7 @@ class _SettingRowState extends State<_SettingRow> {
     final text = context.text;
     final range = entry.minimum != null && entry.maximum != null ? '${entry.minimum}–${entry.maximum}' : null;
     final control = switch (entry.value) {
-      engine.FlagSettingValue(:final enabled) => Switch(
+      engine.FlagSettingValue(:final enabled) => Switch.adaptive(
         value: enabled,
         onChanged: (on) => _write(engine.FlagSettingValue(on)),
       ),
@@ -584,7 +587,6 @@ class _SettingRowState extends State<_SettingRow> {
           inputFormatters: [FilteringTextInputFormatter.digitsOnly],
           decoration: InputDecoration(
             isDense: true,
-            border: const OutlineInputBorder(),
             suffixText: entry.key.endsWith('Seconds') ? 's' : null,
             helperText: range,
           ),
@@ -598,7 +600,6 @@ class _SettingRowState extends State<_SettingRow> {
           focusNode: _focus,
           decoration: InputDecoration(
             isDense: true,
-            border: const OutlineInputBorder(),
             hintText: entry.key == 'aiTagging.ompPath' ? 'From the login shell\'s PATH' : null,
           ),
           onSubmitted: (_) => _commitField(),
@@ -631,7 +632,7 @@ class _SettingRowState extends State<_SettingRow> {
                 child: entry.changed
                     ? IconButton(
                         tooltip: 'Reset to default',
-                        icon: const Icon(Icons.restart_alt, size: 20),
+                        icon: const Icon(CupertinoIcons.arrow_counterclockwise),
                         onPressed: () => _write(null),
                       )
                     : null,
@@ -698,9 +699,8 @@ class _AddressesState extends State<_Addresses> {
             controller: _field,
             decoration: InputDecoration(
               isDense: true,
-              border: const OutlineInputBorder(),
               hintText: 'Add address',
-              suffixIcon: IconButton(icon: const Icon(Icons.add, size: 18), onPressed: _add),
+              suffixIcon: IconButton(icon: const Icon(CupertinoIcons.plus, size: 14), onPressed: _add),
             ),
             onSubmitted: (_) => _add(),
           ),

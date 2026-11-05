@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart' show CupertinoActivityIndicator, CupertinoIcons;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:html/dom.dart' as dom;
@@ -8,6 +9,7 @@ import '../state/mail_state.dart';
 import 'common.dart';
 import 'design.dart';
 import 'format.dart';
+import 'glass.dart';
 
 /// One conversation: a reading column with the subject and its chips, then message cards
 /// (service mail) or a chat log (people), and reply buttons at the bottom that open an inline
@@ -89,7 +91,7 @@ class ReaderState extends State<Reader> {
       _Header(state: widget.state, conversation: c),
       const SizedBox(height: 24),
       if (messages == null && thread.error == null)
-        const Padding(padding: EdgeInsets.symmetric(vertical: 48), child: Center(child: CircularProgressIndicator())),
+        const Padding(padding: EdgeInsets.symmetric(vertical: 48), child: Center(child: CupertinoActivityIndicator())),
       if (thread.error != null) Text(thread.error!, style: context.text.bodyMedium?.copyWith(color: colors.error)),
       if (messages != null)
         if (_chat)
@@ -180,7 +182,7 @@ class _Header extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(subject.title, style: context.text.headlineSmall?.copyWith(color: colors.onSurface)),
+        Text(subject.title, style: context.text.headlineSmall?.copyWith(color: colors.onSurface, fontWeight: FontWeight.w700)),
         const SizedBox(height: 12),
         Wrap(
           spacing: 8,
@@ -189,11 +191,11 @@ class _Header extends StatelessWidget {
             if (c.waiting)
               Chip(
                 visualDensity: VisualDensity.compact,
-                avatar: Icon(Icons.reply, size: 16, color: colors.onTertiaryContainer),
+                avatar: Icon(CupertinoIcons.arrowshape_turn_up_left_fill, size: 13, color: colors.onTertiaryContainer),
                 backgroundColor: colors.tertiaryContainer,
                 labelStyle: context.text.labelMedium?.copyWith(color: colors.onTertiaryContainer),
                 label: const Text('Waiting on you'),
-                deleteIcon: Icon(Icons.task_alt, size: 16, color: colors.onTertiaryContainer),
+                deleteIcon: Icon(CupertinoIcons.checkmark_circle, size: 15, color: colors.onTertiaryContainer),
                 deleteButtonTooltipMessage: 'Resolve (D)',
                 onDeleted: () => state.setWaiting(c, waiting: false),
               ),
@@ -236,10 +238,14 @@ class _MessageCard extends StatelessWidget {
     final text = context.text;
     final m = message;
     final sender = m.sender;
-    return Card.filled(
-      color: colors.surfaceContainerLow,
+    // Mail's message: the window's surface inside a hairline, rounded.
+    return Card(
+      color: colors.surface,
       clipBehavior: Clip.antiAlias,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(Panes.corner),
+        side: BorderSide(color: colors.outlineVariant, width: 0.5),
+      ),
       child: AnimatedSize(
         duration: Motion.enter,
         curve: Motion.curve,
@@ -290,8 +296,12 @@ class _MessageCard extends StatelessWidget {
                     const SizedBox(width: 12),
                     Text(messageDate(m.date, now), style: text.labelMedium?.copyWith(color: colors.onSurfaceVariant)),
                     if (expanded) ...[
-                      IconButton(tooltip: 'Reply', icon: const Icon(Icons.reply), onPressed: () => onReply()),
-                      IconButton(tooltip: 'Reply all', icon: const Icon(Icons.reply_all), onPressed: () => onReply(all: true)),
+                      IconButton(tooltip: 'Reply', icon: const Icon(CupertinoIcons.arrowshape_turn_up_left), onPressed: () => onReply()),
+                      IconButton(
+                        tooltip: 'Reply all',
+                        icon: const Icon(CupertinoIcons.arrowshape_turn_up_left_2),
+                        onPressed: () => onReply(all: true),
+                      ),
                     ],
                   ],
                 ),
@@ -327,7 +337,7 @@ class _AttachmentChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ActionChip(
-    avatar: const Icon(Icons.attach_file, size: 18),
+    avatar: const Icon(CupertinoIcons.paperclip, size: 14),
     label: Text('${attachment.filename}  ·  ${fileSize(attachment.size)}'),
     onPressed: onOpen,
   );
@@ -563,7 +573,7 @@ class _FoldState extends State<_Fold> {
                 child: InkWell(
                   borderRadius: BorderRadius.circular(8),
                   onTap: () => setState(() => _open = !_open),
-                  child: SizedBox(width: 32, height: 18, child: Icon(Icons.more_horiz, size: 16, color: colors.onSurfaceVariant)),
+                  child: SizedBox(width: 32, height: 18, child: Icon(CupertinoIcons.ellipsis, size: 14, color: colors.onSurfaceVariant)),
                 ),
               ),
             ),
@@ -718,13 +728,15 @@ class _ChatMessageState extends State<_ChatMessage> {
                 child: AnimatedOpacity(
                   opacity: _hover ? 1 : 0,
                   duration: Durations.short3,
-                  child: Material(
-                    color: colors.surfaceContainerHigh,
-                    elevation: 1,
-                    shape: const StadiumBorder(),
+                  child: GlassCapsule(
+                    blur: true,
                     child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      IconButton(tooltip: 'Reply', icon: const Icon(Icons.reply, size: 20), onPressed: () => widget.onReply()),
-                      IconButton(tooltip: 'Reply all', icon: const Icon(Icons.reply_all, size: 20), onPressed: () => widget.onReply(all: true)),
+                      IconButton(tooltip: 'Reply', icon: const Icon(CupertinoIcons.arrowshape_turn_up_left), onPressed: () => widget.onReply()),
+                      IconButton(
+                        tooltip: 'Reply all',
+                        icon: const Icon(CupertinoIcons.arrowshape_turn_up_left_2),
+                        onPressed: () => widget.onReply(all: true),
+                      ),
                     ]),
                   ),
                 ),
@@ -745,20 +757,17 @@ class _ReplyBar extends StatelessWidget {
   final VoidCallback onReply;
   final VoidCallback onReplyAll;
 
-  /// A floating toolbar: raised over the conversation it scrolls above.
+  /// Floating glass over the conversation it scrolls above.
   @override
   Widget build(BuildContext context) => Center(
-    child: Material(
-      color: context.colors.surfaceContainer,
-      elevation: 3,
-      shadowColor: context.colors.shadow,
-      shape: const StadiumBorder(),
+    child: GlassCapsule(
+      blur: true,
       child: Padding(
-        padding: const EdgeInsets.all(8),
+        padding: const EdgeInsets.all(3),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          FilledButton.icon(onPressed: onReply, icon: const Icon(Icons.reply), label: const Text('Reply')),
-          const SizedBox(width: 8),
-          FilledButton.tonalIcon(onPressed: onReplyAll, icon: const Icon(Icons.reply_all), label: const Text('Reply all')),
+          FilledButton.icon(onPressed: onReply, icon: const Icon(CupertinoIcons.arrowshape_turn_up_left), label: const Text('Reply')),
+          const SizedBox(width: 6),
+          OutlinedButton.icon(onPressed: onReplyAll, icon: const Icon(CupertinoIcons.arrowshape_turn_up_left_2), label: const Text('Reply All')),
         ]),
       ),
     ),
@@ -857,9 +866,13 @@ class _ComposerState extends State<_Composer> {
         },
       },
       child: Card(
-        elevation: 3,
-        color: colors.surfaceContainerHigh,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+        elevation: 12,
+        shadowColor: Colors.black.withValues(alpha: 0.35),
+        color: colors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(Panes.sheetCorner),
+          side: BorderSide(color: colors.outlineVariant, width: 0.5),
+        ),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 12, 12, 16),
           child: Column(
@@ -867,7 +880,7 @@ class _ComposerState extends State<_Composer> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Row(children: [
-                Icon(widget.all ? Icons.reply_all : Icons.reply, size: 20, color: colors.onSurfaceVariant),
+                Icon(widget.all ? CupertinoIcons.arrowshape_turn_up_left_2 : CupertinoIcons.arrowshape_turn_up_left, size: 17, color: colors.onSurfaceVariant),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text.rich(
@@ -882,10 +895,10 @@ class _ComposerState extends State<_Composer> {
                 ),
                 IconButton(
                   tooltip: widget.all ? 'Reply to sender only' : 'Reply all',
-                  icon: Icon(widget.all ? Icons.reply : Icons.reply_all),
+                  icon: Icon(widget.all ? CupertinoIcons.arrowshape_turn_up_left : CupertinoIcons.arrowshape_turn_up_left_2),
                   onPressed: () => widget.onAll(!widget.all),
                 ),
-                IconButton(tooltip: 'Discard', icon: const Icon(Icons.delete_outline), onPressed: _discard),
+                IconButton(tooltip: 'Discard', icon: const Icon(CupertinoIcons.trash), onPressed: _discard),
               ]),
               const SizedBox(height: 8),
               TextField(
@@ -895,7 +908,7 @@ class _ComposerState extends State<_Composer> {
                 minLines: 3,
                 maxLines: 12,
                 style: text.bodyLarge,
-                decoration: const InputDecoration(hintText: 'Write a reply', border: OutlineInputBorder()),
+                decoration: const InputDecoration(hintText: 'Write a reply'),
               ),
               const SizedBox(height: 12),
               Row(children: [
@@ -906,8 +919,8 @@ class _ComposerState extends State<_Composer> {
                 FilledButton.icon(
                   onPressed: _sending ? null : _send,
                   icon: _sending
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.send),
+                      ? const CupertinoActivityIndicator(radius: 7, color: Colors.white)
+                      : const Icon(CupertinoIcons.paperplane_fill),
                   label: Text(_sending ? 'Sending' : 'Send'),
                 ),
               ]),

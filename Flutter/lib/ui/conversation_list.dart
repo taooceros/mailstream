@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart' show CupertinoActivityIndicator, CupertinoIcons;
 import 'package:flutter/material.dart';
 
 import '../backend/models.dart';
@@ -6,6 +7,7 @@ import '../state/mail_state.dart';
 import 'common.dart';
 import 'design.dart';
 import 'format.dart';
+import 'glass.dart';
 
 /// One line of the list: a date group header, a conversation, or a Smart Inbox bundle.
 sealed class ListItem {
@@ -105,6 +107,7 @@ class ConversationList extends StatefulWidget {
     required this.highlight,
     required this.onActivate,
     this.emptyText = 'No conversations',
+    this.topInset = 0,
   });
 
   final MailState state;
@@ -112,6 +115,9 @@ class ConversationList extends StatefulWidget {
   final ListHighlight highlight;
   final void Function(ListItem item) onActivate;
   final String emptyText;
+
+  /// Height of a bar over the top of the list that rows scroll under.
+  final double topInset;
 
   @override
   State<ConversationList> createState() => ConversationListState();
@@ -155,18 +161,19 @@ class ConversationListState extends State<ConversationList> {
 
   double _extent(ListItem item) => item is SectionItem ? ListMetrics.sectionHeight : ListMetrics.rowHeight;
 
-  /// Keeps the keyboard highlight in view.
+  /// Keeps the keyboard highlight in view, below the bar over the list.
   void _reveal() {
     final id = widget.highlight.id;
     if (id == null || !_scroll.hasClients) return;
-    var top = 8.0;
+    final inset = widget.topInset;
+    var top = inset + 8.0;
     for (final item in widget.items) {
       if (itemId(item) == id) break;
       top += _extent(item);
     }
     final position = _scroll.position;
-    if (top < position.pixels) {
-      _scroll.jumpTo((top - ListMetrics.sectionHeight).clamp(0, position.maxScrollExtent));
+    if (top < position.pixels + inset) {
+      _scroll.jumpTo((top - inset - ListMetrics.sectionHeight).clamp(0, position.maxScrollExtent));
     } else if (top + ListMetrics.rowHeight > position.pixels + position.viewportDimension) {
       _scroll.jumpTo((top + ListMetrics.rowHeight * 2 - position.viewportDimension).clamp(0, position.maxScrollExtent));
     }
@@ -181,56 +188,63 @@ class ConversationListState extends State<ConversationList> {
       if (mounted) _pageIfNearEnd();
     });
     if (items.isEmpty) {
-      if (state.isLoading || state.canLoadMore) return const Center(child: CircularProgressIndicator());
-      return Center(
-        child: Text(
-          state.listError ?? widget.emptyText,
-          style: context.text.bodyLarge?.copyWith(color: context.colors.onSurfaceVariant),
-        ),
-      );
+      final Widget empty;
+      if (state.isLoading || state.canLoadMore) {
+        empty = const Center(child: CupertinoActivityIndicator());
+      } else {
+        empty = Center(
+          child: Text(
+            state.listError ?? widget.emptyText,
+            style: context.text.bodyLarge?.copyWith(color: context.colors.onSurfaceVariant),
+          ),
+        );
+      }
+      return Padding(padding: EdgeInsets.only(top: widget.topInset), child: empty);
     }
     final now = DateTime.now();
     final footer = state.canLoadMore ? 1 : 0;
-    return Scrollbar(
-      controller: _scroll,
-      child: ListView.builder(
+    // The scrollbar's track starts below the bar over the list.
+    return MediaQuery(
+      data: MediaQuery.of(context).copyWith(padding: EdgeInsets.only(top: widget.topInset)),
+      child: Scrollbar(
         controller: _scroll,
-        padding: const EdgeInsets.only(top: 4, bottom: 24),
-        itemCount: items.length + footer,
-        itemExtentBuilder: (index, _) =>
-            index < items.length ? _extent(items[index]) : (index == items.length && footer == 1 ? 56 : null),
-        itemBuilder: (context, index) {
-          if (index == items.length) {
-            return const Center(
-              child: SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 3)),
-            );
-          }
-          final item = items[index];
-          return switch (item) {
-            SectionItem(:final title, :final count) => SectionHeader(title, count: count),
-            RowItem(:final conversation) => ConversationRow(
-              key: ValueKey(conversation.id),
-              conversation: conversation,
-              state: state,
-              highlight: widget.highlight,
-              now: now,
-              onTap: () => widget.onActivate(item),
-            ),
-            BundleItem() => BundleRow(
-              key: ValueKey(itemId(item)),
-              bundle: item,
-              highlight: widget.highlight,
-              now: now,
-              onTap: () => widget.onActivate(item),
-            ),
-          };
-        },
+        child: ListView.builder(
+          controller: _scroll,
+          padding: EdgeInsets.only(top: widget.topInset + 4, bottom: 24),
+          itemCount: items.length + footer,
+          itemExtentBuilder: (index, _) =>
+              index < items.length ? _extent(items[index]) : (index == items.length && footer == 1 ? 56 : null),
+          itemBuilder: (context, index) {
+            if (index == items.length) {
+              return const Center(child: CupertinoActivityIndicator());
+            }
+            final item = items[index];
+            return switch (item) {
+              SectionItem(:final title, :final count) => SectionHeader(title, count: count),
+              RowItem(:final conversation) => ConversationRow(
+                key: ValueKey(conversation.id),
+                conversation: conversation,
+                state: state,
+                highlight: widget.highlight,
+                now: now,
+                onTap: () => widget.onActivate(item),
+              ),
+              BundleItem() => BundleRow(
+                key: ValueKey(itemId(item)),
+                bundle: item,
+                highlight: widget.highlight,
+                now: now,
+                onTap: () => widget.onActivate(item),
+              ),
+            };
+          },
+        ),
       ),
     );
   }
 }
 
-/// A date group's header in a list.
+/// A date group's header in a list, as the Mac heads table sections.
 class SectionHeader extends StatelessWidget {
   const SectionHeader(this.title, {super.key, this.count});
 
@@ -241,21 +255,14 @@ class SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final style = context.text.labelSmall?.copyWith(
-      color: context.colors.onSurfaceVariant,
-      fontWeight: FontWeight.w700,
-      letterSpacing: 0.8,
-    );
+    final style = context.text.labelMedium?.copyWith(color: context.colors.onSurfaceVariant, fontWeight: FontWeight.w600);
     return Container(
       alignment: Alignment.bottomLeft,
-      padding: const EdgeInsets.fromLTRB(24, 0, 16, 6),
+      padding: const EdgeInsets.fromLTRB(22, 0, 16, 5),
       child: Text.rich(
         TextSpan(
           children: [
-            TextSpan(
-              text: title.toUpperCase(),
-              style: count == null ? null : TextStyle(color: context.colors.tertiary),
-            ),
+            TextSpan(text: title, style: count == null ? null : TextStyle(color: context.colors.tertiary)),
             if (count != null) TextSpan(text: '  $count'),
           ],
         ),
@@ -265,7 +272,8 @@ class SectionHeader extends StatelessWidget {
   }
 }
 
-/// A Material list item's surface: rounded, hover and keyboard highlight as state layers.
+/// A row's surface, as in Mail: a rounded highlight for the keyboard and the pointer, a
+/// hairline under the row from the avatar on.
 class _RowSurface extends StatelessWidget {
   const _RowSurface({required this.highlighted, required this.onTap, required this.onHover, required this.child});
 
@@ -276,14 +284,44 @@ class _RowSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: ListMetrics.inset, vertical: 1),
-    child: Material(
-      color: highlighted ? context.colors.secondaryContainer : Colors.transparent,
-      borderRadius: BorderRadius.circular(16),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(onTap: onTap, onHover: onHover, child: child),
+    padding: const EdgeInsets.symmetric(horizontal: ListMetrics.inset),
+    child: DecoratedBox(
+      position: DecorationPosition.foreground,
+      decoration: highlighted
+          ? const BoxDecoration()
+          : _RowSeparator(color: context.colors.outlineVariant),
+      child: Material(
+        color: highlighted ? context.colors.secondaryContainer : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(onTap: onTap, onHover: onHover, child: child),
+      ),
     ),
   );
+}
+
+/// The hairline under a row, from where its text starts.
+class _RowSeparator extends Decoration {
+  const _RowSeparator({required this.color});
+
+  final Color color;
+
+  @override
+  BoxPainter createBoxPainter([VoidCallback? onChanged]) => _RowSeparatorPainter(color);
+}
+
+class _RowSeparatorPainter extends BoxPainter {
+  _RowSeparatorPainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Offset offset, ImageConfiguration configuration) {
+    final size = configuration.size!;
+    const start = 16 + ListMetrics.avatarSize + 12;
+    final y = offset.dy + size.height - 0.25;
+    canvas.drawLine(Offset(offset.dx + start, y), Offset(offset.dx + size.width - 8, y), Paint()..color = color..strokeWidth = 0.5);
+  }
 }
 
 /// The layout every row shares: an unread dot, the avatar, and two lines; the first ends in
@@ -405,7 +443,7 @@ class _ConversationRowState extends State<ConversationRow> {
     final senders = c.participants.isEmpty ? person.displayName : c.participants.join(', ');
     final archivable = state.selection.role == MailboxRole.inbox || c.mailboxes.contains(MailboxRole.inbox);
     final snippet = (c.snippet ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
-    final strong = c.unread ? FontWeight.w700 : FontWeight.w500;
+    final strong = c.unread ? FontWeight.w700 : FontWeight.w600;
 
     final meta = Row(
       mainAxisSize: MainAxisSize.min,
@@ -413,7 +451,7 @@ class _ConversationRowState extends State<ConversationRow> {
         if (c.hasAttachment)
           Padding(
             padding: const EdgeInsets.only(right: 4),
-            child: Icon(Icons.attach_file, size: 14, color: colors.outline),
+            child: Icon(CupertinoIcons.paperclip, size: 13, color: colors.onSurfaceVariant),
           ),
         if (state.accounts.length > 1)
           Container(
@@ -425,56 +463,40 @@ class _ConversationRowState extends State<ConversationRow> {
               shape: BoxShape.circle,
             ),
           ),
-        Text(
-          listDate(c.date, widget.now),
-          style: text.labelSmall?.copyWith(
-            fontSize: 12,
-            color: c.unread ? colors.primary : colors.onSurfaceVariant,
-            fontWeight: strong,
-          ),
-        ),
+        Text(listDate(c.date, widget.now), style: text.labelMedium?.copyWith(color: colors.onSurfaceVariant, fontWeight: FontWeight.w400)),
       ],
     );
 
-    // On hover the actions float over the row's end on a raised pill.
-    Widget actions() => Material(
-      color: colors.surfaceContainerHigh,
-      elevation: 2,
-      shadowColor: colors.shadow,
-      shape: const StadiumBorder(),
-      child: IconTheme.merge(
-        data: const IconThemeData(size: 20),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (c.waiting)
-              IconButton(
-                tooltip: 'Resolve (D)',
-                icon: const Icon(Icons.task_alt),
-                onPressed: () => state.setWaiting(c, waiting: false),
-              ),
-            if (archivable)
-              IconButton(
-                tooltip: 'Archive',
-                icon: const Icon(Icons.archive_outlined),
-                onPressed: () => state.archive(c),
-              ),
-            IconButton(tooltip: 'Delete', icon: const Icon(Icons.delete_outline), onPressed: () => state.trash(c)),
+    // On hover the actions float over the row's end on a glass capsule.
+    Widget actions() => GlassCapsule(
+      blur: true,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (c.waiting)
             IconButton(
-              tooltip: c.unread ? 'Mark as read' : 'Mark as unread',
-              icon: Icon(c.unread ? Icons.drafts_outlined : Icons.mark_email_unread_outlined),
-              onPressed: () => state.setRead(c, read: c.unread),
+              tooltip: 'Resolve (D)',
+              icon: const Icon(CupertinoIcons.checkmark_circle),
+              onPressed: () => state.setWaiting(c, waiting: false),
             ),
+          if (archivable)
             IconButton(
-              tooltip: c.starred ? 'Unstar' : 'Star',
-              icon: Icon(
-                c.starred ? Icons.star_rounded : Icons.star_outline_rounded,
-                color: c.starred ? const Color(0xFFF4B400) : null,
-              ),
-              onPressed: () => state.setStarred(c, starred: !c.starred),
+              tooltip: 'Archive',
+              icon: const Icon(CupertinoIcons.archivebox),
+              onPressed: () => state.archive(c),
             ),
-          ],
-        ),
+          IconButton(tooltip: 'Delete', icon: const Icon(CupertinoIcons.trash), onPressed: () => state.trash(c)),
+          IconButton(
+            tooltip: c.unread ? 'Mark as read' : 'Mark as unread',
+            icon: Icon(c.unread ? CupertinoIcons.envelope_open : CupertinoIcons.envelope_badge),
+            onPressed: () => state.setRead(c, read: c.unread),
+          ),
+          IconButton(
+            tooltip: c.starred ? 'Unstar' : 'Star',
+            icon: Icon(c.starred ? CupertinoIcons.star_fill : CupertinoIcons.star, color: c.starred ? starColor : null),
+            onPressed: () => state.setStarred(c, starred: !c.starred),
+          ),
+        ],
       ),
     );
 
@@ -512,7 +534,7 @@ class _ConversationRowState extends State<ConversationRow> {
                       padding: const EdgeInsets.only(left: 6),
                       child: Tooltip(
                         message: 'Waiting on you',
-                        child: Icon(Icons.reply_rounded, size: 15, color: colors.tertiary),
+                        child: Icon(CupertinoIcons.arrowshape_turn_up_left_fill, size: 12, color: colors.tertiary),
                       ),
                     ),
                 ],
@@ -524,13 +546,13 @@ class _ConversationRowState extends State<ConversationRow> {
                     if (subject.tag.isNotEmpty)
                       TextSpan(
                         text: '${subject.tag} ',
-                        style: TextStyle(color: colors.outline, fontWeight: FontWeight.w400),
+                        style: TextStyle(color: colors.onSurfaceVariant, fontWeight: FontWeight.w400),
                       ),
                     TextSpan(
                       text: subject.title.isEmpty ? '(no subject)' : subject.title,
                       style: TextStyle(
                         color: colors.onSurface,
-                        fontWeight: c.unread ? FontWeight.w600 : FontWeight.w400,
+                        fontWeight: c.unread ? FontWeight.w500 : FontWeight.w400,
                       ),
                     ),
                     if (snippet.isNotEmpty) TextSpan(text: '  —  $snippet'),
@@ -538,14 +560,14 @@ class _ConversationRowState extends State<ConversationRow> {
                 ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: text.bodySmall?.copyWith(fontSize: 13, color: colors.onSurfaceVariant),
+                style: text.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
               ),
               marks: [
                 if (topic != null) ...[const SizedBox(width: 8), _TopicLabel(topic)],
                 if (c.starred)
                   const Padding(
                     padding: EdgeInsets.only(left: 6),
-                    child: Icon(Icons.star_rounded, size: 16, color: Color(0xFFF4B400)),
+                    child: Icon(CupertinoIcons.star_fill, size: 13, color: starColor),
                   ),
               ],
             ),
@@ -619,7 +641,7 @@ class BundleRow extends StatelessWidget {
         if (seen.add(c.from?.displayName ?? '')) c.from?.displayName ?? '',
     ].where((s) => s.isNotEmpty).take(6).join(', ');
     final tone = categoryColors(bundle.category, colors);
-    final strong = unread > 0 ? FontWeight.w700 : FontWeight.w500;
+    final strong = unread > 0 ? FontWeight.w700 : FontWeight.w600;
     return ListenableBuilder(
       listenable: highlight,
       builder: (context, _) => _RowSurface(
@@ -644,22 +666,15 @@ class BundleRow extends StatelessWidget {
                 height: 18,
                 padding: const EdgeInsets.symmetric(horizontal: 7),
                 alignment: Alignment.center,
-                decoration: BoxDecoration(color: tone.background, borderRadius: BorderRadius.circular(9)),
+                decoration: BoxDecoration(color: tone.background.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(9)),
                 child: Text(
                   unread > 0 ? '$unread new' : '${items.length}',
-                  style: text.labelSmall?.copyWith(fontSize: 11, color: tone.foreground, fontWeight: FontWeight.w700),
+                  style: text.labelSmall?.copyWith(color: tone.background, fontWeight: FontWeight.w600),
                 ),
               ),
             ],
           ),
-          meta: Text(
-            listDate(items.first.date, now),
-            style: text.labelSmall?.copyWith(
-              fontSize: 12,
-              color: unread > 0 ? colors.primary : colors.onSurfaceVariant,
-              fontWeight: strong,
-            ),
-          ),
+          meta: Text(listDate(items.first.date, now), style: text.labelMedium?.copyWith(color: colors.onSurfaceVariant, fontWeight: FontWeight.w400)),
           subtitle: Text.rich(
             TextSpan(
               children: [
@@ -672,7 +687,7 @@ class BundleRow extends StatelessWidget {
             ),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: text.bodySmall?.copyWith(fontSize: 13, color: colors.onSurfaceVariant),
+            style: text.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
           ),
         ),
       ),
