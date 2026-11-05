@@ -19,9 +19,15 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
 - Language: write everything on Linear (issue titles, descriptions, comments) in Chinese, plainly
   enough that someone who has not read the code understands what is wrong, what was done and what
   remains. Code identifiers, paths, commands and commit hashes stay as they are.
-- Labels: one type (`Bug`, `Feature`, `Improvement`, `Performance`, `Regression`) plus one `Area`
-  label. Area names match the jj workspaces (`chat`, `concurrency`, `flutter`, `gpui`, `motion`,
-  `ui-shell`) or the layer (`sync`, `cache`, `ffi`); an issue is worked in its area's workspace.
+- Labels: every issue carries one type (`Bug`, `Feature`, `Improvement`, `Performance`,
+  `Regression`) plus one `Area` label (Linear allows one; for work across areas, the one most of
+  it is in). Area names match the jj workspaces (`chat`, `concurrency`, `flutter`, `gpui`,
+  `motion`, `ui-shell`) or the layer (`sync`, `cache`, `ffi`); an issue is worked in its area's
+  workspace. Issues about the repo's own tooling (AGENTS.md, scripts, CI, build setup) take no
+  Area label and are worked on main. Label issues you file when creating them. Issues the user
+  files often have none: whoever claims one adds the missing labels first (the polling session
+  before handing it out, so it goes to the area's workspace; otherwise the agent, before its
+  start comment).
 - Claim before working: every agent, subagents included, works under an issue it has claimed.
   With no issue for the work yet, create one first and claim it. Work that serves another issue
   is a sub-issue of it: set Linear's parent field (`parentId`) when creating it, so Linear shows
