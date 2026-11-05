@@ -1,0 +1,14 @@
+[package]
+name = "mailstream-bindgen"
+version = "0.1.0"
+edition = "2024"
+description = "Generates the mailstream crate's Dart bindings with uniffi-dart"
+publish = false
+
+[[bin]]
+name = "mailstream-bindgen-dart"
+path = "main.rs"
+
+[dependencies]
+uniffi-dart = { git = "https://github.com/Uniffi-Dart/uniffi-dart", features = ["binary"] }
+anyhow = "1"

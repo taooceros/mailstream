@@ -1,0 +1,4 @@
+# The Dart package that ships the generated bindings and bundles libmailstream.dylib as its
+# native asset `package:mailstream/uniffi:mailstream`.
+[bindings.dart]
+package_name = "mailstream"

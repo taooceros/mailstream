@@ -6,3 +6,4 @@ Push/.wrangler/
 node_modules/
 Engine/
 .turso/
+FFI/target/

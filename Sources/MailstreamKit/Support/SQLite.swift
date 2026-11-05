@@ -32,13 +32,20 @@ nonisolated final class SQLiteConnection {
 
     private let handle: OpaquePointer
 
+    /// Every process that opens mail.db (the app, FFI front ends) shares it through Turso's
+    /// multi-process WAL; Turso refuses a file open in both modes at once.
+    private static let multiprocess: Void = turso_enable_multiprocess_wal()
+
     init(path: String) throws {
+        _ = Self.multiprocess
         var handle: OpaquePointer?
         let code = sqlite3_open(path, &handle)
         guard code == SQLITE_OK, let handle else {
             if let handle { sqlite3_close(handle) }
             throw Failure(message: "Cannot open \(path) (code \(code))")
         }
+        // Another process writing holds the WAL briefly; wait for it rather than fail the write.
+        sqlite3_busy_timeout(handle, 2000)
         self.handle = handle
     }
 
