@@ -17,8 +17,8 @@ This repo is a colocated jj repo (`.jj` + `.git`), pushed to `github.com/taoocer
 
 ## Work tracking: Linear
 
-Work is tracked in Linear: team `MS`, project `Mailstream`. Issue IDs look like `MS-12`. Use
-omp's Linear tools; the issue, not the session, is the record other sessions read.
+Work is tracked in Linear: team `MS`, split into projects by effort. Issue IDs look like
+`MS-12`. Use omp's Linear tools; the issue, not the session, is the record other sessions read.
 
 - Language: write everything on Linear (issue titles, descriptions, comments) in Chinese, plainly
   enough that someone who has not read the code understands what is wrong, what was done and what
@@ -32,6 +32,10 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
   files often have none: whoever claims one adds the missing labels first (the polling session
   before handing it out, so it goes to the area's workspace; otherwise the agent, before its
   start comment).
+- Projects: every issue belongs to the team's project whose scope (its description) it fits,
+  set together with the labels. When none fits, create a new project: team `MS`, a short
+  Chinese name, a one-line description of its scope, lead taooceros; then put the issue in it.
+  Sub-issues go in their parent's project.
 - Claim before working: every agent, subagents included, works under an issue it has claimed.
   With no issue for the work yet, create one first and claim it. Work that serves another issue
   is a sub-issue of it: set Linear's parent field (`parentId`) when creating it, so Linear shows
