@@ -77,11 +77,29 @@ nonisolated final class MailCache: Sendable {
         return rows.compactMapValues { try? decoder.decode(ConversationTag.self, from: $0) }
     }
 
-    func saveTags(_ tags: [String: ConversationTag]) {
+    /// Writes the tags that changed, then tells every Mailstream process to read them again.
+    func saveTags(_ changed: [String: ConversationTag]) {
         let database = database
         writes.yield {
             let encoder = JSONEncoder()
-            await database.replaceTags(tags.compactMapValues { try? encoder.encode($0) })
+            await database.setTags(changed.compactMapValues { try? encoder.encode($0) })
+            ProcessSignal.tags.post()
+        }
+    }
+
+    /// Forgets every tag, then tells every Mailstream process.
+    func clearTags() {
+        let database = database
+        writes.yield {
+            await database.clearTags()
+            ProcessSignal.tags.post()
+        }
+    }
+
+    /// Returns once every write queued before the call has landed.
+    func flush() async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            writes.yield { done.resume() }
         }
     }
 

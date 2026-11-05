@@ -5,6 +5,10 @@ import Observation
 /// debounced after list changes, backing off after a failure. Runs as the `aiTagging.*` settings
 /// say, following edits of settings.json as they land.
 ///
+/// Every Mailstream process (the app, front ends running the engine in-process) keeps its own
+/// copy of the tags, saves only what it changed, and reads them all again when any process saves
+/// (`ProcessSignal.tags`): so a tag the CLI sets through the app shows in GPUI and Flutter too.
+///
 /// Observable: the list follows `tags`, `isEnabled` and `status`.
 @Observable
 final class TagStore {
@@ -30,9 +34,12 @@ final class TagStore {
     /// Keys the model was asked about but skipped; automatic passes leave them alone.
     @ObservationIgnored private var attempted = Set<String>()
     @ObservationIgnored private lazy var passes = CoalescedTask("AI tagging") { [weak self] in await self?.pass() }
+    @ObservationIgnored private lazy var reloads = CoalescedTask("AI tags reload") { [weak self] in await self?.reload() }
+    /// Counts this process's changes, so a reload that raced one drops its older copy.
+    @ObservationIgnored private var edits = 0
     @ObservationIgnored private var debounce: Task<Void, Never>?
     @ObservationIgnored private var backoffUntil: Date?
-    /// The `aiTagging.*` settings.
+    /// The `aiTagging.*` settings and other processes' tag changes.
     @ObservationIgnored private var watchers: [Task<Void, Never>] = []
 
     init(cache: MailCache, tools: ToolEnvironment, contents: ContentStore, problems: StoreProblems) {
@@ -61,9 +68,13 @@ final class TagStore {
         }
     }
 
-    /// Follows the `aiTagging.*` settings, however settings.json is edited.
+    /// Follows the `aiTagging.*` settings, however settings.json is edited, and the tags any
+    /// Mailstream process saves.
     func start() {
         watchers = [
+            Task.immediate(name: "AI tags saved") { [weak self] in
+                for await _ in ProcessSignal.tags.posts() { self?.reloads.request() }
+            },
             Task.immediate(name: "AI tagging switch") { [weak self] in
                 for await enabled in Observations({ Settings.shared.bool(.aiTaggingEnabled) }) {
                     self?.apply(enabled: enabled)
@@ -107,6 +118,21 @@ final class TagStore {
         tags.merge(saved) { current, _ in current }
     }
 
+    /// Reads the tags again from mail.db, where every process saves its changes as it makes them.
+    private func reload() async {
+        await cache.flush()
+        let edits = edits
+        let saved = await cache.loadTags() ?? [:]
+        // A change made meanwhile is still on its way to disk; its save signals another reload.
+        guard edits == self.edits, saved != tags else { return }
+        tags = saved
+    }
+
+    private func save(_ changed: [String: ConversationTag]) {
+        edits += 1
+        cache.saveTags(changed)
+    }
+
     /// The conversation's tag, with `toRespond` false once the ask has lapsed.
     func tag(for conversation: Conversation) -> ConversationTag? {
         guard enabled, var tag = tags[Self.key(conversation)] else { return nil }
@@ -128,7 +154,7 @@ final class TagStore {
         tag.toRespond = waiting
         tag.waitingUntil = nil
         tags[key] = tag
-        cache.saveTags(tags)
+        save([key: tag])
     }
 
     /// Corrects the conversation's tag; nil leaves a part as it is. A conversation the tagger has
@@ -155,7 +181,7 @@ final class TagStore {
         }
         tags[key] = tag
         attempted.insert(key)
-        cache.saveTags(tags)
+        save([key: tag])
         tag.toRespond = tag.isWaiting()
         return tag
     }
@@ -165,7 +191,8 @@ final class TagStore {
         tags = [:]
         attempted = []
         backoffUntil = nil
-        cache.saveTags(tags)
+        edits += 1
+        cache.clearTags()
         debounce?.cancel()
         passes.restart()
     }
@@ -206,7 +233,7 @@ final class TagStore {
                 try Task.checkCancellation()
                 tags.merge(result) { _, new in new }
                 attempted.formUnion(batch.map(\.id))
-                cache.saveTags(tags)
+                save(result)
                 remaining -= batch.count
             } catch {
                 if Task.isCancelled || error is CancellationError {

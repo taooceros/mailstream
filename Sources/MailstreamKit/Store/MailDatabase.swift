@@ -65,13 +65,20 @@ actor MailDatabase {
         return Dictionary(rows ?? [], uniquingKeysWith: { a, _ in a })
     }
 
-    func replaceTags(_ tags: [String: Data]) {
+    /// Writes these tags, leaving the others: each process writes only what it changed, so one
+    /// never overwrites another's changes with its older copy.
+    func setTags(_ tags: [String: Data]) {
         run { db in
             try db.transaction {
-                try db.execute("DELETE FROM tags")
-                for (key, value) in tags { try db.execute("INSERT INTO tags (key, value) VALUES (?, ?)", [.text(key), .blob(value)]) }
+                for (key, value) in tags {
+                    try db.execute("INSERT OR REPLACE INTO tags (key, value) VALUES (?, ?)", [.text(key), .blob(value)])
+                }
             }
         }
+    }
+
+    func clearTags() {
+        run { db in try db.execute("DELETE FROM tags") }
     }
 
     // MARK: - Listings
