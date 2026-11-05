@@ -27,6 +27,8 @@ nonisolated enum CommandID: Sendable, Equatable {
         case mailList = "mail.list"
         case mailSearch = "mail.search"
         case mailShow = "mail.show"
+        case mailPreviews = "mail.previews"
+        case mailAvatars = "mail.avatars"
         case mailRead = "mail.read"
         case mailStar = "mail.star"
         case mailArchive = "mail.archive"
@@ -151,13 +153,14 @@ nonisolated struct CommandSpec: Sendable {
 
         CommandSpec(command: .app(.mailboxes), summary: "Each account's mailboxes with role, id and counts.", arguments: [account]),
 
-        CommandSpec(command: .app(.mailList), summary: "Conversations in mailboxes, newest first, with AI category and waiting-on-you flag.", arguments: [
+        CommandSpec(command: .app(.mailList), summary: "Conversations in mailboxes, newest first, with AI category and waiting-on-you flag. The answer's `next`, when there is more, passed as --cursor gives the following page.", arguments: [
             mailbox, account,
             Argument(name: "unread", kind: .bool, summary: "Only unread conversations."),
             Argument(name: "starred", kind: .bool, summary: "Only starred conversations."),
             Argument(name: "category", kind: .choice(MailCategory.allCases.map(\.rawValue)), summary: "Only this AI category."),
             Argument(name: "waiting", kind: .bool, summary: "Only conversations waiting on your reply or action."),
             limit,
+            Argument(name: "cursor", kind: .string, summary: "The previous page's `next`: lists the conversations after it, with the same filters."),
         ]),
         CommandSpec(command: .app(.mailSearch), summary: "Searches every mailbox but trash and junk with the providers' own search (subject, people, body; Gmail operators such as from: work), newest first.", arguments: [
             Argument(name: "query", kind: .string, summary: "Free text, or the provider's search syntax.", positional: true, required: true),
@@ -167,6 +170,13 @@ nonisolated struct CommandSpec: Sendable {
         CommandSpec(command: .app(.mailShow), summary: "A conversation's messages with headers, text bodies and attachments.", arguments: [
             conversationID,
             Argument(name: "max-chars", kind: .int, summary: "Longest text body returned per message.", defaultValue: 20_000),
+            Argument(name: "html", kind: .bool, summary: "Also return each message's HTML body, when it has one, under `html`; inline images point at files in the cache."),
+        ]),
+        CommandSpec(command: .app(.mailPreviews), summary: "The preview line of each conversation's latest message, loading the messages that have none yet.",
+                    arguments: [conversationIDs]),
+        CommandSpec(command: .app(.mailAvatars), summary: "Each sender's picture as a PNG file in the cache (contact photo, BIMI logo, Gravatar or, for automated senders, the site icon), looking up those not cached yet; null when there is none.", arguments: [
+            Argument(name: "addresses", kind: .list, summary: "Sender addresses.", positional: true, variadic: true, required: true),
+            Argument(name: "automated", kind: .list, summary: "Those of the addresses that send automated mail, for which a site icon may stand in."),
         ]),
         CommandSpec(command: .app(.mailRead), summary: "Marks conversations read (or with --unread, unread).", arguments: [
             conversationIDs,

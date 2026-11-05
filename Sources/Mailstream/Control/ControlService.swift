@@ -52,6 +52,8 @@ final class ControlService {
         case .mailList: return try await list(args, query: nil)
         case .mailSearch: return try await list(args, query: try args.required("query"))
         case .mailShow: return try await show(args)
+        case .mailPreviews: return try await previews(args)
+        case .mailAvatars: return try await avatars(args)
         case .mailRead:
             let unread = args.bool("unread")
             return try await each(args) { known in
@@ -233,26 +235,63 @@ final class ControlService {
 
     private func list(_ args: Arguments, query: String?) async throws -> JSON {
         let limit = min(max(args.int("limit") ?? 25, 1), 100)
-        let pageSize = min(max(limit, 25), 100)
-        let listing = if let query {
-            await store.agentSearch(try accountNames(args), query: query, pageSize: pageSize)
+        let category = args.string("category").flatMap(MailCategory.init(rawValue:))
+        let include = { (conversation: Conversation) -> Bool in
+            if args.bool("unread"), !conversation.isUnread { return false }
+            if args.bool("starred"), !conversation.isFlagged { return false }
+            let tag = self.store.tagging.tag(for: conversation)
+            if let category, tag?.category != category { return false }
+            if args.bool("waiting"), tag?.toRespond != true { return false }
+            return true
+        }
+        var listing: MailStore.AgentListing
+        if let query {
+            listing = await store.agentSearch(try accountNames(args), query: query, pageSize: min(max(limit, 25), 100))
+            listing.conversations = Array(listing.conversations.filter(include).prefix(limit))
         } else {
-            await store.agentListing(try mailboxKeys(args), pageSize: pageSize)
+            let cursor = try args.string("cursor").map { text in
+                guard let cursor = MailStore.AgentCursor(text) else { throw ControlError.usage("--cursor: not a `next` from mail list.") }
+                return cursor
+            }
+            listing = await store.agentListing(try mailboxKeys(args), after: cursor, limit: limit, include: include)
         }
         if listing.primary.isEmpty, !listing.failures.isEmpty {
             throw ControlError("provider", listing.failures.joined(separator: "; "))
         }
-        let category = args.string("category").flatMap(MailCategory.init(rawValue:))
-        let conversations = listing.conversations.filter { conversation in
-            if args.bool("unread"), !conversation.isUnread { return false }
-            if args.bool("starred"), !conversation.isFlagged { return false }
-            let tag = store.tagging.tag(for: conversation)
-            if let category, tag?.category != category { return false }
-            if args.bool("waiting"), tag?.toRespond != true { return false }
-            return true
-        }.prefix(limit)
-        for conversation in conversations { remember(conversation, primary: listing.primary) }
-        return ["conversations": .array(conversations.map(summary)), "failures": .strings(listing.failures)]
+        for conversation in listing.conversations { remember(conversation, primary: listing.primary) }
+        // Previews missing now load in the background; `mail previews` waits for them.
+        store.contents.prefetchSnippets(for: listing.conversations)
+        var answer: [String: JSON] = ["conversations": .array(listing.conversations.map(summary)), "failures": .strings(listing.failures)]
+        if query == nil { answer["next"] = (listing.next?.text).json }
+        return .object(answer)
+    }
+
+    private func previews(_ args: Arguments) async throws -> JSON {
+        let ids = args.list("ids") ?? []
+        guard !ids.isEmpty else { throw ControlError.usage("Give at least one conversation id.") }
+        let refs = try ids.map { id in (id, try lookup(id).conversation.latest.ref) }
+        let contents = store.contents
+        var out: [String: JSON] = [:]
+        await forEachConcurrently(refs) { job in
+            await contents.preview(job.1)
+        } consume: { job, result in
+            out[job.0] = (try? result.get() ?? nil).json
+        }
+        return .object(out)
+    }
+
+    private func avatars(_ args: Arguments) async throws -> JSON {
+        let addresses = Array(Set((args.list("addresses") ?? []).map { $0.lowercased() }.filter { $0.contains("@") }))
+        guard !addresses.isEmpty else { throw ControlError.usage("Give at least one address.") }
+        let automated = Set((args.list("automated") ?? []).map { $0.lowercased() })
+        let avatars = store.avatars
+        var out: [String: JSON] = [:]
+        await forEachConcurrently(addresses) { address in
+            await avatars.pictureFile(for: address, automated: automated.contains(address))
+        } consume: { address, result in
+            out[address] = ((try? result.get() ?? nil)?.absoluteString).json
+        }
+        return .object(out)
     }
 
     private func show(_ args: Arguments) async throws -> JSON {
@@ -282,6 +321,11 @@ final class ControlService {
                 item["cc"] = Self.addresses(content.cc)
                 item["text"] = .string(String(text.prefix(maxChars)))
                 item["truncated"] = .bool(text.count > maxChars)
+                if args.bool("html"), let html = content.html {
+                    // Inline parts point at the reader's `mscid:` scheme; other clients read the cached files.
+                    item["html"] = .string(html.replacingOccurrences(
+                        of: store.cache.partURLBase(message.ref), with: store.cache.messageDirectory(message.ref).absoluteString))
+                }
                 item["attachments"] = .array(content.attachments.filter { !$0.inline }.map { attachment in
                     ["filename": .string(attachment.filename), "mime": .string(attachment.mime), "size": .int(attachment.size),
                      "path": .string(store.cache.attachmentURL(attachment, of: message.ref).path)]
