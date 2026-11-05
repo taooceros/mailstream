@@ -9,7 +9,6 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_widget_from_html_core: ^0.17.4
   html: ^0.15.7
   intl: ^0.20.3
 

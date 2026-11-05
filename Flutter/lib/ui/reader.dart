@@ -1,9 +1,7 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_widget_from_html_core/flutter_widget_from_html_core.dart';
 import 'package:html/dom.dart' as dom;
+import 'package:html/parser.dart' as html_parser;
 
 import '../backend/models.dart';
 import '../state/mail_state.dart';
@@ -358,14 +356,26 @@ class _Body extends StatelessWidget {
   }
 }
 
-/// HTML through flutter_widget_from_html: Flutter widgets, no web view. Quoted history folds
-/// behind a toggle; links open in the browser.
-class MailHtml extends StatelessWidget {
+/// An HTML body, drawn by WebKit (`MailHtmlView` in the runner) at the height of its content.
+/// Quoted history (Gmail, Outlook, Thunderbird, Apple Mail markup) is cut out of the body and
+/// folds behind a toggle, in a view of its own made when it opens.
+class MailHtml extends StatefulWidget {
   const MailHtml({super.key, required this.html});
 
   final String html;
 
-  static const _style = TextStyle(fontSize: 14, height: 1.45, color: Color(0xFF1F1F1F));
+  @override
+  State<MailHtml> createState() => _MailHtmlState();
+}
+
+class _MailHtmlState extends State<MailHtml> {
+  late (String, String?) _parts = _split(widget.html);
+
+  @override
+  void didUpdateWidget(MailHtml old) {
+    super.didUpdateWidget(old);
+    if (old.html != widget.html) _parts = _split(widget.html);
+  }
 
   static bool _isQuote(dom.Element e) =>
       e.classes.contains('gmail_quote') ||
@@ -375,22 +385,87 @@ class MailHtml extends StatelessWidget {
       e.id == 'appendonsend' ||
       (e.localName == 'blockquote' && e.attributes['type'] == 'cite');
 
-  @override
-  Widget build(BuildContext context) => HtmlWidget(
-    html,
-    textStyle: _style,
-    renderMode: RenderMode.column,
-    customWidgetBuilder: (element) => _isQuote(element)
-        ? _Fold(child: HtmlWidget(element.outerHtml, textStyle: _style, onTapUrl: _open))
-        : null,
-    customStylesBuilder: (element) => element.localName == 'img' ? const {'max-width': '100%', 'height': 'auto'} : null,
-    onTapUrl: _open,
-  );
+  /// The body without its quoted history, and that history with the body's styles; the whole
+  /// body when nothing would stay above the fold.
+  static (String, String?) _split(String html) {
+    final document = html_parser.parse(html);
+    final body = document.body;
+    if (body == null) return (html, null);
+    final quotes = <dom.Element>[];
+    void collect(dom.Element element) {
+      for (final child in element.children) {
+        if (_isQuote(child)) {
+          quotes.add(child);
+        } else {
+          collect(child);
+        }
+      }
+    }
 
-  static Future<bool> _open(String url) async {
-    await Process.run('open', [url]);
-    return true;
+    collect(body);
+    if (quotes.isEmpty) return (html, null);
+    final quoted = quotes.map((q) => q.outerHtml).join();
+    for (final quote in quotes) {
+      quote.remove();
+    }
+    final kept = body.text.trim().isNotEmpty || body.querySelector('img') != null;
+    if (!kept) return (html, null);
+    final head = document.head?.outerHtml ?? '';
+    return (document.outerHtml, '<html>$head<body>$quoted</body></html>');
   }
+
+  @override
+  Widget build(BuildContext context) {
+    final (main, quoted) = _parts;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _WebBody(key: ValueKey(main), html: main),
+        if (quoted != null) _Fold(child: _WebBody(key: ValueKey(quoted), html: quoted)),
+      ],
+    );
+  }
+}
+
+/// One WebKit view, as tall as the page it holds says it is.
+class _WebBody extends StatefulWidget {
+  const _WebBody({super.key, required this.html});
+
+  final String html;
+
+  @override
+  State<_WebBody> createState() => _WebBodyState();
+}
+
+class _WebBodyState extends State<_WebBody> {
+  MethodChannel? _channel;
+
+  /// Until the page measures itself: about two lines.
+  double _height = 40;
+
+  void _created(int id) {
+    _channel = MethodChannel('mailstream/html/$id')
+      ..setMethodCallHandler((call) async {
+        if (call.method == 'height' && mounted) setState(() => _height = (call.arguments as num).toDouble());
+      });
+  }
+
+  @override
+  void dispose() {
+    _channel?.setMethodCallHandler(null);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    height: _height,
+    child: AppKitView(
+      viewType: 'mailstream/html',
+      creationParams: {'html': widget.html},
+      creationParamsCodec: const StandardMessageCodec(),
+      onPlatformViewCreated: _created,
+    ),
+  );
 }
 
 /// Plain text with its quoted history and signature folded behind a toggle.
@@ -576,7 +651,7 @@ class _ChatMessageState extends State<_ChatMessage> {
     final colors = context.colors;
     final text = context.text;
     final m = widget.message;
-    final body = (m.text ?? '').trim().isEmpty && m.html != null ? MailHtml(html: m.html!) : FoldedText(text: m.text ?? '');
+    final body = (m.text ?? '').trim().isEmpty && m.html != null ? _Body(message: m) : FoldedText(text: m.text ?? '');
     return MouseRegion(
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),

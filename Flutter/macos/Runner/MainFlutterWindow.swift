@@ -33,6 +33,9 @@ class MainFlutterWindow: NSWindow {
 
     RegisterGeneratedPlugins(registry: flutterViewController)
 
+    let html = flutterViewController.registrar(forPlugin: "MailHtmlView")
+    html.register(MailHtmlFactory(messenger: html.messenger), withId: "mailstream/html")
+
     super.awakeFromNib()
   }
 }

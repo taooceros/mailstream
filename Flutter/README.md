@@ -18,9 +18,15 @@ flutter build macos --release           # build/macos/Build/Products/Release/Mai
 The app is not sandboxed, because it has to reach the socket in `~/Library`.
 
 The layout follows Material's large-screen guidance: a navigation drawer from 1200 dp wide
-(a navigation rail below, whose menu button opens the drawer), and from 1000 dp the
-list-detail layout, list and conversation in two rounded panes side by side. Narrower
-windows show one pane; the conversation slides over the list.
+(a navigation rail below, whose menu button opens the drawer). The list fills the window;
+from 1000 dp opening a conversation splits it into the list-detail layout, list and
+conversation in two rounded panes side by side, and closing it gives the list the width
+back. Narrower windows slide the conversation over the list.
+
+HTML mail is drawn by WebKit: `macos/Runner/MailHtmlView.swift` is a platform view
+(`mailstream/html`) that runs none of the mail's scripts, opens links in the browser, loads
+remote images without cookies, zooms out a body wider than the column, and reports its
+content height so the body scrolls with the conversation.
 
 | Path | Role |
 | --- | --- |
@@ -31,13 +37,13 @@ windows show one pane; the conversation slides over the list.
 | `lib/ui/shell.dart` | Adaptive layout, panes, search bar, keys, snackbars |
 | `lib/ui/sidebar.dart` | Navigation drawer and rail |
 | `lib/ui/conversation_list.dart` | Fixed-height lazy list that loads the next page near its end, Smart Inbox bundles, hover actions |
-| `lib/ui/reader.dart` | Reading column, message cards and chat log, HTML bodies, folds, inline reply |
+| `lib/ui/reader.dart` | Reading column, message cards and chat log, HTML bodies (quoted history cut out and folded), inline reply |
 | `lib/ui/slide_layer.dart` | Bundles (and, in one pane, the reader) slide over the list, which stays mounted; trackpad swipe back |
 
 Keys: ↑/↓ or J/K move (beside an open conversation they open the next one), Return or Space
 opens, Esc or ⌘[ goes back, E archives, ⌫ trashes, S stars, U toggles read, R replies (⇧R or
 A replies to all), ⌘F searches, ⌘R refreshes.
 
-Not here: Google Chat, a compose window, attachments on send, contact photos and settings.
+Not here: Google Chat, a compose window, attachments on send and settings.
 Reply recipients shown in the composer are a preview; the app plans the real ones when it
 sends.
