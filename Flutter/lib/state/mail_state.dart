@@ -62,6 +62,10 @@ class ListEntry {
   bool loading = false;
   String? error;
 
+  /// `mail.list`'s cursor for the page after `items`; nil at the end.
+  String? next;
+  bool loadingMore = false;
+
   /// Answers of fetches older than the latest are dropped.
   int generation = 0;
 }
@@ -75,7 +79,7 @@ class ThreadEntry {
   String? error;
 }
 
-/// A short-lived line at the bottom of the window.
+/// A message for a snack bar; each one shows once.
 class Toast {
   Toast(this.text, {this.error = false});
 
@@ -94,7 +98,7 @@ class MailState extends ChangeNotifier {
   /// A list fetched within this long serves reads without asking again; the native app polls at
   /// the same pace while push is down.
   static const listLifetime = Duration(seconds: 90);
-  static const pageSize = 100;
+  static const pageSize = 60;
 
   List<Account> accounts = const [];
   Map<String, List<Mailbox>> mailboxes = const {};
@@ -113,14 +117,13 @@ class MailState extends ChangeNotifier {
   /// Nil while the app answers; else why it does not.
   String? unreachable;
   Toast? toast;
-  Timer? _toastTimer;
 
   final Map<String, ListEntry> _lists = {};
   final Map<String, ThreadEntry> _threads = {};
   Timer? _poll;
 
-  /// Whether the running app knows `mail.show --html`; a build without it gets text bodies.
-  bool _htmlBodies = true;
+  /// Conversations whose preview `mail.previews` is loading or has answered.
+  final Set<String> _previewRequested = {};
 
   /// Inline reply drafts by conversation, kept until sent or discarded (in memory, like the app).
   final Map<String, String> drafts = {};
@@ -137,7 +140,6 @@ class MailState extends ChangeNotifier {
   void dispose() {
     _poll?.cancel();
     _searchDebounce?.cancel();
-    _toastTimer?.cancel();
     super.dispose();
   }
 
@@ -186,8 +188,11 @@ class MailState extends ChangeNotifier {
 
   ListEntry get _current => searchQuery != null ? _search : (_lists[selection.key] ??= ListEntry());
 
-  bool get isLoading => _current.loading;
+  bool get isLoading => _current.loading || _current.loadingMore;
   String? get listError => _current.error;
+
+  /// Whether the list in view has older pages to load.
+  bool get canLoadMore => searchQuery == null && _current.next != null;
 
   /// The conversations in view, before the Smart Inbox folds bundles.
   List<Conversation> get conversations {
@@ -229,6 +234,11 @@ class MailState extends ChangeNotifier {
     if (!fresh) _fetch(next);
   }
 
+  static List<Conversation> _decode(Map<String, Object?> result) =>
+      (result['conversations'] as List).map((c) => Conversation.fromJson(c as Map<String, Object?>)).toList();
+
+  /// The first page. A refresh keeps the older pages already loaded below it: their cursor still
+  /// points past them.
   Future<void> _fetch(Selection target) async {
     final entry = _lists[target.key] ??= ListEntry();
     final generation = ++entry.generation;
@@ -237,11 +247,20 @@ class MailState extends ChangeNotifier {
     try {
       final result = await client.call('mail.list', {...target.listArgs, 'limit': pageSize}) as Map<String, Object?>;
       if (generation != entry.generation) return;
-      entry.items = (result['conversations'] as List).map((c) => Conversation.fromJson(c as Map<String, Object?>)).toList();
-      entry.fetchedAt = DateTime.now();
+      final page = _decode(result);
+      final ids = {for (final c in page) c.id};
+      final oldest = page.lastOrNull?.date;
+      final kept = oldest == null
+          ? const <Conversation>[]
+          : entry.items.where((c) => !ids.contains(c.id) && c.date != null && c.date!.isBefore(oldest)).toList();
+      entry
+        ..items = [...page, ...kept]
+        ..next = kept.isEmpty ? result['next'] as String? : entry.next
+        ..fetchedAt = DateTime.now();
       final failures = (result['failures'] as List?)?.cast<String>() ?? const [];
       entry.error = failures.isEmpty ? null : failures.join('\n');
       unreachable = null;
+      _loadPreviews(page);
     } on ControlException catch (error) {
       if (generation != entry.generation) return;
       entry.error = error.message;
@@ -250,6 +269,55 @@ class MailState extends ChangeNotifier {
       if (generation == entry.generation) {
         entry.loading = false;
         notifyListeners();
+      }
+    }
+  }
+
+  /// The page after the list in view: scrolling near its end, or a Smart Inbox that folds a page
+  /// into bundles and still leaves the window empty.
+  Future<void> loadMore() async {
+    if (searchQuery != null) return;
+    final entry = _current;
+    final cursor = entry.next;
+    if (cursor == null || entry.loadingMore || entry.loading) return;
+    final generation = entry.generation;
+    entry.loadingMore = true;
+    notifyListeners();
+    try {
+      final result =
+          await client.call('mail.list', {...selection.listArgs, 'limit': pageSize, 'cursor': cursor}) as Map<String, Object?>;
+      // A first page landed meanwhile and decided the cursor.
+      if (generation != entry.generation || entry.next != cursor) return;
+      final ids = {for (final c in entry.items) c.id};
+      final page = _decode(result).where((c) => !ids.contains(c.id)).toList();
+      entry
+        ..items = [...entry.items, ...page]
+        ..next = result['next'] as String?;
+      _loadPreviews(page);
+    } on ControlException catch (error) {
+      _report('Could not load more: ${error.message}');
+    } finally {
+      entry.loadingMore = false;
+      notifyListeners();
+    }
+  }
+
+  /// Previews of conversations listed without one: the app loads their latest messages.
+  Future<void> _loadPreviews(List<Conversation> conversations) async {
+    final missing = [
+      for (final c in conversations)
+        if ((c.snippet == null || c.snippet!.isEmpty) && _previewRequested.add(c.id)) c.id,
+    ];
+    for (var i = 0; i < missing.length; i += 20) {
+      final chunk = missing.sublist(i, (i + 20).clamp(0, missing.length));
+      try {
+        final result = await _call('mail.previews', {'ids': chunk});
+        for (final MapEntry(key: id, value: snippet) in result.entries) {
+          if (snippet is String && snippet.isNotEmpty) _patch(id, (c) => c.copyWith(snippet: snippet));
+        }
+      } on ControlException {
+        // Rows keep their subject alone; a later listing asks again.
+        _previewRequested.removeAll(chunk);
       }
     }
   }
@@ -282,9 +350,11 @@ class MailState extends ChangeNotifier {
       try {
         final result = await client.call('mail.search', {'query': text, 'limit': 60}) as Map<String, Object?>;
         if (generation != _search.generation) return;
+        final found = _decode(result);
         _search
-          ..items = (result['conversations'] as List).map((c) => Conversation.fromJson(c as Map<String, Object?>)).toList()
+          ..items = found
           ..fetchedAt = DateTime.now();
+        _loadPreviews(found);
       } on ControlException catch (error) {
         if (generation != _search.generation) return;
         _search.error = error.message;
@@ -342,18 +412,7 @@ class MailState extends ChangeNotifier {
     return _threads[id] = entry;
   }
 
-  Future<Map<String, Object?>> _show(String id) async {
-    final args = <String, Object?>{'id': id, 'max-chars': 400000};
-    if (_htmlBodies) {
-      try {
-        return await _call('mail.show', {...args, 'html': true});
-      } on ControlException catch (error) {
-        if (error.code != 'usage' || !error.message.contains('html')) rethrow;
-        _htmlBodies = false;
-      }
-    }
-    return await _call('mail.show', args);
-  }
+  Future<Map<String, Object?>> _show(String id) => _call('mail.show', {'id': id, 'max-chars': 400000, 'html': true});
 
   /// A command on conversation ids. The app remembers ids only while it runs: after it restarts,
   /// the list in view is fetched again, which registers them anew, and the command runs once more.
@@ -378,16 +437,25 @@ class MailState extends ChangeNotifier {
   static bool _unknownID(Map<String, Object?> failure) =>
       failure['code'] == 'unknown_conversation' || (failure['message'] as String? ?? '').startsWith('Unknown conversation');
 
+  /// Lists again, as deep as the list in view goes, so the app knows its ids once more.
   Future<void> _reregister() async {
-    final query = searchQuery;
-    if (query != null) {
-      try {
+    try {
+      final query = searchQuery;
+      if (query != null) {
         await client.call('mail.search', {'query': query, 'limit': 60});
-      } on ControlException {
-        // The retry reports the failure.
+        return;
       }
+      final want = _current.items.length;
+      var listed = 0;
+      String? cursor;
+      do {
+        final result = await client.call('mail.list', {...selection.listArgs, 'limit': 100, 'cursor': ?cursor}) as Map<String, Object?>;
+        listed += (result['conversations'] as List).length;
+        cursor = result['next'] as String?;
+      } while (cursor != null && listed < want);
+    } on ControlException {
+      // The retry reports the failure.
     }
-    await _fetch(selection);
   }
 
   void prefetch(Conversation conversation) => thread(conversation.id);
@@ -481,11 +549,6 @@ class MailState extends ChangeNotifier {
 
   void showToast(String text, {bool error = false}) {
     toast = Toast(text, error: error);
-    _toastTimer?.cancel();
-    _toastTimer = Timer(Duration(seconds: error ? 6 : 3), () {
-      toast = null;
-      notifyListeners();
-    });
     notifyListeners();
   }
 

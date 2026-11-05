@@ -1,5 +1,5 @@
 import 'package:flutter/gestures.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 
 import 'design.dart';
 
@@ -18,7 +18,7 @@ class SlideLayer extends StatefulWidget {
 }
 
 class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
-  late final _presence = AnimationController(vsync: this, duration: Motion.standard);
+  late final _presence = AnimationController(vsync: this, duration: Motion.enter, reverseDuration: Motion.exit);
 
   /// Horizontal offset in pixels while swiping, and while it settles back or flies off.
   late final _drag = AnimationController.unbounded(vsync: this);
@@ -97,10 +97,10 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
     if (offset.abs() > width / 3 || flicked) {
       _swipedAway = true;
       _drag
-          .animateTo(offset.sign * width, duration: Motion.brief, curve: houseCurve)
+          .animateTo(offset.sign * width, duration: Motion.exit, curve: Motion.curve)
           .whenComplete(widget.onDismiss);
     } else {
-      _drag.animateTo(0, duration: Motion.standard, curve: houseCurve);
+      _drag.animateTo(0, duration: Motion.enter, curve: Motion.curve);
     }
   }
 
@@ -118,12 +118,14 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
           child: AnimatedBuilder(
             animation: Listenable.merge([_presence, _drag]),
             builder: (context, child) {
-              final enter = houseCurve.transform(_presence.value);
+              final enter = Motion.curve.transform(_presence.value);
               final x = (1 - enter) * width + _drag.value;
               return Transform.translate(offset: Offset(x, 0), child: child);
             },
-            child: DecoratedBox(
-              decoration: BoxDecoration(boxShadow: Shadows.page(context.brightness)),
+            child: Material(
+              elevation: 2,
+              color: context.colors.surface,
+              shadowColor: context.colors.shadow,
               child: shown,
             ),
           ),

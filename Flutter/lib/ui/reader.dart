@@ -11,16 +11,16 @@ import 'common.dart';
 import 'design.dart';
 import 'format.dart';
 
-/// One conversation: a 720 pt reading column with a serif subject and one line of metadata, then
-/// either message cards (service mail) or a chat log (people), and a reply pill docked at the
-/// bottom. It shows at once from the list's summary; bodies fill in when they arrive.
+/// One conversation: a reading column with the subject and its chips, then message cards
+/// (service mail) or a chat log (people), and reply buttons at the bottom that open an inline
+/// composer. It shows at once from the list's summary; bodies fill in when they arrive.
 class Reader extends StatefulWidget {
   const Reader({super.key, required this.state, required this.conversation});
 
   final MailState state;
   final Conversation conversation;
 
-  static const column = 720.0;
+  static const column = 760.0;
 
   @override
   State<Reader> createState() => ReaderState();
@@ -32,6 +32,10 @@ class ReaderState extends State<Reader> {
   final _composer = GlobalKey<_ComposerState>();
   bool _composing = false;
   bool _replyAll = false;
+
+  /// The message the thread opens on: the first unread, else the latest.
+  final _focusKey = GlobalKey(debugLabel: 'Thread focus');
+  bool _focused = false;
 
   Conversation get c => widget.conversation;
 
@@ -60,10 +64,6 @@ class ReaderState extends State<Reader> {
 
   void _toggle(String id) => setState(() => _expanded.contains(id) ? _expanded.remove(id) : _expanded.add(id));
 
-  /// The message the thread opens on: the first unread, else the latest.
-  final _focusKey = GlobalKey(debugLabel: 'Thread focus');
-  bool _focused = false;
-
   void _revealFocus(int index) {
     if (_focused) return;
     _focused = true;
@@ -76,7 +76,7 @@ class ReaderState extends State<Reader> {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.palette;
+    final colors = context.colors;
     final thread = widget.state.thread(c.id);
     final messages = thread.messages;
     final now = DateTime.now();
@@ -89,48 +89,44 @@ class ReaderState extends State<Reader> {
 
     final body = <Widget>[
       _Header(state: widget.state, conversation: c),
-      const SizedBox(height: 22),
+      const SizedBox(height: 24),
       if (messages == null && thread.error == null)
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 40),
-          child: Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: palette.faint))),
-        ),
-      if (thread.error != null) Text(thread.error!, style: uiText(TextSize.body, palette.danger)),
+        const Padding(padding: EdgeInsets.symmetric(vertical: 48), child: Center(child: CircularProgressIndicator())),
+      if (thread.error != null) Text(thread.error!, style: context.text.bodyMedium?.copyWith(color: colors.error)),
       if (messages != null)
         if (_chat)
           _ChatLog(messages: messages, now: now, state: widget.state, onReply: reply, focus: focus, focusKey: _focusKey)
         else
-          for (final (i, m) in messages.indexed) ...[
-            if (i > 0) Divider(height: 1, thickness: 0.5, color: palette.line),
-            _MessageCard(
-              key: i == focus ? _focusKey : null,
-              message: m,
-              state: widget.state,
-              now: now,
-              // The latest and unread messages open; the rest are one-line previews.
-              expanded: _expanded.contains(m.id) != (i == messages.length - 1 || m.unread),
-              onToggle: () => _toggle(m.id),
-              onReply: reply,
+          for (final (i, m) in messages.indexed)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: _MessageCard(
+                key: i == focus ? _focusKey : null,
+                message: m,
+                state: widget.state,
+                now: now,
+                // The latest and unread messages open; the rest are one-line previews.
+                expanded: _expanded.contains(m.id) != (i == messages.length - 1 || m.unread),
+                onToggle: () => _toggle(m.id),
+                onReply: reply,
+              ),
             ),
-          ],
-      const SizedBox(height: 140),
+      const SizedBox(height: 120),
     ];
 
-    return Container(
-      color: palette.page,
+    return Material(
+      color: colors.surface,
       child: Stack(
         children: [
           Scrollbar(
             controller: _scroll,
             child: SingleChildScrollView(
               controller: _scroll,
-              padding: const EdgeInsets.fromLTRB(32, 26, 32, 0),
+              padding: const EdgeInsets.fromLTRB(32, 24, 32, 0),
               child: Center(
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: Reader.column),
-                  child: SelectionArea(
-                    child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: body),
-                  ),
+                  child: SelectionArea(child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: body)),
                 ),
               ),
             ),
@@ -138,14 +134,14 @@ class ReaderState extends State<Reader> {
           Positioned(
             left: 32,
             right: 32,
-            bottom: 18,
+            bottom: 20,
             child: Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: Reader.column),
                 child: AnimatedSwitcher(
-                  duration: Motion.brief,
-                  switchInCurve: houseCurve,
-                  switchOutCurve: houseCurve,
+                  duration: Motion.enter,
+                  switchInCurve: Motion.curve,
+                  switchOutCurve: Motion.curve,
                   transitionBuilder: (child, animation) => FadeTransition(
                     opacity: animation,
                     child: SizeTransition(sizeFactor: animation, alignment: Alignment.bottomCenter, child: child),
@@ -160,7 +156,7 @@ class ReaderState extends State<Reader> {
                           onAll: (all) => setState(() => _replyAll = all),
                           onClose: () => setState(() => _composing = false),
                         )
-                      : _ReplyDock(onReply: () => reply(), onReplyAll: () => reply(all: true)),
+                      : _ReplyBar(onReply: () => reply(), onReplyAll: () => reply(all: true)),
                 ),
               ),
             ),
@@ -179,37 +175,33 @@ class _Header extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.palette;
     final c = conversation;
     final subject = splitSubject(c.subject);
     final account = state.account(c.account);
+    final colors = context.colors;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          subject.title,
-          style: TextStyle(
-            fontFamily: FontFamily.serif,
-            fontFamilyFallback: FontFamily.serifFallback,
-            fontSize: TextSize.display,
-            height: 1.2,
-            fontWeight: FontWeight.w500,
-            letterSpacing: -0.4,
-            color: palette.text,
-          ),
-        ),
+        Text(subject.title, style: context.text.headlineSmall?.copyWith(color: colors.onSurface)),
         const SizedBox(height: 12),
         Wrap(
-          spacing: 6,
-          runSpacing: 6,
+          spacing: 8,
+          runSpacing: 8,
           children: [
-            if (c.waiting) MetaChip(label: 'Waiting on you', tint: palette.waiting),
-            if (subject.tag.isNotEmpty) MetaChip(label: subject.tag),
-            for (final label in c.labels) MetaChip(label: label, tint: topicColor(label, context.brightness), mark: ChipMark.dot),
+            if (c.waiting)
+              Chip(
+                visualDensity: VisualDensity.compact,
+                avatar: Icon(Icons.reply, size: 16, color: colors.onTertiaryContainer),
+                backgroundColor: colors.tertiaryContainer,
+                labelStyle: context.text.labelMedium?.copyWith(color: colors.onTertiaryContainer),
+                label: const Text('Waiting on you'),
+              ),
+            if (subject.tag.isNotEmpty) MarkChip(label: subject.tag),
+            for (final label in c.labels) MarkChip(label: label, mark: topicColor(label, context.brightness)),
             if (account != null)
-              MetaChip(label: account.title, tint: accountPalette[state.accountIndex(account.id) % accountPalette.length], mark: ChipMark.bar),
-            for (final role in c.mailboxes.where((r) => r != MailboxRole.inbox && r != MailboxRole.other)) MetaChip(label: role.title),
-            if (c.messageCount > 1) MetaChip(label: '${c.messageCount} messages'),
+              MarkChip(label: account.title, mark: accountPalette[state.accountIndex(account.id) % accountPalette.length], bar: true),
+            for (final role in c.mailboxes.where((r) => r != MailboxRole.inbox && r != MailboxRole.other)) MarkChip(label: role.title),
+            if (c.messageCount > 1) MarkChip(label: '${c.messageCount} messages'),
           ],
         ),
       ],
@@ -219,7 +211,7 @@ class _Header extends StatelessWidget {
 
 // MARK: - Cards
 
-class _MessageCard extends StatefulWidget {
+class _MessageCard extends StatelessWidget {
   const _MessageCard({
     super.key,
     required this.message,
@@ -238,89 +230,79 @@ class _MessageCard extends StatefulWidget {
   final void Function({bool all}) onReply;
 
   @override
-  State<_MessageCard> createState() => _MessageCardState();
-}
-
-class _MessageCardState extends State<_MessageCard> {
-  bool _hover = false;
-
-  @override
   Widget build(BuildContext context) {
-    final palette = context.palette;
-    final m = widget.message;
+    final colors = context.colors;
+    final text = context.text;
+    final m = message;
     final sender = m.sender;
-    final head = MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: widget.onToggle,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 14),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              InitialsAvatar(address: sender, size: widget.expanded ? 34 : 26),
-              const SizedBox(width: 11),
-              Expanded(
-                child: widget.expanded
-                    ? Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text.rich(TextSpan(children: [
-                            TextSpan(text: sender.displayName, style: uiText(TextSize.headline, palette.text, weight: FontWeight.w600)),
-                            if (sender.name != null) TextSpan(text: '  ${sender.email}', style: uiText(TextSize.footnote, palette.faint)),
-                          ]), maxLines: 1, overflow: TextOverflow.ellipsis),
-                          const SizedBox(height: 2),
-                          Text(
-                            'to ${[...m.to, ...m.cc].map((a) => a.displayName).join(', ')}',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: uiText(TextSize.footnote, palette.muted),
-                          ),
-                        ],
-                      )
-                    : Text.rich(
-                        TextSpan(children: [
-                          TextSpan(text: sender.displayName, style: uiText(TextSize.body, palette.text, weight: FontWeight.w600)),
-                          TextSpan(text: '   ${_preview(m)}', style: uiText(TextSize.body, palette.muted)),
-                        ]),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-              ),
-              const SizedBox(width: 12),
-              if (widget.expanded && _hover) ...[
-                HoverIconButton(icon: Icons.reply_rounded, tooltip: 'Reply', onPressed: () => widget.onReply()),
-                HoverIconButton(icon: Icons.reply_all_rounded, tooltip: 'Reply All', onPressed: () => widget.onReply(all: true)),
-                const SizedBox(width: 6),
-              ],
-              Text(messageDate(m.date, widget.now), style: uiText(TextSize.footnote, palette.muted)),
-            ],
-          ),
-        ),
-      ),
-    );
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() => _hover = false),
+    return Card.filled(
+      color: colors.surfaceContainerLow,
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: AnimatedSize(
-        duration: Motion.standard,
-        curve: houseCurve,
+        duration: Motion.enter,
+        curve: Motion.curve,
         alignment: Alignment.topCenter,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            head,
-            if (widget.expanded) ...[
-              Padding(
-                padding: const EdgeInsets.only(bottom: 18),
-                child: _Body(message: widget.message, state: widget.state),
+            InkWell(
+              onTap: onToggle,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+                child: Row(
+                  children: [
+                    InitialsAvatar(address: sender),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: expanded
+                          ? Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text.rich(
+                                  TextSpan(children: [
+                                    TextSpan(text: sender.displayName, style: text.titleSmall),
+                                    if (sender.name != null)
+                                      TextSpan(text: '  <${sender.email}>', style: text.bodySmall?.copyWith(color: colors.onSurfaceVariant)),
+                                  ]),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'to ${[...m.to, ...m.cc].map((a) => a.displayName).join(', ')}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: text.bodySmall?.copyWith(color: colors.onSurfaceVariant),
+                                ),
+                              ],
+                            )
+                          : Text.rich(
+                              TextSpan(children: [
+                                TextSpan(text: sender.displayName, style: text.titleSmall),
+                                TextSpan(text: '   ${_preview(m)}', style: text.bodyMedium?.copyWith(color: colors.onSurfaceVariant)),
+                              ]),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                    ),
+                    const SizedBox(width: 12),
+                    Text(messageDate(m.date, now), style: text.labelMedium?.copyWith(color: colors.onSurfaceVariant)),
+                    if (expanded) ...[
+                      IconButton(tooltip: 'Reply', icon: const Icon(Icons.reply), onPressed: () => onReply()),
+                      IconButton(tooltip: 'Reply all', icon: const Icon(Icons.reply_all), onPressed: () => onReply(all: true)),
+                    ],
+                  ],
+                ),
               ),
+            ),
+            if (expanded) ...[
+              Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), child: _Body(message: m)),
               if (m.attachments.isNotEmpty)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 18),
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                   child: Wrap(spacing: 8, runSpacing: 8, children: [
-                    for (final a in m.attachments) _AttachmentTile(attachment: a, onOpen: () => widget.state.openFile(a.path)),
+                    for (final a in m.attachments) _AttachmentChip(attachment: a, onOpen: () => state.openFile(a.path)),
                   ]),
                 ),
             ],
@@ -336,60 +318,40 @@ class _MessageCardState extends State<_MessageCard> {
   }
 }
 
-class _AttachmentTile extends StatelessWidget {
-  const _AttachmentTile({required this.attachment, required this.onOpen});
+class _AttachmentChip extends StatelessWidget {
+  const _AttachmentChip({required this.attachment, required this.onOpen});
 
   final AttachmentInfo attachment;
   final VoidCallback onOpen;
 
   @override
-  Widget build(BuildContext context) {
-    final palette = context.palette;
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: onOpen,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(Corner.card),
-            border: Border.all(color: palette.line),
-          ),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(Icons.insert_drive_file_outlined, size: 18, color: palette.muted),
-            const SizedBox(width: 8),
-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(attachment.filename, style: uiText(TextSize.body, palette.text, weight: FontWeight.w500)),
-              Text(fileSize(attachment.size), style: uiText(TextSize.caption, palette.muted)),
-            ]),
-          ]),
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => ActionChip(
+    avatar: const Icon(Icons.attach_file, size: 18),
+    label: Text('${attachment.filename}  ·  ${fileSize(attachment.size)}'),
+    onPressed: onOpen,
+  );
 }
 
-/// A body: HTML mail on a light card, as mail is designed for; plain text in the page's type.
+/// A body: HTML mail on a white sheet, as mail is designed for; plain text in the theme's type.
 class _Body extends StatelessWidget {
-  const _Body({required this.message, required this.state});
+  const _Body({required this.message});
 
   final MessageDetail message;
-  final MailState state;
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.palette;
-    if (message.error != null) return Text(message.error!, style: uiText(TextSize.body, palette.danger));
+    final colors = context.colors;
+    if (message.error != null) return Text(message.error!, style: context.text.bodyMedium?.copyWith(color: colors.error));
     final html = message.html;
     if (html != null && html.trim().isNotEmpty) {
       return Container(
-        padding: const EdgeInsets.all(18),
+        padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: const Color(0xFFFFFFFF),
-          borderRadius: BorderRadius.circular(Corner.card),
-          border: context.brightness == Brightness.light ? Border.all(color: palette.line, width: 0.5) : null,
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: colors.outlineVariant),
         ),
-        child: MailHtml(html: html, state: state),
+        child: MailHtml(html: html),
       );
     }
     return FoldedText(text: message.text ?? '');
@@ -397,14 +359,13 @@ class _Body extends StatelessWidget {
 }
 
 /// HTML through flutter_widget_from_html: Flutter widgets, no web view. Quoted history folds
-/// behind •••; links open in the browser.
+/// behind a toggle; links open in the browser.
 class MailHtml extends StatelessWidget {
-  const MailHtml({super.key, required this.html, required this.state});
+  const MailHtml({super.key, required this.html});
 
   final String html;
-  final MailState state;
 
-  static const _style = TextStyle(fontSize: TextSize.reading, height: 1.45, color: Color(0xFF1D1D1F));
+  static const _style = TextStyle(fontSize: 14, height: 1.45, color: Color(0xFF1F1F1F));
 
   static bool _isQuote(dom.Element e) =>
       e.classes.contains('gmail_quote') ||
@@ -432,11 +393,17 @@ class MailHtml extends StatelessWidget {
   }
 }
 
-/// Plain text with its quoted history and signature folded behind •••.
+/// Plain text with its quoted history and signature folded behind a toggle.
 class FoldedText extends StatelessWidget {
   const FoldedText({super.key, required this.text});
 
   final String text;
+
+  static final _sentenceEnd = RegExp(r'[.!?:;)>]$');
+  static final _runsOn = RegExp(r'^[a-z0-9(]');
+
+  static bool _wrapped(String line, String next) =>
+      line.length >= 50 && !line.startsWith('>') && !_sentenceEnd.hasMatch(line) && _runsOn.hasMatch(next);
 
   static final _foldStarts = [
     RegExp(r'^On .{4,240}wrote:\s*$'),
@@ -451,17 +418,22 @@ class FoldedText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.palette;
     // Text derived from HTML layouts keeps their indentation and empty table cells: drop both.
     final lines = <String>[];
     for (final raw in text.replaceAll('\r\n', '\n').split('\n')) {
       final line = raw.trim();
       if (line.isEmpty && (lines.isEmpty || lines.last.isEmpty)) continue;
+      // Plain text mail is often hard-wrapped near 72 columns: a long line that stops mid-sentence
+      // and runs on in lower case is one line, so it reflows to the column's width.
+      if (lines.isNotEmpty && _wrapped(lines.last, line)) {
+        lines.last = '${lines.last} $line';
+        continue;
+      }
       lines.add(line);
     }
     var cut = lines.length;
     for (var i = 1; i < lines.length; i++) {
-      if (_foldStarts.any((p) => p.hasMatch(lines[i].trimRight()))) {
+      if (_foldStarts.any((p) => p.hasMatch(lines[i]))) {
         cut = i;
         break;
       }
@@ -469,18 +441,18 @@ class FoldedText extends StatelessWidget {
     String join(Iterable<String> part) => part.join('\n').trim();
     final shown = join(lines.take(cut));
     final folded = join(lines.skip(cut));
-    final style = uiText(TextSize.reading, palette.text, height: 1.5);
+    final style = context.text.bodyLarge?.copyWith(height: 1.5);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (shown.isNotEmpty) Text(shown, style: style),
-        if (folded.isNotEmpty) _Fold(child: Text(folded, style: style.copyWith(color: palette.muted))),
+        if (folded.isNotEmpty) _Fold(child: Text(folded, style: style?.copyWith(color: context.colors.onSurfaceVariant))),
       ],
     );
   }
 }
 
-/// Folded content behind a ••• button.
+/// Folded content behind a small tonal "more" button.
 class _Fold extends StatefulWidget {
   const _Fold({required this.child});
 
@@ -495,24 +467,25 @@ class _FoldState extends State<_Fold> {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.palette;
+    final colors = context.colors;
     return AnimatedSize(
-      duration: Motion.standard,
-      curve: houseCurve,
+      duration: Motion.enter,
+      curve: Motion.curve,
       alignment: Alignment.topLeft,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            child: MouseRegion(
-              cursor: SystemMouseCursors.click,
-              child: GestureDetector(
-                onTap: () => setState(() => _open = !_open),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
-                  decoration: BoxDecoration(color: const Color(0x14000000), borderRadius: BorderRadius.circular(6)),
-                  child: Text('•••', style: uiText(TextSize.footnote, const Color(0x99000000), weight: FontWeight.w700)),
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Tooltip(
+              message: _open ? 'Hide quoted text' : 'Show quoted text',
+              child: Material(
+                color: colors.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(8),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: () => setState(() => _open = !_open),
+                  child: SizedBox(width: 32, height: 18, child: Icon(Icons.more_horiz, size: 16, color: colors.onSurfaceVariant)),
                 ),
               ),
             ),
@@ -520,7 +493,7 @@ class _FoldState extends State<_Fold> {
           if (_open)
             Container(
               padding: const EdgeInsets.only(left: 12),
-              decoration: BoxDecoration(border: Border(left: BorderSide(color: palette.line, width: 2))),
+              decoration: BoxDecoration(border: Border(left: BorderSide(color: colors.outlineVariant, width: 2))),
               child: widget.child,
             ),
         ],
@@ -531,8 +504,8 @@ class _FoldState extends State<_Fold> {
 
 // MARK: - Chat log
 
-/// Like Slack without bubbles: a divider per day, each message under its sender's avatar, name and
-/// time; a sender's next message within an hour on the same day drops the avatar and name.
+/// A divider per day, each message under its sender's avatar, name and time; a sender's next
+/// message within an hour on the same day drops the avatar and name.
 class _ChatLog extends StatelessWidget {
   const _ChatLog({
     required this.messages,
@@ -552,7 +525,6 @@ class _ChatLog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.palette;
     final children = <Widget>[];
     MessageDetail? previous;
     for (final (index, m) in messages.indexed) {
@@ -560,14 +532,14 @@ class _ChatLog extends StatelessWidget {
       final newDay = date != null && (previous?.date == null || !sameDay(previous!.date!, date));
       if (newDay) {
         children.add(Padding(
-          padding: const EdgeInsets.symmetric(vertical: 14),
+          padding: const EdgeInsets.symmetric(vertical: 12),
           child: Row(children: [
-            Expanded(child: Divider(thickness: 0.5, color: palette.line)),
+            const Expanded(child: Divider()),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Text(dayDivider(date, now), style: uiText(TextSize.caption, palette.muted, weight: FontWeight.w600)),
+              child: Text(dayDivider(date, now), style: context.text.labelMedium?.copyWith(color: context.colors.onSurfaceVariant)),
             ),
-            Expanded(child: Divider(thickness: 0.5, color: palette.line)),
+            const Expanded(child: Divider()),
           ]),
         ));
       }
@@ -577,13 +549,7 @@ class _ChatLog extends StatelessWidget {
           date != null &&
           previous.date != null &&
           date.difference(previous.date!).inMinutes < 60;
-      children.add(_ChatMessage(
-        key: index == focus ? focusKey : null,
-        message: m,
-        continued: continued,
-        state: state,
-        onReply: onReply,
-      ));
+      children.add(_ChatMessage(key: index == focus ? focusKey : null, message: m, continued: continued, state: state, onReply: onReply));
       previous = m;
     }
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children);
@@ -607,37 +573,38 @@ class _ChatMessageState extends State<_ChatMessage> {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.palette;
+    final colors = context.colors;
+    final text = context.text;
     final m = widget.message;
-    final text = m.text ?? '';
-    final body = text.trim().isEmpty && m.html != null
-        ? MailHtml(html: m.html!, state: widget.state)
-        : FoldedText(text: text);
+    final body = (m.text ?? '').trim().isEmpty && m.html != null ? MailHtml(html: m.html!) : FoldedText(text: m.text ?? '');
     return MouseRegion(
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
       child: AnimatedContainer(
-        duration: Motion.quick,
-        margin: EdgeInsets.only(top: widget.continued ? 2 : 12),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(color: _hover ? palette.hover : null, borderRadius: BorderRadius.circular(Corner.control)),
+        duration: Durations.short3,
+        margin: EdgeInsets.only(top: widget.continued ? 0 : 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: _hover ? colors.surfaceContainerLow : Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+        ),
         child: Stack(
           children: [
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 SizedBox(
-                  width: 44,
+                  width: 56,
                   child: widget.continued
                       ? Padding(
-                          padding: const EdgeInsets.only(top: 3),
+                          padding: const EdgeInsets.only(top: 4),
                           child: AnimatedOpacity(
                             opacity: _hover ? 1 : 0,
-                            duration: Motion.quick,
-                            child: Text(messageTime(m.date), style: uiText(TextSize.micro, palette.faint)),
+                            duration: Durations.short3,
+                            child: Text(messageTime(m.date), style: text.labelSmall?.copyWith(color: colors.outline)),
                           ),
                         )
-                      : Align(alignment: Alignment.topLeft, child: InitialsAvatar(address: m.sender, size: 34)),
+                      : Align(alignment: Alignment.topLeft, child: InitialsAvatar(address: m.sender)),
                 ),
                 Expanded(
                   child: Column(
@@ -645,10 +612,10 @@ class _ChatMessageState extends State<_ChatMessage> {
                     children: [
                       if (!widget.continued)
                         Padding(
-                          padding: const EdgeInsets.only(bottom: 3),
+                          padding: const EdgeInsets.only(bottom: 4),
                           child: Text.rich(TextSpan(children: [
-                            TextSpan(text: m.sender.displayName, style: uiText(TextSize.headline, palette.text, weight: FontWeight.w600)),
-                            TextSpan(text: '  ${messageTime(m.date)}', style: uiText(TextSize.footnote, palette.faint)),
+                            TextSpan(text: m.sender.displayName, style: text.titleSmall),
+                            TextSpan(text: '  ${messageTime(m.date)}', style: text.labelSmall?.copyWith(color: colors.onSurfaceVariant)),
                           ])),
                         ),
                       body,
@@ -656,7 +623,7 @@ class _ChatMessageState extends State<_ChatMessage> {
                         Padding(
                           padding: const EdgeInsets.only(top: 8),
                           child: Wrap(spacing: 8, runSpacing: 8, children: [
-                            for (final a in m.attachments) _AttachmentTile(attachment: a, onOpen: () => widget.state.openFile(a.path)),
+                            for (final a in m.attachments) _AttachmentChip(attachment: a, onOpen: () => widget.state.openFile(a.path)),
                           ]),
                         ),
                     ],
@@ -672,17 +639,14 @@ class _ChatMessageState extends State<_ChatMessage> {
                 ignoring: !_hover,
                 child: AnimatedOpacity(
                   opacity: _hover ? 1 : 0,
-                  duration: Motion.quick,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: palette.page,
-                      borderRadius: BorderRadius.circular(Corner.control),
-                      border: Border.all(color: palette.line, width: 0.5),
-                      boxShadow: Shadows.raised,
-                    ),
+                  duration: Durations.short3,
+                  child: Material(
+                    color: colors.surfaceContainerHigh,
+                    elevation: 1,
+                    shape: const StadiumBorder(),
                     child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      HoverIconButton(icon: Icons.reply_rounded, tooltip: 'Reply', size: 26, iconSize: 15, onPressed: () => widget.onReply()),
-                      HoverIconButton(icon: Icons.reply_all_rounded, tooltip: 'Reply All', size: 26, iconSize: 15, onPressed: () => widget.onReply(all: true)),
+                      IconButton(tooltip: 'Reply', icon: const Icon(Icons.reply, size: 20), onPressed: () => widget.onReply()),
+                      IconButton(tooltip: 'Reply all', icon: const Icon(Icons.reply_all, size: 20), onPressed: () => widget.onReply(all: true)),
                     ]),
                   ),
                 ),
@@ -697,35 +661,33 @@ class _ChatMessageState extends State<_ChatMessage> {
 
 // MARK: - Reply
 
-class _ReplyDock extends StatelessWidget {
-  const _ReplyDock({required this.onReply, required this.onReplyAll});
+class _ReplyBar extends StatelessWidget {
+  const _ReplyBar({required this.onReply, required this.onReplyAll});
 
   final VoidCallback onReply;
   final VoidCallback onReplyAll;
 
+  /// A floating toolbar: raised over the conversation it scrolls above.
   @override
-  Widget build(BuildContext context) {
-    final palette = context.palette;
-    return Center(
-      child: Container(
-        padding: const EdgeInsets.all(4),
-        decoration: BoxDecoration(
-          color: palette.page,
-          borderRadius: BorderRadius.circular(19),
-          border: Border.all(color: palette.line, width: 0.5),
-          boxShadow: Shadows.floating,
-        ),
+  Widget build(BuildContext context) => Center(
+    child: Material(
+      color: context.colors.surfaceContainer,
+      elevation: 3,
+      shadowColor: context.colors.shadow,
+      shape: const StadiumBorder(),
+      child: Padding(
+        padding: const EdgeInsets.all(8),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          PillButton(label: 'Reply', icon: Icons.reply_rounded, onPressed: onReply),
-          const SizedBox(width: 4),
-          PillButton(label: 'Reply All', icon: Icons.reply_all_rounded, onPressed: onReplyAll),
+          FilledButton.icon(onPressed: onReply, icon: const Icon(Icons.reply), label: const Text('Reply')),
+          const SizedBox(width: 8),
+          FilledButton.tonalIcon(onPressed: onReplyAll, icon: const Icon(Icons.reply_all), label: const Text('Reply all')),
         ]),
       ),
-    );
-  }
+    ),
+  );
 }
 
-/// The inline composer the pill unfolds into. The app plans recipients and quotes the original;
+/// The inline composer the reply buttons open. The app plans recipients and quotes the original;
 /// this shows who it goes to from what is loaded.
 class _Composer extends StatefulWidget {
   const _Composer({
@@ -803,7 +765,8 @@ class _ComposerState extends State<_Composer> {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.palette;
+    final colors = context.colors;
+    final text = context.text;
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.enter, meta: true): _send,
@@ -815,58 +778,63 @@ class _ComposerState extends State<_Composer> {
           }
         },
       },
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
-        decoration: BoxDecoration(
-          color: palette.page,
-          borderRadius: BorderRadius.circular(Corner.panel),
-          border: Border.all(color: palette.line, width: 0.5),
-          boxShadow: Shadows.floating,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(children: [
-              Icon(widget.all ? Icons.reply_all_rounded : Icons.reply_rounded, size: 15, color: palette.muted),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text.rich(
-                  TextSpan(children: [
-                    TextSpan(text: 'To ', style: uiText(TextSize.footnote, palette.muted)),
-                    TextSpan(text: _recipients, style: uiText(TextSize.footnote, palette.text, weight: FontWeight.w500)),
-                  ]),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+      child: Card(
+        elevation: 3,
+        color: colors.surfaceContainerHigh,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 12, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(children: [
+                Icon(widget.all ? Icons.reply_all : Icons.reply, size: 20, color: colors.onSurfaceVariant),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text.rich(
+                    TextSpan(children: [
+                      TextSpan(text: 'To  ', style: TextStyle(color: colors.onSurfaceVariant)),
+                      TextSpan(text: _recipients),
+                    ]),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: text.bodyMedium,
+                  ),
                 ),
+                IconButton(
+                  tooltip: widget.all ? 'Reply to sender only' : 'Reply all',
+                  icon: Icon(widget.all ? Icons.reply : Icons.reply_all),
+                  onPressed: () => widget.onAll(!widget.all),
+                ),
+                IconButton(tooltip: 'Discard', icon: const Icon(Icons.delete_outline), onPressed: _discard),
+              ]),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _text,
+                focusNode: _focus,
+                autofocus: true,
+                minLines: 3,
+                maxLines: 12,
+                style: text.bodyLarge,
+                decoration: const InputDecoration(hintText: 'Write a reply', border: OutlineInputBorder()),
               ),
-              HoverIconButton(
-                icon: widget.all ? Icons.reply_rounded : Icons.reply_all_rounded,
-                tooltip: widget.all ? 'Reply' : 'Reply All',
-                onPressed: () => widget.onAll(!widget.all),
-              ),
-              HoverIconButton(icon: Icons.delete_outline_rounded, tooltip: 'Discard', onPressed: _discard),
-            ]),
-            const SizedBox(height: 4),
-            TextField(
-              controller: _text,
-              focusNode: _focus,
-              autofocus: true,
-              minLines: 3,
-              maxLines: 12,
-              cursorColor: palette.accent,
-              style: uiText(TextSize.reading, palette.text, height: 1.45),
-              decoration: InputDecoration.collapsed(hintText: 'Write a reply…', hintStyle: uiText(TextSize.reading, palette.faint)),
-            ),
-            const SizedBox(height: 8),
-            Row(children: [
-              Text('Quotes the original below your text', style: uiText(TextSize.caption, palette.faint)),
-              const Spacer(),
-              Text('⌘ Return', style: uiText(TextSize.caption, palette.faint)),
-              const SizedBox(width: 8),
-              PillButton(label: _sending ? 'Sending…' : 'Send', icon: Icons.arrow_upward_rounded, primary: true, onPressed: _sending ? null : _send),
-            ]),
-          ],
+              const SizedBox(height: 12),
+              Row(children: [
+                Expanded(
+                  child: Text('The original is quoted below your text.  ⌘ Return sends.',
+                      style: text.bodySmall?.copyWith(color: colors.onSurfaceVariant)),
+                ),
+                FilledButton.icon(
+                  onPressed: _sending ? null : _send,
+                  icon: _sending
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.send),
+                  label: Text(_sending ? 'Sending' : 'Send'),
+                ),
+              ]),
+            ],
+          ),
         ),
       ),
     );

@@ -4,7 +4,7 @@ import 'package:flutter/services.dart';
 import '../backend/models.dart';
 import 'design.dart';
 
-/// Initials on the sender's stable color (`Avatar`).
+/// A sender's initial on their stable tonal color.
 class InitialsAvatar extends StatelessWidget {
   const InitialsAvatar({super.key, required this.address, this.size = ListMetrics.avatarSize});
 
@@ -13,174 +13,58 @@ class InitialsAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: size,
-      height: size,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(color: avatarColor(address.email, context.brightness), shape: BoxShape.circle),
+    final colors = avatarColors(address.email, context.brightness);
+    return CircleAvatar(
+      radius: size / 2,
+      backgroundColor: colors.background,
       child: Text(
         address.initials,
-        style: TextStyle(color: Colors.white, fontSize: size * 0.43, fontWeight: FontWeight.w600, height: 1),
+        style: TextStyle(color: colors.foreground, fontSize: size * 0.42, fontWeight: FontWeight.w500, height: 1),
       ),
     );
   }
 }
 
-/// A symbol in the avatar slot: bundles and automated senders.
-class SymbolAvatar extends StatelessWidget {
-  const SymbolAvatar({super.key, required this.icon, required this.color, this.size = ListMetrics.avatarSize});
+/// An icon in the avatar slot: Smart Inbox bundles.
+class IconAvatar extends StatelessWidget {
+  const IconAvatar({super.key, required this.icon, required this.background, required this.foreground, this.size = ListMetrics.avatarSize});
 
   final IconData icon;
-  final Color color;
+  final Color background;
+  final Color foreground;
   final double size;
 
   @override
-  Widget build(BuildContext context) => Container(
-    width: size,
-    height: size,
-    decoration: BoxDecoration(color: color.withValues(alpha: 0.14), shape: BoxShape.circle),
-    child: Icon(icon, size: size * 0.55, color: color),
+  Widget build(BuildContext context) => CircleAvatar(
+    radius: size / 2,
+    backgroundColor: background,
+    child: Icon(icon, size: size * 0.5, color: foreground),
   );
 }
 
-/// An icon button with the house hover fill.
-class HoverIconButton extends StatefulWidget {
-  const HoverIconButton({
-    super.key,
-    required this.icon,
-    required this.tooltip,
-    required this.onPressed,
-    this.color,
-    this.size = 28,
-    this.iconSize = 17,
-  });
-
-  final IconData icon;
-  final String tooltip;
-  final VoidCallback? onPressed;
-  final Color? color;
-  final double size;
-  final double iconSize;
-
-  @override
-  State<HoverIconButton> createState() => _HoverIconButtonState();
-}
-
-class _HoverIconButtonState extends State<HoverIconButton> {
-  bool _hover = false;
-  bool _down = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = context.palette;
-    final enabled = widget.onPressed != null;
-    return Tooltip(
-      message: widget.tooltip,
-      waitDuration: const Duration(milliseconds: 600),
-      child: MouseRegion(
-        cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
-        onEnter: (_) => setState(() => _hover = true),
-        onExit: (_) => setState(() => _hover = _down = false),
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapDown: (_) => setState(() => _down = true),
-          onTapCancel: () => setState(() => _down = false),
-          onTapUp: (_) => setState(() => _down = false),
-          onTap: widget.onPressed,
-          child: AnimatedContainer(
-            duration: Motion.quick,
-            width: widget.size,
-            height: widget.size,
-            decoration: BoxDecoration(
-              color: !enabled ? null : (_down ? palette.chip : (_hover ? palette.hover : null)),
-              borderRadius: BorderRadius.circular(Corner.control),
-            ),
-            child: Icon(widget.icon, size: widget.iconSize, color: enabled ? (widget.color ?? palette.muted) : palette.faint),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// A pill button: the reply dock's and the composer's.
-class PillButton extends StatefulWidget {
-  const PillButton({super.key, required this.label, required this.onPressed, this.icon, this.primary = false});
+/// A label with a colored mark: topics take a dot, accounts a bar.
+class MarkChip extends StatelessWidget {
+  const MarkChip({super.key, required this.label, this.mark, this.bar = false});
 
   final String label;
-  final IconData? icon;
-  final VoidCallback? onPressed;
-  final bool primary;
+  final Color? mark;
+  final bool bar;
 
   @override
-  State<PillButton> createState() => _PillButtonState();
-}
-
-class _PillButtonState extends State<PillButton> {
-  bool _hover = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = context.palette;
-    final enabled = widget.onPressed != null;
-    final foreground = widget.primary ? palette.onAccent : palette.text;
-    final background = widget.primary
-        ? palette.accent.withValues(alpha: enabled ? (_hover ? 0.88 : 1) : 0.45)
-        : (_hover ? palette.chip : palette.hover);
-    return MouseRegion(
-      cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() => _hover = false),
-      child: GestureDetector(
-        onTap: widget.onPressed,
-        child: AnimatedContainer(
-          duration: Motion.quick,
-          height: 30,
-          padding: const EdgeInsets.symmetric(horizontal: 14),
-          decoration: BoxDecoration(color: background, borderRadius: BorderRadius.circular(15)),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (widget.icon != null) ...[Icon(widget.icon, size: 15, color: foreground), const SizedBox(width: 6)],
-              Text(widget.label, style: uiText(TextSize.body, foreground, weight: FontWeight.w500)),
-            ],
+  Widget build(BuildContext context) => Chip(
+    visualDensity: VisualDensity.compact,
+    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    labelStyle: context.text.labelMedium?.copyWith(color: context.colors.onSurfaceVariant),
+    avatar: mark == null
+        ? null
+        : Container(
+            width: bar ? 4 : 8,
+            height: bar ? 14 : 8,
+            decoration: BoxDecoration(color: mark, borderRadius: BorderRadius.circular(bar ? 2 : 4)),
           ),
-        ),
-      ),
-    );
-  }
+    label: Text(label),
+  );
 }
-
-/// A meta chip: a topic with its dot, an account with its bar, or plain text.
-class MetaChip extends StatelessWidget {
-  const MetaChip({super.key, required this.label, this.tint, this.mark = ChipMark.none});
-
-  final String label;
-  final Color? tint;
-  final ChipMark mark;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = context.palette;
-    return Container(
-      height: 22,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      decoration: BoxDecoration(color: palette.chip, borderRadius: BorderRadius.circular(11)),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (mark == ChipMark.dot)
-            Container(width: 6, height: 6, margin: const EdgeInsets.only(right: 6), decoration: BoxDecoration(color: tint, shape: BoxShape.circle)),
-          if (mark == ChipMark.bar)
-            Container(width: 3, height: 11, margin: const EdgeInsets.only(right: 6), decoration: BoxDecoration(color: tint, borderRadius: BorderRadius.circular(1.5))),
-          Text(label, style: uiText(TextSize.footnote, mark == ChipMark.none && tint != null ? tint! : palette.muted, weight: FontWeight.w500)),
-        ],
-      ),
-    );
-  }
-}
-
-enum ChipMark { none, dot, bar }
 
 const _window = MethodChannel('mailstream/window');
 
@@ -199,22 +83,29 @@ class WindowDragArea extends StatelessWidget {
   );
 }
 
-IconData roleIcon(MailboxRole role) => switch (role) {
-  MailboxRole.inbox => Icons.inbox_outlined,
-  MailboxRole.starred => Icons.star_border_rounded,
-  MailboxRole.important => Icons.label_important_outline_rounded,
-  MailboxRole.sent => Icons.send_outlined,
-  MailboxRole.drafts => Icons.edit_note_rounded,
-  MailboxRole.archive => Icons.archive_outlined,
-  MailboxRole.all => Icons.all_inbox_outlined,
-  MailboxRole.junk => Icons.report_gmailerrorred_outlined,
-  MailboxRole.trash => Icons.delete_outline_rounded,
-  MailboxRole.other => Icons.folder_outlined,
+IconData roleIcon(MailboxRole role, {bool selected = false}) => switch (role) {
+  MailboxRole.inbox => selected ? Icons.inbox : Icons.inbox_outlined,
+  MailboxRole.starred => selected ? Icons.star : Icons.star_outline,
+  MailboxRole.important => selected ? Icons.label_important : Icons.label_important_outline,
+  MailboxRole.sent => selected ? Icons.send : Icons.send_outlined,
+  MailboxRole.drafts => selected ? Icons.insert_drive_file : Icons.insert_drive_file_outlined,
+  MailboxRole.archive => selected ? Icons.archive : Icons.archive_outlined,
+  MailboxRole.all => selected ? Icons.mail : Icons.mail_outline,
+  MailboxRole.junk => selected ? Icons.report : Icons.report_outlined,
+  MailboxRole.trash => selected ? Icons.delete : Icons.delete_outline,
+  MailboxRole.other => selected ? Icons.label : Icons.label_outline,
 };
 
 IconData categoryIcon(MailCategory category) => switch (category) {
-  MailCategory.people => Icons.people_outline_rounded,
-  MailCategory.notification => Icons.notifications_none_rounded,
-  MailCategory.newsletter => Icons.newspaper_rounded,
-  MailCategory.invitation => Icons.calendar_today_rounded,
+  MailCategory.people => Icons.people_outline,
+  MailCategory.notification => Icons.notifications_outlined,
+  MailCategory.newsletter => Icons.newspaper_outlined,
+  MailCategory.invitation => Icons.event_outlined,
+};
+
+/// A bundle's tonal pair from the scheme.
+({Color background, Color foreground}) categoryColors(MailCategory category, ColorScheme colors) => switch (category) {
+  MailCategory.newsletter => (background: colors.primaryContainer, foreground: colors.onPrimaryContainer),
+  MailCategory.invitation => (background: colors.tertiaryContainer, foreground: colors.onTertiaryContainer),
+  _ => (background: colors.secondaryContainer, foreground: colors.onSecondaryContainer),
 };

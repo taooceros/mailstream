@@ -154,7 +154,7 @@ class Conversation {
     _ => null,
   };
 
-  Conversation copyWith({bool? unread, bool? starred, bool? waiting}) => Conversation(
+  Conversation copyWith({bool? unread, bool? starred, bool? waiting, String? snippet}) => Conversation(
     id: id,
     account: account,
     subject: subject,
@@ -166,7 +166,7 @@ class Conversation {
     starred: starred ?? this.starred,
     hasAttachment: hasAttachment,
     mailboxes: mailboxes,
-    snippet: snippet,
+    snippet: snippet ?? this.snippet,
     category: category,
     waiting: waiting ?? this.waiting,
     labels: labels,

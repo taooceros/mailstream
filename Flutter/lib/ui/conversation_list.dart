@@ -83,7 +83,8 @@ String itemId(ListItem item) => switch (item) {
   SectionItem(:final title) => 'section:$title',
 };
 
-/// A lazily built list on fixed row heights: only the rows in view are built and laid out.
+/// A lazily built list on fixed row heights: only the rows in view are built and laid out. Near
+/// its end, and while it does not fill the window, it asks for the next page.
 class ConversationList extends StatefulWidget {
   const ConversationList({
     super.key,
@@ -107,10 +108,14 @@ class ConversationList extends StatefulWidget {
 class ConversationListState extends State<ConversationList> {
   final _scroll = ScrollController();
 
+  /// Distance from the end at which the next page loads.
+  static const _pagingMargin = 900.0;
+
   @override
   void initState() {
     super.initState();
     widget.highlight.addListener(_reveal);
+    _scroll.addListener(_pageIfNearEnd);
   }
 
   @override
@@ -129,6 +134,12 @@ class ConversationListState extends State<ConversationList> {
     super.dispose();
   }
 
+  void _pageIfNearEnd() {
+    if (!_scroll.hasClients || !widget.state.canLoadMore) return;
+    final position = _scroll.position;
+    if (position.maxScrollExtent - position.pixels < _pagingMargin) widget.state.loadMore();
+  }
+
   double _extent(ListItem item) => item is SectionItem ? ListMetrics.sectionHeight : ListMetrics.rowHeight;
 
   /// Keeps the keyboard highlight in view.
@@ -142,40 +153,46 @@ class ConversationListState extends State<ConversationList> {
     }
     final position = _scroll.position;
     if (top < position.pixels) {
-      _scroll.jumpTo(top - ListMetrics.sectionHeight);
+      _scroll.jumpTo((top - ListMetrics.sectionHeight).clamp(0, position.maxScrollExtent));
     } else if (top + ListMetrics.rowHeight > position.pixels + position.viewportDimension) {
-      _scroll.jumpTo(top + ListMetrics.rowHeight * 2 - position.viewportDimension);
+      _scroll.jumpTo((top + ListMetrics.rowHeight * 2 - position.viewportDimension).clamp(0, position.maxScrollExtent));
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final items = widget.items;
-    final palette = context.palette;
+    final state = widget.state;
+    // A page that folded into bundles may leave the window unfilled: ask for the next one.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _pageIfNearEnd();
+    });
     if (items.isEmpty) {
-      final loading = widget.state.isLoading;
+      if (state.isLoading || state.canLoadMore) return const Center(child: CircularProgressIndicator());
       return Center(
-        child: loading
-            ? SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: palette.faint))
-            : Text(widget.state.listError ?? widget.emptyText, style: uiText(TextSize.body, palette.muted)),
+        child: Text(state.listError ?? widget.emptyText, style: context.text.bodyLarge?.copyWith(color: context.colors.onSurfaceVariant)),
       );
     }
     final now = DateTime.now();
+    final footer = state.canLoadMore ? 1 : 0;
     return Scrollbar(
       controller: _scroll,
       child: ListView.builder(
         controller: _scroll,
-        padding: const EdgeInsets.only(top: 8, bottom: 24),
-        itemCount: items.length,
-        itemExtentBuilder: (index, _) => index < items.length ? _extent(items[index]) : null,
+        padding: const EdgeInsets.only(top: 4, bottom: 24),
+        itemCount: items.length + footer,
+        itemExtentBuilder: (index, _) => index < items.length ? _extent(items[index]) : (index == items.length && footer == 1 ? 56 : null),
         itemBuilder: (context, index) {
+          if (index == items.length) {
+            return const Center(child: SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 3)));
+          }
           final item = items[index];
           return switch (item) {
             SectionItem(:final title) => _SectionHeader(title),
             RowItem(:final conversation) => ConversationRow(
               key: ValueKey(conversation.id),
               conversation: conversation,
-              state: widget.state,
+              state: state,
               highlight: widget.highlight,
               now: now,
               onTap: () => widget.onActivate(item),
@@ -200,35 +217,83 @@ class _SectionHeader extends StatelessWidget {
   final String title;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(ListMetrics.inset + ListMetrics.senderX, 14, 0, 0),
-    child: Text(title, style: uiText(TextSize.caption, context.palette.muted, weight: FontWeight.w600)),
+  Widget build(BuildContext context) => Container(
+    alignment: Alignment.bottomLeft,
+    padding: const EdgeInsets.fromLTRB(32, 0, 16, 8),
+    child: Text(
+      title.toUpperCase(),
+      style: context.text.labelMedium?.copyWith(color: context.colors.onSurfaceVariant, fontWeight: FontWeight.w600, letterSpacing: 0.8),
+    ),
   );
 }
 
-/// The rounded row behind a line: hover fill under the pointer, keyboard highlight.
-class _RowFrame extends StatelessWidget {
-  const _RowFrame({required this.hover, required this.highlighted, required this.child});
+/// A Material list item's surface: rounded, hover and keyboard highlight as state layers.
+class _RowSurface extends StatelessWidget {
+  const _RowSurface({required this.highlighted, required this.onTap, required this.onHover, required this.child});
 
-  final bool hover;
   final bool highlighted;
+  final VoidCallback onTap;
+  final ValueChanged<bool> onHover;
   final Widget child;
 
   @override
-  Widget build(BuildContext context) {
-    final palette = context.palette;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: ListMetrics.inset),
-      child: AnimatedContainer(
-        duration: Motion.quick,
-        decoration: BoxDecoration(
-          color: highlighted ? palette.selection : (hover ? palette.hover : const Color(0x00000000)),
-          borderRadius: BorderRadius.circular(Corner.control),
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: ListMetrics.inset, vertical: 2),
+    child: Material(
+      color: highlighted ? context.colors.secondaryContainer : Colors.transparent,
+      borderRadius: BorderRadius.circular(20),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(onTap: onTap, onHover: onHover, child: child),
+    ),
+  );
+}
+
+/// The layout every row shares: an unread dot, the avatar, three lines of text, and a trailing
+/// column whose top holds the date.
+class _RowLayout extends StatelessWidget {
+  const _RowLayout({
+    required this.unread,
+    required this.avatar,
+    required this.title,
+    required this.subtitle,
+    required this.detail,
+    required this.trailing,
+  });
+
+  final bool unread;
+  final Widget avatar;
+  final Widget title;
+  final Widget subtitle;
+  final Widget detail;
+  final Widget trailing;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(4, 10, 16, 10),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 16,
+          height: ListMetrics.avatarSize,
+          child: unread
+              ? Center(child: Container(width: 8, height: 8, decoration: BoxDecoration(color: context.colors.primary, shape: BoxShape.circle)))
+              : null,
         ),
-        child: child,
-      ),
-    );
-  }
+        const SizedBox(width: 4),
+        avatar,
+        const SizedBox(width: 16),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [title, const SizedBox(height: 2), subtitle, const SizedBox(height: 2), detail],
+          ),
+        ),
+        const SizedBox(width: 12),
+        trailing,
+      ],
+    ),
+  );
 }
 
 class ConversationRow extends StatefulWidget {
@@ -257,8 +322,9 @@ class _ConversationRowState extends State<ConversationRow> {
   /// Resting on a row for 80 ms loads the conversation, so opening it renders the bodies at once.
   Future<void>? _rest;
 
-  void _enter() {
-    setState(() => _hover = true);
+  void _hovered(bool hover) {
+    setState(() => _hover = hover);
+    if (!hover) return;
     final rest = _rest = Future.delayed(const Duration(milliseconds: 80));
     rest.then((_) {
       if (mounted && _hover && identical(rest, _rest)) widget.state.prefetch(widget.conversation);
@@ -269,184 +335,157 @@ class _ConversationRowState extends State<ConversationRow> {
   Widget build(BuildContext context) {
     final c = widget.conversation;
     final state = widget.state;
-    final palette = context.palette;
-    final brightness = context.brightness;
+    final colors = context.colors;
+    final text = context.text;
     final person = c.from ?? const Address(email: '?');
     final subject = splitSubject(c.subject);
     final topic = c.labels.firstOrNull;
-    final senderStyle = uiText(TextSize.body, palette.text, weight: c.unread ? FontWeight.w600 : FontWeight.w400);
     final senders = c.participants.isEmpty ? person.displayName : c.participants.join(', ');
-    final accountColor = accountPalette[state.accountIndex(c.account) % accountPalette.length];
     final archivable = state.selection.role == MailboxRole.inbox || c.mailboxes.contains(MailboxRole.inbox);
+    final snippet = (c.snippet ?? '').trim();
+
+    // The date column stays; on hover the actions float over the row's end on a raised pill.
+    final trailing = Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Row(mainAxisSize: MainAxisSize.min, children: [
+          if (c.hasAttachment) Padding(padding: const EdgeInsets.only(right: 6), child: Icon(Icons.attach_file, size: 14, color: colors.outline)),
+          if (state.accounts.length > 1)
+            Container(
+              margin: const EdgeInsets.only(right: 8),
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(color: accountPalette[state.accountIndex(c.account) % accountPalette.length], shape: BoxShape.circle),
+            ),
+          Text(
+            listDate(c.date, widget.now),
+            style: text.labelMedium?.copyWith(
+              color: c.unread ? colors.primary : colors.onSurfaceVariant,
+              fontWeight: c.unread ? FontWeight.w700 : FontWeight.w500,
+            ),
+          ),
+        ]),
+        const SizedBox(height: 8),
+        if (c.starred) const Icon(Icons.star_rounded, size: 20, color: Color(0xFFF4B400)),
+      ],
+    );
+    final actions = Material(
+      color: colors.surfaceContainerHigh,
+      elevation: 2,
+      shadowColor: colors.shadow,
+      shape: const StadiumBorder(),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (c.waiting) IconButton(tooltip: 'Done', icon: const Icon(Icons.task_alt), onPressed: () => state.resolveWaiting(c)),
+          if (archivable) IconButton(tooltip: 'Archive', icon: const Icon(Icons.archive_outlined), onPressed: () => state.archive(c)),
+          IconButton(tooltip: 'Delete', icon: const Icon(Icons.delete_outline), onPressed: () => state.trash(c)),
+          IconButton(
+            tooltip: c.unread ? 'Mark as read' : 'Mark as unread',
+            icon: Icon(c.unread ? Icons.drafts_outlined : Icons.mark_email_unread_outlined),
+            onPressed: () => state.setRead(c, read: c.unread),
+          ),
+          IconButton(
+            tooltip: c.starred ? 'Unstar' : 'Star',
+            icon: Icon(c.starred ? Icons.star_rounded : Icons.star_outline_rounded, color: c.starred ? const Color(0xFFF4B400) : null),
+            onPressed: () => state.setStarred(c, starred: !c.starred),
+          ),
+        ]),
+      ),
+    );
 
     return ListenableBuilder(
       listenable: widget.highlight,
-      builder: (context, _) => MouseRegion(
-        onEnter: (_) => _enter(),
-        onExit: (_) => setState(() => _hover = false),
-        cursor: SystemMouseCursors.basic,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: widget.onTap,
-          child: _RowFrame(
-            hover: _hover,
-            highlighted: widget.highlight.id == c.id,
-            child: Stack(
-              children: [
-                if (c.unread)
-                  Positioned(
-                    left: ListMetrics.dotX - 3.5,
-                    top: ListMetrics.rowHeight / 2 - 3.5,
-                    child: Container(width: 7, height: 7, decoration: BoxDecoration(color: palette.accent, shape: BoxShape.circle)),
-                  ),
-                Positioned(
-                  left: ListMetrics.senderX,
-                  top: (ListMetrics.rowHeight - 26) / 2,
-                  child: InitialsAvatar(address: person, size: 26),
-                ),
-                Positioned(
-                  left: ListMetrics.nameX,
-                  width: ListMetrics.senderX + ListMetrics.senderWidth - ListMetrics.nameX,
-                  top: 0,
-                  bottom: 0,
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text.rich(
-                      TextSpan(children: [
-                        TextSpan(text: senders, style: senderStyle),
-                        if (c.messageCount > 1)
-                          TextSpan(text: '  ${c.messageCount}', style: uiText(TextSize.caption, palette.faint, weight: FontWeight.w500)),
-                      ]),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ),
-                Positioned(
-                  left: ListMetrics.subjectX,
-                  right: ListMetrics.trailingInset,
-                  top: 0,
-                  bottom: 0,
-                  child: Row(
-                    children: [
-                      if (c.waiting)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 6),
-                          child: Icon(Icons.reply_rounded, size: 14, color: palette.waiting),
-                        ),
-                      Expanded(
-                        child: Text.rich(
-                          TextSpan(children: [
-                            if (subject.tag.isNotEmpty) TextSpan(text: '${subject.tag} ', style: uiText(TextSize.footnote, palette.faint)),
-                            TextSpan(
-                              text: subject.title,
-                              style: uiText(TextSize.body, c.unread ? palette.text : palette.text.withValues(alpha: palette.text.a * 0.8),
-                                  weight: c.unread ? FontWeight.w500 : FontWeight.w400),
-                            ),
-                            if ((c.snippet ?? '').isNotEmpty)
-                              TextSpan(
-                                text: '   ${c.snippet!.length > 160 ? c.snippet!.substring(0, 160) : c.snippet}',
-                                style: uiText(TextSize.body, palette.muted.withValues(alpha: palette.muted.a * 0.75)),
-                              ),
-                          ]),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      // The pill is wider than the date: everything it covers fades with it.
-                      AnimatedOpacity(
-                        opacity: _hover ? 0 : 1,
-                        duration: Motion.quick,
-                        child: Row(mainAxisSize: MainAxisSize.min, children: [
-                          if (c.hasAttachment) Padding(padding: const EdgeInsets.only(left: 6), child: Icon(Icons.attach_file_rounded, size: 13, color: palette.faint)),
-                          if (topic != null) ...[
-                            const SizedBox(width: 10),
-                            Container(width: 6, height: 6, decoration: BoxDecoration(color: topicColor(topic, brightness), shape: BoxShape.circle)),
-                            const SizedBox(width: 5),
-                            Text(topic, style: uiText(TextSize.footnote, palette.muted)),
-                          ],
-                          if (c.starred) Padding(padding: const EdgeInsets.only(left: 8), child: Icon(Icons.star_rounded, size: 14, color: palette.star)),
-                          SizedBox(
-                            width: ListMetrics.dateWidth + 6,
-                            child: Text(listDate(c.date, widget.now), textAlign: TextAlign.right, style: uiText(TextSize.footnote, palette.muted)),
-                          ),
-                        ]),
-                      ),
-                    ],
-                  ),
-                ),
-                // Hovering cross-fades the date into the action pill.
-                Positioned(
-                  right: ListMetrics.trailingInset - 6,
-                  top: (ListMetrics.rowHeight - 30) / 2,
-                  child: IgnorePointer(
-                    ignoring: !_hover,
-                    child: AnimatedOpacity(
-                      opacity: _hover ? 1 : 0,
-                      duration: Motion.quick,
-                      child: _ActionPill(children: [
-                        if (c.waiting)
-                          HoverIconButton(icon: Icons.task_alt_rounded, tooltip: 'Done (no longer waiting)', color: palette.waiting, size: 24, iconSize: 15, onPressed: () => state.resolveWaiting(c)),
-                        if (archivable) HoverIconButton(icon: Icons.archive_outlined, tooltip: 'Archive', size: 24, iconSize: 15, onPressed: () => state.archive(c)),
-                        HoverIconButton(icon: Icons.delete_outline_rounded, tooltip: 'Trash', size: 24, iconSize: 15, onPressed: () => state.trash(c)),
-                        HoverIconButton(
-                          icon: c.unread ? Icons.mark_email_read_outlined : Icons.mark_email_unread_outlined,
-                          tooltip: c.unread ? 'Mark Read' : 'Mark Unread',
-                          size: 24,
-                          iconSize: 15,
-                          onPressed: () => state.setRead(c, read: c.unread),
-                        ),
-                        HoverIconButton(
-                          icon: c.starred ? Icons.star_rounded : Icons.star_border_rounded,
-                          tooltip: c.starred ? 'Unstar' : 'Star',
-                          color: c.starred ? palette.star : null,
-                          size: 24,
-                          iconSize: 15,
-                          onPressed: () => state.setStarred(c, starred: !c.starred),
-                        ),
-                      ]),
-                    ),
-                  ),
-                ),
-                if (state.accounts.length > 1)
-                  Positioned(
-                    right: 3,
-                    top: (ListMetrics.rowHeight - 14) / 2,
-                    child: Container(width: 3, height: 14, decoration: BoxDecoration(color: accountColor, borderRadius: BorderRadius.circular(1.5))),
-                  ),
-              ],
+      builder: (context, _) => _RowSurface(
+        highlighted: widget.highlight.id == c.id,
+        onTap: widget.onTap,
+        onHover: _hovered,
+        child: Stack(children: [
+          _RowLayout(
+          unread: c.unread,
+          avatar: InitialsAvatar(address: person),
+          title: Row(children: [
+            Flexible(
+              child: Text(
+                senders,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: text.titleSmall?.copyWith(fontSize: 15, color: colors.onSurface, fontWeight: c.unread ? FontWeight.w700 : FontWeight.w500),
+              ),
+            ),
+            if (c.messageCount > 1)
+              Padding(
+                padding: const EdgeInsets.only(left: 6),
+                child: Text('${c.messageCount}', style: text.labelMedium?.copyWith(color: colors.onSurfaceVariant)),
+              ),
+            if (c.waiting)
+              Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: Tooltip(message: 'Waiting on you', child: Icon(Icons.reply_rounded, size: 16, color: colors.tertiary)),
+              ),
+          ]),
+          subtitle: Row(children: [
+            Flexible(
+              child: Text.rich(
+                TextSpan(children: [
+                  if (subject.tag.isNotEmpty) TextSpan(text: '${subject.tag} ', style: TextStyle(color: colors.outline, fontWeight: FontWeight.w400)),
+                  TextSpan(text: subject.title.isEmpty ? '(no subject)' : subject.title),
+                ]),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: text.bodyMedium?.copyWith(color: colors.onSurface, fontWeight: c.unread ? FontWeight.w600 : FontWeight.w400),
+              ),
+            ),
+            if (topic != null) ...[
+              const SizedBox(width: 8),
+              _TopicLabel(topic),
+            ],
+          ]),
+          detail: Text(
+            snippet.isEmpty ? ' ' : snippet,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: text.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
+          ),
+          trailing: trailing,
+          ),
+          Positioned(
+            right: 12,
+            top: 0,
+            bottom: 0,
+            child: Center(
+              child: IgnorePointer(
+                ignoring: !_hover,
+                child: AnimatedOpacity(opacity: _hover ? 1 : 0, duration: Durations.short3, child: actions),
+              ),
             ),
           ),
-        ),
+        ]),
       ),
     );
   }
 }
 
-class _ActionPill extends StatelessWidget {
-  const _ActionPill({required this.children});
+class _TopicLabel extends StatelessWidget {
+  const _TopicLabel(this.topic);
 
-  final List<Widget> children;
+  final String topic;
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.palette;
+    final color = topicColor(topic, context.brightness);
     return Container(
-      height: 30,
-      padding: const EdgeInsets.symmetric(horizontal: 3),
-      decoration: BoxDecoration(
-        color: palette.page,
-        borderRadius: BorderRadius.circular(15),
-        border: Border.all(color: palette.line, width: 0.5),
-        boxShadow: Shadows.raised,
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: children),
+      height: 20,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(10)),
+      child: Text(topic, style: context.text.labelSmall?.copyWith(color: color, fontWeight: FontWeight.w600)),
     );
   }
 }
 
-/// A Smart Inbox bundle: its category, how many, who and what's newest.
-class BundleRow extends StatefulWidget {
+/// A Smart Inbox bundle: its category, how many unread, who and what's newest.
+class BundleRow extends StatelessWidget {
   const BundleRow({super.key, required this.bundle, required this.highlight, required this.now, required this.onTap});
 
   final BundleItem bundle;
@@ -455,102 +494,60 @@ class BundleRow extends StatefulWidget {
   final VoidCallback onTap;
 
   @override
-  State<BundleRow> createState() => _BundleRowState();
-}
-
-class _BundleRowState extends State<BundleRow> {
-  bool _hover = false;
-
-  @override
   Widget build(BuildContext context) {
-    final palette = context.palette;
-    final items = widget.bundle.conversations;
+    final colors = context.colors;
+    final text = context.text;
+    final items = bundle.conversations;
     final unread = items.where((c) => c.unread).length;
     final seen = <String>{};
     final senders = [for (final c in items) if (seen.add(c.from?.displayName ?? '')) c.from?.displayName ?? '']
         .where((s) => s.isNotEmpty)
-        .take(4)
+        .take(5)
         .join(', ');
-    final color = switch (widget.bundle.category) {
-      MailCategory.newsletter => palette.accent,
-      MailCategory.invitation => palette.success,
-      _ => palette.waiting,
-    };
+    final tone = categoryColors(bundle.category, colors);
     return ListenableBuilder(
-      listenable: widget.highlight,
-      builder: (context, _) => MouseRegion(
-        onEnter: (_) => setState(() => _hover = true),
-        onExit: (_) => setState(() => _hover = false),
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: widget.onTap,
-          child: _RowFrame(
-            hover: _hover,
-            highlighted: widget.highlight.id == itemId(widget.bundle),
-            child: Stack(
-              children: [
-                if (unread > 0)
-                  Positioned(
-                    left: ListMetrics.dotX - 3.5,
-                    top: ListMetrics.rowHeight / 2 - 3.5,
-                    child: Container(width: 7, height: 7, decoration: BoxDecoration(color: palette.accent, shape: BoxShape.circle)),
-                  ),
-                Positioned(
-                  left: ListMetrics.senderX,
-                  top: (ListMetrics.rowHeight - 26) / 2,
-                  child: SymbolAvatar(icon: categoryIcon(widget.bundle.category), color: color, size: 26),
-                ),
-                Positioned(
-                  left: ListMetrics.nameX,
-                  width: ListMetrics.senderX + ListMetrics.senderWidth - ListMetrics.nameX,
-                  top: 0,
-                  bottom: 0,
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: Row(
-                      children: [
-                        Text(widget.bundle.category.title, style: uiText(TextSize.body, palette.text, weight: unread > 0 ? FontWeight.w600 : FontWeight.w500)),
-                        const SizedBox(width: 6),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                          decoration: BoxDecoration(
-                            color: unread > 0 ? palette.accent.withValues(alpha: 0.12) : palette.chip,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            '${unread > 0 ? unread : items.length}',
-                            style: uiText(TextSize.caption, unread > 0 ? palette.accent : palette.muted, weight: FontWeight.w600),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                Positioned(
-                  left: ListMetrics.subjectX,
-                  right: ListMetrics.trailingInset,
-                  top: 0,
-                  bottom: 0,
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text.rich(
-                          TextSpan(children: [
-                            TextSpan(text: senders, style: uiText(TextSize.body, palette.text, weight: FontWeight.w500)),
-                            TextSpan(text: '   ${splitSubject(items.first.subject).title}', style: uiText(TextSize.body, palette.muted)),
-                          ]),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      SizedBox(
-                        width: ListMetrics.dateWidth + 6,
-                        child: Text(listDate(items.first.date, widget.now), textAlign: TextAlign.right, style: uiText(TextSize.footnote, palette.muted)),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+      listenable: highlight,
+      builder: (context, _) => _RowSurface(
+        highlighted: highlight.id == itemId(bundle),
+        onTap: onTap,
+        onHover: (_) {},
+        child: _RowLayout(
+          unread: unread > 0,
+          avatar: IconAvatar(icon: categoryIcon(bundle.category), background: tone.background, foreground: tone.foreground),
+          title: Row(children: [
+            Text(
+              bundle.category.title,
+              style: text.titleSmall?.copyWith(fontSize: 15, color: colors.onSurface, fontWeight: unread > 0 ? FontWeight.w700 : FontWeight.w500),
+            ),
+            const SizedBox(width: 8),
+            Container(
+              height: 20,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(color: tone.background, borderRadius: BorderRadius.circular(10)),
+              child: Text(
+                unread > 0 ? '$unread new' : '${items.length}',
+                style: text.labelSmall?.copyWith(color: tone.foreground, fontWeight: FontWeight.w700),
+              ),
+            ),
+          ]),
+          subtitle: Text(
+            senders,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: text.bodyMedium?.copyWith(color: colors.onSurface, fontWeight: unread > 0 ? FontWeight.w600 : FontWeight.w400),
+          ),
+          detail: Text(
+            splitSubject(items.first.subject).title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: text.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
+          ),
+          trailing: Text(
+            listDate(items.first.date, now),
+            style: text.labelMedium?.copyWith(
+              color: unread > 0 ? colors.primary : colors.onSurfaceVariant,
+              fontWeight: unread > 0 ? FontWeight.w700 : FontWeight.w500,
             ),
           ),
         ),
