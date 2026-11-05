@@ -312,11 +312,18 @@ class ConversationRow extends StatefulWidget {
 class _ConversationRowState extends State<ConversationRow> {
   bool _hover = false;
 
+  /// Whether the hover actions are built: from the hover until they have faded out. Rows
+  /// without them build a fraction of the widgets, which keeps scrolling cheap.
+  bool _actions = false;
+
   /// Resting on a row for 80 ms loads the conversation, so opening it renders the bodies at once.
   Future<void>? _rest;
 
   void _hovered(bool hover) {
-    setState(() => _hover = hover);
+    setState(() {
+      _hover = hover;
+      if (hover) _actions = true;
+    });
     if (!hover) return;
     final rest = _rest = Future.delayed(const Duration(milliseconds: 80));
     rest.then((_) {
@@ -354,7 +361,7 @@ class _ConversationRowState extends State<ConversationRow> {
     ]);
 
     // On hover the actions float over the row's end on a raised pill.
-    final actions = Material(
+    Widget actions() => Material(
       color: colors.surfaceContainerHigh,
       elevation: 2,
       shadowColor: colors.shadow,
@@ -428,17 +435,27 @@ class _ConversationRowState extends State<ConversationRow> {
               if (c.starred) const Padding(padding: EdgeInsets.only(left: 6), child: Icon(Icons.star_rounded, size: 16, color: Color(0xFFF4B400))),
             ],
           ),
-          Positioned(
-            right: 8,
-            top: 0,
-            bottom: 0,
-            child: Center(
-              child: IgnorePointer(
-                ignoring: !_hover,
-                child: AnimatedOpacity(opacity: _hover ? 1 : 0, duration: Durations.short3, child: actions),
+          if (_actions)
+            Positioned(
+              right: 8,
+              top: 0,
+              bottom: 0,
+              child: Center(
+                child: IgnorePointer(
+                  ignoring: !_hover,
+                  // Starts from transparent when first built, so the pill still fades in.
+                  child: TweenAnimationBuilder<double>(
+                    tween: Tween(begin: 0, end: _hover ? 1 : 0),
+                    duration: Durations.short3,
+                    onEnd: () {
+                      if (mounted && !_hover) setState(() => _actions = false);
+                    },
+                    builder: (context, opacity, child) => Opacity(opacity: opacity, child: child),
+                    child: actions(),
+                  ),
+                ),
               ),
             ),
-          ),
         ]),
       ),
     );

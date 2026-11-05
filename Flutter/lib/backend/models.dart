@@ -1,6 +1,7 @@
 /// The window's values, made from the engine's typed answers (`package:mailstream`).
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:mailstream/mailstream.dart' as engine;
 
 enum MailboxRole { inbox, starred, important, sent, drafts, archive, all, junk, trash, other }
@@ -154,6 +155,25 @@ class Conversation {
     MailCategory.notification || MailCategory.newsletter || MailCategory.invitation when !waiting => category,
     _ => null,
   };
+
+  /// Whether `other` shows the same: a re-read that changed nothing keeps the row it had.
+  bool sameAs(Conversation other) =>
+      id == other.id &&
+      account == other.account &&
+      subject == other.subject &&
+      date == other.date &&
+      from?.email == other.from?.email &&
+      from?.name == other.from?.name &&
+      listEquals(participants, other.participants) &&
+      messageCount == other.messageCount &&
+      unread == other.unread &&
+      starred == other.starred &&
+      hasAttachment == other.hasAttachment &&
+      setEquals(mailboxes, other.mailboxes) &&
+      snippet == other.snippet &&
+      category == other.category &&
+      waiting == other.waiting &&
+      listEquals(labels, other.labels);
 
   Conversation copyWith({bool? unread, bool? starred, bool? waiting, String? snippet}) => Conversation(
     id: id,

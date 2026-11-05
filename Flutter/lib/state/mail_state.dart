@@ -297,8 +297,9 @@ class MailState extends ChangeNotifier {
   static List<Conversation> _decode(engine.Listing listing) => listing.conversations.map(Conversation.of).toList();
 
   /// The first page. A refresh keeps the older pages already loaded below it: their cursor still
-  /// points past them. `quiet` (a change the engine reported) shows no progress and reads what
-  /// the engine holds rather than asking the providers again.
+  /// points past them. `quiet` (a change the engine reported) shows no progress, reads what the
+  /// engine holds rather than asking the providers again, and leaves the window alone when
+  /// nothing it shows changed.
   Future<void> _fetch(Selection target, {bool quiet = false}) async {
     final entry = _lists[target.key] ??= ListEntry();
     final generation = ++entry.generation;
@@ -306,31 +307,56 @@ class MailState extends ChangeNotifier {
       entry.loading = true;
       notifyListeners();
     }
+    var changed = !quiet;
     try {
       final listing = await mail.list(query: target.query(limit: pageSize, cached: quiet));
       if (generation != entry.generation) return;
-      final page = _decode(listing);
+      final known = {for (final c in entry.items) c.id: c};
+      final page = [for (final c in _decode(listing)) _keep(known[c.id], c)];
       final ids = {for (final c in page) c.id};
       final oldest = page.lastOrNull?.date;
       final kept = oldest == null
           ? const <Conversation>[]
           : entry.items.where((c) => !ids.contains(c.id) && c.date != null && c.date!.isBefore(oldest)).toList();
-      entry
-        ..items = [...page, ...kept]
-        ..next = kept.isEmpty ? listing.next : entry.next
-        ..fetchedAt = DateTime.now()
-        ..error = listing.failures.isEmpty ? null : listing.failures.join('\n');
+      final items = [...page, ...kept];
+      final next = kept.isEmpty ? listing.next : entry.next;
+      final error = listing.failures.isEmpty ? null : listing.failures.join('\n');
+      changed |= next != entry.next || error != entry.error || !_sameRows(items, entry.items);
+      if (changed) {
+        entry
+          ..items = items
+          ..next = next
+          ..error = error;
+      }
+      entry.fetchedAt = DateTime.now();
       _loadPreviews(page);
       _loadAvatars(page);
     } on engine.MailException catch (error) {
       if (generation != entry.generation) return;
+      changed |= entry.error != describe(error);
       entry.error = describe(error);
     } finally {
       if (generation == entry.generation) {
         entry.loading = false;
-        notifyListeners();
+        if (changed) notifyListeners();
       }
     }
+  }
+
+  /// `fresh`, with the preview `old` has when the listing lacks one; `old` itself when that
+  /// shows the same, so the row keeps its instance.
+  static Conversation _keep(Conversation? old, Conversation fresh) {
+    if (old == null) return fresh;
+    final filled = fresh.snippet == null && old.snippet != null ? fresh.copyWith(snippet: old.snippet) : fresh;
+    return old.sameAs(filled) ? old : filled;
+  }
+
+  static bool _sameRows(List<Conversation> a, List<Conversation> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (!identical(a[i], b[i])) return false;
+    }
+    return true;
   }
 
   /// The page after the list in view: scrolling near its end, or a Smart Inbox that folds a page
