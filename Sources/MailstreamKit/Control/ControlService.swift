@@ -30,15 +30,28 @@ final class ControlService {
             guard let name = request?["command"]?.string else {
                 throw ControlError("bad_request", "Expected {\"command\": …, \"args\": {…}}.")
             }
-            guard let spec = CommandSpec.named(name), case .app(let command) = spec.command else {
+            guard let spec = CommandSpec.named(name) else {
                 throw ControlError("unknown_command", "Unknown command \"\(name)\"; `mailstream commands` lists them.")
             }
-            let args = try Arguments(spec: spec, values: request?["args"]?.object ?? [:])
-            answer = ["ok": true, "result": try await run(command, args)]
+            let values = request?["args"]?.object ?? [:]
+            let args = try Arguments(spec: spec, values: values)
+            let result = switch spec.command {
+            case .app(let command): try await run(command, args)
+            case .local(let command): try await configure(command, values)
+            }
+            answer = ["ok": true, "result": result]
         } catch {
             answer = ["ok": false, "error": ControlError(error).body]
         }
         return answer.encoded(pretty: false)
+    }
+
+    /// A `config …` command; the settings in effect follow at once rather than when the file
+    /// watcher next reads the file.
+    private func configure(_ command: CommandID.Local, _ values: [String: JSON]) throws -> JSON {
+        let result = try command.run(values)
+        Settings.shared.reload()
+        return result
     }
 
     private func run(_ command: CommandID.App, _ args: Arguments) async throws -> JSON {

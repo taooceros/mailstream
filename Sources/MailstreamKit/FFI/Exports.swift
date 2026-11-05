@@ -87,6 +87,7 @@ private final class HostedEngine {
             follow("tags", Observations { _ = store.tagging.tags }),
             follow("sync", Observations { _ = (store.isLoading, store.isPushConnected) }),
             follow("problems", Observations { _ = store.problems.current }),
+            follow("settings", Observations { _ = (Settings.shared.values, Settings.shared.issues) }),
         ]
     }
 

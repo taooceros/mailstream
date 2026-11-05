@@ -53,7 +53,7 @@ enum CLI {
         if rest.contains("--help") || rest.contains("-h") { return spec.help }
         let args = try parse(rest, for: spec)
         let result = switch spec.command {
-        case .local(let command): try runLocal(command, args)
+        case .local(let command): try command.run(args)
         case .app: try send(spec, args)
         }
         if let failed = result["failed"]?.array, !failed.isEmpty {
@@ -167,61 +167,6 @@ enum CLI {
             }
             return .string(raw)
         }
-    }
-
-    // MARK: - Settings, without the app
-
-    private static func runLocal(_ command: CommandID.Local, _ args: [String: JSON]) throws -> JSON {
-        func setting() throws -> Setting {
-            do { return try Setting.named(args["key"]?.string ?? "") } catch { throw ControlError.usage(error.localizedDescription) }
-        }
-        switch command {
-        case .configList:
-            let (values, issues) = SettingsFile.read()
-            return ["file": .string(SettingsFile.url.path), "settings": .array(Setting.allCases.map { entry($0, values) }),
-                    "issues": .strings(issues)]
-        case .configGet:
-            return entry(try setting())
-        case .configSet:
-            let setting = try setting()
-            try SettingsFile.update(setting, to: try setting.parse(args["value"]?.string ?? ""))
-            return entry(setting)
-        case .configReset:
-            let setting = try setting()
-            try SettingsFile.update(setting, to: nil)
-            return entry(setting)
-        case .configAdd, .configRemove:
-            let setting = try setting()
-            guard case .addresses = setting.kind else { throw ControlError.usage("\(setting.rawValue) is not a list setting.") }
-            let words = (args["values"]?.strings ?? []).flatMap { $0.split(separator: ",").map(String.init) }
-            let given = try setting.validate(.strings(words)).strings ?? []
-            let current = setting.value(in: SettingsFile.read().values).strings ?? []
-            let next = command == .configAdd ? current + given : current.filter { !given.contains($0) }
-            try SettingsFile.update(setting, to: .strings(next))
-            return entry(setting)
-        case .configSchema:
-            return Setting.fileSchema
-        case .configPath:
-            return ["path": .string(SettingsFile.url.path), "exists": .bool(FileManager.default.fileExists(atPath: SettingsFile.url.path))]
-        }
-    }
-
-    /// The setting as `config` commands print it; `values` defaults to the file as it is now.
-    private static func entry(_ setting: Setting, _ values: [Setting: JSON] = SettingsFile.read().values) -> JSON {
-        let type = switch setting.kind {
-        case .bool: "boolean"
-        case .int: "integer"
-        case .string: "string"
-        case .addresses: "array of email addresses"
-        }
-        return [
-            "key": .string(setting.rawValue),
-            "value": setting.value(in: values),
-            "default": setting.defaultValue,
-            "changed": .bool(values[setting] != nil),
-            "type": .string(type),
-            "summary": .string(setting.summary),
-        ]
     }
 
     // MARK: - The app

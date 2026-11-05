@@ -2,6 +2,8 @@ import Cocoa
 import FlutterMacOS
 
 class MainFlutterWindow: NSWindow {
+  private var chrome: FlutterMethodChannel?
+
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
     self.contentViewController = flutterViewController
@@ -30,6 +32,7 @@ class MainFlutterWindow: NSWindow {
         result(FlutterMethodNotImplemented)
       }
     }
+    self.chrome = chrome
 
     RegisterGeneratedPlugins(registry: flutterViewController)
 
@@ -37,5 +40,10 @@ class MainFlutterWindow: NSWindow {
     html.register(MailHtmlFactory(messenger: html.messenger), withId: "mailstream/html")
 
     super.awakeFromNib()
+  }
+
+  /// The app menu's Settings… (⌘,), which Flutter opens.
+  @objc func showSettings(_ sender: Any?) {
+    chrome?.invokeMethod("settings", arguments: nil)
   }
 }

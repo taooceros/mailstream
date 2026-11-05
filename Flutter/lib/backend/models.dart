@@ -35,14 +35,18 @@ extension MailCategoryTitle on MailCategory {
 }
 
 class Account {
-  const Account({required this.id, required this.label, required this.provider});
+  const Account({required this.id, required this.label, required this.provider, this.services = const []});
 
-  factory Account.of(engine.Account account) => Account(id: account.id, label: account.label, provider: account.provider);
+  factory Account.of(engine.Account account) =>
+      Account(id: account.id, label: account.label, provider: account.provider, services: account.services);
 
   /// The address; accounts are addressed by it.
   final String id;
   final String label;
   final String provider;
+
+  /// What the sign-in grants: `mail`, `contacts`, `chat`.
+  final List<String> services;
 
   String get title => label.isEmpty ? id : label;
 }

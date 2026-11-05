@@ -169,6 +169,7 @@ class MailState extends ChangeNotifier {
   Future<void> start() async {
     mail.subscribe(listener: _Changes(_changed));
     await reloadAccounts();
+    unawaited(reloadSettings());
     await _fetch(selection);
   }
 
@@ -185,6 +186,9 @@ class MailState extends ChangeNotifier {
         _accountsChanged = true;
       case engine.ConversationsEvent() || engine.TagsEvent():
         _listsChanged = true;
+      case engine.SettingsEvent():
+        unawaited(reloadSettings());
+        return;
       default:
         return;
     }
@@ -669,6 +673,61 @@ class MailState extends ChangeNotifier {
   void _sentToast(engine.Sent sent) => showToast('Sent to ${sent.to.map((a) => Address.parse(a).displayName).join(', ')}');
 
   void openFile(String path) => Process.run('open', [path]);
+
+  // MARK: - Settings and accounts
+
+  /// settings.json as the engine reads it: the one file Mailstream.app, the CLI and this app
+  /// share. Null until first read.
+  engine.Settings? settings;
+
+  Future<void> reloadSettings() async {
+    try {
+      settings = await mail.settings();
+    } on engine.MailException catch (error) {
+      _report('Could not read settings: ${describe(error)}');
+    }
+    notifyListeners();
+  }
+
+  /// Writes one setting (null resets it to its default) and shows the value at once; throws the
+  /// engine's refusal (out of range, not an address) for the field to show.
+  Future<void> setSetting(String key, engine.SettingValue? value) async {
+    final entry = value == null ? await mail.resetSetting(key: key) : await mail.setSetting(key: key, value: value);
+    final current = settings;
+    if (current == null) return;
+    settings = engine.Settings(
+      file: current.file,
+      settings: [for (final e in current.settings) e.key == key ? entry : e],
+      issues: current.issues,
+    );
+    notifyListeners();
+  }
+
+  Future<void> renameAccount(String account, String label) async {
+    try {
+      await mail.renameAccount(account: account, label: label);
+    } on engine.MailException catch (error) {
+      _report('Could not rename: ${describe(error)}');
+    }
+    await reloadAccounts();
+  }
+
+  /// Signs out of the account; the person confirmed in the dialog.
+  Future<void> removeAccount(String account) async {
+    try {
+      await mail.removeAccount(account: account, confirm: true);
+    } on engine.MailException catch (error) {
+      _report('Could not remove $account: ${describe(error)}');
+    }
+    await reloadAccounts();
+  }
+
+  /// Browser sign-in; throws the engine's reason when it fails or times out.
+  Future<Account> addAccount(String provider, {String? clientId, String? clientSecret}) async {
+    final record = await mail.addAccount(provider: provider, clientId: clientId, clientSecret: clientSecret);
+    await reloadAccounts();
+    return Account.of(record);
+  }
 
   // MARK: - Toasts
 

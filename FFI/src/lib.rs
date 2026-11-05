@@ -265,6 +265,92 @@ pub struct Sent {
     pub subject: String,
 }
 
+/// A setting's value, typed by what the setting holds.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SettingValue {
+    Flag { enabled: bool },
+    Number { value: i64 },
+    Text { text: String },
+    /// Lowercased email addresses, sorted and unique.
+    Addresses { addresses: Vec<String> },
+}
+
+impl SettingValue {
+    fn of(kind: &str, value: &Value) -> Option<Self> {
+        Some(match kind {
+            "boolean" => Self::Flag { enabled: value.as_bool()? },
+            "integer" => Self::Number { value: value.as_i64()? },
+            "string" => Self::Text { text: value.as_str()?.into() },
+            _ => Self::Addresses { addresses: serde_json::from_value(value.clone()).ok()? },
+        })
+    }
+
+    /// As `config.set` takes it: true/false, a number, text, or a JSON array.
+    fn typed(&self) -> String {
+        match self {
+            Self::Flag { enabled } => enabled.to_string(),
+            Self::Number { value } => value.to_string(),
+            Self::Text { text } => text.clone(),
+            Self::Addresses { addresses } => serde_json::to_string(addresses).expect("strings encode"),
+        }
+    }
+}
+
+/// One setting of settings.json, the file Mailstream.app and every front end share.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct SettingEntry {
+    /// Dotted key, e.g. `sync.pollSeconds`.
+    pub key: String,
+    pub value: SettingValue,
+    pub default_value: SettingValue,
+    /// The file sets it (to something other than the default).
+    pub changed: bool,
+    pub summary: String,
+    /// The range a number setting accepts.
+    pub minimum: Option<i64>,
+    pub maximum: Option<i64>,
+}
+
+impl<'de> Deserialize<'de> for SettingEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            key: String,
+            #[serde(rename = "type")]
+            kind: String,
+            value: Value,
+            default: Value,
+            changed: bool,
+            summary: String,
+            minimum: Option<i64>,
+            maximum: Option<i64>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let typed = |value: &Value| {
+            SettingValue::of(&raw.kind, value)
+                .ok_or_else(|| serde::de::Error::custom(format!("{} is not a {}", raw.key, raw.kind)))
+        };
+        Ok(Self {
+            value: typed(&raw.value)?,
+            default_value: typed(&raw.default)?,
+            key: raw.key,
+            changed: raw.changed,
+            summary: raw.summary,
+            minimum: raw.minimum,
+            maximum: raw.maximum,
+        })
+    }
+}
+
+/// Every setting, the file they live in and its problems (unknown keys, invalid values, broken
+/// JSON; those fall back to the default).
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct Settings {
+    pub file: String,
+    pub settings: Vec<SettingEntry>,
+    pub issues: Vec<String>,
+}
+
 /// What changed in the engine; a front end re-reads what it shows of it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Event {
@@ -276,6 +362,8 @@ pub enum Event {
     Tags,
     Sync,
     Problems,
+    /// settings.json changed, from any front end, the CLI or an editor.
+    Settings,
     /// A kind this build does not know yet.
     Other { name: String },
 }
@@ -290,6 +378,7 @@ impl Event {
             "tags" => Self::Tags,
             "sync" => Self::Sync,
             "problems" => Self::Problems,
+            "settings" => Self::Settings,
             _ => Self::Other { name: name.into() },
         }
     }
@@ -329,6 +418,48 @@ impl Mailstream {
 
     pub async fn accounts(&self) -> Result<Vec<Account>, MailError> {
         call("accounts.list", json!({})).await
+    }
+
+    /// Changes the label an account shows; empty shows the address.
+    pub async fn rename_account(&self, account: String, label: String) -> Result<Account, MailError> {
+        call("accounts.rename", json!({ "account": account, "label": label })).await
+    }
+
+    /// Signs in a new account through the browser and waits (up to 5 minutes) for the person to
+    /// finish. Without `client_id` it uses the OAuth client used last (or the build's); Google
+    /// needs `client_secret` with it.
+    pub async fn add_account(
+        &self,
+        provider: String,
+        client_id: Option<String>,
+        client_secret: Option<String>,
+    ) -> Result<Account, MailError> {
+        call(
+            "accounts.add",
+            json!({ "provider": provider, "client-id": client_id, "client-secret": client_secret }),
+        )
+        .await
+    }
+
+    /// Signs the account out and deletes its saved sign-in; mail on the server stays. `confirm`
+    /// is the person's go-ahead.
+    pub async fn remove_account(&self, account: String, confirm: bool) -> Result<(), MailError> {
+        call::<Value>("accounts.remove", json!({ "account": account, "yes": confirm })).await.map(drop)
+    }
+
+    /// Every setting in settings.json, with defaults for those it does not set.
+    pub async fn settings(&self) -> Result<Settings, MailError> {
+        call("config.list", json!({})).await
+    }
+
+    /// Writes one setting; the engine applies it at once and sends [`Event::Settings`].
+    pub async fn set_setting(&self, key: String, value: SettingValue) -> Result<SettingEntry, MailError> {
+        call("config.set", json!({ "key": key, "value": value.typed() })).await
+    }
+
+    /// Puts a setting back to its default.
+    pub async fn reset_setting(&self, key: String) -> Result<SettingEntry, MailError> {
+        call("config.reset", json!({ "key": key })).await
     }
 
     /// Each account's mailboxes, by account id; only `account`'s when given.

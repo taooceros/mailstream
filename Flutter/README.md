@@ -6,7 +6,7 @@ process: `packages/mailstream` is the Dart binding of the `FFI/` crate (generate
 uniffi-dart), and its build hook bundles `libmailstream.dylib` and `libMailstreamKit.dylib`.
 The UI lists accounts, mailboxes and conversations, reads previews, sender avatars and
 messages (with their HTML), searches, marks, archives, trashes, tags, replies and sends new mail through it,
-and follows the engine's change events instead of polling. Mailstream.app need not run.
+manages accounts and settings, and follows the engine's change events instead of polling. Mailstream.app need not run.
 
 ```sh
 # at the repository root: release dylibs and the Dart bindings (packages/mailstream/lib/src, not committed)
@@ -42,13 +42,14 @@ content height so the body scrolls with the conversation.
 | `lib/ui/conversation_list.dart` | Fixed-height lazy list that loads the next page near its end, Smart Inbox bundles, hover actions |
 | `lib/ui/reader.dart` | Reading column, message cards and chat log, HTML bodies (quoted history cut out and folded), inline reply |
 | `lib/ui/compose.dart` | The compose window for a new plain-text message (`mail.send`): From, To, Cc, Bcc, Subject, body |
+| `lib/ui/settings.dart` | Settings (⌘,): accounts (browser sign-in, rename, remove) and every key of the settings.json Mailstream.app and `mailstream config` share (`config.*` over FFI), following edits made elsewhere |
 | `lib/ui/slide_layer.dart` | Bundles (and, in one pane, the reader) slide over the list, which stays mounted; trackpad swipe back |
 
 Keys: ↑/↓ or J/K move (beside an open conversation they open the next one), Return or Space
 opens, Esc or ⌘[ goes back, E archives, ⌫ trashes, S stars, U toggles read, R replies (⇧R or
-A replies to all), ⌘N writes a new message, ⌘F searches, ⌘R refreshes. In the compose window
+A replies to all), ⌘N writes a new message, ⌘F searches, ⌘R refreshes, ⌘, opens Settings. In the compose window
 ⌘Return sends and Esc or ⌘W closes (asking first when something is written).
 
-Not here: Google Chat, forwarding, attachments on send, recipient completion and settings.
+Not here: Google Chat, forwarding, attachments on send and recipient completion.
 Reply recipients shown in the composer are a preview; the app plans the real ones when it
 sends.

@@ -8,6 +8,7 @@ import 'compose.dart';
 import 'conversation_list.dart';
 import 'design.dart';
 import 'reader.dart';
+import 'settings.dart';
 import 'sidebar.dart';
 import 'slide_layer.dart';
 
@@ -56,6 +57,9 @@ class _MailShellState extends State<MailShell> {
     super.initState();
     FocusManager.instance.addListener(_keepFocus);
     state.addListener(_showToast);
+    _window.setMethodCallHandler((call) async {
+      if (call.method == 'settings') _settings();
+    });
   }
 
   /// The last toast shown as a snackbar: each one shows once.
@@ -86,9 +90,17 @@ class _MailShellState extends State<MailShell> {
 
   void _compose() => openCompose(context, state);
 
+  /// The app menu's Settings… (⌘,) asks the window channel; once, over the main window only.
+  static const _window = MethodChannel('mailstream/window');
+
+  void _settings() {
+    if (mounted && (ModalRoute.isCurrentOf(context) ?? true)) openSettings(context, state);
+  }
+
   @override
   void dispose() {
     FocusManager.instance.removeListener(_keepFocus);
+    _window.setMethodCallHandler(null);
     state.removeListener(_showToast);
     _focus.dispose();
     _searchFocus.dispose();

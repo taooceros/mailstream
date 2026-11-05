@@ -1,7 +1,7 @@
 import Foundation
 
-/// Every command, by its request id. Settings commands run in the CLI on settings.json and the
-/// rest need the app, so the CLI and the control server each switch over only their own half.
+/// Every command, by its request id. Settings commands work on settings.json, so the CLI runs
+/// them itself without the app; the control service (socket and FFI) runs them too.
 nonisolated enum CommandID: Sendable, Equatable {
     case local(Local)
     case app(App)
