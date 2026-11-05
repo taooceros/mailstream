@@ -58,7 +58,6 @@ pub fn init(cx: &mut App) {
 
 /// A `size` circle for `address`: its photo once the app has one, else its initial on its color.
 /// Drawing it asks for the photo; rows redraw when it arrives.
-#[expect(dead_code, reason = "replaces ui::avatar once ui.rs calls it; remove this line then")]
 pub fn avatar(address: &Address, size: f32, p: &Palette, cx: &mut App) -> AnyElement {
     let color = design::avatar_color(&address.email, p.dark);
     let Some(path) = photo(&address.email, cx) else {

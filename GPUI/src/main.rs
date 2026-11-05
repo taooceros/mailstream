@@ -29,7 +29,6 @@ fn main() {
         avatars::init(cx);
         input::bind_keys(cx);
         state::bind_keys(cx);
-        settings::init(|cx| cx.refresh_windows(), cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(menus());
         cx.on_window_closed(|cx| {
@@ -53,6 +52,13 @@ fn main() {
         let window = cx
             .open_window(options, |window, cx| cx.new(|cx| MailApp::new(window, cx)))
             .expect("the window opens");
+        // Renames, sign-outs, added accounts and setting changes reload accounts and the list.
+        settings::init(
+            move |cx| {
+                window.update(cx, |app, _, cx| app.retry(cx)).ok();
+            },
+            cx,
+        );
         window
             .update(cx, |app, window, cx| {
                 window.focus(&app.focus);

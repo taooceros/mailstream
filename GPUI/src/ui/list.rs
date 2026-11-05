@@ -121,6 +121,7 @@ impl MailApp {
         } else {
             conversation.sender.clone()
         };
+        let photo = avatars::avatar(&conversation.avatar(), metrics::AVATAR, p, cx);
         // Hover styles apply at paint time and cannot move layout, so the hovered row is state:
         // its subject makes room for the actions, which take the date's place.
         let hovered = self.hovered_row.as_ref() == Some(&id);
@@ -202,10 +203,11 @@ impl MailApp {
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate(&id, window, cx)))
             .when(conversation.unread, |d| d.child(unread_dot(p)))
             .child(
-                avatar(&conversation.avatar(), metrics::AVATAR, p)
+                div()
                     .absolute()
                     .left(px(metrics::SENDER_X))
-                    .top(px((metrics::ROW_HEIGHT - metrics::AVATAR) / 2.)),
+                    .top(px((metrics::ROW_HEIGHT - metrics::AVATAR) / 2.))
+                    .child(photo),
             )
             .child(sender_cell(sender, weight).when(conversation.message_count > 1, |d| {
                 d.child(

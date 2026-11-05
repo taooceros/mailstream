@@ -15,6 +15,7 @@ use gpui::{
     SharedString, Stateful, StatefulInteractiveElement, Styled, Window, canvas, div, point, px, relative, uniform_list,
 };
 
+use crate::avatars;
 use crate::design::{self, Palette, UI_FONT, icon as icon_size, layout, list as metrics, radius, text};
 use crate::format;
 use crate::icons::{Icon, icon};
@@ -149,21 +150,6 @@ impl Render for Tooltip {
 
 fn popover_shadow(p: &Palette) -> Vec<BoxShadow> {
     vec![BoxShadow { color: p.shadow, offset: point(px(0.), px(4.)), blur_radius: px(14.), spread_radius: px(0.) }]
-}
-
-fn avatar(address: &Address, size: f32, p: &Palette) -> Div {
-    div()
-        .flex_shrink_0()
-        .size(px(size))
-        .rounded_full()
-        .bg(design::avatar_color(&address.email, p.dark))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(size * 0.43))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(p.on_accent)
-        .child(address.initial())
 }
 
 fn chip(label: SharedString, color: Hsla) -> Div {

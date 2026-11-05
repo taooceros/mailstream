@@ -80,6 +80,7 @@ impl MailApp {
     ) -> AnyElement {
         let sender = message.sender();
         let id = message.id.clone();
+        let photo = avatars::avatar(&sender, 32., p, cx);
         let header = div()
             .id(ElementId::Name(format!("message:{id}").into()))
             .flex()
@@ -89,7 +90,7 @@ impl MailApp {
                 d.cursor_pointer()
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_fold(&id, cx)))
             })
-            .child(avatar(&sender, 32., p))
+            .child(photo)
             .child(
                 div()
                     .flex_1()
