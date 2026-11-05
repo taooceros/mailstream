@@ -1,0 +1,15 @@
+[package]
+name = "mailstream-gpui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gpui = "0.2.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+unicode-segmentation = "1"
+
+[profile.dev.package."*"]
+opt-level = 2
