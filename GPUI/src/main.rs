@@ -31,6 +31,7 @@ use crate::state::{
 
 fn main() {
     Application::new().with_assets(icons::Assets).run(|cx: &mut App| {
+        set_dock_icon();
         // The engine paints from the cache and syncs while the window opens.
         engine::engine();
         avatars::init(cx);
@@ -79,6 +80,23 @@ fn main() {
             })
             .ok();
     });
+}
+
+/// The Dock icon: the binary runs outside an app bundle, so without this the Dock shows the
+/// generic executable icon. `assets/AppIcon.png` is Mailstream's icon with a "GPUI" badge
+/// (`swift scripts/make-icon.swift GPUI/assets/AppIcon.png GPUI`, then `sips -Z 512`).
+fn set_dock_icon() {
+    use objc2::MainThreadMarker;
+    use objc2::AllocAnyThread;
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    static ICON: &[u8] = include_bytes!("../assets/AppIcon.png");
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let data = NSData::with_bytes(ICON);
+    if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+        unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
+    }
 }
 
 /// The menu bar (`AppDelegate.buildMenu`). Items dispatch to the focused window's handlers, so

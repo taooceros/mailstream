@@ -190,7 +190,7 @@ The bundle is signed with an "Apple Development" certificate when there is one, 
 ad hoc. Nothing else is needed. Signed ad hoc, each new build is a new app to macOS,
 which asks once whether it may read the saved sign-ins. A free certificate stops that
 prompt: add any Apple ID in Xcode ▸ Settings ▸ Accounts, then Manage Certificates ▸ +
-▸ Apple Development. `scripts/make-icon.swift` regenerates `Resources/AppIcon.png`.
+▸ Apple Development. `scripts/make-icon.swift` regenerates `Resources/AppIcon.png`; `swift scripts/make-icon.swift <out.png> GPUI` (or `Flutter`) renders the same icon with that front end's badge (`GPUI/assets/AppIcon.png`, scaled to 512; the Flutter `AppIcon.appiconset` sizes).
 
 GitHub Actions (`.github/workflows/build.yml`) builds every push and pull request on
 macOS 26 with Xcode 26.4 (Swift 6.3), with warnings as errors, and keeps the app as a
