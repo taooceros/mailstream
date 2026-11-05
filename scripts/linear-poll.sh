@@ -2,16 +2,17 @@
 # One pass over Linear: claims what an omp session should act on now and prints it as JSON lines,
 # which that session hands to subagents. dir is the jj workspace to work in (../mailstream-<area>
 # for the issue's Area label, else this repo).
-#   {"kind": "issue", "id", "identifier", "dir"}: an issue to start. Claimed when it is
+#   {"kind": "issue", "id", "identifier", "dir", "busy"}: an issue to start. Claimed when it is
 #     - in Todo, created by a workspace member (not an app, a guest or a GitHub import: the repo
 #       is public and the subagents run with full access), not claimed before and not yet
 #       commented on by an app (omp); or
 #     - labelled `omp`, in any state but started, done or canceled; the label is removed on
 #       claim, so adding it again reruns the issue.
 #     Agents file their own issues in Backlog and move issues to Todo to ask the user something,
-#     so neither is picked up. Issues share their area's workspace: a workspace with an In Progress
-#     issue, one listed in BUSY (JSON array of dirs, e.g. the caller's running subagents) or one
-#     claimed this pass waits.
+#     so neither is picked up. Issues share their area's workspace: busy is true when that
+#     workspace has an In Progress issue, is listed in BUSY (JSON array of dirs, e.g. the caller's
+#     running subagents) or got an earlier issue this pass; the caller then hands the issue to the
+#     subagent already working nearby code, or gives it a private workspace. Nothing waits.
 #   {"kind": "comment", "id", "issue", "issueId", "state", "dir", "createdAt", "body"}: a comment a
 #     workspace member (not an app, a guest or a GitHub sync) posted on any team issue in the last
 #     7 days, each once. The caller routes it to the issue's subagent or starts one.
@@ -87,8 +88,8 @@ PLAN=$(jq -c --argjson ws "$WORKSPACES" --argjson busy "$BUSY" --arg root "$ROOT
   | (reduce ($todo | sort_by(.number))[] as $i (
       {busy: ([.active.nodes[] | dir] + $busy), out: []};
       ($i | dir) as $d
-      | if (.busy | index($d)) then . else .busy += [$d] | .out += [$i + {dir: $d}] end)
-    | .out[] | {kind: "issue", id, identifier, dir, label: labelled}),
+      | .out += [$i + {dir: $d, busy: (.busy | index($d) != null)}] | .busy += [$d])
+    | .out[] | {kind: "issue", id, identifier, dir, busy, label: labelled}),
     (.comments.nodes | sort_by(.createdAt)[]
       | select((.user | member) and (.id as $id | $seen | index($id) | not))
       | {kind: "comment", id, issue: .issue.identifier, issueId: .issue.id,

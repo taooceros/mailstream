@@ -38,7 +38,8 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
 - Problems found outside the current change: file a Backlog issue with labels; do not fix them
   in passing.
 - An omp session polls `scripts/linear-poll.sh` every minute and hands each issue it claims to a
-  subagent working in the area's workspace, one issue per workspace at a time. It claims Todo
+  subagent working in the area's workspace; when another issue holds that workspace, the issue
+  goes to the subagent working related code, or to a private workspace. It claims Todo
   issues the user created, once each, and any issue labelled `omp` (then removes the label). Every
   comment the user posts reaches the subagent working that issue, or starts one. Only the user
   adds `omp`; file your own issues in Backlog. `scripts/linear-omp.sh MS-12` opens one issue in a
