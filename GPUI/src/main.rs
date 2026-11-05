@@ -2,6 +2,7 @@
 //! `mailstream` crate in `FFI/`. See README.md.
 
 mod avatars;
+mod bench;
 mod chat;
 mod compose;
 mod design;
@@ -71,7 +72,10 @@ fn main() {
         window
             .update(cx, |app, window, cx| {
                 window.focus(&app.focus);
-                cx.activate(true);
+                // A measurement runs beside the user's work without taking the foreground.
+                if app.bench.is_none() {
+                    cx.activate(true);
+                }
             })
             .ok();
     });

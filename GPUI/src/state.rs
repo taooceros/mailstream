@@ -21,6 +21,7 @@ use gpui::{
 };
 use mailstream::{Event, EventListener, ListQuery};
 
+use crate::bench::Bench;
 use crate::chat::ChatPane;
 use crate::compose::ReplyBox;
 use crate::engine::{MailError, engine};
@@ -334,6 +335,8 @@ pub struct MailApp {
     pub reply: Option<ReplyDraft>,
     /// A conversation to forward once its messages arrive.
     forward_pending: Option<SharedString>,
+    /// The frame measurement, when the environment asks for one (`bench.rs`).
+    pub bench: Option<Bench>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -388,6 +391,7 @@ impl MailApp {
             chat_view: None,
             reply: None,
             forward_pending: None,
+            bench: Bench::from_env(cx),
             _subscriptions: subscriptions,
         };
         this.load_mailboxes(cx);

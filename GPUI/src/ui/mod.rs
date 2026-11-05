@@ -29,6 +29,7 @@ use crate::state::{
 impl Render for MailApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = design::palette(window.appearance());
+        let bench_end = self.bench.as_mut().and_then(|bench| bench.frame(&self.list_scroll, window, cx));
         // Chat replaces the list; the pane draws its own header under the title bar.
         let content = if self.chat_view.is_some() {
             div().flex_1().min_h_0().child(self.chat.clone()).into_any_element()
@@ -89,6 +90,8 @@ impl Render for MailApp {
                     .child(content),
             )
             .children(self.render_context_menu(p, cx))
+            // Painted last: ends the frame a measurement times.
+            .children(bench_end)
     }
 }
 

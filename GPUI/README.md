@@ -43,6 +43,7 @@ that one build, so the app and every other host get asked again.
 | `src/design.rs` | The native `Design` tokens: both palettes, type scale, radii, durations, house curve, list metrics, avatar/topic colors |
 | `src/icons.rs`, `src/format.rs` | Material Symbols glyphs; dates and sizes |
 | `src/input.rs`, `src/textarea.rs` | Single-line field (IME, selection, clipboard) adapted from gpui's input example, and the multi-line editor for bodies |
+| `src/bench.rs` | The frame measurement `scripts/bench.sh gpui` runs (`MAILSTREAM_BENCH=scroll`): the list scrolls itself and every frame's start and render-to-paint time is logged |
 
 Keys: ↑/↓ or J/K move (in the reader they page through conversations), Return or Space opens,
 Esc or ⌘[ goes back, E or ⌃⌘A archives, ⌫ trashes, S or ⇧⌘L stars, U or ⇧⌘U toggles read,
