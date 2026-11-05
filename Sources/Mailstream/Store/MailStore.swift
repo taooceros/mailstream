@@ -90,9 +90,11 @@ final class MailStore {
 
     private struct Listing {
         var envelopes: [Envelope]
-        /// Cursor of the page after `envelopes`; nil at the end, or when the listing came from
-        /// disk and no first page arrived yet.
+        /// Cursor of the page after `envelopes`; nil at the end.
         var next: String?
+        /// The latest first page's cursor, which paging falls back to when `next`, kept on disk,
+        /// has gone stale.
+        var restart: String?
 
         /// Adds the envelopes not listed yet after the listed ones, in the order given.
         mutating func appendUnknown(_ more: [Envelope]) {
@@ -452,9 +454,9 @@ final class MailStore {
         let cache = cache
         for key in keys where listings[key] == nil && cacheReads[key] == nil {
             cacheReads[key] = Task {
-                let cached = await cache.loadEnvelopes(key)
+                let cached = await cache.loadListing(key)
                 guard !Task.isCancelled, let cached, listings[key] == nil else { return }
-                listings[key] = Listing(envelopes: cached, next: nil)
+                listings[key] = Listing(envelopes: cached.envelopes, next: cached.next)
                 if !inRebuild, (primaryKeys + contextKeys).contains(key) { rebuild.request() }
             }
         }
@@ -541,50 +543,70 @@ final class MailStore {
     /// Returns whether anything changed, so an unchanged mailbox costs no rebuild.
     private func merge(firstPage page: EnvelopePage, into key: MailboxKey) -> Bool {
         let before = listings[key]
-        var listing = Listing(envelopes: page.envelopes, next: page.next)
+        var listing = Listing(envelopes: page.envelopes, next: page.next, restart: page.next)
         if page.next != nil, let before {
             let oldest = page.envelopes.compactMap(\.date).min() ?? .distantPast
             let ids = Set(page.envelopes.map(\.id))
             let older = before.envelopes.filter { !ids.contains($0.id) && ($0.date ?? .distantPast) < oldest }
             listing.envelopes += older
-            // Pages loaded past the first keep their cursor; older mail only from disk is
-            // reached again through the first page's.
-            if !older.isEmpty, let next = before.next { listing.next = next }
+            // Paging resumes after the older mail kept when the first page reaches it. Past a gap
+            // (more new mail than a page) it goes on from the first page, skipping what is listed.
+            if !older.isEmpty, let next = before.next, before.envelopes.contains(where: { ids.contains($0.id) }) {
+                listing.next = next
+            }
         }
-        guard listing.envelopes != before?.envelopes || listing.next != before?.next else { return false }
+        guard listing.envelopes != before?.envelopes || listing.next != before?.next else {
+            listings[key]?.restart = page.next
+            return false
+        }
         listings[key] = listing
         persist(key)
         return true
     }
 
+    /// Writes the listing to disk, at most `cachedEnvelopes` of it; a listing cut short is kept
+    /// without its cursor, and paging then goes on from the first page's.
     private func persist(_ key: MailboxKey) {
-        guard let envelopes = listings[key]?.envelopes.prefix(200) else { return }
-        cache.saveEnvelopes(Array(envelopes), for: key)
+        guard let listing = listings[key] else { return }
+        let kept = Array(listing.envelopes.prefix(Self.cachedEnvelopes))
+        let next = kept.count == listing.envelopes.count ? listing.next : nil
+        cache.saveListing(CachedListing(envelopes: kept, next: next), for: key)
     }
 
+    private static let cachedEnvelopes = 2000
+
+    /// The next page of every mailbox in view that has one, fetched at once.
     func loadMore() {
         guard loadMoreTask == nil, canLoadMore else { return }
-        let jobs = backends(primaryKeys.filter { listings[$0]?.next != nil }, account: \.account)
+        let jobs = backends(primaryKeys.compactMap { key in listings[key]?.next.map { (key, $0) } }, account: \.0.account)
+            .map { (key: $0.key.0, cursor: $0.key.1, backend: $0.backend) }
         isLoading = true
         loadMoreTask = Task(name: "Mail load more") {
             defer { loadMoreTask = nil }
-            for (key, backend) in jobs {
-                guard let cursor = listings[key]?.next else { continue }
-                do {
-                    let page = try await backend.envelopes(mailbox: key.mailbox, cursor: cursor,
-                                                           pageSize: Self.pageSize, priority: .interactive)
-                    // `select` cancelled it and resets `isLoading`.
-                    guard !Task.isCancelled else { return }
-                    // The account was removed meanwhile.
-                    guard var listing = listings[key] else { continue }
+            await forEachConcurrently(jobs) { job in
+                try await job.backend.envelopes(mailbox: job.key.mailbox, cursor: job.cursor,
+                                                pageSize: Self.pageSize, priority: .interactive)
+            } consume: { job, result in
+                // `select` cancelled it and resets `isLoading`; a first page or another page
+                // moved the cursor meanwhile; or the account was removed.
+                guard !Task.isCancelled, var listing = listings[job.key], listing.next == job.cursor else { return }
+                switch result {
+                case .success(let page):
                     listing.appendUnknown(page.envelopes)
                     listing.next = page.next
-                    listings[key] = listing
-                } catch {
-                    if Task.isCancelled { return }
-                    report(error, context: key.account)
+                    listings[job.key] = listing
+                    persist(job.key)
+                case .failure(let error):
+                    // A cursor kept on disk went stale: page on from the first page's instead.
+                    if let api = error as? APIError, [400, 404, 410].contains(api.status),
+                       let restart = listing.restart, restart != job.cursor {
+                        listings[job.key]?.next = restart
+                    } else {
+                        report(error, context: job.key.account)
+                    }
                 }
             }
+            guard !Task.isCancelled else { return }
             isLoading = false
             rebuild.request()
         }

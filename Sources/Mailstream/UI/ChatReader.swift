@@ -1,12 +1,12 @@
 import AppKit
 import Observation
 
-/// `ReaderModel`'s chat peer. Shows one Google Chat space in the reader's web page (`WebShell`):
+/// Shows one Google Chat space in the reader's web page (`WebShell`), as the mail reader's peer:
 /// the space's messages as a chat log with a composer at the bottom. The log is built off the main
 /// actor and diffed against what the page shows, so new messages append, changed ones (a pending
 /// message that failed) are replaced in place, and the page never reloads.
 @MainActor
-final class ChatModel: WebShellClient {
+final class ChatReader: WebShellClient {
     private let store: MailStore
     private let shell: WebShell
 
@@ -43,13 +43,9 @@ final class ChatModel: WebShellClient {
     /// Whether the composer has focus, as last reported by the page, so Escape can decide at once.
     private var composerFocused = false
 
-    /// The page asked to enlarge a picture: the person, whether automated, and the page's `avatar` message.
-    private let onAvatar: (Address, Bool, [String: Any]) -> Void
-
-    init(store: MailStore, shell: WebShell, onAvatar: @escaping (Address, Bool, [String: Any]) -> Void) {
+    init(store: MailStore, shell: WebShell) {
         self.store = store
         self.shell = shell
-        self.onAvatar = onAvatar
     }
 
     isolated deinit { watch?.cancel() }
@@ -221,7 +217,7 @@ final class ChatModel: WebShellClient {
         case "avatar":
             guard let email = nonEmpty("email"), email.contains("@") else { return }
             let name = store.chat.thread(key)?.messages.last { $0.sender.email?.lowercased() == email }?.sender.displayName
-            onAvatar(Address(name: name, email: email), false, body)
+            shell.showAvatar(of: Address(name: name, email: email), automated: false, from: body)
         default:
             break
         }

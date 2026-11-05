@@ -26,7 +26,7 @@ nonisolated final class MailCache: Sendable {
         writes.yield {
             let fm = FileManager.default
             for legacy in Self.legacy { try? fm.removeItem(at: root.appendingPathComponent(legacy)) }
-            for sub in ["envelopes-v2", "messages-v2", "mailboxes-v2", "chat-v2"] {
+            for sub in ["envelopes-v3", "messages-v2", "mailboxes-v2", "chat-v2"] {
                 try? fm.createDirectory(at: root.appendingPathComponent(sub), withIntermediateDirectories: true)
             }
         }
@@ -35,9 +35,10 @@ nonisolated final class MailCache: Sendable {
     deinit { writes.finish() }
 
     /// Layouts no longer read: from before the provider APIs, keyed by account, mailbox and chat
-    /// account names that no provider id matches, and tags from before automated mail could wait
-    /// on the user.
-    private static let legacy = ["envelopes", "messages", "mailboxes", "chat", "accounts-v1.json", "chat-accounts-v1.json", "tags-v1.json"]
+    /// account names that no provider id matches; tags from before automated mail could wait on
+    /// the user; and listings without their paging cursor.
+    private static let legacy = ["envelopes", "messages", "mailboxes", "chat", "accounts-v1.json", "chat-accounts-v1.json",
+                                 "tags-v1.json", "envelopes-v2"]
 
     static func hash(_ parts: String...) -> String {
         let digest = SHA256.hash(data: Data(parts.joined(separator: "\u{1F}").utf8))
@@ -68,15 +69,15 @@ nonisolated final class MailCache: Sendable {
 
     func saveTags(_ tags: [String: ConversationTag]) { write(tags, to: tagsURL) }
 
-    // MARK: Envelopes
+    // MARK: Listings
 
-    private func envelopesURL(_ key: MailboxKey) -> URL {
-        root.appendingPathComponent("envelopes-v2/\(Self.hash(key.account, key.mailbox)).json")
+    private func listingURL(_ key: MailboxKey) -> URL {
+        root.appendingPathComponent("envelopes-v3/\(Self.hash(key.account, key.mailbox)).json")
     }
 
-    func loadEnvelopes(_ key: MailboxKey) async -> [Envelope]? { await read([Envelope].self, at: envelopesURL(key)) }
+    func loadListing(_ key: MailboxKey) async -> CachedListing? { await read(CachedListing.self, at: listingURL(key)) }
 
-    func saveEnvelopes(_ envelopes: [Envelope], for key: MailboxKey) { write(envelopes, to: envelopesURL(key)) }
+    func saveListing(_ listing: CachedListing, for key: MailboxKey) { write(listing, to: listingURL(key)) }
 
     // MARK: Mailboxes
 
@@ -154,4 +155,11 @@ nonisolated final class MailCache: Sendable {
         let url = chatMessagesURL(key)
         writes.yield { try? FileManager.default.removeItem(at: url) }
     }
+}
+
+/// A mailbox's listing as last loaded: its envelopes, newest first, and the cursor of the page
+/// after them, so paging resumes past what is on disk instead of fetching it again.
+nonisolated struct CachedListing: Codable, Sendable {
+    var envelopes: [Envelope]
+    var next: String?
 }
