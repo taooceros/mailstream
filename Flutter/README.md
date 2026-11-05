@@ -45,7 +45,7 @@ content height so the body scrolls with the conversation.
 | `lib/ui/sidebar.dart` | Navigation drawer and rail, each with the Compose button |
 | `lib/ui/conversation_list.dart` | Fixed-height lazy list that loads the next page near its end, Smart Inbox bundles, hover actions |
 | `lib/ui/reader.dart` | Reading column, message cards and chat log, HTML bodies (quoted history cut out and folded), inline reply |
-| `lib/ui/compose.dart` | The compose window for a new plain-text message (`mail.send`): From, To, Cc, Bcc, Subject, body |
+| `lib/ui/compose.dart` | The compose window for a new plain-text message (`mail.send`): From, To, Cc, Bcc, Subject, body, attachments (the Attach button's open panel, or files dropped on the window: `mailstream/files` in `macos/Runner/MainFlutterWindow.swift`) |
 | `lib/ui/settings.dart` | Settings (⌘,): accounts (browser sign-in, rename, remove) and every key of the settings.json Mailstream.app and `mailstream config` share (`config.*` over FFI), following edits made elsewhere |
 | `lib/ui/slide_layer.dart` | Bundles (and, in one pane, the reader) slide over the list, which stays mounted; trackpad swipe back |
 
@@ -54,7 +54,7 @@ opens, Esc or ⌘[ goes back, E archives, ⌫ trashes, S stars, U toggles read, 
 A replies to all), ⌘N writes a new message, ⌘F searches, ⌘R refreshes, ⌘, opens Settings. In the compose window
 ⌘Return sends and Esc or ⌘W closes (asking first when something is written).
 
-Not here: forwarding, attachments on send and recipient completion; in Chat, threads,
+Not here: forwarding, attachments on replies and recipient completion; in Chat, threads,
 reactions, editing and attachments on send.
 Reply recipients shown in the composer are a preview; the app plans the real ones when it
 sends.

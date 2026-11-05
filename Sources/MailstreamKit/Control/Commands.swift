@@ -214,13 +214,14 @@ nonisolated struct CommandSpec: Sendable {
             Argument(name: "labels", kind: .list, summary: "Topic labels (at most two)."),
         ]),
         CommandSpec(command: .app(.mailRetag), summary: "Forgets every AI tag and tags the current list again."),
-        CommandSpec(command: .app(.mailSend), summary: "Sends a new plain-text message.", arguments: [
+        CommandSpec(command: .app(.mailSend), summary: "Sends a new plain-text message, with files attached if given.", arguments: [
             Argument(name: "from", kind: .string, summary: "Sending account (its address).", required: true),
             Argument(name: "to", kind: .list, summary: "Recipients.", required: true),
             Argument(name: "cc", kind: .list, summary: "Cc recipients."),
             Argument(name: "bcc", kind: .list, summary: "Bcc recipients."),
             Argument(name: "subject", kind: .string, summary: "Subject.", required: true),
             Argument(name: "body", kind: .string, summary: "Plain-text body; `-` reads standard input.", required: true),
+            Argument(name: "attachments", kind: .list, summary: "A file to attach; repeat for several."),
             yes,
         ], confirm: true),
         CommandSpec(command: .app(.mailReply), summary: "Replies to a conversation's latest message, quoting it like the app does.", arguments: [

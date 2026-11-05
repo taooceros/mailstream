@@ -4,6 +4,12 @@ import FlutterMacOS
 class MainFlutterWindow: NSWindow {
   private var chrome: FlutterMethodChannel?
 
+  /// Files for the compose window: dropped on the window or chosen in an open panel.
+  private var files: FlutterMethodChannel?
+
+  /// Whether a drop attaches: Flutter turns it on while the compose window is open.
+  private var takesFiles = false
+
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
     self.contentViewController = flutterViewController
@@ -34,6 +40,29 @@ class MainFlutterWindow: NSWindow {
     }
     self.chrome = chrome
 
+    // `accept` turns drops on and off; `pick` answers the paths chosen in an open panel. Flutter
+    // hears `hover` (a drag of files over the window starts or ends) and `drop` (their paths).
+    let files = FlutterMethodChannel(name: "mailstream/files", binaryMessenger: flutterViewController.engine.binaryMessenger)
+    files.setMethodCallHandler { [weak self] call, result in
+      switch call.method {
+      case "accept":
+        self?.takesFiles = call.arguments as? Bool ?? false
+        result(nil)
+      case "pick":
+        guard let self else { return result([String]()) }
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.beginSheetModal(for: self) { response in
+          result(response == .OK ? panel.urls.map(\.path) : [String]())
+        }
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    self.files = files
+    registerForDraggedTypes([.fileURL])
+
     RegisterGeneratedPlugins(registry: flutterViewController)
 
     let html = flutterViewController.registrar(forPlugin: "MailHtmlView")
@@ -45,5 +74,36 @@ class MainFlutterWindow: NSWindow {
   /// The app menu's Settings… (⌘,), which Flutter opens.
   @objc func showSettings(_ sender: Any?) {
     chrome?.invokeMethod("settings", arguments: nil)
+  }
+
+  // MARK: - Dropped files
+
+  /// The dragged files, without folders.
+  private func droppedFiles(_ info: any NSDraggingInfo) -> [URL] {
+    let urls = info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    return urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) != true }
+  }
+
+  // NSWindow declares no implementations of these, so they need `@objc` to reach AppKit.
+  @objc func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+    guard takesFiles, !droppedFiles(sender).isEmpty else { return [] }
+    files?.invokeMethod("hover", arguments: true)
+    return .copy
+  }
+
+  @objc func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+    takesFiles && !droppedFiles(sender).isEmpty ? .copy : []
+  }
+
+  @objc func draggingExited(_ sender: (any NSDraggingInfo)?) {
+    files?.invokeMethod("hover", arguments: false)
+  }
+
+  @objc func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+    files?.invokeMethod("hover", arguments: false)
+    let urls = droppedFiles(sender)
+    guard takesFiles, !urls.isEmpty else { return false }
+    files?.invokeMethod("drop", arguments: urls.map(\.path))
+    return true
   }
 }

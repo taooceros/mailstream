@@ -254,6 +254,8 @@ pub struct Draft {
     pub subject: String,
     /// Plain text.
     pub body: String,
+    /// Full paths of the files to attach.
+    pub attachments: Vec<String>,
 }
 
 /// What was sent: the account it went from, its recipients (`Name <address>`; for replies `to`
@@ -672,14 +674,14 @@ impl Mailstream {
         call("mail.tag", json!({ "ids": ids, "category": category, "waiting": waiting, "labels": labels })).await
     }
 
-    /// Sends `draft` as a new plain-text message. Sends at once: `confirm` is the person's
+    /// Sends `draft` as a new plain-text message with its attachments. Sends at once: `confirm` is the person's
     /// go-ahead; without it the engine only answers what it would send (`confirm`).
     pub async fn send(&self, draft: Draft, confirm: bool) -> Result<Sent, MailError> {
         call(
             "mail.send",
             json!({
                 "from": draft.from, "to": draft.to, "cc": draft.cc, "bcc": draft.bcc,
-                "subject": draft.subject, "body": draft.body, "yes": confirm,
+                "subject": draft.subject, "body": draft.body, "attachments": draft.attachments, "yes": confirm,
             }),
         )
         .await

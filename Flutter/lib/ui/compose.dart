@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -5,6 +7,11 @@ import 'package:mailstream/mailstream.dart' as engine;
 
 import '../state/mail_state.dart';
 import 'design.dart';
+import 'format.dart';
+
+/// The window's files (`MainFlutterWindow`): `accept` turns drops on the window on or off and
+/// `pick` shows an open panel; the window calls back with `hover` and `drop`.
+const _files = MethodChannel('mailstream/files');
 
 /// Opens the compose window for a new message (⌘N, the Compose button), from the account whose
 /// mailbox is shown, else the first. Like the other front ends' compose windows it sends with
@@ -72,9 +79,10 @@ bool _validEmail(String email) {
   return (recipients: recipients, invalid: null);
 }
 
-/// A new message: From, To, Cc (Bcc on request), Subject and a plain-text body. ⌘Return sends;
-/// Esc or ⌘W closes, asking first when something is written. A failed send keeps the window
-/// open with the engine's reason underneath.
+/// A new message: From, To, Cc (Bcc on request), Subject, a plain-text body and attachments
+/// (the Attach button, or files dropped anywhere on the window). ⌘Return sends; Esc or ⌘W closes,
+/// asking first when something is written. A failed send keeps the window open with the
+/// engine's reason underneath.
 class ComposeWindow extends StatefulWidget {
   const ComposeWindow({super.key, required this.state, required this.from});
 
@@ -98,11 +106,27 @@ class _ComposeWindowState extends State<ComposeWindow> {
   bool _confirmingDiscard = false;
   String? _error;
 
+  /// Full paths of the attached files, with their sizes once read.
+  final List<String> _attachments = [];
+  final Map<String, int> _sizes = {};
+
+  /// Whether files are being dragged over the window.
+  bool _dropping = false;
+
   /// Fields the last Send refused.
   final Set<_Field> _invalid = {};
 
   @override
+  void initState() {
+    super.initState();
+    _files.setMethodCallHandler(_onFiles);
+    _files.invokeMethod<void>('accept', true);
+  }
+
+  @override
   void dispose() {
+    _files.invokeMethod<void>('accept', false);
+    _files.setMethodCallHandler(null);
     for (final controller in [..._fields.values, _subject, _body]) {
       controller.dispose();
     }
@@ -112,8 +136,33 @@ class _ComposeWindowState extends State<ComposeWindow> {
     super.dispose();
   }
 
+  Future<void> _onFiles(MethodCall call) async {
+    if (!mounted) return;
+    switch (call.method) {
+      case 'hover':
+        setState(() => _dropping = call.arguments == true && !_sending);
+      case 'drop':
+        _attach((call.arguments as List).cast<String>());
+    }
+  }
+
+  Future<void> _pick() async => _attach(await _files.invokeListMethod<String>('pick') ?? const []);
+
+  /// Adds the files not attached yet; nothing changes while sending.
+  void _attach(List<String> paths) {
+    if (_sending || !mounted) return;
+    final added = paths.where((p) => !_attachments.contains(p)).toList();
+    if (added.isEmpty) return;
+    setState(() => _attachments.addAll(added));
+    for (final path in added) {
+      File(path).length().then((size) {
+        if (mounted) setState(() => _sizes[path] = size);
+      }, onError: (_) {});
+    }
+  }
+
   /// Whether closing would lose something the person wrote.
-  bool get _hasDraft => [..._fields.values, _subject, _body].any((c) => c.text.trim().isNotEmpty);
+  bool get _hasDraft => _attachments.isNotEmpty || [..._fields.values, _subject, _body].any((c) => c.text.trim().isNotEmpty);
 
   void _close() => Navigator.of(context).pop();
 
@@ -166,6 +215,7 @@ class _ComposeWindowState extends State<ComposeWindow> {
         bcc: lists[_Field.bcc]!,
         subject: _subject.text.trim(),
         body: _body.text,
+        attachments: List.of(_attachments),
       ));
       if (mounted) _close();
     } on engine.MailException catch (error) {
@@ -198,7 +248,7 @@ class _ComposeWindowState extends State<ComposeWindow> {
           clipBehavior: Clip.antiAlias,
           backgroundColor: colors.surface,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Panes.corner)),
-          child: SizedBox(
+          child: _droppable(context, SizedBox(
             width: 680,
             height: 620,
             child: Column(
@@ -247,6 +297,11 @@ class _ComposeWindowState extends State<ComposeWindow> {
                     ),
                   ),
                 ),
+                if (_attachments.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                    child: Wrap(spacing: 8, runSpacing: 8, children: [for (final path in _attachments) _attachmentChip(context, path)]),
+                  ),
                 if (_sending || _error != null)
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
@@ -259,9 +314,53 @@ class _ComposeWindowState extends State<ComposeWindow> {
                 if (_confirmingDiscard) _discardBar(context),
               ],
             ),
-          ),
+          )),
         ),
       ),
+    );
+  }
+
+  /// The window's content, under the drop target while files are dragged over it.
+  Widget _droppable(BuildContext context, Widget child) => Stack(children: [
+    child,
+    if (_dropping) Positioned.fill(child: IgnorePointer(child: _dropTarget(context))),
+  ]);
+
+  Widget _dropTarget(BuildContext context) {
+    final colors = context.colors;
+    return Container(
+      margin: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: colors.primaryContainer.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(Panes.corner - 4),
+        border: Border.all(color: colors.primary, width: 2),
+      ),
+      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+        Icon(Icons.attach_file, size: 40, color: colors.onPrimaryContainer),
+        const SizedBox(height: 12),
+        Text('Drop files to attach', style: context.text.titleMedium?.copyWith(color: colors.onPrimaryContainer)),
+      ]),
+    );
+  }
+
+  /// A file's name and size, and a button removing it.
+  Widget _attachmentChip(BuildContext context, String path) {
+    final size = _sizes[path];
+    final name = path.substring(path.lastIndexOf('/') + 1);
+    return InputChip(
+      avatar: const Icon(Icons.attach_file, size: 18),
+      label: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 260),
+        child: Text(size == null ? name : '$name  ·  ${fileSize(size)}', maxLines: 1, overflow: TextOverflow.ellipsis),
+      ),
+      tooltip: path,
+      deleteButtonTooltipMessage: 'Remove',
+      onDeleted: _sending
+          ? null
+          : () => setState(() {
+              _attachments.remove(path);
+              _sizes.remove(path);
+            }),
     );
   }
 
@@ -271,6 +370,12 @@ class _ComposeWindowState extends State<ComposeWindow> {
       IconButton(tooltip: 'Close (Esc)', icon: const Icon(Icons.close), onPressed: _sending ? null : _requestClose),
       const SizedBox(width: 4),
       Expanded(child: Text('New Message', style: context.text.titleLarge)),
+      IconButton(
+        tooltip: 'Attach files (or drop them on the message)',
+        icon: const Icon(Icons.attach_file),
+        onPressed: _sending ? null : _pick,
+      ),
+      const SizedBox(width: 8),
       Tooltip(
         message: '⌘ Return',
         child: FilledButton.icon(

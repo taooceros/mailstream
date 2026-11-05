@@ -621,10 +621,25 @@ final class ControlService {
         let to = try addresses(args, "to"), cc = try addresses(args, "cc"), bcc = try addresses(args, "bcc")
         guard !to.isEmpty else { throw ControlError.usage("--to needs at least one address.") }
         let subject = try args.required("subject"), body = try args.required("body")
-        try requireYes(args, "Would send \"\(subject)\" (\(body.count) characters) from \(from) to \(Self.emails(to + cc + bcc)). Re-run with --yes.")
-        let message = await store.outgoing(account: from, source: nil, to: to, cc: cc, bcc: bcc, subject: subject, text: body)
+        let attachments = try await Self.files(args.list("attachments") ?? [], argument: "attachments")
+        let attached = attachments.isEmpty ? "" : ", \(attachments.count) attachment\(attachments.count == 1 ? "" : "s")"
+        try requireYes(args, "Would send \"\(subject)\" (\(body.count) characters\(attached)) from \(from) to \(Self.emails(to + cc + bcc)). Re-run with --yes.")
+        let message = await store.outgoing(account: from, source: nil, to: to, cc: cc, bcc: bcc, subject: subject, text: body,
+                                           attachments: attachments)
         try await store.send(message, account: from)
         return ["sent": true, "from": .string(from), "to": Self.addresses(to), "subject": .string(subject)]
+    }
+
+    /// The files named by full path, each one a readable file rather than a folder.
+    @concurrent private nonisolated static func files(_ paths: [String], argument: String) async throws -> [URL] {
+        try paths.map { path in
+            var isFolder: ObjCBool = false
+            guard path.hasPrefix("/"), FileManager.default.fileExists(atPath: path, isDirectory: &isFolder), !isFolder.boolValue,
+                  FileManager.default.isReadableFile(atPath: path) else {
+                throw ControlError.usage("--\(argument): \"\(path)\" is not a readable file (give its full path).")
+            }
+            return URL(fileURLWithPath: path)
+        }
     }
 
     private func reply(_ args: Arguments) async throws -> JSON {

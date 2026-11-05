@@ -158,8 +158,10 @@ enum CLI {
             guard let value = TypedValue.bool(raw) else { throw ControlError.usage("--\(argument.name) must be true or false, not \"\(raw)\".") }
             return .bool(value)
         case .list:
-            // Settings values and conversation ids are taken whole; recipient and label lists split on commas.
+            // Settings values and conversation ids are taken whole; recipient and label lists split on
+            // commas. Attachments are paths, taken whole and made absolute here: the app resolves them.
             if argument.positional { return .strings([raw]) }
+            if argument.name == "attachments" { return .strings([URL(fileURLWithPath: raw).standardizedFileURL.path]) }
             return .strings(TypedValue.list(raw))
         case .choice(let choices):
             guard choices.contains(raw) else {
