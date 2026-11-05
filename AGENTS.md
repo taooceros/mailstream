@@ -41,6 +41,11 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
   one over. Move it to In Progress and comment `[omp @ <workspace>] start (<agent id>): <plan>`.
 - Progress: record decisions, blockers and dead ends as comments; the next session only sees
   what is on the issue.
+- Blocked by another issue (it needs that issue's change first, or the user said to wait for
+  it): mark it on Linear with a "blocked by" relation to that issue (file that issue first if
+  there is none), comment what it waits for, move it out of In Progress (to Backlog) so the
+  workspace frees up, and stop. When every blocker reaches In Review, Done or Canceled, the poll
+  hands the issue out again and its agent carries on from the comments.
 - Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work),
   move it to In Review and comment what changed, how it was verified and what remains. The user
   moves it to Done. If the issue has a parent, check its other sub-issues: when none is left in
@@ -56,8 +61,9 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
   in passing.
 - An omp session polls `scripts/linear-poll.sh` every minute and hands each issue it claims to a
   subagent working in the area's workspace; when another issue holds that workspace, the issue
-  goes to the subagent working related code, or to a private workspace. It claims Todo
-  issues the user created, once each, and any issue labelled `omp` (then removes the label). Every
+  goes to the subagent working related code, or to a private workspace. It claims Todo issues the
+  user created, once each, unless a blocker is still open; issues it claimed before, once all
+  their blockers are resolved; and any issue labelled `omp` (then removes the label). Every
   comment the user posts reaches the subagent working that issue, or starts one. Only the user
   adds `omp`; file your own issues in Backlog. `scripts/linear-omp.sh MS-12` opens one issue in a
   new Tern tab instead (Linear's "Work on issue → Custom script").

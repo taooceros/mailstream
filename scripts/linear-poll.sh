@@ -2,21 +2,29 @@
 # One pass over Linear: claims what an omp session should act on now and prints it as JSON lines,
 # which that session hands to subagents. dir is the jj workspace to work in (../mailstream-<area>
 # for the issue's Area label, else this repo).
-#   {"kind": "issue", "id", "identifier", "dir", "busy"}: an issue to start. Claimed when it is
+#   {"kind": "issue", "id", "identifier", "dir", "busy", "resume", "unblockedBy"}: an issue to
+#     start. Claimed when it is
 #     - in Todo, created by a workspace member (not an app, a guest or a GitHub import: the repo
 #       is public and the subagents run with full access), not claimed before and not yet
 #       commented on by an app (omp); or
+#     - claimed before, out of In Progress and no longer blocked: every issue blocking it (Linear
+#       "blocked by") is In Review, Done, Canceled or a duplicate. Claimed once per set of
+#       blockers, so blocking it again by another issue resumes it again; or
 #     - labelled `omp`, in any state but started, done or canceled; the label is removed on
 #       claim, so adding it again reruns the issue.
-#     Agents file their own issues in Backlog and move issues to Todo to ask the user something,
-#     so neither is picked up. Issues share their area's workspace: busy is true when that
+#     The first two skip issues with a blocker still open. resume is true for an issue claimed
+#     before (the subagent carries on from the issue's comments); unblockedBy lists the
+#     identifiers of its resolved blockers. Agents file their own issues in Backlog and move
+#     issues to Todo to ask the user something, so neither is picked up unless it was claimed
+#     before and gets unblocked. Issues share their area's workspace: busy is true when that
 #     workspace has an In Progress issue, is listed in BUSY (JSON array of dirs, e.g. the caller's
 #     running subagents) or got an earlier issue this pass; the caller then hands the issue to the
 #     subagent already working nearby code, or gives it a private workspace. Nothing waits.
 #   {"kind": "comment", "id", "issue", "issueId", "state", "dir", "createdAt", "body"}: a comment a
 #     workspace member (not an app, a guest or a GitHub sync) posted on any team issue in the last
 #     7 days, each once. The caller routes it to the issue's subagent or starts one.
-# Claims are kept in ~/.local/state/linear-poll/: `launched` (issue ids), `comments` (comment ids).
+# Claims are kept in ~/.local/state/linear-poll/: `launched` (issue ids), `comments` (comment
+# ids), `unblocked` (issue id and the blocker ids it was claimed with).
 # DRY_RUN=1 prints without claiming. `linear-poll.sh seen comment|issue <id>` puts omp's 👀 on a
 # comment or issue once the caller has handed it to a subagent, so the user sees it was picked up.
 set -euo pipefail
@@ -27,7 +35,8 @@ RENEW="$HOME/.pi/agent/extensions/linear/renew-omp-token.sh"
 STATE=${STATE:-$HOME/.local/state/linear-poll}
 LAUNCHED="$STATE/launched"
 HANDLED="$STATE/comments"
-mkdir -p "$STATE" && touch "$LAUNCHED" "$HANDLED"
+UNBLOCKED="$STATE/unblocked"
+mkdir -p "$STATE" && touch "$LAUNCHED" "$HANDLED" "$UNBLOCKED"
 
 log() { echo "$(date '+%F %T') $*" >&2; }
 
@@ -69,9 +78,11 @@ BUSY=${BUSY:-[]}
 DATA=$(gql 'query($team: ID!, $label: String!) {
   queued: issues(first: 100, filter: {
     team: { id: { eq: $team } }, state: { type: { in: ["triage", "backlog", "unstarted"] } },
-    or: [{ labels: { some: { name: { eq: $label } } } }, { state: { name: { eq: "Todo" } } }] }) {
+    or: [{ labels: { some: { name: { eq: $label } } } }, { state: { name: { eq: "Todo" } } },
+      { hasBlockedByRelations: { eq: true } }] }) {
     nodes { id identifier number state { name } creator { app guest }
-      labels { nodes { id name parent { name } } } comments(first: 100) { nodes { user { app } } } } }
+      labels { nodes { id name parent { name } } } comments(first: 100) { nodes { user { app } } }
+      inverseRelations(first: 50) { nodes { type issue { id identifier state { name type } } } } } }
   active: issues(first: 100, filter: {
     team: { id: { eq: $team } }, state: { name: { eq: "In Progress" } } }) {
     nodes { labels { nodes { name parent { name } } } } }
@@ -82,22 +93,35 @@ DATA=$(gql 'query($team: ID!, $label: String!) {
 
 # Issue lines oldest first, one per free workspace, then comment lines oldest first.
 PLAN=$(jq -c --argjson ws "$WORKSPACES" --argjson busy "$BUSY" --arg root "$ROOT" \
-  --arg label "$LABEL" --rawfile launched "$LAUNCHED" --rawfile handled "$HANDLED" '
+  --arg label "$LABEL" --rawfile launched "$LAUNCHED" --rawfile handled "$HANDLED" \
+  --rawfile unblocked "$UNBLOCKED" '
   def dir: ([.labels.nodes[] | select(.parent.name == "Area") | .name][0] // "") as $a
     | if $ws | index($a) then ($root | sub("/[^/]*$"; "")) + "/mailstream-\($a)" else $root end;
   def labelled: [.labels.nodes[] | select(.name == $label) | .id][0];
   def member: . != null and .app != true and .guest != true;
+  def blockers: [.inverseRelations.nodes[] | select(.type == "blocks") | .issue];
+  def resolved: .state.type == "completed" or .state.type == "canceled"
+    or .state.type == "duplicate" or .state.name == "In Review";
   ($launched | split("\n") | map(split(" ")[0])) as $done
   | ($handled | split("\n")) as $seen
-  | [.queued.nodes[] | select(labelled != null or (.state.name == "Todo"
-      and (.creator | member)
-      and (.id as $id | $done | index($id) | not)
-      and ([.comments.nodes[].user.app] | index(true) | not)))] as $todo
+  | ($unblocked | split("\n")) as $freed
+  | [.queued.nodes[]
+      | (.id as $id | $done | index($id) != null) as $claimed
+      | (blockers | all(resolved)) as $free
+      | (if (blockers | length) > 0 and $free
+          then "\(.id) \([blockers[].id] | sort | join(","))" else null end) as $key
+      | select(labelled != null or ($free and (
+          (.state.name == "Todo" and (.creator | member) and ($claimed | not)
+            and ([.comments.nodes[].user.app] | index(true) | not))
+          or ($claimed and $key != null and ($key as $k | $freed | index($k) | not)))))
+      | . + {resume: $claimed, unblockedBy: [blockers[] | select(resolved) | .identifier],
+          unblockKey: $key}] as $todo
   | (reduce ($todo | sort_by(.number))[] as $i (
       {busy: ([.active.nodes[] | dir] + $busy), out: []};
       ($i | dir) as $d
       | .out += [$i + {dir: $d, busy: (.busy | index($d) != null)}] | .busy += [$d])
-    | .out[] | {kind: "issue", id, identifier, dir, busy, label: labelled}),
+    | .out[] | {kind: "issue", id, identifier, dir, busy, resume, unblockedBy,
+        label: labelled, unblockKey}),
     (.comments.nodes | sort_by(.createdAt)[]
       | select((.user | member) and (.id as $id | $seen | index($id) | not))
       | {kind: "comment", id, issue: .issue.identifier, issueId: .issue.id,
@@ -113,9 +137,11 @@ while read -r line; do
     continue
   fi
   label=$(jq -r '.label // empty' <<<"$line")
-  echo "$id $(jq -r .identifier <<<"$line")" >>"$LAUNCHED"
+  key=$(jq -r '.unblockKey // empty' <<<"$line")
+  [ "$(jq -r .resume <<<"$line")" = true ] || echo "$id $(jq -r .identifier <<<"$line")" >>"$LAUNCHED"
+  [ -z "$key" ] || echo "$key" >>"$UNBLOCKED"
   [ -z "$label" ] ||
     gql 'mutation($id: String!, $label: String!) { issueRemoveLabel(id: $id, labelId: $label) { success } }' \
       "$(jq -nc --arg id "$id" --arg label "$label" '{id: $id, label: $label}')" >/dev/null
-  jq -c 'del(.label)' <<<"$line"
+  jq -c 'del(.label, .unblockKey)' <<<"$line"
 done <<<"$PLAN"
