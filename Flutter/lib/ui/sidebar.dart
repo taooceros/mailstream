@@ -5,12 +5,15 @@ import '../state/mail_state.dart';
 import 'common.dart';
 import 'design.dart';
 
-/// A standard Material 3 navigation drawer: unified mailboxes first (Inbox expands into each
-/// account's inbox, each marked with its color), then every account's folders.
+/// A standard Material 3 navigation drawer: the Compose button, unified mailboxes first (Inbox
+/// expands into each account's inbox, each marked with its color), then every account's folders.
 class Sidebar extends StatefulWidget {
-  const Sidebar({super.key, required this.state, this.onCollapse});
+  const Sidebar({super.key, required this.state, required this.onCompose, this.onCollapse});
 
   final MailState state;
+
+  /// Opens a new message.
+  final VoidCallback onCompose;
 
   /// Folds the drawer back into the rail; nil where the drawer is the layout's navigation.
   final VoidCallback? onCollapse;
@@ -110,6 +113,20 @@ class _SidebarState extends State<Sidebar> {
               ]),
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: FloatingActionButton.extended(
+                heroTag: null,
+                elevation: 1,
+                tooltip: 'New message (⌘N)',
+                onPressed: widget.onCompose,
+                icon: const Icon(Icons.edit_outlined),
+                label: const Text('Compose'),
+              ),
+            ),
+          ),
           Expanded(child: ListView(padding: const EdgeInsets.fromLTRB(12, 4, 12, 16), children: rows)),
         ],
       ),
@@ -135,12 +152,13 @@ class AppMark extends StatelessWidget {
   );
 }
 
-/// The navigation rail for medium windows: the unified mailboxes, and a menu button that
-/// opens the full drawer with every account's folders.
+/// The navigation rail for medium windows: a menu button that opens the full drawer with every
+/// account's folders, the Compose button, and the unified mailboxes.
 class Rail extends StatelessWidget {
-  const Rail({super.key, required this.state, required this.onMenu});
+  const Rail({super.key, required this.state, required this.onCompose, required this.onMenu});
 
   final MailState state;
+  final VoidCallback onCompose;
   final VoidCallback onMenu;
 
   @override
@@ -156,7 +174,17 @@ class Rail extends StatelessWidget {
       leading: WindowDragArea(
         child: Padding(
           padding: const EdgeInsets.only(top: 36, bottom: 8),
-          child: IconButton(tooltip: 'All folders', icon: const Icon(Icons.menu), onPressed: onMenu),
+          child: Column(children: [
+            IconButton(tooltip: 'All folders', icon: const Icon(Icons.menu), onPressed: onMenu),
+            const SizedBox(height: 8),
+            FloatingActionButton(
+              heroTag: null,
+              elevation: 1,
+              tooltip: 'New message (⌘N)',
+              onPressed: onCompose,
+              child: const Icon(Icons.edit_outlined),
+            ),
+          ]),
         ),
       ),
       selectedIndex: selected < 0 ? null : selected,

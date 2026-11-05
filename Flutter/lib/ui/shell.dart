@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../backend/models.dart';
 import '../state/mail_state.dart';
 import 'common.dart';
+import 'compose.dart';
 import 'conversation_list.dart';
 import 'design.dart';
 import 'reader.dart';
@@ -74,11 +75,16 @@ class _MailShellState extends State<MailShell> {
       ));
   }
 
-  /// Keys reach the window again once the field that had focus goes away (a closed composer).
+  /// Keys reach the window again once the field that had focus goes away (a closed composer),
+  /// unless a window above it (the compose window) holds the keys.
   void _keepFocus() {
     final primary = FocusManager.instance.primaryFocus;
-    if (primary == null || primary is FocusScopeNode) Future.microtask(() => mounted ? _focus.requestFocus() : null);
+    if (primary != null && primary is! FocusScopeNode) return;
+    if (!mounted || !(ModalRoute.isCurrentOf(context) ?? true)) return;
+    Future.microtask(() => mounted ? _focus.requestFocus() : null);
   }
+
+  void _compose() => openCompose(context, state);
 
   @override
   void dispose() {
@@ -189,6 +195,8 @@ class _MailShellState extends State<MailShell> {
         _search.selection = TextSelection(baseOffset: 0, extentOffset: _search.text.length);
       } else if (key == LogicalKeyboardKey.keyR) {
         state.refresh();
+      } else if (key == LogicalKeyboardKey.keyN) {
+        _compose();
       } else if (key == LogicalKeyboardKey.bracketLeft) {
         _back();
       } else {
@@ -285,8 +293,8 @@ class _MailShellState extends State<MailShell> {
     final drawer = width >= 1200 || _drawerOpen;
     _twoPane = width >= 1000;
     final navigation = drawer
-        ? Sidebar(state: state, onCollapse: width >= 1200 ? null : () => setState(() => _drawerOpen = false))
-        : Rail(state: state, onMenu: () => setState(() => _drawerOpen = true));
+        ? Sidebar(state: state, onCompose: _compose, onCollapse: width >= 1200 ? null : () => setState(() => _drawerOpen = false))
+        : Rail(state: state, onCompose: _compose, onMenu: () => setState(() => _drawerOpen = true));
     final listPane = _Pane(child: _listPane(context));
     final opened = state.opened;
     if (opened != null) _lastOpened = opened;

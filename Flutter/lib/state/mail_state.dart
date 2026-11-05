@@ -627,14 +627,20 @@ class MailState extends ChangeNotifier {
   /// button is the person's confirmation.
   Future<bool> reply(Conversation c, String body, {required bool all}) async {
     try {
-      final sent = await mail.reply(id: c.id, body: body, all: all, confirm: true);
-      showToast('Sent to ${sent.to.map((a) => Address.parse(a).displayName).join(', ')}');
+      _sentToast(await mail.reply(id: c.id, body: body, all: all, confirm: true));
       return true;
     } on engine.MailException catch (error) {
       _report('Could not send: ${describe(error)}');
       return false;
     }
   }
+
+  /// Sends a new plain-text message (`mail.send`); the Send button is the person's confirmation.
+  /// Throws the engine's refusal (an unknown account, an address it does not take, the
+  /// provider's error) for the compose window to show.
+  Future<void> send(engine.Draft draft) async => _sentToast(await mail.send(draft: draft, confirm: true));
+
+  void _sentToast(engine.Sent sent) => showToast('Sent to ${sent.to.map((a) => Address.parse(a).displayName).join(', ')}');
 
   void openFile(String path) => Process.run('open', [path]);
 

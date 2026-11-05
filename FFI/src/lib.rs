@@ -242,7 +242,22 @@ pub struct TagResult {
     pub failed: Vec<BatchFailure>,
 }
 
-/// A sent reply: the account it went from, its recipients (`Name <address>`) and subject.
+/// A new message. Addresses are `Name <address>` or bare addresses.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Draft {
+    /// The sending account's id (its address).
+    pub from: String,
+    /// At least one address.
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+    pub subject: String,
+    /// Plain text.
+    pub body: String,
+}
+
+/// What was sent: the account it went from, its recipients (`Name <address>`; for replies `to`
+/// and `cc`) and subject.
 #[derive(Clone, Debug, Deserialize, uniffi::Record)]
 pub struct Sent {
     pub from: String,
@@ -392,6 +407,19 @@ impl Mailstream {
     ) -> Result<TagResult, MailError> {
         let waiting = waiting.map(|waiting| if waiting { "true" } else { "false" });
         call("mail.tag", json!({ "ids": ids, "category": category, "waiting": waiting, "labels": labels })).await
+    }
+
+    /// Sends `draft` as a new plain-text message. Sends at once: `confirm` is the person's
+    /// go-ahead; without it the engine only answers what it would send (`confirm`).
+    pub async fn send(&self, draft: Draft, confirm: bool) -> Result<Sent, MailError> {
+        call(
+            "mail.send",
+            json!({
+                "from": draft.from, "to": draft.to, "cc": draft.cc, "bcc": draft.bcc,
+                "subject": draft.subject, "body": draft.body, "yes": confirm,
+            }),
+        )
+        .await
     }
 
     /// Replies to the conversation's latest message, quoting it, to its sender or with `all` to
