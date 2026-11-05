@@ -610,9 +610,9 @@ impl MailApp {
         );
     }
 
-    /// The current list's lines: in the Smart Inbox, what waits on the user's reply or action
-    /// first under its own header, as in the native app's Smart Inbox; then bundles
-    /// folded at their newest member's place, and date headers.
+    /// The current list's lines. In the Smart Inbox service mail folds into bundles pinned above
+    /// the rest, newest bundle first, and what waits on the user's reply or action follows under
+    /// its own header, as in the native app's Smart Inbox; date headers group the remaining rows.
     pub fn rebuild_items(&mut self) {
         let key = self.key();
         let bundles = key.bundles();
@@ -621,7 +621,8 @@ impl MailApp {
             self.items.clear();
             return;
         };
-        let mut lines: Vec<(usize, Option<Category>)> = Vec::with_capacity(list.conversations.len());
+        let mut rows = Vec::with_capacity(list.conversations.len());
+        let mut pinned: Vec<Category> = Vec::new();
         let mut members: HashMap<Category, Vec<usize>> = HashMap::new();
         let mut waiting = Vec::new();
         for (index, conversation) in list.conversations.iter().enumerate() {
@@ -630,24 +631,28 @@ impl MailApp {
                 continue;
             }
             match conversation.bundle().filter(|_| bundles) {
-                None => lines.push((index, None)),
+                None => rows.push(index),
                 Some(category) => {
                     let group = members.entry(category).or_default();
                     if group.is_empty() {
-                        lines.push((index, Some(category)));
+                        pinned.push(category);
                     }
                     group.push(index);
                 }
             }
         }
         let now = Local::now();
-        let mut items = Vec::with_capacity(lines.len() + waiting.len() + 9);
+        let mut items = Vec::with_capacity(pinned.len() + waiting.len() + rows.len() + 9);
+        items.extend(pinned.into_iter().map(|category| {
+            let members = members.remove(&category).unwrap_or_default();
+            Item::Bundle(Rc::new(Bundle::new(category, members, &list.conversations)))
+        }));
         if !waiting.is_empty() {
             items.push(Item::Waiting(waiting.len()));
             items.extend(waiting.into_iter().map(Item::Row));
         }
         let mut current: Option<String> = None;
-        for (index, bundle) in lines {
+        for index in rows {
             if sections {
                 let section = format::list_section(list.conversations[index].date, now);
                 if current.as_ref() != Some(&section) {
@@ -655,14 +660,7 @@ impl MailApp {
                     current = Some(section);
                 }
             }
-            items.push(match bundle {
-                None => Item::Row(index),
-                Some(category) => Item::Bundle(Rc::new(Bundle::new(
-                    category,
-                    members.remove(&category).unwrap_or_default(),
-                    &list.conversations,
-                ))),
-            });
+            items.push(Item::Row(index));
         }
         self.items = items;
     }
