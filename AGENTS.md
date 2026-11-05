@@ -11,6 +11,43 @@ This repo is a colocated jj repo (`.jj` + `.git`), pushed to `github.com/taoocer
 - Push: `jj bookmark set main -r @-` then `jj git push`.
 - The repo is public: never commit secrets, tokens, OAuth client files or personal mail data.
 
+## Work tracking: Linear
+
+Work is tracked in Linear: team `MS`, project `Mailstream`. Issue IDs look like `MS-12`. Use
+omp's Linear tools; the issue, not the session, is the record other sessions read.
+
+- Language: write everything on Linear (issue titles, descriptions, comments) in Chinese, plainly
+  enough that someone who has not read the code understands what is wrong, what was done and what
+  remains. Code identifiers, paths, commands and commit hashes stay as they are.
+- Labels: one type (`Bug`, `Feature`, `Improvement`, `Performance`, `Regression`) plus one `Area`
+  label. Area names match the jj workspaces (`chat`, `concurrency`, `flutter`, `gpui`, `motion`,
+  `ui-shell`) or the layer (`sync`, `cache`, `ffi`); an issue is worked in its area's workspace.
+- Claim before working: every agent, subagents included, works under an issue it has claimed.
+  With no issue for the work yet, create one first (a sub-issue of the issue it serves, if any)
+  and claim it. The start comment names the agent doing the work (its subagent/roster id), so
+  each issue shows which subagent owns it.
+- Start: read the issue and its comments. Skip issues already In Progress unless the user hands
+  one over. Move it to In Progress and comment `[omp @ <workspace>] start (<agent id>): <plan>`.
+- Progress: record decisions, blockers and dead ends as comments; the next session only sees
+  what is on the issue.
+- Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work),
+  move it to In Review and comment what changed, how it was verified and what remains. The user
+  moves it to Done.
+- UI changes (a new or changed view, flow or interaction, in any front end): take screenshots
+  of the running app showing the change, every state it adds included, and attach them to the
+  finishing comment. Work without them is not ready for review.
+- Questions only the user can decide: move the issue to Todo and ask in a comment instead of
+  guessing.
+- Problems found outside the current change: file a Backlog issue with labels; do not fix them
+  in passing.
+- An omp session polls `scripts/linear-poll.sh` every minute and hands each issue it claims to a
+  subagent working in the area's workspace; when another issue holds that workspace, the issue
+  goes to the subagent working related code, or to a private workspace. It claims Todo
+  issues the user created, once each, and any issue labelled `omp` (then removes the label). Every
+  comment the user posts reaches the subagent working that issue, or starts one. Only the user
+  adds `omp`; file your own issues in Backlog. `scripts/linear-omp.sh MS-12` opens one issue in a
+  new Tern tab instead (Linear's "Work on issue → Custom script").
+
 ## Building
 
 - The app links the Turso database engine (`.turso/lib/libturso_sqlite3.a`). Run `scripts/turso.sh`
