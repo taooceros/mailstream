@@ -37,8 +37,12 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
   is a sub-issue of it: set Linear's parent field (`parentId`) when creating it, so Linear shows
   it as a sub-issue; naming the parent only in the text does not count. The start comment names
   the agent doing the work (its subagent/roster id), so each issue shows which subagent owns it.
-- Start: read the issue and its comments. Skip issues already In Progress unless the user hands
-  one over. Move it to In Progress and comment `[omp @ <workspace>] start (<agent id>): <plan>`.
+- Start: read the issue and its comments. Skip issues already In Progress unless the user or the
+  polling session hands one over. Move it to In Progress, comment
+  `[omp @ <workspace>] start (<agent id>): <plan>`, then add the `claimed` label: it says an
+  agent is on the issue now, and the start comment says which. Taking over or resuming an issue
+  counts as starting it: post a new start comment with your own id. Remove `claimed` when you
+  stop (In Review, Todo with a question, Backlog when blocked).
 - Progress: record decisions, blockers and dead ends as comments; the next session only sees
   what is on the issue.
 - Blocked by another issue (it needs that issue's change first, or the user said to wait for
@@ -63,10 +67,13 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
   subagent working in the area's workspace; when another issue holds that workspace, the issue
   goes to the subagent working related code, or to a private workspace. It claims Todo issues the
   user created, once each, unless a blocker is still open; issues it claimed before, once all
-  their blockers are resolved; and any issue labelled `omp` (then removes the label). Every
-  comment the user posts reaches the subagent working that issue, or starts one. Only the user
-  adds `omp`; file your own issues in Backlog. `scripts/linear-omp.sh MS-12` opens one issue in a
-  new Tern tab instead (Linear's "Work on issue → Custom script").
+  their blockers are resolved; and any issue labelled `omp` (then removes the label). An In
+  Progress issue still `claimed` by an agent that is no longer running is reported stale, and the
+  session wakes that agent or hands the issue to a new one; `claimed` is dropped from issues out
+  of In Progress whose agent has stopped. Every comment the user posts reaches the subagent
+  working that issue, or starts one. Only the user adds `omp`; file your own issues in Backlog.
+  `scripts/linear-omp.sh MS-12` opens one issue in a new Tern tab instead (Linear's "Work on
+  issue → Custom script").
 - Who gets an issue: the polling session reuses an agent it already started over starting a new
   one, whenever that agent has related context and room left. Related, in this order: it worked
   this issue before (resumed, or a user comment on it); it worked the parent, a sub-issue, a
@@ -75,7 +82,7 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
   An agent still running another issue gets the new one only after it finishes, unless it is
   the same issue. At or over 400K, start a new agent instead; it picks up from the issue's
   comments, as after a session restart. A reused agent claims the new issue like any other: its
-  own start comment, In Progress, working in its own workspace.
+  own start comment, In Progress, `claimed`, working in its own workspace.
 
 ## Building
 

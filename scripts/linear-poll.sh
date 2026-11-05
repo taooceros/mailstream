@@ -23,20 +23,30 @@
 #   {"kind": "comment", "id", "issue", "issueId", "state", "dir", "createdAt", "body"}: a comment a
 #     workspace member (not an app, a guest or a GitHub sync) posted on any team issue in the last
 #     7 days, each once. The caller routes it to the issue's subagent or starts one.
+#   {"kind": "stale", "id", "identifier", "dir", "agent", "claimedAt"}: an In Progress issue
+#     labelled `claimed` whose owner, the agent named in its latest start comment
+#     (`[omp @ <workspace>] start (<agent id>): …`, posted at claimedAt), is not in RUNNING, and
+#     whose claim is at least 10 minutes old. agent is null when no start comment names one. Each
+#     start comment is reported once: whoever takes the issue over posts a new one. Needs RUNNING
+#     (JSON array of the agent ids running now, as the caller sees them); without it nothing is
+#     reported stale. Issues out of In Progress whose owner is not running lose `claimed`.
 # Claims are kept in ~/.local/state/linear-poll/: `launched` (issue ids), `comments` (comment
-# ids), `unblocked` (issue id and the blocker ids it was claimed with).
+# ids), `unblocked` (issue id and the blocker ids it was claimed with), `stale` (issue id and the
+# start comment reported).
 # DRY_RUN=1 prints without claiming. `linear-poll.sh seen comment|issue <id>` puts omp's 👀 on a
 # comment or issue once the caller has handed it to a subagent, so the user sees it was picked up.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TEAM_ID=${TEAM_ID:-9f8fe59f-3788-4542-8c18-4e5c5dd5ddc2} # Mailstream; the id survives key renames
 LABEL=${LABEL:-omp}
+CLAIMED=${CLAIMED:-claimed}
 RENEW="$HOME/.pi/agent/extensions/linear/renew-omp-token.sh"
 STATE=${STATE:-$HOME/.local/state/linear-poll}
 LAUNCHED="$STATE/launched"
 HANDLED="$STATE/comments"
 UNBLOCKED="$STATE/unblocked"
-mkdir -p "$STATE" && touch "$LAUNCHED" "$HANDLED" "$UNBLOCKED"
+STALE="$STATE/stale"
+mkdir -p "$STATE" && touch "$LAUNCHED" "$HANDLED" "$UNBLOCKED" "$STALE"
 
 log() { echo "$(date '+%F %T') $*" >&2; }
 
@@ -74,8 +84,9 @@ fi
 WORKSPACES=$(for d in "$ROOT"/../mailstream-*/; do [ -d "$d.jj" ] && basename "$d"; done |
   sed 's/^mailstream-//' | jq -Rnc '[inputs]')
 BUSY=${BUSY:-[]}
+RUNNING=${RUNNING:-null}
 
-DATA=$(gql 'query($team: ID!, $label: String!) {
+DATA=$(gql 'query($team: ID!, $label: String!, $claimed: String!) {
   queued: issues(first: 100, filter: {
     team: { id: { eq: $team } }, state: { type: { in: ["triage", "backlog", "unstarted"] } },
     or: [{ labels: { some: { name: { eq: $label } } } }, { state: { name: { eq: "Todo" } } },
@@ -86,15 +97,21 @@ DATA=$(gql 'query($team: ID!, $label: String!) {
   active: issues(first: 100, filter: {
     team: { id: { eq: $team } }, state: { name: { eq: "In Progress" } } }) {
     nodes { labels { nodes { name parent { name } } } } }
+  claimed: issues(first: 100, filter: {
+    team: { id: { eq: $team } }, labels: { some: { name: { eq: $claimed } } } }) {
+    nodes { id identifier state { name } labels { nodes { id name parent { name } } }
+      comments(first: 100) { nodes { id createdAt body user { app } } } } }
   comments(first: 100, filter: { createdAt: { gt: "-P7D" }, issue: { team: { id: { eq: $team } } } }) {
     nodes { id createdAt body user { app guest }
       issue { id identifier state { name } labels { nodes { name parent { name } } } } } }
-}' "$(jq -nc --arg team "$TEAM_ID" --arg label "$LABEL" '{team: $team, label: $label}')")
+}' "$(jq -nc --arg team "$TEAM_ID" --arg label "$LABEL" --arg claimed "$CLAIMED" \
+  '{team: $team, label: $label, claimed: $claimed}')")
 
-# Issue lines oldest first, one per free workspace, then comment lines oldest first.
-PLAN=$(jq -c --argjson ws "$WORKSPACES" --argjson busy "$BUSY" --arg root "$ROOT" \
-  --arg label "$LABEL" --rawfile launched "$LAUNCHED" --rawfile handled "$HANDLED" \
-  --rawfile unblocked "$UNBLOCKED" '
+# Issue lines oldest first, one per free workspace, then stale and comment lines oldest first.
+PLAN=$(jq -c --argjson ws "$WORKSPACES" --argjson busy "$BUSY" --argjson running "$RUNNING" \
+  --arg root "$ROOT" --arg label "$LABEL" --arg claimedLabel "$CLAIMED" \
+  --rawfile launched "$LAUNCHED" --rawfile handled "$HANDLED" --rawfile unblocked "$UNBLOCKED" \
+  --rawfile stale "$STALE" --arg now "$(date -u +%FT%TZ)" '
   def dir: ([.labels.nodes[] | select(.parent.name == "Area") | .name][0] // "") as $a
     | if $ws | index($a) then ($root | sub("/[^/]*$"; "")) + "/mailstream-\($a)" else $root end;
   def labelled: [.labels.nodes[] | select(.name == $label) | .id][0];
@@ -105,6 +122,8 @@ PLAN=$(jq -c --argjson ws "$WORKSPACES" --argjson busy "$BUSY" --arg root "$ROOT
   ($launched | split("\n") | map(split(" ")[0])) as $done
   | ($handled | split("\n")) as $seen
   | ($unblocked | split("\n")) as $freed
+  | ($stale | split("\n")) as $reported
+  | ($now | fromdateiso8601) as $t
   | [.queued.nodes[]
       | (.id as $id | $done | index($id) != null) as $claimed
       | (blockers | all(resolved)) as $free
@@ -122,6 +141,20 @@ PLAN=$(jq -c --argjson ws "$WORKSPACES" --argjson busy "$BUSY" --arg root "$ROOT
       | .out += [$i + {dir: $d, busy: (.busy | index($d) != null)}] | .busy += [$d])
     | .out[] | {kind: "issue", id, identifier, dir, busy, resume, unblockedBy,
         label: labelled, unblockKey}),
+    (if $running == null then empty else .claimed.nodes[]
+      | ([.comments.nodes[] | select(.user.app == true)
+          | select(.body | test("^\\[omp @ [^\\]]*\\] start \\("))] | sort_by(.createdAt) | last)
+          as $start
+      | ([$start.body // "" | capture("^\\[omp @ [^\\]]*\\] start \\((?<a>[^)]+)\\)").a][0])
+          as $agent
+      | select($running | index($agent) | not)
+      | [.labels.nodes[] | select(.name == $claimedLabel) | .id][0] as $labelId
+      | if .state.name != "In Progress" then {kind: "unclaim", id, label: $labelId}
+        else "\(.id) \($start.id // "none")" as $key
+          | select(($reported | index($key) | not) and ($start == null
+              or $t - ($start.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) >= 600))
+          | {kind: "stale", id, identifier, dir: dir, agent: $agent,
+             claimedAt: $start.createdAt, staleKey: $key} end end),
     (.comments.nodes | sort_by(.createdAt)[]
       | select((.user | member) and (.id as $id | $seen | index($id) | not))
       | {kind: "comment", id, issue: .issue.identifier, issueId: .issue.id,
@@ -131,11 +164,14 @@ PLAN=$(jq -c --argjson ws "$WORKSPACES" --argjson busy "$BUSY" --arg root "$ROOT
 if [ -n "${DRY_RUN:-}" ]; then echo "$PLAN"; exit 0; fi
 while read -r line; do
   id=$(jq -r .id <<<"$line")
-  if [ "$(jq -r .kind <<<"$line")" = comment ]; then
-    echo "$id" >>"$HANDLED"
-    echo "$line"
-    continue
-  fi
+  case "$(jq -r .kind <<<"$line")" in
+    comment) echo "$id" >>"$HANDLED"; echo "$line"; continue ;;
+    stale) jq -r .staleKey <<<"$line" >>"$STALE"; jq -c 'del(.staleKey)' <<<"$line"; continue ;;
+    unclaim)
+      gql 'mutation($id: String!, $label: String!) { issueRemoveLabel(id: $id, labelId: $label) { success } }' \
+        "$(jq -c '{id, label}' <<<"$line")" >/dev/null
+      continue ;;
+  esac
   label=$(jq -r '.label // empty' <<<"$line")
   key=$(jq -r '.unblockKey // empty' <<<"$line")
   [ "$(jq -r .resume <<<"$line")" = true ] || echo "$id $(jq -r .identifier <<<"$line")" >>"$LAUNCHED"
