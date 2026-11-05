@@ -22,8 +22,9 @@ final class ControlService {
         self.store = store
     }
 
-    /// One request's answer, encoded.
-    nonisolated func handle(_ data: Data) async -> Data {
+    /// One request's answer, encoded. Decoding and encoding run off the main actor, which only
+    /// runs the command: answers carrying message bodies take milliseconds to encode.
+    @concurrent nonisolated func handle(_ data: Data) async -> Data {
         let answer: JSON
         do {
             let request = try? JSON.decode(data)
@@ -297,47 +298,55 @@ final class ControlService {
     private func show(_ args: Arguments) async throws -> JSON {
         let known = try lookup(try args.required("id"))
         let conversation = known.conversation
-        let maxChars = max(args.int("max-chars") ?? 20_000, 0)
-        var bodies: [MessageRef: Result<MessageContent, any Error>] = [:]
+        var bodies: [MessageRef: Result<MessageContent, ControlError>] = [:]
         for message in conversation.messages {
             do {
                 bodies[message.ref] = .success(try await store.contents.load(message.ref).content)
             } catch {
-                bodies[message.ref] = .failure(error)
+                bodies[message.ref] = .failure(ControlError(error))
             }
         }
         var out = summary(conversation).object ?? [:]
-        out["messages"] = .array(conversation.messages.map { message in
+        out["messages"] = await Self.messages(conversation.messages, bodies: bodies, cache: store.cache,
+                                              maxChars: max(args.int("max-chars") ?? 20_000, 0), html: args.bool("html"))
+        return .object(out)
+    }
+
+    /// The messages of `mail show` with their bodies, off the main actor: stripping, cutting and
+    /// rewriting bodies of several megabytes would hold up the front end's frames.
+    @concurrent private nonisolated static func messages(_ messages: [MailMessage], bodies: [MessageRef: Result<MessageContent, ControlError>],
+                                                         cache: MailCache, maxChars: Int, html: Bool) async -> JSON {
+        .array(messages.map { message in
             let envelope = message.envelope
             var item: [String: JSON] = [
                 "id": .string(message.ref.id), "mailbox": .string(message.ref.mailbox), "role": .string(message.role.rawValue),
-                "from": Self.addresses(envelope.from), "to": Self.addresses(envelope.to),
+                "from": addresses(envelope.from), "to": addresses(envelope.to),
                 "date": .date(envelope.date), "subject": .string(envelope.subject),
                 "unread": .bool(!envelope.isSeen), "starred": .bool(envelope.isFlagged),
             ]
             switch bodies[message.ref] {
             case .success(let content):
                 let text = content.text.flatMap { $0.isEmpty ? nil : $0 } ?? content.html.map(HTMLText.strip) ?? ""
-                item["cc"] = Self.addresses(content.cc)
-                item["text"] = .string(String(text.prefix(maxChars)))
-                item["truncated"] = .bool(text.count > maxChars)
-                if args.bool("html"), let html = content.html {
+                let shown = text.prefix(maxChars)
+                item["cc"] = addresses(content.cc)
+                item["text"] = .string(String(shown))
+                item["truncated"] = .bool(shown.endIndex < text.endIndex)
+                if html, let body = content.html {
                     // Inline parts point at the reader's `mscid:` scheme; other clients read the cached files.
-                    item["html"] = .string(html.replacingOccurrences(
-                        of: store.cache.partURLBase(message.ref), with: store.cache.messageDirectory(message.ref).absoluteString))
+                    item["html"] = .string(body.replacingOccurrences(
+                        of: cache.partURLBase(message.ref), with: cache.messageDirectory(message.ref).absoluteString))
                 }
                 item["attachments"] = .array(content.attachments.filter { !$0.inline }.map { attachment in
                     ["filename": .string(attachment.filename), "mime": .string(attachment.mime), "size": .int(attachment.size),
-                     "path": .string(store.cache.attachmentURL(attachment, of: message.ref).path)]
+                     "path": .string(cache.attachmentURL(attachment, of: message.ref).path)]
                 })
             case .failure(let error):
-                item["error"] = .string(error.localizedDescription)
+                item["error"] = .string(error.message)
             case nil:
                 break
             }
             return .object(item)
         })
-        return .object(out)
     }
 
     private func summary(_ conversation: Conversation) -> JSON {
@@ -365,11 +374,11 @@ final class ControlService {
         ]
     }
 
-    private static func text(_ address: Address) -> String {
+    private nonisolated static func text(_ address: Address) -> String {
         address.name.map { "\($0) <\(address.email)>" } ?? address.email
     }
 
-    private static func addresses(_ list: [Address]) -> JSON { .strings(list.map(text)) }
+    private nonisolated static func addresses(_ list: [Address]) -> JSON { .strings(list.map(text)) }
 
     /// The addresses as a confirmation names them.
     private static func emails(_ list: [Address]) -> String { list.map(\.email).joined(separator: ", ") }
