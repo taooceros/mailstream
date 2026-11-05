@@ -118,7 +118,10 @@ class MailState extends ChangeNotifier {
   /// A list not in view fetched within this long serves reads without asking again; the one in
   /// view follows the engine's change events.
   static const listLifetime = Duration(seconds: 90);
-  static const pageSize = 60;
+
+  /// Conversations per page, the engine's most. Long pages matter in the Smart Inbox: most of a
+  /// page folds into bundles, so short ones load one after another near the list's end.
+  static const pageSize = 200;
 
   List<Account> accounts = const [];
   Map<String, List<Mailbox>> mailboxes = const {};

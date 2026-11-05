@@ -118,7 +118,7 @@ nonisolated struct CommandSpec: Sendable {
 
     private static let accountAddress = Argument(name: "account", kind: .string, summary: "Account address.", positional: true, required: true)
 
-    private static let limit = Argument(name: "limit", kind: .int, summary: "Most conversations returned (1-100).", defaultValue: 25)
+    private static let limit = Argument(name: "limit", kind: .int, summary: "Most conversations returned (1-200).", defaultValue: 25)
 
     private static let settingKey = Argument(name: "key", kind: .string, summary: "Setting key.", positional: true, required: true)
 

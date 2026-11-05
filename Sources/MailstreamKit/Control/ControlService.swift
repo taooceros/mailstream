@@ -375,7 +375,7 @@ final class ControlService {
     }
 
     private func list(_ args: Arguments, query: String?) async throws -> JSON {
-        let limit = min(max(args.int("limit") ?? 25, 1), 100)
+        let limit = min(max(args.int("limit") ?? 25, 1), 200)
         let category = args.string("category").flatMap(MailCategory.init(rawValue:))
         let include = { (conversation: Conversation) -> Bool in
             if args.bool("unread"), !conversation.isUnread { return false }
@@ -387,7 +387,7 @@ final class ControlService {
         }
         var listing: MailStore.AgentListing
         if let query {
-            listing = await store.agentSearch(try accountNames(args), query: query, pageSize: min(max(limit, 25), 100))
+            listing = await store.agentSearch(try accountNames(args), query: query, pageSize: min(max(limit, 25), 200))
             listing.conversations = Array(listing.conversations.filter(include).prefix(limit))
         } else {
             let cursor = try args.string("cursor").map { text in
