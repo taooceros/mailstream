@@ -38,8 +38,11 @@ class _MailShellState extends State<MailShell> {
   /// The rail's menu button opens the full drawer.
   bool _drawerOpen = false;
 
-  /// Whether the last layout showed list and conversation side by side.
+  /// Whether the window is wide enough for list and conversation side by side.
   bool _twoPane = false;
+
+  /// The conversation last open, kept to slide out beside the list as the split closes.
+  Conversation? _lastOpened;
 
   MailState get state => widget.state;
 
@@ -275,7 +278,9 @@ class _MailShellState extends State<MailShell> {
     );
   }
 
-  /// Breakpoints: a drawer from 1200 dp (large), a rail below; two panes from 1000 dp.
+  /// Breakpoints: a drawer from 1200 dp (large), a rail below. The list fills the content area;
+  /// from 1000 dp an opened conversation splits it, list-detail, the list narrowing as the
+  /// conversation slides in beside it. Narrower windows slide the conversation over the list.
   Widget _layout(BuildContext context, double width) {
     final drawer = width >= 1200 || _drawerOpen;
     _twoPane = width >= 1000;
@@ -283,16 +288,30 @@ class _MailShellState extends State<MailShell> {
         ? Sidebar(state: state, onCollapse: width >= 1200 ? null : () => setState(() => _drawerOpen = false))
         : Rail(state: state, onMenu: () => setState(() => _drawerOpen = true));
     final listPane = _Pane(child: _listPane(context));
+    final opened = state.opened;
+    if (opened != null) _lastOpened = opened;
     final Widget content;
     if (_twoPane) {
-      final listWidth = (width * 0.42).clamp(420.0, 600.0);
-      content = Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SizedBox(width: listWidth, child: listPane),
-          const SizedBox(width: Panes.spacer),
-          Expanded(child: _Pane(child: _detailPane(context))),
-        ],
+      final listWidth = (width * 0.36).clamp(400.0, 520.0);
+      // While the split closes, the conversation that was open slides out.
+      final shown = opened ?? _lastOpened;
+      final detail = shown == null ? null : _Pane(child: _detailPane(context, shown));
+      content = TweenAnimationBuilder<double>(
+        tween: Tween(end: opened == null ? 0 : 1),
+        duration: opened == null ? Motion.exit : Motion.enter,
+        curve: Motion.curve,
+        builder: (context, split, _) => LayoutBuilder(builder: (context, constraints) {
+          final full = constraints.maxWidth;
+          final list = full + (listWidth - full) * split;
+          return ClipRect(
+            child: Stack(children: [
+              Positioned(left: 0, top: 0, bottom: 0, width: list, child: listPane),
+              // The conversation keeps its final width, so its text does not reflow as it slides.
+              if (split > 0 && detail != null)
+                Positioned(left: list + Panes.spacer, top: 0, bottom: 0, width: full - listWidth - Panes.spacer, child: detail),
+            ]),
+          );
+        }),
       );
     } else {
       content = Stack(
@@ -301,7 +320,7 @@ class _MailShellState extends State<MailShell> {
           listPane,
           SlideLayer(
             onDismiss: state.close,
-            child: state.opened == null ? null : _Pane(child: _detailPane(context)),
+            child: opened == null ? null : _Pane(child: _detailPane(context, opened)),
           ),
         ],
       );
@@ -370,29 +389,24 @@ class _MailShellState extends State<MailShell> {
     );
   }
 
-  Widget _detailPane(BuildContext context) {
-    final opened = state.opened;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        WindowDragArea(child: SizedBox(height: 54, child: opened == null ? null : _readerToolbar(context, opened))),
-        Expanded(
-          child: AnimatedSwitcher(
-            duration: Durations.medium2,
-            switchInCurve: Motion.curve,
-            // Material fade through: the old content fades out as the new one scales in.
-            transitionBuilder: (child, animation) => FadeTransition(
-              opacity: animation,
-              child: ScaleTransition(scale: Tween(begin: 0.98, end: 1.0).animate(animation), child: child),
-            ),
-            child: opened == null
-                ? _EmptyDetail(key: const ValueKey('empty'), unread: state.conversations.where((c) => c.unread).length)
-                : KeyedSubtree(key: ValueKey(opened.id), child: Reader(key: _reader, state: state, conversation: opened)),
+  Widget _detailPane(BuildContext context, Conversation opened) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      WindowDragArea(child: SizedBox(height: 54, child: _readerToolbar(context, opened))),
+      Expanded(
+        child: AnimatedSwitcher(
+          duration: Durations.medium2,
+          switchInCurve: Motion.curve,
+          // Material fade through: the old conversation fades out as the next one scales in.
+          transitionBuilder: (child, animation) => FadeTransition(
+            opacity: animation,
+            child: ScaleTransition(scale: Tween(begin: 0.98, end: 1.0).animate(animation), child: child),
           ),
+          child: KeyedSubtree(key: ValueKey(opened.id), child: Reader(key: _reader, state: state, conversation: opened)),
         ),
-      ],
-    );
-  }
+      ),
+    ],
+  );
 
   Widget _readerToolbar(BuildContext context, Conversation opened) {
     final colors = context.colors;
@@ -469,38 +483,6 @@ class _ListHeader extends StatelessWidget {
       const SizedBox(width: 16),
     ]),
   );
-}
-
-/// Shown beside the list until a conversation opens.
-class _EmptyDetail extends StatelessWidget {
-  const _EmptyDetail({super.key, required this.unread});
-
-  final int unread;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.colors;
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 96,
-            height: 96,
-            decoration: BoxDecoration(color: colors.surfaceContainerHigh, shape: BoxShape.circle),
-            child: Icon(Icons.mark_email_unread_outlined, size: 44, color: colors.onSurfaceVariant),
-          ),
-          const SizedBox(height: 20),
-          Text('Select a conversation', style: context.text.titleMedium?.copyWith(color: colors.onSurface)),
-          const SizedBox(height: 6),
-          Text(
-            unread > 0 ? '$unread unread in this view' : 'Nothing unread',
-            style: context.text.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 /// A Material 3 search bar with refresh at its trailing end.
