@@ -1,8 +1,9 @@
-import 'package:flutter/cupertino.dart' show CupertinoActivityIndicator, CupertinoIcons;
+import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
+import 'package:macos_ui/macos_ui.dart';
 
 import '../backend/models.dart';
 import '../state/mail_state.dart';
@@ -15,10 +16,13 @@ import 'glass.dart';
 /// (service mail) or a chat log (people), and reply buttons at the bottom that open an inline
 /// composer. It shows at once from the list's summary; bodies fill in when they arrive.
 class Reader extends StatefulWidget {
-  const Reader({super.key, required this.state, required this.conversation});
+  const Reader({super.key, required this.state, required this.conversation, this.topInset = 0});
 
   final MailState state;
   final Conversation conversation;
+
+  /// Height of the toolbar floating over the top, which the message scrolls under.
+  final double topInset;
 
   static const column = 760.0;
 
@@ -91,7 +95,7 @@ class ReaderState extends State<Reader> {
       _Header(state: widget.state, conversation: c),
       const SizedBox(height: 24),
       if (messages == null && thread.error == null)
-        const Padding(padding: EdgeInsets.symmetric(vertical: 48), child: Center(child: CupertinoActivityIndicator())),
+        const Padding(padding: EdgeInsets.symmetric(vertical: 48), child: Center(child: Spinner())),
       if (thread.error != null) Text(thread.error!, style: context.text.bodyMedium?.copyWith(color: colors.error)),
       if (messages != null)
         if (_chat)
@@ -122,7 +126,7 @@ class ReaderState extends State<Reader> {
             controller: _scroll,
             child: SingleChildScrollView(
               controller: _scroll,
-              padding: const EdgeInsets.fromLTRB(32, 24, 32, 0),
+              padding: EdgeInsets.fromLTRB(32, widget.topInset + 16, 32, 0),
               child: Center(
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: Reader.column),
@@ -296,12 +300,9 @@ class _MessageCard extends StatelessWidget {
                     const SizedBox(width: 12),
                     Text(messageDate(m.date, now), style: text.labelMedium?.copyWith(color: colors.onSurfaceVariant)),
                     if (expanded) ...[
-                      IconButton(tooltip: 'Reply', icon: const Icon(CupertinoIcons.arrowshape_turn_up_left), onPressed: () => onReply()),
-                      IconButton(
-                        tooltip: 'Reply all',
-                        icon: const Icon(CupertinoIcons.arrowshape_turn_up_left_2),
-                        onPressed: () => onReply(all: true),
-                      ),
+                      const SizedBox(width: 4),
+                      ToolButton(tooltip: 'Reply', icon: CupertinoIcons.arrowshape_turn_up_left, onPressed: () => onReply()),
+                      ToolButton(tooltip: 'Reply all', icon: CupertinoIcons.arrowshape_turn_up_left_2, onPressed: () => onReply(all: true)),
                     ],
                   ],
                 ),
@@ -336,10 +337,15 @@ class _AttachmentChip extends StatelessWidget {
   final VoidCallback onOpen;
 
   @override
-  Widget build(BuildContext context) => ActionChip(
-    avatar: const Icon(CupertinoIcons.paperclip, size: 14),
-    label: Text('${attachment.filename}  ·  ${fileSize(attachment.size)}'),
+  Widget build(BuildContext context) => PushButton(
+    controlSize: ControlSize.regular,
+    secondary: true,
     onPressed: onOpen,
+    child: Row(mainAxisSize: MainAxisSize.min, children: [
+      const MacosIcon(CupertinoIcons.paperclip, size: 13),
+      const SizedBox(width: 6),
+      Text('${attachment.filename}  ·  ${fileSize(attachment.size)}'),
+    ]),
   );
 }
 
@@ -728,13 +734,12 @@ class _ChatMessageState extends State<_ChatMessage> {
                 child: AnimatedOpacity(
                   opacity: _hover ? 1 : 0,
                   duration: Durations.short3,
-                  child: GlassCapsule(
-                    blur: true,
+                  child: RaisedCapsule(
                     child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      IconButton(tooltip: 'Reply', icon: const Icon(CupertinoIcons.arrowshape_turn_up_left), onPressed: () => widget.onReply()),
-                      IconButton(
+                      ToolButton(tooltip: 'Reply', icon: CupertinoIcons.arrowshape_turn_up_left, onPressed: () => widget.onReply()),
+                      ToolButton(
                         tooltip: 'Reply all',
-                        icon: const Icon(CupertinoIcons.arrowshape_turn_up_left_2),
+                        icon: CupertinoIcons.arrowshape_turn_up_left_2,
                         onPressed: () => widget.onReply(all: true),
                       ),
                     ]),
@@ -757,19 +762,15 @@ class _ReplyBar extends StatelessWidget {
   final VoidCallback onReply;
   final VoidCallback onReplyAll;
 
-  /// Floating glass over the conversation it scrolls above.
+  /// Push buttons on a capsule of the system's glass, floating over the conversation.
   @override
   Widget build(BuildContext context) => Center(
     child: GlassCapsule(
-      blur: true,
-      child: Padding(
-        padding: const EdgeInsets.all(3),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          FilledButton.icon(onPressed: onReply, icon: const Icon(CupertinoIcons.arrowshape_turn_up_left), label: const Text('Reply')),
-          const SizedBox(width: 6),
-          OutlinedButton.icon(onPressed: onReplyAll, icon: const Icon(CupertinoIcons.arrowshape_turn_up_left_2), label: const Text('Reply All')),
-        ]),
-      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        PushButton(controlSize: ControlSize.large, onPressed: onReply, child: const Text('Reply')),
+        const SizedBox(width: 6),
+        PushButton(controlSize: ControlSize.large, secondary: true, onPressed: onReplyAll, child: const Text('Reply All')),
+      ]),
     ),
   );
 }
@@ -893,22 +894,22 @@ class _ComposerState extends State<_Composer> {
                     style: text.bodyMedium,
                   ),
                 ),
-                IconButton(
+                ToolButton(
                   tooltip: widget.all ? 'Reply to sender only' : 'Reply all',
-                  icon: Icon(widget.all ? CupertinoIcons.arrowshape_turn_up_left : CupertinoIcons.arrowshape_turn_up_left_2),
+                  icon: widget.all ? CupertinoIcons.arrowshape_turn_up_left : CupertinoIcons.arrowshape_turn_up_left_2,
                   onPressed: () => widget.onAll(!widget.all),
                 ),
-                IconButton(tooltip: 'Discard', icon: const Icon(CupertinoIcons.trash), onPressed: _discard),
+                ToolButton(tooltip: 'Discard', icon: CupertinoIcons.trash, onPressed: _discard),
               ]),
               const SizedBox(height: 8),
-              TextField(
+              MacosTextField(
                 controller: _text,
                 focusNode: _focus,
                 autofocus: true,
                 minLines: 3,
                 maxLines: 12,
                 style: text.bodyLarge,
-                decoration: const InputDecoration(hintText: 'Write a reply'),
+                placeholder: 'Write a reply',
               ),
               const SizedBox(height: 12),
               Row(children: [
@@ -916,12 +917,12 @@ class _ComposerState extends State<_Composer> {
                   child: Text('The original is quoted below your text.  ⌘ Return sends.',
                       style: text.bodySmall?.copyWith(color: colors.onSurfaceVariant)),
                 ),
-                FilledButton.icon(
+                PushButton(
+                  controlSize: ControlSize.large,
                   onPressed: _sending ? null : _send,
-                  icon: _sending
-                      ? const CupertinoActivityIndicator(radius: 7, color: Colors.white)
-                      : const Icon(CupertinoIcons.paperplane_fill),
-                  label: Text(_sending ? 'Sending' : 'Send'),
+                  child: _sending
+                      ? const Row(mainAxisSize: MainAxisSize.min, children: [Spinner(radius: 6), SizedBox(width: 6), Text('Sending')])
+                      : const Text('Send'),
                 ),
               ]),
             ],

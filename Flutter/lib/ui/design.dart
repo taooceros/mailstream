@@ -1,11 +1,14 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:macos_ui/macos_ui.dart';
 
-/// macOS 26's look on Material's widgets: the system font at the Mac's type sizes, the system
-/// accent blue on neutral grays (Material's token names, Apple's values), no ink ripples, capsule
-/// buttons, compact controls. Only what the theme cannot carry lives in the other classes here:
-/// motion, the list's row heights, the window's panel metrics, stable account and topic colors.
+/// The Mac's look: macos_ui's controls (push buttons, icon buttons, search and text fields,
+/// switches, pop-up buttons, spinners) under [macos], and Material's remaining widgets themed to
+/// match by [of]: the system font at the Mac's type sizes, the accent blue on neutral grays
+/// (Material's token names, Apple's values), no ink ripples. Only what a theme cannot carry lives
+/// in the other classes here: motion, the list's row heights, the islands' metrics, stable
+/// account and topic colors.
 abstract final class MailTheme {
   static const accent = Color(0xFF007AFF);
   static const accentDark = Color(0xFF0A84FF);
@@ -108,6 +111,11 @@ abstract final class MailTheme {
     labelSmall: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, letterSpacing: 0, height: 1.3),
   );
 
+  /// macos_ui's theme, in the same accent.
+  static MacosThemeData macos(Brightness brightness) => brightness == Brightness.light
+      ? MacosThemeData.light(accentColor: AccentColor.blue)
+      : MacosThemeData.dark(accentColor: AccentColor.blue);
+
   static ThemeData of(Brightness brightness) {
     final scheme = MailTheme.scheme(brightness);
     final light = brightness == Brightness.light;
@@ -132,7 +140,7 @@ abstract final class MailTheme {
       hoverColor: hover,
       highlightColor: pressed,
       focusColor: hover,
-      scaffoldBackgroundColor: scheme.surface,
+      scaffoldBackgroundColor: Colors.transparent,
       canvasColor: scheme.surface,
       dividerTheme: DividerThemeData(color: scheme.outlineVariant, thickness: 0.5, space: 1),
       iconTheme: IconThemeData(size: 17, color: scheme.onSurfaceVariant),
@@ -311,14 +319,13 @@ abstract final class ListMetrics {
   static const inset = 6.0;
 }
 
-/// The window as macOS 26 lays it out: the navigation on a Liquid Glass panel floating [inset]
-/// from the window's edges with [panelCorner] corners; the list and the conversation share the
-/// window's surface, a hairline between them. Cards round at [corner], sheets at [sheetCorner].
+/// The window as islands, after Dia: the sidebar sits on the window's Liquid Glass, and the list
+/// and the conversation are rounded white islands floating on it, [gap] apart and from the
+/// window's edges, with [corner] corners. Sheets round at [sheetCorner].
 abstract final class Panes {
-  static const inset = 8.0;
-  static const panelCorner = 16.0;
+  static const gap = 8.0;
   static const corner = 12.0;
-  static const sheetCorner = 18.0;
+  static const sheetCorner = 16.0;
 }
 
 /// Stable per-account colors, in sidebar order: the system blue, orange, purple, green, red, teal.

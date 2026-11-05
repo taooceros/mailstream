@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:macos_ui/macos_ui.dart';
 
 import 'package:mailstream/mailstream.dart' as engine;
 
@@ -6,8 +7,11 @@ import 'state/mail_state.dart';
 import 'ui/design.dart';
 import 'ui/shell.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // macos_ui's controls dim with the window and follow the accent color through the window
+  // delegate macos_window_utils installs.
+  await WindowManipulator.initialize(enableWindowDelegate: true);
   // The engine starts in this process: it paints from the shared cache and syncs every account.
   final state = MailState(engine.Mailstream())..start();
   runApp(MailstreamApp(state: state));
@@ -24,6 +28,7 @@ class MailstreamApp extends StatelessWidget {
     debugShowCheckedModeBanner: false,
     theme: MailTheme.of(Brightness.light),
     darkTheme: MailTheme.of(Brightness.dark),
+    builder: (context, child) => MacosTheme(data: MailTheme.macos(Theme.of(context).brightness), child: child!),
     home: MailShell(state: state),
   );
 }

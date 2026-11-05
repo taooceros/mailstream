@@ -120,12 +120,7 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
               final x = (1 - enter) * width + _drag.value;
               return Transform.translate(offset: Offset(x, 0), child: child);
             },
-            child: Material(
-              elevation: 2,
-              color: context.colors.surface,
-              shadowColor: context.colors.shadow,
-              child: shown,
-            ),
+            child: shown,
           ),
         );
       },
@@ -289,7 +284,7 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
     return LayoutBuilder(
       builder: (context, constraints) {
         final full = constraints.maxWidth;
-        final detailWidth = full - widget.listWidth;
+        final detailWidth = full - widget.listWidth - Panes.gap;
         final travel = _travel = full - widget.listWidth;
         return AnimatedBuilder(
           animation: _split,
@@ -297,26 +292,27 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
             final split = _split.value.clamp(0.0, 1.0);
             final list = full + (widget.listWidth - full) * split;
             final shown = _shown;
-            return ClipRect(
-              child: Stack(
-                children: [
-                  Positioned(left: 0, top: 0, bottom: 0, width: list, child: widget.list),
-                  // The page keeps its final width, so its text does not reflow as it slides.
-                  if (split > 0 && shown != null)
-                    Positioned(
-                      left: list,
-                      top: 0,
-                      bottom: 0,
-                      width: detailWidth,
-                      child: Listener(
-                        onPointerPanZoomStart: _start,
-                        onPointerPanZoomUpdate: (event) => _update(event, travel),
-                        onPointerPanZoomEnd: (_) => _end(travel),
-                        child: shown,
-                      ),
+            // Unclipped: the islands' shadows reach into the gaps around them, and the page slides
+            // in from the window's edge.
+            return Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Positioned(left: 0, top: 0, bottom: 0, width: list, child: widget.list),
+                // The page keeps its final width, so its text does not reflow as it slides.
+                if (split > 0 && shown != null)
+                  Positioned(
+                    left: list + Panes.gap,
+                    top: 0,
+                    bottom: 0,
+                    width: detailWidth,
+                    child: Listener(
+                      onPointerPanZoomStart: _start,
+                      onPointerPanZoomUpdate: (event) => _update(event, travel),
+                      onPointerPanZoomEnd: (_) => _end(travel),
+                      child: shown,
                     ),
-                ],
-              ),
+                  ),
+              ],
             );
           },
         );

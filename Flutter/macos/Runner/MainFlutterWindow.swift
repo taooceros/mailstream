@@ -1,5 +1,6 @@
 import Cocoa
 import FlutterMacOS
+import macos_window_utils
 
 class MainFlutterWindow: NSWindow {
   private var chrome: FlutterMethodChannel?
@@ -10,30 +11,29 @@ class MainFlutterWindow: NSWindow {
   /// Whether a drop attaches: Flutter turns it on while the compose window is open.
   private var takesFiles = false
 
-  /// The navigation's Liquid Glass panel. It sits under the Flutter view, which paints the
-  /// window's surface everywhere but the panel's rect (`GlassPanel` in `lib/ui/glass.dart`), so
-  /// the desktop shows through it, blurred by the system's glass.
-  private let panel = BackdropGlass()
+  /// The window's Liquid Glass: it fills the window under the Flutter view, which leaves it open
+  /// around the islands it paints (the list, the conversation), so the desktop shows through
+  /// the sidebar and the gaps, blurred by the system's glass.
+  private let backdrop = BackdropGlass()
 
   override func awakeFromNib() {
-    let flutterViewController = FlutterViewController()
-    flutterViewController.backgroundColor = .clear
-    let container = NSViewController()
-    container.view = NSView()
-    container.addChild(flutterViewController)
-    flutterViewController.view.frame = container.view.bounds
-    flutterViewController.view.autoresizingMask = [.width, .height]
-    panel.isHidden = true
-    // Fixed left edge, width and distance to the top and bottom: it follows the window's height
-    // as the window resizes, before Flutter lays out again.
-    panel.autoresizingMask = [.height, .maxXMargin]
-    container.view.addSubview(panel)
-    container.view.addSubview(flutterViewController.view)
-    self.contentViewController = container
+    // macos_ui's controls follow the window (main or not, the accent color) through
+    // macos_window_utils, which hosts the Flutter view in its own controller.
+    let utils = MacOSWindowUtilsViewController()
+    let flutterViewController = utils.flutterViewController
+    self.contentViewController = utils
+    MainFlutterWindowManipulator.start(mainFlutterWindow: self)
+    // The controller's view is a window-background material; masked out, so the glass shows the
+    // desktop rather than gray.
+    (utils.view as? NSVisualEffectView)?.maskImage = NSImage(size: NSSize(width: 1, height: 1))
+    backdrop.frame = utils.view.bounds
+    backdrop.autoresizingMask = [.width, .height]
+    backdrop.cornerRadius = 16
+    utils.view.addSubview(backdrop, positioned: .below, relativeTo: flutterViewController.view)
     isOpaque = false
     backgroundColor = .clear
-    // Content runs under the title bar, as in the native app: the sidebar reaches the top and the
-    // traffic lights sit over it.
+    // Content runs under the title bar: the sidebar reaches the top and the traffic lights sit
+    // over it.
     styleMask.insert(.fullSizeContentView)
     titlebarAppearsTransparent = true
     titleVisibility = .hidden
@@ -52,11 +52,6 @@ class MainFlutterWindow: NSWindow {
         result(nil)
       case "zoom":
         self?.performZoom(nil)
-        result(nil)
-      case "panel":
-        // The panel's rect in Flutter's coordinates (top-left origin) and its corner radius;
-        // no arguments hide it.
-        self?.placePanel(call.arguments as? [String: Double])
         result(nil)
       default:
         result(FlutterMethodNotImplemented)
@@ -94,6 +89,8 @@ class MainFlutterWindow: NSWindow {
 
     let html = flutterViewController.registrar(forPlugin: "MailHtmlView")
     html.register(MailHtmlFactory(messenger: html.messenger), withId: "mailstream/html")
+    let glass = flutterViewController.registrar(forPlugin: "Glass")
+    glass.register(GlassFactory(), withId: "mailstream/glass")
 
     super.awakeFromNib()
   }
@@ -101,18 +98,6 @@ class MainFlutterWindow: NSWindow {
   /// The app menu's Settings… (⌘,), which Flutter opens.
   @objc func showSettings(_ sender: Any?) {
     chrome?.invokeMethod("settings", arguments: nil)
-  }
-
-  private func placePanel(_ rect: [String: Double]?) {
-    guard let rect, let x = rect["x"], let y = rect["y"], let width = rect["width"], let height = rect["height"],
-          let container = panel.superview
-    else {
-      panel.isHidden = true
-      return
-    }
-    panel.frame = NSRect(x: x, y: container.bounds.height - y - height, width: width, height: height)
-    panel.cornerRadius = rect["radius"] ?? 0
-    panel.isHidden = false
   }
 
   // MARK: - Dropped and pasted files
@@ -149,7 +134,41 @@ class MainFlutterWindow: NSWindow {
   }
 }
 
-/// The glass under the navigation: only a backdrop, so clicks go to the Flutter view over it.
+/// Glass over Flutter's own content, as Flutter `AppKitView`s of type `mailstream/glass` (a
+/// `radius` creation argument rounds them): the toolbars' capsules. AppKit composites the Flutter
+/// layers under a platform view below it, so this glass refracts the list and the message that
+/// scroll under it.
+final class GlassFactory: NSObject, FlutterPlatformViewFactory {
+  func create(withViewIdentifier viewId: Int64, arguments args: Any?) -> NSView {
+    let radius = (args as? [String: Any])?["radius"] as? Double ?? 0
+    let glass = BackdropGlass()
+    glass.cornerRadius = radius
+    glass.autoresizingMask = [.width, .height]
+    // The glass paints a tinted rect past its rounded shape; the clip leaves only the capsule.
+    let clip = BackdropView()
+    clip.wantsLayer = true
+    clip.layer?.cornerRadius = radius
+    clip.layer?.cornerCurve = .continuous
+    clip.layer?.masksToBounds = true
+    clip.addSubview(glass)
+    return clip
+  }
+
+  func createArgsCodec() -> (any FlutterMessageCodec & NSObjectProtocol)? {
+    FlutterStandardMessageCodec.sharedInstance()
+  }
+}
+
+/// Glass that is only a backdrop: clicks go to the Flutter view, which draws the controls on it.
 private final class BackdropGlass: NSGlassEffectView {
   override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+private final class BackdropView: NSView {
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+  override func layout() {
+    super.layout()
+    subviews.forEach { $0.frame = bounds }
+  }
 }

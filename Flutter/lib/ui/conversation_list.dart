@@ -1,4 +1,4 @@
-import 'package:flutter/cupertino.dart' show CupertinoActivityIndicator, CupertinoIcons;
+import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/material.dart';
 
 import '../backend/models.dart';
@@ -107,7 +107,6 @@ class ConversationList extends StatefulWidget {
     required this.highlight,
     required this.onActivate,
     this.emptyText = 'No conversations',
-    this.topInset = 0,
   });
 
   final MailState state;
@@ -115,9 +114,6 @@ class ConversationList extends StatefulWidget {
   final ListHighlight highlight;
   final void Function(ListItem item) onActivate;
   final String emptyText;
-
-  /// Height of a bar over the top of the list that rows scroll under.
-  final double topInset;
 
   @override
   State<ConversationList> createState() => ConversationListState();
@@ -161,19 +157,18 @@ class ConversationListState extends State<ConversationList> {
 
   double _extent(ListItem item) => item is SectionItem ? ListMetrics.sectionHeight : ListMetrics.rowHeight;
 
-  /// Keeps the keyboard highlight in view, below the bar over the list.
+  /// Keeps the keyboard highlight in view.
   void _reveal() {
     final id = widget.highlight.id;
     if (id == null || !_scroll.hasClients) return;
-    final inset = widget.topInset;
-    var top = inset + 8.0;
+    var top = 4.0;
     for (final item in widget.items) {
       if (itemId(item) == id) break;
       top += _extent(item);
     }
     final position = _scroll.position;
-    if (top < position.pixels + inset) {
-      _scroll.jumpTo((top - inset - ListMetrics.sectionHeight).clamp(0, position.maxScrollExtent));
+    if (top < position.pixels) {
+      _scroll.jumpTo((top - ListMetrics.sectionHeight).clamp(0, position.maxScrollExtent));
     } else if (top + ListMetrics.rowHeight > position.pixels + position.viewportDimension) {
       _scroll.jumpTo((top + ListMetrics.rowHeight * 2 - position.viewportDimension).clamp(0, position.maxScrollExtent));
     }
@@ -190,7 +185,7 @@ class ConversationListState extends State<ConversationList> {
     if (items.isEmpty) {
       final Widget empty;
       if (state.isLoading || state.canLoadMore) {
-        empty = const Center(child: CupertinoActivityIndicator());
+        empty = const Center(child: Spinner());
       } else {
         empty = Center(
           child: Text(
@@ -199,46 +194,42 @@ class ConversationListState extends State<ConversationList> {
           ),
         );
       }
-      return Padding(padding: EdgeInsets.only(top: widget.topInset), child: empty);
+      return empty;
     }
     final now = DateTime.now();
     final footer = state.canLoadMore ? 1 : 0;
-    // The scrollbar's track starts below the bar over the list.
-    return MediaQuery(
-      data: MediaQuery.of(context).copyWith(padding: EdgeInsets.only(top: widget.topInset)),
-      child: Scrollbar(
+    return Scrollbar(
+      controller: _scroll,
+      child: ListView.builder(
         controller: _scroll,
-        child: ListView.builder(
-          controller: _scroll,
-          padding: EdgeInsets.only(top: widget.topInset + 4, bottom: 24),
-          itemCount: items.length + footer,
-          itemExtentBuilder: (index, _) =>
-              index < items.length ? _extent(items[index]) : (index == items.length && footer == 1 ? 56 : null),
-          itemBuilder: (context, index) {
-            if (index == items.length) {
-              return const Center(child: CupertinoActivityIndicator());
-            }
-            final item = items[index];
-            return switch (item) {
-              SectionItem(:final title, :final count) => SectionHeader(title, count: count),
-              RowItem(:final conversation) => ConversationRow(
-                key: ValueKey(conversation.id),
-                conversation: conversation,
-                state: state,
-                highlight: widget.highlight,
-                now: now,
-                onTap: () => widget.onActivate(item),
-              ),
-              BundleItem() => BundleRow(
-                key: ValueKey(itemId(item)),
-                bundle: item,
-                highlight: widget.highlight,
-                now: now,
-                onTap: () => widget.onActivate(item),
-              ),
-            };
-          },
-        ),
+        padding: const EdgeInsets.only(top: 4, bottom: 24),
+        itemCount: items.length + footer,
+        itemExtentBuilder: (index, _) =>
+            index < items.length ? _extent(items[index]) : (index == items.length && footer == 1 ? 56 : null),
+        itemBuilder: (context, index) {
+          if (index == items.length) {
+            return const Center(child: Spinner());
+          }
+          final item = items[index];
+          return switch (item) {
+            SectionItem(:final title, :final count) => SectionHeader(title, count: count),
+            RowItem(:final conversation) => ConversationRow(
+              key: ValueKey(conversation.id),
+              conversation: conversation,
+              state: state,
+              highlight: widget.highlight,
+              now: now,
+              onTap: () => widget.onActivate(item),
+            ),
+            BundleItem() => BundleRow(
+              key: ValueKey(itemId(item)),
+              bundle: item,
+              highlight: widget.highlight,
+              now: now,
+              onTap: () => widget.onActivate(item),
+            ),
+          };
+        },
       ),
     );
   }
@@ -467,33 +458,28 @@ class _ConversationRowState extends State<ConversationRow> {
       ],
     );
 
-    // On hover the actions float over the row's end on a glass capsule.
-    Widget actions() => GlassCapsule(
-      blur: true,
+    // On hover the actions float over the row's end on a raised capsule.
+    Widget actions() => RaisedCapsule(
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           if (c.waiting)
-            IconButton(
+            ToolButton(
               tooltip: 'Resolve (D)',
-              icon: const Icon(CupertinoIcons.checkmark_circle),
+              icon: CupertinoIcons.checkmark_circle,
               onPressed: () => state.setWaiting(c, waiting: false),
             ),
-          if (archivable)
-            IconButton(
-              tooltip: 'Archive',
-              icon: const Icon(CupertinoIcons.archivebox),
-              onPressed: () => state.archive(c),
-            ),
-          IconButton(tooltip: 'Delete', icon: const Icon(CupertinoIcons.trash), onPressed: () => state.trash(c)),
-          IconButton(
+          if (archivable) ToolButton(tooltip: 'Archive', icon: CupertinoIcons.archivebox, onPressed: () => state.archive(c)),
+          ToolButton(tooltip: 'Delete', icon: CupertinoIcons.trash, onPressed: () => state.trash(c)),
+          ToolButton(
             tooltip: c.unread ? 'Mark as read' : 'Mark as unread',
-            icon: Icon(c.unread ? CupertinoIcons.envelope_open : CupertinoIcons.envelope_badge),
+            icon: c.unread ? CupertinoIcons.envelope_open : CupertinoIcons.envelope_badge,
             onPressed: () => state.setRead(c, read: c.unread),
           ),
-          IconButton(
+          ToolButton(
             tooltip: c.starred ? 'Unstar' : 'Star',
-            icon: Icon(c.starred ? CupertinoIcons.star_fill : CupertinoIcons.star, color: c.starred ? starColor : null),
+            icon: c.starred ? CupertinoIcons.star_fill : CupertinoIcons.star,
+            color: c.starred ? starColor : null,
             onPressed: () => state.setStarred(c, starred: !c.starred),
           ),
         ],
