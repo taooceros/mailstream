@@ -103,11 +103,13 @@ final class AvatarStore {
         return keep(decoded, in: large, as: key)
     }
 
-    /// The PNG the app shows for `key` at `side` pixels (96 or 512, the sizes the resolver
-    /// caches), waiting for the lookup; nil when there is none. For the control socket.
-    func png(for key: String, automated: Bool, side: Int) async -> Data? {
+    /// The file holding `key`'s picture at the row size, looked up first if it is not cached;
+    /// nil when there is none. For front ends that draw from files.
+    func pictureFile(for key: String, automated: Bool) async -> URL? {
         let key = key.lowercased()
-        return await resolver.avatar(for: key, published: published[key], automated: automated, side: side)
+        let photo = published[key]
+        guard await resolver.avatar(for: key, published: photo, automated: automated) != nil else { return nil }
+        return resolver.file(for: key, published: photo)
     }
 
     /// Everyone the accounts' contact lists name, for completing addresses; none until the
@@ -236,7 +238,7 @@ actor AvatarResolver {
     /// is per published picture: one found without it may be a lower source, such as a domain logo.
     func avatar(for key: String, published: URL?, automated: Bool, side: Int = AvatarResolver.side) async -> Data? {
         let automated = automated || Self.looksAutomated(key)
-        let cacheKey = (side == Self.side ? "p-" : "p\(side)-") + Self.hash(published.map { key + "|" + $0.absoluteString } ?? key)
+        let cacheKey = Self.cacheKey(key, published: published, side: side)
         let missStamp: String?
         switch await cached(cacheKey) {
         case .hit(let png, let fresh):
@@ -249,6 +251,15 @@ actor AvatarResolver {
         if missStamp == Self.stamp(directory, published) { return nil }
         return await lookUp(key, published: published, automated: automated, side: side, cacheKey: cacheKey,
                             in: directory, replacing: false)
+    }
+
+    /// Where `avatar(for:published:)` keeps the row-size picture of `key`.
+    nonisolated func file(for key: String, published: URL?) -> URL {
+        root.appendingPathComponent(Self.cacheKey(key, published: published, side: Self.side) + ".png")
+    }
+
+    private nonisolated static func cacheKey(_ key: String, published: URL?, side: Int) -> String {
+        (side == Self.side ? "p-" : "p\(side)-") + hash(published.map { key + "|" + $0.absoluteString } ?? key)
     }
 
     /// What a miss is made against: the directory, and the published picture if any, since a miss

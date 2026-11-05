@@ -2,7 +2,8 @@ import Foundation
 import Security
 
 /// OAuth access tokens by account id, refreshed from the refresh tokens kept in the Keychain.
-/// Concurrent callers for one account share a single refresh; the Keychain item is read once.
+/// Concurrent callers for one account share a single refresh; the Keychain item is read once and
+/// again before each change.
 nonisolated final class Tokens: TokenSource {
     private let state: State
 
@@ -47,7 +48,8 @@ nonisolated final class Tokens: TokenSource {
         private var access: [String: Access] = [:]
         /// Refreshes in flight, shared by every caller for that account.
         private var flights: [String: Task<TokenResponse, any Error>] = [:]
-        /// The Keychain item's contents once read.
+        /// The Keychain item's contents once read. Changes re-read the item first: other
+        /// processes hosting the engine (FFI front ends) write it too.
         private var signIns: SignIns?
 
         init(providers: [String: Provider]) {
@@ -63,10 +65,13 @@ nonisolated final class Tokens: TokenSource {
             } else {
                 let stored = try stored()
                 guard let refreshToken = stored.refreshTokens[account] else { throw Tokens.signInAgain(account) }
-                // Only the client that issued a refresh token can redeem it.
+                // Only the client that issued a refresh token can redeem it. Tokens from before
+                // clients were stored came from the build's client, which only the app's
+                // Info.plist carries: storing it lets every host of the engine redeem them.
                 guard let client = stored.clients[account] ?? OAuthClient.builtIn(provider) else {
                     throw Tokens.signInAgain(account)
                 }
+                if stored.clients[account] == nil { try setClient(client, for: account) }
                 flight = Task { try await OAuth.refresh(refreshToken, provider: provider, client: client) }
                 flights[account] = flight
             }
@@ -99,7 +104,7 @@ nonisolated final class Tokens: TokenSource {
 
         func install(account: String, provider: Provider, client: OAuthClient, refreshToken: String,
                      access fresh: Access) throws {
-            var signIns = try stored()
+            var signIns = try self.fresh()
             signIns.refreshTokens[account] = refreshToken
             signIns.clients[account] = client
             signIns.lastClients[provider.rawValue] = client
@@ -114,7 +119,7 @@ nonisolated final class Tokens: TokenSource {
         }
 
         func forget(_ account: String) {
-            if var signIns = try? stored() {
+            if var signIns = try? fresh() {
                 signIns.refreshTokens[account] = nil
                 signIns.clients[account] = nil
                 try? save(signIns)
@@ -131,10 +136,24 @@ nonisolated final class Tokens: TokenSource {
             return loaded
         }
 
+        /// The item as it is now, for a change to start from.
+        private func fresh() throws -> SignIns {
+            let loaded = try Keychain.load()
+            signIns = loaded
+            return loaded
+        }
+
         private func setRefreshToken(_ token: String, for account: String) throws {
-            var signIns = try stored()
+            var signIns = try fresh()
             guard signIns.refreshTokens[account] != token else { return }
             signIns.refreshTokens[account] = token
+            try save(signIns)
+        }
+
+        private func setClient(_ client: OAuthClient, for account: String) throws {
+            var signIns = try fresh()
+            guard signIns.clients[account] == nil else { return }
+            signIns.clients[account] = client
             try save(signIns)
         }
 

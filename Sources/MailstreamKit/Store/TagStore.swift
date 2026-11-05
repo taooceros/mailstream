@@ -107,8 +107,11 @@ final class TagStore {
         tags.merge(saved) { current, _ in current }
     }
 
+    /// The conversation's tag, with `toRespond` false once the ask has lapsed.
     func tag(for conversation: Conversation) -> ConversationTag? {
-        enabled ? tags[Self.key(conversation)] : nil
+        guard enabled, var tag = tags[Self.key(conversation)] else { return nil }
+        tag.toRespond = tag.isWaiting()
+        return tag
     }
 
     /// Whether `conversation` can be resolved or put back on "Waiting on you": any conversation
@@ -121,8 +124,9 @@ final class TagStore {
     /// belongs to the latest message, so a new incoming one is judged afresh.
     func setWaiting(_ conversation: Conversation, waiting: Bool) {
         let key = Self.key(conversation)
-        guard enabled, var tag = tags[key], tag.category != .newsletter, tag.toRespond != waiting else { return }
+        guard enabled, var tag = tags[key], tag.category != .newsletter, tag.isWaiting() != waiting else { return }
         tag.toRespond = waiting
+        tag.waitingUntil = nil
         tags[key] = tag
         cache.saveTags(tags)
     }
@@ -140,7 +144,10 @@ final class TagStore {
         if waiting == true, tag.category == .newsletter {
             throw StoreError(message: "Newsletters cannot wait on you.")
         }
-        if let waiting { tag.toRespond = waiting }
+        if let waiting {
+            tag.toRespond = waiting
+            tag.waitingUntil = nil
+        }
         if tag.category == .newsletter { tag.toRespond = false }
         if let labels {
             tag.labels = Array(labels.map { String($0.trimmingCharacters(in: .whitespaces).prefix(OmpTagger.maxLabelLength)) }
@@ -149,6 +156,7 @@ final class TagStore {
         tags[key] = tag
         attempted.insert(key)
         cache.saveTags(tags)
+        tag.toRespond = tag.isWaiting()
         return tag
     }
 
@@ -237,6 +245,7 @@ final class TagStore {
             userInTo: incoming.envelope.to.contains { own.contains($0.normalizedEmail) },
             subject: conversation.subject,
             snippet: contents.snippet(for: incoming.ref) ?? "",
+            date: incoming.envelope.date,
             messageCount: messages.count,
             userReplied: firstIncoming.map { fromUser[($0 + 1)...].contains(true) } ?? false,
             latestFromUser: fromUser.last ?? false)
