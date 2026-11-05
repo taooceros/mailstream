@@ -16,6 +16,9 @@ This repo is a colocated jj repo (`.jj` + `.git`), pushed to `github.com/taoocer
 Work is tracked in Linear: team `TAO`, project `Mailstream`. Issue IDs look like `TAO-12`. Use
 omp's Linear tools; the issue, not the session, is the record other sessions read.
 
+- Language: write everything on Linear (issue titles, descriptions, comments) in Chinese, plainly
+  enough that someone who has not read the code understands what is wrong, what was done and what
+  remains. Code identifiers, paths, commands and commit hashes stay as they are.
 - Labels: one type (`Bug`, `Feature`, `Improvement`, `Performance`, `Regression`) plus one `Area`
   label. Area names match the jj workspaces (`chat`, `concurrency`, `flutter`, `gpui`, `motion`,
   `ui-shell`) or the layer (`sync`, `cache`, `ffi`); an issue is worked in its area's workspace.
