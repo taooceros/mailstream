@@ -39,8 +39,9 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
 - UI changes (a new or changed view, flow or interaction, in any front end): take screenshots
   of the running app showing the change, every state it adds included, and attach them to the
   finishing comment. Work without them is not ready for review.
-- Questions only the user can decide: move the issue to Todo and ask in a comment instead of
-  guessing.
+- Questions only the user can decide: ask instead of guessing, and make the question impossible
+  to miss: assign the issue to the user (taooceros), move it to Todo, and start the comment with
+  `**❓ 需要你回答：**` followed by the question(s), each answerable on its own. Then stop.
 - Problems found outside the current change: file a Backlog issue with labels; do not fix them
   in passing.
 - An omp session polls `scripts/linear-poll.sh` every minute and hands each issue it claims to a
