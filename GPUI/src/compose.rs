@@ -1,6 +1,6 @@
 //! Writing mail: the compose window (a new message or a forward, sent with `mail.send`) and the
-//! reader's inline reply (`mail.reply`). Clicking Send is the confirmation the socket asks for, so
-//! both pass `yes`. Recipients complete from `contacts.search` when the running app offers it.
+//! reader's inline reply (`mail.reply`). Clicking Send is the confirmation the engine asks for, so
+//! both pass `confirm`. Recipients complete from `contacts.search` when the running app offers it.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -9,11 +9,8 @@ use gpui::{
     Render, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, Subscription, TitlebarOptions,
     Window, WindowBounds, WindowOptions, actions, deferred, div, point, px, relative, size,
 };
-use serde::Deserialize;
-use serde_json::{Value, json};
-
 use crate::avatars;
-use crate::control::{self, ControlError};
+use crate::engine::engine;
 use crate::design::{self, Palette, UI_FONT, compose as metrics, editor, layout, radius, text};
 use crate::input::{InputEvent, TextInput};
 use crate::model::{Account, Address};
@@ -76,10 +73,16 @@ pub fn open_compose(mode: ComposeMode, accounts: Vec<Account>, cx: &mut App) {
 }
 
 /// One person `contacts.search` offers.
-#[derive(Clone, Deserialize)]
+#[derive(Clone)]
 struct Person {
     name: Option<SharedString>,
     email: SharedString,
+}
+
+impl From<mailstream::Person> for Person {
+    fn from(person: mailstream::Person) -> Self {
+        Self { name: person.name.map(SharedString::from), email: person.email.into() }
+    }
 }
 
 impl Person {
@@ -489,12 +492,10 @@ impl Compose {
             if this.read_with(cx, |this, _| this.lookup != generation).unwrap_or(true) {
                 return;
             }
-            let limit = metrics::SUGGESTIONS + taken.len();
+            let limit = (metrics::SUGGESTIONS + taken.len()) as u32;
             let answer = cx
                 .background_executor()
-                .spawn(async move {
-                    control::call::<Vec<Person>>("contacts.search", json!({ "query": query, "limit": limit }))
-                })
+                .spawn(async move { engine().search_contacts(query, limit).await })
                 .await;
             this.update(cx, |this, cx| {
                 if this.lookup != generation {
@@ -504,14 +505,15 @@ impl Compose {
                     Ok(people) => {
                         let people: Vec<Person> = people
                             .into_iter()
+                            .map(Person::from)
                             .filter(|person| !taken.contains(&person.email.to_lowercase()))
                             .take(metrics::SUGGESTIONS)
                             .collect();
                         (!people.is_empty()).then_some(Suggestions { field, people, highlighted: 0 })
                     }
-                    Err(ControlError { code, .. }) => {
-                        // An app without the command: no completion, and no error either.
-                        this.contacts_unavailable = code == "unknown_command";
+                    Err(error) => {
+                        // An engine without the command: no completion, and no error either.
+                        this.contacts_unavailable = error.code() == "unknown_command";
                         None
                     }
                 };
@@ -608,26 +610,24 @@ impl Compose {
             window.focus(&self.to.focus_handle(cx));
             return self.fail("Add at least one recipient.", cx);
         }
-        let args = json!({
-            "from": from,
-            "to": to,
-            "cc": cc,
-            "bcc": bcc,
-            "subject": self.subject.read(cx).text().trim(),
-            "body": self.body.read(cx).text(),
-            "yes": true,
-        });
+        let draft = mailstream::Draft {
+            from: from.to_string(),
+            to,
+            cc,
+            bcc,
+            subject: self.subject.read(cx).text().trim().to_string(),
+            body: self.body.read(cx).text().to_string(),
+        };
         self.status = Status::Sending;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let answer =
-                cx.background_executor().spawn(async move { control::call::<Value>("mail.send", args) }).await;
+            let answer = cx.background_executor().spawn(async move { engine().send(draft, true).await }).await;
             this.update_in(cx, |this, window, cx| match answer {
                 Ok(_) => {
                     this.status = Status::Idle;
                     window.remove_window();
                 }
-                Err(error) => this.fail(error.message, cx),
+                Err(error) => this.fail(error.to_string(), cx),
             })
             .ok();
         })
@@ -1034,19 +1034,19 @@ impl ReplyBox {
             cx.notify();
             return;
         }
-        let args = json!({ "id": self.conversation_id, "body": body, "all": self.all, "yes": true });
+        let (id, all) = (self.conversation_id.to_string(), self.all);
         self.status = Status::Sending;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let answer =
-                cx.background_executor().spawn(async move { control::call::<Value>("mail.reply", args) }).await;
+                cx.background_executor().spawn(async move { engine().reply(id, body, all, true).await }).await;
             this.update(cx, |this, cx| {
                 match answer {
                     Ok(_) => {
                         this.status = Status::Idle;
                         cx.emit(ReplyEvent::Sent);
                     }
-                    Err(error) => this.status = Status::Failed(error.message.into()),
+                    Err(error) => this.status = Status::Failed(error.to_string().into()),
                 }
                 cx.notify();
             })

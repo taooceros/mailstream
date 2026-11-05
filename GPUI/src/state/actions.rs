@@ -1,8 +1,39 @@
-//! Actions on conversations: optimistic, rolled back when the app refuses them; replying,
+//! Actions on conversations: optimistic, rolled back when the engine refuses them; replying,
 //! forwarding and writing new mail.
+
+use mailstream::TagChange;
 
 use super::*;
 use crate::compose::{self, ComposeMode, ReplyEvent};
+use crate::engine::{self, BatchResult};
+
+/// What takes a conversation out of the list.
+#[derive(Clone, Copy)]
+pub enum Removal {
+    Archive,
+    Trash,
+    Restore,
+}
+
+impl Removal {
+    /// What the toast says could not be done.
+    fn verb(self) -> &'static str {
+        match self {
+            Removal::Archive => "archive",
+            Removal::Trash => "move it to the Trash",
+            Removal::Restore => "move it to the Inbox",
+        }
+    }
+
+    async fn run(self, ids: Vec<String>) -> Result<BatchResult, MailError> {
+        match self {
+            Removal::Archive => engine().archive(ids).await,
+            // Deleting for good from the Trash is left to the app.
+            Removal::Trash => engine().trash(ids, false).await,
+            Removal::Restore => engine().restore(ids).await,
+        }
+    }
+}
 
 impl MailApp {
     /// What an action applies to: the row a context menu is open on, else the open
@@ -120,30 +151,26 @@ impl MailApp {
 
     /// Shows Chat and its New Chat form.
     pub fn new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.chat.read(cx).supported() {
-            self.show_toast("This version of Mailstream has no Google Chat commands.", cx);
-            return;
-        }
         self.select_chat(None, window, cx);
         self.chat.update(cx, |chat, cx| chat.new_chat(&crate::chat::NewChat, window, cx));
     }
 
     pub fn archive(&mut self, _: &Archive, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(conversation) = self.take_target(window, cx).filter(Conversation::can_archive) {
-            self.remove(conversation, "mail.archive", "archive", window, cx);
+            self.remove(conversation, Removal::Archive, window, cx);
         }
     }
 
     pub fn trash(&mut self, _: &Trash, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(conversation) = self.take_target(window, cx) {
-            self.remove(conversation, "mail.trash", "move it to the Trash", window, cx);
+            self.remove(conversation, Removal::Trash, window, cx);
         }
     }
 
     /// Moves trashed or junk messages back to the inbox; the conversation leaves the Trash list.
     pub fn restore(&mut self, _: &Restore, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(conversation) = self.take_target(window, cx).filter(Conversation::can_restore) {
-            self.remove(conversation, "mail.restore", "move it to the Inbox", window, cx);
+            self.remove(conversation, Removal::Restore, window, cx);
         }
     }
 
@@ -167,10 +194,18 @@ impl MailApp {
         self.patch(&id, |c| c.waiting = waiting);
         self.rebuild_items();
         cx.notify();
-        let arg = id.to_string();
+        let ids = vec![id.to_string()];
+        let change = TagChange { waiting: Some(waiting), ..TagChange::default() };
         self.background(
             cx,
-            move || control::call::<Value>("mail.tag", json!({ "ids": [arg], "waiting": waiting.to_string() })),
+            async move {
+                let result = engine().tag(ids, change).await?;
+                match result.failed.into_iter().next() {
+                    None => Ok(()),
+                    Some(failure) => Err(failure.message),
+                }
+                .map_err(|message| MailError::Failed { code: "failed".into(), message })
+            },
             move |this, result, cx| {
                 if let Err(error) = result {
                     this.patch(&id, |c| c.waiting = !waiting);
@@ -181,11 +216,11 @@ impl MailApp {
         );
     }
 
-    /// Forgets every AI tag; the app tags the lists again and the poll picks the new tags up.
+    /// Forgets every AI tag; the engine tags the lists again and says so with change events.
     pub fn retag(&mut self, _: &Retag, _: &mut Window, cx: &mut Context<Self>) {
         self.background(
             cx,
-            || control::call::<Value>("mail.retag", json!({})),
+            engine().retag(),
             |this, result, cx| match result {
                 Ok(_) => this.show_toast("Tagging every conversation again…", cx),
                 Err(error) => this.show_toast(format!("Couldn't re-tag: {error}"), cx),
@@ -193,15 +228,8 @@ impl MailApp {
         );
     }
 
-    /// Takes the conversation out of every list at once; puts it back if the app refuses.
-    pub fn remove(
-        &mut self,
-        conversation: Conversation,
-        command: &'static str,
-        verb: &'static str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Takes the conversation out of every list at once; puts it back if the engine refuses.
+    pub fn remove(&mut self, conversation: Conversation, removal: Removal, window: &mut Window, cx: &mut Context<Self>) {
         let id = conversation.id.clone();
         // The highlight moves to the row after, as in the native list.
         let (lines, in_bundle) = self.active_lines();
@@ -229,10 +257,10 @@ impl MailApp {
         window.focus(&self.focus);
         cx.notify();
 
-        let arg = id.to_string();
+        let ids = vec![id.to_string()];
         self.background(
             cx,
-            move || control::batch(command, json!({ "ids": [arg] })),
+            async move { engine::all_done(removal.run(ids).await) },
             move |this, result, cx| {
                 this.removing.remove(&id);
                 let Err(error) = result else { return };
@@ -243,10 +271,10 @@ impl MailApp {
                     }
                 }
                 this.rebuild_items();
-                let message = if error.code == "confirm" {
+                let message = if error.code() == "confirm" {
                     "It is already in the Trash; deleting for good is left to the app.".to_owned()
                 } else {
-                    format!("Couldn't {verb}: {error}")
+                    format!("Couldn't {}: {error}", removal.verb())
                 };
                 this.show_toast(message, cx);
                 cx.notify();
@@ -274,10 +302,10 @@ impl MailApp {
         let id = conversation.id.clone();
         self.patch(&id, |c| c.starred = starred);
         cx.notify();
-        let arg = id.to_string();
+        let ids = vec![id.to_string()];
         self.background(
             cx,
-            move || control::batch("mail.star", json!({ "ids": [arg], "off": !starred })),
+            async move { engine::all_done(engine().set_starred(ids, starred).await) },
             move |this, result, cx| {
                 if let Err(error) = result {
                     this.patch(&id, |c| c.starred = !starred);
@@ -291,10 +319,10 @@ impl MailApp {
         let id = conversation.id.clone();
         self.patch(&id, |c| c.unread = unread);
         cx.notify();
-        let arg = id.to_string();
+        let ids = vec![id.to_string()];
         self.background(
             cx,
-            move || control::batch("mail.read", json!({ "ids": [arg], "unread": unread })),
+            async move { engine::all_done(engine().set_read(ids, !unread).await) },
             move |this, result, cx| {
                 if let Err(error) = result {
                     this.patch(&id, |c| c.unread = !unread);

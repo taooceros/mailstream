@@ -10,15 +10,6 @@ impl MailApp {
     pub(super) fn render_list(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         if self.items.is_empty() {
             let list = self.list();
-            if let Some(offline) = &self.offline {
-                return centered_note(offline.clone(), p)
-                    .child(
-                        button("retry", "Try Again", p)
-                            .text_color(p.accent)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.retry(cx))),
-                    )
-                    .into_any_element();
-            }
             let note: SharedString = match list {
                 Some(list) if list.loading => "Loading…".into(),
                 Some(List { error: Some(error), .. }) => error.clone(),
@@ -150,9 +141,9 @@ impl MailApp {
                             cx.stop_propagation();
                             let Some(c) = this.conversation(&file) else { return };
                             if c.can_archive() {
-                                this.remove(c, "mail.archive", "archive", window, cx);
+                                this.remove(c, Removal::Archive, window, cx);
                             } else if c.can_restore() {
-                                this.remove(c, "mail.restore", "move it to the Inbox", window, cx);
+                                this.remove(c, Removal::Restore, window, cx);
                             }
                         })),
                 )
@@ -160,7 +151,7 @@ impl MailApp {
                     move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         if let Some(c) = this.conversation(&trash) {
-                            this.remove(c, "mail.trash", "move it to the Trash", window, cx);
+                            this.remove(c, Removal::Trash, window, cx);
                         }
                     },
                 )))

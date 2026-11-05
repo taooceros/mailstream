@@ -87,22 +87,12 @@ impl MailApp {
     }
 
     pub fn refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
-        // The app syncs every account; the lists are asked again once it has had a moment.
-        self.background(
-            cx,
-            || {
-                let started = control::call::<Value>("refresh", json!({}));
-                std::thread::sleep(Duration::from_secs(2));
-                started
-            },
-            |this, result, cx| {
-                if let Err(error) = result {
-                    this.show_toast(format!("Couldn't refresh: {error}"), cx);
-                }
-                this.load_mailboxes(cx);
-                this.load_list(this.key(), true, cx);
-            },
-        );
+        // The engine syncs every account; its change events reload the lists as mail comes in.
+        self.background(cx, engine().refresh(), |this, result, cx| {
+            if let Err(error) = result {
+                this.show_toast(format!("Couldn't refresh: {error}"), cx);
+            }
+        });
         self.load_list(self.key(), true, cx);
     }
 

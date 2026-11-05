@@ -21,8 +21,8 @@ use crate::format;
 use crate::icons::{Icon, icon};
 use crate::model::{Address, Category, Conversation, Message, Role};
 use crate::state::{
-    Archive, Back, CONTEXT, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh, Reply, ReplyAll,
-    Restore, Source, Star, ThreadState, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
+    Archive, Back, CONTEXT, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh, Removal, Reply,
+    ReplyAll, Restore, Source, Star, ThreadState, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
 };
 
 impl Render for MailApp {
@@ -95,26 +95,6 @@ fn title_bar(id: &'static str) -> Stateful<Div> {
             window.start_window_move();
         }
     })
-}
-
-/// A text button that keeps its click from moving the window.
-fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, p: &Palette) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_shrink_0()
-        .h(px(26.))
-        .px(px(10.))
-        .flex()
-        .items_center()
-        .rounded(px(radius::CONTROL))
-        .text_size(px(text::FOOTNOTE))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(p.text)
-        .cursor_pointer()
-        .hover(|s| s.bg(p.hover))
-        .active(|s| s.bg(p.selection))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(label.into())
 }
 
 /// A round icon button with a tooltip; a disabled one is faint and takes no clicks.

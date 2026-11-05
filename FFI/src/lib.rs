@@ -20,6 +20,16 @@ use serde_json::{Value, json};
 
 uniffi::setup_scaffolding!();
 
+mod accounts;
+mod chat;
+mod compose;
+mod people;
+
+pub use accounts::*;
+pub use chat::*;
+pub use compose::*;
+pub use people::Person;
+
 type Callback = extern "C" fn(*mut c_void, *const u8, usize);
 
 unsafe extern "C" {
@@ -31,7 +41,7 @@ unsafe extern "C" {
 
 /// A failed request: the engine's stable `code` (`unknown_account`, `provider`, `confirm`, …)
 /// and a message for people.
-#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[derive(Clone, Debug, thiserror::Error, uniffi::Error)]
 pub enum MailError {
     #[error("{message}")]
     Failed { code: String, message: String },
@@ -40,6 +50,13 @@ pub enum MailError {
 impl MailError {
     fn new(code: &str, message: impl Into<String>) -> Self {
         Self::Failed { code: code.into(), message: message.into() }
+    }
+
+    /// The engine's stable code: `unreachable`, `unknown_command`, `confirm`, `disabled`, …
+    pub fn code(&self) -> &str {
+        match self {
+            Self::Failed { code, .. } => code,
+        }
     }
 }
 
@@ -74,6 +91,15 @@ pub struct Status {
     pub settings_issues: Vec<String>,
     pub accounts: Vec<AccountStatus>,
     pub sync: SyncStatus,
+    pub ai_tagging: TaggingStatus,
+}
+
+/// The AI tagger: whether it is on, and what it is doing or why it stopped.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct TaggingStatus {
+    pub enabled: bool,
+    /// A line for people (progress or the last failure); nil while idle.
+    pub status: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, uniffi::Record)]
@@ -222,6 +248,34 @@ pub struct BatchResult {
     pub failed: Vec<BatchFailure>,
 }
 
+/// A correction to conversations' AI tags; parts left `None` stay as they are.
+#[derive(Clone, Debug, Default, uniffi::Record)]
+pub struct TagChange {
+    /// `people`, `newsletter`, `notification`, …
+    #[uniffi(default = None)]
+    pub category: Option<String>,
+    #[uniffi(default = None)]
+    pub waiting: Option<bool>,
+    /// Topic labels, at most two.
+    #[uniffi(default = None)]
+    pub labels: Option<Vec<String>>,
+}
+
+/// A conversation's AI tag after a correction.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct Tag {
+    pub id: String,
+    pub category: String,
+    pub waiting: bool,
+    pub labels: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct TagResult {
+    pub done: Vec<Tag>,
+    pub failed: Vec<BatchFailure>,
+}
+
 /// What changed in the engine; a front end re-reads what it shows of it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Event {
@@ -344,6 +398,18 @@ impl Mailstream {
         call("mail.restore", json!({ "ids": ids })).await
     }
 
+    /// Corrects the AI tags of conversations.
+    pub async fn tag(&self, ids: Vec<String>, change: TagChange) -> Result<TagResult, MailError> {
+        let waiting = change.waiting.map(|waiting| waiting.to_string());
+        call("mail.tag", json!({ "ids": ids, "category": change.category, "waiting": waiting, "labels": change.labels }))
+            .await
+    }
+
+    /// Forgets every AI tag and tags the current list again; `disabled` while tagging is off.
+    pub async fn retag(&self) -> Result<(), MailError> {
+        call::<Value>("mail.retag", json!({})).await.map(drop)
+    }
+
     /// Fetches new mail and counts now.
     pub async fn refresh(&self) -> Result<(), MailError> {
         call::<Value>("refresh", json!({})).await.map(drop)
@@ -376,7 +442,7 @@ struct ErrorBody {
     message: Option<String>,
 }
 
-async fn call<T: DeserializeOwned>(command: &str, args: Value) -> Result<T, MailError> {
+pub(crate) async fn call<T: DeserializeOwned>(command: &str, args: Value) -> Result<T, MailError> {
     let request = serde_json::to_vec(&json!({ "command": command, "args": args })).expect("JSON values encode");
     let (sender, receiver) = oneshot::channel::<Vec<u8>>();
     let context = Box::into_raw(Box::new(sender)).cast::<c_void>();

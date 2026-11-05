@@ -1,14 +1,12 @@
-//! Plain values decoded from the control socket's JSON answers. Decoding and the derived display
-//! strings (`prepare`) run on the background executor.
+//! The UI's values, converted from the engine's records (`mailstream` crate). Conversion and the
+//! derived display strings (`prepare`) run on the background executor.
 
 use chrono::{DateTime, Local, Utc};
 use gpui::SharedString;
-use serde::{Deserialize, Deserializer};
 
 use crate::format;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Role {
     Inbox,
     Starred,
@@ -19,11 +17,26 @@ pub enum Role {
     All,
     Junk,
     Trash,
-    #[serde(other)]
     Other,
 }
 
 impl Role {
+    /// A role as the engine names it; unknown names are user folders.
+    pub fn named(name: &str) -> Role {
+        match name {
+            "inbox" => Role::Inbox,
+            "starred" => Role::Starred,
+            "important" => Role::Important,
+            "sent" => Role::Sent,
+            "drafts" => Role::Drafts,
+            "archive" => Role::Archive,
+            "all" => Role::All,
+            "junk" => Role::Junk,
+            "trash" => Role::Trash,
+            _ => Role::Other,
+        }
+    }
+
     /// The unified mailboxes the sidebar offers, in order (`MailStore.unifiedMailboxes`).
     pub const UNIFIED: [Role; 7] =
         [Role::Inbox, Role::Starred, Role::Drafts, Role::Sent, Role::Archive, Role::Junk, Role::Trash];
@@ -65,18 +78,26 @@ impl Role {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Category {
     People,
     Notification,
     Newsletter,
     Invitation,
-    #[serde(other)]
     Other,
 }
 
 impl Category {
+    pub fn named(name: &str) -> Category {
+        match name {
+            "people" => Category::People,
+            "notification" => Category::Notification,
+            "newsletter" => Category::Newsletter,
+            "invitation" => Category::Invitation,
+            _ => Category::Other,
+        }
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             Category::People => "People",
@@ -98,18 +119,26 @@ impl Category {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Account {
     /// The address; accounts are addressed by it.
     pub id: SharedString,
-    #[serde(default)]
     pub label: SharedString,
     /// `google` or `microsoft`.
-    #[serde(default)]
     pub provider: SharedString,
     /// The person's name, when the provider gave one.
-    #[serde(default)]
     pub name: Option<SharedString>,
+}
+
+impl From<mailstream::Account> for Account {
+    fn from(account: mailstream::Account) -> Self {
+        Account {
+            id: account.id.into(),
+            label: account.label.into(),
+            provider: account.provider.into(),
+            name: account.name.map(Into::into),
+        }
+    }
 }
 
 impl Account {
@@ -127,14 +156,25 @@ impl Account {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Mailbox {
     pub id: SharedString,
-    #[serde(default)]
     pub name: SharedString,
     pub role: Role,
     pub unread: Option<u32>,
     pub total: Option<u32>,
+}
+
+impl From<mailstream::Mailbox> for Mailbox {
+    fn from(mailbox: mailstream::Mailbox) -> Self {
+        Mailbox {
+            id: mailbox.id.into(),
+            name: mailbox.name.into(),
+            role: Role::named(&mailbox.role),
+            unread: mailbox.unread.and_then(|n| u32::try_from(n).ok()),
+            total: mailbox.total.and_then(|n| u32::try_from(n).ok()),
+        }
+    }
 }
 
 impl Mailbox {
@@ -156,7 +196,7 @@ pub struct Address {
 }
 
 impl Address {
-    /// `Name <email>` or a bare address, as the control socket writes them.
+    /// `Name <email>` or a bare address, as the engine writes them.
     pub fn parse(raw: &str) -> Address {
         let raw = raw.trim();
         if let (Some(open), true) = (raw.rfind('<'), raw.ends_with('>')) {
@@ -195,66 +235,68 @@ impl Address {
     }
 }
 
-fn address<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Address>, D::Error> {
-    Ok(Option::<String>::deserialize(d)?.map(|raw| Address::parse(&raw)))
+/// An ISO 8601 date from the engine.
+fn date(raw: Option<String>) -> Option<DateTime<Utc>> {
+    raw?.parse().ok()
 }
 
-fn addresses<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Address>, D::Error> {
-    Ok(Option::<Vec<String>>::deserialize(d)?
-        .unwrap_or_default()
-        .iter()
-        .map(|raw| Address::parse(raw))
-        .collect())
+fn addresses(raw: Vec<String>) -> Vec<Address> {
+    raw.iter().map(|raw| Address::parse(raw)).collect()
 }
 
-fn one() -> u32 {
-    1
-}
-
-/// One row of `mail.list` / `mail.search`.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// One row of a listing or search.
+#[derive(Clone, Debug)]
 pub struct Conversation {
     pub id: SharedString,
     pub account: SharedString,
-    #[serde(default)]
     pub subject: SharedString,
     pub date: Option<DateTime<Utc>>,
     /// The latest incoming message's sender.
-    #[serde(default, deserialize_with = "address")]
     pub from: Option<Address>,
-    #[serde(default)]
     pub participants: Vec<SharedString>,
-    #[serde(default = "one")]
     pub message_count: u32,
-    #[serde(default)]
     pub unread: bool,
-    #[serde(default)]
     pub starred: bool,
-    #[serde(default)]
     pub has_attachment: bool,
-    #[serde(default)]
     pub snippet: Option<SharedString>,
-    #[serde(default)]
     pub category: Option<Category>,
-    #[serde(default)]
     pub waiting: bool,
-    #[serde(default)]
     pub labels: Vec<SharedString>,
     /// The roles of the mailboxes its messages sit in.
-    #[serde(default)]
     pub mailboxes: Vec<Role>,
 
     /// The subject without reply prefixes; `tag` holds leading `[list]` tags.
-    #[serde(skip)]
     pub title: SharedString,
-    #[serde(skip)]
     pub tag: SharedString,
     /// The row's date, as of `prepare`.
-    #[serde(skip)]
     pub when: SharedString,
-    #[serde(skip)]
     pub sender: SharedString,
+}
+
+impl From<mailstream::Conversation> for Conversation {
+    fn from(c: mailstream::Conversation) -> Self {
+        Conversation {
+            id: c.id.into(),
+            account: c.account.into(),
+            subject: c.subject.into(),
+            date: date(c.date),
+            from: c.from.as_deref().map(Address::parse),
+            participants: c.participants.into_iter().map(Into::into).collect(),
+            message_count: u32::try_from(c.message_count).unwrap_or(1).max(1),
+            unread: c.unread,
+            starred: c.starred,
+            has_attachment: c.has_attachment,
+            snippet: c.snippet.map(Into::into),
+            category: c.category.as_deref().map(Category::named),
+            waiting: c.waiting,
+            labels: c.labels.into_iter().map(Into::into).collect(),
+            mailboxes: c.mailboxes.iter().map(|role| Role::named(role)).collect(),
+            title: SharedString::default(),
+            tag: SharedString::default(),
+            when: SharedString::default(),
+            sender: SharedString::default(),
+        }
+    }
 }
 
 impl Conversation {
@@ -303,57 +345,77 @@ impl Conversation {
     }
 }
 
-#[derive(Deserialize)]
 pub struct Listing {
-    #[serde(default)]
     pub conversations: Vec<Conversation>,
-    #[serde(default)]
     pub failures: Vec<String>,
-    /// The following page's cursor, from apps that page `mail.list`.
-    #[serde(default)]
+    /// The following page's cursor.
     pub next: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+impl From<mailstream::Listing> for Listing {
+    fn from(listing: mailstream::Listing) -> Self {
+        Listing {
+            conversations: listing.conversations.into_iter().map(Conversation::from).collect(),
+            failures: listing.failures,
+            next: listing.next,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Attachment {
-    #[serde(default)]
     pub filename: SharedString,
-    #[serde(default)]
     pub size: u64,
-    #[serde(default)]
     pub path: SharedString,
 }
 
-/// One message of `mail.show`.
-#[derive(Clone, Debug, Deserialize)]
+/// One message of a thread.
+#[derive(Clone, Debug)]
 pub struct Message {
     pub id: SharedString,
-    #[serde(default, deserialize_with = "addresses")]
     pub from: Vec<Address>,
-    #[serde(default, deserialize_with = "addresses")]
     pub to: Vec<Address>,
-    #[serde(default, deserialize_with = "addresses")]
     pub cc: Vec<Address>,
     pub date: Option<DateTime<Utc>>,
-    #[serde(default)]
     pub unread: bool,
-    #[serde(default)]
     pub text: Option<SharedString>,
-    #[serde(default)]
     pub truncated: bool,
-    #[serde(default)]
     pub attachments: Vec<Attachment>,
-    #[serde(default)]
     pub error: Option<SharedString>,
 
-    #[serde(skip)]
     pub when: SharedString,
     /// The first line of the body, for a folded message.
-    #[serde(skip)]
     pub preview: SharedString,
     /// `to` and `cc`, joined.
-    #[serde(skip)]
     pub recipients: SharedString,
+}
+
+impl From<mailstream::Message> for Message {
+    fn from(m: mailstream::Message) -> Self {
+        Message {
+            id: m.id.into(),
+            from: addresses(m.from),
+            to: addresses(m.to),
+            cc: addresses(m.cc),
+            date: date(m.date),
+            unread: m.unread,
+            text: m.text.map(Into::into),
+            truncated: m.truncated,
+            attachments: m
+                .attachments
+                .into_iter()
+                .map(|a| Attachment {
+                    filename: a.filename.into(),
+                    size: u64::try_from(a.size).unwrap_or(0),
+                    path: a.path.into(),
+                })
+                .collect(),
+            error: m.error.map(Into::into),
+            when: SharedString::default(),
+            preview: SharedString::default(),
+            recipients: SharedString::default(),
+        }
+    }
 }
 
 impl Message {
@@ -401,8 +463,3 @@ impl Message {
     }
 }
 
-#[derive(Deserialize)]
-pub struct Thread {
-    #[serde(default)]
-    pub messages: Vec<Message>,
-}

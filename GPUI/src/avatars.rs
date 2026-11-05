@@ -1,11 +1,11 @@
 //! Contact photos: the picture the native app shows for an address (directory photo, BIMI,
-//! Gravatar, site icon), asked of it with the `avatars` command, which answers with square PNG
-//! files on disk. Addresses drawn during a frame are asked for together, one request at a time;
-//! answers, pictures and misses alike, are kept for the session. A failed request is retried
-//! after a growing pause. An app without the command is not asked again: initials stay.
+//! Gravatar), asked of the engine (`Mailstream::avatars`), which answers with PNG files in its
+//! cache. Addresses drawn during a frame are asked for together, one request at a time; answers,
+//! pictures and misses alike, are kept for the session. A failed request is retried after a
+//! growing pause.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,17 +13,14 @@ use gpui::{
     AnyElement, App, Div, FontWeight, Global, Hsla, IntoElement, ObjectFit, ParentElement, SharedString, Styled,
     StyledImage, div, img, px,
 };
-use serde_json::json;
+use url::Url;
 
-use crate::control::{self, ControlError};
 use crate::design::{self, Palette};
+use crate::engine::{MailError, engine};
 use crate::model::Address;
 
-/// Addresses per `avatars` request.
+/// Addresses per request.
 const BATCH: usize = 50;
-/// The picture's side in pixels: rows and the reader draw at most 34 pt, so this covers Retina
-/// (the native row size).
-const SIDE: u32 = 96;
 /// The pause before an address whose request failed is asked for again; it doubles with every
 /// further failure up to `LAST_RETRY`.
 const FIRST_RETRY: Duration = Duration::from_secs(10);
@@ -32,13 +29,13 @@ const LAST_RETRY: Duration = Duration::from_secs(600);
 enum Photo {
     /// Queued or being asked for; `failures` earlier requests for it failed.
     Pending { failures: u32 },
-    /// The app's answer: its picture, or none.
+    /// The engine's answer: its picture, or none.
     Known(Option<Arc<Path>>),
     /// Not asked again before `retry`.
     Failed { retry: Instant, failures: u32 },
 }
 
-/// The session's photos by address as drawn (the app matches addresses case-insensitively).
+/// The session's photos by address as drawn (the engine matches addresses case-insensitively).
 #[derive(Default)]
 struct Avatars {
     photos: HashMap<SharedString, Photo>,
@@ -46,8 +43,6 @@ struct Avatars {
     queue: Vec<SharedString>,
     /// A request is in flight (or about to be sent); it takes the queue when it finishes.
     asking: bool,
-    /// The app has no `avatars` command.
-    unsupported: bool,
 }
 
 impl Global for Avatars {}
@@ -101,7 +96,7 @@ fn initials(initial: SharedString, size: f32, color: Hsla, text: Hsla) -> Div {
 /// The known photo for `email`; an address not asked for yet (or due for a retry) joins the queue.
 fn photo(email: &SharedString, cx: &mut App) -> Option<Arc<Path>> {
     let avatars = cx.global_mut::<Avatars>();
-    if avatars.unsupported || email.is_empty() {
+    if email.is_empty() {
         return None;
     }
     let failures = match avatars.photos.get(email.as_ref()) {
@@ -122,7 +117,7 @@ fn photo(email: &SharedString, cx: &mut App) -> Option<Arc<Path>> {
         // Runs after this frame, so everything it draws goes out in one request.
         cx.spawn(async move |cx| {
             while let Ok(Some(emails)) = cx.update(next_batch) {
-                let (emails, answer) = cx.background_executor().spawn(async move { ask(emails) }).await;
+                let (emails, answer) = cx.background_executor().spawn(ask(emails)).await;
                 if cx.update(|cx| settle(emails, answer, cx)).is_err() {
                     break;
                 }
@@ -136,7 +131,7 @@ fn photo(email: &SharedString, cx: &mut App) -> Option<Arc<Path>> {
 /// The newest queued addresses, or none once the queue is empty (the request loop then ends).
 fn next_batch(cx: &mut App) -> Option<Vec<SharedString>> {
     let avatars = cx.global_mut::<Avatars>();
-    if avatars.unsupported || avatars.queue.is_empty() {
+    if avatars.queue.is_empty() {
         avatars.asking = false;
         return None;
     }
@@ -144,19 +139,22 @@ fn next_batch(cx: &mut App) -> Option<Vec<SharedString>> {
     Some(avatars.queue.split_off(start))
 }
 
-/// Asks the app for `emails`' photos (blocking); the answer is in `emails`' order.
-fn ask(emails: Vec<SharedString>) -> (Vec<SharedString>, Result<Vec<Option<Arc<Path>>>, ControlError>) {
-    let answer = control::call::<HashMap<String, Option<PathBuf>>>("avatars", json!({ "emails": emails, "size": SIDE }))
-        .map(|mut paths| {
-            emails
-                .iter()
-                .map(|email| paths.remove(&email.to_lowercase()).flatten().map(Arc::from))
-                .collect()
-        });
+/// Asks the engine for `emails`' photos; the answer is in `emails`' order.
+async fn ask(emails: Vec<SharedString>) -> (Vec<SharedString>, Result<Vec<Option<Arc<Path>>>, MailError>) {
+    let addresses = emails.iter().map(|email| email.to_string()).collect();
+    let answer = engine().avatars(addresses, Vec::new()).await.map(|mut urls| {
+        emails
+            .iter()
+            .map(|email| {
+                let url = urls.remove(&email.to_lowercase()).flatten()?;
+                Some(Arc::from(Url::parse(&url).ok()?.to_file_path().ok()?))
+            })
+            .collect()
+    });
     (emails, answer)
 }
 
-fn settle(emails: Vec<SharedString>, answer: Result<Vec<Option<Arc<Path>>>, ControlError>, cx: &mut App) {
+fn settle(emails: Vec<SharedString>, answer: Result<Vec<Option<Arc<Path>>>, MailError>, cx: &mut App) {
     let avatars = cx.global_mut::<Avatars>();
     match answer {
         Ok(paths) => {
@@ -167,11 +165,6 @@ fn settle(emails: Vec<SharedString>, answer: Result<Vec<Option<Arc<Path>>>, Cont
             if found {
                 cx.refresh_windows();
             }
-        }
-        Err(error) if error.code == "unknown_command" => {
-            avatars.unsupported = true;
-            avatars.queue.clear();
-            avatars.photos.clear();
         }
         Err(_) => {
             let now = Instant::now();

@@ -148,7 +148,9 @@ DART_OUT=path/to/lib/src ./scripts/ffi.sh         # and the Dart bindings (asset
 - **One signature.** `scripts/sign.sh` signs the app and every host with the Apple
   Development certificate and code identifier `dev.mailstream.Mailstream`. The Keychain
   item holding the sign-ins trusts that pair, so every host reads it without asking. A
-  host signed otherwise gets a Keychain prompt.
+  host signed otherwise gets a Keychain prompt, and "Always Allow" there re-pins the item
+  to that one binary, so the signed hosts get asked again. `GPUI/run.sh` builds, signs and
+  checks the GPUI front end before starting it.
 - **Shared database.** Every process opens `mail.db` with Turso's experimental
   multi-process WAL (`mail.db-tshm`). The Turso 0.8.3 C API does not expose it, so
   `scripts/turso.sh` applies `scripts/turso-multiprocess.patch`. Turso refuses to mix

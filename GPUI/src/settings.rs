@@ -1,7 +1,7 @@
 //! The Settings window (`AccountsWindowController`): signed-in accounts (rename, sign out, add),
 //! the app's status, and the settings kept in settings.json.
 //!
-//! Accounts and status go through the control socket. `config.*` settings are local to the CLI:
+//! Accounts and status come from the in-process engine. `config.*` settings are local to the CLI:
 //! it edits `~/Library/Application Support/Mailstream/settings.json` and the running app follows
 //! the file, so this window does the same (`SettingsFile.update`): a flat object of dotted keys
 //! holding only values changed from their default, unknown keys kept as they are.
@@ -16,10 +16,9 @@ use gpui::{
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Stateful, StatefulInteractiveElement,
     Styled, Subscription, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, px, size,
 };
-use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
-use crate::control::{self, ControlError};
+use crate::engine::{MailError, engine};
 use crate::design::{self, Palette, UI_FONT, radius, settings as metrics, text};
 use crate::format;
 use crate::input::{InputEvent, TextInput};
@@ -66,17 +65,25 @@ impl Global for OpenSettings {}
 
 // MARK: - Values
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone)]
 struct AccountRow {
     id: SharedString,
-    #[serde(default)]
     label: SharedString,
-    #[serde(default)]
     provider: SharedString,
-    #[serde(default)]
     name: Option<SharedString>,
-    #[serde(default)]
     services: Vec<SharedString>,
+}
+
+impl From<mailstream::Account> for AccountRow {
+    fn from(account: mailstream::Account) -> Self {
+        Self {
+            id: account.id.into(),
+            label: account.label.into(),
+            provider: account.provider.into(),
+            name: account.name.map(SharedString::from),
+            services: account.services.into_iter().map(SharedString::from).collect(),
+        }
+    }
 }
 
 impl AccountRow {
@@ -93,36 +100,33 @@ impl AccountRow {
     }
 }
 
-#[derive(Deserialize)]
+/// What the Status section shows of the engine's `status`.
 struct Status {
-    #[serde(default)]
-    version: Option<String>,
-    #[serde(default)]
-    sync: SyncStatus,
-    #[serde(default, rename = "aiTagging")]
-    ai_tagging: TaggingStatus,
-    #[serde(default, rename = "settingsIssues")]
+    version: String,
+    loading: bool,
+    last_refresh: Option<DateTime<Utc>>,
+    last_error: Option<String>,
+    push_connected: bool,
+    tagging: mailstream::TaggingStatus,
     settings_issues: Vec<String>,
 }
 
-#[derive(Default, Deserialize)]
-struct SyncStatus {
-    #[serde(default)]
-    loading: bool,
-    #[serde(default, rename = "lastRefresh")]
-    last_refresh: Option<DateTime<Utc>>,
-    #[serde(default, rename = "lastError")]
-    last_error: Option<String>,
-    #[serde(default, rename = "pushConnected")]
-    push_connected: bool,
-}
-
-#[derive(Default, Deserialize)]
-struct TaggingStatus {
-    #[serde(default)]
-    enabled: bool,
-    #[serde(default)]
-    status: Value,
+impl From<mailstream::Status> for Status {
+    fn from(status: mailstream::Status) -> Self {
+        let sync = status.sync;
+        Self {
+            version: status.version,
+            loading: sync.loading,
+            last_refresh: sync
+                .last_refresh
+                .and_then(|at| DateTime::parse_from_rfc3339(&at).ok())
+                .map(|at| at.with_timezone(&Utc)),
+            last_error: sync.last_error,
+            push_connected: sync.push_connected,
+            tagging: status.ai_tagging,
+            settings_issues: status.settings_issues,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -212,7 +216,7 @@ fn write_ai_tagging(enabled: bool) -> Result<bool, String> {
 
 struct Settings {
     on_changed: Rc<dyn Fn(&mut App)>,
-    accounts: Option<Result<Vec<AccountRow>, ControlError>>,
+    accounts: Option<Result<Vec<AccountRow>, MailError>>,
     status: Option<Status>,
     /// `aiTagging.enabled` as the file says; None until read.
     ai_tagging: Option<bool>,
@@ -251,11 +255,11 @@ impl Settings {
     fn background<R: Send + 'static>(
         &self,
         cx: &mut Context<Self>,
-        work: impl FnOnce() -> R + Send + 'static,
+        work: impl Future<Output = R> + Send + 'static,
         done: impl FnOnce(&mut Self, R, &mut Context<Self>) + 'static,
     ) {
         cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { work() }).await;
+            let result = cx.background_executor().spawn(work).await;
             this.update(cx, |this, cx| done(this, result, cx)).ok();
         })
         .detach();
@@ -264,9 +268,9 @@ impl Settings {
     fn reload(&self, cx: &mut Context<Self>) {
         self.background(
             cx,
-            || {
-                let accounts = control::call::<Vec<AccountRow>>("accounts.list", json!({}));
-                let status = control::call::<Status>("status", json!({})).ok();
+            async {
+                let accounts = engine().accounts().await.map(|list| list.into_iter().map(AccountRow::from).collect());
+                let status = engine().status().await.ok().map(Status::from);
                 let ai = read_settings().map(|s| ai_tagging(&s));
                 (accounts, status, ai)
             },
@@ -339,13 +343,13 @@ impl Settings {
         let account = id.to_string();
         self.background(
             cx,
-            move || control::call::<Value>("accounts.rename", json!({ "account": account, "label": label })),
+            async move { engine().rename_account(account, label).await },
             |this, result, cx| match result {
                 Ok(_) => {
                     this.note = None;
                     this.changed(cx);
                 }
-                Err(error) => this.fail(error.message, cx),
+                Err(error) => this.fail(error.to_string(), cx),
             },
         );
     }
@@ -358,13 +362,13 @@ impl Settings {
         let account = id.to_string();
         self.background(
             cx,
-            move || control::call::<Value>("accounts.remove", json!({ "account": account, "yes": true })),
+            async move { engine().remove_account(account, true).await },
             move |this, result, cx| match result {
                 Ok(_) => {
                     this.note = Some(Note { text: format!("Signed out of {id}.").into(), error: false });
                     this.changed(cx);
                 }
-                Err(error) => this.fail(error.message, cx),
+                Err(error) => this.fail(error.to_string(), cx),
             },
         );
     }
@@ -379,13 +383,7 @@ impl Settings {
         cx.notify();
         self.background(
             cx,
-            move || {
-                control::call_waiting::<AccountRow>(
-                    "accounts.add",
-                    json!({ "provider": provider.key() }),
-                    metrics::SIGN_IN_WAIT,
-                )
-            },
+            async move { engine().add_account(provider.key().to_string(), None, None).await },
             move |this, result, cx| {
                 // The user stopped waiting, or started over.
                 if this.attempt != attempt {
@@ -397,7 +395,7 @@ impl Settings {
                         this.note = Some(Note { text: format!("Signed in as {}.", account.id).into(), error: false });
                         this.changed(cx);
                     }
-                    Err(error) => this.fail(error.message, cx),
+                    Err(error) => this.fail(error.to_string(), cx),
                 }
             },
         );
@@ -416,7 +414,7 @@ impl Settings {
         cx.notify();
         self.background(
             cx,
-            move || write_ai_tagging(enabled),
+            async move { write_ai_tagging(enabled) },
             |this, result, cx| match result {
                 Ok(_) => this.changed(cx),
                 Err(message) => {
@@ -432,12 +430,12 @@ impl Settings {
         cx.notify();
         self.background(
             cx,
-            || control::call::<Value>("mail.retag", json!({})),
+            async { engine().retag().await },
             |this, result, cx| match result {
                 Ok(_) => this.reload(cx),
                 Err(error) => {
                     this.retag_started = false;
-                    this.fail(error.message, cx);
+                    this.fail(error.to_string(), cx);
                 }
             },
         );
@@ -488,7 +486,7 @@ impl Settings {
 
         let body: AnyElement = match &self.accounts {
             None => note("Loading accounts…", p).into_any_element(),
-            Some(Err(error)) => note(error.message.clone(), p).into_any_element(),
+            Some(Err(error)) => note(error.to_string(), p).into_any_element(),
             Some(Ok(rows)) if rows.is_empty() => div()
                 .py(px(24.))
                 .flex()
@@ -746,33 +744,23 @@ impl Settings {
         let Some(status) = &self.status else {
             return section("Status", p).child(note("Mailstream is not answering.", p));
         };
-        let sync = &status.sync;
-        let refreshed = if sync.loading {
+        let refreshed = if status.loading {
             "Refreshing now".to_string()
         } else {
-            sync.last_refresh.map_or("Not yet".into(), |at| format::message_date(Some(at), Local::now()))
+            status.last_refresh.map_or("Not yet".into(), |at| format::message_date(Some(at), Local::now()))
         };
-        let tagging = if !status.ai_tagging.enabled {
-            "Off".to_string()
-        } else {
-            match &status.ai_tagging.status {
-                Value::Null => "On".to_string(),
-                Value::String(s) => s.clone(),
-                Value::Object(o) => o
-                    .get("message")
-                    .or_else(|| o.get("state"))
-                    .and_then(Value::as_str)
-                    .map_or_else(|| Value::Object(o.clone()).to_string(), str::to_string),
-                other => other.to_string(),
-            }
+        let tagging = match &status.tagging {
+            mailstream::TaggingStatus { enabled: false, .. } => "Off".to_string(),
+            mailstream::TaggingStatus { status: None, .. } => "On".to_string(),
+            mailstream::TaggingStatus { status: Some(line), .. } => line.clone(),
         };
         let mut rows = vec![
-            ("Version", status.version.clone().unwrap_or_else(|| "—".into()), None),
+            ("Version", status.version.clone(), None),
             ("Last refresh", refreshed, None),
-            ("Push", if sync.push_connected { "Connected" } else { "Not connected" }.into(), None),
+            ("Push", if status.push_connected { "Connected" } else { "Not connected" }.into(), None),
             ("AI tagging", tagging, None),
         ];
-        if let Some(error) = &sync.last_error {
+        if let Some(error) = &status.last_error {
             rows.push(("Sync error", error.clone(), Some(p.danger)));
         }
         for issue in &status.settings_issues {

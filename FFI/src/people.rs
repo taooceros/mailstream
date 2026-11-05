@@ -1,0 +1,20 @@
+//! The people compose completes addresses to (`contacts.search`).
+use serde::Deserialize;
+use serde_json::json;
+
+use crate::{MailError, Mailstream, call};
+
+/// Someone from the accounts' Google and Outlook directories or recent correspondents.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct Person {
+    pub name: Option<String>,
+    pub email: String,
+}
+
+#[uniffi::export]
+impl Mailstream {
+    /// People whose name or address starts with `query`, best first; at most `limit` (1-12).
+    pub async fn search_contacts(&self, query: String, limit: u32) -> Result<Vec<Person>, MailError> {
+        call("contacts.search", json!({ "query": query, "limit": limit })).await
+    }
+}

@@ -1,11 +1,11 @@
-//! Google Chat over the app's `chat.*` socket commands: the space list (direct messages, group
+//! Google Chat through the in-process engine's `chat_*` methods: the space list (direct messages, group
 //! chats, spaces), a space's log with a composer, and starting a conversation. `ChatPane` fills
 //! the main window's content area; the sidebar reads `accounts()` and `unread()` from it.
 //!
-//! The space list comes from the app's memory (the app polls Google every `chat.pollSeconds`), so
+//! The space list comes from the engine's memory (it polls Google every `chat.pollSeconds`), so
 //! it is asked for every few seconds. An open space's messages come from Google: when it opens,
 //! and again whenever the list shows its activity changed. Opened spaces stay in memory, so
-//! reopening one paints at once. Socket calls run on the background executor.
+//! reopening one paints at once. Engine calls run on the background executor.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -20,11 +20,9 @@ use gpui::{
     StrikethroughStyle, Styled, StyledText, Subscription, UniformListScrollHandle, Window, actions, div, list, px,
     relative, uniform_list,
 };
-use serde::Deserialize;
-use serde_json::json;
 
-use crate::control::{self, ControlError};
 use crate::design::{self, Palette, UI_FONT, chat as metrics, layout, list as rows, radius, text};
+use crate::engine::{MailError, engine};
 use crate::format;
 use crate::input::{InputEvent, TextInput};
 
@@ -35,8 +33,8 @@ const CONTEXT: &str = "Chat";
 const POLL: Duration = Duration::from_secs(5);
 /// Typing pauses this long before people are looked up.
 const SEARCH_DELAY: Duration = Duration::from_millis(120);
-const MESSAGES_PAGE: usize = 50;
-const SUGGESTIONS: usize = 8;
+const MESSAGES_PAGE: u32 = 50;
+const SUGGESTIONS: u32 = 8;
 /// Log height measured beyond the visible part, so scrolling does not pop.
 const OVERDRAW: f32 = 800.0;
 
@@ -57,7 +55,7 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-// MARK: - What the socket returns
+// MARK: - What the engine returns
 
 /// A Google Chat account, for the sidebar.
 #[derive(Clone, Debug, PartialEq)]
@@ -66,23 +64,19 @@ pub struct ChatAccountInfo {
     pub label: SharedString,
 }
 
-#[derive(Clone, PartialEq, Deserialize)]
-struct AccountWire {
+/// A Chat account as the pane keeps it: what the sidebar shows plus whether it may start chats.
+#[derive(Clone, PartialEq)]
+struct Account {
     id: SharedString,
     label: SharedString,
     /// Its sign-in may create direct messages and group chats.
-    #[serde(rename = "canStart", default)]
     can_start: bool,
 }
 
-#[derive(Deserialize)]
-struct MailAccount {
-    id: SharedString,
-}
-
-#[derive(Deserialize)]
-struct SpacesWire {
-    spaces: Vec<Space>,
+impl From<mailstream::ChatAccount> for Account {
+    fn from(account: mailstream::ChatAccount) -> Self {
+        Account { id: account.id.into(), label: account.label.into(), can_start: account.can_start }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -91,27 +85,39 @@ struct Key {
     space: SharedString,
 }
 
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Clone, PartialEq)]
 struct Space {
     account: SharedString,
     id: SharedString,
     kind: SharedString,
     title: SharedString,
-    #[serde(default)]
     snippet: SharedString,
-    #[serde(default)]
     unread: u32,
-    #[serde(rename = "lastActive")]
     last_active: Option<DateTime<Utc>>,
     avatar: SpaceAvatar,
-    #[serde(default)]
     members: Vec<User>,
     /// The row's date, derived off the main thread.
-    #[serde(skip)]
     when: SharedString,
 }
 
 impl Space {
+    /// Converts off the main thread, deriving the row's date against `now`.
+    fn new(space: mailstream::ChatSpace, now: DateTime<Local>) -> Self {
+        let last_active = date(space.last_active);
+        Space {
+            account: space.account.into(),
+            id: space.id.into(),
+            kind: space.kind.into(),
+            title: space.title.into(),
+            snippet: space.snippet.into(),
+            unread: space.unread,
+            last_active,
+            avatar: SpaceAvatar { name: space.avatar.name.into(), color_key: space.avatar.color_key.into() },
+            members: space.members.into_iter().map(User::from).collect(),
+            when: format::list_date(last_active, now).into(),
+        }
+    }
+
     fn key(&self) -> Key {
         Key { account: self.account.clone(), space: self.id.clone() }
     }
@@ -130,65 +136,54 @@ impl Space {
     }
 }
 
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Clone, PartialEq)]
 struct SpaceAvatar {
     name: SharedString,
-    #[serde(rename = "colorKey")]
     color_key: SharedString,
 }
 
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Clone, PartialEq)]
 struct User {
     /// `users/<id>`.
     id: SharedString,
-    #[serde(default)]
     email: Option<SharedString>,
     label: SharedString,
 }
 
-#[derive(Deserialize)]
-struct PageWire {
-    messages: Vec<MessageWire>,
-    more: bool,
-    #[serde(rename = "lastRead")]
-    last_read: Option<DateTime<Utc>>,
+impl From<mailstream::ChatUser> for User {
+    fn from(user: mailstream::ChatUser) -> Self {
+        User { id: user.id.into(), email: user.email.map(Into::into), label: user.label.into() }
+    }
 }
 
-#[derive(Deserialize)]
-struct MessageWire {
-    id: SharedString,
-    sender: User,
-    created: Option<DateTime<Utc>>,
-    edited: Option<DateTime<Utc>>,
-    #[serde(default)]
-    text: String,
-    thread: Option<SharedString>,
-    #[serde(rename = "threadReply", default)]
-    thread_reply: bool,
-    #[serde(default)]
-    mine: bool,
-    #[serde(default)]
-    card: bool,
-    #[serde(default)]
-    attachments: Vec<Attachment>,
-}
-
-#[derive(Clone, Deserialize)]
+#[derive(Clone)]
 struct Attachment {
     name: SharedString,
     url: Option<SharedString>,
 }
 
-#[derive(Deserialize)]
-struct Sent {
-    message: MessageWire,
+impl From<mailstream::ChatAttachment> for Attachment {
+    fn from(attachment: mailstream::ChatAttachment) -> Self {
+        Attachment { name: attachment.name.into(), url: attachment.url.map(Into::into) }
+    }
 }
 
-/// Someone `contacts.search` found.
-#[derive(Clone, PartialEq, Deserialize)]
+/// An ISO 8601 time from the engine; None when absent or unreadable.
+fn date(raw: Option<String>) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&raw?).ok().map(|date| date.with_timezone(&Utc))
+}
+
+/// Someone `search_contacts` found, or an address typed in full.
+#[derive(Clone, PartialEq)]
 struct Person {
     name: Option<SharedString>,
     email: SharedString,
+}
+
+impl From<mailstream::Person> for Person {
+    fn from(person: mailstream::Person) -> Self {
+        Person { name: person.name.map(Into::into), email: person.email.into() }
+    }
 }
 
 impl Person {
@@ -451,38 +446,40 @@ struct Msg {
 }
 
 impl Msg {
-    fn from_wire(message: MessageWire, names: &HashMap<String, SharedString>, now: DateTime<Local>) -> Self {
-        let local = message.created.map(|date| date.with_timezone(&Local));
+    fn from_wire(message: mailstream::ChatMessage, names: &HashMap<String, SharedString>, now: DateTime<Local>) -> Self {
+        let created = date(message.created);
+        let local = created.map(|date| date.with_timezone(&Local));
+        let sender = User::from(message.sender);
         let body = if message.card && message.text.is_empty() {
             Body::note("Card message")
         } else {
             Body::parse(&message.text, names, message.edited.is_some())
         };
         Msg {
-            name: if message.mine { "You".into() } else { message.sender.label.clone() },
-            initial: initial(&message.sender.label),
-            color_key: message.sender.email.clone().unwrap_or_else(|| message.sender.id.clone()),
-            sender_id: message.sender.id,
-            id: message.id,
-            created: message.created,
+            name: if message.mine { "You".into() } else { sender.label.clone() },
+            initial: initial(&sender.label),
+            color_key: sender.email.clone().unwrap_or_else(|| sender.id.clone()),
+            sender_id: sender.id,
+            id: message.id.into(),
+            created,
             day: local.map(|date| date.date_naive()),
             day_label: local.map(|date| day_label(date, now)).unwrap_or_default().into(),
             time: local.map(|date| date.format("%-I:%M %p").to_string()).unwrap_or_default().into(),
-            thread: message.thread,
+            thread: message.thread.map(Into::into),
             thread_reply: message.thread_reply,
             mine: message.mine,
             body,
-            attachments: message.attachments,
+            attachments: message.attachments.into_iter().map(Attachment::from).collect(),
             status: Status::Sent,
             draft: None,
         }
     }
 
-    fn convert(messages: Vec<MessageWire>, members: &[User]) -> Vec<Msg> {
+    fn convert(messages: Vec<mailstream::ChatMessage>, members: &[User]) -> Vec<Msg> {
         let mut names: HashMap<String, SharedString> =
             members.iter().map(|user| (user.id.to_string(), user.label.clone())).collect();
         for message in &messages {
-            names.entry(message.sender.id.to_string()).or_insert_with(|| message.sender.label.clone());
+            names.entry(message.sender.id.clone()).or_insert_with(|| message.sender.label.clone().into());
         }
         let now = Local::now();
         messages.into_iter().map(|message| Msg::from_wire(message, &names, now)).collect()
@@ -644,13 +641,12 @@ pub struct ChatPane {
     focus: FocusHandle,
     composer: Entity<TextInput>,
     people_input: Entity<TextInput>,
-    supported: bool,
-    /// Why the app could not be asked, while it cannot.
-    offline: Option<SharedString>,
+    /// Why the space list failed to load, until a load succeeds.
+    failure: Option<SharedString>,
     /// The first space list arrived.
     loaded: bool,
     loading: bool,
-    account_wires: Vec<AccountWire>,
+    chat_accounts: Vec<Account>,
     accounts: Vec<ChatAccountInfo>,
     /// Every signed-in account in sidebar order, for account colors.
     account_order: Vec<SharedString>,
@@ -690,11 +686,10 @@ impl ChatPane {
             focus: cx.focus_handle(),
             composer,
             people_input,
-            supported: true,
-            offline: None,
+            failure: None,
             loaded: false,
             loading: false,
-            account_wires: Vec::new(),
+            chat_accounts: Vec::new(),
             accounts: Vec::new(),
             account_order: Vec::new(),
             spaces: Vec::new(),
@@ -739,19 +734,15 @@ impl ChatPane {
             .count()
     }
 
-    /// False when the running app has no chat commands.
-    pub fn supported(&self) -> bool {
-        self.supported
-    }
-
+    /// Runs `work` on the background executor, then `done` with its result on the main thread.
     fn background<R: Send + 'static>(
         &self,
         cx: &mut Context<Self>,
-        work: impl FnOnce() -> R + Send + 'static,
+        work: impl Future<Output = R> + Send + 'static,
         done: impl FnOnce(&mut Self, R, &mut Context<Self>) + 'static,
     ) {
         cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { work() }).await;
+            let result = cx.background_executor().spawn(work).await;
             this.update(cx, |this, cx| done(this, result, cx)).ok();
         })
         .detach();
@@ -761,13 +752,7 @@ impl ChatPane {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL).await;
-                let alive = this.update(cx, |this, cx| {
-                    if this.supported {
-                        this.load_spaces(cx);
-                    }
-                    this.supported
-                });
-                if !matches!(alive, Ok(true)) {
+                if this.update(cx, |this, cx| this.load_spaces(cx)).is_err() {
                     break;
                 }
             }
@@ -785,39 +770,40 @@ impl ChatPane {
         let known = self.account_order.clone();
         self.background(
             cx,
-            move || -> Result<_, ControlError> {
-                let accounts: Vec<AccountWire> = control::call("chat.accounts", json!({}))?;
-                let mut answer: SpacesWire = control::call("chat.spaces", json!({}))?;
+            async move {
+                let accounts: Vec<Account> =
+                    engine().chat_accounts().await?.into_iter().map(Account::from).collect();
+                let answer = engine().chat_spaces(None).await?;
                 let now = Local::now();
-                for space in &mut answer.spaces {
-                    space.when = format::list_date(space.last_active, now).into();
-                }
+                let spaces: Vec<Space> = answer.spaces.into_iter().map(|space| Space::new(space, now)).collect();
                 // Account colors follow the sidebar's order of every account; asked for again only
                 // when a chat account is not in the known order.
                 let order = if accounts.iter().all(|a| known.contains(&a.id)) {
                     None
                 } else {
-                    control::call::<Vec<MailAccount>>("accounts.list", json!({}))
+                    engine()
+                        .accounts()
+                        .await
                         .ok()
-                        .map(|list| list.into_iter().map(|a| a.id).collect::<Vec<_>>())
+                        .map(|list| list.into_iter().map(|a| SharedString::from(a.id)).collect::<Vec<_>>())
                 };
-                Ok((accounts, answer.spaces, order))
+                Ok::<_, MailError>((accounts, spaces, order))
             },
             |this, result, cx| {
                 this.loading = false;
                 match result {
                     Ok((accounts, spaces, order)) => {
-                        this.offline = None;
+                        this.failure = None;
                         this.loaded = true;
                         if let Some(order) = order {
                             this.account_order = order;
                         }
-                        if accounts != this.account_wires {
+                        if accounts != this.chat_accounts {
                             this.accounts = accounts
                                 .iter()
                                 .map(|a| ChatAccountInfo { id: a.id.clone(), label: a.label.clone() })
                                 .collect();
-                            this.account_wires = accounts;
+                            this.chat_accounts = accounts;
                         }
                         if spaces != this.spaces {
                             this.spaces = spaces;
@@ -825,8 +811,7 @@ impl ChatPane {
                         }
                         this.follow_open_space(cx);
                     }
-                    Err(error) if error.code == "unknown_command" => this.supported = false,
-                    Err(error) => this.offline = Some(error.message.into()),
+                    Err(error) => this.failure = Some(error.to_string().into()),
                 }
                 cx.notify();
             },
@@ -916,13 +901,13 @@ impl ChatPane {
         let space = self.spaces.iter().find(|s| s.is(key));
         let activity = space.and_then(|s| s.last_active);
         let members = space.map(|s| s.members.clone()).unwrap_or_default();
-        let args = json!({ "account": key.account.as_ref(), "space": key.space.as_ref(), "limit": MESSAGES_PAGE });
+        let (account, space) = (key.account.to_string(), key.space.to_string());
         let key = key.clone();
         self.background(
             cx,
-            move || -> Result<_, ControlError> {
-                let page: PageWire = control::call("chat.messages", args)?;
-                Ok((Msg::convert(page.messages, &members), page.more, page.last_read))
+            async move {
+                let page = engine().chat_messages(space, account, None, MESSAGES_PAGE).await?;
+                Ok::<_, MailError>((Msg::convert(page.messages, &members), page.more, date(page.last_read)))
             },
             move |this, result, cx| {
                 let Some(log) = this.logs.get_mut(&key) else { return };
@@ -958,7 +943,7 @@ impl ChatPane {
                     }
                     Err(error) => {
                         if log.messages.is_empty() {
-                            log.failure = Some(error.message.into());
+                            log.failure = Some(error.to_string().into());
                             log.list.splice(0..1, 1);
                         }
                     }
@@ -977,16 +962,14 @@ impl ChatPane {
         log.loading_earlier = true;
         log.list.splice(0..1, 1);
         let members = self.space(key).map(|s| s.members.clone()).unwrap_or_default();
-        let args = json!({
-            "account": key.account.as_ref(), "space": key.space.as_ref(), "limit": MESSAGES_PAGE,
-            "before": oldest.to_rfc3339_opts(SecondsFormat::Micros, true),
-        });
+        let (account, space) = (key.account.to_string(), key.space.to_string());
+        let before = oldest.to_rfc3339_opts(SecondsFormat::Micros, true);
         let key = key.clone();
         self.background(
             cx,
-            move || -> Result<_, ControlError> {
-                let page: PageWire = control::call("chat.messages", args)?;
-                Ok((Msg::convert(page.messages, &members), page.more))
+            async move {
+                let page = engine().chat_messages(space, account, Some(before), MESSAGES_PAGE).await?;
+                Ok::<_, MailError>((Msg::convert(page.messages, &members), page.more))
             },
             move |this, result, cx| {
                 let Some(log) = this.logs.get_mut(&key) else { return };
@@ -1012,8 +995,8 @@ impl ChatPane {
         if let Some(space) = self.spaces.iter_mut().find(|s| s.is(key)) {
             space.unread = 0;
         }
-        let args = json!({ "account": key.account.as_ref(), "space": key.space.as_ref() });
-        self.background(cx, move || control::call::<serde_json::Value>("chat.read", args).ok(), |_, _, _| {});
+        let (account, space) = (key.account.to_string(), key.space.to_string());
+        self.background(cx, async move { engine().chat_read(space, account).await.ok() }, |_, _, _| {});
         cx.notify();
     }
 
@@ -1063,18 +1046,15 @@ impl ChatPane {
         cx.notify();
 
         let members = self.space(key).map(|s| s.members.clone()).unwrap_or_default();
-        let mut args = json!({
-            "account": key.account.as_ref(), "space": key.space.as_ref(), "body": text, "yes": true,
-        });
-        if let Some(thread) = &thread {
-            args["thread"] = json!(thread.as_ref());
-        }
+        let (account, space) = (key.account.to_string(), key.space.to_string());
+        let thread_id = thread.as_ref().map(ToString::to_string);
         let key = key.clone();
         self.background(
             cx,
-            move || -> Result<_, ControlError> {
-                let sent: Sent = control::call("chat.send", args)?;
-                Ok(Msg::convert(vec![sent.message], &members))
+            async move {
+                // Pressing Send is the user's confirmation.
+                let sent = engine().chat_send(space, account, text, thread_id, true).await?;
+                Ok::<_, MailError>(Msg::convert(vec![sent], &members))
             },
             move |this, result, cx| {
                 let Some(log) = this.logs.get_mut(&key) else { return };
@@ -1088,7 +1068,7 @@ impl ChatPane {
                     }
                     Err(error) => {
                         if let Some(pending) = log.pending.iter_mut().find(|m| m.id == id) {
-                            pending.status = Status::Failed(error.message.into());
+                            pending.status = Status::Failed(error.to_string().into());
                         }
                     }
                 }
@@ -1139,7 +1119,7 @@ impl ChatPane {
         let account = self
             .filter
             .clone()
-            .or_else(|| self.account_wires.iter().find(|a| a.can_start).map(|a| a.id.clone()))
+            .or_else(|| self.chat_accounts.iter().find(|a| a.can_start).map(|a| a.id.clone()))
             .or_else(|| self.accounts.first().map(|a| a.id.clone()));
         self.form = NewChatForm { account, ..Default::default() };
         self.view = View::NewChat;
@@ -1182,10 +1162,9 @@ impl ChatPane {
             if !current {
                 return;
             }
-            let args = json!({ "query": query, "limit": SUGGESTIONS });
             let found = cx
                 .background_executor()
-                .spawn(async move { control::call::<Vec<Person>>("contacts.search", args) })
+                .spawn(async move { engine().search_contacts(query, SUGGESTIONS).await })
                 .await;
             this.update(cx, |this, cx| {
                 if this.form.generation != generation {
@@ -1193,8 +1172,12 @@ impl ChatPane {
                 }
                 // An app without people lookup offers none; typed addresses still work.
                 let chosen: HashSet<String> = this.form.people.iter().map(|p| p.email.to_lowercase()).collect();
-                this.form.suggestions =
-                    found.unwrap_or_default().into_iter().filter(|p| !chosen.contains(&p.email.to_lowercase())).collect();
+                this.form.suggestions = found
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|p| !chosen.contains(&p.email.to_lowercase()))
+                    .map(Person::from)
+                    .collect();
                 cx.notify();
             })
             .ok();
@@ -1222,14 +1205,13 @@ impl ChatPane {
         self.form.failure = None;
         cx.notify();
         let emails: Vec<String> = self.form.people.iter().map(|p| p.email.to_string()).collect();
-        let args = json!({ "account": account.as_ref(), "emails": emails });
+        let account = account.to_string();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut space: Space = control::call("chat.start", args)?;
-                    space.when = format::list_date(space.last_active, Local::now()).into();
-                    Ok::<_, ControlError>(space)
+                    let space = engine().chat_start(account, emails).await?;
+                    Ok::<_, MailError>(Space::new(space, Local::now()))
                 })
                 .await;
             this.update_in(cx, |this, window, cx| {
@@ -1246,7 +1228,7 @@ impl ChatPane {
                             this.open(key, window, cx);
                         }
                     }
-                    Err(error) => this.form.failure = Some(error.message.into()),
+                    Err(error) => this.form.failure = Some(error.to_string().into()),
                 }
                 cx.notify();
             })
@@ -1301,10 +1283,7 @@ impl ChatPane {
     }
 
     fn refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.supported {
-            return;
-        }
-        self.background(cx, || control::call::<serde_json::Value>("chat.refresh", json!({})).ok(), |_, _, _| {});
+        self.background(cx, async { engine().chat_refresh().await.ok() }, |_, _, _| {});
         self.load_spaces(cx);
         if let View::Space(key) = &self.view {
             let key = key.clone();
@@ -1318,17 +1297,13 @@ impl ChatPane {
 impl Render for ChatPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = design::palette(window.appearance());
-        let body = if !self.supported {
-            note("This version of Mailstream has no Google Chat commands.", p).into_any_element()
-        } else {
-            match &self.view {
-                View::Spaces => self.render_spaces(p, cx),
-                View::Space(key) => {
-                    let key = key.clone();
-                    self.render_space(&key, p, cx)
-                }
-                View::NewChat => self.render_form(p, cx),
+        let body = match &self.view {
+            View::Spaces => self.render_spaces(p, cx),
+            View::Space(key) => {
+                let key = key.clone();
+                self.render_space(&key, p, cx)
             }
+            View::NewChat => self.render_form(p, cx),
         };
         div()
             .key_context(CONTEXT)
@@ -1371,8 +1346,8 @@ impl ChatPane {
             .when(!self.accounts.is_empty(), |d| {
                 d.child(button("chat-new", "New Chat", p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.start_form(window, cx))))
             });
-        let content: AnyElement = if let Some(offline) = &self.offline {
-            note(offline.clone(), p).into_any_element()
+        let content: AnyElement = if let Some(failure) = &self.failure {
+            note(failure.clone(), p).into_any_element()
         } else if !self.loaded {
             note("Loading chats…", p).into_any_element()
         } else if self.accounts.is_empty() {
@@ -1798,7 +1773,7 @@ impl ChatPane {
         let can_start = form
             .account
             .as_ref()
-            .and_then(|id| self.account_wires.iter().find(|a| &a.id == id))
+            .and_then(|id| self.chat_accounts.iter().find(|a| &a.id == id))
             .is_none_or(|a| a.can_start);
         let count = form.people.len();
         let (note_text, note_color): (SharedString, _) = match &form.failure {

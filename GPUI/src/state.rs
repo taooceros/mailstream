@@ -1,27 +1,32 @@
 //! `MailApp`'s state and everything that changes it: what is selected, the lists served from
 //! memory, the layers over the list, the reader's threads, and the optimistic actions that roll
-//! back when the app refuses them. Rendering is in `ui`.
+//! back when the engine refuses them. Rendering is in `ui`.
 
 mod actions;
 mod nav;
 
+pub use actions::Removal;
+
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Local;
+use futures::StreamExt;
+use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::{
     App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, Pixels, Point, ScrollHandle, ScrollStrategy,
     SharedString, Subscription, UniformListScrollHandle, Window, actions,
 };
-use serde_json::{Value, json};
+use mailstream::{Event, EventListener, ListQuery};
 
 use crate::chat::ChatPane;
 use crate::compose::ReplyBox;
-use crate::control::{self, ControlError};
+use crate::engine::{MailError, engine};
 use crate::format;
 use crate::input::{InputEvent, TextInput};
-use crate::model::{Account, Category, Conversation, Listing, Mailbox, Message, Role, Thread};
+use crate::model::{Account, Category, Conversation, Listing, Mailbox, Message, Role};
 use crate::swipe::{BackSwipe, Preferences};
 
 actions!(
@@ -93,12 +98,11 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// Conversations asked for per page.
-const PAGE: usize = 100;
-/// A list or count this young is served from memory without asking the app again.
+/// Conversations asked for per page (the engine's most).
+const PAGE: u32 = 100;
+/// A list this young is served from memory when shown again; the engine's change events reload
+/// the one on screen sooner.
 const FRESH: Duration = Duration::from_secs(90);
-/// How often stale lists and counts are looked at.
-const POLL: Duration = Duration::from_secs(30);
 const TOAST: Duration = Duration::from_secs(4);
 
 /// What the list shows.
@@ -139,20 +143,26 @@ pub struct ListKey {
 }
 
 impl ListKey {
-    fn request(&self, cursor: Option<&str>) -> (&'static str, Value) {
+    /// One page of this list from the engine, prepared for display.
+    async fn fetch(self, cursor: Option<String>) -> Result<Listing, MailError> {
         let account = self.source.account().map(|a| a.to_string());
-        if let Some(query) = &self.query {
-            return ("mail.search", json!({ "query": query.as_ref(), "account": account, "limit": PAGE }));
-        }
-        let mailbox = match &self.source {
-            Source::Unified(role) => role.arg().to_owned(),
-            Source::Mailbox { id, .. } => id.to_string(),
+        let listing = match &self.query {
+            Some(query) => engine().search(query.to_string(), account, PAGE).await?,
+            None => {
+                let mailbox = match &self.source {
+                    Source::Unified(role) => role.arg().to_owned(),
+                    Source::Mailbox { id, .. } => id.to_string(),
+                };
+                let query = ListQuery { mailboxes: vec![mailbox], account, limit: PAGE, cursor, ..ListQuery::default() };
+                engine().list(query).await?
+            }
         };
-        let mut args = json!({ "mailbox": [mailbox], "account": account, "limit": PAGE });
-        if let Some(cursor) = cursor {
-            args["cursor"] = cursor.into();
+        let mut listing = Listing::from(listing);
+        let now = Local::now();
+        for conversation in &mut listing.conversations {
+            conversation.prepare(now);
         }
-        ("mail.list", args)
+        Ok(listing)
     }
 
     /// The Smart Inbox folds bundles in the inbox, outside search.
@@ -164,10 +174,12 @@ impl ListKey {
 #[derive(Default)]
 pub struct List {
     pub conversations: Vec<Conversation>,
-    /// The following page's cursor, from apps that page.
+    /// The following page's cursor.
     next: Option<String>,
     fetched: Option<Instant>,
     pub loading: bool,
+    /// The engine changed it while a load was under way: load again when that one lands.
+    stale: bool,
     loading_more: bool,
     /// The view and its length that asked for the last page. A page that leaves that view's
     /// length unchanged (all of it folded into bundles) asks for no more from that view.
@@ -279,9 +291,6 @@ pub struct MailApp {
     pub search: Entity<TextInput>,
     pub accounts: Vec<Account>,
     pub mailboxes: HashMap<SharedString, Vec<Mailbox>>,
-    mailboxes_fetched: Option<Instant>,
-    /// Set when the app could not be reached at all.
-    pub offline: Option<SharedString>,
     pub source: Source,
     pub query: Option<SharedString>,
     pub lists: HashMap<ListKey, List>,
@@ -297,7 +306,9 @@ pub struct MailApp {
     pub unfolded: HashSet<SharedString>,
     /// Conversations being archived or trashed: refreshes that still list them leave them out.
     removing: HashSet<SharedString>,
-    previews_supported: bool,
+    /// A previews request is out; `previews_again` asks once more when it lands.
+    previews_asking: bool,
+    previews_again: bool,
     pub toast: Option<Toast>,
     /// The row under the pointer, which shows its actions.
     pub hovered_row: Option<SharedString>,
@@ -348,8 +359,6 @@ impl MailApp {
             search,
             accounts: Vec::new(),
             mailboxes: HashMap::new(),
-            mailboxes_fetched: None,
-            offline: None,
             source: Source::Unified(Role::Inbox),
             query: None,
             lists: HashMap::new(),
@@ -360,7 +369,8 @@ impl MailApp {
             threads: HashMap::new(),
             unfolded: HashSet::new(),
             removing: HashSet::new(),
-            previews_supported: true,
+            previews_asking: false,
+            previews_again: false,
             toast: None,
             hovered_row: None,
             toast_generation: 0,
@@ -382,8 +392,8 @@ impl MailApp {
         };
         this.load_mailboxes(cx);
         this.load_list(this.key(), false, cx);
-        this.poll(cx);
-        this.background(cx, Preferences::read, |this, preferences, _| this.swipe.preferences = preferences);
+        this.follow_engine(cx);
+        this.background(cx, async { Preferences::read() }, |this, preferences, _| this.swipe.preferences = preferences);
         this
     }
 
@@ -399,11 +409,11 @@ impl MailApp {
     fn background<R: Send + 'static>(
         &self,
         cx: &mut Context<Self>,
-        work: impl FnOnce() -> R + Send + 'static,
+        work: impl Future<Output = R> + Send + 'static,
         done: impl FnOnce(&mut Self, R, &mut Context<Self>) + 'static,
     ) {
         cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { work() }).await;
+            let result = cx.background_executor().spawn(work).await;
             this.update(cx, |this, cx| done(this, result, cx)).ok();
         })
         .detach();
@@ -411,14 +421,35 @@ impl MailApp {
 
     // MARK: - Loading
 
-    fn poll(&self, cx: &mut Context<Self>) {
+    /// Re-reads what the engine says changed: the list on screen on new mail, moves and tags
+    /// (other lists count as stale), counts on mailbox and account changes, previews as they load.
+    fn follow_engine(&self, cx: &mut Context<Self>) {
+        let (sender, mut events) = unbounded();
+        engine().subscribe(Arc::new(Changes(sender)));
         cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(POLL).await;
+            while let Some(first) = events.next().await {
+                // A sync sends bursts; one pass answers everything queued.
+                let mut batch = vec![first];
+                while let Ok(event) = events.try_recv() {
+                    batch.push(event);
+                }
                 let alive = this.update(cx, |this, cx| {
-                    this.load_list(this.key(), false, cx);
-                    if this.mailboxes_fetched.is_none_or(|at| at.elapsed() >= FRESH) {
+                    let mailboxes = batch.iter().any(|e| matches!(e, Event::Accounts | Event::Mailboxes));
+                    if mailboxes {
                         this.load_mailboxes(cx);
+                    }
+                    // A list asked for before the engine knew the mailboxes failed; it can load now.
+                    let failed = mailboxes && this.list().is_some_and(|list| list.error.is_some());
+                    if failed || batch.iter().any(|e| matches!(e, Event::Conversations | Event::Tags)) {
+                        let key = this.key();
+                        for (other, list) in &mut this.lists {
+                            if other != &key {
+                                list.fetched = None;
+                            }
+                        }
+                        this.load_list(key, true, cx);
+                    } else if batch.contains(&Event::Previews) {
+                        this.load_previews(&this.key(), cx);
                     }
                 });
                 if alive.is_err() {
@@ -430,49 +461,47 @@ impl MailApp {
     }
 
     fn load_mailboxes(&mut self, cx: &mut Context<Self>) {
-        self.mailboxes_fetched = Some(Instant::now());
         self.background(
             cx,
-            || -> Result<_, ControlError> {
-                let accounts: Vec<Account> = control::call("accounts.list", json!({}))?;
-                let mailboxes: HashMap<SharedString, Vec<Mailbox>> = control::call("mailboxes", json!({}))?;
-                Ok((accounts, mailboxes))
+            async {
+                let accounts = engine().accounts().await?;
+                let mailboxes = engine().mailboxes(None).await?;
+                Ok::<_, MailError>((
+                    accounts.into_iter().map(Account::from).collect::<Vec<_>>(),
+                    mailboxes
+                        .into_iter()
+                        .map(|(account, list)| (account.into(), list.into_iter().map(Mailbox::from).collect()))
+                        .collect::<HashMap<SharedString, Vec<Mailbox>>>(),
+                ))
             },
             |this, result, cx| {
-                match result {
-                    Ok((accounts, mailboxes)) => {
-                        let was_offline = this.offline.take().is_some();
-                        this.accounts = accounts;
-                        this.mailboxes = mailboxes;
-                        if was_offline {
-                            this.load_list(this.key(), true, cx);
-                        }
-                    }
-                    Err(error) => {
-                        this.mailboxes_fetched = None;
-                        if error.code == "unreachable" {
-                            this.offline = Some(error.message.into());
-                        }
-                    }
+                if let Ok((accounts, mailboxes)) = result {
+                    this.accounts = accounts;
+                    this.mailboxes = mailboxes;
+                    cx.notify();
                 }
-                cx.notify();
             },
         );
     }
 
-    /// Asks for `key`'s first page unless a fresh copy is in memory (or `force`).
+    /// Asks for `key`'s first page unless a fresh copy is in memory (or `force`). A forced load
+    /// while one is under way runs again once that one lands.
     pub fn load_list(&mut self, key: ListKey, force: bool, cx: &mut Context<Self>) {
         let list = self.lists.entry(key.clone()).or_default();
-        if list.loading || (!force && list.fetched.is_some_and(|at| at.elapsed() < FRESH)) {
+        if list.loading {
+            list.stale |= force;
+            return;
+        }
+        if !force && list.fetched.is_some_and(|at| at.elapsed() < FRESH) {
             return;
         }
         list.loading = true;
+        list.stale = false;
         cx.notify();
-        let (command, args) = key.request(None);
-        self.background(cx, move || fetch(command, args), move |this, result, cx| this.list_arrived(key, result, false, cx));
+        self.background(cx, key.clone().fetch(None), move |this, result, cx| this.list_arrived(key, result, false, cx));
     }
 
-    /// Asks for the page after the current list's last, when the app pages and none is loading.
+    /// Asks for the page after the current list's last, when there is one and none is loading.
     /// `shown` is the length of the view whose end the user reached.
     pub fn load_more(&mut self, view: PagedView, shown: usize, cx: &mut Context<Self>) {
         let key = self.key();
@@ -483,14 +512,18 @@ impl MailApp {
         }
         list.loading_more = true;
         list.paged_at = Some((view, shown));
-        let (command, args) = key.request(Some(&cursor));
-        self.background(cx, move || fetch(command, args), move |this, result, cx| this.list_arrived(key, result, true, cx));
+        self.background(cx, key.clone().fetch(Some(cursor)), move |this, result, cx| {
+            this.list_arrived(key, result, true, cx)
+        });
     }
 
-    fn list_arrived(&mut self, key: ListKey, result: Result<Listing, ControlError>, more: bool, cx: &mut Context<Self>) {
+    fn list_arrived(&mut self, key: ListKey, result: Result<Listing, MailError>, more: bool, cx: &mut Context<Self>) {
         let list = self.lists.entry(key.clone()).or_default();
-        list.loading = false;
+        if !more {
+            list.loading = false;
+        }
         list.loading_more = false;
+        let again = !more && std::mem::take(&mut list.stale);
         match result {
             Ok(mut listing) => {
                 listing.conversations.retain(|c| !self.removing.contains(&c.id));
@@ -517,52 +550,52 @@ impl MailApp {
                     }
                 }
                 list.error = (!listing.failures.is_empty()).then(|| listing.failures.join("; ").into());
-                self.offline = None;
             }
-            Err(error) => {
-                if error.code == "unreachable" {
-                    self.offline = Some(error.message.clone().into());
-                }
-                list.error = Some(error.message.into());
-            }
+            Err(error) => list.error = Some(error.to_string().into()),
         }
         if key == self.key() {
             self.rebuild_items();
             self.refresh_layers();
         }
         self.load_previews(&key, cx);
+        if again {
+            self.load_list(key, true, cx);
+        }
         cx.notify();
     }
 
-    /// Previews missing from a listing, from apps that offer `mail.previews`.
+    /// Previews missing from a listing, which the engine loads on demand; one request at a time.
     fn load_previews(&mut self, key: &ListKey, cx: &mut Context<Self>) {
-        if !self.previews_supported {
+        if self.previews_asking {
+            self.previews_again = true;
             return;
         }
         let Some(list) = self.lists.get(key) else { return };
         let ids: Vec<String> =
-            list.conversations.iter().filter(|c| c.snippet.is_none()).map(|c| c.id.to_string()).take(PAGE).collect();
+            list.conversations.iter().filter(|c| c.snippet.is_none()).map(|c| c.id.to_string()).take(PAGE as usize).collect();
         if ids.is_empty() {
             return;
         }
+        self.previews_asking = true;
         self.background(
             cx,
-            move || control::call::<HashMap<SharedString, Option<SharedString>>>("mail.previews", json!({ "ids": ids })),
-            |this, result, cx| match result {
-                Ok(previews) => {
+            engine().previews(ids),
+            |this, result, cx| {
+                this.previews_asking = false;
+                if let Ok(previews) = result {
+                    // A conversation without one shows none rather than being asked for again.
                     for list in this.lists.values_mut() {
                         for conversation in &mut list.conversations {
-                            if let Some(Some(preview)) = previews.get(&conversation.id) {
-                                conversation.snippet = Some(preview.clone());
+                            if let Some(preview) = previews.get(conversation.id.as_ref()) {
+                                conversation.snippet = Some(preview.clone().unwrap_or_default().into());
                             }
                         }
                     }
                     cx.notify();
                 }
-                Err(error) if error.code == "unknown_command" || error.code == "usage" => {
-                    this.previews_supported = false;
+                if std::mem::take(&mut this.previews_again) {
+                    this.load_previews(&this.key(), cx);
                 }
-                Err(_) => {}
             },
         );
     }
@@ -661,20 +694,26 @@ impl MailApp {
         let arg = id.to_string();
         self.background(
             cx,
-            move || {
-                control::call::<Thread>("mail.show", json!({ "id": arg, "max-chars": 200_000 })).map(|mut thread| {
-                    let now = Local::now();
-                    for message in &mut thread.messages {
-                        message.prepare(now);
-                    }
-                    thread.messages
-                })
+            async move {
+                let thread = engine().show(arg, 200_000, false).await?;
+                let now = Local::now();
+                Ok::<_, MailError>(
+                    thread
+                        .messages
+                        .into_iter()
+                        .map(|message| {
+                            let mut message = Message::from(message);
+                            message.prepare(now);
+                            message
+                        })
+                        .collect::<Vec<_>>(),
+                )
             },
             move |this, result, cx| {
                 let Some(thread) = this.threads.get_mut(&id) else { return };
                 thread.state = match result {
                     Ok(messages) => ThreadState::Loaded(messages.into()),
-                    Err(error) => ThreadState::Failed(error.message.into()),
+                    Err(error) => ThreadState::Failed(error.to_string().into()),
                 };
                 if this.forward_pending.as_ref() == Some(&id) {
                     this.forward_pending = None;
@@ -686,12 +725,11 @@ impl MailApp {
     }
 }
 
-/// One page of a list, decoded and prepared for display. Blocking.
-fn fetch(command: &'static str, args: Value) -> Result<Listing, ControlError> {
-    let mut listing: Listing = control::call(command, args)?;
-    let now = Local::now();
-    for conversation in &mut listing.conversations {
-        conversation.prepare(now);
+/// Hands the engine's change events to the window's task.
+struct Changes(UnboundedSender<Event>);
+
+impl EventListener for Changes {
+    fn on_event(&self, event: Event) {
+        let _ = self.0.unbounded_send(event);
     }
-    Ok(listing)
 }

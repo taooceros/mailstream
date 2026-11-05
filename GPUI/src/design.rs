@@ -271,8 +271,6 @@ pub mod settings {
     /// The account color dot.
     pub const DOT: f32 = 10.0;
     pub const ROW_HEIGHT: f32 = 56.0;
-    /// `accounts.add` waits this long on the browser.
-    pub const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(5 * 60 + 10);
 }
 
 /// The multi-line text editor (`textarea.rs`).

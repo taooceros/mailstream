@@ -133,9 +133,9 @@ impl MailApp {
             }
         }
 
-        // Google Chat, when the app has it: one node, expanding into accounts when there are several.
+        // Google Chat, for accounts signed in to it: one node, expanding into accounts when there are several.
         let chat = self.chat.read(cx);
-        if chat.supported() && !chat.accounts().is_empty() {
+        if !chat.accounts().is_empty() {
             let key: SharedString = "chat".into();
             let several = chat.accounts().len() > 1;
             let open = several && self.expanded.contains(&key);

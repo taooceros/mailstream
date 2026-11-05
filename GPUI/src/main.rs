@@ -1,11 +1,11 @@
-//! Mailstream's GPUI front end (experiment). The Swift app stays the backend; this window talks to
-//! it over the control socket. See README.md.
+//! Mailstream's GPUI front end (experiment). The Swift engine runs in this process through the
+//! `mailstream` crate in `FFI/`. See README.md.
 
 mod avatars;
 mod chat;
 mod compose;
-mod control;
 mod design;
+mod engine;
 mod format;
 mod icons;
 mod input;
@@ -29,6 +29,8 @@ use crate::state::{
 
 fn main() {
     Application::new().with_assets(icons::Assets).run(|cx: &mut App| {
+        // The engine paints from the cache and syncs while the window opens.
+        engine::engine();
         avatars::init(cx);
         input::bind_keys(cx);
         chat::bind_keys(cx);
