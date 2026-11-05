@@ -1,6 +1,12 @@
 import AppKit
 import Observation
-import WebKit
+
+@MainActor
+protocol ReaderDelegate: AnyObject {
+    func reader(_ reader: ReaderViewController, compose mode: ComposeMode, replyAll: Bool, message: MailMessage,
+                text: String, plan: ReplyPlan?)
+    func reader(_ reader: ReaderViewController, composeTo address: Address)
+}
 
 /// What the reader shows.
 enum ReaderTarget {
@@ -13,37 +19,26 @@ enum ReaderTarget {
     }
 }
 
-/// The reader: renders one conversation into the long-lived web page (`WebShell`): native-feeling
+/// Renders one conversation into the reader's long-lived web page (`WebShell`): native-feeling
 /// cards for each message, HTML bodies in auto-sized iframes, quoted history folded, remote content
 /// blocked unless the sender is known (`MailStore.loadsRemoteContent`). Switching conversations
 /// swaps the page's content through script, not a navigation. Chat spaces render into the same
-/// page through `ChatModel`, its peer. `ReaderView` shows the shell's web view, the placeholder
-/// and the picture preview.
+/// page through `ChatReader`, its peer.
 @MainActor
-@Observable
-final class ReaderModel: WebShellClient {
-    /// The inline reply moves into a composer window, or the page asked for a forward or a reply window.
-    @ObservationIgnored var onCompose: (ComposeMode, _ replyAll: Bool, MailMessage, _ text: String, ReplyPlan?) -> Void = { _, _, _, _, _ in }
-    /// A mail address in the page (or a `mailto:` link) was clicked.
-    @ObservationIgnored var onComposeTo: (Address) -> Void = { _ in }
+final class ReaderViewController: NSViewController, WebShellClient {
+    weak var delegate: (any ReaderDelegate)?
 
-    /// Whether the placeholder shows instead of the page (nothing is shown).
-    private(set) var isEmpty = true
-    /// The picture the page asked to enlarge, presented as a popover over the web view.
-    var avatarPreview: AvatarPreviewItem?
-    /// Whether the reply's text field has focus, as last reported by the page, so Escape can decide at once.
-    private(set) var isReplyFocused = false
-
-    @ObservationIgnored let shell: WebShell
-    @ObservationIgnored private let store: MailStore
+    private let store: MailStore
+    private var shell: WebShell!
     /// Renders chat spaces into the shell.
-    @ObservationIgnored private var chat: ChatModel!
-    @ObservationIgnored private var conversation: Conversation?
-    @ObservationIgnored private var messages: [MailMessage] = []
+    private var chatReader: ChatReader!
+    private let placeholder = NSStackView()
+    private var conversation: Conversation?
+    private var messages: [MailMessage] = []
     /// Messages whose body was requested for the page on screen.
-    @ObservationIgnored private var loaded = Set<Int>()
+    private var loaded = Set<Int>()
     /// Whether this thread's bodies may load remote content; blocked ones carry their own strict CSP.
-    @ObservationIgnored private var allowRemote = false
+    private var allowRemote = false
 
     /// An inline reply in progress; `plan` arrives once the source's content is loaded.
     private struct Reply {
@@ -57,26 +52,59 @@ final class ReaderModel: WebShellClient {
         var isEmpty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
-    @ObservationIgnored private var reply: Reply?
+    private var reply: Reply?
     /// Unsent inline replies of conversations not on screen, so leaving one keeps its text.
-    @ObservationIgnored private var drafts: [String: Reply] = [:]
-    @ObservationIgnored private var planning: (ref: MessageRef, all: Bool)?
+    private var drafts: [String: Reply] = [:]
+    /// Whether the reply's text field has focus, as last reported by the page, so Escape can decide at once.
+    private(set) var isReplyFocused = false
+    private var planning: (ref: MessageRef, all: Bool)?
     /// Senders whose picture the page has.
-    @ObservationIgnored private var avatarsSent = Set<String>()
+    private var avatarsSent = Set<String>()
     /// Pictures arriving and the conversation's "Waiting on you" flag.
-    @ObservationIgnored private var storeWatches: [Task<Void, Never>] = []
+    private var storeWatches: [Task<Void, Never>] = []
 
-    /// Creates the one long-lived web page, which starts loading the shell at once so it is warm
-    /// before the first `show`.
     init(store: MailStore) {
         self.store = store
-        var openLink: (URL) -> Void = { _ in }
-        shell = WebShell(cache: store.cache) { url in openLink(url) }
-        shell.webView.isHidden = true
-        chat = ChatModel(store: store, shell: shell) { [weak self] person, automated, message in
-            self?.presentAvatar(of: person, automated: automated, from: message)
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    isolated deinit { storeWatches.forEach { $0.cancel() } }
+
+    override func loadView() {
+        shell = WebShell(cache: store.cache, avatars: store.avatars) { [weak self] url in self?.open(url) }
+        chatReader = ChatReader(store: store, shell: shell)
+        let webView = shell.webView
+        webView.isHidden = true
+
+        let icon = NSImageView(image: NSImage(systemSymbolName: "envelope.open", accessibilityDescription: nil) ?? NSImage())
+        icon.symbolConfiguration = .init(pointSize: 44, weight: .thin)
+        icon.contentTintColor = .tertiaryLabelColor
+        let label = NSTextField(labelWithString: "No Conversation Selected")
+        label.font = .systemFont(ofSize: 15, weight: .medium)
+        label.textColor = .tertiaryLabelColor
+        placeholder.orientation = .vertical
+        placeholder.spacing = 10
+        placeholder.addArrangedSubview(icon)
+        placeholder.addArrangedSubview(label)
+
+        let container = NSView()
+        for view in [webView, placeholder] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(view)
         }
-        openLink = { [weak self] url in self?.open(url) }
+        NSLayoutConstraint.activate([
+            webView.topAnchor.constraint(equalTo: container.topAnchor),
+            webView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            webView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            placeholder.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            placeholder.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+        ])
+        view = container
+        let store = store
         storeWatches = [
             Task.immediate(name: "Reader pictures") { [weak self] in
                 for await _ in Observations({ store.avatars.revision }).dropFirst() { self?.pushAvatars() }
@@ -92,8 +120,6 @@ final class ReaderModel: WebShellClient {
             },
         ]
     }
-
-    isolated deinit { storeWatches.forEach { $0.cancel() } }
 
     /// Mail from services, whose pictures are logos.
     private var isAutomated: Bool {
@@ -120,22 +146,21 @@ final class ReaderModel: WebShellClient {
     /// Renders `target` (nothing: the placeholder); `onReady` runs once it is in the page (a later
     /// `show` replaces it).
     func show(_ target: ReaderTarget?, onReady: (() -> Void)? = nil) {
-        avatarPreview = nil
         switch target {
         case .conversation(let conversation):
-            chat.hide()
+            chatReader.hide()
             allowRemote = store.loadsRemoteContent(for: conversation)
             render(conversation)
         case .chat(let key):
             leaveConversation()
-            chat.show(key)
+            chatReader.show(key)
         case nil:
-            chat.hide()
+            chatReader.hide()
             leaveConversation()
             shell.clear()
         }
         shell.webView.isHidden = target == nil
-        isEmpty = target == nil
+        placeholder.isHidden = target != nil
         shell.onReady = onReady
     }
 
@@ -149,11 +174,6 @@ final class ReaderModel: WebShellClient {
         } else {
             messages = conversation.messages
         }
-    }
-
-    /// Makes the web view the window's first responder (was `makeFirstResponder(reader.view)`).
-    func focus() {
-        shell.webView.window?.makeFirstResponder(shell.webView)
     }
 
     /// The conversation leaves the page, its unsent reply kept as a draft.
@@ -321,10 +341,10 @@ final class ReaderModel: WebShellClient {
             if let conversation { store.tagging.setWaiting(conversation, waiting: false) }
         case "avatar":
             guard let target, let from = target.envelope.from.first else { return }
-            presentAvatar(of: store.withIdentityName(from), automated: isAutomated, from: body)
+            shell.showAvatar(of: store.withIdentityName(from), automated: isAutomated, from: body)
         case "compose-to":
             if let email = body["email"] as? String, !email.isEmpty {
-                onComposeTo(Address(name: nil, email: email))
+                delegate?.reader(self, composeTo: Address(name: nil, email: email))
             }
         default:
             break
@@ -337,23 +357,7 @@ final class ReaderModel: WebShellClient {
 
     private func compose(_ action: String, message: MailMessage) {
         let mode: ComposeMode = action == "forward" ? .forward(message.ref) : .reply(message.ref)
-        onCompose(mode, action == "replyAll", message, "", nil)
-    }
-
-    // MARK: - Picture preview
-
-    /// Enlarges `person`'s picture over the web view. `message` is the page's `avatar` message, whose
-    /// `rect` is the avatar's box in viewport CSS pixels, scaled to the web view's points by
-    /// `pageZoom * magnification`. SwiftUI's coordinates are top-left, like a flipped `WKWebView`,
-    /// so the top needs no flipping.
-    private func presentAvatar(of person: Address, automated: Bool, from message: [String: Any]) {
-        guard let rect = message["rect"] as? [Double], rect.count == 4,
-              let photo = store.avatars.image(for: person.email, automated: automated) else { return }
-        let webView = shell.webView
-        let scale = webView.pageZoom * webView.magnification
-        let anchor = CGRect(x: rect[0] * scale, y: rect[1] * scale, width: rect[2] * scale, height: rect[3] * scale)
-        avatarPreview = AvatarPreviewItem(address: person, small: photo, automated: automated, anchor: anchor,
-                                          avatars: store.avatars)
+        delegate?.reader(self, compose: mode, replyAll: action == "replyAll", message: message, text: "", plan: nil)
     }
 
     // MARK: - Inline reply
@@ -499,13 +503,14 @@ final class ReaderModel: WebShellClient {
     private func popOutReply() {
         guard let reply, !reply.sending else { return }
         discardReply()
-        onCompose(.reply(reply.source.ref), reply.all, reply.source, reply.text, reply.plan)
+        delegate?.reader(self, compose: .reply(reply.source.ref), replyAll: reply.all, message: reply.source,
+                         text: reply.text, plan: reply.plan)
     }
 
     /// Escape while replying: leaves the text field, or closes an empty reply. False when Escape
     /// should go back as usual, the reply then waiting as a draft.
     func handleEscape() -> Bool {
-        if chat.key != nil { return chat.handleEscape() }
+        if chatReader.key != nil { return chatReader.handleEscape() }
         guard let reply, !reply.sending else { return false }
         if reply.isEmpty {
             discardReply()
@@ -523,16 +528,15 @@ final class ReaderModel: WebShellClient {
         if url.scheme?.lowercased() == "mailto" {
             let address = url.absoluteString.dropFirst("mailto:".count).split(separator: "?").first.map(String.init) ?? ""
             let decoded = address.removingPercentEncoding ?? address
-            if !decoded.isEmpty { onComposeTo(Address(name: nil, email: decoded)) }
+            if !decoded.isEmpty { delegate?.reader(self, composeTo: Address(name: nil, email: decoded)) }
             return
         }
         guard let scheme = url.scheme?.lowercased(), ["http", "https", "tel", "facetime"].contains(scheme) else { return }
         NSWorkspace.shared.open(url)
     }
 
-    /// A save sheet on the reader's window; the cached part is copied over the chosen file.
     private func save(_ url: URL, name: String) {
-        guard let window = shell.webView.window else { return }
+        guard let window = view.window else { return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = name
         panel.beginSheetModal(for: window) { response in
