@@ -27,7 +27,7 @@ that one build, so the app and every other host get asked again.
 
 | Path | Role |
 | --- | --- |
-| `build.rs` | Adds the rpath to `libMailstreamKit.dylib` (`DEP_MAILSTREAMKIT_DIR` from the `FFI` crate) |
+| `build.rs` | Adds the rpaths to `libMailstreamKit.dylib`: `.build/<config>` (`DEP_MAILSTREAMKIT_DIR` from the `FFI` crate) for development, `@executable_path/../Frameworks` for an app bundle |
 | `run.sh` | Builds the engine and the app, signs it, checks the signature, starts it |
 | `src/engine.rs` | The one in-process `Mailstream` engine, started at launch |
 | `src/model.rs` | Accounts, mailboxes, conversations and messages converted from the crate's records; display strings derived once per answer, off the main thread |
