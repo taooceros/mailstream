@@ -6,4 +6,6 @@ Push/.wrangler/
 node_modules/
 Engine/
 .turso/
-FFI/target/
+# Rust/Cargo build output anywhere in the tree
+target/
+Flutter/.dart_tool/
