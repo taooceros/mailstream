@@ -23,9 +23,10 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
   label. Area names match the jj workspaces (`chat`, `concurrency`, `flutter`, `gpui`, `motion`,
   `ui-shell`) or the layer (`sync`, `cache`, `ffi`); an issue is worked in its area's workspace.
 - Claim before working: every agent, subagents included, works under an issue it has claimed.
-  With no issue for the work yet, create one first (a sub-issue of the issue it serves, if any)
-  and claim it. The start comment names the agent doing the work (its subagent/roster id), so
-  each issue shows which subagent owns it.
+  With no issue for the work yet, create one first and claim it. Work that serves another issue
+  is a sub-issue of it: set Linear's parent field (`parentId`) when creating it, so Linear shows
+  it as a sub-issue; naming the parent only in the text does not count. The start comment names
+  the agent doing the work (its subagent/roster id), so each issue shows which subagent owns it.
 - Start: read the issue and its comments. Skip issues already In Progress unless the user hands
   one over. Move it to In Progress and comment `[omp @ <workspace>] start (<agent id>): <plan>`.
 - Progress: record decisions, blockers and dead ends as comments; the next session only sees
