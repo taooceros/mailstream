@@ -32,7 +32,9 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
   what is on the issue.
 - Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work),
   move it to In Review and comment what changed, how it was verified and what remains. The user
-  moves it to Done.
+  moves it to Done. If the issue has a parent, check its other sub-issues: when none is left in
+  Backlog, Todo or In Progress, finish the parent too (a summary comment listing each sub-issue
+  and what remains, then In Review). Nobody else picks up a parent an agent filed.
 - UI changes (a new or changed view, flow or interaction, in any front end): take screenshots
   of the running app showing the change, every state it adds included, and attach them to the
   finishing comment. Work without them is not ready for review.
