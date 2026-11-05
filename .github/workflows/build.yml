@@ -58,8 +58,7 @@ jobs:
           path: Mailstream.dmg
           retention-days: 14
 
-  # The GPUI and Flutter front ends live on their own lines (gpui-ui, flutter-ui); each build of
-  # main also builds the newest commit of both, so the prerelease carries all three apps.
+  # The GPUI and Flutter front ends, from the same commit, so the prerelease carries all three apps.
   gpui:
     if: github.event_name != 'pull_request'
     runs-on: macos-26
@@ -68,8 +67,6 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: gpui-ui
 
       - uses: actions/cache@v4
         with:
@@ -133,8 +130,6 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: flutter-ui
 
       - uses: subosito/flutter-action@v2
         with:
@@ -197,7 +192,7 @@ jobs:
       - name: Publish
         run: |
           SHORT=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
-          NOTES="Built from $GITHUB_SHA by run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID: Mailstream.dmg from main, Mailstream-GPUI.dmg from gpui-ui and Mailstream-Flutter.dmg from flutter-ui at that time.
+          NOTES="Built from $GITHUB_SHA by run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID: Mailstream.dmg, Mailstream-GPUI.dmg and Mailstream-Flutter.dmg.
 
           Signed ad hoc and built without OAuth clients or push settings: they open, but signing in needs a build from \`scripts/bundle.sh\` (or each front end's README) on a set-up Mac. After dragging an app to Applications, run \`xattr -dr com.apple.quarantine \"/Applications/<app name>.app\"\` before the first launch."
           # Delete the old release and tag, then publish again at this commit, so the tag,

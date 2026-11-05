@@ -8,6 +8,8 @@ version = "0.1.0"
 edition = "2024"
 description = "Mailstream's Swift engine for Rust front ends, and through UniFFI for Dart and others"
 publish = false
+# Dependents' build scripts read the engine's directory as DEP_MAILSTREAMKIT_DIR (for their rpath).
+links = "MailstreamKit"
 
 [lib]
 # lib: Rust front ends depend on the crate; cdylib: what UniFFI's Dart (and other) bindings load.

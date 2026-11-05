@@ -1,7 +1,7 @@
 import Foundation
 
-/// Every command, by its request id. Settings commands run in the CLI on settings.json and the
-/// rest need the app, so the CLI and the control server each switch over only their own half.
+/// Every command, by its request id. Settings commands work on settings.json, so the CLI runs
+/// them itself without the app; the control service (socket and FFI) runs them too.
 nonisolated enum CommandID: Sendable, Equatable {
     case local(Local)
     case app(App)
@@ -39,6 +39,17 @@ nonisolated enum CommandID: Sendable, Equatable {
         case mailSend = "mail.send"
         case mailReply = "mail.reply"
         case refresh
+        case contactsSearch = "contacts.search"
+        case chatSpaces = "chat.spaces"
+        case chatMore = "chat.more"
+        case chatRefresh = "chat.refresh"
+        case chatOpen = "chat.open"
+        case chatClose = "chat.close"
+        case chatMessages = "chat.messages"
+        case chatEarlier = "chat.earlier"
+        case chatSend = "chat.send"
+        case chatPeople = "chat.people"
+        case chatStart = "chat.start"
     }
 
     /// The request's `command`: `mail.list`.
@@ -108,9 +119,13 @@ nonisolated struct CommandSpec: Sendable {
 
     private static let accountAddress = Argument(name: "account", kind: .string, summary: "Account address.", positional: true, required: true)
 
-    private static let limit = Argument(name: "limit", kind: .int, summary: "Most conversations returned (1-100).", defaultValue: 25)
+    private static let limit = Argument(name: "limit", kind: .int, summary: "Most conversations returned (1-200).", defaultValue: 25)
 
     private static let settingKey = Argument(name: "key", kind: .string, summary: "Setting key.", positional: true, required: true)
+
+    private static let chatAccount = Argument(name: "account", kind: .string, summary: "Chat account (its address).", positional: true, required: true)
+
+    private static let chatSpace = Argument(name: "space", kind: .string, summary: "Space name from `chat spaces` (spaces/…).", positional: true, required: true)
 
     static let all: [CommandSpec] = [
         CommandSpec(command: .app(.status), summary: "The app's state: version, accounts, sync, push, AI tagging, settings problems."),
@@ -161,6 +176,7 @@ nonisolated struct CommandSpec: Sendable {
             Argument(name: "waiting", kind: .bool, summary: "Only conversations waiting on your reply or action."),
             limit,
             Argument(name: "cursor", kind: .string, summary: "The previous page's `next`: lists the conversations after it, with the same filters."),
+            Argument(name: "cached", kind: .bool, summary: "Lists the mail already loaded without asking the providers for their newest first."),
         ]),
         CommandSpec(command: .app(.mailSearch), summary: "Searches every mailbox but trash and junk with the providers' own search (subject, people, body; Gmail operators such as from: work), newest first.", arguments: [
             Argument(name: "query", kind: .string, summary: "Free text, or the provider's search syntax.", positional: true, required: true),
@@ -199,13 +215,14 @@ nonisolated struct CommandSpec: Sendable {
             Argument(name: "labels", kind: .list, summary: "Topic labels (at most two)."),
         ]),
         CommandSpec(command: .app(.mailRetag), summary: "Forgets every AI tag and tags the current list again."),
-        CommandSpec(command: .app(.mailSend), summary: "Sends a new plain-text message.", arguments: [
+        CommandSpec(command: .app(.mailSend), summary: "Sends a new plain-text message, with files attached if given.", arguments: [
             Argument(name: "from", kind: .string, summary: "Sending account (its address).", required: true),
             Argument(name: "to", kind: .list, summary: "Recipients.", required: true),
             Argument(name: "cc", kind: .list, summary: "Cc recipients."),
             Argument(name: "bcc", kind: .list, summary: "Bcc recipients."),
             Argument(name: "subject", kind: .string, summary: "Subject.", required: true),
             Argument(name: "body", kind: .string, summary: "Plain-text body; `-` reads standard input.", required: true),
+            Argument(name: "attachments", kind: .list, summary: "A file to attach; repeat for several."),
             yes,
         ], confirm: true),
         CommandSpec(command: .app(.mailReply), summary: "Replies to a conversation's latest message, quoting it like the app does.", arguments: [
@@ -216,6 +233,31 @@ nonisolated struct CommandSpec: Sendable {
         ], confirm: true),
 
         CommandSpec(command: .app(.refresh), summary: "Fetches new mail and counts for the list on screen now."),
+
+        CommandSpec(command: .app(.contactsSearch), summary: "People whose name or address starts with the query, best first, as compose completes them: the accounts' Google and Outlook directories and recent correspondents.", arguments: [
+            Argument(name: "query", kind: .string, summary: "The start of a name, a word of it, or an address.", positional: true, required: true),
+            Argument(name: "limit", kind: .int, summary: "Most people returned (1-12).", defaultValue: 10),
+        ]),
+
+        CommandSpec(command: .app(.chatSpaces), summary: "Google Chat: the chat accounts and their spaces (direct messages, group chats, spaces) as the list shows them, most recently active first, from what the app has loaded.", arguments: [account]),
+        CommandSpec(command: .app(.chatMore), summary: "Loads another page of older spaces for one chat account, or all of them.", arguments: [account]),
+        CommandSpec(command: .app(.chatRefresh), summary: "Fetches every chat account's spaces now."),
+        CommandSpec(command: .app(.chatOpen), summary: "Opens a space as the reader does: its cached messages at once, the newest from Google after, kept current and read while it stays open. Answers what is loaded now.", arguments: [chatAccount, chatSpace]),
+        CommandSpec(command: .app(.chatClose), summary: "Closes the open space: it is no longer kept current."),
+        CommandSpec(command: .app(.chatMessages), summary: "A space's loaded messages, oldest first, with those being sent from here.", arguments: [chatAccount, chatSpace]),
+        CommandSpec(command: .app(.chatEarlier), summary: "Loads the page of messages before the oldest loaded one.", arguments: [chatAccount, chatSpace]),
+        CommandSpec(command: .app(.chatSend), summary: "Sends a plain-text message to a space and waits for Google to take it.", arguments: [
+            chatAccount, chatSpace,
+            Argument(name: "text", kind: .string, summary: "Message text; `-` reads standard input.", required: true),
+            Argument(name: "thread", kind: .string, summary: "Reply in this thread (`spaces/…/threads/…`)."),
+            yes,
+        ], confirm: true),
+        CommandSpec(command: .app(.chatPeople), summary: "People a chat account talks with, most recently active first, and whether it may start new conversations.",
+                    arguments: [accountAddress]),
+        CommandSpec(command: .app(.chatStart), summary: "Finds or starts the direct message with one person, or the group chat with several, and answers its space.", arguments: [
+            accountAddress,
+            Argument(name: "people", kind: .list, summary: "Email addresses of the people to chat with.", positional: true, variadic: true, required: true),
+        ]),
     ]
 
     static let overview = """
@@ -230,8 +272,9 @@ nonisolated struct CommandSpec: Sendable {
 
         Conversations are addressed by the `id` that `mail list`, `mail search` and `mail show`
         return (e.g. "you@gmail.com|<message-id>"). Accounts are addressed by their email address.
-        Sending mail and signing accounts out require --yes; without it the error says what would
-        happen.
+        Google Chat spaces are addressed by their account and the `space` that `chat spaces` returns
+        (e.g. "spaces/AAAA…"). Sending mail or chat messages and signing accounts out require
+        --yes; without it the error says what would happen.
 
         `mailstream commands` prints every command and argument as JSON.
         `mailstream help <command>` describes one command.

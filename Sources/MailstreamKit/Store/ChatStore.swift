@@ -458,14 +458,17 @@ final class ChatStore {
         }
     }
 
-    /// Shows `text` as a pending message at once and sends it, in `thread` when given.
-    func send(_ text: String, thread: String?, in key: ChatSpaceKey) {
+    /// Shows `text` as a pending message at once and sends it, in `thread` when given. Returns the
+    /// pending message's id and the send, which ends once Google answered: the message joined the
+    /// thread, or its pending copy is marked failed.
+    @discardableResult
+    func send(_ text: String, thread: String?, in key: ChatSpaceKey) -> (pending: String, task: Task<Void, Never>)? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else { return nil }
         let pending = ChatPending(id: "pending-" + UUID().uuidString, text: trimmed, thread: thread, created: Date())
         threads[key, default: ChatThread()].pending.append(pending)
         let chat = chat
-        Task {
+        let task = Task {
             do {
                 let message = try await chat.send(account: key.account, space: key.space, text: pending.text,
                                                     thread: pending.thread)
@@ -488,6 +491,7 @@ final class ChatStore {
                 threads[key]?.pending[index].failure = error.localizedDescription
             }
         }
+        return (pending.id, task)
     }
 
     /// Sends a failed message again, on the user's request only.

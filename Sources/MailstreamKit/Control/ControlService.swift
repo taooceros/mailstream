@@ -3,8 +3,8 @@ import Foundation
 /// Runs control-socket requests against the app's stores, on the main actor like the UI.
 @MainActor
 final class ControlService {
-    private let accounts: AccountStore
-    private let store: MailStore
+    let accounts: AccountStore
+    let store: MailStore
 
     /// Conversations handed out by `mail list`/`search`/`show`, so later commands can address them
     /// by id while the app runs, with the mailboxes they were listed from.
@@ -16,6 +16,8 @@ final class ControlService {
     private var known: [String: Known] = [:]
     private var knownOrder: [String] = []
     private static let knownLimit = 5000
+    /// `contacts.search`'s people (`MailStore.contacts()`), loaded again after `contactsAge`.
+    var contactsLoad: (task: Task<[Contact], Never>, started: ContinuousClock.Instant)?
 
     init(accounts: AccountStore, store: MailStore) {
         self.accounts = accounts
@@ -31,15 +33,28 @@ final class ControlService {
             guard let name = request?["command"]?.string else {
                 throw ControlError("bad_request", "Expected {\"command\": …, \"args\": {…}}.")
             }
-            guard let spec = CommandSpec.named(name), case .app(let command) = spec.command else {
+            guard let spec = CommandSpec.named(name) else {
                 throw ControlError("unknown_command", "Unknown command \"\(name)\"; `mailstream commands` lists them.")
             }
-            let args = try Arguments(spec: spec, values: request?["args"]?.object ?? [:])
-            answer = ["ok": true, "result": try await run(command, args)]
+            let values = request?["args"]?.object ?? [:]
+            let args = try Arguments(spec: spec, values: values)
+            let result = switch spec.command {
+            case .app(let command): try await run(command, args)
+            case .local(let command): try await configure(command, values)
+            }
+            answer = ["ok": true, "result": result]
         } catch {
             answer = ["ok": false, "error": ControlError(error).body]
         }
         return answer.encoded(pretty: false)
+    }
+
+    /// A `config …` command; the settings in effect follow at once rather than when the file
+    /// watcher next reads the file.
+    private func configure(_ command: CommandID.Local, _ values: [String: JSON]) throws -> JSON {
+        let result = try command.run(values)
+        Settings.shared.reload()
+        return result
     }
 
     private func run(_ command: CommandID.App, _ args: Arguments) async throws -> JSON {
@@ -98,7 +113,137 @@ final class ControlService {
             store.refresh()
             store.refreshCounts()
             return ["started": true]
+        case .contactsSearch: return await searchContacts(args)
+        case .chatSpaces: return try chatSpaces(args)
+        case .chatMore:
+            let account = try args.string("account").map { try chatAccount($0) }
+            store.chat.loadMore(account: account)
+            return ["started": true]
+        case .chatRefresh:
+            store.chat.refresh()
+            return ["started": true]
+        case .chatOpen:
+            let key = try chatSpace(args)
+            store.chat.open(key)
+            return chatThread(key)
+        case .chatClose:
+            store.chat.close()
+            return ["closed": true]
+        case .chatMessages: return chatThread(try chatSpace(args))
+        case .chatEarlier:
+            let key = try chatSpace(args)
+            store.chat.loadEarlier(key)
+            return chatThread(key)
+        case .chatSend: return try await chatSend(args)
+        case .chatPeople: return try chatPeople(args)
+        case .chatStart:
+            let account = try chatAccount(try args.required("account"))
+            let key = try await store.chat.start(account: account, with: args.list("people") ?? [])
+            return ["account": .string(key.account), "space": .string(key.space)]
         }
+    }
+
+    // MARK: - Google Chat
+
+    private func chatAccount(_ id: String) throws -> String {
+        let id = id.lowercased()
+        guard store.chat.account(named: id) != nil else {
+            throw ControlError("unknown_account", "No chat account \(id); `mailstream chat spaces` lists them.")
+        }
+        return id
+    }
+
+    private func chatSpace(_ args: Arguments) throws -> ChatSpaceKey {
+        ChatSpaceKey(account: try chatAccount(try args.required("account")), space: try args.required("space"))
+    }
+
+    private func chatSpaces(_ args: Arguments) throws -> JSON {
+        let account = try args.string("account").map { try chatAccount($0) }
+        let chat = store.chat
+        let accounts = chat.accounts.map(\.name).filter { account == nil || $0 == account }
+        return [
+            "accounts": .array(accounts.map { name in
+                ["id": .string(name), "label": .string(self.accounts.record(name)?.label ?? name),
+                 "canStart": .bool(chat.canStartChats(account: name)), "unread": .int(chat.unreadSpaces(account: name))]
+            }),
+            "loading": .bool(chat.isLoading),
+            "more": .bool(chat.canLoadMore(account: account)),
+            "spaces": .array(chat.rows(account: account).map { row in
+                let space = chat.space(row.key)
+                return [
+                    "account": .string(row.key.account), "space": .string(row.key.space),
+                    "kind": (space?.kind.rawValue).json, "title": .string(row.title), "preview": .string(row.preview),
+                    "date": .string(row.date), "section": .string(row.section), "activity": .date(row.activity),
+                    "unread": .bool(row.isUnread), "attachment": .bool(row.hasAttachment),
+                    "avatarKey": .string(row.avatarKey), "avatarName": .string(row.avatarName),
+                    "avatarColorKey": .string(row.avatarColorKey), "avatarUrl": (row.avatarPhoto?.absoluteString).json,
+                ]
+            }),
+        ]
+    }
+
+    private func chatUser(_ user: ChatUser) -> JSON {
+        [
+            "id": .string(user.name), "name": .string(user.label), "email": user.email.json,
+            "avatarKey": .string(user.avatarKey), "avatarUrl": user.avatarUrl.json, "bot": .bool(user.bot),
+        ]
+    }
+
+    /// What the store holds of `key`'s history. Senders' pictures go to the avatar store, so
+    /// `mail avatars` finds them by address.
+    private func chatThread(_ key: ChatSpaceKey) -> JSON {
+        let chat = store.chat
+        let thread = chat.thread(key) ?? ChatThread()
+        for message in thread.messages {
+            if let photo = message.sender.avatarUrl.flatMap(URL.init(string:)) {
+                store.avatars.publish(photo, for: message.sender.avatarKey)
+            }
+        }
+        return [
+            "account": .string(key.account), "space": .string(key.space),
+            "title": (chat.space(key)?.title).json, "me": chat.me(account: key.account).json,
+            "members": .array((chat.space(key)?.members ?? []).map(chatUser)), "lastRead": .date(thread.lastRead),
+            "messages": .array(thread.messages.map { message in
+                [
+                    "id": .string(message.name), "sender": chatUser(message.sender), "created": .date(message.created),
+                    "edited": .date(message.edited), "text": .string(ChatMarkup.plain(message.text)),
+                    "markup": .string(message.text),
+                    "thread": message.thread.json, "threadReply": .bool(message.threadReply), "mine": .bool(message.mine),
+                    "card": .bool(message.card),
+                    "attachments": .array(message.attachments.map { ["name": .string($0.name), "url": $0.url.json] }),
+                ]
+            }),
+            "pending": .array(thread.pending.map { pending in
+                ["id": .string(pending.id), "text": .string(pending.text), "created": .date(pending.created),
+                 "failure": pending.failure.json]
+            }),
+            "more": .bool(thread.more), "loaded": .bool(thread.loaded), "failure": thread.failure.json,
+            "loadingEarlier": .bool(chat.isLoadingEarlier(key)),
+        ]
+    }
+
+    private func chatSend(_ args: Arguments) async throws -> JSON {
+        let key = try chatSpace(args)
+        let text = try args.required("text")
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ControlError.usage("--text is empty.") }
+        try requireYes(args, "Would send \(text.count) characters to \(key.space) from \(key.account). Re-run with --yes.")
+        guard let sending = store.chat.send(text, thread: args.string("thread"), in: key) else {
+            throw ControlError.usage("--text is empty.")
+        }
+        await sending.task.value
+        if let failure = store.chat.thread(key)?.pending.first(where: { $0.id == sending.pending })?.failure {
+            store.chat.discard(sending.pending, in: key)
+            throw ControlError("provider", failure)
+        }
+        return ["sent": true, "account": .string(key.account), "space": .string(key.space)]
+    }
+
+    private func chatPeople(_ args: Arguments) throws -> JSON {
+        let account = try chatAccount(try args.required("account"))
+        return [
+            "canStart": .bool(store.chat.canStartChats(account: account)),
+            "people": .array(store.chat.people(account: account).map { chatUser($0.user) }),
+        ]
     }
 
     // MARK: - Status and accounts
@@ -235,7 +380,7 @@ final class ControlService {
     }
 
     private func list(_ args: Arguments, query: String?) async throws -> JSON {
-        let limit = min(max(args.int("limit") ?? 25, 1), 100)
+        let limit = min(max(args.int("limit") ?? 25, 1), 200)
         let category = args.string("category").flatMap(MailCategory.init(rawValue:))
         let include = { (conversation: Conversation) -> Bool in
             if args.bool("unread"), !conversation.isUnread { return false }
@@ -247,14 +392,15 @@ final class ControlService {
         }
         var listing: MailStore.AgentListing
         if let query {
-            listing = await store.agentSearch(try accountNames(args), query: query, pageSize: min(max(limit, 25), 100))
+            listing = await store.agentSearch(try accountNames(args), query: query, pageSize: min(max(limit, 25), 200))
             listing.conversations = Array(listing.conversations.filter(include).prefix(limit))
         } else {
             let cursor = try args.string("cursor").map { text in
                 guard let cursor = MailStore.AgentCursor(text) else { throw ControlError.usage("--cursor: not a `next` from mail list.") }
                 return cursor
             }
-            listing = await store.agentListing(try mailboxKeys(args), after: cursor, limit: limit, include: include)
+            listing = await store.agentListing(try mailboxKeys(args), after: cursor, limit: limit,
+                                               cached: args.bool("cached"), include: include)
         }
         if listing.primary.isEmpty, !listing.failures.isEmpty {
             throw ControlError("provider", listing.failures.joined(separator: "; "))
@@ -480,10 +626,25 @@ final class ControlService {
         let to = try addresses(args, "to"), cc = try addresses(args, "cc"), bcc = try addresses(args, "bcc")
         guard !to.isEmpty else { throw ControlError.usage("--to needs at least one address.") }
         let subject = try args.required("subject"), body = try args.required("body")
-        try requireYes(args, "Would send \"\(subject)\" (\(body.count) characters) from \(from) to \(Self.emails(to + cc + bcc)). Re-run with --yes.")
-        let message = await store.outgoing(account: from, source: nil, to: to, cc: cc, bcc: bcc, subject: subject, text: body)
+        let attachments = try await Self.files(args.list("attachments") ?? [], argument: "attachments")
+        let attached = attachments.isEmpty ? "" : ", \(attachments.count) attachment\(attachments.count == 1 ? "" : "s")"
+        try requireYes(args, "Would send \"\(subject)\" (\(body.count) characters\(attached)) from \(from) to \(Self.emails(to + cc + bcc)). Re-run with --yes.")
+        let message = await store.outgoing(account: from, source: nil, to: to, cc: cc, bcc: bcc, subject: subject, text: body,
+                                           attachments: attachments)
         try await store.send(message, account: from)
         return ["sent": true, "from": .string(from), "to": Self.addresses(to), "subject": .string(subject)]
+    }
+
+    /// The files named by full path, each one a readable file rather than a folder.
+    @concurrent private nonisolated static func files(_ paths: [String], argument: String) async throws -> [URL] {
+        try paths.map { path in
+            var isFolder: ObjCBool = false
+            guard path.hasPrefix("/"), FileManager.default.fileExists(atPath: path, isDirectory: &isFolder), !isFolder.boolValue,
+                  FileManager.default.isReadableFile(atPath: path) else {
+                throw ControlError.usage("--\(argument): \"\(path)\" is not a readable file (give its full path).")
+            }
+            return URL(fileURLWithPath: path)
+        }
     }
 
     private func reply(_ args: Arguments) async throws -> JSON {

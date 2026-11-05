@@ -9,6 +9,10 @@ This repo is a colocated jj repo (`.jj` + `.git`), pushed to `github.com/taoocer
   Do it unprompted as soon as a change is built and verified, then push; never leave finished work
   uncommitted in `@`.
 - Push: `jj bookmark set main -r @-` then `jj git push`.
+- One line: every front end (the AppKit app, `GPUI/`, `Flutter/`) and the engine they share
+  live on `main`. Every workspace works on `main`; the old `gpui-ui` and `flutter-ui` bookmarks
+  are history and take no new commits. A change to the engine (`Sources/MailstreamKit`, `FFI/`)
+  updates every front end that calls what it changed, in the same change.
 - The repo is public: never commit secrets, tokens, OAuth client files or personal mail data.
 
 ## Work tracking: Linear
@@ -75,7 +79,10 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
 - All Swift code is in the `MailstreamKit` target (`Sources/MailstreamKit`); the `Mailstream`
   executable only calls `MailstreamApp.main()`. `MailstreamKit` is also the dynamic library FFI
   front ends load: `scripts/ffi.sh` builds it with the UniFFI crate in `FFI/`. New commands go in
-  `CommandSpec`/`ControlService`, then get a typed method in `FFI/src/lib.rs`.
+  `CommandSpec`/`ControlService`, then get a typed method in `FFI/src/lib.rs`; GPUI uses that
+  crate directly, Flutter through the Dart binding `ffi.sh` generates (`Flutter/README.md`). The
+  engine keeps the state every front end shares (the open chat space and its history, as for
+  the native reader); front ends re-read it on the engine's change events.
 - Test only what you changed: build, then exercise the parts your change touches (the view, flow or command you edited). Do not re-run the whole app checklist or every CLI case after each change; we iterate in small steps.
 
 ## Performance: 120 fps

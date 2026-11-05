@@ -1,0 +1,27 @@
+//! Mailstream's Swift engine (accounts, sync, cache, threading, tagging), loaded into this process
+//! from `libMailstreamKit.dylib` through the `mailstream` crate in `FFI/`. This UI asks it for
+//! values and hears about changes from it; it shares the app's mail.db and sign-ins.
+//!
+//! Calls are futures answered on the main thread's run loop; they run on the background
+//! executor, where their answers are decoded, never blocking a thread.
+
+use std::sync::{Arc, LazyLock};
+
+pub use mailstream::{BatchResult, MailError, Mailstream};
+
+static ENGINE: LazyLock<Arc<Mailstream>> = LazyLock::new(Mailstream::new);
+
+/// The process's engine, started on first use (`main` starts it at launch).
+pub fn engine() -> &'static Mailstream {
+    &ENGINE
+}
+
+/// An action over conversation ids; a failure for any of them is the action's failure.
+pub fn all_done(result: Result<BatchResult, MailError>) -> Result<(), MailError> {
+    match result?.failed.into_iter().next() {
+        None => Ok(()),
+        Some(failure) => {
+            Err(MailError::Failed { code: failure.code.unwrap_or_else(|| "failed".into()), message: failure.message })
+        }
+    }
+}

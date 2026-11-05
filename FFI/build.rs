@@ -15,7 +15,9 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", dir.display());
     println!("cargo:rustc-link-lib=dylib=MailstreamKit");
     // Development hosts find the dylib where swift build left it; app bundles embed it and add
-    // their own rpath (@executable_path/../Frameworks).
+    // their own rpath (@executable_path/../Frameworks). The rpath reaches this package's own
+    // binaries; other crates' binaries add it from `DEP_MAILSTREAMKIT_DIR`.
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dir.display());
+    println!("cargo:dir={}", dir.display());
     println!("cargo:rerun-if-changed={}", dir.join("libMailstreamKit.dylib").display());
 }

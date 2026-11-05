@@ -210,6 +210,68 @@ nonisolated enum SettingsFile {
     }
 }
 
+/// The `config …` commands, on settings.json: the CLI runs them without the app, the control
+/// service (socket and FFI) runs them for front ends.
+nonisolated extension CommandID.Local {
+    func run(_ args: [String: JSON]) throws -> JSON {
+        func setting() throws -> Setting {
+            do { return try Setting.named(args["key"]?.string ?? "") } catch { throw ControlError.usage(error.localizedDescription) }
+        }
+        switch self {
+        case .configList:
+            let (values, issues) = SettingsFile.read()
+            return ["file": .string(SettingsFile.url.path), "settings": .array(Setting.allCases.map { $0.entry(values) }),
+                    "issues": .strings(issues)]
+        case .configGet:
+            return try setting().entry()
+        case .configSet:
+            let setting = try setting()
+            try SettingsFile.update(setting, to: try setting.parse(args["value"]?.string ?? ""))
+            return setting.entry()
+        case .configReset:
+            let setting = try setting()
+            try SettingsFile.update(setting, to: nil)
+            return setting.entry()
+        case .configAdd, .configRemove:
+            let setting = try setting()
+            guard case .addresses = setting.kind else { throw ControlError.usage("\(setting.rawValue) is not a list setting.") }
+            let words = (args["values"]?.strings ?? []).flatMap { $0.split(separator: ",").map(String.init) }
+            let given = try setting.validate(.strings(words)).strings ?? []
+            let current = setting.value(in: SettingsFile.read().values).strings ?? []
+            let next = self == .configAdd ? current + given : current.filter { !given.contains($0) }
+            try SettingsFile.update(setting, to: .strings(next))
+            return setting.entry()
+        case .configSchema:
+            return Setting.fileSchema
+        case .configPath:
+            return ["path": .string(SettingsFile.url.path), "exists": .bool(FileManager.default.fileExists(atPath: SettingsFile.url.path))]
+        }
+    }
+}
+
+nonisolated extension Setting {
+    /// The setting as `config` commands answer it; `values` defaults to the file as it is now.
+    func entry(_ values: [Setting: JSON] = SettingsFile.read().values) -> JSON {
+        var out: [String: JSON] = [
+            "key": .string(rawValue),
+            "value": value(in: values),
+            "default": defaultValue,
+            "changed": .bool(values[self] != nil),
+            "summary": .string(summary),
+        ]
+        switch kind {
+        case .bool: out["type"] = "boolean"
+        case .int(let range):
+            out["type"] = "integer"
+            out["minimum"] = .int(range.lowerBound)
+            out["maximum"] = .int(range.upperBound)
+        case .string: out["type"] = "string"
+        case .addresses: out["type"] = "array of email addresses"
+        }
+        return .object(out)
+    }
+}
+
 /// The settings in effect, following settings.json as it changes. Every value lives in `values`,
 /// so an observer reading a setting through `Observations` hears of any edit of the file.
 @Observable

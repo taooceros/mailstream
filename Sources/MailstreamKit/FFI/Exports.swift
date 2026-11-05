@@ -89,6 +89,12 @@ private final class HostedEngine {
             follow("tags", Observations { _ = store.tagging.tags }),
             follow("sync", Observations { _ = (store.isLoading, store.isPushConnected) }),
             follow("problems", Observations { _ = store.problems.current }),
+            follow("settings", Observations { _ = (Settings.shared.values, Settings.shared.issues) }),
+            follow("chat", Observations { _ = (store.chat.accounts, store.chat.rows, store.chat.isLoading) }),
+            // The open space's history: fetched pages, earlier pages, sends confirmed or failed.
+            follow("chatMessages", Observations {
+                if let key = store.chat.openSpace { _ = (store.chat.thread(key), store.chat.isLoadingEarlier(key)) }
+            }),
         ]
     }
 

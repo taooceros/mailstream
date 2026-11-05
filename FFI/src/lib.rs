@@ -20,6 +20,10 @@ use serde_json::{Value, json};
 
 uniffi::setup_scaffolding!();
 
+mod people;
+
+pub use people::Person;
+
 type Callback = extern "C" fn(*mut c_void, *const u8, usize);
 
 unsafe extern "C" {
@@ -31,7 +35,7 @@ unsafe extern "C" {
 
 /// A failed request: the engine's stable `code` (`unknown_account`, `provider`, `confirm`, …)
 /// and a message for people.
-#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[derive(Clone, Debug, thiserror::Error, uniffi::Error)]
 pub enum MailError {
     #[error("{message}")]
     Failed { code: String, message: String },
@@ -40,6 +44,13 @@ pub enum MailError {
 impl MailError {
     fn new(code: &str, message: impl Into<String>) -> Self {
         Self::Failed { code: code.into(), message: message.into() }
+    }
+
+    /// The engine's stable code: `unreachable`, `unknown_command`, `confirm`, `disabled`, …
+    pub fn code(&self) -> &str {
+        match self {
+            Self::Failed { code, .. } => code,
+        }
     }
 }
 
@@ -74,6 +85,15 @@ pub struct Status {
     pub settings_issues: Vec<String>,
     pub accounts: Vec<AccountStatus>,
     pub sync: SyncStatus,
+    pub ai_tagging: TaggingStatus,
+}
+
+/// The AI tagger: whether it is on, and what it is doing or why it stopped.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct TaggingStatus {
+    pub enabled: bool,
+    /// A line for people (progress or the last failure); nil while idle.
+    pub status: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, uniffi::Record)]
@@ -155,13 +175,17 @@ pub struct ListQuery {
     /// The previous page's [`Listing::next`]: the conversations after it, with the same filters.
     #[uniffi(default = None)]
     pub cursor: Option<String>,
+    /// Lists what the engine already holds without fetching the providers' first pages, for a
+    /// front end reading again after a change event.
+    #[uniffi(default = false)]
+    pub cached: bool,
 }
 
 impl Default for ListQuery {
     fn default() -> Self {
         Self {
             mailboxes: vec![], account: None, unread: false, starred: false, category: None, waiting: false, limit: 25,
-            cursor: None,
+            cursor: None, cached: false,
         }
     }
 }
@@ -222,6 +246,269 @@ pub struct BatchResult {
     pub failed: Vec<BatchFailure>,
 }
 
+/// A conversation's AI tag after [`Mailstream::tag`] corrected it.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct Tagged {
+    pub id: String,
+    /// `people`, `newsletter`, `notification`, …
+    pub category: String,
+    pub waiting: bool,
+    pub labels: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct TagResult {
+    pub done: Vec<Tagged>,
+    pub failed: Vec<BatchFailure>,
+}
+
+/// A new message. Addresses are `Name <address>` or bare addresses.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Draft {
+    /// The sending account's id (its address).
+    pub from: String,
+    /// At least one address.
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+    pub subject: String,
+    /// Plain text.
+    pub body: String,
+    /// Full paths of the files to attach.
+    pub attachments: Vec<String>,
+}
+
+/// What was sent: the account it went from, its recipients (`Name <address>`; for replies `to`
+/// and `cc`) and subject.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct Sent {
+    pub from: String,
+    pub to: Vec<String>,
+    pub subject: String,
+}
+
+/// A setting's value, typed by what the setting holds.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SettingValue {
+    Flag { enabled: bool },
+    Number { value: i64 },
+    Text { text: String },
+    /// Lowercased email addresses, sorted and unique.
+    Addresses { addresses: Vec<String> },
+}
+
+impl SettingValue {
+    fn of(kind: &str, value: &Value) -> Option<Self> {
+        Some(match kind {
+            "boolean" => Self::Flag { enabled: value.as_bool()? },
+            "integer" => Self::Number { value: value.as_i64()? },
+            "string" => Self::Text { text: value.as_str()?.into() },
+            _ => Self::Addresses { addresses: serde_json::from_value(value.clone()).ok()? },
+        })
+    }
+
+    /// As `config.set` takes it: true/false, a number, text, or a JSON array.
+    fn typed(&self) -> String {
+        match self {
+            Self::Flag { enabled } => enabled.to_string(),
+            Self::Number { value } => value.to_string(),
+            Self::Text { text } => text.clone(),
+            Self::Addresses { addresses } => serde_json::to_string(addresses).expect("strings encode"),
+        }
+    }
+}
+
+/// One setting of settings.json, the file Mailstream.app and every front end share.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct SettingEntry {
+    /// Dotted key, e.g. `sync.pollSeconds`.
+    pub key: String,
+    pub value: SettingValue,
+    pub default_value: SettingValue,
+    /// The file sets it (to something other than the default).
+    pub changed: bool,
+    pub summary: String,
+    /// The range a number setting accepts.
+    pub minimum: Option<i64>,
+    pub maximum: Option<i64>,
+}
+
+impl<'de> Deserialize<'de> for SettingEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            key: String,
+            #[serde(rename = "type")]
+            kind: String,
+            value: Value,
+            default: Value,
+            changed: bool,
+            summary: String,
+            minimum: Option<i64>,
+            maximum: Option<i64>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let typed = |value: &Value| {
+            SettingValue::of(&raw.kind, value)
+                .ok_or_else(|| serde::de::Error::custom(format!("{} is not a {}", raw.key, raw.kind)))
+        };
+        Ok(Self {
+            value: typed(&raw.value)?,
+            default_value: typed(&raw.default)?,
+            key: raw.key,
+            changed: raw.changed,
+            summary: raw.summary,
+            minimum: raw.minimum,
+            maximum: raw.maximum,
+        })
+    }
+}
+
+/// Every setting, the file they live in and its problems (unknown keys, invalid values, broken
+/// JSON; those fall back to the default).
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct Settings {
+    pub file: String,
+    pub settings: Vec<SettingEntry>,
+    pub issues: Vec<String>,
+}
+
+/// A Google Chat account: a Google account signed in with Chat access.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatAccount {
+    pub id: String,
+    /// The account's label, as the sidebar shows it.
+    pub label: String,
+    /// Whether its sign-in lets it create direct messages and group chats.
+    pub can_start: bool,
+    /// Spaces with unread messages.
+    pub unread: u32,
+}
+
+/// One space as the chat list shows it.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSpace {
+    pub account: String,
+    /// `spaces/…`.
+    pub space: String,
+    /// `dm`, `group`, `space` or `bot`.
+    pub kind: Option<String>,
+    pub title: String,
+    /// "Brent: see you" / "You: thanks".
+    pub preview: String,
+    /// The date as lists show it, and its date group.
+    pub date: String,
+    pub section: String,
+    pub activity: Option<String>,
+    pub unread: bool,
+    pub attachment: bool,
+    /// The person the row shows: their lowercased address, else their Chat user id; empty for none.
+    pub avatar_key: String,
+    pub avatar_name: String,
+    /// What picks the row's avatar color, as the native list picks it.
+    pub avatar_color_key: String,
+    /// The picture Google Chat publishes for them.
+    pub avatar_url: Option<String>,
+}
+
+/// The chat accounts and every space loaded, most recently active first.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct ChatSpaces {
+    pub accounts: Vec<ChatAccount>,
+    pub loading: bool,
+    /// Older spaces exist beyond these ([`Mailstream::chat_more`]).
+    pub more: bool,
+    pub spaces: Vec<ChatSpace>,
+}
+
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatUser {
+    /// `users/…`.
+    pub id: String,
+    pub name: String,
+    pub email: Option<String>,
+    pub avatar_key: String,
+    pub avatar_url: Option<String>,
+    pub bot: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct ChatAttachment {
+    pub name: String,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessage {
+    pub id: String,
+    pub sender: ChatUser,
+    pub created: Option<String>,
+    pub edited: Option<String>,
+    /// Plain text.
+    pub text: String,
+    /// The text as Google Chat sent it, with its markup (`*bold*`, `<users/…>` mentions, …).
+    pub markup: String,
+    pub thread: Option<String>,
+    pub thread_reply: bool,
+    pub mine: bool,
+    /// Carries a card the text does not show.
+    pub card: bool,
+    pub attachments: Vec<ChatAttachment>,
+}
+
+/// A message sent from here that Google has not taken yet, or that it refused (`failure`).
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct ChatPending {
+    pub id: String,
+    pub text: String,
+    pub created: Option<String>,
+    pub failure: Option<String>,
+}
+
+/// The loaded part of a space's history.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatThread {
+    pub account: String,
+    pub space: String,
+    pub title: Option<String>,
+    /// The user's `users/…` in this account.
+    pub me: Option<String>,
+    /// The space's members, for naming mentions.
+    pub members: Vec<ChatUser>,
+    /// Messages up to this time (ISO 8601) were read.
+    pub last_read: Option<String>,
+    /// Oldest first.
+    pub messages: Vec<ChatMessage>,
+    pub pending: Vec<ChatPending>,
+    /// Older messages exist ([`Mailstream::chat_earlier`]).
+    pub more: bool,
+    /// Google answered this session; until then the messages are the cached ones.
+    pub loaded: bool,
+    /// Why fetching failed, while there is nothing to show.
+    pub failure: Option<String>,
+    pub loading_earlier: bool,
+}
+
+/// People a chat account talks with, and whether it may start new conversations.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatPeople {
+    pub can_start: bool,
+    pub people: Vec<ChatUser>,
+}
+
+/// A space to open.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct ChatSpaceRef {
+    pub account: String,
+    pub space: String,
+}
+
 /// What changed in the engine; a front end re-reads what it shows of it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Event {
@@ -233,6 +520,12 @@ pub enum Event {
     Tags,
     Sync,
     Problems,
+    /// settings.json changed, from any front end, the CLI or an editor.
+    Settings,
+    /// Chat accounts or their spaces changed.
+    Chat,
+    /// The open space's messages changed.
+    ChatMessages,
     /// A kind this build does not know yet.
     Other { name: String },
 }
@@ -247,15 +540,26 @@ impl Event {
             "tags" => Self::Tags,
             "sync" => Self::Sync,
             "problems" => Self::Problems,
+            "settings" => Self::Settings,
+            "chat" => Self::Chat,
+            "chatMessages" => Self::ChatMessages,
             _ => Self::Other { name: name.into() },
         }
     }
 }
 
+/// One change, as [`EventListener::on_event`] gets it. A record rather than the bare [`Event`]:
+/// uniffi-dart passes an enum argument of a foreign callback as an integer, which does not match
+/// the buffer Rust sends, and the Dart side fails to read it; records cross intact.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Change {
+    pub event: Event,
+}
+
 /// Implemented by the front end (in Rust, Dart, …) to hear about changes.
 #[uniffi::export(with_foreign)]
 pub trait EventListener: Send + Sync {
-    fn on_event(&self, event: Event);
+    fn on_event(&self, change: Change);
 }
 
 /// The engine of this process.
@@ -280,6 +584,49 @@ impl Mailstream {
         call("accounts.list", json!({})).await
     }
 
+    /// Changes the label an account shows; empty shows the address. `None` when the account went
+    /// away meanwhile.
+    pub async fn rename_account(&self, account: String, label: String) -> Result<Option<Account>, MailError> {
+        call("accounts.rename", json!({ "account": account, "label": label })).await
+    }
+
+    /// Signs in a new account through the browser and waits (up to 5 minutes) for the person to
+    /// finish. Without `client_id` it uses the OAuth client used last (or the build's); Google
+    /// needs `client_secret` with it.
+    pub async fn add_account(
+        &self,
+        provider: String,
+        client_id: Option<String>,
+        client_secret: Option<String>,
+    ) -> Result<Account, MailError> {
+        call(
+            "accounts.add",
+            json!({ "provider": provider, "client-id": client_id, "client-secret": client_secret }),
+        )
+        .await
+    }
+
+    /// Signs the account out and deletes its saved sign-in; mail on the server stays. `confirm`
+    /// is the person's go-ahead.
+    pub async fn remove_account(&self, account: String, confirm: bool) -> Result<(), MailError> {
+        call::<Value>("accounts.remove", json!({ "account": account, "yes": confirm })).await.map(drop)
+    }
+
+    /// Every setting in settings.json, with defaults for those it does not set.
+    pub async fn settings(&self) -> Result<Settings, MailError> {
+        call("config.list", json!({})).await
+    }
+
+    /// Writes one setting; the engine applies it at once and sends [`Event::Settings`].
+    pub async fn set_setting(&self, key: String, value: SettingValue) -> Result<SettingEntry, MailError> {
+        call("config.set", json!({ "key": key, "value": value.typed() })).await
+    }
+
+    /// Puts a setting back to its default.
+    pub async fn reset_setting(&self, key: String) -> Result<SettingEntry, MailError> {
+        call("config.reset", json!({ "key": key })).await
+    }
+
     /// Each account's mailboxes, by account id; only `account`'s when given.
     pub async fn mailboxes(&self, account: Option<String>) -> Result<HashMap<String, Vec<Mailbox>>, MailError> {
         call("mailboxes", json!({ "account": account })).await
@@ -290,6 +637,7 @@ impl Mailstream {
         let mut args = json!({
             "account": query.account, "unread": query.unread, "starred": query.starred,
             "category": query.category, "waiting": query.waiting, "limit": query.limit, "cursor": query.cursor,
+            "cached": query.cached,
         });
         if !query.mailboxes.is_empty() {
             args["mailbox"] = json!(query.mailboxes);
@@ -344,9 +692,109 @@ impl Mailstream {
         call("mail.restore", json!({ "ids": ids })).await
     }
 
+    /// Corrects the AI tag; each of `category`, `waiting` and `labels` (at most two) changes
+    /// only when given.
+    pub async fn tag(
+        &self,
+        ids: Vec<String>,
+        category: Option<String>,
+        waiting: Option<bool>,
+        labels: Option<Vec<String>>,
+    ) -> Result<TagResult, MailError> {
+        let waiting = waiting.map(|waiting| if waiting { "true" } else { "false" });
+        call("mail.tag", json!({ "ids": ids, "category": category, "waiting": waiting, "labels": labels })).await
+    }
+
+    /// Forgets every AI tag and tags the current list again; `disabled` while tagging is off.
+    pub async fn retag(&self) -> Result<(), MailError> {
+        call::<Value>("mail.retag", json!({})).await.map(drop)
+    }
+
+    /// Sends `draft` as a new plain-text message with its attachments. Sends at once: `confirm` is the person's
+    /// go-ahead; without it the engine only answers what it would send (`confirm`).
+    pub async fn send(&self, draft: Draft, confirm: bool) -> Result<Sent, MailError> {
+        call(
+            "mail.send",
+            json!({
+                "from": draft.from, "to": draft.to, "cc": draft.cc, "bcc": draft.bcc,
+                "subject": draft.subject, "body": draft.body, "attachments": draft.attachments, "yes": confirm,
+            }),
+        )
+        .await
+    }
+
+    /// Replies to the conversation's latest message, quoting it, to its sender or with `all` to
+    /// everyone. Sends at once: `confirm` is the person's go-ahead.
+    pub async fn reply(&self, id: String, body: String, all: bool, confirm: bool) -> Result<Sent, MailError> {
+        call("mail.reply", json!({ "id": id, "body": body, "all": all, "yes": confirm })).await
+    }
+
     /// Fetches new mail and counts now.
     pub async fn refresh(&self) -> Result<(), MailError> {
         call::<Value>("refresh", json!({})).await.map(drop)
+    }
+
+    /// Google Chat accounts and their spaces, from what the engine has loaded.
+    pub async fn chat_spaces(&self, account: Option<String>) -> Result<ChatSpaces, MailError> {
+        call("chat.spaces", json!({ "account": account })).await
+    }
+
+    /// Loads another page of older spaces; [`Event::Chat`] follows.
+    pub async fn chat_more(&self, account: Option<String>) -> Result<(), MailError> {
+        call::<Value>("chat.more", json!({ "account": account })).await.map(drop)
+    }
+
+    /// Fetches every chat account's spaces now.
+    pub async fn chat_refresh(&self) -> Result<(), MailError> {
+        call::<Value>("chat.refresh", json!({})).await.map(drop)
+    }
+
+    /// Opens a space: its cached messages now, the newest from Google after
+    /// ([`Event::ChatMessages`]), kept current and read while it stays open.
+    pub async fn chat_open(&self, account: String, space: String) -> Result<ChatThread, MailError> {
+        call("chat.open", json!({ "account": account, "space": space })).await
+    }
+
+    pub async fn chat_close(&self) -> Result<(), MailError> {
+        call::<Value>("chat.close", json!({})).await.map(drop)
+    }
+
+    /// What is loaded of a space's history.
+    pub async fn chat_messages(&self, account: String, space: String) -> Result<ChatThread, MailError> {
+        call("chat.messages", json!({ "account": account, "space": space })).await
+    }
+
+    /// Loads the page before the oldest loaded message.
+    pub async fn chat_earlier(&self, account: String, space: String) -> Result<ChatThread, MailError> {
+        call("chat.earlier", json!({ "account": account, "space": space })).await
+    }
+
+    /// Sends `text` (shown pending at once) and returns once Google took it. `confirm` is the
+    /// person's go-ahead.
+    pub async fn chat_send(
+        &self,
+        account: String,
+        space: String,
+        text: String,
+        thread: Option<String>,
+        confirm: bool,
+    ) -> Result<(), MailError> {
+        call::<Value>(
+            "chat.send",
+            json!({ "account": account, "space": space, "text": text, "thread": thread, "yes": confirm }),
+        )
+        .await
+        .map(drop)
+    }
+
+    /// People `account` chats with, most recently active first.
+    pub async fn chat_people(&self, account: String) -> Result<ChatPeople, MailError> {
+        call("chat.people", json!({ "account": account })).await
+    }
+
+    /// The direct message with one person or the group chat with several, found or started.
+    pub async fn chat_start(&self, account: String, people: Vec<String>) -> Result<ChatSpaceRef, MailError> {
+        call("chat.start", json!({ "account": account, "people": people })).await
     }
 
     /// Calls `listener` on the main thread for every change from now on, while the process runs.
@@ -376,7 +824,7 @@ struct ErrorBody {
     message: Option<String>,
 }
 
-async fn call<T: DeserializeOwned>(command: &str, args: Value) -> Result<T, MailError> {
+pub(crate) async fn call<T: DeserializeOwned>(command: &str, args: Value) -> Result<T, MailError> {
     let request = serde_json::to_vec(&json!({ "command": command, "args": args })).expect("JSON values encode");
     let (sender, receiver) = oneshot::channel::<Vec<u8>>();
     let context = Box::into_raw(Box::new(sender)).cast::<c_void>();
@@ -409,7 +857,7 @@ extern "C" fn deliver_event(context: *mut c_void, bytes: *const u8, length: usiz
         event: String,
     }
     if let Ok(message) = serde_json::from_slice::<Message>(unsafe { bytes_of(bytes, length) }) {
-        listener.on_event(Event::named(&message.event));
+        listener.on_event(Change { event: Event::named(&message.event) });
     }
 }
 

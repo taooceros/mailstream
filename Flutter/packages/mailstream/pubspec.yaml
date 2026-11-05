@@ -1,0 +1,11 @@
+name: mailstream
+description: Mailstream's engine in this process, through the UniFFI bindings of the FFI/ crate.
+publish_to: none
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  code_assets: ^1.0.0
+  ffi: ^2.1.0
+  hooks: ^1.0.0

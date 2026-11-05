@@ -81,6 +81,10 @@ mailstream mail show '<conversation id>' --html
 mailstream mail archive '<id>' '<id>'
 mailstream mail tag '<id>' --category newsletter
 mailstream mail reply '<id>' --body - --yes < reply.txt
+mailstream chat spaces
+mailstream chat messages you@gmail.com spaces/AAAA
+mailstream chat send you@gmail.com spaces/AAAA --text "On my way" --yes
+mailstream chat start you@gmail.com friend@example.com
 ```
 
 Settings live in `~/Library/Application Support/Mailstream/settings.json`: a flat
@@ -121,8 +125,16 @@ pointing at `file://` copies in the cache. `mail avatars` answers each sender's 
 file in the avatar cache, the one the window shows. Actions answer once the provider
 confirmed them and report each id under `done` or `failed`. Sending (`mail send`,
 `mail reply`), signing an account out and deleting from the trash do nothing without
-`--yes`; the error says what would happen. `accounts add google` opens the browser
+`--yes`; the error says what would happen. `mail send --attachments <file>` (repeated for
+several) attaches files; over the socket they are full paths. `accounts add google` opens the browser
 sign-in and waits for the person to finish it.
+
+`chat …` works on the Google Chat spaces the app has loaded (`chat spaces`, from its last poll;
+`chat more` loads older ones). `chat open` makes a space the one the app keeps current and reads
+as messages arrive, like opening it in the window; `chat messages` answers what is loaded without
+that, and `chat earlier` loads the page before it. `chat send` (with `--yes`) answers once Google
+took the message. `chat start` finds or starts the direct message with one person or the group
+chat with several; `chat people` lists who an account already chats with.
 
 Failures print `{"error": {"code", "message"}}` on stderr and exit 1, 2 for usage
 errors, 3 when the app cannot be reached.
@@ -148,7 +160,9 @@ DART_OUT=path/to/lib/src ./scripts/ffi.sh         # and the Dart bindings (asset
 - **One signature.** `scripts/sign.sh` signs the app and every host with the Apple
   Development certificate and code identifier `dev.mailstream.Mailstream`. The Keychain
   item holding the sign-ins trusts that pair, so every host reads it without asking. A
-  host signed otherwise gets a Keychain prompt.
+  host signed otherwise gets a Keychain prompt, and "Always Allow" there re-pins the item
+  to that one binary, so the signed hosts get asked again. `GPUI/run.sh` builds, signs and
+  checks the GPUI front end before starting it.
 - **Shared database.** Every process opens `mail.db` with Turso's experimental
   multi-process WAL (`mail.db-tshm`). The Turso 0.8.3 C API does not expose it, so
   `scripts/turso.sh` applies `scripts/turso-multiprocess.patch`. Turso refuses to mix
@@ -188,12 +202,12 @@ The bundle is signed with an "Apple Development" certificate when there is one, 
 ad hoc. Nothing else is needed. Signed ad hoc, each new build is a new app to macOS,
 which asks once whether it may read the saved sign-ins. A free certificate stops that
 prompt: add any Apple ID in Xcode ▸ Settings ▸ Accounts, then Manage Certificates ▸ +
-▸ Apple Development. `scripts/make-icon.swift` regenerates `Resources/AppIcon.png`.
+▸ Apple Development. `scripts/make-icon.swift` regenerates `Resources/AppIcon.png`; `swift scripts/make-icon.swift <out.png> GPUI` (or `Flutter`) renders the same icon with that front end's badge (`GPUI/assets/AppIcon.png`, scaled to 512; the Flutter `AppIcon.appiconset` sizes).
 
 GitHub Actions (`.github/workflows/build.yml`) builds every push and pull request on
 macOS 26 with Xcode 26.4 (Swift 6.3), with warnings as errors, and keeps the app as a
 disk image (`Mailstream.dmg`) in the run's artifacts. Builds of `main` (and manual runs) also
-build the newest `gpui-ui` and `flutter-ui` commits into `Mailstream-GPUI.dmg` and
+build the GPUI and Flutter front ends of the same commit into `Mailstream-GPUI.dmg` and
 `Mailstream-Flutter.dmg`, and each build of `main` replaces the `nightly` prerelease with all
 three. CI has no
 OAuth clients, push settings or signing identity, so that app is signed ad hoc, polls

@@ -1,0 +1,23 @@
+[package]
+name = "mailstream-gpui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gpui = "0.2.2"
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+unicode-segmentation = "1"
+mailstream = { path = "../FFI" }
+futures = "0.3"
+url = "2"
+raw-window-handle = "0.6"
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL", "NSURLRequest", "NSValue", "NSGeometry", "NSError", "NSObject", "NSObjCRuntime", "NSData"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView", "NSResponder", "NSWorkspace", "NSEvent", "NSApplication", "NSImage"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "objc2-core-foundation", "block2", "WKWebView", "WKWebViewConfiguration", "WKPreferences", "WKWebpagePreferences", "WKNavigationDelegate", "WKNavigationAction", "WKNavigation", "WKWebsiteDataStore", "WKUIDelegate", "WKWindowFeatures", "WKFrameInfo"] }
+
+[profile.dev.package."*"]
+opt-level = 2
