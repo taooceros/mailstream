@@ -16,6 +16,8 @@ use gpui::{
 };
 use serde_json::{Value, json};
 
+use crate::chat::ChatPane;
+use crate::compose::ReplyBox;
 use crate::control::{self, ControlError};
 use crate::format;
 use crate::input::{InputEvent, TextInput};
@@ -35,6 +37,11 @@ actions!(
         Star,
         ToggleRead,
         ToggleWaiting,
+        Reply,
+        ReplyAll,
+        Forward,
+        NewMessage,
+        NewChat,
         FocusSearch,
         Refresh,
         ToggleSidebar,
@@ -47,8 +54,8 @@ actions!(
 pub const CONTEXT: &str = "Mail";
 
 pub fn bind_keys(cx: &mut App) {
-    // Single keys act on the list, never while a text field has focus.
-    let list = Some("Mail && !TextInput && !TextArea");
+    // Single keys act on the list, never while a text field has focus or in Chat, which has its own.
+    let list = Some("Mail && !TextInput && !TextArea && !Chat");
     let window = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("j", Next, list),
@@ -70,6 +77,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-u", ToggleRead, window),
         KeyBinding::new("d", ToggleWaiting, list),
         KeyBinding::new("cmd-shift-d", ToggleWaiting, window),
+        KeyBinding::new("r", Reply, list),
+        KeyBinding::new("cmd-r", Reply, window),
+        KeyBinding::new("a", ReplyAll, list),
+        KeyBinding::new("cmd-shift-r", ReplyAll, window),
+        KeyBinding::new("f", Forward, list),
+        KeyBinding::new("cmd-shift-f", Forward, window),
+        KeyBinding::new("cmd-n", NewMessage, window),
         KeyBinding::new("/", FocusSearch, list),
         KeyBinding::new("cmd-f", FocusSearch, window),
         KeyBinding::new("cmd-shift-n", Refresh, window),
@@ -301,15 +315,33 @@ pub struct MailApp {
     /// The content area's width, as last laid out: how far a layer slides.
     pub content_width: f32,
     pub context_menu: Option<ContextMenu>,
+    /// Google Chat, shown instead of the mail list while `chat_view` is set.
+    pub chat: Entity<ChatPane>,
+    /// The chat account in view (None: every account), while Chat is selected.
+    pub chat_view: Option<Option<SharedString>>,
+    /// The inline reply under a conversation in the reader.
+    pub reply: Option<ReplyDraft>,
+    /// A conversation to forward once its messages arrive.
+    forward_pending: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
+}
+
+pub struct ReplyDraft {
+    pub all: bool,
+    pub conversation: SharedString,
+    pub view: Entity<ReplyBox>,
+    _subscription: Subscription,
 }
 
 impl MailApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| TextInput::new("Search", cx));
+        let chat = cx.new(|cx| ChatPane::new(window, cx));
         let subscriptions = vec![
             cx.subscribe_in(&search, window, Self::on_search_event),
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
+            // Chat accounts and unread counts feed the sidebar.
+            cx.observe(&chat, |_, _, cx| cx.notify()),
         ];
         let mut this = Self {
             focus: cx.focus_handle(),
@@ -342,6 +374,10 @@ impl MailApp {
             slide_layer: None,
             content_width: 0.0,
             context_menu: None,
+            chat,
+            chat_view: None,
+            reply: None,
+            forward_pending: None,
             _subscriptions: subscriptions,
         };
         this.load_mailboxes(cx);
@@ -613,7 +649,7 @@ impl MailApp {
         }
     }
 
-    fn load_thread(&mut self, conversation: &Conversation, cx: &mut Context<Self>) {
+    pub(crate) fn load_thread(&mut self, conversation: &Conversation, cx: &mut Context<Self>) {
         if let Some(thread) = self.threads.get(&conversation.id)
             && thread.count == conversation.message_count
             && !matches!(thread.state, ThreadState::Failed(_))
@@ -640,6 +676,10 @@ impl MailApp {
                     Ok(messages) => ThreadState::Loaded(messages.into()),
                     Err(error) => ThreadState::Failed(error.message.into()),
                 };
+                if this.forward_pending.as_ref() == Some(&id) {
+                    this.forward_pending = None;
+                    this.forward_loaded(&id, cx);
+                }
                 cx.notify();
             },
         );

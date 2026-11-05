@@ -1,6 +1,8 @@
-//! Actions on conversations: optimistic, rolled back when the app refuses them.
+//! Actions on conversations: optimistic, rolled back when the app refuses them; replying,
+//! forwarding and writing new mail.
 
 use super::*;
+use crate::compose::{self, ComposeMode, ReplyEvent};
 
 impl MailApp {
     /// What an action applies to: the row a context menu is open on, else the open
@@ -14,8 +16,11 @@ impl MailApp {
         self.target()
     }
 
-    /// The open conversation, else the highlighted row.
+    /// The open conversation, else the highlighted row; nothing while Chat is shown.
     pub fn target(&self) -> Option<Conversation> {
+        if self.chat_view.is_some() {
+            return None;
+        }
         if let Some(conversation) = self.reader() {
             return Some(conversation.clone());
         }
@@ -25,6 +30,102 @@ impl MailApp {
 
     pub fn conversation(&self, id: &SharedString) -> Option<Conversation> {
         self.list()?.conversations.iter().find(|c| &c.id == id).cloned()
+    }
+
+    pub fn reply(&mut self, _: &Reply, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_reply(false, window, cx);
+    }
+
+    pub fn reply_all(&mut self, _: &ReplyAll, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_reply(true, window, cx);
+    }
+
+    /// Opens the conversation in the reader, if it is not, with a reply box under its messages.
+    fn start_reply(&mut self, all: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(conversation) = self.take_target(window, cx) else { return };
+        if self.reader().is_none_or(|open| open.id != conversation.id) {
+            self.activate(&conversation.id, window, cx);
+        }
+        if self.reader().is_none_or(|open| open.id != conversation.id) {
+            return;
+        }
+        // The same reply already open keeps what was written.
+        if let Some(draft) = self.reply.as_ref().filter(|d| d.conversation == conversation.id && d.all == all) {
+            draft.view.read(cx).focus(window);
+            return;
+        }
+        // Who it goes to is the app's to decide; the box names them for the user.
+        let preview: SharedString = if all {
+            let people: Vec<&str> =
+                conversation.participants.iter().map(|p| p.as_ref()).filter(|p| *p != "me").collect();
+            if people.is_empty() { conversation.sender.clone() } else { people.join(", ").into() }
+        } else {
+            conversation.sender.clone()
+        };
+        let id = conversation.id.clone();
+        let view = cx.new(|cx| ReplyBox::new(id.clone(), all, preview, window, cx));
+        let subscription = cx.subscribe_in(&view, window, move |this, _, event: &ReplyEvent, window, cx| {
+            this.reply = None;
+            window.focus(&this.focus);
+            if matches!(event, ReplyEvent::Sent) {
+                this.show_toast("Sent", cx);
+                // The thread grows by the reply: read it again, and the lists with it.
+                this.threads.remove(&this.reader().map(|c| c.id.clone()).unwrap_or_default());
+                if let Some(open) = this.reader().cloned() {
+                    this.load_thread(&open, cx);
+                }
+                this.load_list(this.key(), true, cx);
+            }
+            cx.notify();
+        });
+        self.reply = Some(super::ReplyDraft { conversation: id, all, view, _subscription: subscription });
+        self.reader_scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    pub fn forward(&mut self, _: &Forward, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(conversation) = self.take_target(window, cx) else { return };
+        let id = conversation.id.clone();
+        if self.threads.get(&id).is_some_and(|t| matches!(t.state, ThreadState::Loaded(_))) {
+            self.forward_loaded(&id, cx);
+        } else {
+            // The compose window opens once the messages it quotes arrive.
+            self.forward_pending = Some(id);
+            self.load_thread(&conversation, cx);
+        }
+    }
+
+    /// Opens a forward of the conversation's newest message, whose thread is loaded.
+    pub(super) fn forward_loaded(&mut self, id: &SharedString, cx: &mut Context<Self>) {
+        let conversation = self.conversation(id).or_else(|| self.reader().filter(|c| &c.id == id).cloned());
+        let Some(conversation) = conversation else { return };
+        let Some(ThreadState::Loaded(messages)) = self.threads.get(id).map(|t| &t.state) else { return };
+        let Some(last) = messages.last() else { return };
+        let quoted = last.forwarded(&conversation.subject).into();
+        compose::open_compose(
+            ComposeMode::Forward { from: conversation.account.clone(), subject: conversation.subject.clone(), quoted },
+            self.accounts.clone(),
+            cx,
+        );
+    }
+
+    /// A new message, from the account whose mailbox is shown.
+    pub fn new_message(&mut self, _: &NewMessage, _: &mut Window, cx: &mut Context<Self>) {
+        let from = match &self.source {
+            Source::Mailbox { account, .. } => Some(account.clone()),
+            Source::Unified(_) => None,
+        };
+        compose::open_compose(ComposeMode::New { from }, self.accounts.clone(), cx);
+    }
+
+    /// Shows Chat and its New Chat form.
+    pub fn new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.chat.read(cx).supported() {
+            self.show_toast("This version of Mailstream has no Google Chat commands.", cx);
+            return;
+        }
+        self.select_chat(None, window, cx);
+        self.chat.update(cx, |chat, cx| chat.new_chat(&crate::chat::NewChat, window, cx));
     }
 
     pub fn archive(&mut self, _: &Archive, window: &mut Window, cx: &mut Context<Self>) {

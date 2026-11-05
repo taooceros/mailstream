@@ -21,14 +21,19 @@ use crate::format;
 use crate::icons::{Icon, icon};
 use crate::model::{Address, Category, Conversation, Message, Role};
 use crate::state::{
-    Archive, Back, CONTEXT, Item, Layer, List, MailApp, PagedView, Refresh, Restore, Source, Star, ThreadState,
-    ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
+    Archive, Back, CONTEXT, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh, Reply, ReplyAll,
+    Restore, Source, Star, ThreadState, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
 };
 
 impl Render for MailApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = design::palette(window.appearance());
-        let content = self.render_content(p, window, cx);
+        // Chat replaces the list; the pane draws its own header under the title bar.
+        let content = if self.chat_view.is_some() {
+            div().flex_1().min_h_0().child(self.chat.clone()).into_any_element()
+        } else {
+            self.render_content(p, window, cx)
+        };
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -46,10 +51,19 @@ impl Render for MailApp {
             .on_action(cx.listener(Self::refresh))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::retag))
+            .on_action(cx.listener(Self::reply))
+            .on_action(cx.listener(Self::reply_all))
+            .on_action(cx.listener(Self::forward))
+            .on_action(cx.listener(Self::new_message))
+            .on_action(cx.listener(Self::new_chat))
             // The mouse's back button, as in the native window.
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
-                cx.listener(|this, _, window, cx| this.back(&Back, window, cx)),
+                cx.listener(|this, _, window, cx| {
+                    if this.chat_view.is_none() {
+                        this.back(&Back, window, cx);
+                    }
+                }),
             )
             .size_full()
             .flex()

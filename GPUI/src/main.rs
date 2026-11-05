@@ -3,8 +3,6 @@
 
 mod avatars;
 mod chat;
-// Remove both `expect`s when `ui.rs`/`state.rs` open the compose window and mount `ReplyBox`.
-#[expect(dead_code, reason = "the compose window and inline reply are not wired into the main window yet")]
 mod compose;
 mod control;
 mod design;
@@ -15,7 +13,6 @@ mod model;
 mod settings;
 mod state;
 mod swipe;
-#[expect(dead_code, reason = "only the compose window, not wired yet, uses the editor")]
 mod textarea;
 mod ui;
 
@@ -26,8 +23,8 @@ use gpui::{
 
 use crate::input::{Copy, Cut, Paste, SelectAll};
 use crate::state::{
-    Archive, Back, FocusSearch, MailApp, Quit, Refresh, Restore, Retag, Star, ToggleRead, ToggleSidebar,
-    ToggleWaiting, Trash,
+    Archive, Back, FocusSearch, Forward, MailApp, NewChat, NewMessage, Quit, Refresh, Reply, ReplyAll, Restore,
+    Retag, Star, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
 };
 
 fn main() {
@@ -90,6 +87,10 @@ fn menus() -> Vec<Menu> {
             ],
         },
         Menu {
+            name: "File".into(),
+            items: vec![MenuItem::action("New Message", NewMessage), MenuItem::action("New Chat", NewChat)],
+        },
+        Menu {
             name: "Edit".into(),
             items: vec![
                 MenuItem::os_action("Cut", Cut, OsAction::Cut),
@@ -113,6 +114,10 @@ fn menus() -> Vec<Menu> {
         Menu {
             name: "Message".into(),
             items: vec![
+                MenuItem::action("Reply", Reply),
+                MenuItem::action("Reply All", ReplyAll),
+                MenuItem::action("Forward", Forward),
+                MenuItem::separator(),
                 MenuItem::action("Mark as Read/Unread", ToggleRead),
                 MenuItem::action("Star/Unstar", Star),
                 MenuItem::action("Waiting on You", ToggleWaiting),

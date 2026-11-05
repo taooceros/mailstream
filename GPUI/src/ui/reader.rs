@@ -64,7 +64,10 @@ impl MailApp {
                                 .when(!conversation.tag.is_empty(), |d| d.child(conversation.tag.clone()))
                                 .child(conversation.account.clone()),
                         )
-                        .child(div().mt(px(6.)).child(body)),
+                        .child(div().mt(px(6.)).child(body))
+                        .when_some(self.reply.as_ref().filter(|r| r.conversation == conversation.id), |d, reply| {
+                            d.child(div().mt(px(10.)).child(reply.view.clone()))
+                        }),
                 ),
             )
             .into_any_element()

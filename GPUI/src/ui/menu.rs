@@ -1,4 +1,4 @@
-//! The row's right-click menu (`ConversationListViewController.menu`): read and star toggles,
+//! The row's right-click menu (`ConversationListViewController.menu`): reply and forward, read and star toggles,
 //! "Waiting on you", then filing. Escape or a click outside closes it.
 
 use super::*;
@@ -16,7 +16,11 @@ impl MailApp {
         let menu = self.context_menu.as_ref()?;
         let conversation = self.conversation(&menu.id)?;
 
-        let mut groups: Vec<Vec<Entry>> = Vec::new();
+        let mut groups: Vec<Vec<Entry>> = vec![vec![
+            Entry { glyph: Icon::Reply, title: "Reply", run: |this, w, cx| this.reply(&Reply, w, cx) },
+            Entry { glyph: Icon::ReplyAll, title: "Reply All", run: |this, w, cx| this.reply_all(&ReplyAll, w, cx) },
+            Entry { glyph: Icon::Forward, title: "Forward", run: |this, w, cx| this.forward(&Forward, w, cx) },
+        ]];
         groups.push(vec![
             if conversation.unread {
                 Entry { glyph: Icon::MarkRead, title: "Mark as Read", run: |this, w, cx| this.toggle_read(&ToggleRead, w, cx) }

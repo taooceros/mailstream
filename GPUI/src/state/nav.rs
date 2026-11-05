@@ -7,7 +7,9 @@ use gpui::ScrollWheelEvent;
 
 impl MailApp {
     pub fn select(&mut self, source: Source, window: &mut Window, cx: &mut Context<Self>) {
-        let same = self.source == source && self.query.is_none();
+        let same = self.source == source && self.query.is_none() && self.chat_view.is_none();
+        self.chat_view = None;
+        self.context_menu = None;
         self.source = source;
         self.query = None;
         self.search.update(cx, |search, cx| search.clear(cx));
@@ -19,6 +21,15 @@ impl MailApp {
         self.rebuild_items();
         self.load_list(self.key(), false, cx);
         window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// Shows Google Chat: every account's spaces (None) or one account's.
+    pub fn select_chat(&mut self, account: Option<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat_view = Some(account.clone());
+        self.context_menu = None;
+        self.hovered_row = None;
+        self.chat.update(cx, |chat, cx| chat.show(account, window, cx));
         cx.notify();
     }
 
@@ -35,6 +46,7 @@ impl MailApp {
                 if text.is_empty() {
                     self.end_search(cx);
                 } else {
+                    self.chat_view = None;
                     self.query = Some(text.into());
                     self.layers.clear();
                     self.highlight = None;

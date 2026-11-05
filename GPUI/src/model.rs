@@ -177,6 +177,14 @@ impl Address {
         self.name.clone().unwrap_or_else(|| self.email.clone())
     }
 
+    /// `Name <email>`, or the bare address.
+    pub fn header_form(&self) -> String {
+        match &self.name {
+            Some(name) if name != &self.email => format!("{name} <{}>", self.email),
+            _ => self.email.to_string(),
+        }
+    }
+
     /// The first letter or digit of the name, uppercased (`Avatar.initials`).
     pub fn initial(&self) -> SharedString {
         let name = self.name.as_ref().unwrap_or(&self.email);
@@ -374,6 +382,22 @@ impl Message {
 
     pub fn sender(&self) -> Address {
         self.from.first().cloned().unwrap_or(Address { name: None, email: "(unknown)".into() })
+    }
+
+    /// The body a forward of this message starts with (`Replies.forward`): a header block, then
+    /// the text.
+    pub fn forwarded(&self, subject: &str) -> String {
+        let list = |addresses: &[Address]| addresses.iter().map(Address::header_form).collect::<Vec<_>>().join(", ");
+        let mut header = vec!["---------- Forwarded message ---------".to_owned(), format!("From: {}", list(&self.from))];
+        if let Some(date) = self.date {
+            header.push(format!("Date: {}", date.with_timezone(&Local).format("%a, %b %-d, %Y at %-I:%M %p")));
+        }
+        header.push(format!("Subject: {subject}"));
+        header.push(format!("To: {}", list(&self.to)));
+        if !self.cc.is_empty() {
+            header.push(format!("Cc: {}", list(&self.cc)));
+        }
+        format!("{}\n\n{}", header.join("\n"), self.text.as_ref().map_or("", |text| text.as_ref()))
     }
 }
 

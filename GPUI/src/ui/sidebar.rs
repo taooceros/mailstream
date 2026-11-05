@@ -24,16 +24,24 @@ struct Node {
     /// Whether it has children, and so a disclosure triangle.
     expandable: bool,
     /// What selecting it shows; `None` rows only fold.
-    source: Option<Source>,
+    source: Option<Pick>,
     /// Account inboxes under the unified Inbox: secondary text.
     secondary: bool,
     tooltip: Option<SharedString>,
 }
 
+/// What a selectable row shows.
+#[derive(Clone, PartialEq)]
+enum Pick {
+    Mail(Source),
+    /// Google Chat: every account's spaces, or one account's.
+    Chat(Option<SharedString>),
+}
+
 impl MailApp {
     pub(super) fn render_sidebar(&self, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let mut rows: Vec<AnyElement> = Vec::new();
-        for node in self.sidebar_nodes() {
+        for node in self.sidebar_nodes(cx) {
             rows.push(self.sidebar_row(node, p, cx));
         }
         div()
@@ -73,7 +81,7 @@ impl MailApp {
     }
 
     /// The visible rows: the tree flattened through expanded nodes.
-    fn sidebar_nodes(&self) -> Vec<Node> {
+    fn sidebar_nodes(&self, cx: &App) -> Vec<Node> {
         let mut nodes = Vec::new();
         let boxes = |account: &Account| self.mailboxes.get(&account.id).map(Vec::as_slice).unwrap_or_default();
 
@@ -104,7 +112,7 @@ impl MailApp {
                 leading: Leading::Icon(Icon::for_role(role)),
                 badge: members.iter().map(|(_, _, b)| b.badge()).sum(),
                 expandable: children,
-                source: Some(Source::Unified(role)),
+                source: Some(Pick::Mail(Source::Unified(role))),
                 secondary: false,
                 tooltip: None,
             });
@@ -117,7 +125,43 @@ impl MailApp {
                         leading: Leading::Dot(design::account_color(index)),
                         badge: inbox.unread.unwrap_or(0),
                         expandable: false,
-                        source: Some(mailbox_source(account, inbox)),
+                        source: Some(Pick::Mail(mailbox_source(account, inbox))),
+                        secondary: true,
+                        tooltip: Some(account.id.clone()),
+                    });
+                }
+            }
+        }
+
+        // Google Chat, when the app has it: one node, expanding into accounts when there are several.
+        let chat = self.chat.read(cx);
+        if chat.supported() && !chat.accounts().is_empty() {
+            let key: SharedString = "chat".into();
+            let several = chat.accounts().len() > 1;
+            let open = several && self.expanded.contains(&key);
+            nodes.push(Node {
+                key,
+                depth: 0,
+                title: "Chat".into(),
+                leading: Leading::Icon(Icon::Chat),
+                badge: chat.unread(None) as u32,
+                expandable: several,
+                source: Some(Pick::Chat(None)),
+                secondary: false,
+                tooltip: None,
+            });
+            if open {
+                for (position, account) in chat.accounts().iter().enumerate() {
+                    // Chat accounts take their mail account's color, as natively.
+                    let index = self.accounts.iter().position(|a| a.id == account.id).unwrap_or(position);
+                    nodes.push(Node {
+                        key: format!("chat:{}", account.id).into(),
+                        depth: 1,
+                        title: account.label.clone(),
+                        leading: Leading::Dot(design::account_color(index)),
+                        badge: chat.unread(Some(&account.id)) as u32,
+                        expandable: false,
+                        source: Some(Pick::Chat(Some(account.id.clone()))),
                         secondary: true,
                         tooltip: Some(account.id.clone()),
                     });
@@ -191,7 +235,10 @@ impl MailApp {
 
     fn sidebar_row(&self, node: Node, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let is_section = node.key.starts_with("section:");
-        let selected = node.source.as_ref().is_some_and(|source| self.source == *source && self.query.is_none());
+        let selected = node.source.as_ref().is_some_and(|pick| match pick {
+            Pick::Mail(source) => self.chat_view.is_none() && self.source == *source && self.query.is_none(),
+            Pick::Chat(account) => self.chat_view.as_ref() == Some(account),
+        });
         let expanded = self.expanded.contains(&node.key);
         let key = node.key.clone();
         let toggle_key = node.key.clone();
@@ -285,7 +332,8 @@ impl MailApp {
                 d.tooltip(move |_, cx| cx.new(|_| Tooltip { text: tip.clone(), p }).into())
             })
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| match &source {
-                Some(source) => this.select(source.clone(), window, cx),
+                Some(Pick::Mail(source)) => this.select(source.clone(), window, cx),
+                Some(Pick::Chat(account)) => this.select_chat(account.clone(), window, cx),
                 // Rows that show nothing themselves fold, as clicking them does natively.
                 None => this.toggle_expanded(&key, cx),
             }))
@@ -330,7 +378,7 @@ fn mailbox_node(account: &Account, mailbox: &Mailbox, depth: usize) -> Node {
         leading: Leading::Icon(Icon::for_role(mailbox.role)),
         badge: mailbox.badge(),
         expandable: false,
-        source: Some(source),
+        source: Some(Pick::Mail(source)),
         secondary: false,
         tooltip: None,
     }

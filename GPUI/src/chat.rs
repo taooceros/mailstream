@@ -1296,7 +1296,7 @@ impl ChatPane {
         }
     }
 
-    fn new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
         self.start_form(window, cx);
     }
 

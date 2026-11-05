@@ -12,6 +12,7 @@ use gpui::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::avatars;
 use crate::control::{self, ControlError};
 use crate::design::{self, Palette, UI_FONT, compose as metrics, editor, layout, radius, text};
 use crate::input::{InputEvent, TextInput};
@@ -771,6 +772,7 @@ impl Compose {
                 let rows = suggestions.people.iter().enumerate().map(|(ix, person)| {
                     let address = person.address();
                     let picked = person.clone();
+                    let photo = avatars::avatar(&address, metrics::MENU_AVATAR, p, cx);
                     div()
                         .id(ElementId::NamedInteger("suggestion".into(), ix as u64))
                         .h(px(metrics::MENU_ROW))
@@ -782,7 +784,7 @@ impl Compose {
                         .cursor_pointer()
                         .when(ix == suggestions.highlighted, |d| d.bg(p.selection))
                         .hover(|s| s.bg(p.hover))
-                        .child(initial_avatar(&address, metrics::MENU_AVATAR, p))
+                        .child(photo)
                         .child(
                             div()
                                 .flex_1()
@@ -869,22 +871,6 @@ fn popover(p: &Palette) -> Div {
         .occlude()
         // A click in the menu leaves the keyboard in the field.
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-}
-
-/// The sender initial on its stable color (`Avatar`).
-fn initial_avatar(address: &Address, size: f32, p: &Palette) -> Div {
-    div()
-        .flex_shrink_0()
-        .size(px(size))
-        .rounded_full()
-        .bg(design::avatar_color(&address.email, p.dark))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(size * 0.43))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(p.on_accent)
-        .child(address.initial())
 }
 
 impl Render for Compose {

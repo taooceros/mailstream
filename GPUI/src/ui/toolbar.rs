@@ -5,8 +5,10 @@ use super::*;
 
 impl MailApp {
     pub(super) fn render_toolbar(&self, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let layers = self.live_layers();
+        let chat = self.chat_view.is_some();
+        let layers = if chat { &[] } else { self.live_layers() };
         let (title, count): (SharedString, Option<usize>) = match (layers.last(), &self.query) {
+            _ if chat => ("Chat".into(), None),
             (Some(Layer::Reader(_)), _) => ("".into(), None),
             (Some(Layer::Bundle(category)), _) => {
                 (category.title().into(), self.open_bundle_members().map(|b| b.members.len()))
@@ -17,7 +19,7 @@ impl MailApp {
             (None, None) => (self.source.title(), None),
         };
         let back_to: Option<SharedString> = match layers.len() {
-            0 if self.query.is_some() => Some(self.source.title()),
+            0 if self.query.is_some() && !chat => Some(self.source.title()),
             0 => None,
             depth => Some(match layers.get(depth.wrapping_sub(2)) {
                 Some(Layer::Bundle(category)) => category.title().into(),
@@ -125,8 +127,25 @@ impl MailApp {
             )
             .child(div().w(px(12.)))
             .child(
+                icon_button("reply", Icon::Reply, "Reply", has, p.muted, p)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.reply(&Reply, window, cx))),
+            )
+            .child(
+                icon_button("reply-all", Icon::ReplyAll, "Reply All", has, p.muted, p)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.reply_all(&ReplyAll, window, cx))),
+            )
+            .child(
+                icon_button("forward", Icon::Forward, "Forward", has, p.muted, p)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.forward(&Forward, window, cx))),
+            )
+            .child(div().w(px(12.)))
+            .child(
                 icon_button("refresh", Icon::Refresh, "Get New Mail", true, p.muted, p)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
+            )
+            .child(
+                icon_button("compose", Icon::Compose, "New Message", true, p.muted, p)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.new_message(&NewMessage, window, cx))),
             )
             .child(
                 div()
