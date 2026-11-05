@@ -5,8 +5,11 @@ let package = Package(
     name: "Mailstream",
     platforms: [.macOS(.v26)],
     targets: [
+        // The Turso database engine through its SQLite C API; scripts/turso.sh builds the library.
+        .systemLibrary(name: "CTurso", path: "Sources/CTurso"),
         .executableTarget(
             name: "Mailstream",
+            dependencies: ["CTurso"],
             path: "Sources/Mailstream",
             swiftSettings: [
                 // An app target: code is main-actor unless it says otherwise, async functions run
@@ -22,6 +25,7 @@ let package = Package(
                 .linkedFramework("WebKit"),
                 .linkedFramework("Security"),
                 .linkedFramework("CoreFoundation"),
+                .unsafeFlags(["-L\(Context.packageDirectory)/.turso/lib"]),
             ]
         ),
     ]

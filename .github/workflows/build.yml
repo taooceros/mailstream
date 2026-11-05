@@ -26,6 +26,15 @@ jobs:
       - name: Toolchain
         run: swift --version
 
+      # The Turso engine's static library, built by cargo once per pinned version.
+      - uses: actions/cache@v4
+        with:
+          path: .turso/lib
+          key: turso-${{ runner.os }}-${{ hashFiles('scripts/turso.sh', 'Sources/CTurso/sqlite3.h') }}
+
+      - name: Turso
+        run: ./scripts/turso.sh
+
       - name: Build (debug, warnings are errors)
         run: swift build -Xswiftc -warnings-as-errors
 
