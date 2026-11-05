@@ -80,6 +80,14 @@ final class ContentStore {
         }
     }
 
+    /// The preview of `ref`, loading the message in the background when none is known. The body
+    /// only fills free room in memory, like a prefetch.
+    func preview(_ ref: MessageRef) async -> String? {
+        if let snippet = snippets[ref] { return snippet }
+        let loaded = try? await task(ref, priority: .background).value
+        return loaded?.content.snippet ?? snippets[ref]
+    }
+
     /// Drops everything of `removed` accounts: bodies, previews and loads in flight.
     func forget(accounts removed: Set<String>) {
         generation += 1

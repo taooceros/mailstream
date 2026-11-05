@@ -73,8 +73,11 @@ mailstream status                   # accounts, sync, push, AI tagging
 mailstream config list              # every setting with value, default, description
 mailstream config set sync.pollSeconds 120
 mailstream mail list --mailbox inbox --unread --limit 10
+mailstream mail list --limit 60 --cursor '<next from the previous page>'
 mailstream mail search "invoice" --account you@gmail.com
-mailstream mail show '<conversation id>'
+mailstream mail previews '<id>' '<id>'
+mailstream mail avatars sender@example.com news@shop.example --automated news@shop.example
+mailstream mail show '<conversation id>' --html
 mailstream mail archive '<id>' '<id>'
 mailstream mail tag '<id>' --category newsletter
 mailstream mail reply '<id>' --body - --yes < reply.txt
@@ -110,7 +113,12 @@ running. The protocol is one JSON line each way:
 Conversations are addressed by the ids `mail list`, `mail search` and `mail show`
 return; the app remembers them while it runs, with the mailboxes they were listed
 from, which is where `mail archive` moves them out of. Listing fetches from the
-providers without touching what the window shows. Actions answer once the provider
+providers without touching what the window shows. `mail list` answers with `next`, a
+cursor for the page after it (by date, so mail arriving between pages shifts nothing);
+conversations listed without a preview line get one from `mail previews`, which loads
+their latest messages. `mail show --html` adds each message's HTML body, its inline images
+pointing at `file://` copies in the cache. `mail avatars` answers each sender's picture as a PNG
+file in the avatar cache, the one the window shows. Actions answer once the provider
 confirmed them and report each id under `done` or `failed`. Sending (`mail send`,
 `mail reply`), signing an account out and deleting from the trash do nothing without
 `--yes`; the error says what would happen. `accounts add google` opens the browser
