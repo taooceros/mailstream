@@ -34,6 +34,7 @@ that one build, so the app and every other host get asked again.
 | `src/state.rs` | `MailApp`: selection, lists served from memory for 90 s and reloaded on change events, paging, search, previews, layers over the list, key bindings |
 | `src/state/nav.rs`, `src/state/actions.rs` | Navigation (sources, bundles, the reader, refresh) and optimistic actions (archive, trash, restore, star, read, waiting, tags) that roll back on failure |
 | `src/ui/` | Sidebar tree (`sidebar.rs`), toolbar, the lazy conversation list with Smart Inbox bundles (`list.rs`), the reader with its reply card (`reader.rs`), the context menu (`menu.rs`) |
+| `src/webview.rs` | HTML bodies in native `WKWebView`s laid over the reader: placed and clipped each frame, sized to their page, page scripts off, links opened in the browser, wheel events handed back to the reader |
 | `src/swipe.rs` | Two-finger back swipe over the bundle and reader layers, following the system's swipe-between-pages setting |
 | `src/chat.rs` | `ChatPane`: Google Chat spaces, a space's log (bottom-aligned, runs and day dividers, markup and links), sending, earlier pages, threads, New Chat with contact completion; the open space is read again every 5 s |
 | `src/compose.rs` | The New Message and Forward windows (From picker, recipient completion, discard confirmation) and the reader's reply card |
@@ -55,5 +56,4 @@ back (Esc or a two-finger swipe) reveals the live list without reloading it. Ope
 conversation shows its header at once; bodies arrive after.
 
 Limits:
-- HTML mail is shown through its text part.
 - Deleting from the Trash for good is left to the app.

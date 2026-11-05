@@ -136,16 +136,20 @@ impl MailApp {
         if !open {
             return card.into_any_element();
         }
-        card.when_some(message.text.as_ref(), |d, text| {
-            d.child(
+        let body = match (&message.html, &message.text) {
+            (Some(html), _) => Some(html_body(message.id.clone(), html.clone())),
+            (None, Some(text)) => Some(
                 div()
                     .pl(px(42.))
                     .text_size(px(text::READING))
                     .line_height(relative(1.55))
-                    .child(text.clone()),
-            )
-        })
-        .when(message.truncated, |d| {
+                    .child(text.clone())
+                    .into_any_element(),
+            ),
+            (None, None) => None,
+        };
+        card.children(body)
+        .when(message.truncated && message.html.is_none(), |d| {
             d.child(
                 div()
                     .pl(px(42.))
@@ -187,4 +191,18 @@ impl MailApp {
         })
         .into_any_element()
     }
+}
+
+/// An HTML body: a placeholder the native web view is laid over, as tall as its page once that
+/// is measured.
+fn html_body(id: SharedString, html: SharedString) -> AnyElement {
+    let height = webview::height(&id).unwrap_or(40.);
+    div()
+        .pl(px(42.))
+        .child(
+            canvas(|_, _, _| {}, move |bounds, _, window, _| webview::paint(&id, &html, bounds, window))
+                .w_full()
+                .h(px(height)),
+        )
+        .into_any_element()
 }

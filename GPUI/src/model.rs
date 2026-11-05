@@ -379,6 +379,8 @@ pub struct Message {
     pub date: Option<DateTime<Utc>>,
     pub unread: bool,
     pub text: Option<SharedString>,
+    /// The HTML body, when the message has one; the reader shows it in a web view.
+    pub html: Option<SharedString>,
     pub truncated: bool,
     pub attachments: Vec<Attachment>,
     pub error: Option<SharedString>,
@@ -400,6 +402,7 @@ impl From<mailstream::Message> for Message {
             date: date(m.date),
             unread: m.unread,
             text: m.text.map(Into::into),
+            html: m.html.map(Into::into),
             truncated: m.truncated,
             attachments: m
                 .attachments

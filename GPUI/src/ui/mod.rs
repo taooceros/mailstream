@@ -19,6 +19,7 @@ use crate::avatars;
 use crate::design::{self, Palette, UI_FONT, icon as icon_size, layout, list as metrics, radius, text};
 use crate::format;
 use crate::icons::{Icon, icon};
+use crate::webview;
 use crate::model::{Address, Category, Conversation, Message, Role};
 use crate::state::{
     Archive, Back, CONTEXT, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh, Removal, Reply,
@@ -71,6 +72,11 @@ impl Render for MailApp {
             .text_size(px(text::BODY))
             .text_color(p.text)
             .bg(p.page)
+            // Painted first: native web views placed last frame are hidden until painted again.
+            .child({
+                let covered = self.context_menu.is_some();
+                canvas(|_, _, _| {}, move |_, _, _, _| webview::begin_frame(covered)).absolute().size_0()
+            })
             .when(self.sidebar_open, |d| d.child(self.render_sidebar(p, cx)))
             .child(
                 div()

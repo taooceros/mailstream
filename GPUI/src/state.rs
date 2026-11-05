@@ -695,7 +695,7 @@ impl MailApp {
         self.background(
             cx,
             async move {
-                let thread = engine().show(arg, 200_000, false).await?;
+                let thread = engine().show(arg, 200_000, true).await?;
                 let now = Local::now();
                 Ok::<_, MailError>(
                     thread

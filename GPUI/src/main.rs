@@ -15,6 +15,7 @@ mod state;
 mod swipe;
 mod textarea;
 mod ui;
+mod webview;
 
 use gpui::{
     App, AppContext, Application, Bounds, Menu, MenuItem, OsAction, TitlebarOptions, WindowBounds, WindowOptions,
