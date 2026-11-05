@@ -11,6 +11,26 @@ This repo is a colocated jj repo (`.jj` + `.git`), pushed to `github.com/taoocer
 - Push: `jj bookmark set main -r @-` then `jj git push`.
 - The repo is public: never commit secrets, tokens, OAuth client files or personal mail data.
 
+## Work tracking: Linear
+
+Work is tracked in Linear: team `TAO`, project `Mailstream`. Issue IDs look like `TAO-12`. Use
+omp's Linear tools; the issue, not the session, is the record other sessions read.
+
+- Labels: one type (`Bug`, `Feature`, `Improvement`, `Performance`, `Regression`) plus one `Area`
+  label. Area names match the jj workspaces (`chat`, `concurrency`, `flutter`, `gpui`, `motion`,
+  `ui-shell`) or the layer (`sync`, `cache`, `ffi`); an issue is worked in its area's workspace.
+- Start: read the issue and its comments. Skip issues already In Progress unless the user hands
+  one over. Move it to In Progress and comment `[omp @ <workspace>] start: <plan>`.
+- Progress: record decisions, blockers and dead ends as comments; the next session only sees
+  what is on the issue.
+- Finish: reference the issue in the commit (`Fixes TAO-12`, or `Refs TAO-12` for partial work),
+  move it to In Review and comment what changed, how it was verified and what remains. The user
+  moves it to Done.
+- Questions only the user can decide: move the issue to Todo and ask in a comment instead of
+  guessing.
+- Problems found outside the current change: file a Backlog issue with labels; do not fix them
+  in passing.
+
 ## Building
 
 - The app links the Turso database engine (`.turso/lib/libturso_sqlite3.a`). Run `scripts/turso.sh`
