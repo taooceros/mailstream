@@ -10,8 +10,9 @@ import Foundation
 /// socket. Events are `{"event": "<what changed>"}`; a front end re-reads what it shows.
 ///
 /// The engine is main-actor code: the host must run the main thread's run loop (an AppKit,
-/// Flutter or GPUI app does; a command-line host calls `mailstream_run_main_loop`). Callbacks run
-/// on the main thread; the bytes they get are valid only during the call.
+/// Flutter or GPUI app does; a command-line host calls `mailstream_run_main_loop`). Answers
+/// arrive on a background thread and events on the main thread; the bytes a callback gets are
+/// valid only during the call.
 public typealias MailstreamCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>?, Int) -> Void
 
 /// A C callback with its context, handed to the main actor.
@@ -32,15 +33,16 @@ public nonisolated func mailstreamStart() {
     Task { @MainActor in _ = HostedEngine.shared }
 }
 
-/// Runs one request; `reply` gets the answer once, on the main thread.
+/// Runs one request; `reply` gets the answer once, on a background thread. Only the command
+/// itself runs on the main thread: decoding, encoding and the copy into `reply` do not.
 @_cdecl("mailstream_call")
 public nonisolated func mailstreamCall(_ request: UnsafePointer<UInt8>?, _ length: Int,
                                        _ context: UnsafeMutableRawPointer?, _ reply: MailstreamCallback) {
     let data = request.map { Data(bytes: $0, count: length) } ?? Data()
     let callback = Callback(context: context, function: reply)
-    Task { @MainActor in
-        let answer = await HostedEngine.shared.service.handle(data)
-        callback(answer)
+    Task {
+        let service = await MainActor.run { HostedEngine.shared.service }
+        callback(await service.handle(data))
     }
 }
 
