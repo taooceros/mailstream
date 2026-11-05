@@ -7,6 +7,8 @@
 # offers through its SDK, so several processes (the app and FFI front ends) can share mail.db.
 set -eu
 cd "$(dirname "$0")/.."
+# Rust builds go through rcache (~/projects/rcache), the rustc cache shared across workspaces.
+command -v rcache >/dev/null && export RUSTC_WRAPPER="${RUSTC_WRAPPER:-rcache}"
 TAG="v0.8.3"
 PATCH="scripts/turso-multiprocess.patch"
 LIB=".turso/lib/libturso_sqlite3.a"

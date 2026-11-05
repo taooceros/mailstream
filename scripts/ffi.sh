@@ -5,6 +5,8 @@
 set -eu
 cd "$(dirname "$0")/.."
 CONFIG="${CONFIG:-debug}"
+# Rust builds go through rcache (~/projects/rcache), the rustc cache shared across workspaces.
+command -v rcache >/dev/null && export RUSTC_WRAPPER="${RUSTC_WRAPPER:-rcache}"
 
 ./scripts/turso.sh
 swift build -c "$CONFIG" --product MailstreamKit

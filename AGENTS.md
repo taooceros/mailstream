@@ -53,6 +53,10 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
 
 ## Building
 
+- Every Rust build (cargo here, in FFI/, GPUI/, and Turso) goes through rcache (`~/projects/rcache`),
+  the copy-on-write rustc cache shared across jj workspaces: `~/.cargo/config.toml` sets
+  `build.rustc-wrapper` to it, and `scripts/ffi.sh`/`turso.sh` export `RUSTC_WRAPPER=rcache`.
+  Don't set `RUSTC_WRAPPER`/`RCACHE_DISABLE` to bypass it; `rcache stats` shows hits.
 - The app links the Turso database engine (`.turso/lib/libturso_sqlite3.a`). Run `scripts/turso.sh`
   once before `swift build` (it needs rustup; `bundle.sh` runs it too). It builds the pinned version
   with cargo in a few minutes and returns at once after that.
