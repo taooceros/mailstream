@@ -127,6 +127,44 @@ sign-in and waits for the person to finish it.
 Failures print `{"error": {"code", "message"}}` on stderr and exit 1, 2 for usage
 errors, 3 when the app cannot be reached.
 
+## Front ends in other languages (FFI)
+
+The engine (accounts, sync, cache, threading, push, tagging) also runs inside other
+front ends' processes. The Swift package builds it as `libMailstreamKit.dylib`, whose
+small C API (`Sources/MailstreamKit/FFI/Exports.swift`) takes the control socket's JSON
+requests in memory. `FFI/` is a Rust crate over that API with typed values, async calls
+and change events (`Mailstream`, `EventListener`). Rust front ends depend on the crate;
+[UniFFI](https://mozilla.github.io/uniffi-rs/) generates the Dart bindings for Flutter
+(through [uniffi-dart](https://github.com/Uniffi-Dart/uniffi-dart), which pins UniFFI
+0.31.2) and could generate Kotlin or Python ones.
+
+```sh
+./scripts/ffi.sh                                  # libMailstreamKit.dylib + FFI/target/debug/libmailstream.dylib
+DART_OUT=path/to/lib/src ./scripts/ffi.sh         # and the Dart bindings (asset package:mailstream/uniffi:mailstream)
+(cd FFI && cargo run --example inbox)             # lists the inboxes, then prints change events
+./scripts/sign.sh FFI/target/debug/examples/inbox # sign a host so it reads the saved sign-ins
+```
+
+- **One signature.** `scripts/sign.sh` signs the app and every host with the Apple
+  Development certificate and code identifier `dev.mailstream.Mailstream`. The Keychain
+  item holding the sign-ins trusts that pair, so every host reads it without asking. A
+  host signed otherwise gets a Keychain prompt.
+- **Shared database.** Every process opens `mail.db` with Turso's experimental
+  multi-process WAL (`mail.db-tshm`). The Turso 0.8.3 C API does not expose it, so
+  `scripts/turso.sh` applies `scripts/turso-multiprocess.patch`. Turso refuses to mix
+  modes, so a build from before this change cannot open the file while a new one has it.
+  Each process runs its own engine (polling, push, tagging). Running several at once is
+  meant for development.
+- **Main thread.** The engine is main-actor code. App hosts (Flutter, GPUI) run the main
+  run loop already; a command-line host calls `run_main_loop()` on its main thread and
+  works from other threads. Events arrive on the main thread. Each one names what changed
+  (`Accounts`, `Mailboxes`, `Conversations`, `Previews`, `Tags`, `Sync`, `Problems`), and
+  the front end reads it again.
+- **OAuth clients.** A sign-in's OAuth client is stored with its refresh token. Older
+  sign-ins relied on the client in the app's `Info.plist`, which other hosts lack. The app
+  stores that client the next time it refreshes such a token, and from then on other hosts
+  can refresh it too.
+
 ## Build and run
 
 ```sh
@@ -165,6 +203,7 @@ for mail and asks for your OAuth client at sign-in. Dragged to Applications, it 
 | --- | --- | --- |
 | Accounts | `Backend/Accounts.swift`, `OAuth.swift`, `Tokens.swift`, `AppConfig.swift`, `UI/AccountsWindowController.swift` | Signed-in accounts, browser sign-in (authorization code with PKCE, loopback redirect), refresh tokens in the Keychain, build-time defaults from `Info.plist`, the Settings window |
 | Control | `Control/Settings.swift`, `Commands.swift`, `CLI.swift`, `ControlSocket.swift`, `ControlService.swift`, `MailStore+Control.swift` | settings.json with live reload (an observable `Settings`), the `mailstream` command table, the CLI, the control socket (a `NetworkListener` on a Unix-domain path) and the app side of each command |
+| FFI | `FFI/Exports.swift`, `FFI/` (Rust crate) | The engine without windows for other front ends: a C API over `ControlService` in `libMailstreamKit.dylib`, and the UniFFI crate that types it for Rust and Dart |
 | Backend | `Backend/API.swift`, `MailBackend.swift`, `GmailBackend.swift`, `MIMEMessage.swift`, `GraphBackend.swift`, `MessageAssembly.swift`, `HTMLText.swift`, `AsyncSemaphore.swift`, `QuotaBudget.swift` | `API` sends authorized requests per account (token refresh on 401, backoff on 429 and 5xx; a rate-limit refusal pauses the whole account's quota budget; Gmail runs 6 interactive / 3 background requests at a time within a 3,000-units-a-minute budget, Graph 3 / 1 for Outlook's limit of four per mailbox). Gmail and Graph implement one `MailBackend` protocol: mailboxes with roles, cursor-paged envelopes, search, message content (bodies, inline `cid:` parts and attachments written to the cache), flags, moves, sending |
 | Chat | `Backend/Chat.swift`, `ChatAPI.swift`, `Store/ChatStore.swift`, `UI/ChatPage.swift`, `UI/ChatReader.swift` | Google Chat REST API for Google accounts granted Chat access; main-actor spaces and message state with a disk cache, rendered into the reader's page |
 | Push | `Backend/PushService.swift`, `Push/` | One WebSocket to the relay; registers Gmail watches and Graph subscriptions for every account and asks the store to refresh the account a notification names |

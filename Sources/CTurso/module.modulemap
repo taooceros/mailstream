@@ -1,5 +1,6 @@
 module CTurso [system] {
     header "sqlite3.h"
+    header "turso.h"
     link "turso_sqlite3"
     export *
 }

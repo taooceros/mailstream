@@ -21,6 +21,10 @@ This repo is a colocated jj repo (`.jj` + `.git`), pushed to `github.com/taoocer
   whole module single-threaded, ~30 s per edit; build it only to check performance or ship.
 - Deploying to `/Applications/Mailstream.app` is always a release build: `CONFIG=release
   ./scripts/bundle.sh`, then replace the bundle (the running copy keeps working until relaunched).
+- All Swift code is in the `MailstreamKit` target (`Sources/MailstreamKit`); the `Mailstream`
+  executable only calls `MailstreamApp.main()`. `MailstreamKit` is also the dynamic library FFI
+  front ends load: `scripts/ffi.sh` builds it with the UniFFI crate in `FFI/`. New commands go in
+  `CommandSpec`/`ControlService`, then get a typed method in `FFI/src/lib.rs`.
 - Test only what you changed: build, then exercise the parts your change touches (the view, flow or command you edited). Do not re-run the whole app checklist or every CLI case after each change; we iterate in small steps.
 
 ## Swift: concurrency and state

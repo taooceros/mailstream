@@ -68,15 +68,7 @@ $CONFIG_KEYS</dict>
 </plist>
 PLIST
 
-# macOS pins the app's Keychain item (OAuth tokens) to its signer: with an Apple Development
-# certificate (free with any Apple ID in Xcode) that is the team, so rebuilds read it silently;
-# signed ad hoc, each new build is a new signer and macOS asks once to allow it.
-IDENTITY=$(security find-identity -v -p codesigning |
-  sed -n 's/^ *[0-9]*) \([0-9A-F]*\) "Apple Development: .*"$/\1/p' | sed -n 1p)
-if [ -n "$IDENTITY" ]; then
-  codesign --force --sign "$IDENTITY" "$APP" >/dev/null
-else
-  echo "note: signed ad hoc; macOS asks once after each rebuild to let it read saved sign-ins" >&2
-  codesign --force --sign - "$APP" >/dev/null
-fi
+# macOS pins the app's Keychain item (OAuth tokens) to its signer; sign.sh signs the app and
+# every FFI front end alike so all of them read it silently.
+./scripts/sign.sh "$APP"
 echo "Built $APP"

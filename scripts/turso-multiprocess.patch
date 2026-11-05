@@ -1,0 +1,36 @@
+--- a/bindings/c/src/lib.rs
++++ b/bindings/c/src/lib.rs
+@@ -14,6 +14,8 @@
+ 
+ /// Global flag: when set, all subsequently opened databases enable experimental features.
+ static EXPERIMENTAL_ENABLED: AtomicBool = AtomicBool::new(false);
++/// Global flag: when set, databases opened after it coordinate their WAL across processes.
++static MULTIPROCESS_WAL_ENABLED: AtomicBool = AtomicBool::new(false);
+ static SQLITE_VERSION_C_STRING: OnceLock<CString> = OnceLock::new();
+ 
+ /// Global B-tree search counter exposed to the TCL test harness as
+@@ -54,6 +56,14 @@
+     EXPERIMENTAL_ENABLED.store(true, Ordering::Release);
+ }
+ 
++/// Enable Turso's experimental multi-process WAL (the `.tshm` sidecar) for databases opened
++/// after this call, so several processes can read and write one file. Every process opening the
++/// file must enable it: Turso refuses mixed opens.
++#[no_mangle]
++pub extern "C" fn turso_enable_multiprocess_wal() {
++    MULTIPROCESS_WAL_ENABLED.store(true, Ordering::Release);
++}
++
+ /// Build `DatabaseOpts` respecting the global experimental flag.
+ fn default_db_opts() -> DatabaseOpts {
+     let mut opts = DatabaseOpts::new();
+@@ -65,6 +75,9 @@
+             .with_attach(true)
+             .with_autovacuum(true);
+     }
++    if MULTIPROCESS_WAL_ENABLED.load(Ordering::Acquire) {
++        opts = opts.with_multiprocess_wal(true);
++    }
+     opts
+ }
+ 
