@@ -45,12 +45,6 @@ class _MailShellState extends State<MailShell> {
   /// Whether the window is wide enough for list and conversation side by side.
   bool _twoPane = false;
 
-  /// The conversation last open, kept to slide out beside the list as the split closes.
-  Conversation? _lastOpened;
-
-  /// The chat space last open, kept the same way.
-  SpaceKey? _lastSpace;
-
   MailState get state => widget.state;
 
   /// What the list and the open bundle show, for drawing and for the keyboard.
@@ -328,39 +322,18 @@ class _MailShellState extends State<MailShell> {
     final listPane = _Pane(child: chat.active ? _onChat(() => ChatListPane(state: state)) : _listPane(context));
     final opened = chat.active ? null : state.opened;
     final space = chat.active ? chat.opened : null;
-    final open = opened != null || space != null;
-    if (opened != null) _lastOpened = opened;
-    if (space != null) _lastSpace = space;
-    // The pane that slides out as the split closes is the kind that was in view.
-    if (chat.active) _lastOpened = null;
-    if (!chat.active) _lastSpace = null;
     final Widget content;
     if (_twoPane) {
       final listWidth = (width * 0.36).clamp(400.0, 520.0);
-      // While the split closes, the conversation that was open slides out.
-      final shownSpace = space ?? _lastSpace;
-      final shown = opened ?? _lastOpened;
-      final detail = shownSpace != null
-          ? _Pane(child: _chatPane(shownSpace))
-          : shown == null
-          ? null
-          : _Pane(child: _detailPane(context, shown));
-      content = TweenAnimationBuilder<double>(
-        tween: Tween(end: open ? 1 : 0),
-        duration: open ? Motion.enter : Motion.exit,
-        curve: Motion.curve,
-        builder: (context, split, _) => LayoutBuilder(builder: (context, constraints) {
-          final full = constraints.maxWidth;
-          final list = full + (listWidth - full) * split;
-          return ClipRect(
-            child: Stack(children: [
-              Positioned(left: 0, top: 0, bottom: 0, width: list, child: listPane),
-              // The conversation keeps its final width, so its text does not reflow as it slides.
-              if (split > 0 && detail != null)
-                Positioned(left: list + Panes.spacer, top: 0, bottom: 0, width: full - listWidth - Panes.spacer, child: detail),
-            ]),
-          );
-        }),
+      content = SplitDetail(
+        list: listPane,
+        listWidth: listWidth,
+        onDismiss: chat.active ? chat.close : state.close,
+        detail: space != null
+            ? _Pane(child: _chatPane(space))
+            : opened == null
+            ? null
+            : _Pane(child: _detailPane(context, opened)),
       );
     } else {
       content = Stack(

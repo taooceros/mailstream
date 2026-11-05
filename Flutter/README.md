@@ -25,7 +25,9 @@ The layout follows Material's large-screen guidance: a navigation drawer from 12
 (a navigation rail below, whose menu button opens the drawer). The list fills the window;
 from 1000 dp opening a conversation splits it into the list-detail layout, list and
 conversation in two rounded panes side by side, and closing it gives the list the width
-back. Narrower windows slide the conversation over the list.
+back. Narrower windows slide the conversation over the list. Either way a two-finger swipe to
+the right on the trackpad drags the conversation out and closes it, springing from the fingers'
+velocity.
 
 HTML mail is drawn by WebKit: `macos/Runner/MailHtmlView.swift` is a platform view
 (`mailstream/html`) that runs none of the mail's scripts, opens links in the browser, loads

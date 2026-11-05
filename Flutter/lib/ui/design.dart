@@ -33,6 +33,10 @@ abstract final class Motion {
   static const enter = Durations.medium4;
   static const exit = Durations.medium2;
   static const curve = Easing.emphasizedDecelerate;
+
+  /// Settles a swiped page from wherever the fingers let go, carrying their velocity: critically
+  /// damped, so it glides to rest without overshoot.
+  static final spring = SpringDescription.withDampingRatio(mass: 1, stiffness: 420, ratio: 1);
 }
 
 /// The conversation list's rows: dense two-line list items.

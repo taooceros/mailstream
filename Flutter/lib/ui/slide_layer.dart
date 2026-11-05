@@ -1,5 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 
 import 'design.dart';
 
@@ -27,12 +28,7 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
   /// Set once a swipe dismissed the layer, which is already off screen: no slide-out follows.
   bool _swipedAway = false;
 
-  // Swipe tracking.
-  bool? _horizontal;
-  double _velocity = 0;
-  Duration? _lastStamp;
-
-  static const _decisionDistance = 6.0;
+  final _swipe = HorizontalSwipe();
 
   @override
   void initState() {
@@ -73,34 +69,23 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
   }
 
   void _start(PointerPanZoomStartEvent event) {
-    _horizontal = null;
-    _velocity = 0;
-    _lastStamp = event.timeStamp;
+    _swipe.start(event);
     _drag.stop();
   }
 
   void _update(PointerPanZoomUpdateEvent event) {
-    final pan = event.pan;
-    _horizontal ??= pan.distance >= _decisionDistance ? pan.dx.abs() > pan.dy.abs() * 1.5 : null;
-    if (_horizontal != true) return;
-    final elapsed = (event.timeStamp - (_lastStamp ?? event.timeStamp)).inMicroseconds;
-    if (elapsed > 0) _velocity = event.panDelta.dx / elapsed * 1e6;
-    _lastStamp = event.timeStamp;
-    _drag.value = pan.dx;
+    if (_swipe.update(event)) _drag.value = event.pan.dx;
   }
 
   void _end(double width) {
-    if (_horizontal != true) return;
-    _horizontal = null;
+    final velocity = _swipe.end();
+    if (velocity == null) return;
     final offset = _drag.value;
-    final flicked = _velocity.abs() > 900 && _velocity.sign == offset.sign;
-    if (offset.abs() > width / 3 || flicked) {
+    if (HorizontalSwipe.dismisses(offset, velocity, width)) {
       _swipedAway = true;
-      _drag
-          .animateTo(offset.sign * width, duration: Motion.exit, curve: Motion.curve)
-          .whenComplete(widget.onDismiss);
+      _drag.animateWith(_settle(offset, offset.sign * width, velocity)).whenComplete(widget.onDismiss);
     } else {
-      _drag.animateTo(0, duration: Motion.enter, curve: Motion.curve);
+      _drag.animateWith(_settle(offset, 0, velocity));
     }
   }
 
@@ -137,3 +122,187 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
 
 /// Mouse back buttons go back too.
 bool isBackButton(PointerDownEvent event) => event.kind == PointerDeviceKind.mouse && event.buttons == kBackMouseButton;
+
+/// Tracks a two-finger horizontal trackpad swipe: decides its axis after a few pixels and measures
+/// the fingers' velocity as they let go.
+class HorizontalSwipe {
+  bool? _horizontal;
+  double _velocity = 0;
+  Duration? _lastStamp;
+
+  static const _decisionDistance = 6.0;
+
+  void start(PointerPanZoomStartEvent event) {
+    _horizontal = null;
+    _velocity = 0;
+    _lastStamp = event.timeStamp;
+  }
+
+  /// Whether the swipe is horizontal, so the caller should follow `event.pan.dx`.
+  bool update(PointerPanZoomUpdateEvent event) {
+    final pan = event.pan;
+    _horizontal ??= pan.distance >= _decisionDistance ? pan.dx.abs() > pan.dy.abs() * 1.5 : null;
+    if (_horizontal != true) return false;
+    final elapsed = (event.timeStamp - (_lastStamp ?? event.timeStamp)).inMicroseconds;
+    if (elapsed > 0) _velocity = event.panDelta.dx / elapsed * 1e6;
+    _lastStamp = event.timeStamp;
+    return true;
+  }
+
+  /// The release velocity in pixels per second, or null when the swipe was not horizontal.
+  double? end() {
+    if (_horizontal != true) return null;
+    _horizontal = null;
+    return _velocity;
+  }
+
+  /// Past a third of the page, or flicked that way.
+  static bool dismisses(double offset, double velocity, double width) =>
+      offset.abs() > width / 3 || (velocity.abs() > 900 && velocity.sign == offset.sign);
+}
+
+/// Springs a swiped value from [from] to [to], starting at the fingers' [velocity]; it rests
+/// within half a pixel of [to], so a dismissal hands over with the page off screen. [pixels] is
+/// how many pixels one unit of the value moves the page.
+Simulation _settle(double from, double to, double velocity, {double pixels = 1}) => SpringSimulation(
+  Motion.spring,
+  from,
+  to,
+  velocity,
+  tolerance: Tolerance(distance: 0.5 / pixels, velocity: 20 / pixels),
+);
+
+/// The list-detail split of wide windows: the list beside the opened page, which slides in from
+/// the trailing edge as the list narrows. A two-finger swipe to the right on the page drags it
+/// out, the list widening behind it, and closes it once past a third of its width or flicked.
+class SplitDetail extends StatefulWidget {
+  const SplitDetail({
+    super.key,
+    required this.list,
+    required this.detail,
+    required this.listWidth,
+    required this.onDismiss,
+  });
+
+  final Widget list;
+
+  /// Null closes the split; the page last shown slides out.
+  final Widget? detail;
+  final double listWidth;
+  final VoidCallback onDismiss;
+
+  @override
+  State<SplitDetail> createState() => _SplitDetailState();
+}
+
+class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStateMixin {
+  /// How far the split is open: 0 the list alone, 1 the page fully in. Driven by the open/close
+  /// animations and directly by the fingers while swiping.
+  late final _split = AnimationController.unbounded(vsync: this);
+  final _swipe = HorizontalSwipe();
+  Widget? _shown;
+
+  /// Set once a swipe closed the split, which is already springing shut: closing follows on its own.
+  bool _swipedAway = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _shown = widget.detail;
+    if (_shown != null) _split.value = 1;
+  }
+
+  @override
+  void didUpdateWidget(SplitDetail old) {
+    super.didUpdateWidget(old);
+    final detail = widget.detail;
+    if (detail != null) {
+      _shown = detail;
+      if (old.detail == null) {
+        _swipedAway = false;
+        _split.animateTo(1, duration: Motion.enter, curve: Motion.curve);
+      }
+    } else if (old.detail != null && !_swipedAway) {
+      _split.animateTo(0, duration: Motion.exit, curve: Easing.emphasizedAccelerate).whenComplete(_hide);
+    }
+  }
+
+  void _hide() {
+    if (mounted && widget.detail == null) setState(() => _shown = null);
+  }
+
+  @override
+  void dispose() {
+    _split.dispose();
+    super.dispose();
+  }
+
+  void _start(PointerPanZoomStartEvent event) {
+    if (widget.detail == null) return;
+    _swipe.start(event);
+    _split.stop();
+  }
+
+  void _update(PointerPanZoomUpdateEvent event, double travel) {
+    if (widget.detail == null || !_swipe.update(event)) return;
+    // Only rightward drags close; leftward ones resist, so the page cannot be pulled past open.
+    final dx = event.pan.dx;
+    _split.value = 1 - (dx >= 0 ? dx : dx / 4) / travel;
+  }
+
+  void _end(double travel) {
+    final velocity = _swipe.end();
+    if (velocity == null || widget.detail == null) return;
+    final offset = (1 - _split.value) * travel;
+    final splitVelocity = -velocity / travel;
+    if (offset > 0 && HorizontalSwipe.dismisses(offset, velocity, travel)) {
+      _swipedAway = true;
+      _split.animateWith(_settle(_split.value, 0, splitVelocity, pixels: travel)).whenComplete(() {
+        widget.onDismiss();
+        _hide();
+      });
+    } else {
+      _split.animateWith(_settle(_split.value, 1, splitVelocity, pixels: travel));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final full = constraints.maxWidth;
+        final detailWidth = full - widget.listWidth - Panes.spacer;
+        final travel = full - widget.listWidth;
+        return AnimatedBuilder(
+          animation: _split,
+          builder: (context, _) {
+            final split = _split.value.clamp(0.0, 1.0);
+            final list = full + (widget.listWidth - full) * split;
+            final shown = _shown;
+            return ClipRect(
+              child: Stack(
+                children: [
+                  Positioned(left: 0, top: 0, bottom: 0, width: list, child: widget.list),
+                  // The page keeps its final width, so its text does not reflow as it slides.
+                  if (split > 0 && shown != null)
+                    Positioned(
+                      left: list + Panes.spacer,
+                      top: 0,
+                      bottom: 0,
+                      width: detailWidth,
+                      child: Listener(
+                        onPointerPanZoomStart: _start,
+                        onPointerPanZoomUpdate: (event) => _update(event, travel),
+                        onPointerPanZoomEnd: (_) => _end(travel),
+                        child: shown,
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
