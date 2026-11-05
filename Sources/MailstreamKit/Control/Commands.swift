@@ -161,6 +161,7 @@ nonisolated struct CommandSpec: Sendable {
             Argument(name: "waiting", kind: .bool, summary: "Only conversations waiting on your reply or action."),
             limit,
             Argument(name: "cursor", kind: .string, summary: "The previous page's `next`: lists the conversations after it, with the same filters."),
+            Argument(name: "cached", kind: .bool, summary: "Lists the mail already loaded without asking the providers for their newest first."),
         ]),
         CommandSpec(command: .app(.mailSearch), summary: "Searches every mailbox but trash and junk with the providers' own search (subject, people, body; Gmail operators such as from: work), newest first.", arguments: [
             Argument(name: "query", kind: .string, summary: "Free text, or the provider's search syntax.", positional: true, required: true),

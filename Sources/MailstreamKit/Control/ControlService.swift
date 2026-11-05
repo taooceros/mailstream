@@ -253,7 +253,8 @@ final class ControlService {
                 guard let cursor = MailStore.AgentCursor(text) else { throw ControlError.usage("--cursor: not a `next` from mail list.") }
                 return cursor
             }
-            listing = await store.agentListing(try mailboxKeys(args), after: cursor, limit: limit, include: include)
+            listing = await store.agentListing(try mailboxKeys(args), after: cursor, limit: limit,
+                                               cached: args.bool("cached"), include: include)
         }
         if listing.primary.isEmpty, !listing.failures.isEmpty {
             throw ControlError("provider", listing.failures.joined(separator: "; "))

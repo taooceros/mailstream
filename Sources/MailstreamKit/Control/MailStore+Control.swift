@@ -44,15 +44,16 @@ extension MailStore {
     private static let agentPageRounds = 6
 
     /// One page of `keys`' conversations that pass `include`, newest first, from the listings the
-    /// window uses (memory, then disk). The first page fetches the providers' first pages; later
-    /// pages fetch further pages until the page is complete: every mailbox with more mail has been
-    /// listed back past the page's oldest conversation, so none can still be missing from it.
-    func agentListing(_ keys: [MailboxKey], after cursor: AgentCursor?, limit: Int,
+    /// window uses (memory, then disk). The first page fetches the providers' first pages unless
+    /// `cached`; later pages fetch further pages until the page is complete: every mailbox with
+    /// more mail has been listed back past the page's oldest conversation, so none can still be
+    /// missing from it.
+    func agentListing(_ keys: [MailboxKey], after cursor: AgentCursor?, limit: Int, cached: Bool = false,
                       include: (Conversation) -> Bool) async -> AgentListing {
         var failures = keys.filter { key in accountStore.backend(for: key.account) == nil }.map { "\($0.account): signed out" }
         let context = contextKeys(for: keys)
         await loadCachedListings(keys + context)
-        if cursor == nil {
+        if cursor == nil, !cached {
             let failed = await fetchFirstPages(keys + context)
             failures += failed.filter { keys.contains($0.key) }.map { key, error in
                 "\(key.account) \(mailbox(key)?.displayName ?? key.mailbox): \(error.localizedDescription)"

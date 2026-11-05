@@ -155,13 +155,17 @@ pub struct ListQuery {
     /// The previous page's [`Listing::next`]: the conversations after it, with the same filters.
     #[uniffi(default = None)]
     pub cursor: Option<String>,
+    /// Lists what the engine already holds without fetching the providers' first pages, for a
+    /// front end reading again after a change event.
+    #[uniffi(default = false)]
+    pub cached: bool,
 }
 
 impl Default for ListQuery {
     fn default() -> Self {
         Self {
             mailboxes: vec![], account: None, unread: false, starred: false, category: None, waiting: false, limit: 25,
-            cursor: None,
+            cursor: None, cached: false,
         }
     }
 }
@@ -322,6 +326,7 @@ impl Mailstream {
         let mut args = json!({
             "account": query.account, "unread": query.unread, "starred": query.starred,
             "category": query.category, "waiting": query.waiting, "limit": query.limit, "cursor": query.cursor,
+            "cached": query.cached,
         });
         if !query.mailboxes.is_empty() {
             args["mailbox"] = json!(query.mailboxes);

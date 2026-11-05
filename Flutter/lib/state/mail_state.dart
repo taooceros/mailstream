@@ -14,8 +14,8 @@ sealed class Selection {
   String get key;
   MailboxRole get role;
 
-  /// The engine's listing of it.
-  engine.ListQuery query({required int limit, String? cursor});
+  /// The engine's listing of it; `cached` reads what the engine holds without fetching.
+  engine.ListQuery query({required int limit, String? cursor, bool cached = false});
 }
 
 final class UnifiedSelection extends Selection {
@@ -28,8 +28,8 @@ final class UnifiedSelection extends Selection {
   String get key => 'unified:${role.name}';
 
   @override
-  engine.ListQuery query({required int limit, String? cursor}) =>
-      engine.ListQuery(mailboxes: [role.name], limit: limit, cursor: cursor);
+  engine.ListQuery query({required int limit, String? cursor, bool cached = false}) =>
+      engine.ListQuery(mailboxes: [role.name], limit: limit, cursor: cursor, cached: cached);
 
   @override
   bool operator ==(Object other) => other is UnifiedSelection && other.role == role;
@@ -50,8 +50,8 @@ final class MailboxSelection extends Selection {
   String get key => 'mailbox:${mailbox.account}:${mailbox.id}';
 
   @override
-  engine.ListQuery query({required int limit, String? cursor}) =>
-      engine.ListQuery(mailboxes: [mailbox.id], account: mailbox.account, limit: limit, cursor: cursor);
+  engine.ListQuery query({required int limit, String? cursor, bool cached = false}) =>
+      engine.ListQuery(mailboxes: [mailbox.id], account: mailbox.account, limit: limit, cursor: cursor, cached: cached);
 
   @override
   bool operator ==(Object other) => other is MailboxSelection && other.key == key;
@@ -146,9 +146,17 @@ class MailState extends ChangeNotifier {
   /// Conversations whose preview `previews` is loading or has answered.
   final Set<String> _previewRequested = {};
 
+  /// Previews waiting for the request in flight to finish.
+  final Set<String> _previewQueue = {};
+  bool _previewsRunning = false;
+
   /// Sender address → the file of their picture in the engine's cache, or null when they have
   /// none. An address absent here has not been asked for yet.
   final Map<String, String?> _avatars = {};
+
+  /// Senders (and whether they are automated) waiting for the request in flight to finish.
+  final Map<String, bool> _avatarQueue = {};
+  bool _avatarsRunning = false;
 
   /// The picture for `email`, once the engine found one.
   String? avatar(String email) => _avatars[email.toLowerCase()];
@@ -289,7 +297,8 @@ class MailState extends ChangeNotifier {
   static List<Conversation> _decode(engine.Listing listing) => listing.conversations.map(Conversation.of).toList();
 
   /// The first page. A refresh keeps the older pages already loaded below it: their cursor still
-  /// points past them. `quiet` (a change the engine reported) shows no progress.
+  /// points past them. `quiet` (a change the engine reported) shows no progress and reads what
+  /// the engine holds rather than asking the providers again.
   Future<void> _fetch(Selection target, {bool quiet = false}) async {
     final entry = _lists[target.key] ??= ListEntry();
     final generation = ++entry.generation;
@@ -298,7 +307,7 @@ class MailState extends ChangeNotifier {
       notifyListeners();
     }
     try {
-      final listing = await mail.list(query: target.query(limit: pageSize));
+      final listing = await mail.list(query: target.query(limit: pageSize, cached: quiet));
       if (generation != entry.generation) return;
       final page = _decode(listing);
       final ids = {for (final c in page) c.id};
@@ -354,23 +363,32 @@ class MailState extends ChangeNotifier {
   }
 
   /// Previews of conversations listed without one: the engine loads their latest messages.
-  Future<void> _loadPreviews(List<Conversation> conversations) async {
-    final missing = [
-      for (final c in conversations)
-        if ((c.snippet == null || c.snippet!.isEmpty) && _previewRequested.add(c.id)) c.id,
-    ];
-    for (var i = 0; i < missing.length; i += 20) {
-      final chunk = missing.sublist(i, (i + 20).clamp(0, missing.length));
-      try {
-        final previews = await mail.previews(ids: chunk);
-        for (final MapEntry(key: id, value: snippet) in previews.entries) {
-          if (snippet != null && snippet.isNotEmpty) _patch(id, (c) => c.copyWith(snippet: snippet));
-        }
-      } on engine.MailException {
-        // Rows keep their subject alone; a later listing asks again.
-        _previewRequested.removeAll(chunk);
-      }
+  /// Ids asked for while a request runs go together in the next one.
+  void _loadPreviews(List<Conversation> conversations) {
+    for (final c in conversations) {
+      if ((c.snippet == null || c.snippet!.isEmpty) && _previewRequested.add(c.id)) _previewQueue.add(c.id);
     }
+    unawaited(_sendPreviews());
+  }
+
+  Future<void> _sendPreviews() async {
+    if (_previewsRunning || _previewQueue.isEmpty) return;
+    final ids = _previewQueue.toList();
+    _previewQueue.clear();
+    _previewsRunning = true;
+    try {
+      final previews = await mail.previews(ids: ids);
+      _patchAll({
+        for (final MapEntry(key: id, value: snippet) in previews.entries)
+          if (snippet != null && snippet.isNotEmpty) id: (c) => c.copyWith(snippet: snippet),
+      });
+    } on engine.MailException {
+      // Rows keep their subject alone; a later listing asks again.
+      _previewRequested.removeAll(ids);
+    } finally {
+      _previewsRunning = false;
+    }
+    await _sendPreviews();
   }
 
   /// Pictures of the senders `conversations` show, from the engine's avatar cache (it looks up
@@ -381,40 +399,41 @@ class MailState extends ChangeNotifier {
   ]);
 
   /// Asks the engine for the pictures of `senders` not asked for yet; automated senders may take
-  /// their site's icon.
-  Future<void> requestAvatars(Iterable<(String, bool)> senders) async {
-    final automated = <String>{};
-    final missing = <String>[];
+  /// their site's icon. Senders asked for while a request runs go together in the next one.
+  void requestAvatars(Iterable<(String, bool)> senders) {
     for (final (email, isAutomated) in senders) {
       final key = email.toLowerCase();
-      if (!key.contains('@') || _avatars.containsKey(key) || missing.contains(key)) continue;
-      missing.add(key);
-      if (isAutomated) automated.add(key);
-    }
-    for (final key in missing) {
+      if (!key.contains('@') || _avatars.containsKey(key)) continue;
       _avatars[key] = null;
+      _avatarQueue[key] = isAutomated;
     }
-    for (var i = 0; i < missing.length; i += 30) {
-      final chunk = missing.sublist(i, (i + 30).clamp(0, missing.length));
-      try {
-        final pictures = await mail.avatars(
-          addresses: chunk,
-          automated: [for (final key in chunk) if (automated.contains(key)) key],
-        );
-        var found = false;
-        for (final MapEntry(key: email, value: url) in pictures.entries) {
-          if (url == null) continue;
-          _avatars[email] = Uri.parse(url).toFilePath();
-          found = true;
-        }
-        if (found) notifyListeners();
-      } on engine.MailException {
-        // Initials stay; the next listing asks again.
-        for (final key in chunk) {
-          _avatars.remove(key);
-        }
+    unawaited(_sendAvatars());
+  }
+
+  Future<void> _sendAvatars() async {
+    if (_avatarsRunning || _avatarQueue.isEmpty) return;
+    final batch = Map.of(_avatarQueue);
+    _avatarQueue.clear();
+    _avatarsRunning = true;
+    try {
+      final pictures = await mail.avatars(
+        addresses: batch.keys.toList(),
+        automated: [for (final MapEntry(:key, :value) in batch.entries) if (value) key],
+      );
+      var found = false;
+      for (final MapEntry(key: email, value: url) in pictures.entries) {
+        if (url == null) continue;
+        _avatars[email] = Uri.parse(url).toFilePath();
+        found = true;
       }
+      if (found) notifyListeners();
+    } on engine.MailException {
+      // Initials stay; the next listing asks again.
+      batch.keys.forEach(_avatars.remove);
+    } finally {
+      _avatarsRunning = false;
     }
+    await _sendAvatars();
   }
 
   // MARK: - Search
@@ -514,12 +533,16 @@ class MailState extends ChangeNotifier {
   // MARK: - Actions
 
   /// Every list's copy of `id`, replaced; the reader's too.
-  void _patch(String id, Conversation Function(Conversation) change) {
+  void _patch(String id, Conversation Function(Conversation) change) => _patchAll({id: change});
+
+  /// Each changed conversation replaced in every list and the reader, in one pass and one rebuild.
+  void _patchAll(Map<String, Conversation Function(Conversation)> changes) {
+    if (changes.isEmpty) return;
     for (final entry in [..._lists.values, _search]) {
-      final index = entry.items.indexWhere((c) => c.id == id);
-      if (index >= 0) entry.items = [...entry.items]..[index] = change(entry.items[index]);
+      if (!entry.items.any((c) => changes.containsKey(c.id))) continue;
+      entry.items = [for (final c in entry.items) changes[c.id]?.call(c) ?? c];
     }
-    if (opened?.id == id) opened = change(opened!);
+    if (opened case final open?) opened = changes[open.id]?.call(open) ?? open;
     notifyListeners();
   }
 
