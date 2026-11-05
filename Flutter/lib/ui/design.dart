@@ -35,20 +35,20 @@ abstract final class Motion {
   static const curve = Easing.emphasizedDecelerate;
 }
 
-/// The conversation list's rows: Material three-line list items.
+/// The conversation list's rows: dense two-line list items.
 abstract final class ListMetrics {
-  static const rowHeight = 90.0;
-  static const sectionHeight = 40.0;
-  static const avatarSize = 40.0;
-  static const inset = 8.0;
+  static const rowHeight = 60.0;
+  static const sectionHeight = 30.0;
+  static const avatarSize = 36.0;
+  static const inset = 6.0;
 }
 
 /// Material's large-screen panes: rounded surfaces on the surface container, with a spacer
-/// between them and a margin to the window edge.
+/// between them and a margin to the window edge (tightened for a desktop mail client).
 abstract final class Panes {
-  static const margin = 16.0;
-  static const spacer = 24.0;
-  static const corner = 24.0;
+  static const margin = 8.0;
+  static const spacer = 8.0;
+  static const corner = 16.0;
 }
 
 /// Stable per-account colors, in sidebar order.

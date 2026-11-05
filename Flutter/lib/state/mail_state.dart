@@ -125,6 +125,13 @@ class MailState extends ChangeNotifier {
   /// Conversations whose preview `mail.previews` is loading or has answered.
   final Set<String> _previewRequested = {};
 
+  /// Sender address → the file of their picture in the app's cache, or null when they have none.
+  /// An address absent here has not been asked for yet.
+  final Map<String, String?> _avatars = {};
+
+  /// The picture for `email`, once the app found one.
+  String? avatar(String email) => _avatars[email.toLowerCase()];
+
   /// Inline reply drafts by conversation, kept until sent or discarded (in memory, like the app).
   final Map<String, String> drafts = {};
 
@@ -261,6 +268,7 @@ class MailState extends ChangeNotifier {
       entry.error = failures.isEmpty ? null : failures.join('\n');
       unreachable = null;
       _loadPreviews(page);
+      _loadAvatars(page);
     } on ControlException catch (error) {
       if (generation != entry.generation) return;
       entry.error = error.message;
@@ -294,6 +302,7 @@ class MailState extends ChangeNotifier {
         ..items = [...entry.items, ...page]
         ..next = result['next'] as String?;
       _loadPreviews(page);
+      _loadAvatars(page);
     } on ControlException catch (error) {
       _report('Could not load more: ${error.message}');
     } finally {
@@ -318,6 +327,50 @@ class MailState extends ChangeNotifier {
       } on ControlException {
         // Rows keep their subject alone; a later listing asks again.
         _previewRequested.removeAll(chunk);
+      }
+    }
+  }
+
+  /// Pictures of the senders `conversations` show, from the app's avatar cache (it looks up the
+  /// ones it has not cached yet).
+  void _loadAvatars(List<Conversation> conversations) => requestAvatars([
+    for (final c in conversations)
+      if (c.from != null) (c.from!.email, c.category != null && c.category != MailCategory.people),
+  ]);
+
+  /// Asks the app for the pictures of `senders` not asked for yet; automated senders may take
+  /// their site's icon.
+  Future<void> requestAvatars(Iterable<(String, bool)> senders) async {
+    final automated = <String>{};
+    final missing = <String>[];
+    for (final (email, isAutomated) in senders) {
+      final key = email.toLowerCase();
+      if (!key.contains('@') || _avatars.containsKey(key) || missing.contains(key)) continue;
+      missing.add(key);
+      if (isAutomated) automated.add(key);
+    }
+    for (final key in missing) {
+      _avatars[key] = null;
+    }
+    for (var i = 0; i < missing.length; i += 30) {
+      final chunk = missing.sublist(i, (i + 30).clamp(0, missing.length));
+      try {
+        final result = await client.call('mail.avatars', {
+          'addresses': chunk,
+          'automated': [for (final key in chunk) if (automated.contains(key)) key],
+        }) as Map<String, Object?>;
+        var found = false;
+        for (final MapEntry(key: email, value: url) in result.entries) {
+          if (url is! String) continue;
+          _avatars[email] = Uri.parse(url).toFilePath();
+          found = true;
+        }
+        if (found) notifyListeners();
+      } on ControlException {
+        // Initials stay; the next listing asks again.
+        for (final key in chunk) {
+          _avatars.remove(key);
+        }
       }
     }
   }
@@ -355,6 +408,7 @@ class MailState extends ChangeNotifier {
           ..items = found
           ..fetchedAt = DateTime.now();
         _loadPreviews(found);
+        _loadAvatars(found);
       } on ControlException catch (error) {
         if (generation != _search.generation) return;
         _search.error = error.message;
@@ -400,6 +454,7 @@ class MailState extends ChangeNotifier {
         final result = await _show(id);
         final messages = (result['messages'] as List).map((m) => MessageDetail.fromJson(m as Map<String, Object?>)).toList();
         entry.messages = messages;
+        requestAvatars([for (final m in messages) (m.sender.email, false)]);
         return messages;
       } on ControlException catch (error) {
         entry.error = error.message;

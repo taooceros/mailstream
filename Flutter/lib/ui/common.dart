@@ -1,25 +1,48 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../backend/models.dart';
 import 'design.dart';
 
-/// A sender's initial on their stable tonal color.
-class InitialsAvatar extends StatelessWidget {
-  const InitialsAvatar({super.key, required this.address, this.size = ListMetrics.avatarSize});
+/// A sender's picture from the app's avatar cache, else their initial on a stable tonal color.
+class PersonAvatar extends StatelessWidget {
+  const PersonAvatar({super.key, required this.address, this.photo, this.size = ListMetrics.avatarSize});
 
   final Address address;
+
+  /// The picture's file, when the app has one.
+  final String? photo;
   final double size;
 
   @override
   Widget build(BuildContext context) {
     final colors = avatarColors(address.email, context.brightness);
-    return CircleAvatar(
-      radius: size / 2,
-      backgroundColor: colors.background,
-      child: Text(
-        address.initials,
-        style: TextStyle(color: colors.foreground, fontSize: size * 0.42, fontWeight: FontWeight.w500, height: 1),
+    final initials = Text(
+      address.initials,
+      style: TextStyle(color: colors.foreground, fontSize: size * 0.42, fontWeight: FontWeight.w500, height: 1),
+    );
+    final photo = this.photo;
+    if (photo == null) return CircleAvatar(radius: size / 2, backgroundColor: colors.background, child: initials);
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: colors.background,
+        border: Border.all(color: context.colors.outlineVariant.withValues(alpha: 0.6), width: 0.5),
+      ),
+      child: ClipOval(
+        child: Image.file(
+          File(photo),
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+          cacheWidth: (size * MediaQuery.devicePixelRatioOf(context)).round(),
+          filterQuality: FilterQuality.medium,
+          errorBuilder: (_, _, _) => Center(child: initials),
+        ),
       ),
     );
   }

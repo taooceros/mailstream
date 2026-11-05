@@ -252,7 +252,7 @@ class _MessageCard extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
                 child: Row(
                   children: [
-                    InitialsAvatar(address: sender),
+                    PersonAvatar(address: sender, photo: state.avatar(sender.email)),
                     const SizedBox(width: 16),
                     Expanded(
                       child: expanded
@@ -604,7 +604,7 @@ class _ChatMessageState extends State<_ChatMessage> {
                             child: Text(messageTime(m.date), style: text.labelSmall?.copyWith(color: colors.outline)),
                           ),
                         )
-                      : Align(alignment: Alignment.topLeft, child: InitialsAvatar(address: m.sender)),
+                      : Align(alignment: Alignment.topLeft, child: PersonAvatar(address: m.sender, photo: widget.state.avatar(m.sender.email))),
                 ),
                 Expanded(
                   child: Column(

@@ -15,7 +15,7 @@ class Sidebar extends StatefulWidget {
   /// Folds the drawer back into the rail; nil where the drawer is the layout's navigation.
   final VoidCallback? onCollapse;
 
-  static const width = 272.0;
+  static const width = 248.0;
   static const unifiedRoles = [
     MailboxRole.inbox, MailboxRole.starred, MailboxRole.drafts, MailboxRole.sent, MailboxRole.archive, MailboxRole.junk, MailboxRole.trash,
   ];
@@ -227,7 +227,7 @@ class _Destination extends StatelessWidget {
     return Padding(
       padding: EdgeInsets.only(left: indent ? 16 : 0),
       child: SizedBox(
-        height: 48,
+        height: 40,
         child: Material(
           color: selected ? colors.secondaryContainer : Colors.transparent,
           shape: const StadiumBorder(),

@@ -285,7 +285,7 @@ class _MailShellState extends State<MailShell> {
     final listPane = _Pane(child: _listPane(context));
     final Widget content;
     if (_twoPane) {
-      final listWidth = (width * 0.36).clamp(380.0, 480.0);
+      final listWidth = (width * 0.42).clamp(420.0, 600.0);
       content = Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -327,7 +327,7 @@ class _MailShellState extends State<MailShell> {
       children: [
         WindowDragArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+            padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
             child: _SearchField(controller: _search, focus: _searchFocus, onChanged: state.search, onEscape: _back, onRefresh: state.refresh),
           ),
         ),
@@ -375,7 +375,7 @@ class _MailShellState extends State<MailShell> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        WindowDragArea(child: SizedBox(height: 64, child: opened == null ? null : _readerToolbar(context, opened))),
+        WindowDragArea(child: SizedBox(height: 54, child: opened == null ? null : _readerToolbar(context, opened))),
         Expanded(
           child: AnimatedSwitcher(
             duration: Durations.medium2,
@@ -451,7 +451,7 @@ class _ListHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => SizedBox(
-    height: 52,
+    height: 44,
     child: Row(children: [
       if (onBack != null)
         Padding(padding: const EdgeInsets.only(left: 8), child: IconButton(tooltip: 'Back (Esc)', icon: const Icon(Icons.arrow_back), onPressed: onBack))
@@ -527,7 +527,7 @@ class _SearchField extends StatelessWidget {
       focusNode: focus,
       onChanged: onChanged,
       hintText: 'Search mail',
-      constraints: const BoxConstraints(minHeight: 52, maxHeight: 52),
+      constraints: const BoxConstraints(minHeight: 44, maxHeight: 44),
       elevation: const WidgetStatePropertyAll(0),
       backgroundColor: WidgetStatePropertyAll(context.colors.surfaceContainerHigh),
       padding: const WidgetStatePropertyAll(EdgeInsets.only(left: 16, right: 4)),

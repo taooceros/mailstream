@@ -219,10 +219,10 @@ class _SectionHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Container(
     alignment: Alignment.bottomLeft,
-    padding: const EdgeInsets.fromLTRB(32, 0, 16, 8),
+    padding: const EdgeInsets.fromLTRB(24, 0, 16, 6),
     child: Text(
       title.toUpperCase(),
-      style: context.text.labelMedium?.copyWith(color: context.colors.onSurfaceVariant, fontWeight: FontWeight.w600, letterSpacing: 0.8),
+      style: context.text.labelSmall?.copyWith(color: context.colors.onSurfaceVariant, fontWeight: FontWeight.w700, letterSpacing: 0.8),
     ),
   );
 }
@@ -238,59 +238,52 @@ class _RowSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: ListMetrics.inset, vertical: 2),
+    padding: const EdgeInsets.symmetric(horizontal: ListMetrics.inset, vertical: 1),
     child: Material(
       color: highlighted ? context.colors.secondaryContainer : Colors.transparent,
-      borderRadius: BorderRadius.circular(20),
+      borderRadius: BorderRadius.circular(16),
       clipBehavior: Clip.antiAlias,
       child: InkWell(onTap: onTap, onHover: onHover, child: child),
     ),
   );
 }
 
-/// The layout every row shares: an unread dot, the avatar, three lines of text, and a trailing
-/// column whose top holds the date.
+/// The layout every row shares: an unread dot, the avatar, and two lines; the first ends in
+/// `meta` (the date), the second in `marks`.
 class _RowLayout extends StatelessWidget {
-  const _RowLayout({
-    required this.unread,
-    required this.avatar,
-    required this.title,
-    required this.subtitle,
-    required this.detail,
-    required this.trailing,
-  });
+  const _RowLayout({required this.unread, required this.avatar, required this.title, required this.meta, required this.subtitle, this.marks = const []});
 
   final bool unread;
   final Widget avatar;
   final Widget title;
+  final Widget meta;
   final Widget subtitle;
-  final Widget detail;
-  final Widget trailing;
+  final List<Widget> marks;
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(4, 10, 16, 10),
+    padding: const EdgeInsets.fromLTRB(0, 8, 14, 8),
     child: Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         SizedBox(
           width: 16,
-          height: ListMetrics.avatarSize,
           child: unread
-              ? Center(child: Container(width: 8, height: 8, decoration: BoxDecoration(color: context.colors.primary, shape: BoxShape.circle)))
+              ? Center(child: Container(width: 7, height: 7, decoration: BoxDecoration(color: context.colors.primary, shape: BoxShape.circle)))
               : null,
         ),
-        const SizedBox(width: 4),
         avatar,
-        const SizedBox(width: 16),
+        const SizedBox(width: 12),
         Expanded(
           child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.start,
-            children: [title, const SizedBox(height: 2), subtitle, const SizedBox(height: 2), detail],
+            children: [
+              Row(children: [Expanded(child: title), const SizedBox(width: 8), meta]),
+              const SizedBox(height: 2),
+              Row(children: [Expanded(child: subtitle), ...marks]),
+            ],
           ),
         ),
-        const SizedBox(width: 12),
-        trailing,
       ],
     ),
   );
@@ -342,40 +335,32 @@ class _ConversationRowState extends State<ConversationRow> {
     final topic = c.labels.firstOrNull;
     final senders = c.participants.isEmpty ? person.displayName : c.participants.join(', ');
     final archivable = state.selection.role == MailboxRole.inbox || c.mailboxes.contains(MailboxRole.inbox);
-    final snippet = (c.snippet ?? '').trim();
+    final snippet = (c.snippet ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
+    final strong = c.unread ? FontWeight.w700 : FontWeight.w500;
 
-    // The date column stays; on hover the actions float over the row's end on a raised pill.
-    final trailing = Column(
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        Row(mainAxisSize: MainAxisSize.min, children: [
-          if (c.hasAttachment) Padding(padding: const EdgeInsets.only(right: 6), child: Icon(Icons.attach_file, size: 14, color: colors.outline)),
-          if (state.accounts.length > 1)
-            Container(
-              margin: const EdgeInsets.only(right: 8),
-              width: 6,
-              height: 6,
-              decoration: BoxDecoration(color: accountPalette[state.accountIndex(c.account) % accountPalette.length], shape: BoxShape.circle),
-            ),
-          Text(
-            listDate(c.date, widget.now),
-            style: text.labelMedium?.copyWith(
-              color: c.unread ? colors.primary : colors.onSurfaceVariant,
-              fontWeight: c.unread ? FontWeight.w700 : FontWeight.w500,
-            ),
-          ),
-        ]),
-        const SizedBox(height: 8),
-        if (c.starred) const Icon(Icons.star_rounded, size: 20, color: Color(0xFFF4B400)),
-      ],
-    );
+    final meta = Row(mainAxisSize: MainAxisSize.min, children: [
+      if (c.hasAttachment) Padding(padding: const EdgeInsets.only(right: 4), child: Icon(Icons.attach_file, size: 14, color: colors.outline)),
+      if (state.accounts.length > 1)
+        Container(
+          margin: const EdgeInsets.only(right: 6),
+          width: 6,
+          height: 6,
+          decoration: BoxDecoration(color: accountPalette[state.accountIndex(c.account) % accountPalette.length], shape: BoxShape.circle),
+        ),
+      Text(
+        listDate(c.date, widget.now),
+        style: text.labelSmall?.copyWith(fontSize: 12, color: c.unread ? colors.primary : colors.onSurfaceVariant, fontWeight: strong),
+      ),
+    ]);
+
+    // On hover the actions float over the row's end on a raised pill.
     final actions = Material(
       color: colors.surfaceContainerHigh,
       elevation: 2,
       shadowColor: colors.shadow,
       shape: const StadiumBorder(),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: IconTheme.merge(
+        data: const IconThemeData(size: 20),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           if (c.waiting) IconButton(tooltip: 'Done', icon: const Icon(Icons.task_alt), onPressed: () => state.resolveWaiting(c)),
           if (archivable) IconButton(tooltip: 'Archive', icon: const Icon(Icons.archive_outlined), onPressed: () => state.archive(c)),
@@ -402,55 +387,49 @@ class _ConversationRowState extends State<ConversationRow> {
         onHover: _hovered,
         child: Stack(children: [
           _RowLayout(
-          unread: c.unread,
-          avatar: InitialsAvatar(address: person),
-          title: Row(children: [
-            Flexible(
-              child: Text(
-                senders,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: text.titleSmall?.copyWith(fontSize: 15, color: colors.onSurface, fontWeight: c.unread ? FontWeight.w700 : FontWeight.w500),
+            unread: c.unread,
+            avatar: PersonAvatar(address: person, photo: state.avatar(person.email)),
+            title: Row(children: [
+              Flexible(
+                child: Text(
+                  senders,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: text.bodyMedium?.copyWith(color: colors.onSurface, fontWeight: strong),
+                ),
               ),
+              if (c.messageCount > 1)
+                Padding(
+                  padding: const EdgeInsets.only(left: 5),
+                  child: Text('${c.messageCount}', style: text.labelSmall?.copyWith(color: colors.onSurfaceVariant)),
+                ),
+              if (c.waiting)
+                Padding(
+                  padding: const EdgeInsets.only(left: 6),
+                  child: Tooltip(message: 'Waiting on you', child: Icon(Icons.reply_rounded, size: 15, color: colors.tertiary)),
+                ),
+            ]),
+            meta: meta,
+            subtitle: Text.rich(
+              TextSpan(children: [
+                if (subject.tag.isNotEmpty) TextSpan(text: '${subject.tag} ', style: TextStyle(color: colors.outline, fontWeight: FontWeight.w400)),
+                TextSpan(
+                  text: subject.title.isEmpty ? '(no subject)' : subject.title,
+                  style: TextStyle(color: colors.onSurface, fontWeight: c.unread ? FontWeight.w600 : FontWeight.w400),
+                ),
+                if (snippet.isNotEmpty) TextSpan(text: '  —  $snippet'),
+              ]),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: text.bodySmall?.copyWith(fontSize: 13, color: colors.onSurfaceVariant),
             ),
-            if (c.messageCount > 1)
-              Padding(
-                padding: const EdgeInsets.only(left: 6),
-                child: Text('${c.messageCount}', style: text.labelMedium?.copyWith(color: colors.onSurfaceVariant)),
-              ),
-            if (c.waiting)
-              Padding(
-                padding: const EdgeInsets.only(left: 8),
-                child: Tooltip(message: 'Waiting on you', child: Icon(Icons.reply_rounded, size: 16, color: colors.tertiary)),
-              ),
-          ]),
-          subtitle: Row(children: [
-            Flexible(
-              child: Text.rich(
-                TextSpan(children: [
-                  if (subject.tag.isNotEmpty) TextSpan(text: '${subject.tag} ', style: TextStyle(color: colors.outline, fontWeight: FontWeight.w400)),
-                  TextSpan(text: subject.title.isEmpty ? '(no subject)' : subject.title),
-                ]),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: text.bodyMedium?.copyWith(color: colors.onSurface, fontWeight: c.unread ? FontWeight.w600 : FontWeight.w400),
-              ),
-            ),
-            if (topic != null) ...[
-              const SizedBox(width: 8),
-              _TopicLabel(topic),
+            marks: [
+              if (topic != null) ...[const SizedBox(width: 8), _TopicLabel(topic)],
+              if (c.starred) const Padding(padding: EdgeInsets.only(left: 6), child: Icon(Icons.star_rounded, size: 16, color: Color(0xFFF4B400))),
             ],
-          ]),
-          detail: Text(
-            snippet.isEmpty ? ' ' : snippet,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: text.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
-          ),
-          trailing: trailing,
           ),
           Positioned(
-            right: 12,
+            right: 8,
             top: 0,
             bottom: 0,
             child: Center(
@@ -475,11 +454,11 @@ class _TopicLabel extends StatelessWidget {
   Widget build(BuildContext context) {
     final color = topicColor(topic, context.brightness);
     return Container(
-      height: 20,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+      height: 18,
+      padding: const EdgeInsets.symmetric(horizontal: 7),
       alignment: Alignment.center,
-      decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(10)),
-      child: Text(topic, style: context.text.labelSmall?.copyWith(color: color, fontWeight: FontWeight.w600)),
+      decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(9)),
+      child: Text(topic, style: context.text.labelSmall?.copyWith(fontSize: 11, color: color, fontWeight: FontWeight.w600)),
     );
   }
 }
@@ -502,9 +481,10 @@ class BundleRow extends StatelessWidget {
     final seen = <String>{};
     final senders = [for (final c in items) if (seen.add(c.from?.displayName ?? '')) c.from?.displayName ?? '']
         .where((s) => s.isNotEmpty)
-        .take(5)
+        .take(6)
         .join(', ');
     final tone = categoryColors(bundle.category, colors);
+    final strong = unread > 0 ? FontWeight.w700 : FontWeight.w500;
     return ListenableBuilder(
       listenable: highlight,
       builder: (context, _) => _RowSurface(
@@ -515,40 +495,31 @@ class BundleRow extends StatelessWidget {
           unread: unread > 0,
           avatar: IconAvatar(icon: categoryIcon(bundle.category), background: tone.background, foreground: tone.foreground),
           title: Row(children: [
-            Text(
-              bundle.category.title,
-              style: text.titleSmall?.copyWith(fontSize: 15, color: colors.onSurface, fontWeight: unread > 0 ? FontWeight.w700 : FontWeight.w500),
-            ),
+            Text(bundle.category.title, style: text.bodyMedium?.copyWith(color: colors.onSurface, fontWeight: strong)),
             const SizedBox(width: 8),
             Container(
-              height: 20,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
+              height: 18,
+              padding: const EdgeInsets.symmetric(horizontal: 7),
               alignment: Alignment.center,
-              decoration: BoxDecoration(color: tone.background, borderRadius: BorderRadius.circular(10)),
+              decoration: BoxDecoration(color: tone.background, borderRadius: BorderRadius.circular(9)),
               child: Text(
                 unread > 0 ? '$unread new' : '${items.length}',
-                style: text.labelSmall?.copyWith(color: tone.foreground, fontWeight: FontWeight.w700),
+                style: text.labelSmall?.copyWith(fontSize: 11, color: tone.foreground, fontWeight: FontWeight.w700),
               ),
             ),
           ]),
-          subtitle: Text(
-            senders,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: text.bodyMedium?.copyWith(color: colors.onSurface, fontWeight: unread > 0 ? FontWeight.w600 : FontWeight.w400),
-          ),
-          detail: Text(
-            splitSubject(items.first.subject).title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: text.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
-          ),
-          trailing: Text(
+          meta: Text(
             listDate(items.first.date, now),
-            style: text.labelMedium?.copyWith(
-              color: unread > 0 ? colors.primary : colors.onSurfaceVariant,
-              fontWeight: unread > 0 ? FontWeight.w700 : FontWeight.w500,
-            ),
+            style: text.labelSmall?.copyWith(fontSize: 12, color: unread > 0 ? colors.primary : colors.onSurfaceVariant, fontWeight: strong),
+          ),
+          subtitle: Text.rich(
+            TextSpan(children: [
+              TextSpan(text: senders, style: TextStyle(color: colors.onSurface, fontWeight: unread > 0 ? FontWeight.w600 : FontWeight.w400)),
+              TextSpan(text: '  —  ${splitSubject(items.first.subject).title}'),
+            ]),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: text.bodySmall?.copyWith(fontSize: 13, color: colors.onSurfaceVariant),
           ),
         ),
       ),

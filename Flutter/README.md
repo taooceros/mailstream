@@ -5,8 +5,9 @@ accounts, OAuth, sync, push, the cache, threading and AI tagging all run there.
 This UI talks to it over the control socket
 (`~/Library/Application Support/Mailstream/control.sock`), using the same JSON
 commands as the `mailstream` CLI: `accounts.list`, `mailboxes`, `mail.list` (paged by
-its `next` cursor), `mail.previews`, `mail.search`, `mail.show` (with `html: true`),
-`mail.read`/`star`/`archive`/`trash`, `mail.tag` and `mail.reply`. Mailstream must be running.
+its `next` cursor), `mail.previews`, `mail.avatars` (sender pictures from the app's avatar
+cache), `mail.search`, `mail.show` (with `html: true`), `mail.read`/`star`/`archive`/`trash`,
+`mail.tag` and `mail.reply`. Mailstream must be running.
 
 ```sh
 cd Flutter
