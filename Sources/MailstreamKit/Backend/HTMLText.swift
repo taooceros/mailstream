@@ -35,10 +35,16 @@ nonisolated enum HTMLText {
         return out + plain(ns.substring(from: cursor))
     }
 
+    /// Compiled once. `String.range(of:options: .regularExpression)` runs Swift's regex engine,
+    /// which spends a 100 KB body in retain/release: ~60 ms a call, and far more when several
+    /// content loads scan at once (MS-47). ICU matches the same pattern in a few milliseconds.
+    private static let remoteContent = try! NSRegularExpression(
+        pattern: #"(src|background|poster)\s*=\s*["']?\s*(https?:)?//|url\(\s*["']?\s*(https?:)?//|<link[^>]+href\s*=\s*["']?\s*https?:"#,
+        options: [.caseInsensitive])
+
     /// Whether `html` references remote images, styles or fonts.
     static func hasRemoteContent(_ html: String) -> Bool {
-        html.range(of: #"(src|background|poster)\s*=\s*["']?\s*(https?:)?//|url\(\s*["']?\s*(https?:)?//|<link[^>]+href\s*=\s*["']?\s*https?:"#,
-                   options: [.regularExpression, .caseInsensitive]) != nil
+        remoteContent.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)) != nil
     }
 
     /// Plain text to HTML: linkified, whitespace preserved, `>` quote runs wrapped in blockquotes
