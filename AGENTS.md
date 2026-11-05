@@ -67,6 +67,15 @@ omp's Linear tools; the issue, not the session, is the record other sessions rea
   comment the user posts reaches the subagent working that issue, or starts one. Only the user
   adds `omp`; file your own issues in Backlog. `scripts/linear-omp.sh MS-12` opens one issue in a
   new Tern tab instead (Linear's "Work on issue → Custom script").
+- Who gets an issue: the polling session reuses an agent it already started over starting a new
+  one, whenever that agent has related context and room left. Related, in this order: it worked
+  this issue before (resumed, or a user comment on it); it worked the parent, a sub-issue, a
+  blocker or a blocked issue; it worked the same files in the same workspace. Room left: its
+  context is under 400K tokens (40% of the 1M window, the `ctx` figure the session sees).
+  An agent still running another issue gets the new one only after it finishes, unless it is
+  the same issue. At or over 400K, start a new agent instead; it picks up from the issue's
+  comments, as after a session restart. A reused agent claims the new issue like any other: its
+  own start comment, In Progress, working in its own workspace.
 
 ## Building
 
