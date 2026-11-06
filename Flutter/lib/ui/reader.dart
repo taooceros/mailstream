@@ -40,9 +40,8 @@ class ReaderState extends State<Reader> {
   bool _composing = false;
   bool _replyAll = false;
 
-  /// The message the thread opens on: the first unread, else the latest.
-  final _focusKey = GlobalKey(debugLabel: 'Thread focus');
-  bool _focused = false;
+  /// A thread opens at its end, the latest message above the reply bar.
+  late final _pin = EndPin(_scroll);
 
   Conversation get c => widget.conversation;
 
@@ -57,6 +56,7 @@ class ReaderState extends State<Reader> {
 
   @override
   void dispose() {
+    _pin.release();
     _scroll.dispose();
     super.dispose();
   }
@@ -94,16 +94,9 @@ class ReaderState extends State<Reader> {
     );
   }
 
-  void _toggle(String id) => setState(() => _expanded.contains(id) ? _expanded.remove(id) : _expanded.add(id));
-
-  void _revealFocus(int index) {
-    if (_focused) return;
-    _focused = true;
-    if (index == 0) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final target = _focusKey.currentContext;
-      if (target != null && mounted) Scrollable.ensureVisible(target, alignment: 0.02);
-    });
+  void _toggle(String id) {
+    _pin.release();
+    setState(() => _expanded.contains(id) ? _expanded.remove(id) : _expanded.add(id));
   }
 
   @override
@@ -112,12 +105,6 @@ class ReaderState extends State<Reader> {
     final thread = widget.state.thread(c.id);
     final messages = thread.messages;
     final now = DateTime.now();
-    var focus = -1;
-    if (messages != null && messages.isNotEmpty) {
-      focus = messages.indexWhere((m) => m.unread);
-      if (focus < 0) focus = messages.length - 1;
-      _revealFocus(focus);
-    }
 
     final body = <Widget>[
       _Header(state: widget.state, conversation: c),
@@ -132,8 +119,6 @@ class ReaderState extends State<Reader> {
             now: now,
             state: widget.state,
             onReply: reply,
-            focus: focus,
-            focusKey: _focusKey,
             topInset: widget.topInset,
           )
         else
@@ -141,7 +126,6 @@ class ReaderState extends State<Reader> {
             Padding(
               padding: const EdgeInsets.only(bottom: 12),
               child: _MessageCard(
-                key: i == focus ? _focusKey : null,
                 message: m,
                 state: widget.state,
                 now: now,
@@ -158,13 +142,16 @@ class ReaderState extends State<Reader> {
       color: colors.background,
       child: Stack(
         children: [
-          SingleChildScrollView(
-            controller: _scroll,
-            padding: EdgeInsets.fromLTRB(32, widget.topInset + 16, 32, 0),
-            child: Center(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: Reader.column),
-                child: Selectable(child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: body)),
+          NotificationListener<Notification>(
+            onNotification: _pin.follow,
+            child: SingleChildScrollView(
+              controller: _scroll,
+              padding: EdgeInsets.fromLTRB(32, widget.topInset + 16, 32, 0),
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: Reader.column),
+                  child: Selectable(child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: body)),
+                ),
               ),
             ),
           ),
@@ -201,6 +188,29 @@ class ReaderState extends State<Reader> {
         ],
       ),
     );
+  }
+}
+
+/// Holds a scroll view at its end while its content grows (bodies loading, pictures taking their
+/// size), until the reader scrolls it or [release] lets go. [follow] listens to the notifications
+/// of the scroll view [controller] drives.
+class EndPin {
+  EndPin(this.controller);
+
+  final ScrollController controller;
+  bool _held = true;
+
+  void release() => _held = false;
+
+  bool follow(Notification notification) {
+    if (notification is UserScrollNotification) {
+      _held = false;
+    } else if (notification is ScrollMetricsNotification && _held) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_held && controller.hasClients) controller.jumpTo(controller.position.maxScrollExtent);
+      });
+    }
+    return false;
   }
 }
 
@@ -252,7 +262,6 @@ class _Header extends StatelessWidget {
 
 class _MessageCard extends StatelessWidget {
   const _MessageCard({
-    super.key,
     required this.message,
     required this.state,
     required this.now,
@@ -640,8 +649,6 @@ class _ChatLog extends StatefulWidget {
     required this.now,
     required this.state,
     required this.onReply,
-    required this.focus,
-    required this.focusKey,
     required this.topInset,
   });
 
@@ -649,8 +656,6 @@ class _ChatLog extends StatefulWidget {
   final DateTime now;
   final MailState state;
   final void Function({bool all}) onReply;
-  final int focus;
-  final GlobalKey focusKey;
 
   /// The reader's toolbar height, which the messages' reply buttons slide under too.
   final double topInset;
@@ -695,7 +700,6 @@ class _ChatLogState extends State<_ChatLog> {
           previous.date != null &&
           date.difference(previous.date!).inMinutes < 60;
       children.add(_ChatMessage(
-        key: index == widget.focus ? widget.focusKey : null,
         message: m,
         continued: continued,
         state: widget.state,
@@ -714,7 +718,6 @@ class _ChatLogState extends State<_ChatLog> {
 /// and the reply buttons float on its top edge, over the gap above rather than over the text.
 class _ChatMessage extends StatefulWidget {
   const _ChatMessage({
-    super.key,
     required this.message,
     required this.continued,
     required this.state,
