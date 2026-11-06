@@ -245,18 +245,19 @@ class _AccountsState extends State<_Accounts> {
   static String _providerName(String provider) => provider == 'google' ? 'Google' : 'Microsoft';
 
   Future<void> _add(String provider) async {
-    final client = await showSheet<({String id, String secret})>(context, (_) => _ClientDialog(provider: provider));
+    final suggested = await state.suggestedClient(provider);
+    if (!mounted) return;
+    final client = await showSheet<({String id, String? secret})>(
+      context,
+      (_) => _ClientDialog(provider: provider, suggested: suggested),
+    );
     if (client == null || !mounted) return;
     setState(() {
       _signingIn = provider;
       _status = (text: 'Waiting for the browser…', error: false);
     });
     try {
-      final account = await state.addAccount(
-        provider,
-        clientId: client.id.isEmpty ? null : client.id,
-        clientSecret: client.secret.isEmpty ? null : client.secret,
-      );
+      final account = await state.addAccount(provider, clientId: client.id, clientSecret: client.secret);
       _status = (text: 'Signed in as ${account.id}.', error: false);
     } on engine.MailException catch (error) {
       _status = (text: describe(error), error: true);
@@ -385,23 +386,38 @@ class _AccountsState extends State<_Accounts> {
   }
 }
 
-/// The OAuth client to sign in with. Empty fields leave it to the engine, which uses the client
-/// used last (or the build's).
+/// The OAuth client to sign in with, filled in with the one used last (or the build's). Its
+/// secret never leaves the engine: an empty secret field with that client's id keeps the saved
+/// one.
 class _ClientDialog extends StatefulWidget {
-  const _ClientDialog({required this.provider});
+  const _ClientDialog({required this.provider, required this.suggested});
 
   final String provider;
+  final engine.OAuthClientInfo? suggested;
 
   @override
   State<_ClientDialog> createState() => _ClientDialogState();
 }
 
 class _ClientDialogState extends State<_ClientDialog> {
-  final _id = TextEditingController();
+  late final _id = TextEditingController(text: widget.suggested?.id ?? '');
   final _secret = TextEditingController();
+  late final _focusSecret = _id.text.isNotEmpty;
   String? _error;
 
   bool get _google => widget.provider == 'google';
+
+  /// The id in the field is the suggested client's, whose secret the engine keeps.
+  bool get _savedSecret {
+    final suggested = widget.suggested;
+    return suggested != null && suggested.hasSecret && _id.text.trim() == suggested.id;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _id.addListener(() => setState(() {}));
+  }
 
   @override
   void dispose() {
@@ -412,11 +428,15 @@ class _ClientDialogState extends State<_ClientDialog> {
 
   void _submit() {
     final id = _id.text.trim(), secret = _secret.text.trim();
-    if (_google && id.isNotEmpty && secret.isEmpty) {
+    if (id.isEmpty) {
+      setState(() => _error = 'Enter your OAuth client\'s ID to sign in.');
+      return;
+    }
+    if (_google && secret.isEmpty && !_savedSecret) {
       setState(() => _error = 'Google needs the client secret too; the Cloud Console shows it next to the client ID.');
       return;
     }
-    Navigator.of(context).pop((id: id, secret: secret));
+    Navigator.of(context).pop((id: id, secret: secret.isEmpty ? null : secret));
   }
 
   @override
@@ -445,31 +465,45 @@ class _ClientDialogState extends State<_ClientDialog> {
               _google
                   ? 'The client ID and secret of your Google Cloud OAuth client (type Desktop app). '
                         'Mailstream then opens Google\'s sign-in in your browser.'
-                  : 'The application ID of your Microsoft Entra app, and its secret unless it is a public client.',
+                  : 'The application ID of your Microsoft Entra app, and its secret unless it is a public client. '
+                        'Mailstream then opens Microsoft\'s sign-in in your browser.',
               style: text.body.copyWith(color: colors.label),
             ),
-            const SizedBox(height: 4),
-            Text(
-              'Leave both empty to use the client you signed in with last.',
-              style: text.subheadline.copyWith(color: colors.secondaryLabel),
-            ),
+            if (widget.suggested != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Filled in with the client you signed in with last; change it to use another.',
+                style: text.subheadline.copyWith(color: colors.secondaryLabel),
+              ),
+            ],
             const SizedBox(height: 14),
-            MacosTextField(
-              controller: _id,
-              autofocus: true,
-              style: text.body,
-              placeholder: _google ? 'Client ID' : 'Application (client) ID',
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
-              onSubmitted: (_) => _submit(),
+            _field(
+              _google ? 'Client ID' : 'Application ID',
+              MacosTextField(
+                controller: _id,
+                autofocus: !_focusSecret,
+                style: text.body,
+                placeholder: _google ? 'Client ID' : 'Application (client) ID',
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+                onSubmitted: (_) => _submit(),
+              ),
             ),
             const SizedBox(height: 8),
-            MacosTextField(
-              controller: _secret,
-              obscureText: true,
-              style: text.body,
-              placeholder: _google ? 'Client secret' : 'Client secret (empty for a public client)',
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
-              onSubmitted: (_) => _submit(),
+            _field(
+              'Client secret',
+              MacosTextField(
+                controller: _secret,
+                autofocus: _focusSecret,
+                obscureText: true,
+                style: text.body,
+                placeholder: _savedSecret
+                    ? 'Saved; leave empty to keep it'
+                    : _google
+                    ? 'Client secret'
+                    : 'Empty for a public client',
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+                onSubmitted: (_) => _submit(),
+              ),
             ),
             if (_error != null)
               Padding(
@@ -481,6 +515,17 @@ class _ClientDialogState extends State<_ClientDialog> {
       ),
     );
   }
+
+  Widget _field(String label, Widget field) => Row(
+    children: [
+      SizedBox(
+        width: 104,
+        child: Text('$label:', textAlign: TextAlign.end, style: context.text.body.copyWith(color: context.colors.label)),
+      ),
+      const SizedBox(width: 8),
+      Expanded(child: field),
+    ],
+  );
 }
 
 class _RenameDialog extends StatefulWidget {

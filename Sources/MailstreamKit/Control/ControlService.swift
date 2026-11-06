@@ -64,6 +64,9 @@ final class ControlService {
         case .accountsRename: return try rename(args)
         case .accountsAdd: return try await addAccount(args)
         case .accountsRemove: return try removeAccount(args)
+        case .accountsClient:
+            let client = try await accounts.tokens.suggestedClient(for: try provider(args))
+            return client.map { ["id": .string($0.id), "hasSecret": .bool($0.secret?.isEmpty == false)] } ?? .null
         case .mailboxes: return try mailboxes(args)
         case .mailList: return try await list(args, query: nil)
         case .mailSearch: return try await list(args, query: try args.required("query"))
@@ -322,13 +325,21 @@ final class ControlService {
         return ["removed": .string(record.id)]
     }
 
-    private func addAccount(_ args: Arguments) async throws -> JSON {
+    private func provider(_ args: Arguments) throws -> Provider {
         guard let provider = Provider(rawValue: try args.required("provider")) else {
             throw ControlError.usage("provider must be google or microsoft.")
         }
+        return provider
+    }
+
+    /// Signs in with the client given, else the suggested one. A given id that is the suggested
+    /// client's takes its saved secret when none is given, so front ends can show the id without
+    /// ever holding the secret.
+    private func addAccount(_ args: Arguments) async throws -> JSON {
+        let provider = try provider(args)
         let suggested = try await accounts.tokens.suggestedClient(for: provider)
         let id = args.string("client-id") ?? suggested?.id
-        let secret = args.string("client-secret") ?? (args.string("client-id") == nil ? suggested?.secret : nil)
+        let secret = args.string("client-secret") ?? (id == suggested?.id ? suggested?.secret : nil)
         guard let id, !id.isEmpty else {
             throw ControlError.usage("No OAuth client known for \(provider.rawValue); pass --client-id (and --client-secret).")
         }

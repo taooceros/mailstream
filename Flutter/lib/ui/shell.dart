@@ -68,6 +68,7 @@ class _MailShellState extends State<MailShell> {
     super.initState();
     FocusManager.instance.addListener(_keepFocus);
     state.addListener(_showToast);
+    state.addListener(_offerSignIn);
     _window.setMethodCallHandler((call) async {
       if (call.method == 'settings') _settings();
     });
@@ -108,11 +109,20 @@ class _MailShellState extends State<MailShell> {
     if (mounted && (ModalRoute.isCurrentOf(context) ?? true)) openSettings(context, state);
   }
 
+  /// With no account signed in, Settings opens by itself once the account list is read, where
+  /// the person signs in with their OAuth client, as the app opens its Accounts window.
+  void _offerSignIn() {
+    if (!state.accountsLoaded) return;
+    state.removeListener(_offerSignIn);
+    if (state.accounts.isEmpty) WidgetsBinding.instance.addPostFrameCallback((_) => _settings());
+  }
+
   @override
   void dispose() {
     FocusManager.instance.removeListener(_keepFocus);
     _window.setMethodCallHandler(null);
     state.removeListener(_showToast);
+    state.removeListener(_offerSignIn);
     _toastTimer?.cancel();
     _focus.dispose();
     _searchFocus.dispose();
@@ -370,7 +380,11 @@ class _MailShellState extends State<MailShell> {
     _twoPane = dockedCompose ? mailWidth >= 700.0 : width >= 1000.0;
 
     final navigation = _onChat(() => drawer
-        ? Sidebar(state: state, onCollapse: width >= sidebarThreshold ? null : () => setState(() => _drawerOpen = false))
+        ? Sidebar(
+            state: state,
+            onAddAccount: _settings,
+            onCollapse: width >= sidebarThreshold ? null : () => setState(() => _drawerOpen = false),
+          )
         : Rail(state: state, onMenu: () => setState(() => _drawerOpen = true)));
     final chat = state.chat;
     final listPane = Island(child: chat.active ? _onChat(() => ChatListPane(state: state)) : _listPane(context));

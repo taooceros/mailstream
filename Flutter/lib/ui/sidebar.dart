@@ -9,11 +9,15 @@ import 'design.dart';
 import 'glass.dart';
 
 /// Mail's sidebar, on the window's glass panel: unified mailboxes first (Inbox expands into each
-/// account's inbox, each marked with its color), Chat, then every account's folders.
+/// account's inbox, each marked with its color), Chat, then every account's folders and Add
+/// Account…, which opens Settings.
 class Sidebar extends StatefulWidget {
-  const Sidebar({super.key, required this.state, this.onCollapse});
+  const Sidebar({super.key, required this.state, required this.onAddAccount, this.onCollapse});
 
   final MailState state;
+
+  /// Opens Settings, where accounts are signed in with an OAuth client.
+  final VoidCallback onAddAccount;
 
   /// Folds the sidebar back into the rail; nil where the sidebar is the layout's navigation.
   final VoidCallback? onCollapse;
@@ -99,6 +103,11 @@ class _SidebarState extends State<Sidebar> {
         ));
       }
     }
+    rows.add(_Destination(
+      leading: const Icon(CupertinoIcons.plus_circle),
+      label: 'Add Account…',
+      onTap: widget.onAddAccount,
+    ));
 
     return SizedBox(
       width: Sidebar.width,

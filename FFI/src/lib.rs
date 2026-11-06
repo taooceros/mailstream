@@ -54,6 +54,14 @@ impl MailError {
     }
 }
 
+/// An OAuth client the engine knows: its id, and whether a secret is saved with it.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthClientInfo {
+    pub id: String,
+    pub has_secret: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, uniffi::Record)]
 pub struct Account {
     /// The address, which identifies the account everywhere.
@@ -604,9 +612,15 @@ impl Mailstream {
         call("accounts.rename", json!({ "account": account, "label": label })).await
     }
 
+    /// The OAuth client a sign-in with `provider` uses unless given another: the one used last,
+    /// else the build's; `None` when there is neither. Its secret stays in the engine.
+    pub async fn suggested_client(&self, provider: String) -> Result<Option<OAuthClientInfo>, MailError> {
+        call("accounts.client", json!({ "provider": provider })).await
+    }
+
     /// Signs in a new account through the browser and waits (up to 5 minutes) for the person to
-    /// finish. Without `client_id` it uses the OAuth client used last (or the build's); Google
-    /// needs `client_secret` with it.
+    /// finish. Without `client_id` it uses [`Mailstream::suggested_client`]; Google needs a
+    /// secret, which for that client's id the engine supplies when `client_secret` is `None`.
     pub async fn add_account(
         &self,
         provider: String,

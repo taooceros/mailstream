@@ -190,6 +190,10 @@ class MailState extends ChangeNotifier {
   static const pageSize = 200;
 
   List<Account> accounts = const [];
+
+  /// Set once the engine answered the account list, so an empty [accounts] means none signed in.
+  bool accountsLoaded = false;
+
   Map<String, List<Mailbox>> mailboxes = const {};
   Selection selection = const UnifiedSelection(MailboxRole.inbox);
 
@@ -294,6 +298,7 @@ class MailState extends ChangeNotifier {
         for (final MapEntry(key: account, value: boxes) in boxes.entries)
           account: [for (final box in boxes) Mailbox.of(account, box)],
       };
+      accountsLoaded = true;
     } on engine.MailException catch (error) {
       _report(describe(error));
     }
@@ -863,7 +868,18 @@ class MailState extends ChangeNotifier {
     await reloadAccounts();
   }
 
-  /// Browser sign-in; throws the engine's reason when it fails or times out.
+  /// The OAuth client a sign-in with `provider` uses unless given another (the one used last,
+  /// else the build's), for the sign-in sheet to show; null when there is none.
+  Future<engine.OAuthClientInfo?> suggestedClient(String provider) async {
+    try {
+      return await mail.suggestedClient(provider: provider);
+    } on engine.MailException {
+      return null;
+    }
+  }
+
+  /// Browser sign-in; throws the engine's reason when it fails or times out. A null secret with
+  /// the suggested client's id signs in with that client's saved secret.
   Future<Account> addAccount(String provider, {String? clientId, String? clientSecret}) async {
     final record = await mail.addAccount(provider: provider, clientId: clientId, clientSecret: clientSecret);
     await reloadAccounts();

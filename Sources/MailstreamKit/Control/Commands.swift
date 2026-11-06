@@ -23,6 +23,7 @@ nonisolated enum CommandID: Sendable, Equatable {
         case accountsRename = "accounts.rename"
         case accountsAdd = "accounts.add"
         case accountsRemove = "accounts.remove"
+        case accountsClient = "accounts.client"
         case mailboxes
         case mailList = "mail.list"
         case mailSearch = "mail.search"
@@ -120,6 +121,8 @@ nonisolated struct CommandSpec: Sendable {
 
     private static let accountAddress = Argument(name: "account", kind: .string, summary: "Account address.", positional: true, required: true)
 
+    private static let provider = Argument(name: "provider", kind: .choice(["google", "microsoft"]), summary: "Provider.", positional: true, required: true)
+
     private static let limit = Argument(name: "limit", kind: .int, summary: "Most conversations returned (1-200).", defaultValue: 25)
 
     private static let settingKey = Argument(name: "key", kind: .string, summary: "Setting key.", positional: true, required: true)
@@ -157,10 +160,13 @@ nonisolated struct CommandSpec: Sendable {
             accountAddress,
             Argument(name: "label", kind: .string, summary: "New label.", positional: true, required: true),
         ]),
+        CommandSpec(command: .app(.accountsClient), summary: "The OAuth client a sign-in uses unless told otherwise: the one used last for the provider, else the build's. Its id, and whether a secret is saved with it (the secret itself stays in the Keychain).", arguments: [
+            provider,
+        ]),
         CommandSpec(command: .app(.accountsAdd), summary: "Signs in a new account through the browser and waits (up to 5 minutes) for the person to finish.", arguments: [
-            Argument(name: "provider", kind: .choice(["google", "microsoft"]), summary: "Provider.", positional: true, required: true),
+            provider,
             Argument(name: "client-id", kind: .string, summary: "OAuth client id; defaults to the one used last (or the build's)."),
-            Argument(name: "client-secret", kind: .string, summary: "OAuth client secret; Google requires one."),
+            Argument(name: "client-secret", kind: .string, summary: "OAuth client secret; Google requires one. Without it, a --client-id that is the default client's uses that client's saved secret."),
         ]),
         CommandSpec(command: .app(.accountsRemove), summary: "Signs an account out and deletes its saved sign-in. Mail on the server is untouched.", arguments: [
             accountAddress,
