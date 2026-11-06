@@ -7,6 +7,7 @@ import 'package:mailstream/mailstream.dart' as engine;
 import '../backend/models.dart';
 import '../state/chat_state.dart';
 import '../state/mail_state.dart';
+import 'chat_markup.dart';
 import 'common.dart';
 import 'conversation_list.dart';
 import 'design.dart';
@@ -407,6 +408,11 @@ class _ChatReaderState extends State<ChatReader> {
       );
     } else {
       final items = _log(thread).reversed.toList();
+      // Mentions name members and anyone who wrote here.
+      final names = {
+        for (final user in thread.members) user.id: user.name,
+        for (final message in thread.messages) message.sender.id: message.sender.name,
+      };
       final extra = thread.more ? 1 : 0;
       log = Scrollbar(
         controller: _scroll,
@@ -429,6 +435,7 @@ class _ChatReaderState extends State<ChatReader> {
                 state: widget.state,
                 message: message,
                 account: widget.space.account,
+                names: names,
                 head: head,
               ),
               _Pending(:final pending) => _PendingRow(key: ValueKey(pending.id), pending: pending),
@@ -529,13 +536,23 @@ class _DayDivider extends StatelessWidget {
 /// A message as Google Chat lays it out: the sender's picture and name at the head of their run,
 /// the text beside it.
 class _MessageRow extends StatelessWidget {
-  const _MessageRow({super.key, required this.state, required this.message, required this.account, required this.head});
+  const _MessageRow({
+    super.key,
+    required this.state,
+    required this.message,
+    required this.account,
+    required this.names,
+    required this.head,
+  });
 
   final MailState state;
   final engine.ChatMessage message;
 
   /// The account's address: the user's own messages show its picture, as Chat on the web does.
   final String account;
+
+  /// `users/<id>` → name, for mentions.
+  final Map<String, String> names;
   final bool head;
 
   static const _avatar = 32.0;
@@ -546,17 +563,15 @@ class _MessageRow extends StatelessWidget {
     final sender = message.sender;
     final created = DateTime.tryParse(message.created ?? '')?.toLocal();
     final body = <Widget>[
-      if (message.text.isNotEmpty) SelectableText(message.text, style: context.text.bodyMedium),
-      if (message.text.isEmpty && message.card)
+      if (message.markup.isNotEmpty) ChatText(text: message.markup, names: names, onOpen: state.openExternal),
+      if (message.markup.isEmpty && message.card)
         Text('Card', style: context.text.bodyMedium?.copyWith(color: colors.onSurfaceVariant, fontStyle: FontStyle.italic)),
-      for (final attachment in message.attachments)
+      if (message.attachments.isNotEmpty)
         Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: Chip(
-            visualDensity: VisualDensity.compact,
-            avatar: const Icon(CupertinoIcons.paperclip, size: 14),
-            label: Text(attachment.name),
-          ),
+          padding: const EdgeInsets.only(top: 6),
+          child: Wrap(spacing: 8, runSpacing: 8, children: [
+            for (final attachment in message.attachments) _AttachmentTile(attachment: attachment, onOpen: state.openExternal),
+          ]),
         ),
     ];
     return Padding(
@@ -600,6 +615,64 @@ class _MessageRow extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// An attachment as Chat on the web shows it: a tile with the file's kind, opened in the browser
+/// (Chat's download link or the Drive file). One without a link shows dimmed.
+class _AttachmentTile extends StatelessWidget {
+  const _AttachmentTile({required this.attachment, required this.onOpen});
+
+  final engine.ChatAttachment attachment;
+  final void Function(String url) onOpen;
+
+  ({IconData icon, Color color, String label}) _kind() {
+    final type = attachment.contentType ?? '';
+    final dot = attachment.name.lastIndexOf('.');
+    final ext = dot < 0 ? '' : attachment.name.substring(dot + 1).toLowerCase();
+    if (type.startsWith('video/')) return (icon: CupertinoIcons.film, color: const Color(0xFFD93025), label: 'Video');
+    if (type.startsWith('image/')) return (icon: CupertinoIcons.photo, color: const Color(0xFFD93025), label: 'Image');
+    if (type.startsWith('audio/')) return (icon: CupertinoIcons.music_note, color: const Color(0xFFE8710A), label: 'Audio');
+    if (type == 'application/pdf' || ext == 'pdf') return (icon: CupertinoIcons.doc_text, color: const Color(0xFFD93025), label: 'PDF');
+    if (attachment.url?.contains('drive.google.com') ?? false) {
+      return (icon: CupertinoIcons.doc, color: const Color(0xFF1A73E8), label: 'Google Drive');
+    }
+    return (icon: CupertinoIcons.doc, color: const Color(0xFF5F6368), label: ext.isEmpty ? 'File' : ext.toUpperCase());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final url = attachment.url;
+    final kind = _kind();
+    final tile = Container(
+      constraints: const BoxConstraints(minWidth: 220, maxWidth: 340),
+      padding: const EdgeInsets.fromLTRB(12, 10, 14, 10),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: colors.outlineVariant.withValues(alpha: 0.6)),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(kind.icon, size: 22, color: kind.color),
+        const SizedBox(width: 10),
+        Flexible(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(attachment.name, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: context.text.bodyMedium?.copyWith(fontWeight: FontWeight.w500)),
+            Text(kind.label, style: context.text.labelSmall?.copyWith(color: colors.onSurfaceVariant)),
+          ]),
+        ),
+      ]),
+    );
+    if (url == null) return Opacity(opacity: 0.5, child: tile);
+    return Tooltip(
+      message: 'Open in browser',
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(onTap: () => onOpen(url), child: tile),
       ),
     );
   }

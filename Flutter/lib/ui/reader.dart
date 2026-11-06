@@ -314,7 +314,7 @@ class _MessageCard extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                   child: Wrap(spacing: 8, runSpacing: 8, children: [
-                    for (final a in m.attachments) _AttachmentChip(attachment: a, onOpen: () => state.openFile(a.path)),
+                    for (final a in m.attachments) _AttachmentChip(attachment: a, onOpen: () => state.openExternal(a.path)),
                   ]),
                 ),
             ],
@@ -717,7 +717,7 @@ class _ChatMessageState extends State<_ChatMessage> {
                         Padding(
                           padding: const EdgeInsets.only(top: 8),
                           child: Wrap(spacing: 8, runSpacing: 8, children: [
-                            for (final a in m.attachments) _AttachmentChip(attachment: a, onOpen: () => widget.state.openFile(a.path)),
+                            for (final a in m.attachments) _AttachmentChip(attachment: a, onOpen: () => widget.state.openExternal(a.path)),
                           ]),
                         ),
                     ],

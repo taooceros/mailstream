@@ -210,7 +210,10 @@ final class ControlService {
                     "markup": .string(message.text),
                     "thread": message.thread.json, "threadReply": .bool(message.threadReply), "mine": .bool(message.mine),
                     "card": .bool(message.card),
-                    "attachments": .array(message.attachments.map { ["name": .string($0.name), "url": $0.url.json] }),
+                    "attachments": .array(message.attachments.map { attachment in
+                        ["name": .string(attachment.name), "url": attachment.url.json,
+                         "contentType": (attachment.contentType?.nilIfEmpty).json]
+                    }),
                 ]
             }),
             "pending": .array(thread.pending.map { pending in

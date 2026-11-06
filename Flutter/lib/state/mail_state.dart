@@ -714,7 +714,8 @@ class MailState extends ChangeNotifier {
 
   void _sentToast(engine.Sent sent) => showToast('Sent to ${sent.to.map((a) => Address.parse(a).displayName).join(', ')}');
 
-  void openFile(String path) => Process.run('open', [path]);
+  /// Opens a file in its app, or a link in the browser.
+  void openExternal(String pathOrUrl) => Process.run('open', [pathOrUrl]);
 
   // MARK: - Settings and accounts
 

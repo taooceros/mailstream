@@ -436,9 +436,15 @@ pub struct ChatUser {
 }
 
 #[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatAttachment {
     pub name: String,
+    /// Where it opens in the browser (Chat's download link, or the Drive file); nil when the
+    /// API gives none.
     pub url: Option<String>,
+    /// `video/mp4`, `image/png`, …
+    #[serde(default)]
+    pub content_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, uniffi::Record)]
