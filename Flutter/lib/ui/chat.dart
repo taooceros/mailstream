@@ -596,7 +596,8 @@ class _MessageRow extends StatelessWidget {
         ),
     ];
     return Padding(
-      padding: EdgeInsets.only(top: head ? 10 : 2),
+      // A sender's run starts a paragraph's gap below the last; their next messages follow closely.
+      padding: EdgeInsets.only(top: head ? 16 : 6),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -619,16 +620,16 @@ class _MessageRow extends StatelessWidget {
               children: [
                 if (head)
                   Padding(
-                    padding: const EdgeInsets.only(bottom: 2),
-                    child: Row(children: [
+                    padding: const EdgeInsets.only(bottom: 1),
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
                       Flexible(
                         child: Text(message.mine ? 'You' : sender.name, maxLines: 1, overflow: TextOverflow.ellipsis,
-                            style: context.text.body.copyWith(fontWeight: FontWeight.w600)),
+                            style: chatReading(context).copyWith(fontWeight: FontWeight.w600, height: 1.3)),
                       ),
                       const SizedBox(width: 8),
-                      Text(messageTime(created), style: context.text.subheadline.copyWith(color: colors.secondaryLabel)),
+                      Text(messageTime(created), style: context.text.callout.copyWith(color: colors.secondaryLabel)),
                       if (message.edited != null)
-                        Text(' · Edited', style: context.text.subheadline.copyWith(color: colors.secondaryLabel)),
+                        Text(' · Edited', style: context.text.callout.copyWith(color: colors.secondaryLabel)),
                     ]),
                   ),
                 ...body,
@@ -950,7 +951,7 @@ class _PendingRow extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Opacity(opacity: failed ? 1 : 0.55, child: Text(pending.text, style: context.text.body)),
+          Opacity(opacity: failed ? 1 : 0.55, child: Text(pending.text, style: chatReading(context))),
           Text(failed ? 'Not sent: ${pending.failure}' : 'Sending…',
               style: context.text.subheadline.copyWith(color: failed ? colors.red : colors.secondaryLabel)),
         ],

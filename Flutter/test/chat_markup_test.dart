@@ -20,7 +20,7 @@ Future<List<String>> draw(WidgetTester tester, String markdown) async {
     final style = inherited.merge(span.style);
     if (span.text case final text?) {
       final marks = [
-        if (style.fontWeight == FontWeight.w700) 'b',
+        if (style.fontWeight == FontWeight.w600) 'b',
         if (style.fontStyle == FontStyle.italic) 'i',
         if (style.decoration == TextDecoration.lineThrough) 's',
       ].join();
@@ -53,10 +53,28 @@ void main() {
       '```\na\\*b\n```\n'
       'see [site](https://x.y) and <chat-user data-user="users/1"></chat-user> &amp; https://bare.example',
     );
-    expect(runs, containsAllInOrder(['b:Office:', ' CSE 592\nline two ', 'i:it', 's:gone']));
+    // Google wraps lines at 80 columns: a single line break is a space.
+    expect(runs, containsAllInOrder(['b:Office:', ' CSE 592 line two ', 'i:it', 's:gone']));
     expect(runs.join(), contains('**literal** 1. done!'));
     expect(runs, containsAllInOrder(['•', 'item', '•', 'nested', '1.', 'first', '2.', 'second']));
     expect(runs, contains(r'a\*b'));
-    expect(runs.join(), contains('see site and @Brent & https://bare.example'));
+    expect(runs.join(), contains('see site and b:@Brent & https://bare.example'));
+  });
+
+  testWidgets('a hard break keeps its line; wrapped list items and links flow', (tester) async {
+    final runs = await draw(
+      tester,
+      'first line\\\nsecond line\n'
+      '\n'
+      ' \n'
+      '\n'
+      '  - **CSE 561** starts at 3:00 PM. Event link: [CSE\n'
+      '    561](https://x.y)\n',
+    );
+    expect(runs.join(), contains('first line\nsecond line'));
+    expect(runs.join(), contains('Event link: CSE 561'));
+    // The paragraph of a lone space takes no room.
+    final paragraphs = tester.widgetList<RichText>(find.byType(RichText)).map((text) => text.text.toPlainText());
+    expect(paragraphs.where((text) => text.trim().isEmpty), isEmpty);
   });
 }
