@@ -41,8 +41,9 @@ close button and Esc slide it out on the same spring.
 Writing mail happens in a compose column, so other mail can be read beside it: ⌘N, the toolbar's
 pencil, F (forward) and the inline reply's "move to compose column" button (⌘⇧O) open it at the
 window's trailing edge, the sidebar folding to the rail below 1440 dp. Dragging the gap beside it
-sets its width; the list and conversation keep two panes while 700 dp remain for them and slide
-over each other below that. Its title bar closes the draft (⌘W, asking first when something is
+moves that edge alone (the list's width follows the window); the list and conversation keep two
+panes while 700 dp remain for them and slide over each other below that, except with the column
+between them, where it stops widening before the conversation would leave. Its title bar closes the draft (⌘W, asking first when something is
 written), minimizes it to a capsule in the bottom-right corner, swaps it to the other side of
 the conversation, or floats it over the window (dragged by its title, sized from its top-left
 corner). Each draft is a tab; they stay in memory, through mailbox and conversation changes,

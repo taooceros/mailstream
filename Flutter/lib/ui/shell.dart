@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/services.dart';
@@ -381,7 +382,9 @@ class _MailShellState extends State<MailShell> {
         ? null
         : Island(child: _detailPane(context, opened));
     final onDismiss = chat.active ? chat.close : state.close;
-    final listWidth = dockedCompose ? (mailWidth * 0.43).clamp(300.0, 460.0) : (width * 0.36).clamp(400.0, 520.0);
+    // With the compose column docked the list's width follows the window, not the column, so
+    // resizing the column moves only the edge being dragged.
+    final listWidth = dockedCompose ? (contentWidth * 0.3).clamp(300.0, 460.0) : (width * 0.36).clamp(400.0, 520.0);
     final Widget mailContent = _twoPane
         ? SplitDetail(list: listPane, listWidth: listWidth, onDismiss: onDismiss, detail: detail)
         : Stack(
@@ -406,17 +409,26 @@ class _MailShellState extends State<MailShell> {
           )
         : null;
 
+    // Resizes the docked column from a drag of [dx] on its leading or trailing edge, within [widest].
+    void resize(double dx, {required bool trailing, double? widest}) {
+      final current = state.composeWidth.clamp(minCompose, maxCompose);
+      state.setComposeWidth((current + (trailing ? dx : -dx)).clamp(minCompose, widest ?? maxCompose));
+    }
+
     final Widget content;
     if (!dockedCompose || composePane == null) {
       content = mailContent;
     } else if (state.composeSwapped && _twoPane && detail != null) {
+      // Between the list and the conversation, it widens only as far as keeps the conversation
+      // beside the list: past that the layout would fold into one pane under the pointer.
+      final widest = math.min(contentWidth - Panes.gap - 700.0, contentWidth - listWidth - 2 * Panes.gap - 360.0);
       content = Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           SizedBox(width: listWidth, child: listPane),
           const SizedBox(width: Panes.gap),
           SizedBox(width: composeWidth, child: composePane),
-          _ResizeGap(onDrag: (dx) => state.setComposeWidth((composeWidth + dx).clamp(minCompose, maxCompose))),
+          _ResizeGap(onDrag: (dx) => resize(dx, trailing: true, widest: math.max(math.min(widest, maxCompose), composeWidth))),
           Expanded(child: detail),
         ],
       );
@@ -425,7 +437,7 @@ class _MailShellState extends State<MailShell> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           SizedBox(width: composeWidth, child: composePane),
-          _ResizeGap(onDrag: (dx) => state.setComposeWidth((composeWidth + dx).clamp(minCompose, maxCompose))),
+          _ResizeGap(onDrag: (dx) => resize(dx, trailing: true)),
           Expanded(child: mailContent),
         ],
       );
@@ -434,7 +446,7 @@ class _MailShellState extends State<MailShell> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(child: mailContent),
-          _ResizeGap(onDrag: (dx) => state.setComposeWidth((composeWidth - dx).clamp(minCompose, maxCompose))),
+          _ResizeGap(onDrag: (dx) => resize(dx, trailing: false)),
           SizedBox(width: composeWidth, child: composePane),
         ],
       );
