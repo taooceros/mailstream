@@ -24,8 +24,9 @@ in the Keychain. The build is arm64 only. The app is not sandboxed.
 The look is macOS 26's Liquid Glass laid out as islands, after the Dia browser: the whole window
 is the system's glass (`NSGlassEffectView`, which `macos/Runner/MainFlutterWindow.swift` places
 under the transparent Flutter view, through `macos_window_utils`), the sidebar sits on it, and the
-list and the conversation are rounded white islands floating on it with a gap between them. The
-toolbars' controls float on capsules of real system glass (`mailstream/glass` platform views
+list and the conversation are rounded islands floating on it with a gap between them: the
+conversation's white, the lists' a shade grayer, a tray their highlighted row lifts off as a white
+card (the row under the pointer half as far, lifted rows 4 pt apart). The toolbars' controls float on capsules of real system glass (`mailstream/glass` platform views
 under them), the controls over a row on a raised capsule. Buttons, icon buttons, the search and
 text fields and spinners are `macos_ui`'s; Material's remaining widgets are themed to match
 (system font sizes, accent blue, gray fills, SF Symbols-style icons from `CupertinoIcons`). It

@@ -11,12 +11,13 @@ import 'package:macos_ui/macos_ui.dart';
 
 import 'design.dart';
 
-/// A rounded island on the window's glass, in the window's background color: a hairline rim and
-/// a soft shadow lift it.
+/// A rounded island on the window's glass, in the window's background color (or `color`): a
+/// hairline rim and a soft shadow lift it.
 class Island extends StatelessWidget {
-  const Island({super.key, required this.child});
+  const Island({super.key, required this.child, this.color});
 
   final Widget child;
+  final Color? color;
 
   @override
   Widget build(BuildContext context) {
@@ -31,7 +32,7 @@ class Island extends StatelessWidget {
       ),
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: colors.background,
+          color: color ?? colors.background,
           borderRadius: radius,
           boxShadow: [
             BoxShadow(color: MacosColors.black.withValues(alpha: light ? 0.05 : 0.3), blurRadius: 1, offset: const Offset(0, 0.5)),

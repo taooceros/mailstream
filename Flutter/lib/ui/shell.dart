@@ -387,7 +387,10 @@ class _MailShellState extends State<MailShell> {
           )
         : Rail(state: state, onMenu: () => setState(() => _drawerOpen = true)));
     final chat = state.chat;
-    final listPane = Island(child: chat.active ? _onChat(() => ChatListPane(state: state)) : _listPane(context));
+    final listPane = Island(
+      color: context.colors.tray,
+      child: chat.active ? _onChat(() => ChatListPane(state: state)) : _listPane(context),
+    );
     final opened = chat.active ? null : state.opened;
     final space = chat.active ? chat.opened : null;
     final detail = space != null
@@ -696,7 +699,7 @@ class _Page extends StatelessWidget {
     decoration: BoxDecoration(
       boxShadow: [BoxShadow(color: MacosColors.black.withValues(alpha: 0.1), blurRadius: 12, offset: const Offset(-2, 0))],
     ),
-    child: ColoredBox(color: context.colors.background, child: child),
+    child: ColoredBox(color: context.colors.tray, child: child),
   );
 }
 

@@ -19,6 +19,7 @@ final class MailColors {
   const MailColors._({
     required this.brightness,
     required this.background,
+    required this.tray,
     required this.label,
     required this.secondaryLabel,
     required this.border,
@@ -42,6 +43,7 @@ final class MailColors {
   static const light = MailColors._(
     brightness: Brightness.light,
     background: MacosColors.white,
+    tray: Color(0xFFF5F6FA),
     label: Color(0xFF1D1D1F),
     secondaryLabel: Color(0xFF6E6E73),
     border: Color(0xFFC7C7CC),
@@ -65,6 +67,7 @@ final class MailColors {
   static const dark = MailColors._(
     brightness: Brightness.dark,
     background: Color(0xFF1E1E1E),
+    tray: Color(0xFF18181A),
     label: Color(0xFFF5F5F7),
     secondaryLabel: Color(0xFF98989D),
     border: Color(0xFF545458),
@@ -89,6 +92,9 @@ final class MailColors {
 
   /// Islands, sheets and fields.
   final Color background;
+
+  /// The list islands, a shade under [background], so rows can lift off them.
+  final Color tray;
   final Color label;
   final Color secondaryLabel;
 
@@ -145,6 +151,9 @@ abstract final class ListMetrics {
   static const sectionHeight = 30.0;
   static const avatarSize = 36.0;
   static const inset = 6.0;
+
+  /// Lifted rows (selected, under the pointer) stay this far apart, their cards inset by half.
+  static const liftGap = 4.0;
 }
 
 /// The window as islands, after Dia: the sidebar sits on the window's Liquid Glass, and the list

@@ -78,7 +78,8 @@ List<ListItem> listItems(List<Conversation> conversations, {required bool bundle
   ];
 }
 
-/// The keyboard highlight, shared by the list and the window's key handling.
+/// A row the list marks by id: the keyboard highlight, shared by the list and the window's key
+/// handling, or the row under the pointer.
 class ListHighlight extends ChangeNotifier {
   String? _id;
   String? get id => _id;
@@ -122,6 +123,7 @@ class ConversationList extends StatefulWidget {
 
 class ConversationListState extends State<ConversationList> {
   final _scroll = ScrollController();
+  final _hover = ListHighlight();
 
   /// Distance from the end at which the next page loads.
   static const _pagingMargin = 900.0;
@@ -147,6 +149,7 @@ class ConversationListState extends State<ConversationList> {
   void dispose() {
     widget.highlight.removeListener(_reveal);
     _scroll.dispose();
+    _hover.dispose();
     super.dispose();
   }
 
@@ -211,6 +214,8 @@ class ConversationListState extends State<ConversationList> {
           return const Center(child: Spinner());
         }
         final item = items[index];
+        final after = index + 1 < items.length ? items[index + 1] : null;
+        final next = after == null || after is SectionItem ? null : itemId(after);
         return switch (item) {
           SectionItem(:final title, :final count) => SectionHeader(title, count: count),
           RowItem(:final conversation) => ConversationRow(
@@ -218,6 +223,8 @@ class ConversationListState extends State<ConversationList> {
             conversation: conversation,
             state: state,
             highlight: widget.highlight,
+            hover: _hover,
+            next: next,
             now: now,
             onTap: () => widget.onActivate(item),
           ),
@@ -225,6 +232,8 @@ class ConversationListState extends State<ConversationList> {
             key: ValueKey(itemId(item)),
             bundle: item,
             highlight: widget.highlight,
+            hover: _hover,
+            next: next,
             now: now,
             onTap: () => widget.onActivate(item),
           ),
@@ -262,26 +271,74 @@ class SectionHeader extends StatelessWidget {
   }
 }
 
-/// A row's surface, as in Mail: a rounded highlight for the keyboard and the pointer, a
-/// hairline under the row from the avatar on.
-class _RowSurface extends StatelessWidget {
-  const _RowSurface({required this.highlighted, required this.onTap, required this.onHover, required this.child});
+/// A row's surface: a [LiftedRow] on the list's tray for the highlight and the pointer, and
+/// under the row a hairline from the avatar on, hidden beside a lifted row.
+class _RowSurface extends StatefulWidget {
+  const _RowSurface({
+    required this.id,
+    required this.next,
+    required this.highlight,
+    required this.hover,
+    required this.onTap,
+    required this.onHover,
+    required this.child,
+  });
 
-  final bool highlighted;
+  final String id;
+
+  /// The row below's id, if a row follows.
+  final String? next;
+  final ListHighlight highlight;
+  final ListHighlight hover;
   final VoidCallback onTap;
   final ValueChanged<bool> onHover;
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: ListMetrics.inset),
-    child: DecoratedBox(
-      position: DecorationPosition.foreground,
-      decoration: highlighted
-          ? const BoxDecoration()
-          : _RowSeparator(color: context.colors.separator),
-      child: Hoverable(selected: highlighted, onTap: onTap, onHover: onHover, child: child),
-    ),
+  State<_RowSurface> createState() => _RowSurfaceState();
+}
+
+class _RowSurfaceState extends State<_RowSurface> {
+  void _hover(bool hovered) {
+    final hover = widget.hover;
+    if (hovered) {
+      hover.id = widget.id;
+    } else if (hover.id == widget.id) {
+      hover.id = null;
+    }
+    widget.onHover(hovered);
+  }
+
+  @override
+  void dispose() {
+    // A row archived from under the pointer gets no exit; the tree is locked until the frame ends.
+    final hover = widget.hover;
+    final id = widget.id;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (hover.id == id) hover.id = null;
+    });
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: Listenable.merge([widget.highlight, widget.hover]),
+    child: widget.child,
+    builder: (context, child) {
+      final highlight = widget.highlight.id;
+      final hover = widget.hover.id;
+      final selected = highlight == widget.id;
+      final next = widget.next;
+      final rule = !selected && hover != widget.id && (next == null || (next != highlight && next != hover));
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: ListMetrics.inset),
+        child: DecoratedBox(
+          position: DecorationPosition.foreground,
+          decoration: rule ? _RowSeparator(color: context.colors.separator) : const BoxDecoration(),
+          child: LiftedRow(selected: selected, onTap: widget.onTap, onHover: _hover, child: child!),
+        ),
+      );
+    },
   );
 }
 
@@ -293,6 +350,12 @@ class _RowSeparator extends Decoration {
 
   @override
   BoxPainter createBoxPainter([VoidCallback? onChanged]) => _RowSeparatorPainter(color);
+
+  @override
+  bool operator ==(Object other) => other is _RowSeparator && other.color == color;
+
+  @override
+  int get hashCode => color.hashCode;
 }
 
 class _RowSeparatorPainter extends BoxPainter {
@@ -333,10 +396,12 @@ class _RowLayout extends StatelessWidget {
     padding: const EdgeInsets.fromLTRB(0, 8, 14, 8),
     child: Row(
       children: [
+        // The dot sits 6 pt in, clear of the lifted card's bar at its start.
         SizedBox(
           width: 16,
           child: unread
-              ? Center(
+              ? Align(
+                  alignment: const Alignment(1 / 3, 0),
                   child: Container(
                     width: 7,
                     height: 7,
@@ -380,6 +445,8 @@ class ConversationRow extends StatefulWidget {
     required this.conversation,
     required this.state,
     required this.highlight,
+    required this.hover,
+    required this.next,
     required this.now,
     required this.onTap,
   });
@@ -387,6 +454,10 @@ class ConversationRow extends StatefulWidget {
   final Conversation conversation;
   final MailState state;
   final ListHighlight highlight;
+  final ListHighlight hover;
+
+  /// The row below's id, if a row follows.
+  final String? next;
   final DateTime now;
   final VoidCallback onTap;
 
@@ -480,12 +551,13 @@ class _ConversationRowState extends State<ConversationRow> {
       ),
     );
 
-    return ListenableBuilder(
-      listenable: widget.highlight,
-      builder: (context, _) => _RowSurface(
-        highlighted: widget.highlight.id == c.id,
-        onTap: widget.onTap,
-        onHover: _hovered,
+    return _RowSurface(
+      id: c.id,
+      next: widget.next,
+      highlight: widget.highlight,
+      hover: widget.hover,
+      onTap: widget.onTap,
+      onHover: _hovered,
         child: Stack(
           children: [
             _RowLayout(
@@ -573,7 +645,6 @@ class _ConversationRowState extends State<ConversationRow> {
                 ),
               ),
           ],
-        ),
       ),
     );
   }
@@ -602,10 +673,22 @@ class _TopicLabel extends StatelessWidget {
 
 /// A Smart Inbox bundle: its category, how many unread, who and what's newest.
 class BundleRow extends StatelessWidget {
-  const BundleRow({super.key, required this.bundle, required this.highlight, required this.now, required this.onTap});
+  const BundleRow({
+    super.key,
+    required this.bundle,
+    required this.highlight,
+    required this.hover,
+    required this.next,
+    required this.now,
+    required this.onTap,
+  });
 
   final BundleItem bundle;
   final ListHighlight highlight;
+  final ListHighlight hover;
+
+  /// The row below's id, if a row follows.
+  final String? next;
   final DateTime now;
   final VoidCallback onTap;
 
@@ -622,12 +705,13 @@ class BundleRow extends StatelessWidget {
     ].where((s) => s.isNotEmpty).take(6).join(', ');
     final tone = categoryColors(bundle.category, colors);
     final strong = unread > 0 ? FontWeight.w700 : FontWeight.w600;
-    return ListenableBuilder(
-      listenable: highlight,
-      builder: (context, _) => _RowSurface(
-        highlighted: highlight.id == itemId(bundle),
-        onTap: onTap,
-        onHover: (_) {},
+    return _RowSurface(
+      id: itemId(bundle),
+      next: next,
+      highlight: highlight,
+      hover: hover,
+      onTap: onTap,
+      onHover: (_) {},
         child: _RowLayout(
           unread: unread > 0,
           avatar: IconAvatar(
@@ -669,7 +753,6 @@ class BundleRow extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
             style: text.body.copyWith(color: colors.secondaryLabel),
           ),
-        ),
       ),
     );
   }

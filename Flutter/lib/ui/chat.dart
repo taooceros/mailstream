@@ -220,8 +220,8 @@ class _ChatRowState extends State<_ChatRow> {
     final weight = space.unread ? FontWeight.w700 : FontWeight.w600;
     final multiAccount = widget.state.chat.accounts.length > 1;
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: ListMetrics.inset, vertical: 1),
-      child: Hoverable(
+      padding: const EdgeInsets.symmetric(horizontal: ListMetrics.inset),
+      child: LiftedRow(
         selected: widget.selected,
         onTap: widget.onTap,
         child: Padding(

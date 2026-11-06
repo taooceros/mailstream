@@ -184,6 +184,106 @@ class MarkChip extends StatelessWidget {
   );
 }
 
+/// A row on a list island's tray (the mail and chat lists), after Dia: selected, it lifts off
+/// the tray as a [LiftedCard]; under the pointer or pressed, half as far. The card is inset
+/// [ListMetrics.liftGap] / 2 top and bottom, so lifted neighbors stay apart; the hit area is not.
+class LiftedRow extends StatefulWidget {
+  const LiftedRow({super.key, required this.selected, required this.onTap, this.onHover, required this.child});
+
+  final bool selected;
+  final VoidCallback onTap;
+  final ValueChanged<bool>? onHover;
+  final Widget child;
+
+  @override
+  State<LiftedRow> createState() => _LiftedRowState();
+}
+
+class _LiftedRowState extends State<LiftedRow> {
+  bool _hovered = false;
+  bool _pressed = false;
+
+  void _hover(bool hovered) {
+    setState(() => _hovered = hovered);
+    widget.onHover?.call(hovered);
+  }
+
+  @override
+  Widget build(BuildContext context) => MouseRegion(
+    onEnter: (_) => _hover(true),
+    onExit: (_) => _hover(false),
+    child: GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) => setState(() => _pressed = false),
+      onTapCancel: () => setState(() => _pressed = false),
+      onTap: widget.onTap,
+      child: Stack(
+        fit: StackFit.passthrough,
+        children: [
+          if (widget.selected || _hovered || _pressed)
+            Positioned.fill(
+              top: ListMetrics.liftGap / 2,
+              bottom: ListMetrics.liftGap / 2,
+              child: LiftedCard(selected: widget.selected),
+            ),
+          widget.child,
+        ],
+      ),
+    ),
+  );
+}
+
+/// A lifted row's card. Selected: a white card lit from above, with a faint blue rim, a soft
+/// shadow and a blue bar at its start; otherwise half raised, a translucent white.
+class LiftedCard extends StatelessWidget {
+  const LiftedCard({super.key, required this.selected});
+
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final light = colors.brightness == Brightness.light;
+    const radius = BorderRadius.all(Radius.circular(10));
+    if (!selected) {
+      return DecoratedBox(
+        decoration: BoxDecoration(
+          color: light ? const Color(0xB8FFFFFF) : const Color(0x14FFFFFF),
+          borderRadius: radius,
+          border: Border.all(color: light ? const Color(0x12000000) : const Color(0x1AFFFFFF), width: 0.5),
+          boxShadow: const [BoxShadow(color: Color(0x0A000000), blurRadius: 3, offset: Offset(0, 1))],
+        ),
+      );
+    }
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: light ? const [MacosColors.white, Color(0xFFFAFCFF)] : const [Color(0xFF2C2C30), Color(0xFF252529)],
+        ),
+        borderRadius: radius,
+        border: Border.all(color: light ? const Color(0x380066FF) : const Color(0x450A84FF), width: 0.5),
+        boxShadow: [
+          const BoxShadow(color: Color(0x0F0F172A), blurRadius: 2, offset: Offset(0, 1)),
+          BoxShadow(color: light ? const Color(0x170055FF) : const Color(0x45000000), blurRadius: 14, offset: const Offset(0, 4)),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Container(
+            width: 3,
+            decoration: BoxDecoration(color: colors.accent, borderRadius: BorderRadius.circular(2)),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// A surface that answers the pointer as the Mac's lists and sidebars do: a rounded gray wash on
 /// hover, a deeper one while pressed, [selectedColor] when [selected].
 class Hoverable extends StatefulWidget {
