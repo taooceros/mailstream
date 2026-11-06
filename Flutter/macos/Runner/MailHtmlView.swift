@@ -84,13 +84,19 @@ final class MailHtmlView: WKWebView {
   }
 
   /// Applied over the mail's own styles, as the native reader's frames are: the document sizes to
-  /// its content, which the script reports on every change (layout, late images, zoom).
+  /// its content, which the script reports on every change (layout, late images, zoom). The view's
+  /// height is the viewport's, so nothing may size from the viewport: in quirks mode a
+  /// `height: 100%` (mail layout tables) passes over auto-height blocks up to the viewport, and
+  /// the reported height then grows the view, which grows the table, without end. A flex `html`
+  /// stops that walk and makes those percentages auto; `html` itself still stretches to the
+  /// viewport in quirks mode, so the height is where the body ends.
   private static let script = """
   (() => {
     const doc = document, root = doc.documentElement;
     const style = doc.createElement('style');
     style.textContent = `
       html, body { height: auto !important; min-height: 0 !important; overflow: hidden !important; }
+      html { display: flex !important; flex-direction: column !important; }
       body { margin: 0; padding: 2px 0; color: #1f1f1f; font: 14px/1.45 -apple-system, system-ui, sans-serif;
         overflow-wrap: break-word; }
       img { max-width: 100%; }
@@ -102,8 +108,10 @@ final class MailHtmlView: WKWebView {
       pending = false;
       const body = doc.body;
       const width = Math.max(root.scrollWidth, body ? body.scrollWidth : 0);
+      const box = (body || root).getBoundingClientRect();
+      const margin = body ? parseFloat(getComputedStyle(body).marginBottom) || 0 : 0;
       window.webkit.messageHandlers.size.postMessage({
-        height: root.getBoundingClientRect().height, width, room: root.clientWidth,
+        height: box.bottom + window.scrollY + margin, width, room: root.clientWidth,
       });
     };
     const schedule = () => {
@@ -111,7 +119,7 @@ final class MailHtmlView: WKWebView {
       pending = true;
       requestAnimationFrame(measure);
     };
-    new ResizeObserver(schedule).observe(root);
+    new ResizeObserver(schedule).observe(doc.body || root);
     doc.querySelectorAll('img').forEach((img) => img.addEventListener('load', schedule));
     measure();
   })();
