@@ -5,10 +5,10 @@ import macos_window_utils
 class MainFlutterWindow: NSWindow {
   private var chrome: FlutterMethodChannel?
 
-  /// Files for the compose window: dropped on the window or chosen in an open panel.
+  /// Files for the compose column: dropped on the window or chosen in an open panel.
   private var files: FlutterMethodChannel?
 
-  /// Whether a drop attaches: Flutter turns it on while the compose window is open.
+  /// Whether a drop attaches: Flutter turns it on while the compose column is open.
   private var takesFiles = false
 
   /// The window's Liquid Glass: it fills the window under the Flutter view, which leaves it open

@@ -10,6 +10,7 @@ import 'package:macos_ui/macos_ui.dart';
 import '../backend/models.dart';
 import '../state/mail_state.dart';
 import 'common.dart';
+import 'compose.dart';
 import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
@@ -66,6 +67,31 @@ class ReaderState extends State<Reader> {
       _replyAll = all;
     });
     WidgetsBinding.instance.addPostFrameCallback((_) => _composer.currentState?.focus());
+  }
+
+  /// Forwards the latest message in a new compose tab: its text under a forwarded-message header
+  /// (as the native app's), the caret above it.
+  void forward() {
+    final messages = widget.state.thread(c.id).messages;
+    final latest = messages?.lastWhere((m) => m.role != MailboxRole.drafts, orElse: () => messages.last);
+    final lower = c.subject.trimLeft().toLowerCase();
+    final subject = lower.startsWith('fwd:') || lower.startsWith('fw:') ? c.subject : 'Fwd: ${c.subject}';
+    final header = <String>[
+      '---------- Forwarded message ---------',
+      if (latest != null && latest.from.isNotEmpty) 'From: ${latest.from.map(formatRecipient).join(', ')}' else if (c.from != null) 'From: ${formatRecipient(c.from!)}',
+      if ((latest?.date ?? c.date) case final date?) 'Date: ${messageDate(date, DateTime.now())}',
+      'Subject: ${c.subject}',
+      if (latest != null && latest.to.isNotEmpty) 'To: ${latest.to.map(formatRecipient).join(', ')}',
+      if (latest != null && latest.cc.isNotEmpty) 'Cc: ${latest.cc.map(formatRecipient).join(', ')}',
+    ].join('\n');
+    final original = latest?.text?.trim() ?? '';
+    widget.state.compose(
+      kind: ComposeKind.forward,
+      from: c.account,
+      subject: subject,
+      body: '\n\n${original.isEmpty ? header : '$header\n\n$original'}',
+      initialBodySelection: 0,
+    );
   }
 
   void _toggle(String id) => setState(() => _expanded.contains(id) ? _expanded.remove(id) : _expanded.add(id));
@@ -933,7 +959,9 @@ class _ComposerState extends State<_Composer> {
       if (widget.all) ...[...latest.to, ...latest.cc, ...latest.from],
     ].where((a) => !own.contains(a.email.toLowerCase()));
     final seen = <String>{};
-    return people.where((a) => seen.add(a.email.toLowerCase())).map((a) => a.displayName).join(', ');
+    final names = people.where((a) => seen.add(a.email.toLowerCase())).map((a) => a.displayName).join(', ');
+    // Mail to oneself is answered to oneself.
+    return names.isEmpty ? primary.map((a) => a.displayName).join(', ') : names;
   }
 
   Future<void> _send() async {
@@ -954,6 +982,25 @@ class _ComposerState extends State<_Composer> {
     widget.onClose();
   }
 
+  /// Moves the reply, as typed so far, into a compose tab so other mail can be read beside it.
+  /// It still goes out with `mail.reply`: the app plans its recipients and quotes the original.
+  void _popOut() {
+    if (_sending) return;
+    final rawSubject = widget.conversation.subject;
+    widget.state.drafts.remove(widget.conversation.id);
+    widget.onClose();
+    widget.state.compose(
+      kind: ComposeKind.reply,
+      replyTo: widget.conversation,
+      replyAll: widget.all,
+      from: widget.conversation.account,
+      to: _recipients,
+      subject: rawSubject.trimLeft().toLowerCase().startsWith('re:') ? rawSubject : 'Re: $rawSubject',
+      body: _text.text,
+      focusBodyInitially: true,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
@@ -961,6 +1008,7 @@ class _ComposerState extends State<_Composer> {
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.enter, meta: true): _send,
+        const SingleActivator(LogicalKeyboardKey.keyO, meta: true, shift: true): _popOut,
         const SingleActivator(LogicalKeyboardKey.escape): () {
           if (_text.text.trim().isEmpty) {
             _discard();
@@ -1002,6 +1050,11 @@ class _ComposerState extends State<_Composer> {
                   tooltip: widget.all ? 'Reply to sender only' : 'Reply all',
                   icon: widget.all ? CupertinoIcons.arrowshape_turn_up_left : CupertinoIcons.arrowshape_turn_up_left_2,
                   onPressed: () => widget.onAll(!widget.all),
+                ),
+                ToolButton(
+                  tooltip: 'Open in compose column (⌘⇧O)',
+                  icon: CupertinoIcons.sidebar_right,
+                  onPressed: _popOut,
                 ),
                 ToolButton(tooltip: 'Discard', icon: CupertinoIcons.trash, onPressed: _discard),
               ]),

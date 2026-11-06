@@ -20,17 +20,6 @@ import 'people.dart';
 /// back with `hover` and `drop`.
 const _files = MethodChannel('mailstream/files');
 
-/// Opens the compose window for a new message (⌘N, the Compose button), from the account whose
-/// mailbox is shown, else the first. Like the other front ends' compose windows it sends with
-/// `mail.send`, and clicking Send is the confirmation the engine asks for.
-Future<void> openCompose(BuildContext context, MailState state) {
-  final from = switch (state.selection) {
-    MailboxSelection(:final mailbox) => mailbox.account,
-    UnifiedSelection() => state.accounts.firstOrNull?.id,
-  };
-  return showSheet<void>(context, (_) => ComposeWindow(state: state, from: from));
-}
-
 enum _Field {
   to('To'),
   cc('Cc'),
@@ -83,48 +72,41 @@ bool _validEmail(String email) {
 }
 
 /// [person] as a recipient: `Name <address>`, the name quoted when it holds a separator.
-String _recipient(Address person) {
+String formatRecipient(Address person) {
   final name = person.name?.replaceAll('"', '').trim();
   if (name == null || name.isEmpty || name == person.email) return person.email;
   return RegExp(r'[,;<>@()\[\]:\\.]').hasMatch(name) ? '"$name" <${person.email}>' : '$name <${person.email}>';
 }
 
-/// A new message: From, To, Cc (Bcc on request), Subject, a plain-text body and attachments
-/// (the Attach button, files dropped anywhere on the window or pasted). ⌘Return sends; Esc or ⌘W closes,
-/// asking first when something is written. A failed send keeps the window open with the
-/// engine's reason underneath.
-class ComposeWindow extends StatefulWidget {
-  const ComposeWindow({super.key, required this.state, required this.from});
+/// The compose column (or floating island): hosts one or more [ComposeDraft] tabs so the person
+/// can read and browse other conversations on the left while writing.
+class ComposePane extends StatefulWidget {
+  const ComposePane({
+    super.key,
+    required this.state,
+    required this.onUnfocus,
+    this.onDragFloating,
+  });
 
   final MailState state;
-
-  /// The sending account's id; null when there is no account.
-  final String? from;
+  final VoidCallback onUnfocus;
+  final ValueChanged<Offset>? onDragFloating;
 
   @override
-  State<ComposeWindow> createState() => _ComposeWindowState();
+  State<ComposePane> createState() => _ComposePaneState();
 }
 
-class _ComposeWindowState extends State<ComposeWindow> {
-  late String? _from = widget.from;
-  final _fields = {for (final field in _Field.values) field: TextEditingController()};
-  final _focus = {for (final field in _Field.values) field: FocusNode()};
-  final _subject = TextEditingController();
-  final _body = TextEditingController();
-  bool _showBcc = false;
-  bool _sending = false;
-  bool _confirmingDiscard = false;
-  String? _error;
-
-  /// Full paths of the attached files, with their sizes once read.
-  final List<String> _attachments = [];
-  final Map<String, int> _sizes = {};
-
-  /// Whether files are being dragged over the window.
+class _ComposePaneState extends State<ComposePane> {
+  final Map<int, GlobalKey<_ComposeDraftViewState>> _draftKeys = {};
   bool _dropping = false;
 
-  /// Fields the last Send refused.
-  final Set<_Field> _invalid = {};
+  GlobalKey<_ComposeDraftViewState> _keyFor(int id) =>
+      _draftKeys.putIfAbsent(id, () => GlobalKey<_ComposeDraftViewState>(debugLabel: 'ComposeDraft:$id'));
+
+  _ComposeDraftViewState? get _activeState {
+    final active = widget.state.activeCompose;
+    return active == null ? null : _draftKeys[active.id]?.currentState;
+  }
 
   @override
   void initState() {
@@ -134,29 +116,269 @@ class _ComposeWindowState extends State<ComposeWindow> {
   }
 
   @override
+  void didUpdateWidget(ComposePane oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final activeIds = {for (final d in widget.state.composes) d.id};
+    _draftKeys.removeWhere((id, _) => !activeIds.contains(id));
+  }
+
+  @override
   void dispose() {
     _files.invokeMethod<void>('accept', false);
     _files.setMethodCallHandler(null);
-    for (final controller in [..._fields.values, _subject, _body]) {
-      controller.dispose();
-    }
-    for (final node in _focus.values) {
-      node.dispose();
-    }
     super.dispose();
   }
 
   Future<void> _onFiles(MethodCall call) async {
     if (!mounted) return;
+    final active = widget.state.activeCompose;
     switch (call.method) {
       case 'hover':
-        setState(() => _dropping = call.arguments == true && !_sending);
+        setState(() => _dropping = call.arguments == true && active != null && !active.sending && active.replyTo == null);
       case 'drop':
-        _attach((call.arguments as List).cast<String>());
+        _activeState?.attach((call.arguments as List).cast<String>());
     }
   }
 
-  Future<void> _pick() async => _attach(await _files.invokeListMethod<String>('pick') ?? const []);
+  @override
+  Widget build(BuildContext context) {
+    final composes = widget.state.composes;
+    if (composes.isEmpty) return const SizedBox.shrink();
+    final activeIndex = widget.state.activeComposeIndex.clamp(0, composes.length - 1);
+    return Island(
+      child: Stack(
+        children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (composes.length > 1) ...[
+                _ComposeTabBar(
+                  state: widget.state,
+                  activeIndex: activeIndex,
+                  onCloseTab: (draft) => _keyFor(draft.id).currentState?.requestClose(),
+                ),
+                const Hairline(),
+              ],
+              Expanded(
+                child: IndexedStack(
+                  index: activeIndex,
+                  children: [
+                    for (final draft in composes)
+                      _ComposeDraftView(
+                        key: _keyFor(draft.id),
+                        state: widget.state,
+                        draft: draft,
+                        onUnfocus: widget.onUnfocus,
+                        onDragFloating: widget.onDragFloating,
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (_dropping) Positioned.fill(child: IgnorePointer(child: _dropTarget(context))),
+        ],
+      ),
+    );
+  }
+
+  Widget _dropTarget(BuildContext context) {
+    final colors = context.colors;
+    return Container(
+      margin: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: colors.accentFill.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(Panes.corner - 4),
+        border: Border.all(color: colors.accent, width: 2),
+      ),
+      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+        MacosIcon(CupertinoIcons.paperclip, size: 36, color: colors.onAccentFill),
+        const SizedBox(height: 12),
+        Text('Drop files to attach', style: context.text.title3.copyWith(color: colors.onAccentFill)),
+      ]),
+    );
+  }
+}
+
+class _ComposeTabBar extends StatelessWidget {
+  const _ComposeTabBar({
+    required this.state,
+    required this.activeIndex,
+    required this.onCloseTab,
+  });
+
+  final MailState state;
+  final int activeIndex;
+  final ValueChanged<ComposeDraft> onCloseTab;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return SizedBox(
+      height: 36,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        child: Row(
+          children: [
+            Expanded(
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: state.composes.length,
+                separatorBuilder: (_, _) => const SizedBox(width: 4),
+                itemBuilder: (context, index) {
+                  final draft = state.composes[index];
+                  final selected = index == activeIndex;
+                  final icon = switch (draft.kind) {
+                    ComposeKind.newMessage => CupertinoIcons.square_pencil,
+                    ComposeKind.reply => CupertinoIcons.arrowshape_turn_up_left,
+                    ComposeKind.forward => CupertinoIcons.arrowshape_turn_up_right,
+                  };
+                  return Hoverable(
+                    selected: selected,
+                    selectedColor: colors.selection,
+                    radius: 6,
+                    onTap: () => state.selectCompose(index),
+                    child: Padding(
+                      padding: const EdgeInsets.only(left: 8, right: 4),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          MacosIcon(icon, size: 12, color: selected ? colors.label : colors.secondaryLabel),
+                          const SizedBox(width: 5),
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 140),
+                            child: Text(
+                              draft.tabTitle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: context.text.subheadline.copyWith(
+                                color: selected ? colors.label : colors.secondaryLabel,
+                                fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          MacosIconButton(
+                            icon: MacosIcon(CupertinoIcons.xmark, size: 10, color: colors.secondaryLabel),
+                            onPressed: () => onCloseTab(draft),
+                            backgroundColor: MacosColors.transparent,
+                            hoverColor: colors.hover,
+                            shape: BoxShape.circle,
+                            padding: EdgeInsets.zero,
+                            boxConstraints: const BoxConstraints.tightFor(width: 16, height: 16),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(width: 4),
+            ToolButton(
+              tooltip: 'New draft tab (⌘N)',
+              icon: CupertinoIcons.plus,
+              onPressed: state.composeNew,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ComposeDraftView extends StatefulWidget {
+  const _ComposeDraftView({
+    super.key,
+    required this.state,
+    required this.draft,
+    required this.onUnfocus,
+    this.onDragFloating,
+  });
+
+  final MailState state;
+  final ComposeDraft draft;
+  final VoidCallback onUnfocus;
+  final ValueChanged<Offset>? onDragFloating;
+
+  @override
+  State<_ComposeDraftView> createState() => _ComposeDraftViewState();
+}
+
+class _ComposeDraftViewState extends State<_ComposeDraftView> {
+  late final _fields = {
+    _Field.to: TextEditingController(text: widget.draft.to),
+    _Field.cc: TextEditingController(text: widget.draft.cc),
+    _Field.bcc: TextEditingController(text: widget.draft.bcc),
+  };
+  final _focus = {for (final field in _Field.values) field: FocusNode()};
+  late final _subject = TextEditingController(text: widget.draft.subject);
+  final _subjectFocus = FocusNode();
+  late final _body = TextEditingController(text: widget.draft.body);
+  final _bodyFocus = FocusNode();
+
+  /// Fields the last Send refused.
+  final Set<_Field> _invalid = {};
+
+  ComposeDraft get d => widget.draft;
+
+  @override
+  void initState() {
+    super.initState();
+    d.from ??= widget.state.preferredComposeAccount;
+    _fields[_Field.to]!.addListener(() {
+      final prev = d.to;
+      d.to = _fields[_Field.to]!.text;
+      if ((prev.isEmpty != d.to.isEmpty || widget.state.composes.length > 1) && d.subject.isEmpty) {
+        widget.state.notifyComposeChanged();
+      }
+    });
+    _fields[_Field.cc]!.addListener(() => d.cc = _fields[_Field.cc]!.text);
+    _fields[_Field.bcc]!.addListener(() => d.bcc = _fields[_Field.bcc]!.text);
+    _subject.addListener(() {
+      d.subject = _subject.text;
+      if (widget.state.composes.length > 1 || widget.state.composeStashed) {
+        widget.state.notifyComposeChanged();
+      }
+    });
+    _body.addListener(() => d.body = _body.text);
+
+    if (d.initialBodySelection != null) {
+      final offset = d.initialBodySelection!.clamp(0, _body.text.length);
+      _body.selection = TextSelection.collapsed(offset: offset);
+      d.initialBodySelection = null;
+    }
+    if (d.focusBodyInitially) {
+      d.focusBodyInitially = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _bodyFocus.requestFocus();
+      });
+    } else if (d.to.isEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focus[_Field.to]!.requestFocus();
+      });
+    }
+    for (final path in d.attachments) {
+      if (!d.attachmentSizes.containsKey(path)) {
+        File(path).length().then((size) {
+          if (mounted) setState(() => d.attachmentSizes[path] = size);
+        }, onError: (_) {});
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final controller in [..._fields.values, _subject, _body]) {
+      controller.dispose();
+    }
+    for (final node in [..._focus.values, _subjectFocus, _bodyFocus]) {
+      node.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _pick() async => attach(await _files.invokeListMethod<String>('pick') ?? const []);
 
   /// ⌘V: files on the clipboard (copied in Finder) attach, as in the native compose window;
   /// anything else pastes as text where the cursor is.
@@ -164,49 +386,62 @@ class _ComposeWindowState extends State<ComposeWindow> {
     final focused = primaryFocus?.context;
     final files = await _files.invokeListMethod<String>('pasted') ?? const [];
     if (!mounted) return;
-    if (files.isNotEmpty) return _attach(files);
+    if (files.isNotEmpty) return attach(files);
     if (focused != null && focused.mounted) {
       Actions.maybeInvoke(focused, const PasteTextIntent(SelectionChangedCause.keyboard));
     }
   }
 
-  /// Adds the files not attached yet; nothing changes while sending.
-  void _attach(List<String> paths) {
-    if (_sending || !mounted) return;
-    final added = paths.where((p) => !_attachments.contains(p)).toList();
+  /// Adds the files not attached yet; nothing changes while sending, and replies take none
+  /// (`mail.reply` sends text).
+  void attach(List<String> paths) {
+    if (d.sending || d.replyTo != null || !mounted) return;
+    final added = paths.where((p) => !d.attachments.contains(p)).toList();
     if (added.isEmpty) return;
-    setState(() => _attachments.addAll(added));
+    setState(() => d.attachments.addAll(added));
     for (final path in added) {
       File(path).length().then((size) {
-        if (mounted) setState(() => _sizes[path] = size);
+        if (mounted) setState(() => d.attachmentSizes[path] = size);
       }, onError: (_) {});
     }
   }
 
-  /// Whether closing would lose something the person wrote.
-  bool get _hasDraft => _attachments.isNotEmpty || [..._fields.values, _subject, _body].any((c) => c.text.trim().isNotEmpty);
+  void _close() => widget.state.closeCompose(d.id);
 
-  void _close() => Navigator.of(context).pop();
-
-  /// Closes at once when nothing would be lost; otherwise asks in the bar at the bottom.
-  void _requestClose() {
-    if (_sending) return;
-    if (!_hasDraft) return _close();
-    setState(() => _confirmingDiscard = true);
+  /// Closes at once when nothing would be lost; otherwise shows the draft and asks in the bar at
+  /// its bottom.
+  void requestClose() {
+    if (d.sending) return;
+    if (!d.hasContent) return _close();
+    widget.state.selectCompose(widget.state.composes.indexOf(d));
+    setState(() => d.confirmingDiscard = true);
   }
 
-  /// Esc takes back the discard question first, then closes.
+  /// Esc takes back the discard question first; closes an empty draft; or leaves a written draft
+  /// open and returns keyboard focus to the mail list/reader so the user can browse other mail.
   void _escape() {
-    if (_confirmingDiscard) return setState(() => _confirmingDiscard = false);
-    _requestClose();
+    if (d.confirmingDiscard) return setState(() => d.confirmingDiscard = false);
+    if (!d.hasContent) {
+      _close();
+      widget.onUnfocus();
+      return;
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+    widget.onUnfocus();
   }
 
-  void _fail(String message) => setState(() => _error = message);
+  void _fail(String message) => setState(() => d.error = message);
 
   Future<void> _send() async {
-    if (_sending) return;
-    _confirmingDiscard = false;
-    final from = _from;
+    if (d.sending) return;
+    if (d.replyTo != null) {
+      if (d.body.trim().isEmpty) {
+        _bodyFocus.requestFocus();
+        return _fail('Write the reply first.');
+      }
+      return widget.state.sendCompose(d);
+    }
+    final from = d.from;
     if (from == null) return _fail('Add an account in Mailstream to send from.');
     _invalid.clear();
     final lists = <_Field, List<String>>{};
@@ -214,7 +449,7 @@ class _ComposeWindowState extends State<ComposeWindow> {
       final parsed = _parseRecipients(_fields[field]!.text);
       if (parsed.invalid case final invalid?) {
         _invalid.add(field);
-        if (field == _Field.bcc) _showBcc = true;
+        if (field == _Field.bcc) d.showBcc = true;
         _focus[field]!.requestFocus();
         return _fail('${field.label}: “$invalid” is not an email address.');
       }
@@ -225,142 +460,106 @@ class _ComposeWindowState extends State<ComposeWindow> {
       _focus[_Field.to]!.requestFocus();
       return _fail('Add at least one recipient.');
     }
-    setState(() {
-      _sending = true;
-      _error = null;
-    });
-    try {
-      await widget.state.send(engine.Draft(
+    await widget.state.sendCompose(
+      d,
+      engine.Draft(
         from: from,
         to: lists[_Field.to]!,
         cc: lists[_Field.cc]!,
         bcc: lists[_Field.bcc]!,
         subject: _subject.text.trim(),
         body: _body.text,
-        attachments: List.of(_attachments),
-      ));
-      if (mounted) _close();
-    } on engine.MailException catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _sending = false;
-        _error = describe(error);
-      });
-    }
+        attachments: List.of(d.attachments),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
     final text = context.text;
-    return PopScope(
-      // Pops other than Send and the discard bar (Esc from the route) go through the same question.
-      canPop: false,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) _escape();
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.enter, meta: true): _send,
+        const SingleActivator(LogicalKeyboardKey.keyW, meta: true): requestClose,
+        const SingleActivator(LogicalKeyboardKey.keyV, meta: true): _paste,
+        const SingleActivator(LogicalKeyboardKey.escape): _escape,
       },
-      child: CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.enter, meta: true): _send,
-          const SingleActivator(LogicalKeyboardKey.keyW, meta: true): _requestClose,
-          const SingleActivator(LogicalKeyboardKey.keyV, meta: true): _paste,
-          const SingleActivator(LogicalKeyboardKey.escape): _escape,
-        },
-        child: Sheet(
-          width: 680,
-          height: 620,
-          child: _droppable(context, Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _titleBar(context),
-                _from == null ? const SizedBox.shrink() : _row(context, label: 'From', child: _fromPicker(context)),
-                _recipients(context, _Field.to),
-                _recipients(
-                  context,
-                  _Field.cc,
-                  trailing: _showBcc
-                      ? null
-                      : PushButton(
-                          controlSize: ControlSize.regular,
-                          secondary: true,
-                          onPressed: _sending
-                              ? null
-                              : () {
-                                  setState(() => _showBcc = true);
-                                  _focus[_Field.bcc]!.requestFocus();
-                                },
-                          child: const Text('Bcc'),
-                        ),
-                ),
-                if (_showBcc) _recipients(context, _Field.bcc),
-                _row(
-                  context,
-                  child: _bareField(
-                    controller: _subject,
-                    enabled: !_sending,
-                    style: text.title3,
-                    placeholder: 'Subject',
-                  ),
-                ),
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
-                    child: _bareField(
-                      controller: _body,
-                      enabled: !_sending,
-                      expands: true,
-                      style: text.body.copyWith(height: 1.55),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _titleBar(context),
+          if (d.replyTo != null) ...[
+            _row(context, label: 'To', child: _preview(context, d.to)),
+            _row(context, child: _preview(context, d.subject, style: text.title3)),
+          ] else ...[
+            d.from == null ? const SizedBox.shrink() : _row(context, label: 'From', child: _fromPicker(context)),
+            _recipients(context, _Field.to),
+            _recipients(
+              context,
+              _Field.cc,
+              trailing: d.showBcc
+                  ? null
+                  : PushButton(
+                      controlSize: ControlSize.regular,
+                      secondary: true,
+                      onPressed: d.sending
+                          ? null
+                          : () {
+                              setState(() => d.showBcc = true);
+                              _focus[_Field.bcc]!.requestFocus();
+                            },
+                      child: const Text('Bcc'),
                     ),
-                  ),
-                ),
-                if (_attachments.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-                    child: Wrap(spacing: 8, runSpacing: 8, children: [for (final path in _attachments) _attachmentChip(context, path)]),
-                  ),
-                if (_sending || _error != null)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                    decoration: BoxDecoration(border: Border(top: BorderSide(color: colors.separator, width: 0.5))),
-                    child: Text(
-                      _sending ? 'Sending…' : _error!,
-                      style: text.subheadline.copyWith(color: _sending ? colors.secondaryLabel : colors.red),
-                    ),
-                  ),
-                if (_confirmingDiscard) _discardBar(context),
-              ],
-          )),
-        ),
+            ),
+            if (d.showBcc) _recipients(context, _Field.bcc),
+            _row(
+              context,
+              child: _bareField(
+                controller: _subject,
+                focusNode: _subjectFocus,
+                enabled: !d.sending,
+                style: text.title3,
+                placeholder: 'Subject',
+              ),
+            ),
+          ],
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+              child: _bareField(
+                controller: _body,
+                focusNode: _bodyFocus,
+                enabled: !d.sending,
+                expands: true,
+                style: text.body.copyWith(height: 1.55),
+                placeholder: d.replyTo != null ? 'Write a reply (the original is quoted below it)' : 'Write your message…',
+              ),
+            ),
+          ),
+          if (d.attachments.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+              child: Wrap(spacing: 8, runSpacing: 8, children: [for (final path in d.attachments) _attachmentChip(context, path)]),
+            ),
+          if (d.sending || d.error != null)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+              decoration: BoxDecoration(border: Border(top: BorderSide(color: colors.separator, width: 0.5))),
+              child: Text(
+                d.sending ? 'Sending…' : d.error!,
+                style: text.subheadline.copyWith(color: d.sending ? colors.secondaryLabel : colors.red),
+              ),
+            ),
+          if (d.confirmingDiscard) _discardBar(context),
+        ],
       ),
-    );
-  }
-
-  /// The window's content, under the drop target while files are dragged over it.
-  Widget _droppable(BuildContext context, Widget child) => Stack(children: [
-    child,
-    if (_dropping) Positioned.fill(child: IgnorePointer(child: _dropTarget(context))),
-  ]);
-
-  Widget _dropTarget(BuildContext context) {
-    final colors = context.colors;
-    return Container(
-      margin: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: colors.accentFill.withValues(alpha: 0.92),
-        borderRadius: BorderRadius.circular(Panes.sheetCorner - 8),
-        border: Border.all(color: colors.accent, width: 2),
-      ),
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        MacosIcon(CupertinoIcons.paperclip, size: 36, color: colors.onAccentFill),
-        const SizedBox(height: 12),
-        Text('Drop files to attach', style: context.text.title3.copyWith(color: colors.onAccentFill)),
-      ]),
     );
   }
 
   /// A file's name and size, and a button removing it.
   Widget _attachmentChip(BuildContext context, String path) {
-    final size = _sizes[path];
+    final size = d.attachmentSizes[path];
     final name = path.substring(path.lastIndexOf('/') + 1);
     return MacosTooltip(
       message: path,
@@ -369,16 +568,24 @@ class _ComposeWindowState extends State<ComposeWindow> {
         child: Pill(
           label: size == null ? name : '$name  ·  ${fileSize(size)}',
           leading: MacosIcon(CupertinoIcons.paperclip, size: 13, color: context.colors.secondaryLabel),
-          onDelete: _sending
+          onDelete: d.sending
               ? null
               : () => setState(() {
-                  _attachments.remove(path);
-                  _sizes.remove(path);
+                  d.attachments.remove(path);
+                  d.attachmentSizes.remove(path);
                 }),
         ),
       ),
     );
   }
+
+  /// A reply's recipients or subject: the app works out the real ones when it sends.
+  Widget _preview(BuildContext context, String value, {TextStyle? style}) => Text(
+    value,
+    maxLines: 1,
+    overflow: TextOverflow.ellipsis,
+    style: style ?? context.text.body.copyWith(color: context.colors.secondaryLabel),
+  );
 
   /// A text field without a box, as Mail's header lines and body are.
   Widget _bareField({
@@ -408,36 +615,89 @@ class _ComposeWindowState extends State<ComposeWindow> {
     onChanged: onChanged,
   );
 
-  Widget _titleBar(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(12, 10, 16, 6),
-    child: Row(children: [
-      GlassCapsule(
-        child: ToolButton(tooltip: 'Close (Esc)', icon: CupertinoIcons.xmark, onPressed: _sending ? null : _requestClose),
-      ),
-      const SizedBox(width: 10),
-      Expanded(child: Text('New Message', style: context.text.title3.copyWith(fontWeight: FontWeight.w700))),
-      GlassCapsule(
-        child: ToolButton(
-          tooltip: 'Attach files (or drop them on the message)',
-          icon: CupertinoIcons.paperclip,
-          onPressed: _sending ? null : _pick,
-        ),
-      ),
-      const SizedBox(width: 10),
-      MacosTooltip(
-        message: '⌘ Return',
-        child: PushButton(
-          controlSize: ControlSize.large,
-          onPressed: _sending ? null : _send,
+  Widget _titleBar(BuildContext context) {
+    final state = widget.state;
+    final floating = state.composeFloating;
+    final titleWidget = Text(
+      d.replyAll ? 'Reply All' : d.kind.title,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: context.text.title3.copyWith(fontWeight: FontWeight.w700),
+    );
+    final draggableTitle = floating && widget.onDragFloating != null
+        ? MouseRegion(
+            cursor: SystemMouseCursors.move,
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onPanUpdate: (details) => widget.onDragFloating!(details.delta),
+              child: Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: titleWidget),
+            ),
+          )
+        : WindowDragArea(child: Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: titleWidget));
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 10, 12, 6),
+      child: Row(children: [
+        GlassCapsule(
           child: Row(mainAxisSize: MainAxisSize.min, children: [
-            _sending ? const Spinner(radius: 6) : const MacosIcon(CupertinoIcons.paperplane_fill, size: 14, color: MacosColors.white),
-            const SizedBox(width: 6),
-            Text(_sending ? 'Sending' : 'Send'),
+            ToolButton(
+              tooltip: 'Close draft (⌘W)',
+              icon: CupertinoIcons.xmark,
+              onPressed: d.sending ? null : requestClose,
+            ),
+            ToolButton(
+              tooltip: 'Minimize to bottom-right',
+              icon: CupertinoIcons.minus,
+              onPressed: () {
+                state.setComposeStashed(true);
+                widget.onUnfocus();
+              },
+            ),
           ]),
         ),
-      ),
-    ]),
-  );
+        const SizedBox(width: 8),
+        Expanded(child: draggableTitle),
+        GlassCapsule(
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            if (state.composes.length == 1)
+              ToolButton(tooltip: 'New message (⌘N)', icon: CupertinoIcons.plus, onPressed: state.composeNew),
+            if (!floating)
+              ToolButton(
+                tooltip: state.composeSwapped ? 'Move column to right edge' : 'Swap column position',
+                icon: CupertinoIcons.arrow_left_right,
+                onPressed: state.toggleComposeSwapped,
+              ),
+            ToolButton(
+              tooltip: floating ? 'Dock as column' : 'Float over window',
+              icon: floating ? CupertinoIcons.sidebar_right : CupertinoIcons.macwindow,
+              onPressed: state.toggleComposeFloating,
+            ),
+            if (d.replyTo == null)
+              ToolButton(
+                tooltip: 'Attach files (or drop them on the message)',
+                icon: CupertinoIcons.paperclip,
+                onPressed: d.sending ? null : _pick,
+              ),
+          ]),
+        ),
+        const SizedBox(width: 8),
+        MacosTooltip(
+          message: '⌘ Return',
+          child: PushButton(
+            controlSize: ControlSize.large,
+            onPressed: d.sending ? null : _send,
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              d.sending
+                  ? const Spinner(radius: 6)
+                  : const MacosIcon(CupertinoIcons.paperplane_fill, size: 14, color: MacosColors.white),
+              const SizedBox(width: 6),
+              Text(d.sending ? 'Sending' : 'Send'),
+            ]),
+          ),
+        ),
+      ]),
+    );
+  }
 
   /// One header line over a hairline: a right-aligned label, then the field.
   Widget _row(BuildContext context, {String? label, bool invalid = false, required Widget child, Widget? trailing}) {
@@ -481,8 +741,8 @@ class _ComposeWindowState extends State<ComposeWindow> {
       child: _bareField(
         controller: _fields[field]!,
         focusNode: _focus[field],
-        enabled: !_sending,
-        autofocus: field == _Field.to,
+        enabled: !d.sending,
+        autofocus: false,
         style: context.text.body,
         onChanged: (_) {
           if (_invalid.contains(field)) setState(() => _invalid.remove(field));
@@ -494,7 +754,7 @@ class _ComposeWindowState extends State<ComposeWindow> {
   /// The people for the address being typed in a field, without those already in To, Cc or Bcc.
   Future<List<Suggestion>> _suggest(String text) async {
     final typed = _splitRecipients(text).last.trim();
-    if (typed.isEmpty || _sending) return const [];
+    if (typed.isEmpty || d.sending) return const [];
     final people = await widget.state.searchContacts(typed);
     final chosen = {
       for (final field in _Field.values)
@@ -509,7 +769,7 @@ class _ComposeWindowState extends State<ComposeWindow> {
     final controller = _fields[field]!;
     final typing = _splitRecipients(controller.text).last;
     final before = controller.text.substring(0, controller.text.length - typing.length);
-    final text = '${before.isEmpty || before.endsWith(' ') ? before : '$before '}${_recipient(person)}, ';
+    final text = '${before.isEmpty || before.endsWith(' ') ? before : '$before '}${formatRecipient(person)}, ';
     controller.value = TextEditingValue(text: text, selection: TextSelection.collapsed(offset: text.length));
     if (_invalid.contains(field)) setState(() => _invalid.remove(field));
   }
@@ -521,12 +781,12 @@ class _ComposeWindowState extends State<ComposeWindow> {
       return account == null || account.title == id ? id : '${account.title} <$id>';
     }
 
-    if (accounts.length < 2) return Text(title(_from!), style: context.text.body);
+    if (accounts.length < 2) return Text(title(d.from!), style: context.text.body);
     return Align(
       alignment: Alignment.centerLeft,
       child: MacosPopupButton<String>(
-        value: _from,
-        onChanged: _sending ? null : (id) => setState(() => _from = id),
+        value: d.from,
+        onChanged: d.sending ? null : (id) => setState(() => d.from = id),
         items: [for (final account in accounts) MacosPopupMenuItem(value: account.id, child: Text(title(account.id)))],
       ),
     );
@@ -542,12 +802,72 @@ class _ComposeWindowState extends State<ComposeWindow> {
         PushButton(
           controlSize: ControlSize.regular,
           secondary: true,
-          onPressed: () => setState(() => _confirmingDiscard = false),
+          onPressed: () => setState(() => d.confirmingDiscard = false),
           child: const Text('Keep Editing'),
         ),
         const SizedBox(width: 8),
         PushButton(controlSize: ControlSize.regular, color: colors.red, onPressed: _close, child: const Text('Discard')),
       ]),
+    );
+  }
+}
+
+/// The minimized capsule at the bottom-right corner when the compose column is stashed.
+class StashedComposeBar extends StatelessWidget {
+  const StashedComposeBar({super.key, required this.state});
+
+  final MailState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final active = state.activeCompose;
+    if (active == null) return const SizedBox.shrink();
+    final colors = context.colors;
+    final count = state.composes.length;
+    return RaisedCapsule(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Hoverable(
+            radius: 14,
+            onTap: () => state.setComposeStashed(false),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  MacosIcon(CupertinoIcons.square_pencil, size: 15, color: colors.accent),
+                  const SizedBox(width: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 220),
+                    child: Text(
+                      active.tabTitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: context.text.body.copyWith(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  if (count > 1) ...[
+                    const SizedBox(width: 8),
+                    Pill(
+                      label: '$count drafts',
+                      background: colors.accentFill,
+                      foreground: colors.onAccentFill,
+                    ),
+                  ],
+                  const SizedBox(width: 6),
+                  MacosIcon(CupertinoIcons.sidebar_right, size: 14, color: colors.secondaryLabel),
+                ],
+              ),
+            ),
+          ),
+          ToolButton(
+            tooltip: 'New draft (⌘N)',
+            icon: CupertinoIcons.plus,
+            onPressed: state.composeNew,
+          ),
+        ],
+      ),
     );
   }
 }

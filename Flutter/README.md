@@ -38,6 +38,18 @@ the conversation's island over the list's. Either way a two-finger swipe to the 
 trackpad drags the conversation out and closes it, springing from the fingers' velocity; the
 close button and Esc slide it out on the same spring.
 
+Writing mail happens in a compose column, so other mail can be read beside it: ⌘N, the toolbar's
+pencil, F (forward) and the inline reply's "move to compose column" button (⌘⇧O) open it at the
+window's trailing edge, the sidebar folding to the rail below 1440 dp. Dragging the gap beside it
+sets its width; the list and conversation keep two panes while 700 dp remain for them and slide
+over each other below that. Its title bar closes the draft (⌘W, asking first when something is
+written), minimizes it to a capsule in the bottom-right corner, swaps it to the other side of
+the conversation, or floats it over the window (dragged by its title, sized from its top-left
+corner). Each draft is a tab; they stay in memory, through mailbox and conversation changes,
+until sent or discarded. A reply moved there still goes out with `mail.reply`, threaded, its
+recipients worked out and the original quoted by the app; new messages and forwards use
+`mail.send`.
+
 HTML mail is drawn by WebKit: `macos/Runner/MailHtmlView.swift` is a platform view
 (`mailstream/html`) that runs none of the mail's scripts, opens links in the browser, loads
 remote images without cookies, zooms out a body wider than the column, and reports its
@@ -57,8 +69,8 @@ content height so the body scrolls with the conversation.
 | `lib/ui/shell.dart` | Islands layout, toolbars, search field, keys, snackbars |
 | `lib/ui/sidebar.dart` | Mail-style sidebar and rail |
 | `lib/ui/conversation_list.dart` | Fixed-height lazy list that loads the next page near its end, Smart Inbox bundles and its "Waiting on you" group, hover actions |
-| `lib/ui/reader.dart` | Reading column, message cards and chat log, HTML bodies (quoted history cut out and folded), inline reply |
-| `lib/ui/compose.dart` | The compose window for a new plain-text message (`mail.send`): From, To, Cc, Bcc (completing to contacts), Subject, body, attachments (the Attach button's open panel, files dropped on the window or pasted with ⌘V: `mailstream/files` in `macos/Runner/MainFlutterWindow.swift`) |
+| `lib/ui/reader.dart` | Reading column, message cards and chat log, HTML bodies (quoted history cut out and folded), inline reply (⌘⇧O moves it to the compose column), forward |
+| `lib/ui/compose.dart` | The compose column (`ComposePane`: draft tabs, docked, swapped or floating) and its minimized capsule (`StashedComposeBar`): From, To, Cc, Bcc (completing to contacts), Subject, body, attachments (the Attach button's open panel, files dropped on the window or pasted with ⌘V: `mailstream/files` in `macos/Runner/MainFlutterWindow.swift`); a moved reply shows its planned recipients and subject instead |
 | `lib/ui/people.dart` | `PeopleCompletion`: people suggested under a recipient field as it is typed in (`contacts.search`, through `MailState.searchContacts`); ↑/↓, Return or Tab, Esc |
 | `lib/ui/settings.dart` | Settings (⌘,): accounts (browser sign-in, rename, remove) and every key of the settings.json Mailstream.app and `mailstream config` share (`config.*` over FFI), following edits made elsewhere |
 | `lib/ui/slide_layer.dart` | Bundles (and, in one pane, the reader) slide over the list, which stays mounted; trackpad swipe back |
@@ -66,11 +78,13 @@ content height so the body scrolls with the conversation.
 
 Keys: ↑/↓ or J/K move (beside an open conversation they open the next one), Return or Space
 opens, Esc or ⌘[ goes back, E archives, ⌫ trashes, S stars, U toggles read, D resolves "Waiting on you" (or puts it back), R replies (⇧R or
-A replies to all), ⌘N writes a new message, ⌘F searches, ⌘R refreshes, ⌘, opens Settings. In the compose window
-⌘Return sends, ⌘V with files on the clipboard (copied in Finder) attaches them, and Esc or ⌘W
-closes (asking first when something is written).
+A replies to all), F forwards, ⌘N writes a new message, ⌘F searches, ⌘R refreshes, ⌘, opens Settings. In the compose column
+⌘Return sends, ⌘V with files on the clipboard (copied in Finder) attaches them, Esc hands the
+keyboard back to the list and conversation (closing the draft when nothing is written), and ⌘W
+closes the draft (asking first when something is written).
 
-Not here: forwarding and attachments on replies; in Chat, threads,
+Not here: attachments, other recipients and a subject of one's own on replies; drafts kept on the
+server or across restarts; in Chat, threads,
 reactions, editing and attachments on send.
 Reply recipients shown in the composer are a preview; the app plans the real ones when it
 sends.

@@ -93,6 +93,72 @@ class Toast {
   final bool error;
 }
 
+/// What a compose draft started as.
+enum ComposeKind {
+  newMessage('New Message'),
+  reply('Reply'),
+  forward('Forward');
+
+  const ComposeKind(this.title);
+
+  final String title;
+}
+
+/// One message being written in the compose column, kept in memory across mailbox, conversation,
+/// and layout changes until sent or discarded.
+class ComposeDraft {
+  ComposeDraft({
+    required this.id,
+    this.kind = ComposeKind.newMessage,
+    this.replyTo,
+    this.replyAll = false,
+    this.from,
+    this.to = '',
+    this.cc = '',
+    this.bcc = '',
+    this.subject = '',
+    this.body = '',
+    this.initialBodySelection,
+    this.focusBodyInitially = false,
+  });
+
+  final int id;
+  final ComposeKind kind;
+
+  /// The conversation a reply answers. A reply goes out with `mail.reply`, which plans the
+  /// recipients, threads it and quotes the original, so its `to` and `subject` only preview them.
+  final Conversation? replyTo;
+  final bool replyAll;
+  String? from;
+  String to;
+  String cc;
+  String bcc;
+  String subject;
+  String body;
+  int? initialBodySelection;
+  bool focusBodyInitially;
+  final List<String> attachments = [];
+  final Map<String, int> attachmentSizes = {};
+  bool showBcc = false;
+  bool sending = false;
+  bool confirmingDiscard = false;
+  String? error;
+
+  /// Whether closing it would lose something the person wrote.
+  bool get hasContent =>
+      body.trim().isNotEmpty ||
+      (replyTo == null &&
+          (attachments.isNotEmpty || to.trim().isNotEmpty || cc.trim().isNotEmpty || bcc.trim().isNotEmpty || subject.trim().isNotEmpty));
+
+  String get tabTitle {
+    final s = subject.trim();
+    if (s.isNotEmpty) return s;
+    final t = to.trim();
+    if (t.isNotEmpty) return 'To: $t';
+    return kind.title;
+  }
+}
+
 /// The engine's change events, handed to the state.
 class _Changes implements engine.EventListener {
   _Changes(this.deliver);
@@ -707,10 +773,30 @@ class MailState extends ChangeNotifier {
     }
   }
 
-  /// Sends a new plain-text message (`mail.send`); the Send button is the person's confirmation.
-  /// Throws the engine's refusal (an unknown account, an address it does not take, the
-  /// provider's error) for the compose window to show.
-  Future<void> send(engine.Draft draft) async => _sentToast(await mail.send(draft: draft, confirm: true));
+  /// Sends [draft] from the compose column, the Send button being the person's confirmation: a
+  /// reply with `mail.reply`, anything else as [message] with `mail.send`. Sent, the draft closes;
+  /// refused (an unknown account, an address the engine does not take, the provider's error), it
+  /// stays open showing why. Kept here rather than in the column, which a stash may unmount.
+  Future<void> sendCompose(ComposeDraft draft, [engine.Draft? message]) async {
+    if (draft.sending) return;
+    draft
+      ..sending = true
+      ..error = null
+      ..confirmingDiscard = false;
+    notifyListeners();
+    try {
+      final conversation = draft.replyTo;
+      _sentToast(conversation != null
+          ? await mail.reply(id: conversation.id, body: draft.body.trim(), all: draft.replyAll, confirm: true)
+          : await mail.send(draft: message!, confirm: true));
+      closeCompose(draft.id);
+    } on engine.MailException catch (error) {
+      draft
+        ..sending = false
+        ..error = describe(error);
+      notifyListeners();
+    }
+  }
 
   /// People whose name, a word of it, or address starts with `query`, best first (`contacts.search`:
   /// the accounts' Google and Outlook directories and recent correspondents), for completing
@@ -792,4 +878,120 @@ class MailState extends ChangeNotifier {
   }
 
   void _report(String message) => showToast(message, error: true);
+
+  // MARK: - Compose column
+
+  int _nextComposeId = 1;
+  final List<ComposeDraft> composes = [];
+  int activeComposeIndex = 0;
+
+  /// Minimized to the capsule at the bottom-right corner.
+  bool composeStashed = false;
+
+  /// Floating over the window instead of docked as a column.
+  bool composeFloating = false;
+
+  /// Docked before the reader (or list) instead of at the trailing edge.
+  bool composeSwapped = false;
+
+  /// Width of the docked compose column, dragged by its gap.
+  double composeWidth = 440.0;
+
+  ComposeDraft? get activeCompose =>
+      composes.isEmpty ? null : composes[activeComposeIndex.clamp(0, composes.length - 1)];
+
+  String? get preferredComposeAccount => switch (selection) {
+    MailboxSelection(:final mailbox) => mailbox.account,
+    UnifiedSelection() => accounts.firstOrNull?.id,
+  };
+
+  /// Opens the compose column on a new message: the active draft when it is a blank new
+  /// message, else a new tab.
+  void composeNew() {
+    final current = activeCompose;
+    if (current != null && current.kind == ComposeKind.newMessage && !current.hasContent) {
+      composeStashed = false;
+      notifyListeners();
+      return;
+    }
+    compose();
+  }
+
+  /// Adds a draft tab and shows it.
+  void compose({
+    ComposeKind kind = ComposeKind.newMessage,
+    Conversation? replyTo,
+    bool replyAll = false,
+    String? from,
+    String to = '',
+    String subject = '',
+    String body = '',
+    int? initialBodySelection,
+    bool focusBodyInitially = false,
+  }) {
+    composes.add(ComposeDraft(
+      id: _nextComposeId++,
+      kind: kind,
+      replyTo: replyTo,
+      replyAll: replyAll,
+      from: from ?? preferredComposeAccount,
+      to: to,
+      subject: subject,
+      body: body,
+      initialBodySelection: initialBodySelection,
+      focusBodyInitially: focusBodyInitially,
+    ));
+    activeComposeIndex = composes.length - 1;
+    composeStashed = false;
+    notifyListeners();
+  }
+
+  void selectCompose(int index) {
+    if (index < 0 || index >= composes.length) return;
+    activeComposeIndex = index;
+    composeStashed = false;
+    notifyListeners();
+  }
+
+  void closeCompose(int id) {
+    final index = composes.indexWhere((d) => d.id == id);
+    if (index < 0) return;
+    composes.removeAt(index);
+    if (composes.isEmpty) {
+      activeComposeIndex = 0;
+      composeStashed = false;
+    } else if (activeComposeIndex >= composes.length) {
+      activeComposeIndex = composes.length - 1;
+    } else if (index < activeComposeIndex) {
+      activeComposeIndex -= 1;
+    }
+    notifyListeners();
+  }
+
+  void setComposeStashed(bool stashed) {
+    if (composeStashed == stashed) return;
+    composeStashed = stashed;
+    notifyListeners();
+  }
+
+  void toggleComposeFloating() {
+    composeFloating = !composeFloating;
+    composeStashed = false;
+    notifyListeners();
+  }
+
+  void toggleComposeSwapped() {
+    composeSwapped = !composeSwapped;
+    composeFloating = false;
+    composeStashed = false;
+    notifyListeners();
+  }
+
+  void setComposeWidth(double width) {
+    if ((composeWidth - width).abs() < 0.5) return;
+    composeWidth = width;
+    notifyListeners();
+  }
+
+  void notifyComposeChanged() => notifyListeners();
 }

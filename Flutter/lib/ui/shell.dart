@@ -43,6 +43,12 @@ class _MailShellState extends State<MailShell> {
   /// A fresh reader, with its own composer and folds, per conversation.
   var _reader = GlobalKey<ReaderState>();
   String? _readerId;
+  final _composeKey = GlobalKey(debugLabel: 'Compose pane');
+
+  /// Floating compose island offset from the bottom-right corner and its size.
+  Offset _floatOffset = Offset.zero;
+  double _floatWidth = 500.0;
+  double _floatHeight = 560.0;
 
   /// The rail's menu button opens the full drawer.
   bool _drawerOpen = false;
@@ -83,8 +89,8 @@ class _MailShellState extends State<MailShell> {
     });
   }
 
-  /// Keys reach the window again once the field that had focus goes away (a closed composer),
-  /// unless a window above it (the compose window) holds the keys.
+  /// Keys reach the window again once the field that had focus goes away (a closed composer or
+  /// compose draft), unless a sheet above it (Settings, New chat) holds the keys.
   void _keepFocus() {
     final primary = FocusManager.instance.primaryFocus;
     if (primary != null && primary is! FocusScopeNode) return;
@@ -92,7 +98,7 @@ class _MailShellState extends State<MailShell> {
     Future.microtask(() => mounted ? _focus.requestFocus() : null);
   }
 
-  void _compose() => openCompose(context, state);
+  void _compose() => state.composeNew();
 
   /// The app menu's Settings… (⌘,) asks the window channel; once, over the main window only.
   static const _window = MethodChannel('mailstream/window');
@@ -259,6 +265,8 @@ class _MailShellState extends State<MailShell> {
         _reader.currentState?.reply(all: keyboard.isShiftPressed);
       case LogicalKeyboardKey.keyA when reading:
         _reader.currentState?.reply(all: true);
+      case LogicalKeyboardKey.keyF when reading:
+        _reader.currentState?.forward();
       default:
         return KeyEventResult.ignored;
     }
@@ -311,7 +319,7 @@ class _MailShellState extends State<MailShell> {
             // The window's glass shows around the islands.
             child: Stack(
               children: [
-                Positioned.fill(child: LayoutBuilder(builder: (context, constraints) => _layout(context, constraints.maxWidth))),
+                Positioned.fill(child: LayoutBuilder(builder: _layout)),
                 Positioned(
                   left: 0,
                   right: 0,
@@ -331,14 +339,32 @@ class _MailShellState extends State<MailShell> {
     );
   }
 
-  /// Breakpoints: the full sidebar from 1200 dp, a rail below. The list's island fills the rest;
-  /// from 1000 dp an opened conversation splits it, the list narrowing as the conversation's
-  /// island slides in beside it. Narrower windows slide the conversation's island over the list's.
-  Widget _layout(BuildContext context, double width) {
-    final drawer = width >= 1200 || _drawerOpen;
-    _twoPane = width >= 1000;
+  /// Breakpoints: the full sidebar from 1200 dp (1440 dp while the compose column is docked), a
+  /// rail below. The list's island fills the rest; an opened conversation splits it when there is
+  /// room, and the compose column sits at the trailing edge by default (resizable, swappable,
+  /// floatable, or stashed into the bottom-right capsule).
+  Widget _layout(BuildContext context, BoxConstraints constraints) {
+    final width = constraints.maxWidth;
+    final height = constraints.maxHeight;
+    final hasCompose = state.composes.isNotEmpty;
+    final stashedCompose = hasCompose && state.composeStashed;
+    final floatingCompose = hasCompose && !state.composeStashed && state.composeFloating;
+    final dockedCompose = hasCompose && !state.composeStashed && !state.composeFloating;
+
+    final sidebarThreshold = dockedCompose ? 1440.0 : 1200.0;
+    final drawer = width >= sidebarThreshold || _drawerOpen;
+    final navWidth = drawer ? Sidebar.width : Rail.width;
+    final contentWidth = (width - navWidth - Panes.gap).clamp(320.0, double.infinity);
+
+    final maxCompose = (contentWidth - 360.0 - Panes.gap).clamp(320.0, 760.0);
+    final minCompose = 340.0.clamp(320.0, maxCompose);
+    final composeWidth = state.composeWidth.clamp(minCompose, maxCompose);
+    final mailWidth = dockedCompose ? (contentWidth - composeWidth - Panes.gap).clamp(320.0, double.infinity) : contentWidth;
+
+    _twoPane = dockedCompose ? mailWidth >= 700.0 : width >= 1000.0;
+
     final navigation = _onChat(() => drawer
-        ? Sidebar(state: state, onCollapse: width >= 1200 ? null : () => setState(() => _drawerOpen = false))
+        ? Sidebar(state: state, onCollapse: width >= sidebarThreshold ? null : () => setState(() => _drawerOpen = false))
         : Rail(state: state, onMenu: () => setState(() => _drawerOpen = true)));
     final chat = state.chat;
     final listPane = Island(child: chat.active ? _onChat(() => ChatListPane(state: state)) : _listPane(context));
@@ -350,13 +376,65 @@ class _MailShellState extends State<MailShell> {
         ? null
         : Island(child: _detailPane(context, opened));
     final onDismiss = chat.active ? chat.close : state.close;
-    final Widget content = _twoPane
-        ? SplitDetail(list: listPane, listWidth: (width * 0.36).clamp(400.0, 520.0), onDismiss: onDismiss, detail: detail)
+    final listWidth = dockedCompose ? (mailWidth * 0.43).clamp(300.0, 460.0) : (width * 0.36).clamp(400.0, 520.0);
+    final Widget mailContent = _twoPane
+        ? SplitDetail(list: listPane, listWidth: listWidth, onDismiss: onDismiss, detail: detail)
         : Stack(
             fit: StackFit.expand,
             clipBehavior: Clip.none,
             children: [listPane, SlideLayer(onDismiss: onDismiss, child: detail)],
           );
+
+    final composePane = hasCompose && !stashedCompose
+        ? ComposePane(
+            key: _composeKey,
+            state: state,
+            onUnfocus: () => _focus.requestFocus(),
+            onDragFloating: floatingCompose
+                ? (delta) => setState(() {
+                    _floatOffset = Offset(
+                      (_floatOffset.dx - delta.dx).clamp(0.0, (width - _floatWidth - 32).clamp(0.0, double.infinity)),
+                      (_floatOffset.dy - delta.dy).clamp(0.0, (height - _floatHeight - 32).clamp(0.0, double.infinity)),
+                    );
+                  })
+                : null,
+          )
+        : null;
+
+    final Widget content;
+    if (!dockedCompose || composePane == null) {
+      content = mailContent;
+    } else if (state.composeSwapped && _twoPane && detail != null) {
+      content = Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(width: listWidth, child: listPane),
+          const SizedBox(width: Panes.gap),
+          SizedBox(width: composeWidth, child: composePane),
+          _ResizeGap(onDrag: (dx) => state.setComposeWidth((composeWidth + dx).clamp(minCompose, maxCompose))),
+          Expanded(child: detail),
+        ],
+      );
+    } else if (state.composeSwapped) {
+      content = Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(width: composeWidth, child: composePane),
+          _ResizeGap(onDrag: (dx) => state.setComposeWidth((composeWidth + dx).clamp(minCompose, maxCompose))),
+          Expanded(child: mailContent),
+        ],
+      );
+    } else {
+      content = Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(child: mailContent),
+          _ResizeGap(onDrag: (dx) => state.setComposeWidth((composeWidth - dx).clamp(minCompose, maxCompose))),
+          SizedBox(width: composeWidth, child: composePane),
+        ],
+      );
+    }
+
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -371,6 +449,40 @@ class _MailShellState extends State<MailShell> {
             ),
           ],
         ),
+        if (floatingCompose && composePane != null)
+          Positioned(
+            right: (16 + _floatOffset.dx).clamp(8.0, (width - _floatWidth - 8).clamp(8.0, double.infinity)),
+            bottom: (16 + _floatOffset.dy).clamp(8.0, (height - _floatHeight - 8).clamp(8.0, double.infinity)),
+            width: _floatWidth.clamp(360.0, (width - 32).clamp(360.0, 760.0)),
+            height: _floatHeight.clamp(360.0, (height - 32).clamp(360.0, 760.0)),
+            child: Stack(
+              children: [
+                Positioned.fill(child: composePane),
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  width: 14,
+                  height: 14,
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.resizeUpLeftDownRight,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.translucent,
+                      onPanUpdate: (d) => setState(() {
+                        _floatWidth = (_floatWidth - d.delta.dx).clamp(380.0, (width - 32).clamp(380.0, 760.0));
+                        _floatHeight = (_floatHeight - d.delta.dy).clamp(380.0, (height - 32).clamp(380.0, 760.0));
+                      }),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        if (stashedCompose)
+          Positioned(
+            right: 16,
+            bottom: 16,
+            child: StashedComposeBar(state: state),
+          ),
       ],
     );
   }
@@ -529,6 +641,11 @@ class _MailShellState extends State<MailShell> {
               icon: CupertinoIcons.arrowshape_turn_up_left_2,
               onPressed: () => _reader.currentState?.reply(all: true),
             ),
+            ToolButton(
+              tooltip: 'Forward (F)',
+              icon: CupertinoIcons.arrowshape_turn_up_right,
+              onPressed: () => _reader.currentState?.forward(),
+            ),
           ]),
         ),
       ]),
@@ -666,6 +783,56 @@ class _ToastView extends StatelessWidget {
         ],
         Flexible(child: Text(toast.text, style: context.text.body.copyWith(color: error ? colors.onRedFill : colors.onToast))),
       ]),
+    );
+  }
+}
+
+/// The gap between a docked compose island and its neighbor: drags horizontally to resize the
+/// compose column and shows a pill handle on hover.
+class _ResizeGap extends StatefulWidget {
+  const _ResizeGap({required this.onDrag});
+
+  final ValueChanged<double> onDrag;
+
+  @override
+  State<_ResizeGap> createState() => _ResizeGapState();
+}
+
+class _ResizeGapState extends State<_ResizeGap> {
+  bool _hovered = false;
+  bool _dragging = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final active = _hovered || _dragging;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeLeftRight,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onHorizontalDragStart: (_) => setState(() => _dragging = true),
+        onHorizontalDragUpdate: (details) => widget.onDrag(details.delta.dx),
+        onHorizontalDragEnd: (_) => setState(() => _dragging = false),
+        onHorizontalDragCancel: () => setState(() => _dragging = false),
+        child: SizedBox(
+          width: Panes.gap,
+          child: Center(
+            child: AnimatedOpacity(
+              duration: Motion.quick,
+              opacity: active ? 1 : 0,
+              child: Container(
+                width: 3,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: context.colors.border,
+                  borderRadius: BorderRadius.circular(1.5),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
