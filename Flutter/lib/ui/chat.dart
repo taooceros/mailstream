@@ -18,6 +18,7 @@ import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
 import 'people.dart';
+import 'reader.dart';
 
 /// A Chat person's picture: the engine's cached file for an address (Google Chat publishes it
 /// there), else Google's own link, else their initial.
@@ -216,7 +217,7 @@ class _ChatRowState extends State<_ChatRow> {
   Widget build(BuildContext context) {
     final space = widget.space;
     final colors = context.colors;
-    final weight = space.unread ? FontWeight.w700 : FontWeight.w400;
+    final weight = space.unread ? FontWeight.w700 : FontWeight.w600;
     final multiAccount = widget.state.chat.accounts.length > 1;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: ListMetrics.inset, vertical: 1),
@@ -237,25 +238,26 @@ class _ChatRowState extends State<_ChatRow> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(children: [
-                      if (multiAccount) ...[
-                        Container(
-                          width: 4,
-                          height: 14,
-                          decoration: BoxDecoration(
-                            color: accountPalette[widget.state.accountIndex(space.account) % accountPalette.length],
-                            borderRadius: BorderRadius.circular(2),
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                      ],
                       Expanded(
                         child: Text(space.title, maxLines: 1, overflow: TextOverflow.ellipsis,
                             style: context.text.body.copyWith(fontWeight: weight)),
                       ),
                       const SizedBox(width: 8),
+                      // The account, as in the mail list: a dot before the date.
+                      if (multiAccount)
+                        Container(
+                          margin: const EdgeInsets.only(right: 6),
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            color: accountPalette[widget.state.accountIndex(space.account) % accountPalette.length],
+                            shape: BoxShape.circle,
+                          ),
+                        ),
                       Text(space.date, style: context.text.callout.copyWith(
-                        color: space.unread ? colors.accent : colors.secondaryLabel, fontWeight: weight)),
+                        color: space.unread ? colors.accent : colors.secondaryLabel)),
                     ]),
+                    const SizedBox(height: 2),
                     Row(children: [
                       if (space.attachment) ...[
                         Icon(CupertinoIcons.paperclip, size: 13, color: colors.secondaryLabel),
@@ -264,11 +266,12 @@ class _ChatRowState extends State<_ChatRow> {
                       Expanded(
                         child: Text(space.preview, maxLines: 1, overflow: TextOverflow.ellipsis,
                             style: context.text.body.copyWith(
-                              color: space.unread ? colors.label : colors.secondaryLabel, fontWeight: weight)),
+                              color: space.unread ? colors.label : colors.secondaryLabel,
+                              fontWeight: space.unread ? FontWeight.w500 : FontWeight.w400)),
                       ),
                       if (space.unread) ...[
                         const SizedBox(width: 8),
-                        Container(width: 8, height: 8, decoration: BoxDecoration(color: colors.accent, shape: BoxShape.circle)),
+                        Container(width: 7, height: 7, decoration: BoxDecoration(color: colors.accent, shape: BoxShape.circle)),
                       ],
                     ]),
                   ],
@@ -424,18 +427,24 @@ class _ChatReaderState extends State<ChatReader> {
               child: Center(child: Spinner()),
             );
           }
-          return switch (items[index]) {
-            _Day(:final date) => _DayDivider(date: date),
-            _Sent(:final message, :final head) => _MessageRow(
-              key: ValueKey(message.id),
-              state: widget.state,
-              message: message,
-              account: widget.space.account,
-              names: names,
-              head: head,
+          // Messages keep the mail reader's reading width, centred in a wide pane.
+          return Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: Reader.column),
+              child: switch (items[index]) {
+                _Day(:final date) => _DayDivider(date: date),
+                _Sent(:final message, :final head) => _MessageRow(
+                  key: ValueKey(message.id),
+                  state: widget.state,
+                  message: message,
+                  account: widget.space.account,
+                  names: names,
+                  head: head,
+                ),
+                _Pending(:final pending) => _PendingRow(key: ValueKey(pending.id), pending: pending),
+              },
             ),
-            _Pending(:final pending) => _PendingRow(key: ValueKey(pending.id), pending: pending),
-          };
+          );
         },
       );
     }
@@ -466,7 +475,10 @@ class _ChatReaderState extends State<ChatReader> {
         ),
         const Hairline(),
         Expanded(child: log),
-        Padding(
+        Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: Reader.column + 40),
+            child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
           child: CallbackShortcuts(
             bindings: {
@@ -489,7 +501,11 @@ class _ChatReaderState extends State<ChatReader> {
                 border: Border.all(color: colors.border, width: 0.5),
                 borderRadius: BorderRadius.circular(18),
               ),
-              focusedDecoration: BoxDecoration(borderRadius: BorderRadius.circular(18)),
+              focusedDecoration: BoxDecoration(
+                color: colors.background,
+                border: Border.all(color: colors.accent.withValues(alpha: 0.6), width: 1),
+                borderRadius: BorderRadius.circular(18),
+              ),
               suffix: Padding(
                 padding: const EdgeInsets.only(right: 4),
                 child: ListenableBuilder(
@@ -509,6 +525,8 @@ class _ChatReaderState extends State<ChatReader> {
                 ),
               ),
             ),
+          ),
+        ),
           ),
         ),
       ],
