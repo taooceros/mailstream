@@ -93,11 +93,14 @@ nonisolated enum ChatAPI {
     struct Message: Decodable, Sendable {
         struct Thread: Codable, Sendable { let name: String }
         struct DriveRef: Decodable, Sendable { let driveFileId: String? }
+        struct DataRef: Decodable, Sendable { let resourceName: String? }
         struct Attachment: Decodable, Sendable {
             let contentName: String?
             let contentType: String?
             let downloadUri: String?
             let driveDataRef: DriveRef?
+            /// Set for files uploaded to Chat; `media(_:resource:)` downloads them.
+            let attachmentDataRef: DataRef?
         }
 
         let name: String
@@ -195,6 +198,15 @@ nonisolated enum ChatAPI {
         let request = API.request(url("users/me/\(space)/spaceReadState", [("updateMask", "lastReadTime")]),
                                   method: "PATCH", json: Body(lastReadTime: time))
         return try await api.decode(ReadState.self, request)
+    }
+
+    /// An uploaded attachment's bytes, by its `attachmentDataRef.resourceName`.
+    static func media(_ api: API, resource: String) async throws -> Data {
+        let parts = resource.split(separator: "/", omittingEmptySubsequences: false)
+        guard !resource.isEmpty, !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
+            throw ChatError(message: "Not an attachment: \(resource)")
+        }
+        return try await api.send(API.request(url("media/\(resource)", [("alt", "media")]))).0
     }
 
     /// Creates a message; never repeated (a POST).

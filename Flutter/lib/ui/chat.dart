@@ -1,9 +1,12 @@
+import 'dart:io';
+
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
 
 import 'package:mailstream/mailstream.dart' as engine;
+import 'package:video_player/video_player.dart';
 
 import '../backend/models.dart';
 import '../state/chat_state.dart';
@@ -569,7 +572,7 @@ class _MessageRow extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.only(top: 6),
           child: Wrap(spacing: 8, runSpacing: 8, children: [
-            for (final attachment in message.attachments) _AttachmentTile(attachment: attachment, onOpen: state.openExternal),
+            for (final attachment in message.attachments) _attachment(attachment),
           ]),
         ),
     ];
@@ -616,6 +619,20 @@ class _MessageRow extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// Videos play and pictures show in the log, as Chat on the web does; other files are tiles.
+  Widget _attachment(engine.ChatAttachment attachment) {
+    final type = attachment.contentType ?? '';
+    if (attachment.resource != null) {
+      if (type.startsWith('video/')) {
+        return _ChatVideo(key: ValueKey(attachment.resource), state: state, account: account, attachment: attachment);
+      }
+      if (type.startsWith('image/')) {
+        return _ChatImage(key: ValueKey(attachment.resource), state: state, account: account, attachment: attachment);
+      }
+    }
+    return _AttachmentTile(attachment: attachment, onOpen: state.openExternal);
   }
 }
 
@@ -675,6 +692,228 @@ class _AttachmentTile extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The largest a picture or video takes in the log.
+const _mediaBox = BoxConstraints(maxWidth: 360, maxHeight: 300);
+
+/// A picture sent in Chat, downloaded when its row first shows; clicking opens it in Preview.
+class _ChatImage extends StatelessWidget {
+  const _ChatImage({super.key, required this.state, required this.account, required this.attachment});
+
+  final MailState state;
+  final String account;
+  final engine.ChatAttachment attachment;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return FutureBuilder<String>(
+      future: state.chat.attachmentFile(account, attachment),
+      builder: (context, file) {
+        if (file.hasError) return _AttachmentTile(attachment: attachment, onOpen: state.openExternal);
+        final path = file.data;
+        if (path == null) {
+          return Container(
+            width: 240,
+            height: 160,
+            decoration: BoxDecoration(color: colors.fill, borderRadius: BorderRadius.circular(12)),
+            child: const Center(child: Spinner()),
+          );
+        }
+        return MacosTooltip(
+          message: attachment.name,
+          child: MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: () => state.openExternal(path),
+              child: ConstrainedBox(
+                constraints: _mediaBox,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Image.file(
+                    File(path),
+                    fit: BoxFit.contain,
+                    cacheWidth: (_mediaBox.maxWidth * MediaQuery.devicePixelRatioOf(context)).round(),
+                    errorBuilder: (_, _, _) => _AttachmentTile(attachment: attachment, onOpen: state.openExternal),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// A video sent in Chat, played in the log: clicking downloads it (once) and plays; then a click
+/// pauses or resumes, the bar seeks, and the corner button opens it in QuickTime.
+class _ChatVideo extends StatefulWidget {
+  const _ChatVideo({super.key, required this.state, required this.account, required this.attachment});
+
+  final MailState state;
+  final String account;
+  final engine.ChatAttachment attachment;
+
+  @override
+  State<_ChatVideo> createState() => _ChatVideoState();
+}
+
+class _ChatVideoState extends State<_ChatVideo> {
+  VideoPlayerController? _player;
+  String? _path;
+  bool _loading = false;
+  String? _failure;
+
+  Future<void> _start() async {
+    setState(() {
+      _loading = true;
+      _failure = null;
+    });
+    try {
+      final path = await widget.state.chat.attachmentFile(widget.account, widget.attachment);
+      final player = VideoPlayerController.file(File(path));
+      await player.initialize();
+      if (!mounted) {
+        await player.dispose();
+        return;
+      }
+      await player.play();
+      setState(() {
+        _path = path;
+        _player = player;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _failure = error is engine.MailException ? describe(error) : 'Could not play this video';
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _player?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final player = _player;
+    if (player == null) return _poster(context);
+    final colors = context.colors;
+    return ConstrainedBox(
+      constraints: _mediaBox,
+      child: AspectRatio(
+        aspectRatio: player.value.aspectRatio,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: ValueListenableBuilder<VideoPlayerValue>(
+            valueListenable: player,
+            builder: (context, value, _) => Stack(fit: StackFit.expand, children: [
+              GestureDetector(
+                onTap: () => value.isPlaying ? player.pause() : player.play(),
+                child: VideoPlayer(player),
+              ),
+              if (!value.isPlaying)
+                IgnorePointer(
+                  child: Center(child: _PlayBadge(icon: CupertinoIcons.play_fill)),
+                ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(10, 14, 6, 6),
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Color(0x00000000), Color(0x99000000)],
+                    ),
+                  ),
+                  child: Row(children: [
+                    Text(
+                      '${_time(value.position)} / ${_time(value.duration)}',
+                      style: context.text.caption1.copyWith(color: const Color(0xFFFFFFFF)),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: VideoProgressIndicator(
+                        player,
+                        allowScrubbing: true,
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        colors: VideoProgressColors(
+                          playedColor: colors.accent,
+                          bufferedColor: const Color(0x66FFFFFF),
+                          backgroundColor: const Color(0x33FFFFFF),
+                        ),
+                      ),
+                    ),
+                    MacosIconButton(
+                      icon: const MacosIcon(CupertinoIcons.arrow_up_right_square, size: 16, color: Color(0xFFFFFFFF)),
+                      onPressed: () => widget.state.openExternal(_path!),
+                    ),
+                  ]),
+                ),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Before playing: a dark frame with the play button and the file's name.
+  Widget _poster(BuildContext context) {
+    return MouseRegion(
+      cursor: _loading ? MouseCursor.defer : SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: _loading ? null : _start,
+        child: Container(
+          width: 320,
+          height: 180,
+          decoration: BoxDecoration(color: const Color(0xFF202124), borderRadius: BorderRadius.circular(12)),
+          child: Stack(children: [
+            Center(child: _loading ? const Spinner() : const _PlayBadge(icon: CupertinoIcons.play_fill)),
+            Positioned(
+              left: 12,
+              right: 12,
+              bottom: 10,
+              child: Text(
+                _failure ?? widget.attachment.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: context.text.caption1.copyWith(color: _failure == null ? const Color(0xDDFFFFFF) : const Color(0xFFFF8A80)),
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  static String _time(Duration d) {
+    final seconds = (d.inSeconds % 60).toString().padLeft(2, '0');
+    return d.inHours > 0 ? '${d.inHours}:${(d.inMinutes % 60).toString().padLeft(2, '0')}:$seconds' : '${d.inMinutes}:$seconds';
+  }
+}
+
+class _PlayBadge extends StatelessWidget {
+  const _PlayBadge({required this.icon});
+
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: 48,
+    height: 48,
+    decoration: const BoxDecoration(color: Color(0x99000000), shape: BoxShape.circle),
+    child: Center(child: MacosIcon(icon, size: 22, color: const Color(0xFFFFFFFF))),
+  );
 }
 
 /// A message being sent, dimmed, or one Google refused, marked.

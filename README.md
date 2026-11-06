@@ -85,6 +85,7 @@ mailstream chat spaces
 mailstream chat messages you@gmail.com spaces/AAAA
 mailstream chat send you@gmail.com spaces/AAAA --text "On my way" --yes
 mailstream chat start you@gmail.com friend@example.com
+mailstream chat attachment you@gmail.com '<resource>' --name clip.mp4
 ```
 
 Settings live in `~/Library/Application Support/Mailstream/settings.json`: a flat
@@ -134,7 +135,9 @@ sign-in and waits for the person to finish it.
 as messages arrive, like opening it in the window; `chat messages` answers what is loaded without
 that, and `chat earlier` loads the page before it. `chat send` (with `--yes`) answers once Google
 took the message. `chat start` finds or starts the direct message with one person or the group
-chat with several; `chat people` lists who an account already chats with.
+chat with several; `chat people` lists who an account already chats with. `chat attachment`
+downloads a file uploaded to a message (its `resource` in `chat messages`) into the cache once
+and prints its path.
 
 Failures print `{"error": {"code", "message"}}` on stderr and exit 1, 2 for usage
 errors, 3 when the app cannot be reached.

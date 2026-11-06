@@ -445,6 +445,14 @@ pub struct ChatAttachment {
     /// `video/mp4`, `image/png`, …
     #[serde(default)]
     pub content_type: Option<String>,
+    /// A file uploaded to Chat: what [`Mailstream::chat_attachment`] downloads. Nil for Drive files.
+    #[serde(default)]
+    pub resource: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FilePath {
+    path: String,
 }
 
 #[derive(Clone, Debug, Deserialize, uniffi::Record)]
@@ -801,6 +809,14 @@ impl Mailstream {
     /// The direct message with one person or the group chat with several, found or started.
     pub async fn chat_start(&self, account: String, people: Vec<String>) -> Result<ChatSpaceRef, MailError> {
         call("chat.start", json!({ "account": account, "people": people })).await
+    }
+
+    /// An uploaded attachment (its `resource`) as a file in the cache, downloaded the first time;
+    /// kept under `name`, so its extension says what it is. Answers the file's path.
+    pub async fn chat_attachment(&self, account: String, resource: String, name: String) -> Result<String, MailError> {
+        let file: FilePath =
+            call("chat.attachment", json!({ "account": account, "resource": resource, "name": name })).await?;
+        Ok(file.path)
     }
 
     /// Calls `listener` on the main thread for every change from now on, while the process runs.

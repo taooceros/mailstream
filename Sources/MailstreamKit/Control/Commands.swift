@@ -50,6 +50,7 @@ nonisolated enum CommandID: Sendable, Equatable {
         case chatSend = "chat.send"
         case chatPeople = "chat.people"
         case chatStart = "chat.start"
+        case chatAttachment = "chat.attachment"
     }
 
     /// The request's `command`: `mail.list`.
@@ -257,6 +258,11 @@ nonisolated struct CommandSpec: Sendable {
         CommandSpec(command: .app(.chatStart), summary: "Finds or starts the direct message with one person, or the group chat with several, and answers its space.", arguments: [
             accountAddress,
             Argument(name: "people", kind: .list, summary: "Email addresses of the people to chat with.", positional: true, variadic: true, required: true),
+        ]),
+        CommandSpec(command: .app(.chatAttachment), summary: "Downloads a file uploaded to a chat message (its `resource` from `chat messages`) into the cache once and answers its path.", arguments: [
+            chatAccount,
+            Argument(name: "resource", kind: .string, summary: "The attachment's `resource` from `chat messages`.", positional: true, required: true),
+            Argument(name: "name", kind: .string, summary: "The file name to keep it under (its kind follows the extension)."),
         ]),
     ]
 

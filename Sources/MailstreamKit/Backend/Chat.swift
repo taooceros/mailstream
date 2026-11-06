@@ -54,6 +54,9 @@ nonisolated struct ChatAttachment: Codable, Hashable, Sendable {
     let name: String
     let contentType: String?
     let url: String?
+    /// The uploaded file's `attachmentDataRef`, which `Chat.attachment` downloads; nil for Drive
+    /// files and for messages cached before it was kept.
+    var resource: String? = nil
 }
 
 nonisolated struct ChatMessage: Codable, Hashable, Sendable {
@@ -203,7 +206,7 @@ nonisolated extension ChatMessage {
             let download = attachment.downloadUri?.nilIfEmpty
             let drive = attachment.driveDataRef?.driveFileId.map { "https://drive.google.com/open?id=\($0)" }
             return ChatAttachment(name: attachment.contentName ?? "Attachment", contentType: attachment.contentType ?? "",
-                                  url: download ?? drive)
+                                  url: download ?? drive, resource: attachment.attachmentDataRef?.resourceName?.nilIfEmpty)
         }
     }
 }
@@ -321,6 +324,11 @@ actor Chat {
             memory[account]?.summaries[space] = summary
         }
         return lastRead
+    }
+
+    /// An uploaded attachment's bytes.
+    func attachment(account: String, resource: String) async throws -> Data {
+        try await ChatAPI.media(try await resolve(account), resource: resource)
     }
 
     /// Sends as the user, in `thread` when given. Not idempotent: never retried here.

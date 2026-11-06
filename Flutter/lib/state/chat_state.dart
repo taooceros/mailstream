@@ -220,6 +220,21 @@ class ChatState extends ChangeNotifier {
     await open((account: found.account, space: found.space));
   }
 
+  /// Downloads (once per session; the engine keeps the file) an uploaded attachment and answers
+  /// its file path. Throws the engine's refusal; a failed download is tried again next time.
+  Future<String> attachmentFile(String account, engine.ChatAttachment attachment) {
+    final key = '$account\u{1F}${attachment.resource}';
+    if (_files[key] case final file?) return file;
+    final file = mail.chatAttachment(account: account, resource: attachment.resource!, name: attachment.name);
+    _files[key] = file;
+    file.then((_) {}, onError: (Object _) {
+      _files.remove(key);
+    });
+    return file;
+  }
+
+  final Map<String, Future<String>> _files = {};
+
   Future<void> _quiet(Future<void> call) async {
     try {
       await call;

@@ -140,6 +140,11 @@ final class ControlService {
             let account = try chatAccount(try args.required("account"))
             let key = try await store.chat.start(account: account, with: args.list("people") ?? [])
             return ["account": .string(key.account), "space": .string(key.space)]
+        case .chatAttachment:
+            let account = try chatAccount(try args.required("account"))
+            let file = try await store.chat.attachmentFile(account: account, resource: try args.required("resource"),
+                                                           name: args.string("name") ?? "attachment")
+            return ["path": .string(file.path)]
         }
     }
 
@@ -212,7 +217,7 @@ final class ControlService {
                     "card": .bool(message.card),
                     "attachments": .array(message.attachments.map { attachment in
                         ["name": .string(attachment.name), "url": attachment.url.json,
-                         "contentType": (attachment.contentType?.nilIfEmpty).json]
+                         "contentType": (attachment.contentType?.nilIfEmpty).json, "resource": attachment.resource.json]
                     }),
                 ]
             }),

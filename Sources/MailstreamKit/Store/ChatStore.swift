@@ -506,6 +506,30 @@ final class ChatStore {
         threads[key]?.pending.removeAll { $0.id == id }
     }
 
+    // MARK: - Attachments
+
+    /// An uploaded attachment as a file in the cache (`chat-media/`), downloaded once; named
+    /// `name` so players and Quick Look know its kind.
+    func attachmentFile(account: String, resource: String, name: String) async throws -> URL {
+        let file = cache.root.appending(path: "chat-media/\(MailCache.hash(account, resource))", directoryHint: .isDirectory)
+            .appending(path: Self.fileName(name), directoryHint: .notDirectory)
+        if FileManager.default.fileExists(atPath: file.path) { return file }
+        let data = try await chat.attachment(account: account, resource: resource)
+        try await Self.write(data, to: file)
+        return file
+    }
+
+    /// `name` as one path component.
+    private nonisolated static func fileName(_ name: String) -> String {
+        let safe = name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+        return safe.isEmpty || safe.hasPrefix(".") ? "attachment" + safe : safe
+    }
+
+    @concurrent private nonisolated static func write(_ data: Data, to file: URL) async throws {
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: file, options: .atomic)
+    }
+
     // MARK: - Starting
 
     /// Whether `account`'s sign-in lets it create direct messages and group chats; accounts signed

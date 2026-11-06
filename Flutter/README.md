@@ -50,7 +50,8 @@ content height so the body scrolls with the conversation.
 | `macos/Runner/MailHtmlView.swift` | The WebKit platform view for HTML bodies |
 | `lib/state/mail_state.dart` | `MailState`: selection, paged lists served from memory for 90 s, previews, search, the reader, and optimistic actions that roll back on failure |
 | `lib/state/chat_state.dart` | `ChatState`: chat accounts and spaces, the open space's messages, sending and starting chats; re-read on the engine's `chat`/`chatMessages` events |
-| `lib/ui/chat.dart` | The chat list, the open space (newest at the bottom, older pages loading at the top, a composer: Return sends, ⇧Return a new line) and the New chat dialog |
+| `lib/ui/chat.dart` | The chat list, the open space (newest at the bottom, older pages loading at the top, messages in Chat's markup, videos playing and pictures showing in the log, other attachments as tiles, a composer: Return sends, ⇧Return a new line) and the New chat dialog |
+| `lib/ui/chat_markup.dart` | Google Chat's message markup (bold, italic, strike, code, fences, lists, quotes, links, mentions, escapes) as selectable text |
 | `lib/ui/design.dart` | `MailTheme` (the `macos_ui` theme and Material's, in macOS colors and type sizes), motion, list and island metrics, stable account/topic/avatar colors |
 | `lib/ui/glass.dart` | Islands, glass capsules (system glass under the controls), raised capsules, toolbar buttons, spinner |
 | `lib/ui/shell.dart` | Islands layout, toolbars, search field, keys, snackbars |
