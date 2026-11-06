@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -99,7 +101,15 @@ class ReaderState extends State<Reader> {
       if (thread.error != null) Text(thread.error!, style: context.text.body.copyWith(color: colors.red)),
       if (messages != null)
         if (_chat)
-          _ChatLog(messages: messages, now: now, state: widget.state, onReply: reply, focus: focus, focusKey: _focusKey)
+          _ChatLog(
+            messages: messages,
+            now: now,
+            state: widget.state,
+            onReply: reply,
+            focus: focus,
+            focusKey: _focusKey,
+            topInset: widget.topInset,
+          )
         else
           for (final (i, m) in messages.indexed)
             Padding(
@@ -594,9 +604,11 @@ class _FoldState extends State<_Fold> {
 
 // MARK: - Chat log
 
-/// A divider per day, each message under its sender's avatar, name and time; a sender's next
-/// message within an hour on the same day drops the avatar and name.
-class _ChatLog extends StatelessWidget {
+/// A conversation between people as a chat log: a divider per day, each message under its
+/// sender's avatar, name and time; a sender's next message within an hour on the same day drops
+/// the avatar and name. One message at a time is hovered: the log owns which, so moving to the
+/// next message always clears the last.
+class _ChatLog extends StatefulWidget {
   const _ChatLog({
     required this.messages,
     required this.now,
@@ -604,6 +616,7 @@ class _ChatLog extends StatelessWidget {
     required this.onReply,
     required this.focus,
     required this.focusKey,
+    required this.topInset,
   });
 
   final List<MessageDetail> messages;
@@ -613,11 +626,27 @@ class _ChatLog extends StatelessWidget {
   final int focus;
   final GlobalKey focusKey;
 
+  /// The reader's toolbar height, which the messages' reply buttons slide under too.
+  final double topInset;
+
+  @override
+  State<_ChatLog> createState() => _ChatLogState();
+}
+
+class _ChatLogState extends State<_ChatLog> {
+  final _hovered = ValueNotifier<int?>(null);
+
+  @override
+  void dispose() {
+    _hovered.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final children = <Widget>[];
     MessageDetail? previous;
-    for (final (index, m) in messages.indexed) {
+    for (final (index, m) in widget.messages.indexed) {
       final date = m.date;
       final newDay = date != null && (previous?.date == null || !sameDay(previous!.date!, date));
       if (newDay) {
@@ -627,7 +656,7 @@ class _ChatLog extends StatelessWidget {
             const Expanded(child: Hairline()),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Text(dayDivider(date, now), style: context.text.callout.copyWith(color: context.colors.secondaryLabel)),
+              child: Text(dayDivider(date, widget.now), style: context.text.callout.copyWith(color: context.colors.secondaryLabel)),
             ),
             const Expanded(child: Hairline()),
           ]),
@@ -639,48 +668,148 @@ class _ChatLog extends StatelessWidget {
           date != null &&
           previous.date != null &&
           date.difference(previous.date!).inMinutes < 60;
-      children.add(_ChatMessage(key: index == focus ? focusKey : null, message: m, continued: continued, state: state, onReply: onReply));
+      children.add(_ChatMessage(
+        key: index == widget.focus ? widget.focusKey : null,
+        message: m,
+        continued: continued,
+        state: widget.state,
+        onReply: widget.onReply,
+        index: index,
+        hovered: _hovered,
+        topInset: widget.topInset,
+      ));
       previous = m;
     }
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children);
   }
 }
 
+/// A message in the chat log. Hovered, it takes a faint wash, a continued message shows its time,
+/// and the reply buttons float on its top edge, over the gap above rather than over the text.
 class _ChatMessage extends StatefulWidget {
-  const _ChatMessage({super.key, required this.message, required this.continued, required this.state, required this.onReply});
+  const _ChatMessage({
+    super.key,
+    required this.message,
+    required this.continued,
+    required this.state,
+    required this.onReply,
+    required this.index,
+    required this.hovered,
+    required this.topInset,
+  });
 
   final MessageDetail message;
   final bool continued;
   final MailState state;
   final void Function({bool all}) onReply;
 
+  /// This message's place in the log, and the log's hovered one.
+  final int index;
+  final ValueNotifier<int?> hovered;
+  final double topInset;
+
   @override
   State<_ChatMessage> createState() => _ChatMessageState();
 }
 
 class _ChatMessageState extends State<_ChatMessage> {
-  bool _hover = false;
+  final _actions = OverlayPortalController();
+  final _link = LayerLink();
+
+  bool get _hover => widget.hovered.value == widget.index;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.hovered.addListener(_hoverChanged);
+  }
+
+  @override
+  void didUpdateWidget(_ChatMessage old) {
+    super.didUpdateWidget(old);
+    if (old.hovered != widget.hovered) {
+      old.hovered.removeListener(_hoverChanged);
+      widget.hovered.addListener(_hoverChanged);
+    }
+    _hoverChanged();
+  }
+
+  @override
+  void dispose() {
+    widget.hovered.removeListener(_hoverChanged);
+    super.dispose();
+  }
+
+  void _hoverChanged() {
+    if (_hover == _actions.isShowing) return;
+    _hover ? _actions.show() : _actions.hide();
+    setState(() {});
+  }
+
+  void _enter(PointerEnterEvent _) => widget.hovered.value = widget.index;
+
+  void _exit(PointerExitEvent _) {
+    if (_hover) widget.hovered.value = null;
+  }
+
+  /// The reply buttons, floated on the message's top edge and clipped to the part of the reader
+  /// below its toolbar, so they slide under the toolbar with the message.
+  Widget _actionsOverlay(BuildContext context) {
+    final buttons = Align(
+      alignment: Alignment.topLeft,
+      child: CompositedTransformFollower(
+        link: _link,
+        targetAnchor: Alignment.topRight,
+        followerAnchor: Alignment.topRight,
+        offset: const Offset(-12, -18),
+        // The buttons sit outside the message, so they keep it hovered themselves.
+        child: MouseRegion(
+          onEnter: _enter,
+          onExit: _exit,
+          child: RaisedCapsule(
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              ToolButton(tooltip: 'Reply', icon: CupertinoIcons.arrowshape_turn_up_left, onPressed: () => widget.onReply()),
+              ToolButton(
+                tooltip: 'Reply all',
+                icon: CupertinoIcons.arrowshape_turn_up_left_2,
+                onPressed: () => widget.onReply(all: true),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
+    final viewport = Scrollable.maybeOf(context)?.context.findRenderObject();
+    if (viewport is! RenderBox || !viewport.hasSize) return buttons;
+    final top = viewport.localToGlobal(Offset(0, widget.topInset));
+    final visible = top & Size(viewport.size.width, math.max(0, viewport.size.height - widget.topInset));
+    return Positioned.fromRect(rect: visible, child: ClipRect(child: buttons));
+  }
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
     final text = context.text;
     final m = widget.message;
+    final hover = _hover;
     final body = (m.text ?? '').trim().isEmpty && m.html != null ? _Body(message: m) : FoldedText(text: m.text ?? '');
     return MouseRegion(
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() => _hover = false),
-      child: AnimatedContainer(
-        duration: Motion.quick,
-        margin: EdgeInsets.only(top: widget.continued ? 0 : 8),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          color: _hover ? colors.fill : MacosColors.transparent,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Stack(
-          children: [
-            Row(
+      onEnter: _enter,
+      onExit: _exit,
+      child: CompositedTransformTarget(
+        link: _link,
+        child: OverlayPortal(
+          controller: _actions,
+          overlayChildBuilder: _actionsOverlay,
+          child: AnimatedContainer(
+            duration: Motion.quick,
+            margin: EdgeInsets.only(top: widget.continued ? 0 : 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: hover ? colors.hover : colors.hover.withValues(alpha: 0),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 SizedBox(
@@ -689,7 +818,7 @@ class _ChatMessageState extends State<_ChatMessage> {
                       ? Padding(
                           padding: const EdgeInsets.only(top: 4),
                           child: AnimatedOpacity(
-                            opacity: _hover ? 1 : 0,
+                            opacity: hover ? 1 : 0,
                             duration: Motion.quick,
                             child: Text(messageTime(m.date), style: text.subheadline.copyWith(color: colors.border)),
                           ),
@@ -721,29 +850,7 @@ class _ChatMessageState extends State<_ChatMessage> {
                 ),
               ],
             ),
-            // Reply floats over a message on hover.
-            Positioned(
-              right: 0,
-              top: 0,
-              child: IgnorePointer(
-                ignoring: !_hover,
-                child: AnimatedOpacity(
-                  opacity: _hover ? 1 : 0,
-                  duration: Motion.quick,
-                  child: RaisedCapsule(
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      ToolButton(tooltip: 'Reply', icon: CupertinoIcons.arrowshape_turn_up_left, onPressed: () => widget.onReply()),
-                      ToolButton(
-                        tooltip: 'Reply all',
-                        icon: CupertinoIcons.arrowshape_turn_up_left_2,
-                        onPressed: () => widget.onReply(all: true),
-                      ),
-                    ]),
-                  ),
-                ),
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );
