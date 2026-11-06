@@ -123,13 +123,16 @@ class ComposeDraft {
     this.body = '',
     this.initialBodySelection,
     this.focusBodyInitially = false,
-  });
+  }) : initialTo = to,
+       initialCc = cc,
+       initialBcc = bcc,
+       initialSubject = subject;
 
   final int id;
   final ComposeKind kind;
 
-  /// The conversation a reply answers. A reply goes out with `mail.reply`, which plans the
-  /// recipients, threads it and quotes the original, so its `to` and `subject` only preview them.
+  /// The conversation a reply answers. The engine preserves threading and quoting; fields that
+  /// have not been edited keep its reply plan rather than replacing it with a local preview.
   final Conversation? replyTo;
   final bool replyAll;
   String? from;
@@ -137,6 +140,7 @@ class ComposeDraft {
   String cc;
   String bcc;
   String subject;
+  final String initialTo, initialCc, initialBcc, initialSubject;
   String body;
   int? initialBodySelection;
   bool focusBodyInitially;
@@ -150,8 +154,10 @@ class ComposeDraft {
   /// Whether closing it would lose something the person wrote.
   bool get hasContent =>
       body.trim().isNotEmpty ||
-      (replyTo == null &&
-          (attachments.isNotEmpty || to.trim().isNotEmpty || cc.trim().isNotEmpty || bcc.trim().isNotEmpty || subject.trim().isNotEmpty));
+      attachments.isNotEmpty ||
+      (replyTo == null
+          ? to.trim().isNotEmpty || cc.trim().isNotEmpty || bcc.trim().isNotEmpty || subject.trim().isNotEmpty
+          : to != initialTo || cc != initialCc || bcc != initialBcc || subject != initialSubject);
 
   String get tabTitle {
     final s = subject.trim();
@@ -300,8 +306,7 @@ class MailState extends ChangeNotifier {
       final boxes = await mail.mailboxes(account: null);
       accounts = list.map(Account.of).toList();
       mailboxes = {
-        for (final MapEntry(key: account, value: boxes) in boxes.entries)
-          account: [for (final box in boxes) Mailbox.of(account, box)],
+        for (final MapEntry(key: account, value: boxes) in boxes.entries) account: [for (final box in boxes) Mailbox.of(account, box)],
       };
       accountsLoaded = true;
     } on engine.MailException catch (error) {
@@ -405,7 +410,9 @@ class MailState extends ChangeNotifier {
     }
     var changed = !quiet;
     try {
-      final listing = await mail.list(query: target.query(limit: pageSize, cached: quiet));
+      final listing = await mail.list(
+        query: target.query(limit: pageSize, cached: quiet),
+      );
       if (generation != entry.generation) return;
       final known = {for (final c in entry.items) c.id: c};
       final page = [for (final c in _decode(listing)) _keep(known[c.id], c)];
@@ -466,7 +473,9 @@ class MailState extends ChangeNotifier {
     final generation = entry.generation;
     entry.loadingMore = true;
     try {
-      final listing = await mail.list(query: selection.query(limit: pageSize, cursor: cursor));
+      final listing = await mail.list(
+        query: selection.query(limit: pageSize, cursor: cursor),
+      );
       // A first page landed meanwhile and decided the cursor.
       if (generation != entry.generation || entry.next != cursor) return;
       final ids = {for (final c in entry.items) c.id};
@@ -508,8 +517,7 @@ class MailState extends ChangeNotifier {
       // A bundle's row shows no previews: ones only for conversations folded into a closed
       // bundle are kept without rebuilding the window (pages loaded near the list's end often
       // fold whole into bundles).
-      final shown = opened != null && changes.containsKey(opened!.id) ||
-          conversations.any((c) => changes.containsKey(c.id) && !_folded(c));
+      final shown = opened != null && changes.containsKey(opened!.id) || conversations.any((c) => changes.containsKey(c.id) && !_folded(c));
       _patchAll(changes, rebuild: shown);
     } on engine.MailException {
       // Rows keep their subject alone; a later listing asks again.
@@ -527,7 +535,10 @@ class MailState extends ChangeNotifier {
   /// Pictures of the senders `conversations` show, from the engine's avatar cache (it looks up
   /// the ones it has not cached yet).
   void _loadAvatars(List<Conversation> conversations) {
-    final shown = {for (final c in conversations) if (c.from != null && !_folded(c)) c.from!.email.toLowerCase()};
+    final shown = {
+      for (final c in conversations)
+        if (c.from != null && !_folded(c)) c.from!.email.toLowerCase(),
+    };
     _foldedSenders.removeAll(shown);
     for (final c in conversations) {
       final key = c.from?.email.toLowerCase();
@@ -564,7 +575,10 @@ class MailState extends ChangeNotifier {
     try {
       final pictures = await mail.avatars(
         addresses: batch.keys.toList(),
-        automated: [for (final MapEntry(:key, :value) in batch.entries) if (value) key],
+        automated: [
+          for (final MapEntry(:key, :value) in batch.entries)
+            if (value) key,
+        ],
       );
       // Pictures only of senders folded into closed bundles are kept without a rebuild.
       var shown = false;
@@ -760,8 +774,7 @@ class MailState extends ChangeNotifier {
     }
   }
 
-  void archive(Conversation c) =>
-      _command(c, (ids) async => (await mail.archive(ids: ids)).failed, _remove(c.id), 'archive');
+  void archive(Conversation c) => _command(c, (ids) async => (await mail.archive(ids: ids)).failed, _remove(c.id), 'archive');
 
   /// Moves to the trash; conversations already there stay, as deleting for good needs a confirmation.
   void trash(Conversation c) =>
@@ -803,7 +816,7 @@ class MailState extends ChangeNotifier {
   /// button is the person's confirmation.
   Future<bool> reply(Conversation c, String body, {required bool all}) async {
     try {
-      _sentToast(await mail.reply(id: c.id, body: body, all: all, confirm: true));
+      _sentToast(await mail.reply(id: c.id, body: body, all: all, overrides: null, confirm: true));
       return true;
     } on engine.MailException catch (error) {
       _report('Could not send: ${describe(error)}');
@@ -815,7 +828,7 @@ class MailState extends ChangeNotifier {
   /// reply with `mail.reply`, anything else as [message] with `mail.send`. Sent, the draft closes;
   /// refused (an unknown account, an address the engine does not take, the provider's error), it
   /// stays open showing why. Kept here rather than in the column, which a stash may unmount.
-  Future<void> sendCompose(ComposeDraft draft, [engine.Draft? message]) async {
+  Future<void> sendCompose(ComposeDraft draft, engine.Draft message) async {
     if (draft.sending) return;
     draft
       ..sending = true
@@ -824,9 +837,23 @@ class MailState extends ChangeNotifier {
     notifyListeners();
     try {
       final conversation = draft.replyTo;
-      _sentToast(conversation != null
-          ? await mail.reply(id: conversation.id, body: draft.body.trim(), all: draft.replyAll, confirm: true)
-          : await mail.send(draft: message!, confirm: true));
+      _sentToast(
+        conversation != null
+            ? await mail.reply(
+                id: conversation.id,
+                body: message.body,
+                all: draft.replyAll,
+                overrides: engine.ReplyOverrides(
+                  to: draft.to == draft.initialTo ? null : message.to,
+                  cc: draft.cc == draft.initialCc ? null : message.cc,
+                  bcc: draft.bcc == draft.initialBcc ? null : message.bcc,
+                  subject: draft.subject == draft.initialSubject ? null : message.subject,
+                  attachments: message.attachments,
+                ),
+                confirm: true,
+              )
+            : await mail.send(draft: message, confirm: true),
+      );
       closeCompose(draft.id);
     } on engine.MailException catch (error) {
       draft
@@ -946,8 +973,7 @@ class MailState extends ChangeNotifier {
   /// Width of the docked compose column, dragged by its gap.
   double composeWidth = 440.0;
 
-  ComposeDraft? get activeCompose =>
-      composes.isEmpty ? null : composes[activeComposeIndex.clamp(0, composes.length - 1)];
+  ComposeDraft? get activeCompose => composes.isEmpty ? null : composes[activeComposeIndex.clamp(0, composes.length - 1)];
 
   String? get preferredComposeAccount => switch (selection) {
     MailboxSelection(:final mailbox) => mailbox.account,
@@ -978,18 +1004,20 @@ class MailState extends ChangeNotifier {
     int? initialBodySelection,
     bool focusBodyInitially = false,
   }) {
-    composes.add(ComposeDraft(
-      id: _nextComposeId++,
-      kind: kind,
-      replyTo: replyTo,
-      replyAll: replyAll,
-      from: from ?? preferredComposeAccount,
-      to: to,
-      subject: subject,
-      body: body,
-      initialBodySelection: initialBodySelection,
-      focusBodyInitially: focusBodyInitially,
-    ));
+    composes.add(
+      ComposeDraft(
+        id: _nextComposeId++,
+        kind: kind,
+        replyTo: replyTo,
+        replyAll: replyAll,
+        from: from ?? preferredComposeAccount,
+        to: to,
+        subject: subject,
+        body: body,
+        initialBodySelection: initialBodySelection,
+        focusBodyInitially: focusBodyInitially,
+      ),
+    );
     activeComposeIndex = composes.length - 1;
     composeStashed = false;
     notifyListeners();

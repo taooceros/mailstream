@@ -286,8 +286,19 @@ pub struct Draft {
     pub attachments: Vec<String>,
 }
 
-/// What was sent: the account it went from, its recipients (`Name <address>`; for replies `to`
-/// and `cc`) and subject.
+/// Optional edits to the engine's reply plan. `None` keeps the default; an empty value clears it.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ReplyOverrides {
+    pub to: Option<Vec<String>>,
+    pub cc: Option<Vec<String>>,
+    pub bcc: Option<Vec<String>>,
+    pub subject: Option<String>,
+    /// Full paths of files to attach; source attachments are not forwarded automatically.
+    pub attachments: Option<Vec<String>>,
+}
+
+/// What was sent: the account it went from, its recipients (`Name <address>`; replies include
+/// To, Cc and Bcc) and subject.
 #[derive(Clone, Debug, Deserialize, uniffi::Record)]
 pub struct Sent {
     pub from: String,
@@ -751,10 +762,20 @@ impl Mailstream {
         .await
     }
 
-    /// Replies to the conversation's latest message, quoting it, to its sender or with `all` to
-    /// everyone. Sends at once: `confirm` is the person's go-ahead.
-    pub async fn reply(&self, id: String, body: String, all: bool, confirm: bool) -> Result<Sent, MailError> {
-        call("mail.reply", json!({ "id": id, "body": body, "all": all, "yes": confirm })).await
+    /// Replies with the original thread headers and quote. Missing overrides keep the reply plan.
+    /// Sends at once: `confirm` is the person's go-ahead.
+    pub async fn reply(
+        &self, id: String, body: String, all: bool, overrides: Option<ReplyOverrides>, confirm: bool,
+    ) -> Result<Sent, MailError> {
+        let mut args = json!({ "id": id, "body": body, "all": all, "yes": confirm });
+        if let Some(edits) = overrides {
+            args["to"] = json!(edits.to);
+            args["cc"] = json!(edits.cc);
+            args["bcc"] = json!(edits.bcc);
+            args["subject"] = json!(edits.subject);
+            args["attachments"] = json!(edits.attachments);
+        }
+        call("mail.reply", args).await
     }
 
     /// Fetches new mail and counts now.

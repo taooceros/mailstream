@@ -48,9 +48,12 @@ between them, where it stops widening before the conversation would leave. Its t
 written), minimizes it to a capsule in the bottom-right corner, swaps it to the other side of
 the conversation, or floats it over the window (dragged by its title, sized from its top-left
 corner). Each draft is a tab; they stay in memory, through mailbox and conversation changes,
-until sent or discarded. A reply moved there still goes out with `mail.reply`, threaded, its
-recipients worked out and the original quoted by the app; new messages and forwards use
-`mail.send`.
+until sent or discarded. A reply moved there still goes out with `mail.reply`, threaded with the
+original quoted by the engine. To, Cc, Bcc and Subject are editable; fields left untouched keep
+the engine's reply plan. New messages and forwards use `mail.send`. All compose modes attach
+files from the paperclip picker, file drops on the window, or ⌘V (Finder files and copied image
+pixels/screenshots). Normal text paste still edits the focused field. Attachments can be removed
+before sending and remain with their draft when switching tabs or browsing other mail.
 
 HTML mail is drawn by WebKit: `macos/Runner/MailHtmlView.swift` is a platform view
 (`mailstream/html`) that runs none of the mail's scripts, opens links in the browser, loads
@@ -82,7 +85,7 @@ failed refreshes retaining the previous content.
 | `lib/ui/sidebar.dart` | Mail-style sidebar and rail |
 | `lib/ui/conversation_list.dart` | Fixed-height lazy list that loads the next page near its end, Smart Inbox bundles and its "Waiting on you" group, hover actions |
 | `lib/ui/reader.dart` | Reading column, message cards and chat log, HTML bodies (quoted history cut out and folded), inline reply (⌘⇧O moves it to the compose column), forward |
-| `lib/ui/compose.dart` | The compose column (`ComposePane`: draft tabs, docked, swapped or floating) and its minimized capsule (`StashedComposeBar`): From, To, Cc, Bcc (completing to contacts), Subject, body, attachments (the Attach button's open panel, files dropped on the window or pasted with ⌘V: `mailstream/files` in `macos/Runner/MainFlutterWindow.swift`); a moved reply shows its planned recipients and subject instead |
+| `lib/ui/compose.dart` | The compose column (`ComposePane`: draft tabs, docked, swapped or floating) and its minimized capsule (`StashedComposeBar`): From, editable To/Cc/Bcc (completing to contacts), Subject, body and attachments for new messages, forwards and threaded replies (`mailstream/files` in `macos/Runner/MainFlutterWindow.swift`) |
 | `lib/ui/people.dart` | `PeopleCompletion`: people suggested under a recipient field as it is typed in (`contacts.search`, through `MailState.searchContacts`); ↑/↓, Return or Tab, Esc |
 | `lib/ui/settings.dart` | Settings (⌘,, the sidebar's Add Account…, or by itself at launch with no account): accounts (browser sign-in with an OAuth client, filled in with the one used last through `accounts.client`, whose secret stays in the engine; rename, remove) and every key of the settings.json Mailstream.app and `mailstream config` share (`config.*` over FFI), following edits made elsewhere |
 | `lib/ui/slide_layer.dart` | Bundles (and, in one pane, the reader) slide over the list, which stays mounted; trackpad swipe back |
@@ -91,12 +94,9 @@ failed refreshes retaining the previous content.
 Keys: ↑/↓ or J/K move (beside an open conversation they open the next one), Return or Space
 opens, Esc or ⌘[ goes back, ⌘W closes the open conversation or chat space, E archives, ⌫ trashes, S stars, U toggles read, D resolves "Waiting on you" (or puts it back), R replies (⇧R or
 A replies to all), F forwards, ⌘N writes a new message, ⌘F searches, ⌘R refreshes, ⌘, opens Settings. In the compose column
-⌘Return sends, ⌘V with files on the clipboard (copied in Finder) attaches them, Esc hands the
+⌘Return sends, ⌘V with files or images on the clipboard attaches them, Esc hands the
 keyboard back to the list and conversation (closing the draft when nothing is written), and ⌘W
 closes the draft (asking first when something is written).
 
-Not here: attachments, other recipients and a subject of one's own on replies; drafts kept on the
-server or across restarts; in Chat, threads,
-reactions, editing and attachments on send.
-Reply recipients shown in the composer are a preview; the app plans the real ones when it
-sends.
+Not here: drafts kept on the server or across restarts; in Chat, threads, reactions, editing and
+attachments on send.

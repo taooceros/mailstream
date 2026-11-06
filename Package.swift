@@ -42,5 +42,10 @@ let package = Package(
             path: "Sources/Mailstream",
             swiftSettings: swiftSettings
         ),
+        .testTarget(
+            name: "MailstreamKitTests",
+            dependencies: ["MailstreamKit"],
+            swiftSettings: swiftSettings
+        ),
     ]
 )

@@ -126,9 +126,13 @@ pointing at `file://` copies in the cache. `mail avatars` answers each sender's 
 file in the avatar cache, the one the window shows. Actions answer once the provider
 confirmed them and report each id under `done` or `failed`. Sending (`mail send`,
 `mail reply`), signing an account out and deleting from the trash do nothing without
-`--yes`; the error says what would happen. `mail send --attachments <file>` (repeated for
-several) attaches files; over the socket they are full paths. `accounts add google` opens the browser
-sign-in and waits for the person to finish it.
+`--yes`; the error says what would happen. `mail send` and `mail reply` accept
+`--attachments <file>` (repeat for several); over the socket these are full paths.
+`mail reply` also accepts optional `to`, `cc`, `bcc` and `subject` overrides while keeping the
+original thread headers and quote. Omitted or null fields keep the reply plan; empty arrays
+clear recipient fields and an empty string clears the subject (at least one recipient must
+remain). The typed FFI exposes these through `ReplyOverrides`. `accounts add google` opens
+the browser sign-in and waits for the person to finish it.
 
 `chat …` works on the Google Chat spaces the app has loaded (`chat spaces`, from its last poll;
 `chat more` loads older ones). `chat open` makes a space the one the app keeps current and reads

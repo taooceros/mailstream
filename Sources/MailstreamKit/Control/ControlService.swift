@@ -669,11 +669,18 @@ final class ControlService {
     private func reply(_ args: Arguments) async throws -> JSON {
         let conversation = try lookup(try args.required("id")).conversation
         let source = conversation.messages.last { $0.role != .drafts } ?? conversation.latest
-        let plan = try await store.replyPlan(for: source, all: args.bool("all"))
+        var plan = try await store.replyPlan(for: source, all: args.bool("all"))
+        if args.list("to") != nil { plan.to = try addresses(args, "to") }
+        if args.list("cc") != nil { plan.cc = try addresses(args, "cc") }
+        let bcc = try addresses(args, "bcc")
+        if let subject = args.string("subject") { plan.subject = subject }
+        guard !(plan.to + plan.cc + bcc).isEmpty else { throw ControlError.usage("A reply needs at least one recipient.") }
+        let attachments = try await Self.files(args.list("attachments") ?? [], argument: "attachments")
         let body = try args.required("body")
-        try requireYes(args, "Would send \"\(plan.subject)\" from \(source.ref.account) to \(Self.emails(plan.to + plan.cc)). Re-run with --yes.")
-        try await store.sendReply(body, plan: plan, source: source)
-        return ["sent": true, "from": .string(source.ref.account), "to": Self.addresses(plan.to + plan.cc),
+        let recipients = plan.to + plan.cc + bcc
+        try requireYes(args, "Would send \"\(plan.subject)\" from \(source.ref.account) to \(Self.emails(recipients)), \(attachments.count) attachments. Re-run with --yes.")
+        try await store.sendReply(body, plan: plan, source: source, bcc: bcc, attachments: attachments)
+        return ["sent": true, "from": .string(source.ref.account), "to": Self.addresses(recipients),
                 "subject": .string(plan.subject)]
     }
 }

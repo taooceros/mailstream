@@ -1040,7 +1040,7 @@ impl ReplyBox {
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let answer =
-                cx.background_executor().spawn(async move { engine().reply(id, body, all, true).await }).await;
+                cx.background_executor().spawn(async move { engine().reply(id, body, all, None, true).await }).await;
             this.update(cx, |this, cx| {
                 match answer {
                     Ok(_) => {

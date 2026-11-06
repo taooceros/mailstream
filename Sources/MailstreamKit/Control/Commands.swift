@@ -236,6 +236,11 @@ nonisolated struct CommandSpec: Sendable {
             conversationID,
             Argument(name: "body", kind: .string, summary: "Plain-text reply; `-` reads standard input.", required: true),
             Argument(name: "all", kind: .bool, summary: "Reply to everyone."),
+            Argument(name: "to", kind: .list, summary: "Override reply recipients; omitted uses the reply plan."),
+            Argument(name: "cc", kind: .list, summary: "Override Cc; an empty list clears it."),
+            Argument(name: "bcc", kind: .list, summary: "Bcc recipients; an empty list clears it."),
+            Argument(name: "subject", kind: .string, summary: "Override the reply subject; an empty string clears it."),
+            Argument(name: "attachments", kind: .list, summary: "A file to attach; repeat for several."),
             yes,
         ], confirm: true),
 

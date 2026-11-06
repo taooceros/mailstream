@@ -81,12 +81,7 @@ String formatRecipient(Address person) {
 /// The compose column (or floating island): hosts one or more [ComposeDraft] tabs so the person
 /// can read and browse other conversations on the left while writing.
 class ComposePane extends StatefulWidget {
-  const ComposePane({
-    super.key,
-    required this.state,
-    required this.onUnfocus,
-    this.onDragFloating,
-  });
+  const ComposePane({super.key, required this.state, required this.onUnfocus, this.onDragFloating});
 
   final MailState state;
   final VoidCallback onUnfocus;
@@ -134,9 +129,11 @@ class _ComposePaneState extends State<ComposePane> {
     final active = widget.state.activeCompose;
     switch (call.method) {
       case 'hover':
-        setState(() => _dropping = call.arguments == true && active != null && !active.sending && active.replyTo == null);
+        setState(() => _dropping = call.arguments == true && active != null && !active.sending);
       case 'drop':
         _activeState?.attach((call.arguments as List).cast<String>());
+      case 'paste':
+        _activeState?.paste();
     }
   }
 
@@ -145,39 +142,42 @@ class _ComposePaneState extends State<ComposePane> {
     final composes = widget.state.composes;
     if (composes.isEmpty) return const SizedBox.shrink();
     final activeIndex = widget.state.activeComposeIndex.clamp(0, composes.length - 1);
-    return Island(
-      child: Stack(
-        children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (composes.length > 1) ...[
-                _ComposeTabBar(
-                  state: widget.state,
-                  activeIndex: activeIndex,
-                  onCloseTab: (draft) => _keyFor(draft.id).currentState?.requestClose(),
+    return Focus(
+      onFocusChange: (focused) => _files.invokeMethod<void>('editing', focused),
+      child: Island(
+        child: Stack(
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (composes.length > 1) ...[
+                  _ComposeTabBar(
+                    state: widget.state,
+                    activeIndex: activeIndex,
+                    onCloseTab: (draft) => _keyFor(draft.id).currentState?.requestClose(),
+                  ),
+                  const Hairline(),
+                ],
+                Expanded(
+                  child: IndexedStack(
+                    index: activeIndex,
+                    children: [
+                      for (final draft in composes)
+                        _ComposeDraftView(
+                          key: _keyFor(draft.id),
+                          state: widget.state,
+                          draft: draft,
+                          onUnfocus: widget.onUnfocus,
+                          onDragFloating: widget.onDragFloating,
+                        ),
+                    ],
+                  ),
                 ),
-                const Hairline(),
               ],
-              Expanded(
-                child: IndexedStack(
-                  index: activeIndex,
-                  children: [
-                    for (final draft in composes)
-                      _ComposeDraftView(
-                        key: _keyFor(draft.id),
-                        state: widget.state,
-                        draft: draft,
-                        onUnfocus: widget.onUnfocus,
-                        onDragFloating: widget.onDragFloating,
-                      ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          if (_dropping) Positioned.fill(child: IgnorePointer(child: _dropTarget(context))),
-        ],
+            ),
+            if (_dropping) Positioned.fill(child: IgnorePointer(child: _dropTarget(context))),
+          ],
+        ),
       ),
     );
   }
@@ -191,21 +191,20 @@ class _ComposePaneState extends State<ComposePane> {
         borderRadius: BorderRadius.circular(Panes.corner - 4),
         border: Border.all(color: colors.accent, width: 2),
       ),
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        MacosIcon(CupertinoIcons.paperclip, size: 36, color: colors.onAccentFill),
-        const SizedBox(height: 12),
-        Text('Drop files to attach', style: context.text.title3.copyWith(color: colors.onAccentFill)),
-      ]),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          MacosIcon(CupertinoIcons.paperclip, size: 36, color: colors.onAccentFill),
+          const SizedBox(height: 12),
+          Text('Drop files to attach', style: context.text.title3.copyWith(color: colors.onAccentFill)),
+        ],
+      ),
     );
   }
 }
 
 class _ComposeTabBar extends StatelessWidget {
-  const _ComposeTabBar({
-    required this.state,
-    required this.activeIndex,
-    required this.onCloseTab,
-  });
+  const _ComposeTabBar({required this.state, required this.activeIndex, required this.onCloseTab});
 
   final MailState state;
   final int activeIndex;
@@ -275,11 +274,7 @@ class _ComposeTabBar extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 4),
-            ToolButton(
-              tooltip: 'New draft tab (⌘N)',
-              icon: CupertinoIcons.plus,
-              onPressed: state.composeNew,
-            ),
+            ToolButton(tooltip: 'New draft tab (⌘N)', icon: CupertinoIcons.plus, onPressed: state.composeNew),
           ],
         ),
       ),
@@ -288,13 +283,7 @@ class _ComposeTabBar extends StatelessWidget {
 }
 
 class _ComposeDraftView extends StatefulWidget {
-  const _ComposeDraftView({
-    super.key,
-    required this.state,
-    required this.draft,
-    required this.onUnfocus,
-    this.onDragFloating,
-  });
+  const _ComposeDraftView({super.key, required this.state, required this.draft, required this.onUnfocus, this.onDragFloating});
 
   final MailState state;
   final ComposeDraft draft;
@@ -380,22 +369,30 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
 
   Future<void> _pick() async => attach(await _files.invokeListMethod<String>('pick') ?? const []);
 
-  /// ⌘V: files on the clipboard (copied in Finder) attach, as in the native compose window;
-  /// anything else pastes as text where the cursor is.
-  Future<void> _paste() async {
+  /// AppKit's Edit > Paste enters here; dispatch through EditableText's overridable action
+  /// so ordinary text retains the editor's selection, caret and undo behavior.
+  void paste() {
     final focused = primaryFocus?.context;
-    final files = await _files.invokeListMethod<String>('pasted') ?? const [];
-    if (!mounted) return;
-    if (files.isNotEmpty) return attach(files);
-    if (focused != null && focused.mounted) {
-      Actions.maybeInvoke(focused, const PasteTextIntent(SelectionChangedCause.keyboard));
+    if (focused != null) Actions.maybeInvoke(focused, const PasteTextIntent(SelectionChangedCause.keyboard));
+  }
+
+  /// Called by an overridable paste action, including when an EditableText owns focus.
+  Future<bool> _pasteAttachments() async {
+    try {
+      final files = await _files.invokeListMethod<String>('pasted') ?? const [];
+      if (!mounted) return true;
+      if (files.isEmpty) return false;
+      attach(files);
+      return true;
+    } on PlatformException catch (error) {
+      if (mounted) _fail(error.message ?? 'Could not paste attachments.');
+      return true;
     }
   }
 
-  /// Adds the files not attached yet; nothing changes while sending, and replies take none
-  /// (`mail.reply` sends text).
+  /// Adds the files not attached yet; nothing changes while sending.
   void attach(List<String> paths) {
-    if (d.sending || d.replyTo != null || !mounted) return;
+    if (d.sending || !mounted) return;
     final added = paths.where((p) => !d.attachments.contains(p)).toList();
     if (added.isEmpty) return;
     setState(() => d.attachments.addAll(added));
@@ -434,13 +431,6 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
 
   Future<void> _send() async {
     if (d.sending) return;
-    if (d.replyTo != null) {
-      if (d.body.trim().isEmpty) {
-        _bodyFocus.requestFocus();
-        return _fail('Write the reply first.');
-      }
-      return widget.state.sendCompose(d);
-    }
     final from = d.from;
     if (from == null) return _fail('Add an account in Mailstream to send from.');
     _invalid.clear();
@@ -455,7 +445,7 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
       }
       lists[field] = parsed.recipients;
     }
-    if (lists[_Field.to]!.isEmpty) {
+    if (d.replyTo == null ? lists[_Field.to]!.isEmpty : lists.values.every((recipients) => recipients.isEmpty)) {
       _invalid.add(_Field.to);
       _focus[_Field.to]!.requestFocus();
       return _fail('Add at least one recipient.');
@@ -478,22 +468,24 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
   Widget build(BuildContext context) {
     final colors = context.colors;
     final text = context.text;
-    return CallbackShortcuts(
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.enter, meta: true): _send,
-        const SingleActivator(LogicalKeyboardKey.keyW, meta: true): requestClose,
-        const SingleActivator(LogicalKeyboardKey.keyV, meta: true): _paste,
-        const SingleActivator(LogicalKeyboardKey.escape): _escape,
-      },
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _titleBar(context),
-          if (d.replyTo != null) ...[
-            _row(context, label: 'To', child: _preview(context, d.to)),
-            _row(context, child: _preview(context, d.subject, style: text.title3)),
-          ] else ...[
-            d.from == null ? const SizedBox.shrink() : _row(context, label: 'From', child: _fromPicker(context)),
+    return Actions(
+      actions: {PasteTextIntent: AttachmentPasteAction(_pasteAttachments)},
+      child: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.enter, meta: true): _send,
+          const SingleActivator(LogicalKeyboardKey.keyW, meta: true): requestClose,
+          const SingleActivator(LogicalKeyboardKey.escape): _escape,
+        },
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _titleBar(context),
+            if (d.from != null)
+              _row(
+                context,
+                label: 'From',
+                child: d.replyTo == null ? _fromPicker(context) : Text(d.from!, style: text.body),
+              ),
             _recipients(context, _Field.to),
             _recipients(
               context,
@@ -523,36 +515,38 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
                 placeholder: 'Subject',
               ),
             ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+                child: _bareField(
+                  controller: _body,
+                  focusNode: _bodyFocus,
+                  enabled: !d.sending,
+                  expands: true,
+                  style: text.body.copyWith(height: 1.55),
+                  placeholder: d.replyTo != null ? 'Write a reply (the original is quoted below it)' : 'Write your message…',
+                ),
+              ),
+            ),
+            if (d.attachments.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                child: Wrap(spacing: 8, runSpacing: 8, children: [for (final path in d.attachments) _attachmentChip(context, path)]),
+              ),
+            if (d.sending || d.error != null)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                decoration: BoxDecoration(
+                  border: Border(top: BorderSide(color: colors.separator, width: 0.5)),
+                ),
+                child: Text(
+                  d.sending ? 'Sending…' : d.error!,
+                  style: text.subheadline.copyWith(color: d.sending ? colors.secondaryLabel : colors.red),
+                ),
+              ),
+            if (d.confirmingDiscard) _discardBar(context),
           ],
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
-              child: _bareField(
-                controller: _body,
-                focusNode: _bodyFocus,
-                enabled: !d.sending,
-                expands: true,
-                style: text.body.copyWith(height: 1.55),
-                placeholder: d.replyTo != null ? 'Write a reply (the original is quoted below it)' : 'Write your message…',
-              ),
-            ),
-          ),
-          if (d.attachments.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-              child: Wrap(spacing: 8, runSpacing: 8, children: [for (final path in d.attachments) _attachmentChip(context, path)]),
-            ),
-          if (d.sending || d.error != null)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-              decoration: BoxDecoration(border: Border(top: BorderSide(color: colors.separator, width: 0.5))),
-              child: Text(
-                d.sending ? 'Sending…' : d.error!,
-                style: text.subheadline.copyWith(color: d.sending ? colors.secondaryLabel : colors.red),
-              ),
-            ),
-          if (d.confirmingDiscard) _discardBar(context),
-        ],
+        ),
       ),
     );
   }
@@ -578,14 +572,6 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
       ),
     );
   }
-
-  /// A reply's recipients or subject: the app works out the real ones when it sends.
-  Widget _preview(BuildContext context, String value, {TextStyle? style}) => Text(
-    value,
-    maxLines: 1,
-    overflow: TextOverflow.ellipsis,
-    style: style ?? context.text.body.copyWith(color: context.colors.secondaryLabel),
-  );
 
   /// A text field without a box, as Mail's header lines and body are.
   Widget _bareField({
@@ -633,69 +619,77 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
               child: Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: titleWidget),
             ),
           )
-        : WindowDragArea(child: Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: titleWidget));
+        : WindowDragArea(
+            child: Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: titleWidget),
+          );
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(10, 10, 12, 6),
-      child: Row(children: [
-        GlassCapsule(
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            ToolButton(
-              tooltip: 'Close draft (⌘W)',
-              icon: CupertinoIcons.xmark,
-              onPressed: d.sending ? null : requestClose,
+      child: Row(
+        children: [
+          GlassCapsule(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ToolButton(tooltip: 'Close draft (⌘W)', icon: CupertinoIcons.xmark, onPressed: d.sending ? null : requestClose),
+                ToolButton(
+                  tooltip: 'Minimize to bottom-right',
+                  icon: CupertinoIcons.minus,
+                  onPressed: () {
+                    state.setComposeStashed(true);
+                    widget.onUnfocus();
+                  },
+                ),
+              ],
             ),
-            ToolButton(
-              tooltip: 'Minimize to bottom-right',
-              icon: CupertinoIcons.minus,
-              onPressed: () {
-                state.setComposeStashed(true);
-                widget.onUnfocus();
-              },
-            ),
-          ]),
-        ),
-        const SizedBox(width: 8),
-        Expanded(child: draggableTitle),
-        GlassCapsule(
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            if (state.composes.length == 1)
-              ToolButton(tooltip: 'New message (⌘N)', icon: CupertinoIcons.plus, onPressed: state.composeNew),
-            if (!floating)
-              ToolButton(
-                tooltip: state.composeSwapped ? 'Move column to right edge' : 'Swap column position',
-                icon: CupertinoIcons.arrow_left_right,
-                onPressed: state.toggleComposeSwapped,
-              ),
-            ToolButton(
-              tooltip: floating ? 'Dock as column' : 'Float over window',
-              icon: floating ? CupertinoIcons.sidebar_right : CupertinoIcons.macwindow,
-              onPressed: state.toggleComposeFloating,
-            ),
-            if (d.replyTo == null)
-              ToolButton(
-                tooltip: 'Attach files (or drop them on the message)',
-                icon: CupertinoIcons.paperclip,
-                onPressed: d.sending ? null : _pick,
-              ),
-          ]),
-        ),
-        const SizedBox(width: 8),
-        MacosTooltip(
-          message: '⌘ Return',
-          child: PushButton(
-            controlSize: ControlSize.large,
-            onPressed: d.sending ? null : _send,
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              d.sending
-                  ? const Spinner(radius: 6)
-                  : const MacosIcon(CupertinoIcons.paperplane_fill, size: 14, color: MacosColors.white),
-              const SizedBox(width: 6),
-              Text(d.sending ? 'Sending' : 'Send'),
-            ]),
           ),
-        ),
-      ]),
+          const SizedBox(width: 8),
+          Expanded(child: draggableTitle),
+          GlassCapsule(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (state.composes.length == 1)
+                  ToolButton(tooltip: 'New message (⌘N)', icon: CupertinoIcons.plus, onPressed: state.composeNew),
+                if (!floating)
+                  ToolButton(
+                    tooltip: state.composeSwapped ? 'Move column to right edge' : 'Swap column position',
+                    icon: CupertinoIcons.arrow_left_right,
+                    onPressed: state.toggleComposeSwapped,
+                  ),
+                ToolButton(
+                  tooltip: floating ? 'Dock as column' : 'Float over window',
+                  icon: floating ? CupertinoIcons.sidebar_right : CupertinoIcons.macwindow,
+                  onPressed: state.toggleComposeFloating,
+                ),
+                ToolButton(
+                  tooltip: 'Attach files (or drop them on the message)',
+                  icon: CupertinoIcons.paperclip,
+                  onPressed: d.sending ? null : _pick,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          MacosTooltip(
+            message: '⌘ Return',
+            child: PushButton(
+              controlSize: ControlSize.large,
+              onPressed: d.sending ? null : _send,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  d.sending
+                      ? const Spinner(radius: 6)
+                      : const MacosIcon(CupertinoIcons.paperplane_fill, size: 14, color: MacosColors.white),
+                  const SizedBox(width: 6),
+                  Text(d.sending ? 'Sending' : 'Send'),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -706,22 +700,26 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
       height: 44,
       margin: const EdgeInsets.only(left: 20),
       padding: const EdgeInsets.only(right: 16),
-      decoration: BoxDecoration(border: Border(bottom: BorderSide(color: colors.separator, width: 0.5))),
-      child: Row(children: [
-        if (label != null) ...[
-          SizedBox(
-            width: 48,
-            child: Text(
-              '$label:',
-              textAlign: TextAlign.end,
-              style: context.text.body.copyWith(color: invalid ? colors.red : colors.secondaryLabel),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: colors.separator, width: 0.5)),
+      ),
+      child: Row(
+        children: [
+          if (label != null) ...[
+            SizedBox(
+              width: 48,
+              child: Text(
+                '$label:',
+                textAlign: TextAlign.end,
+                style: context.text.body.copyWith(color: invalid ? colors.red : colors.secondaryLabel),
+              ),
             ),
-          ),
-          const SizedBox(width: 10),
+            const SizedBox(width: 10),
+          ],
+          Expanded(child: child),
+          ?trailing,
         ],
-        Expanded(child: child),
-        ?trailing,
-      ]),
+      ),
     );
   }
 
@@ -761,7 +759,10 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
         for (final part in _splitRecipients(_fields[field]!.text))
           if (part.trim().isNotEmpty && part.trim() != typed) Address.parse(part).email.toLowerCase(),
     };
-    return [for (final person in people) if (!chosen.contains(person.email.toLowerCase())) Suggestion(person)];
+    return [
+      for (final person in people)
+        if (!chosen.contains(person.email.toLowerCase())) Suggestion(person),
+    ];
   }
 
   /// Puts [person] in place of the address being typed in [field], ready for the next one.
@@ -770,7 +771,10 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
     final typing = _splitRecipients(controller.text).last;
     final before = controller.text.substring(0, controller.text.length - typing.length);
     final text = '${before.isEmpty || before.endsWith(' ') ? before : '$before '}${formatRecipient(person)}, ';
-    controller.value = TextEditingValue(text: text, selection: TextSelection.collapsed(offset: text.length));
+    controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
     if (_invalid.contains(field)) setState(() => _invalid.remove(field));
   }
 
@@ -797,17 +801,19 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
     return Container(
       color: colors.fill,
       padding: const EdgeInsets.fromLTRB(20, 8, 12, 8),
-      child: Row(children: [
-        Expanded(child: Text('Discard this message?', style: context.text.body)),
-        PushButton(
-          controlSize: ControlSize.regular,
-          secondary: true,
-          onPressed: () => setState(() => d.confirmingDiscard = false),
-          child: const Text('Keep Editing'),
-        ),
-        const SizedBox(width: 8),
-        PushButton(controlSize: ControlSize.regular, color: colors.red, onPressed: _close, child: const Text('Discard')),
-      ]),
+      child: Row(
+        children: [
+          Expanded(child: Text('Discard this message?', style: context.text.body)),
+          PushButton(
+            controlSize: ControlSize.regular,
+            secondary: true,
+            onPressed: () => setState(() => d.confirmingDiscard = false),
+            child: const Text('Keep Editing'),
+          ),
+          const SizedBox(width: 8),
+          PushButton(controlSize: ControlSize.regular, color: colors.red, onPressed: _close, child: const Text('Discard')),
+        ],
+      ),
     );
   }
 }
@@ -849,11 +855,7 @@ class StashedComposeBar extends StatelessWidget {
                   ),
                   if (count > 1) ...[
                     const SizedBox(width: 8),
-                    Pill(
-                      label: '$count drafts',
-                      background: colors.accentFill,
-                      foreground: colors.onAccentFill,
-                    ),
+                    Pill(label: '$count drafts', background: colors.accentFill, foreground: colors.onAccentFill),
                   ],
                   const SizedBox(width: 6),
                   MacosIcon(CupertinoIcons.sidebar_right, size: 14, color: colors.secondaryLabel),
@@ -861,13 +863,25 @@ class StashedComposeBar extends StatelessWidget {
               ),
             ),
           ),
-          ToolButton(
-            tooltip: 'New draft (⌘N)',
-            icon: CupertinoIcons.plus,
-            onPressed: state.composeNew,
-          ),
+          ToolButton(tooltip: 'New draft (⌘N)', icon: CupertinoIcons.plus, onPressed: state.composeNew),
         ],
       ),
     );
+  }
+}
+
+/// EditableText exposes an overridable paste action. Preserve its original text action for
+/// text-only clipboards, including selection replacement and caret placement.
+class AttachmentPasteAction extends Action<PasteTextIntent> {
+  AttachmentPasteAction(this.attach);
+  final Future<bool> Function() attach;
+
+  @override
+  Object? invoke(PasteTextIntent intent) {
+    final textPaste = callingAction;
+    () async {
+      if (!await attach()) textPaste?.invoke(intent);
+    }();
+    return null;
   }
 }

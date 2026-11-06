@@ -165,11 +165,11 @@ extension MailStore {
     }
 
     /// Sends an inline reply as plain text plus HTML, the HTML quoting the source's own HTML body.
-    func sendReply(_ text: String, plan: ReplyPlan, source: MailMessage) async throws {
+    func sendReply(_ text: String, plan: ReplyPlan, source: MailMessage, bcc: [Address] = [], attachments: [URL] = []) async throws {
         let content = try? await contents.load(source.ref).content
         let html = ReplyHTML.document(reply: text, attribution: plan.attribution, source: content)
-        let message = await outgoing(account: source.ref.account, source: source, to: plan.to, cc: plan.cc, bcc: [],
-                                     subject: plan.subject, text: plan.plainBody(text), html: html)
+        let message = await outgoing(account: source.ref.account, source: source, to: plan.to, cc: plan.cc, bcc: bcc,
+                                     subject: plan.subject, text: plan.plainBody(text), html: html, attachments: attachments)
         try await send(message, account: source.ref.account)
     }
 }
