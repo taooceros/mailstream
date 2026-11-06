@@ -459,7 +459,7 @@ class _ChatReaderState extends State<ChatReader> {
               child: Row(children: [
                 GlassCapsule(
                   child: ToolButton(
-                    tooltip: widget.twoPane ? 'Close (Esc)' : 'Back (Esc)',
+                    tooltip: widget.twoPane ? 'Close (Esc or ⌘W)' : 'Back (Esc or ⌘W)',
                     icon: widget.twoPane ? CupertinoIcons.xmark : CupertinoIcons.chevron_left,
                     onPressed: widget.onBack,
                   ),

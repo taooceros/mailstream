@@ -227,6 +227,11 @@ class _MailShellState extends State<MailShell> {
         _compose();
       } else if (key == LogicalKeyboardKey.bracketLeft) {
         _back();
+      } else if (key == LogicalKeyboardKey.keyW && event is KeyDownEvent) {
+        // Closes the open conversation or chat space, as its close button does; the compose
+        // column takes ⌘W itself while it has focus.
+        if (state.chat.active ? state.chat.opened == null : state.opened == null) return KeyEventResult.ignored;
+        _back();
       } else {
         return KeyEventResult.ignored;
       }
@@ -602,7 +607,7 @@ class _MailShellState extends State<MailShell> {
       child: Row(children: [
         GlassCapsule(
           child: ToolButton(
-            tooltip: _twoPane ? 'Close (Esc)' : 'Back (Esc)',
+            tooltip: _twoPane ? 'Close (Esc or ⌘W)' : 'Back (Esc or ⌘W)',
             icon: _twoPane ? CupertinoIcons.xmark : CupertinoIcons.chevron_left,
             onPressed: _back,
           ),

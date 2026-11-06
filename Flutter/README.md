@@ -77,7 +77,7 @@ content height so the body scrolls with the conversation.
 | `lib/bench.dart` | The frame measurement `scripts/bench.sh flutter` runs (`MAILSTREAM_BENCH=scroll`): the list scrolls itself and every frame's `FrameTiming` is logged |
 
 Keys: ↑/↓ or J/K move (beside an open conversation they open the next one), Return or Space
-opens, Esc or ⌘[ goes back, E archives, ⌫ trashes, S stars, U toggles read, D resolves "Waiting on you" (or puts it back), R replies (⇧R or
+opens, Esc or ⌘[ goes back, ⌘W closes the open conversation or chat space, E archives, ⌫ trashes, S stars, U toggles read, D resolves "Waiting on you" (or puts it back), R replies (⇧R or
 A replies to all), F forwards, ⌘N writes a new message, ⌘F searches, ⌘R refreshes, ⌘, opens Settings. In the compose column
 ⌘Return sends, ⌘V with files on the clipboard (copied in Finder) attaches them, Esc hands the
 keyboard back to the list and conversation (closing the draft when nothing is written), and ⌘W
