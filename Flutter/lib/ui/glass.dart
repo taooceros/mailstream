@@ -12,7 +12,9 @@ import 'package:macos_ui/macos_ui.dart';
 import 'design.dart';
 
 /// A rounded island on the window's glass, in the window's background color (or `color`): a
-/// hairline rim and a soft shadow lift it.
+/// hairline rim and a soft shadow lift it. The rim is stroked just outside the island, under its
+/// content: drawn over the content, its bounds (the whole island) would cover the WebKit bodies,
+/// and AppKit would give their clicks to Flutter.
 class Island extends StatelessWidget {
   const Island({super.key, required this.child, this.color});
 
@@ -25,22 +27,20 @@ class Island extends StatelessWidget {
     final light = colors.brightness == Brightness.light;
     const radius = BorderRadius.all(Radius.circular(Panes.corner));
     return DecoratedBox(
-      position: DecorationPosition.foreground,
       decoration: BoxDecoration(
+        color: color ?? colors.background,
         borderRadius: radius,
-        border: Border.all(color: light ? const Color(0x12000000) : const Color(0x17FFFFFF), width: 0.5),
-      ),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: color ?? colors.background,
-          borderRadius: radius,
-          boxShadow: [
-            BoxShadow(color: MacosColors.black.withValues(alpha: light ? 0.05 : 0.3), blurRadius: 1, offset: const Offset(0, 0.5)),
-            BoxShadow(color: MacosColors.black.withValues(alpha: light ? 0.07 : 0.35), blurRadius: 18, offset: const Offset(0, 4)),
-          ],
+        border: Border.all(
+          color: light ? const Color(0x12000000) : const Color(0x17FFFFFF),
+          width: 0.5,
+          strokeAlign: BorderSide.strokeAlignOutside,
         ),
-        child: ClipRRect(borderRadius: radius, child: child),
+        boxShadow: [
+          BoxShadow(color: MacosColors.black.withValues(alpha: light ? 0.05 : 0.3), blurRadius: 1, offset: const Offset(0, 0.5)),
+          BoxShadow(color: MacosColors.black.withValues(alpha: light ? 0.07 : 0.35), blurRadius: 18, offset: const Offset(0, 4)),
+        ],
       ),
+      child: ClipRRect(borderRadius: radius, child: child),
     );
   }
 }
