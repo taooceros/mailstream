@@ -693,15 +693,8 @@ class _ChatLogState extends State<_ChatLog> {
           ]),
         ));
       }
-      final continued = !newDay &&
-          previous != null &&
-          previous.sender.email.toLowerCase() == m.sender.email.toLowerCase() &&
-          date != null &&
-          previous.date != null &&
-          date.difference(previous.date!).inMinutes < 60;
       children.add(_ChatMessage(
         message: m,
-        continued: continued,
         state: widget.state,
         onReply: widget.onReply,
         index: index,
@@ -714,12 +707,12 @@ class _ChatLogState extends State<_ChatLog> {
   }
 }
 
-/// A message in the chat log. Hovered, it takes a faint wash, a continued message shows its time,
-/// and the reply buttons float on its top edge, over the gap above rather than over the text.
+/// A message in the chat log, under its sender's avatar, name and time like every other: each mail
+/// stands on its own, with its own sign-off. Hovered, it takes a faint wash, and the reply buttons
+/// float on its top edge, over the gap above rather than over the text.
 class _ChatMessage extends StatefulWidget {
   const _ChatMessage({
     required this.message,
-    required this.continued,
     required this.state,
     required this.onReply,
     required this.index,
@@ -728,7 +721,6 @@ class _ChatMessage extends StatefulWidget {
   });
 
   final MessageDetail message;
-  final bool continued;
   final MailState state;
   final void Function({bool all}) onReply;
 
@@ -832,7 +824,7 @@ class _ChatMessageState extends State<_ChatMessage> {
           overlayChildBuilder: _actionsOverlay,
           child: AnimatedContainer(
             duration: Motion.quick,
-            margin: EdgeInsets.only(top: widget.continued ? 0 : 8),
+            margin: const EdgeInsets.only(top: 12),
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
               color: hover ? colors.hover : colors.hover.withValues(alpha: 0),
@@ -843,29 +835,19 @@ class _ChatMessageState extends State<_ChatMessage> {
               children: [
                 SizedBox(
                   width: 56,
-                  child: widget.continued
-                      ? Padding(
-                          padding: const EdgeInsets.only(top: 4),
-                          child: AnimatedOpacity(
-                            opacity: hover ? 1 : 0,
-                            duration: Motion.quick,
-                            child: Text(messageTime(m.date), style: text.subheadline.copyWith(color: colors.border)),
-                          ),
-                        )
-                      : Align(alignment: Alignment.topLeft, child: PersonAvatar(address: m.sender, photo: widget.state.avatar(m.sender.email))),
+                  child: Align(alignment: Alignment.topLeft, child: PersonAvatar(address: m.sender, photo: widget.state.avatar(m.sender.email))),
                 ),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      if (!widget.continued)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 4),
-                          child: Text.rich(TextSpan(children: [
-                            TextSpan(text: m.sender.displayName, style: text.headline),
-                            TextSpan(text: '  ${messageTime(m.date)}', style: text.subheadline.copyWith(color: colors.secondaryLabel)),
-                          ])),
-                        ),
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Text.rich(TextSpan(children: [
+                          TextSpan(text: m.sender.displayName, style: text.headline),
+                          TextSpan(text: '  ${messageTime(m.date)}', style: text.subheadline.copyWith(color: colors.secondaryLabel)),
+                        ])),
+                      ),
                       body,
                       if (m.attachments.isNotEmpty)
                         Padding(
