@@ -1,6 +1,7 @@
-import 'package:flutter/cupertino.dart' show CupertinoActivityIndicator, CupertinoIcons;
-import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
+import 'package:macos_ui/macos_ui.dart';
 
 import 'package:mailstream/mailstream.dart' as engine;
 
@@ -110,7 +111,7 @@ class _ChatListPaneState extends State<ChatListPane> {
     final Widget body;
     if (entries.isEmpty) {
       body = !chat.listed || chat.loading
-          ? const Center(child: CupertinoActivityIndicator())
+          ? const Center(child: Spinner())
           : Center(
               child: Padding(
                 padding: const EdgeInsets.all(24),
@@ -119,7 +120,7 @@ class _ChatListPaneState extends State<ChatListPane> {
                       ? 'No account has Google Chat. Sign in to a Google account with Chat access in Mailstream.'
                       : 'No chats yet',
                   textAlign: TextAlign.center,
-                  style: context.text.bodyLarge?.copyWith(color: colors.onSurfaceVariant),
+                  style: context.text.body.copyWith(color: colors.secondaryLabel),
                 ),
               ),
             );
@@ -128,31 +129,29 @@ class _ChatListPaneState extends State<ChatListPane> {
         if (mounted) _pageIfNearEnd();
       });
       final footer = chat.more ? 1 : 0;
-      body = Scrollbar(
+      // MacosApp's scroll behavior puts the Mac's overlay scrollbar on it.
+      body = ListView.builder(
         controller: _scroll,
-        child: ListView.builder(
-          controller: _scroll,
-          padding: const EdgeInsets.only(top: 4, bottom: 24),
-          itemCount: entries.length + footer,
-          itemExtentBuilder: (index, _) => index < entries.length
-              ? (entries[index] is _Section ? ListMetrics.sectionHeight : ListMetrics.rowHeight)
-              : (index == entries.length && footer == 1 ? 56 : null),
-          itemBuilder: (context, index) {
-            if (index == entries.length) {
-              return const Center(child: CupertinoActivityIndicator());
-            }
-            return switch (entries[index]) {
-              _Section(:final title) => SectionHeader(title),
-              _Row(:final space) => _ChatRow(
-                key: ValueKey('${space.account}|${space.space}'),
-                state: widget.state,
-                space: space,
-                selected: chat.opened == spaceKey(space),
-                onTap: () => chat.open(spaceKey(space)),
-              ),
-            };
-          },
-        ),
+        padding: const EdgeInsets.only(top: 4, bottom: 24),
+        itemCount: entries.length + footer,
+        itemExtentBuilder: (index, _) => index < entries.length
+            ? (entries[index] is _Section ? ListMetrics.sectionHeight : ListMetrics.rowHeight)
+            : (index == entries.length && footer == 1 ? 56 : null),
+        itemBuilder: (context, index) {
+          if (index == entries.length) {
+            return const Center(child: Spinner());
+          }
+          return switch (entries[index]) {
+            _Section(:final title) => SectionHeader(title),
+            _Row(:final space) => _ChatRow(
+              key: ValueKey('${space.account}|${space.space}'),
+              state: widget.state,
+              space: space,
+              selected: chat.opened == spaceKey(space),
+              onTap: () => chat.open(spaceKey(space)),
+            ),
+          };
+        },
       );
     }
     return Column(
@@ -168,17 +167,20 @@ class _ChatListPaneState extends State<ChatListPane> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Chat', style: context.text.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
-                    if (unread > 0) Text('$unread unread', style: context.text.bodySmall?.copyWith(color: colors.onSurfaceVariant)),
+                    Row(children: [
+                      Text('Chat', style: context.text.title3.copyWith(fontWeight: FontWeight.w700)),
+                      if (chat.loading) const Padding(padding: EdgeInsets.only(left: 8), child: Spinner(radius: 6)),
+                    ]),
+                    if (unread > 0) Text('$unread unread', style: context.text.subheadline.copyWith(color: colors.secondaryLabel)),
                   ],
                 ),
               ),
               GlassCapsule(
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  IconButton(tooltip: 'Refresh (⌘R)', icon: const Icon(CupertinoIcons.arrow_clockwise), onPressed: chat.refresh),
-                  IconButton(
+                  ToolButton(tooltip: 'Refresh (⌘R)', icon: CupertinoIcons.arrow_clockwise, onPressed: chat.refresh),
+                  ToolButton(
                     tooltip: 'New chat',
-                    icon: const Icon(CupertinoIcons.square_pencil),
+                    icon: CupertinoIcons.square_pencil,
                     onPressed: chat.accounts.isEmpty ? null : () => openNewChat(context, widget.state),
                   ),
                 ]),
@@ -187,7 +189,6 @@ class _ChatListPaneState extends State<ChatListPane> {
             ]),
           ),
         ),
-        SizedBox(height: 2, child: chat.loading ? const LinearProgressIndicator() : null),
         Expanded(child: ClipRect(child: body)),
       ],
     );
@@ -215,17 +216,14 @@ class _ChatRowState extends State<_ChatRow> {
     final multiAccount = widget.state.chat.accounts.length > 1;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: ListMetrics.inset, vertical: 1),
-      child: Material(
-        color: widget.selected ? colors.secondaryContainer : Colors.transparent,
-        borderRadius: BorderRadius.circular(8),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: widget.onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: Hoverable(
+        selected: widget.selected,
+        onTap: widget.onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Row(children: [
               space.kind == 'space' && space.avatarKey.isEmpty
-                  ? IconAvatar(icon: CupertinoIcons.person_3_fill, background: colors.tertiary, foreground: Colors.white)
+                  ? IconAvatar(icon: CupertinoIcons.person_3_fill, background: colors.waiting, foreground: MacosColors.white)
                   : ChatAvatar(state: widget.state, avatarKey: space.avatarKey.isEmpty ? space.space : space.avatarKey,
                       name: space.avatarName, url: space.avatarUrl),
               const SizedBox(width: 12),
@@ -248,25 +246,25 @@ class _ChatRowState extends State<_ChatRow> {
                       ],
                       Expanded(
                         child: Text(space.title, maxLines: 1, overflow: TextOverflow.ellipsis,
-                            style: context.text.bodyLarge?.copyWith(fontWeight: weight)),
+                            style: context.text.body.copyWith(fontWeight: weight)),
                       ),
                       const SizedBox(width: 8),
-                      Text(space.date, style: context.text.labelMedium?.copyWith(
-                        color: space.unread ? colors.primary : colors.onSurfaceVariant, fontWeight: weight)),
+                      Text(space.date, style: context.text.callout.copyWith(
+                        color: space.unread ? colors.accent : colors.secondaryLabel, fontWeight: weight)),
                     ]),
                     Row(children: [
                       if (space.attachment) ...[
-                        Icon(CupertinoIcons.paperclip, size: 13, color: colors.onSurfaceVariant),
+                        Icon(CupertinoIcons.paperclip, size: 13, color: colors.secondaryLabel),
                         const SizedBox(width: 2),
                       ],
                       Expanded(
                         child: Text(space.preview, maxLines: 1, overflow: TextOverflow.ellipsis,
-                            style: context.text.bodyMedium?.copyWith(
-                              color: space.unread ? colors.onSurface : colors.onSurfaceVariant, fontWeight: weight)),
+                            style: context.text.body.copyWith(
+                              color: space.unread ? colors.label : colors.secondaryLabel, fontWeight: weight)),
                       ),
                       if (space.unread) ...[
                         const SizedBox(width: 8),
-                        Container(width: 8, height: 8, decoration: BoxDecoration(color: colors.primary, shape: BoxShape.circle)),
+                        Container(width: 8, height: 8, decoration: BoxDecoration(color: colors.accent, shape: BoxShape.circle)),
                       ],
                     ]),
                   ],
@@ -275,7 +273,6 @@ class _ChatRowState extends State<_ChatRow> {
             ]),
           ),
         ),
-      ),
     );
   }
 }
@@ -350,9 +347,6 @@ class _ChatReaderState extends State<ChatReader> {
     if (position.maxScrollExtent - position.pixels < 400) chat.loadEarlier(widget.space);
   }
 
-  static OutlineInputBorder _capsule(Color color) =>
-      OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: color, width: 0.5));
-
   Future<void> _send() async {
     final text = _text.text.trim();
     if (text.isEmpty || _sending) return;
@@ -401,10 +395,10 @@ class _ChatReaderState extends State<ChatReader> {
     if (thread == null || (thread.messages.isEmpty && thread.pending.isEmpty)) {
       log = Center(
         child: thread?.failure != null
-            ? Text(thread!.failure!, style: context.text.bodyLarge?.copyWith(color: colors.error))
+            ? Text(thread!.failure!, style: context.text.body.copyWith(color: colors.red))
             : thread != null && thread.loaded
-            ? Text('No messages yet', style: context.text.bodyLarge?.copyWith(color: colors.onSurfaceVariant))
-            : const CupertinoActivityIndicator(),
+            ? Text('No messages yet', style: context.text.body.copyWith(color: colors.secondaryLabel))
+            : const Spinner(),
       );
     } else {
       final items = _log(thread).reversed.toList();
@@ -414,34 +408,31 @@ class _ChatReaderState extends State<ChatReader> {
         for (final message in thread.messages) message.sender.id: message.sender.name,
       };
       final extra = thread.more ? 1 : 0;
-      log = Scrollbar(
+      log = ListView.builder(
         controller: _scroll,
-        child: ListView.builder(
-          controller: _scroll,
-          reverse: true,
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
-          itemCount: items.length + extra,
-          itemBuilder: (context, index) {
-            if (index == items.length) {
-              return const Padding(
-                padding: EdgeInsets.all(12),
-                child: Center(child: CupertinoActivityIndicator()),
-              );
-            }
-            return switch (items[index]) {
-              _Day(:final date) => _DayDivider(date: date),
-              _Sent(:final message, :final head) => _MessageRow(
-                key: ValueKey(message.id),
-                state: widget.state,
-                message: message,
-                account: widget.space.account,
-                names: names,
-                head: head,
-              ),
-              _Pending(:final pending) => _PendingRow(key: ValueKey(pending.id), pending: pending),
-            };
-          },
-        ),
+        reverse: true,
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+        itemCount: items.length + extra,
+        itemBuilder: (context, index) {
+          if (index == items.length) {
+            return const Padding(
+              padding: EdgeInsets.all(12),
+              child: Center(child: Spinner()),
+            );
+          }
+          return switch (items[index]) {
+            _Day(:final date) => _DayDivider(date: date),
+            _Sent(:final message, :final head) => _MessageRow(
+              key: ValueKey(message.id),
+              state: widget.state,
+              message: message,
+              account: widget.space.account,
+              names: names,
+              head: head,
+            ),
+            _Pending(:final pending) => _PendingRow(key: ValueKey(pending.id), pending: pending),
+          };
+        },
       );
     }
     return Column(
@@ -454,22 +445,22 @@ class _ChatReaderState extends State<ChatReader> {
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Row(children: [
                 GlassCapsule(
-                  child: IconButton(
+                  child: ToolButton(
                     tooltip: widget.twoPane ? 'Close (Esc)' : 'Back (Esc)',
-                    icon: Icon(widget.twoPane ? CupertinoIcons.xmark : CupertinoIcons.chevron_left),
+                    icon: widget.twoPane ? CupertinoIcons.xmark : CupertinoIcons.chevron_left,
                     onPressed: widget.onBack,
                   ),
                 ),
                 const SizedBox(width: 12),
-                Expanded(child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.titleSmall)),
+                Expanded(child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.headline)),
                 if (chat.accounts.length > 1)
-                  Text(widget.space.account, style: context.text.labelMedium?.copyWith(color: colors.onSurfaceVariant)),
+                  Text(widget.space.account, style: context.text.callout.copyWith(color: colors.secondaryLabel)),
                 const SizedBox(width: 8),
               ]),
             ),
           ),
         ),
-        const Divider(height: 1),
+        const Hairline(),
         Expanded(child: log),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
@@ -478,31 +469,39 @@ class _ChatReaderState extends State<ChatReader> {
               const SingleActivator(LogicalKeyboardKey.enter): _send,
               const SingleActivator(LogicalKeyboardKey.escape): widget.onBack,
             },
-            child: TextField(
+            // Messages' field: a capsule with a hairline, the send arrow at its end.
+            child: MacosTextField(
               controller: _text,
               focusNode: _focus,
               minLines: 1,
               maxLines: 6,
               keyboardType: TextInputType.multiline,
               textInputAction: TextInputAction.newline,
-              // Messages' field: a capsule with a hairline, the send arrow at its end.
-              decoration: InputDecoration(
-                hintText: title.isEmpty ? 'Message' : 'Message $title',
-                fillColor: colors.surface,
-                border: _capsule(colors.outline),
-                enabledBorder: _capsule(colors.outline),
-                focusedBorder: _capsule(colors.primary),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
-                suffixIcon: Padding(
-                  padding: const EdgeInsets.only(right: 2),
-                  child: ListenableBuilder(
-                    listenable: _text,
-                    builder: (context, _) => IconButton(
-                      tooltip: 'Send (Return)',
-                      icon: Icon(CupertinoIcons.arrow_up_circle_fill, size: 24, color: _text.text.trim().isEmpty ? null : colors.primary),
-                      onPressed: _text.text.trim().isEmpty || _sending ? null : _send,
-                    ),
-                  ),
+              style: context.text.body,
+              placeholder: title.isEmpty ? 'Message' : 'Message $title',
+              padding: const EdgeInsets.fromLTRB(14, 7, 8, 7),
+              decoration: BoxDecoration(
+                color: colors.background,
+                border: Border.all(color: colors.border, width: 0.5),
+                borderRadius: BorderRadius.circular(18),
+              ),
+              focusedDecoration: BoxDecoration(borderRadius: BorderRadius.circular(18)),
+              suffix: Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: ListenableBuilder(
+                  listenable: _text,
+                  builder: (context, _) {
+                    final empty = _text.text.trim().isEmpty;
+                    return MacosIconButton(
+                      semanticLabel: 'Send (Return)',
+                      icon: MacosIcon(CupertinoIcons.arrow_up_circle_fill, size: 24, color: empty ? colors.border : colors.accent),
+                      backgroundColor: MacosColors.transparent,
+                      hoverColor: MacosColors.transparent,
+                      padding: EdgeInsets.zero,
+                      boxConstraints: const BoxConstraints.tightFor(width: 26, height: 26),
+                      onPressed: empty || _sending ? null : _send,
+                    );
+                  },
                 ),
               ),
             ),
@@ -522,13 +521,13 @@ class _DayDivider extends StatelessWidget {
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 12),
     child: Row(children: [
-      const Expanded(child: Divider()),
+      const Expanded(child: Hairline()),
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12),
         child: Text(dayDivider(date, DateTime.now()),
-            style: context.text.labelMedium?.copyWith(color: context.colors.onSurfaceVariant)),
+            style: context.text.callout.copyWith(color: context.colors.secondaryLabel)),
       ),
-      const Expanded(child: Divider()),
+      const Expanded(child: Hairline()),
     ]),
   );
 }
@@ -565,7 +564,7 @@ class _MessageRow extends StatelessWidget {
     final body = <Widget>[
       if (message.markup.isNotEmpty) ChatText(text: message.markup, names: names, onOpen: state.openExternal),
       if (message.markup.isEmpty && message.card)
-        Text('Card', style: context.text.bodyMedium?.copyWith(color: colors.onSurfaceVariant, fontStyle: FontStyle.italic)),
+        Text('Card', style: context.text.body.copyWith(color: colors.secondaryLabel, fontStyle: FontStyle.italic)),
       if (message.attachments.isNotEmpty)
         Padding(
           padding: const EdgeInsets.only(top: 6),
@@ -602,12 +601,12 @@ class _MessageRow extends StatelessWidget {
                     child: Row(children: [
                       Flexible(
                         child: Text(message.mine ? 'You' : sender.name, maxLines: 1, overflow: TextOverflow.ellipsis,
-                            style: context.text.labelLarge?.copyWith(fontWeight: FontWeight.w600)),
+                            style: context.text.body.copyWith(fontWeight: FontWeight.w600)),
                       ),
                       const SizedBox(width: 8),
-                      Text(messageTime(created), style: context.text.labelSmall?.copyWith(color: colors.onSurfaceVariant)),
+                      Text(messageTime(created), style: context.text.subheadline.copyWith(color: colors.secondaryLabel)),
                       if (message.edited != null)
-                        Text(' · Edited', style: context.text.labelSmall?.copyWith(color: colors.onSurfaceVariant)),
+                        Text(' · Edited', style: context.text.subheadline.copyWith(color: colors.secondaryLabel)),
                     ]),
                   ),
                 ...body,
@@ -651,24 +650,24 @@ class _AttachmentTile extends StatelessWidget {
       constraints: const BoxConstraints(minWidth: 220, maxWidth: 340),
       padding: const EdgeInsets.fromLTRB(12, 10, 14, 10),
       decoration: BoxDecoration(
-        color: colors.surfaceContainerHigh,
+        color: colors.fill,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: colors.outlineVariant.withValues(alpha: 0.6)),
+        border: Border.all(color: colors.separator),
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(kind.icon, size: 22, color: kind.color),
+        MacosIcon(kind.icon, size: 22, color: kind.color),
         const SizedBox(width: 10),
         Flexible(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(attachment.name, maxLines: 1, overflow: TextOverflow.ellipsis,
-                style: context.text.bodyMedium?.copyWith(fontWeight: FontWeight.w500)),
-            Text(kind.label, style: context.text.labelSmall?.copyWith(color: colors.onSurfaceVariant)),
+                style: context.text.body.copyWith(color: colors.label, fontWeight: FontWeight.w500)),
+            Text(kind.label, style: context.text.caption1.copyWith(color: colors.secondaryLabel)),
           ]),
         ),
       ]),
     );
     if (url == null) return Opacity(opacity: 0.5, child: tile);
-    return Tooltip(
+    return MacosTooltip(
       message: 'Open in browser',
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
@@ -693,9 +692,9 @@ class _PendingRow extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Opacity(opacity: failed ? 1 : 0.55, child: Text(pending.text, style: context.text.bodyMedium)),
+          Opacity(opacity: failed ? 1 : 0.55, child: Text(pending.text, style: context.text.body)),
           Text(failed ? 'Not sent: ${pending.failure}' : 'Sending…',
-              style: context.text.labelSmall?.copyWith(color: failed ? colors.error : colors.onSurfaceVariant)),
+              style: context.text.subheadline.copyWith(color: failed ? colors.red : colors.secondaryLabel)),
         ],
       ),
     );
@@ -708,7 +707,7 @@ Future<void> openNewChat(BuildContext context, MailState state) {
   final accounts = state.chat.accounts;
   if (accounts.isEmpty) return Future.value();
   final account = state.chat.opened?.account ?? accounts.first.id;
-  return showDialog<void>(context: context, builder: (_) => _NewChatDialog(state: state, account: account));
+  return showSheet<void>(context, (_) => _NewChatDialog(state: state, account: account));
 }
 
 class _NewChatDialog extends StatefulWidget {
@@ -810,38 +809,58 @@ class _NewChatDialogState extends State<_NewChatDialog> {
             (query.isEmpty || person.name.toLowerCase().contains(query) || person.email!.toLowerCase().contains(query)))
           person,
     ].take(8).toList();
-    return AlertDialog(
-      title: const Text('New chat'),
-      content: SizedBox(
-        width: 460,
+    final text = context.text;
+    return Sheet(
+      width: 460,
+      title: 'New chat',
+      actions: [
+        PushButton(
+          controlSize: ControlSize.large,
+          secondary: true,
+          onPressed: _starting ? null : () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        PushButton(
+          controlSize: ControlSize.large,
+          onPressed: _starting || (_people.isEmpty && _field.text.trim().isEmpty) ? null : _start,
+          child: _starting
+              ? const Row(mainAxisSize: MainAxisSize.min, children: [Spinner(radius: 6), SizedBox(width: 6), Text('Starting')])
+              : Text(_people.length > 1 ? 'Start group chat' : 'Start chat'),
+        ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             if (chat.accounts.length > 1) ...[
-              DropdownButtonFormField<String>(
-                initialValue: _account,
-                decoration: const InputDecoration(labelText: 'Account'),
-                items: [for (final a in chat.accounts) DropdownMenuItem(value: a.id, child: Text(a.id))],
-                onChanged: _starting
-                    ? null
-                    : (value) {
-                        if (value == null || value == _account) return;
-                        setState(() {
-                          _account = value;
-                          _known = const [];
-                        });
-                        _loadPeople();
-                      },
-              ),
-              const SizedBox(height: 16),
+              Row(children: [
+                Text('Account', style: text.body.copyWith(color: colors.secondaryLabel)),
+                const SizedBox(width: 10),
+                MacosPopupButton<String>(
+                  value: _account,
+                  items: [for (final a in chat.accounts) MacosPopupMenuItem(value: a.id, child: Text(a.id))],
+                  onChanged: _starting
+                      ? null
+                      : (value) {
+                          if (value == null || value == _account) return;
+                          setState(() {
+                            _account = value;
+                            _known = const [];
+                          });
+                          _loadPeople();
+                        },
+                ),
+              ]),
+              const SizedBox(height: 14),
             ],
             if (_people.isNotEmpty) ...[
               Wrap(spacing: 6, runSpacing: 6, children: [
                 for (final email in _people)
-                  InputChip(label: Text(email), onDeleted: _starting ? null : () => setState(() => _people.remove(email))),
+                  Pill(label: email, onDelete: _starting ? null : () => setState(() => _people.remove(email))),
               ]),
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
             ],
             CallbackShortcuts(
               bindings: {
@@ -854,15 +873,14 @@ class _NewChatDialogState extends State<_NewChatDialog> {
                 },
                 const SingleActivator(LogicalKeyboardKey.enter, meta: true): _start,
               },
-              child: TextField(
+              child: MacosTextField(
                 controller: _field,
                 focusNode: _focus,
                 autofocus: true,
                 enabled: !_starting,
-                decoration: const InputDecoration(
-                  labelText: 'People',
-                  hintText: 'Name or email address',
-                ),
+                style: text.body,
+                placeholder: 'Name or email address',
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
               ),
             ),
             if (suggestions.isNotEmpty)
@@ -870,18 +888,29 @@ class _NewChatDialogState extends State<_NewChatDialog> {
                 constraints: const BoxConstraints(maxHeight: 280),
                 child: ListView(
                   shrinkWrap: true,
+                  padding: const EdgeInsets.only(top: 6),
                   children: [
                     for (final person in suggestions)
-                      ListTile(
-                        dense: true,
-                        leading: ChatAvatar(state: widget.state, avatarKey: person.avatarKey, name: person.name, url: person.avatarUrl, size: 32),
-                        title: Text(person.name),
-                        subtitle: Text(person.email!),
+                      Hoverable(
                         onTap: () {
                           _add(person.email!);
                           _field.clear();
                           _focus.requestFocus();
                         },
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                          child: Row(children: [
+                            ChatAvatar(state: widget.state, avatarKey: person.avatarKey, name: person.name, url: person.avatarUrl, size: 28),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                Text(person.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: text.body.copyWith(color: colors.label)),
+                                Text(person.email!, maxLines: 1, overflow: TextOverflow.ellipsis,
+                                    style: text.subheadline.copyWith(color: colors.secondaryLabel)),
+                              ]),
+                            ),
+                          ]),
+                        ),
                       ),
                   ],
                 ),
@@ -892,26 +921,17 @@ class _NewChatDialogState extends State<_NewChatDialog> {
                 child: Text(
                   'This account can reopen its existing direct messages only. To start new chats, sign in to it again in '
                   'Mailstream and allow it to create Google Chat conversations.',
-                  style: context.text.bodySmall?.copyWith(color: colors.onSurfaceVariant),
+                  style: text.subheadline.copyWith(color: colors.secondaryLabel),
                 ),
               ),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.only(top: 12),
-                child: Text(_error!, style: context.text.bodyMedium?.copyWith(color: colors.error)),
+                child: Text(_error!, style: text.body.copyWith(color: colors.red)),
               ),
           ],
         ),
       ),
-      actions: [
-        TextButton(onPressed: _starting ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
-        FilledButton(
-          onPressed: _starting || (_people.isEmpty && _field.text.trim().isEmpty) ? null : _start,
-          child: _starting
-              ? const CupertinoActivityIndicator(radius: 7, color: Colors.white)
-              : Text(_people.length > 1 ? 'Start group chat' : 'Start chat'),
-        ),
-      ],
     );
   }
 }

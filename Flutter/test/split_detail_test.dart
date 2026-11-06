@@ -1,5 +1,5 @@
 import 'package:flutter/gestures.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mailstream_ui/ui/slide_layer.dart';
 
@@ -8,12 +8,13 @@ void main() {
     var dismissed = 0;
     await tester.binding.setSurfaceSize(const Size(1200, 800));
     await tester.pumpWidget(
-      MaterialApp(
-        home: SplitDetail(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SplitDetail(
           list: const SizedBox.expand(key: Key('list')),
           listWidth: 400,
           onDismiss: () => dismissed++,
-          detail: const ColoredBox(key: Key('detail'), color: Colors.white),
+          detail: const ColoredBox(key: Key('detail'), color: Color(0xFFFFFFFF)),
         ),
       ),
     );
@@ -43,12 +44,13 @@ void main() {
 
   testWidgets('closing without a swipe moves at once and eases into the full width', (tester) async {
     await tester.binding.setSurfaceSize(const Size(1200, 800));
-    Widget split(bool open) => MaterialApp(
-      home: SplitDetail(
+    Widget split(bool open) => Directionality(
+      textDirection: TextDirection.ltr,
+      child: SplitDetail(
         list: const SizedBox.expand(key: Key('list')),
         listWidth: 400,
         onDismiss: () {},
-        detail: open ? const ColoredBox(key: Key('detail'), color: Colors.white) : null,
+        detail: open ? const ColoredBox(key: Key('detail'), color: Color(0xFFFFFFFF)) : null,
       ),
     );
     double list() => tester.getSize(find.byKey(const Key('list'))).width;
@@ -71,8 +73,9 @@ void main() {
 
   testWidgets('the narrow layer slides out at once when closed', (tester) async {
     await tester.binding.setSurfaceSize(const Size(800, 800));
-    Widget layer(bool open) => MaterialApp(
-      home: SlideLayer(
+    Widget layer(bool open) => Directionality(
+      textDirection: TextDirection.ltr,
+      child: SlideLayer(
         onDismiss: () {},
         child: open ? const SizedBox.expand(key: Key('page')) : null,
       ),

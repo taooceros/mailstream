@@ -1,14 +1,17 @@
 import 'dart:io';
 
-import 'package:flutter/cupertino.dart' show CupertinoActivityIndicator, CupertinoIcons;
-import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
+import 'package:macos_ui/macos_ui.dart';
 
 import 'package:mailstream/mailstream.dart' as engine;
 
 import '../state/mail_state.dart';
+import 'common.dart';
 import 'design.dart';
 import 'format.dart';
+import 'glass.dart';
 
 /// The window's files (`MainFlutterWindow`): `accept` turns drops on the window on or off,
 /// `pick` shows an open panel and `pasted` answers the files on the clipboard; the window calls
@@ -23,11 +26,7 @@ Future<void> openCompose(BuildContext context, MailState state) {
     MailboxSelection(:final mailbox) => mailbox.account,
     UnifiedSelection() => state.accounts.firstOrNull?.id,
   };
-  return showDialog<void>(
-    context: context,
-    barrierDismissible: false,
-    builder: (_) => ComposeWindow(state: state, from: from),
-  );
+  return showSheet<void>(context, (_) => ComposeWindow(state: state, from: from));
 }
 
 enum _Field {
@@ -258,15 +257,10 @@ class _ComposeWindowState extends State<ComposeWindow> {
           const SingleActivator(LogicalKeyboardKey.keyV, meta: true): _paste,
           const SingleActivator(LogicalKeyboardKey.escape): _escape,
         },
-        child: Dialog(
-          insetPadding: const EdgeInsets.all(32),
-          clipBehavior: Clip.antiAlias,
-          backgroundColor: colors.surface,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Panes.sheetCorner)),
-          child: _droppable(context, SizedBox(
-            width: 680,
-            height: 620,
-            child: Column(
+        child: Sheet(
+          width: 680,
+          height: 620,
+          child: _droppable(context, Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 _titleBar(context),
@@ -277,7 +271,9 @@ class _ComposeWindowState extends State<ComposeWindow> {
                   _Field.cc,
                   trailing: _showBcc
                       ? null
-                      : TextButton(
+                      : PushButton(
+                          controlSize: ControlSize.regular,
+                          secondary: true,
                           onPressed: _sending
                               ? null
                               : () {
@@ -290,25 +286,21 @@ class _ComposeWindowState extends State<ComposeWindow> {
                 if (_showBcc) _recipients(context, _Field.bcc),
                 _row(
                   context,
-                  child: TextField(
+                  child: _bareField(
                     controller: _subject,
                     enabled: !_sending,
-                    style: text.titleMedium,
-                    decoration: const InputDecoration.collapsed(hintText: 'Subject'),
+                    style: text.title3,
+                    placeholder: 'Subject',
                   ),
                 ),
                 Expanded(
                   child: Padding(
                     padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
-                    child: TextField(
+                    child: _bareField(
                       controller: _body,
                       enabled: !_sending,
                       expands: true,
-                      maxLines: null,
-                      textAlignVertical: TextAlignVertical.top,
-                      keyboardType: TextInputType.multiline,
-                      style: text.bodyLarge?.copyWith(height: 1.55),
-                      decoration: const InputDecoration.collapsed(hintText: ''),
+                      style: text.body.copyWith(height: 1.55),
                     ),
                   ),
                 ),
@@ -320,15 +312,14 @@ class _ComposeWindowState extends State<ComposeWindow> {
                 if (_sending || _error != null)
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                    decoration: BoxDecoration(border: Border(top: BorderSide(color: colors.outlineVariant))),
+                    decoration: BoxDecoration(border: Border(top: BorderSide(color: colors.separator, width: 0.5))),
                     child: Text(
                       _sending ? 'Sending…' : _error!,
-                      style: text.bodySmall?.copyWith(color: _sending ? colors.onSurfaceVariant : colors.error),
+                      style: text.subheadline.copyWith(color: _sending ? colors.secondaryLabel : colors.red),
                     ),
                   ),
                 if (_confirmingDiscard) _discardBar(context),
               ],
-            ),
           )),
         ),
       ),
@@ -346,14 +337,14 @@ class _ComposeWindowState extends State<ComposeWindow> {
     return Container(
       margin: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: colors.primaryContainer.withValues(alpha: 0.92),
+        color: colors.accentFill.withValues(alpha: 0.92),
         borderRadius: BorderRadius.circular(Panes.sheetCorner - 8),
-        border: Border.all(color: colors.primary, width: 2),
+        border: Border.all(color: colors.accent, width: 2),
       ),
       child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Icon(CupertinoIcons.paperclip, size: 36, color: colors.onPrimaryContainer),
+        MacosIcon(CupertinoIcons.paperclip, size: 36, color: colors.onAccentFill),
         const SizedBox(height: 12),
-        Text('Drop files to attach', style: context.text.titleMedium?.copyWith(color: colors.onPrimaryContainer)),
+        Text('Drop files to attach', style: context.text.title3.copyWith(color: colors.onAccentFill)),
       ]),
     );
   }
@@ -362,43 +353,78 @@ class _ComposeWindowState extends State<ComposeWindow> {
   Widget _attachmentChip(BuildContext context, String path) {
     final size = _sizes[path];
     final name = path.substring(path.lastIndexOf('/') + 1);
-    return InputChip(
-      avatar: const Icon(CupertinoIcons.paperclip, size: 14),
-      label: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 260),
-        child: Text(size == null ? name : '$name  ·  ${fileSize(size)}', maxLines: 1, overflow: TextOverflow.ellipsis),
+    return MacosTooltip(
+      message: path,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 300),
+        child: Pill(
+          label: size == null ? name : '$name  ·  ${fileSize(size)}',
+          leading: MacosIcon(CupertinoIcons.paperclip, size: 13, color: context.colors.secondaryLabel),
+          onDelete: _sending
+              ? null
+              : () => setState(() {
+                  _attachments.remove(path);
+                  _sizes.remove(path);
+                }),
+        ),
       ),
-      tooltip: path,
-      deleteButtonTooltipMessage: 'Remove',
-      onDeleted: _sending
-          ? null
-          : () => setState(() {
-              _attachments.remove(path);
-              _sizes.remove(path);
-            }),
     );
   }
+
+  /// A text field without a box, as Mail's header lines and body are.
+  Widget _bareField({
+    required TextEditingController controller,
+    FocusNode? focusNode,
+    required bool enabled,
+    bool autofocus = false,
+    bool expands = false,
+    required TextStyle style,
+    String? placeholder,
+    ValueChanged<String>? onChanged,
+  }) => MacosTextField(
+    controller: controller,
+    focusNode: focusNode,
+    enabled: enabled,
+    autofocus: autofocus,
+    expands: expands,
+    maxLines: expands ? null : 1,
+    textAlignVertical: expands ? TextAlignVertical.top : null,
+    keyboardType: expands ? TextInputType.multiline : null,
+    style: style,
+    placeholder: placeholder,
+    placeholderStyle: style.copyWith(color: context.colors.border),
+    decoration: null,
+    focusedDecoration: null,
+    padding: EdgeInsets.zero,
+    onChanged: onChanged,
+  );
 
   Widget _titleBar(BuildContext context) => Padding(
     padding: const EdgeInsets.fromLTRB(12, 10, 16, 6),
     child: Row(children: [
-      IconButton(tooltip: 'Close (Esc)', icon: const Icon(CupertinoIcons.xmark), onPressed: _sending ? null : _requestClose),
-      const SizedBox(width: 8),
-      Expanded(child: Text('New Message', style: context.text.titleMedium?.copyWith(fontWeight: FontWeight.w700))),
-      IconButton(
-        tooltip: 'Attach files (or drop them on the message)',
-        icon: const Icon(CupertinoIcons.paperclip),
-        onPressed: _sending ? null : _pick,
+      GlassCapsule(
+        child: ToolButton(tooltip: 'Close (Esc)', icon: CupertinoIcons.xmark, onPressed: _sending ? null : _requestClose),
       ),
-      const SizedBox(width: 8),
-      Tooltip(
+      const SizedBox(width: 10),
+      Expanded(child: Text('New Message', style: context.text.title3.copyWith(fontWeight: FontWeight.w700))),
+      GlassCapsule(
+        child: ToolButton(
+          tooltip: 'Attach files (or drop them on the message)',
+          icon: CupertinoIcons.paperclip,
+          onPressed: _sending ? null : _pick,
+        ),
+      ),
+      const SizedBox(width: 10),
+      MacosTooltip(
         message: '⌘ Return',
-        child: FilledButton.icon(
+        child: PushButton(
+          controlSize: ControlSize.large,
           onPressed: _sending ? null : _send,
-          icon: _sending
-              ? const CupertinoActivityIndicator(radius: 7, color: Colors.white)
-              : const Icon(CupertinoIcons.paperplane_fill),
-          label: Text(_sending ? 'Sending' : 'Send'),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            _sending ? const Spinner(radius: 6) : const MacosIcon(CupertinoIcons.paperplane_fill, size: 14, color: MacosColors.white),
+            const SizedBox(width: 6),
+            Text(_sending ? 'Sending' : 'Send'),
+          ]),
         ),
       ),
     ]),
@@ -411,7 +437,7 @@ class _ComposeWindowState extends State<ComposeWindow> {
       height: 44,
       margin: const EdgeInsets.only(left: 20),
       padding: const EdgeInsets.only(right: 16),
-      decoration: BoxDecoration(border: Border(bottom: BorderSide(color: colors.outlineVariant, width: 0.5))),
+      decoration: BoxDecoration(border: Border(bottom: BorderSide(color: colors.separator, width: 0.5))),
       child: Row(children: [
         if (label != null) ...[
           SizedBox(
@@ -419,7 +445,7 @@ class _ComposeWindowState extends State<ComposeWindow> {
             child: Text(
               '$label:',
               textAlign: TextAlign.end,
-              style: context.text.bodyMedium?.copyWith(color: invalid ? colors.error : colors.onSurfaceVariant),
+              style: context.text.body.copyWith(color: invalid ? colors.red : colors.secondaryLabel),
             ),
           ),
           const SizedBox(width: 10),
@@ -435,13 +461,12 @@ class _ComposeWindowState extends State<ComposeWindow> {
     label: field.label,
     invalid: _invalid.contains(field),
     trailing: trailing,
-    child: TextField(
-      controller: _fields[field],
+    child: _bareField(
+      controller: _fields[field]!,
       focusNode: _focus[field],
       enabled: !_sending,
       autofocus: field == _Field.to,
-      style: context.text.bodyLarge,
-      decoration: const InputDecoration.collapsed(hintText: ''),
+      style: context.text.body,
       onChanged: (_) {
         if (_invalid.contains(field)) setState(() => _invalid.remove(field));
       },
@@ -455,16 +480,13 @@ class _ComposeWindowState extends State<ComposeWindow> {
       return account == null || account.title == id ? id : '${account.title} <$id>';
     }
 
-    if (accounts.length < 2) return Text(title(_from!), style: context.text.bodyLarge);
-    return DropdownButtonHideUnderline(
-      child: DropdownButton<String>(
+    if (accounts.length < 2) return Text(title(_from!), style: context.text.body);
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: MacosPopupButton<String>(
         value: _from,
-        isExpanded: true,
-        focusColor: Colors.transparent,
-        style: context.text.bodyLarge,
-        borderRadius: BorderRadius.circular(12),
         onChanged: _sending ? null : (id) => setState(() => _from = id),
-        items: [for (final account in accounts) DropdownMenuItem(value: account.id, child: Text(title(account.id)))],
+        items: [for (final account in accounts) MacosPopupMenuItem(value: account.id, child: Text(title(account.id)))],
       ),
     );
   }
@@ -472,17 +494,18 @@ class _ComposeWindowState extends State<ComposeWindow> {
   Widget _discardBar(BuildContext context) {
     final colors = context.colors;
     return Container(
-      color: colors.surfaceContainerLow,
+      color: colors.fill,
       padding: const EdgeInsets.fromLTRB(20, 8, 12, 8),
       child: Row(children: [
-        Expanded(child: Text('Discard this message?', style: context.text.bodyMedium)),
-        TextButton(onPressed: () => setState(() => _confirmingDiscard = false), child: const Text('Keep Editing')),
-        const SizedBox(width: 8),
-        FilledButton(
-          style: FilledButton.styleFrom(backgroundColor: colors.error, foregroundColor: colors.onError),
-          onPressed: _close,
-          child: const Text('Discard'),
+        Expanded(child: Text('Discard this message?', style: context.text.body)),
+        PushButton(
+          controlSize: ControlSize.regular,
+          secondary: true,
+          onPressed: () => setState(() => _confirmingDiscard = false),
+          child: const Text('Keep Editing'),
         ),
+        const SizedBox(width: 8),
+        PushButton(controlSize: ControlSize.regular, color: colors.red, onPressed: _close, child: const Text('Discard')),
       ]),
     );
   }

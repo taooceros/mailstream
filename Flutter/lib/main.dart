@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
 
 import 'package:mailstream/mailstream.dart' as engine;
@@ -23,12 +23,11 @@ class MailstreamApp extends StatelessWidget {
   final MailState state;
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
+  Widget build(BuildContext context) => MacosApp(
     title: 'Mailstream',
     debugShowCheckedModeBanner: false,
-    theme: MailTheme.of(Brightness.light),
-    darkTheme: MailTheme.of(Brightness.dark),
-    builder: (context, child) => MacosTheme(data: MailTheme.macos(Theme.of(context).brightness), child: child!),
+    theme: MailTheme.macos(Brightness.light),
+    darkTheme: MailTheme.macos(Brightness.dark),
     home: MailShell(state: state),
   );
 }

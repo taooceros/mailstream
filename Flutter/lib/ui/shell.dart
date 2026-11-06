@@ -1,6 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart' hide Sidebar;
 
 import '../backend/models.dart';
@@ -64,21 +66,21 @@ class _MailShellState extends State<MailShell> {
     });
   }
 
-  /// The last toast shown as a snackbar: each one shows once.
+  /// The last toast the engine raised: each one shows once, as a notice floating over the bottom
+  /// of the window until [_toastTimer] hides it.
   Toast? _shownToast;
+  Toast? _toast;
+  Timer? _toastTimer;
 
   void _showToast() {
     final toast = state.toast;
     if (toast == null || identical(toast, _shownToast)) return;
     _shownToast = toast;
-    final colors = Theme.of(context).colorScheme;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text(toast.text, style: toast.error ? TextStyle(color: colors.onErrorContainer) : null),
-        backgroundColor: toast.error ? colors.errorContainer : null,
-        duration: Duration(seconds: toast.error ? 6 : 3),
-      ));
+    _toastTimer?.cancel();
+    setState(() => _toast = toast);
+    _toastTimer = Timer(Duration(seconds: toast.error ? 6 : 3), () {
+      if (mounted) setState(() => _toast = null);
+    });
   }
 
   /// Keys reach the window again once the field that had focus goes away (a closed composer),
@@ -104,6 +106,7 @@ class _MailShellState extends State<MailShell> {
     FocusManager.instance.removeListener(_keepFocus);
     _window.setMethodCallHandler(null);
     state.removeListener(_showToast);
+    _toastTimer?.cancel();
     _focus.dispose();
     _searchFocus.dispose();
     _search.dispose();
@@ -305,10 +308,22 @@ class _MailShellState extends State<MailShell> {
             onPointerDown: (event) {
               if (isBackButton(event)) _back();
             },
-            child: Scaffold(
-              // The window's glass shows around the islands.
-              backgroundColor: Colors.transparent,
-              body: LayoutBuilder(builder: (context, constraints) => _layout(context, constraints.maxWidth)),
+            // The window's glass shows around the islands.
+            child: Stack(
+              children: [
+                Positioned.fill(child: LayoutBuilder(builder: (context, constraints) => _layout(context, constraints.maxWidth))),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 24,
+                  child: Center(
+                    child: AnimatedSwitcher(
+                      duration: Motion.short,
+                      child: _toast == null ? const SizedBox.shrink() : _ToastView(key: ObjectKey(_toast), toast: _toast!),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         );
@@ -381,7 +396,7 @@ class _MailShellState extends State<MailShell> {
           padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
           child: _SearchField(controller: _search, focus: _searchFocus, onChanged: state.search, onEscape: _back),
         ),
-        const Divider(),
+        const Hairline(),
         Expanded(
           child: ClipRect(
             child: Stack(
@@ -419,7 +434,7 @@ class _MailShellState extends State<MailShell> {
 
   /// The open chat space, a fresh reader (and composer) per space, fading through like mail.
   Widget _chatPane(SpaceKey space) => AnimatedSwitcher(
-    duration: Durations.medium2,
+    duration: Motion.medium,
     switchInCurve: Motion.curve,
     transitionBuilder: (child, animation) => FadeTransition(
       opacity: animation,
@@ -441,7 +456,7 @@ class _MailShellState extends State<MailShell> {
     children: [
       Positioned.fill(
         child: AnimatedSwitcher(
-          duration: Durations.medium2,
+          duration: Motion.medium,
           switchInCurve: Motion.curve,
           // Fade through: the old conversation fades out as the next one scales in.
           transitionBuilder: (child, animation) => FadeTransition(
@@ -487,7 +502,7 @@ class _MailShellState extends State<MailShell> {
               ToolButton(
                 tooltip: 'Resolve (D)',
                 icon: CupertinoIcons.checkmark_circle,
-                color: colors.tertiary,
+                color: colors.waiting,
                 onPressed: () => state.setWaiting(opened, waiting: false),
               ),
             ToolButton(tooltip: 'Archive (E)', icon: CupertinoIcons.archivebox, onPressed: () => _act(state.archive)),
@@ -531,9 +546,9 @@ class _Page extends StatelessWidget {
   @override
   Widget build(BuildContext context) => DecoratedBox(
     decoration: BoxDecoration(
-      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 12, offset: const Offset(-2, 0))],
+      boxShadow: [BoxShadow(color: MacosColors.black.withValues(alpha: 0.1), blurRadius: 12, offset: const Offset(-2, 0))],
     ),
-    child: Material(color: context.colors.surface, child: child),
+    child: ColoredBox(color: context.colors.background, child: child),
   );
 }
 
@@ -577,12 +592,12 @@ class _ListHeader extends StatelessWidget {
             children: [
               Row(children: [
                 Flexible(
-                  child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+                  child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.title3.copyWith(fontWeight: FontWeight.w700)),
                 ),
                 if (loading) const Padding(padding: EdgeInsets.only(left: 8), child: Spinner(radius: 6)),
               ]),
               if (subtitle != null && subtitle.isNotEmpty)
-                Text(subtitle, maxLines: 1, style: context.text.bodySmall?.copyWith(color: context.colors.onSurfaceVariant)),
+                Text(subtitle, maxLines: 1, style: context.text.subheadline.copyWith(color: context.colors.secondaryLabel)),
             ],
           ),
         ),
@@ -623,4 +638,34 @@ class _SearchField extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
     ),
   );
+}
+
+/// A notice from the engine, as the Mac floats them: a dark rounded panel (red for an error)
+/// with a soft shadow.
+class _ToastView extends StatelessWidget {
+  const _ToastView({super.key, required this.toast});
+
+  final Toast toast;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final error = toast.error;
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 460),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: error ? colors.redFill : colors.toast,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [BoxShadow(color: MacosColors.black.withValues(alpha: 0.2), blurRadius: 16, offset: const Offset(0, 6))],
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (error) ...[
+          MacosIcon(CupertinoIcons.exclamationmark_triangle_fill, size: 15, color: colors.onRedFill),
+          const SizedBox(width: 8),
+        ],
+        Flexible(child: Text(toast.text, style: context.text.body.copyWith(color: error ? colors.onRedFill : colors.onToast))),
+      ]),
+    );
+  }
 }

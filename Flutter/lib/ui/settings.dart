@@ -1,21 +1,21 @@
-import 'package:flutter/cupertino.dart' show CupertinoActivityIndicator, CupertinoIcons;
-import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
+import 'package:macos_ui/macos_ui.dart';
 
 import 'package:mailstream/mailstream.dart' as engine;
 
 import '../backend/models.dart';
 import '../state/mail_state.dart';
+import 'common.dart';
 import 'design.dart';
+import 'glass.dart';
 
 /// Opens Settings (⌘,): the accounts, as the app's Accounts window has them (add through the
 /// browser, rename, remove), and every setting of settings.json. The file is the one
 /// Mailstream.app and `mailstream config` use, so a change here is theirs too, and edits made
 /// there show here as the engine reports them.
-Future<void> openSettings(BuildContext context, MailState state) => showDialog<void>(
-  context: context,
-  builder: (_) => SettingsWindow(state: state),
-);
+Future<void> openSettings(BuildContext context, MailState state) => showSheet<void>(context, (_) => SettingsWindow(state: state));
 
 /// Sections of settings.json by key prefix, in the order they show.
 const _sections = [
@@ -47,81 +47,72 @@ class SettingsWindow extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.colors;
     final text = context.text;
-    return CallbackShortcuts(
-      bindings: {const SingleActivator(LogicalKeyboardKey.keyW, meta: true): () => Navigator.of(context).pop()},
-      child: Dialog(
-        insetPadding: const EdgeInsets.all(32),
-        clipBehavior: Clip.antiAlias,
-        backgroundColor: colors.surface,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Panes.sheetCorner)),
-        child: SizedBox(
-          width: 720,
-          height: 680,
-          child: ListenableBuilder(
-            listenable: state,
-            builder: (context, _) {
-              final settings = state.settings;
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(24, 16, 12, 8),
-                    child: Row(
-                      children: [
-                        Expanded(child: Text('Settings', style: text.titleMedium?.copyWith(fontWeight: FontWeight.w700))),
-                        IconButton(
-                          tooltip: 'Close',
-                          icon: const Icon(CupertinoIcons.xmark),
-                          onPressed: () => Navigator.of(context).pop(),
+    return Sheet(
+      width: 720,
+      height: 680,
+      child: ListenableBuilder(
+        listenable: state,
+        builder: (context, _) {
+          final settings = state.settings;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 16, 16, 8),
+                child: Row(
+                  children: [
+                    Expanded(child: Text('Settings', style: text.title3.copyWith(fontWeight: FontWeight.w700))),
+                    GlassCapsule(
+                      child: ToolButton(tooltip: 'Close (Esc)', icon: CupertinoIcons.xmark, onPressed: () => Navigator.of(context).pop()),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  children: [
+                    _Heading('Accounts'),
+                    _Accounts(state: state),
+                    if (settings == null)
+                      const Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Center(child: Spinner()),
+                      )
+                    else ...[
+                      for (final issue in settings.issues) _Issue(issue),
+                      for (final (title, prefixes) in _sections) ...[
+                        _Heading(title),
+                        _Group(
+                          children: [
+                            for (final entry in settings.settings)
+                              if (prefixes.any(entry.key.startsWith)) _SettingRow(state: state, entry: entry),
+                          ],
                         ),
                       ],
-                    ),
-                  ),
-                  Expanded(
-                    child: ListView(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                      children: [
-                        _Heading('Accounts'),
-                        _Accounts(state: state),
-                        if (settings == null)
-                          const Padding(
-                            padding: EdgeInsets.all(24),
-                            child: Center(child: CupertinoActivityIndicator()),
-                          )
-                        else ...[
-                          for (final issue in settings.issues) _Issue(issue),
-                          for (final (title, prefixes) in _sections) ...[
-                            _Heading(title),
-                            _Group(
-                              children: [
-                                for (final entry in settings.settings)
-                                  if (prefixes.any(entry.key.startsWith)) _SettingRow(state: state, entry: entry),
-                              ],
-                            ),
-                          ],
-                          _Group(
-                            children: [
-                              for (final entry in settings.settings)
-                                if (!_sections.any((s) => s.$2.any(entry.key.startsWith)))
-                                  _SettingRow(state: state, entry: entry),
-                            ],
-                          ),
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(8, 12, 8, 0),
-                            child: SelectableText(
-                              'Saved in ${settings.file}, shared with Mailstream and `mailstream config`.',
-                              style: text.bodySmall?.copyWith(color: colors.onSurfaceVariant),
-                            ),
-                          ),
+                      _Group(
+                        children: [
+                          for (final entry in settings.settings)
+                            if (!_sections.any((s) => s.$2.any(entry.key.startsWith)))
+                              _SettingRow(state: state, entry: entry),
                         ],
-                      ],
-                    ),
-                  ),
-                ],
-              );
-            },
-          ),
-        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(8, 12, 8, 0),
+                        child: Selectable(
+                          child: Text(
+                            'Saved in ${settings.file}, shared with Mailstream and `mailstream config`.',
+                            style: text.subheadline.copyWith(color: colors.secondaryLabel),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -135,7 +126,7 @@ class _Heading extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.fromLTRB(8, 16, 8, 6),
-    child: Text(title, style: context.text.labelMedium?.copyWith(color: context.colors.onSurfaceVariant, fontWeight: FontWeight.w600)),
+    child: Text(title, style: context.text.callout.copyWith(color: context.colors.secondaryLabel, fontWeight: FontWeight.w600)),
   );
 }
 
@@ -150,23 +141,63 @@ class _Group extends StatelessWidget {
   Widget build(BuildContext context) {
     if (children.isEmpty) return const SizedBox.shrink();
     final colors = context.colors;
-    return Card.filled(
-      margin: EdgeInsets.zero,
-      color: colors.surfaceContainerLow,
+    return Container(
       clipBehavior: Clip.antiAlias,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(Panes.corner),
-        side: BorderSide(color: colors.outlineVariant, width: 0.5),
+      decoration: ShapeDecoration(
+        color: colors.fill,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(Panes.corner),
+          side: BorderSide(color: colors.separator, width: 0.5),
+        ),
       ),
       child: Column(
         children: [
           for (final (index, child) in children.indexed) ...[
-            if (index > 0) Divider(height: 1, indent: 16, endIndent: 16, color: colors.outlineVariant),
+            if (index > 0) const Hairline(indent: 16, endIndent: 16),
             child,
           ],
         ],
       ),
     );
+  }
+}
+
+/// A row of a [_Group], as System Settings lays them out: a glyph or mark, the title over a line
+/// of small print, the control at the trailing end.
+class _Row extends StatelessWidget {
+  const _Row({this.leading, required this.title, this.subtitle, this.trailing, this.onTap});
+
+  final Widget? leading;
+  final Widget title;
+  final Widget? subtitle;
+  final Widget? trailing;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final row = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+      child: Row(children: [
+        if (leading != null) ...[leading!, const SizedBox(width: 12)],
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              DefaultTextStyle.merge(style: context.text.body.copyWith(color: colors.label), child: title),
+              if (subtitle != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: DefaultTextStyle.merge(style: context.text.subheadline.copyWith(color: colors.secondaryLabel), child: subtitle!),
+                ),
+            ],
+          ),
+        ),
+        if (trailing != null) ...[const SizedBox(width: 12), trailing!],
+      ]),
+    );
+    if (onTap == null) return row;
+    return Hoverable(onTap: onTap, radius: 0, child: row);
   }
 }
 
@@ -180,14 +211,14 @@ class _Issue extends StatelessWidget {
     final colors = context.colors;
     return Padding(
       padding: const EdgeInsets.only(top: 8),
-      child: Material(
-        color: colors.errorContainer,
-        borderRadius: BorderRadius.circular(12),
-        child: ListTile(
-          dense: true,
-          leading: Icon(CupertinoIcons.exclamationmark_circle, color: colors.onErrorContainer),
-          title: Text(message, style: TextStyle(color: colors.onErrorContainer)),
-        ),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(color: colors.redFill, borderRadius: BorderRadius.circular(Panes.corner)),
+        child: Row(children: [
+          MacosIcon(CupertinoIcons.exclamationmark_circle, size: 17, color: colors.onRedFill),
+          const SizedBox(width: 10),
+          Expanded(child: Text(message, style: context.text.body.copyWith(color: colors.onRedFill))),
+        ]),
       ),
     );
   }
@@ -214,10 +245,7 @@ class _AccountsState extends State<_Accounts> {
   static String _providerName(String provider) => provider == 'google' ? 'Google' : 'Microsoft';
 
   Future<void> _add(String provider) async {
-    final client = await showDialog<({String id, String secret})>(
-      context: context,
-      builder: (_) => _ClientDialog(provider: provider),
-    );
+    final client = await showSheet<({String id, String secret})>(context, (_) => _ClientDialog(provider: provider));
     if (client == null || !mounted) return;
     setState(() {
       _signingIn = provider;
@@ -237,33 +265,35 @@ class _AccountsState extends State<_Accounts> {
   }
 
   Future<void> _rename(Account account) async {
-    final label = await showDialog<String>(
-      context: context,
-      builder: (context) => _RenameDialog(account: account),
-    );
+    final label = await showSheet<String>(context, (context) => _RenameDialog(account: account));
     if (label != null && label != account.label) await state.renameAccount(account.id, label);
   }
 
   Future<void> _remove(Account account) async {
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showMacosAlertDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Remove ${account.title}?'),
-        content: Text(
+      builder: (context) => MacosAlertDialog(
+        appIcon: const MacosIcon(CupertinoIcons.person_crop_circle_badge_minus, size: 56),
+        title: Text('Remove ${account.title}?', style: context.text.headline),
+        message: Text(
           'Mailstream signs out of ${account.id} and deletes its saved sign-in. '
           'Mail on the server is not affected; you can add the account again later.',
+          textAlign: TextAlign.center,
+          style: context.text.subheadline,
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: context.colors.error,
-              foregroundColor: context.colors.onError,
-            ),
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Remove'),
-          ),
-        ],
+        horizontalActions: true,
+        secondaryButton: PushButton(
+          controlSize: ControlSize.large,
+          secondary: true,
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        primaryButton: PushButton(
+          controlSize: ControlSize.large,
+          color: context.colors.red,
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('Remove'),
+        ),
       ),
     );
     if (confirmed == true) {
@@ -280,24 +310,20 @@ class _AccountsState extends State<_Accounts> {
     return _Group(
       children: [
         if (state.accounts.isEmpty)
-          ListTile(
-            leading: const Icon(CupertinoIcons.person_badge_plus),
+          _Row(
+            leading: MacosIcon(CupertinoIcons.person_badge_plus, size: 20, color: colors.secondaryLabel),
             title: const Text('No accounts'),
             subtitle: const Text('Sign in to bring in mail, contacts and Google Chat.'),
           ),
         for (final account in state.accounts)
-          ListTile(
-            dense: true,
-            leading: CircleAvatar(
-              radius: 16,
-              backgroundColor: accountPalette[state.accountIndex(account.id) % accountPalette.length],
-              foregroundColor: Colors.white,
-              child: Text(
-                account.provider == 'google' ? 'G' : 'M',
-                style: const TextStyle(fontWeight: FontWeight.w600),
-              ),
+          _Row(
+            leading: IconAvatar(
+              size: 32,
+              icon: account.provider == 'google' ? CupertinoIcons.envelope_fill : CupertinoIcons.mail_solid,
+              background: accountPalette[state.accountIndex(account.id) % accountPalette.length],
+              foreground: MacosColors.white,
             ),
-            title: Text(account.title, style: text.bodyLarge),
+            title: Text(account.title),
             subtitle: Text(
               [
                 if (account.label.isNotEmpty && account.label != account.id) account.id,
@@ -318,14 +344,10 @@ class _AccountsState extends State<_Accounts> {
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                IconButton(
-                  tooltip: 'Rename',
-                  icon: const Icon(CupertinoIcons.pencil),
-                  onPressed: () => _rename(account),
-                ),
-                IconButton(
+                ToolButton(tooltip: 'Rename', icon: CupertinoIcons.pencil, onPressed: () => _rename(account)),
+                ToolButton(
                   tooltip: 'Remove',
-                  icon: const Icon(CupertinoIcons.minus_circle),
+                  icon: CupertinoIcons.minus_circle,
                   onPressed: _signingIn == null ? () => _remove(account) : null,
                 ),
               ],
@@ -336,21 +358,22 @@ class _AccountsState extends State<_Accounts> {
           child: Row(
             children: [
               for (final provider in ['google', 'microsoft']) ...[
-                OutlinedButton.icon(
+                PushButton(
+                  controlSize: ControlSize.regular,
+                  secondary: true,
                   onPressed: _signingIn == null ? () => _add(provider) : null,
-                  icon: const Icon(CupertinoIcons.plus, size: 14),
-                  label: Text('${_providerName(provider)} account…'),
+                  child: Text('${_providerName(provider)} Account…'),
                 ),
                 const SizedBox(width: 8),
               ],
               if (_signingIn != null)
-                const CupertinoActivityIndicator(radius: 8),
+                const Spinner(radius: 7),
               if (status != null) ...[
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     status.text,
-                    style: text.bodySmall?.copyWith(color: status.error ? colors.error : colors.onSurfaceVariant),
+                    style: text.subheadline.copyWith(color: status.error ? colors.red : colors.secondaryLabel),
                   ),
                 ),
               ],
@@ -397,55 +420,67 @@ class _ClientDialogState extends State<_ClientDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: Text(_google ? 'Sign in with Google' : 'Sign in with Microsoft'),
-    content: SizedBox(
-      width: 420,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            _google
-                ? 'The client ID and secret of your Google Cloud OAuth client (type Desktop app). '
-                      'Mailstream then opens Google\'s sign-in in your browser.'
-                : 'The application ID of your Microsoft Entra app, and its secret unless it is a public client.',
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'Leave both empty to use the client you signed in with last.',
-            style: context.text.bodySmall?.copyWith(color: context.colors.onSurfaceVariant),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _id,
-            autofocus: true,
-            decoration: InputDecoration(
-              isDense: true,
-              labelText: _google ? 'Client ID' : 'Application (client) ID',
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final text = context.text;
+    return Sheet(
+      width: 460,
+      title: _google ? 'Sign in with Google' : 'Sign in with Microsoft',
+      actions: [
+        PushButton(
+          controlSize: ControlSize.large,
+          secondary: true,
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        PushButton(controlSize: ControlSize.large, onPressed: _submit, child: const Text('Continue in Browser')),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              _google
+                  ? 'The client ID and secret of your Google Cloud OAuth client (type Desktop app). '
+                        'Mailstream then opens Google\'s sign-in in your browser.'
+                  : 'The application ID of your Microsoft Entra app, and its secret unless it is a public client.',
+              style: text.body.copyWith(color: colors.label),
             ),
-            onSubmitted: (_) => _submit(),
-          ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _secret,
-            obscureText: true,
-            decoration: InputDecoration(
-              isDense: true,
-              labelText: _google ? 'Client secret' : 'Client secret (empty for a public client)',
-              errorText: _error,
-              errorMaxLines: 3,
+            const SizedBox(height: 4),
+            Text(
+              'Leave both empty to use the client you signed in with last.',
+              style: text.subheadline.copyWith(color: colors.secondaryLabel),
             ),
-            onSubmitted: (_) => _submit(),
-          ),
-        ],
+            const SizedBox(height: 14),
+            MacosTextField(
+              controller: _id,
+              autofocus: true,
+              style: text.body,
+              placeholder: _google ? 'Client ID' : 'Application (client) ID',
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+              onSubmitted: (_) => _submit(),
+            ),
+            const SizedBox(height: 8),
+            MacosTextField(
+              controller: _secret,
+              obscureText: true,
+              style: text.body,
+              placeholder: _google ? 'Client secret' : 'Client secret (empty for a public client)',
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+              onSubmitted: (_) => _submit(),
+            ),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(_error!, style: text.subheadline.copyWith(color: colors.red)),
+              ),
+          ],
+        ),
       ),
-    ),
-    actions: [
-      TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
-      FilledButton(onPressed: _submit, child: const Text('Continue in Browser')),
-    ],
-  );
+    );
+  }
 }
 
 class _RenameDialog extends StatefulWidget {
@@ -467,26 +502,46 @@ class _RenameDialogState extends State<_RenameDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Account label'),
-    content: SizedBox(
-      width: 360,
-      child: TextField(
-        controller: _label,
-        autofocus: true,
-        decoration: InputDecoration(
-          isDense: true,
-          hintText: widget.account.id,
-          helperText: 'Shown in the sidebar; empty shows the address.',
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final text = context.text;
+    return Sheet(
+      width: 380,
+      title: 'Account label',
+      actions: [
+        PushButton(
+          controlSize: ControlSize.large,
+          secondary: true,
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
         ),
-        onSubmitted: (value) => Navigator.of(context).pop(value.trim()),
+        PushButton(
+          controlSize: ControlSize.large,
+          onPressed: () => Navigator.of(context).pop(_label.text.trim()),
+          child: const Text('Save'),
+        ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            MacosTextField(
+              controller: _label,
+              autofocus: true,
+              style: text.body,
+              placeholder: widget.account.id,
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+              onSubmitted: (value) => Navigator.of(context).pop(value.trim()),
+            ),
+            const SizedBox(height: 6),
+            Text('Shown in the sidebar; empty shows the address.', style: text.subheadline.copyWith(color: colors.secondaryLabel)),
+          ],
+        ),
       ),
-    ),
-    actions: [
-      TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
-      FilledButton(onPressed: () => Navigator.of(context).pop(_label.text.trim()), child: const Text('Save')),
-    ],
-  );
+    );
+  }
 }
 
 // MARK: - Settings
@@ -573,35 +628,34 @@ class _SettingRowState extends State<_SettingRow> {
     final text = context.text;
     final range = entry.minimum != null && entry.maximum != null ? '${entry.minimum}–${entry.maximum}' : null;
     final control = switch (entry.value) {
-      engine.FlagSettingValue(:final enabled) => Switch.adaptive(
+      engine.FlagSettingValue(:final enabled) => MacosSwitch(
         value: enabled,
         onChanged: (on) => _write(engine.FlagSettingValue(on)),
       ),
       engine.NumberSettingValue() => SizedBox(
         width: 120,
-        child: TextField(
+        child: MacosTextField(
           controller: _field,
           focusNode: _focus,
           textAlign: TextAlign.end,
           keyboardType: TextInputType.number,
           inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-          decoration: InputDecoration(
-            isDense: true,
-            suffixText: entry.key.endsWith('Seconds') ? 's' : null,
-            helperText: range,
-          ),
+          style: text.body,
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          suffix: entry.key.endsWith('Seconds')
+              ? Padding(padding: const EdgeInsets.only(right: 6), child: Text('s', style: text.body.copyWith(color: colors.secondaryLabel)))
+              : null,
           onSubmitted: (_) => _commitField(),
         ),
       ),
       engine.TextSettingValue() => SizedBox(
         width: 220,
-        child: TextField(
+        child: MacosTextField(
           controller: _field,
           focusNode: _focus,
-          decoration: InputDecoration(
-            isDense: true,
-            hintText: entry.key == 'aiTagging.ompPath' ? 'From the login shell\'s PATH' : null,
-          ),
+          style: text.body,
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          placeholder: entry.key == 'aiTagging.ompPath' ? 'From the login shell\'s PATH' : null,
           onSubmitted: (_) => _commitField(),
         ),
       ),
@@ -618,10 +672,10 @@ class _SettingRowState extends State<_SettingRow> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(_titles[entry.key] ?? entry.key, style: text.bodyLarge),
+                    Text(_titles[entry.key] ?? entry.key, style: text.body),
                     const SizedBox(height: 2),
-                    Text(entry.summary, style: text.bodySmall?.copyWith(color: colors.onSurfaceVariant)),
-                    Text(entry.key, style: text.labelSmall?.copyWith(color: colors.outline)),
+                    Text(entry.summary, style: text.subheadline.copyWith(color: colors.secondaryLabel)),
+                    Text(range == null ? entry.key : '${entry.key}  ·  $range', style: text.subheadline.copyWith(color: colors.border)),
                   ],
                 ),
               ),
@@ -630,10 +684,12 @@ class _SettingRowState extends State<_SettingRow> {
               SizedBox(
                 width: 40,
                 child: entry.changed
-                    ? IconButton(
-                        tooltip: 'Reset to default',
-                        icon: const Icon(CupertinoIcons.arrow_counterclockwise),
-                        onPressed: () => _write(null),
+                    ? Center(
+                        child: ToolButton(
+                          tooltip: 'Reset to default',
+                          icon: CupertinoIcons.arrow_counterclockwise,
+                          onPressed: () => _write(null),
+                        ),
                       )
                     : null,
               ),
@@ -644,7 +700,7 @@ class _SettingRowState extends State<_SettingRow> {
           if (_error != null)
             Padding(
               padding: const EdgeInsets.only(top: 4),
-              child: Text(_error!, style: text.bodySmall?.copyWith(color: colors.error)),
+              child: Text(_error!, style: text.subheadline.copyWith(color: colors.red)),
             ),
         ],
       ),
@@ -688,19 +744,22 @@ class _AddressesState extends State<_Addresses> {
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         for (final address in widget.addresses)
-          InputChip(
-            label: Text(address),
-            visualDensity: VisualDensity.compact,
-            onDeleted: () => widget.onChanged([...widget.addresses]..remove(address)),
-          ),
+          Pill(label: address, onDelete: () => widget.onChanged([...widget.addresses]..remove(address))),
         SizedBox(
           width: 260,
-          child: TextField(
+          child: MacosTextField(
             controller: _field,
-            decoration: InputDecoration(
-              isDense: true,
-              hintText: 'Add address',
-              suffixIcon: IconButton(icon: const Icon(CupertinoIcons.plus, size: 14), onPressed: _add),
+            style: context.text.body,
+            placeholder: 'Add address',
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+            suffix: MacosIconButton(
+              semanticLabel: 'Add',
+              icon: MacosIcon(CupertinoIcons.plus, size: 13, color: context.colors.secondaryLabel),
+              backgroundColor: MacosColors.transparent,
+              hoverColor: context.colors.hover,
+              padding: EdgeInsets.zero,
+              boxConstraints: const BoxConstraints.tightFor(width: 22, height: 22),
+              onPressed: _add,
             ),
             onSubmitted: (_) => _add(),
           ),

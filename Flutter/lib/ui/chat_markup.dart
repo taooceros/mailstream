@@ -1,5 +1,5 @@
 import 'package:flutter/gestures.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 
 import 'design.dart';
 
@@ -233,11 +233,11 @@ class _ChatTextState extends State<ChatText> {
   Widget build(BuildContext context) {
     _disposeRecognizers();
     final colors = context.colors;
-    final body = context.text.bodyMedium!;
-    final mono = body.copyWith(fontFamily: 'Menlo', fontSize: (body.fontSize ?? 14) * 0.92);
-    final code = mono.copyWith(backgroundColor: colors.surfaceContainerHighest, color: colors.onSurface);
-    final link = TextStyle(color: colors.primary, decoration: TextDecoration.underline, decorationColor: colors.primary);
-    final mention = TextStyle(color: colors.primary, fontWeight: FontWeight.w600);
+    final body = context.text.body;
+    final mono = body.copyWith(fontFamily: 'Menlo', fontSize: (body.fontSize ?? 13) * 0.92);
+    final code = mono.copyWith(backgroundColor: colors.strongFill, color: colors.label);
+    final link = TextStyle(color: colors.accent, decoration: TextDecoration.underline, decorationColor: colors.accent);
+    final mention = TextStyle(color: colors.accent, fontWeight: FontWeight.w600);
     List<InlineSpan> spans(String text) =>
         ChatMarkup.inline(text, code: code, link: link, mention: mention, names: widget.names, open: _open);
 
@@ -250,8 +250,8 @@ class _ChatTextState extends State<ChatText> {
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: BoxDecoration(
-            color: colors.surfaceContainerHigh,
-            border: Border.all(color: colors.outlineVariant),
+            color: colors.fill,
+            border: Border.all(color: colors.separator),
             borderRadius: BorderRadius.circular(6),
           ),
           child: Text(text, style: mono),
@@ -268,8 +268,8 @@ class _ChatTextState extends State<ChatText> {
         ),
         ChatQuote(:final text) => Container(
           padding: const EdgeInsets.only(left: 10),
-          decoration: BoxDecoration(border: Border(left: BorderSide(color: colors.outlineVariant, width: 3))),
-          child: Text.rich(TextSpan(children: spans(text)), style: body.copyWith(color: colors.onSurfaceVariant)),
+          decoration: BoxDecoration(border: Border(left: BorderSide(color: colors.border, width: 3))),
+          child: Text.rich(TextSpan(children: spans(text)), style: body.copyWith(color: colors.secondaryLabel)),
         ),
       });
     }

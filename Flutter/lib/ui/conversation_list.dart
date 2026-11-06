@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
+import 'package:macos_ui/macos_ui.dart';
 
 import '../backend/models.dart';
 import '../bench.dart';
@@ -190,7 +191,7 @@ class ConversationListState extends State<ConversationList> {
         empty = Center(
           child: Text(
             state.listError ?? widget.emptyText,
-            style: context.text.bodyLarge?.copyWith(color: context.colors.onSurfaceVariant),
+            style: context.text.body.copyWith(color: context.colors.secondaryLabel),
           ),
         );
       }
@@ -198,39 +199,37 @@ class ConversationListState extends State<ConversationList> {
     }
     final now = DateTime.now();
     final footer = state.canLoadMore ? 1 : 0;
-    return Scrollbar(
+    // MacosApp's scroll behavior puts the Mac's overlay scrollbar on it.
+    return ListView.builder(
       controller: _scroll,
-      child: ListView.builder(
-        controller: _scroll,
-        padding: const EdgeInsets.only(top: 4, bottom: 24),
-        itemCount: items.length + footer,
-        itemExtentBuilder: (index, _) =>
-            index < items.length ? _extent(items[index]) : (index == items.length && footer == 1 ? 56 : null),
-        itemBuilder: (context, index) {
-          if (index == items.length) {
-            return const Center(child: Spinner());
-          }
-          final item = items[index];
-          return switch (item) {
-            SectionItem(:final title, :final count) => SectionHeader(title, count: count),
-            RowItem(:final conversation) => ConversationRow(
-              key: ValueKey(conversation.id),
-              conversation: conversation,
-              state: state,
-              highlight: widget.highlight,
-              now: now,
-              onTap: () => widget.onActivate(item),
-            ),
-            BundleItem() => BundleRow(
-              key: ValueKey(itemId(item)),
-              bundle: item,
-              highlight: widget.highlight,
-              now: now,
-              onTap: () => widget.onActivate(item),
-            ),
-          };
-        },
-      ),
+      padding: const EdgeInsets.only(top: 4, bottom: 24),
+      itemCount: items.length + footer,
+      itemExtentBuilder: (index, _) =>
+          index < items.length ? _extent(items[index]) : (index == items.length && footer == 1 ? 56 : null),
+      itemBuilder: (context, index) {
+        if (index == items.length) {
+          return const Center(child: Spinner());
+        }
+        final item = items[index];
+        return switch (item) {
+          SectionItem(:final title, :final count) => SectionHeader(title, count: count),
+          RowItem(:final conversation) => ConversationRow(
+            key: ValueKey(conversation.id),
+            conversation: conversation,
+            state: state,
+            highlight: widget.highlight,
+            now: now,
+            onTap: () => widget.onActivate(item),
+          ),
+          BundleItem() => BundleRow(
+            key: ValueKey(itemId(item)),
+            bundle: item,
+            highlight: widget.highlight,
+            now: now,
+            onTap: () => widget.onActivate(item),
+          ),
+        };
+      },
     );
   }
 }
@@ -246,14 +245,14 @@ class SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final style = context.text.labelMedium?.copyWith(color: context.colors.onSurfaceVariant, fontWeight: FontWeight.w600);
+    final style = context.text.callout.copyWith(color: context.colors.secondaryLabel, fontWeight: FontWeight.w600);
     return Container(
       alignment: Alignment.bottomLeft,
       padding: const EdgeInsets.fromLTRB(22, 0, 16, 5),
       child: Text.rich(
         TextSpan(
           children: [
-            TextSpan(text: title, style: count == null ? null : TextStyle(color: context.colors.tertiary)),
+            TextSpan(text: title, style: count == null ? null : TextStyle(color: context.colors.waiting)),
             if (count != null) TextSpan(text: '  $count'),
           ],
         ),
@@ -280,13 +279,8 @@ class _RowSurface extends StatelessWidget {
       position: DecorationPosition.foreground,
       decoration: highlighted
           ? const BoxDecoration()
-          : _RowSeparator(color: context.colors.outlineVariant),
-      child: Material(
-        color: highlighted ? context.colors.secondaryContainer : Colors.transparent,
-        borderRadius: BorderRadius.circular(8),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(onTap: onTap, onHover: onHover, child: child),
-      ),
+          : _RowSeparator(color: context.colors.separator),
+      child: Hoverable(selected: highlighted, onTap: onTap, onHover: onHover, child: child),
     ),
   );
 }
@@ -346,7 +340,7 @@ class _RowLayout extends StatelessWidget {
                   child: Container(
                     width: 7,
                     height: 7,
-                    decoration: BoxDecoration(color: context.colors.primary, shape: BoxShape.circle),
+                    decoration: BoxDecoration(color: context.colors.accent, shape: BoxShape.circle),
                   ),
                 )
               : null,
@@ -442,7 +436,7 @@ class _ConversationRowState extends State<ConversationRow> {
         if (c.hasAttachment)
           Padding(
             padding: const EdgeInsets.only(right: 4),
-            child: Icon(CupertinoIcons.paperclip, size: 13, color: colors.onSurfaceVariant),
+            child: Icon(CupertinoIcons.paperclip, size: 13, color: colors.secondaryLabel),
           ),
         if (state.accounts.length > 1)
           Container(
@@ -454,7 +448,7 @@ class _ConversationRowState extends State<ConversationRow> {
               shape: BoxShape.circle,
             ),
           ),
-        Text(listDate(c.date, widget.now), style: text.labelMedium?.copyWith(color: colors.onSurfaceVariant, fontWeight: FontWeight.w400)),
+        Text(listDate(c.date, widget.now), style: text.callout.copyWith(color: colors.secondaryLabel, fontWeight: FontWeight.w400)),
       ],
     );
 
@@ -504,7 +498,7 @@ class _ConversationRowState extends State<ConversationRow> {
                       senders,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: text.bodyMedium?.copyWith(color: colors.onSurface, fontWeight: strong),
+                      style: text.body.copyWith(color: colors.label, fontWeight: strong),
                     ),
                   ),
                   if (c.messageCount > 1)
@@ -512,15 +506,15 @@ class _ConversationRowState extends State<ConversationRow> {
                       padding: const EdgeInsets.only(left: 5),
                       child: Text(
                         '${c.messageCount}',
-                        style: text.labelSmall?.copyWith(color: colors.onSurfaceVariant),
+                        style: text.subheadline.copyWith(color: colors.secondaryLabel),
                       ),
                     ),
                   if (c.waiting)
                     Padding(
                       padding: const EdgeInsets.only(left: 6),
-                      child: Tooltip(
+                      child: MacosTooltip(
                         message: 'Waiting on you',
-                        child: Icon(CupertinoIcons.arrowshape_turn_up_left_fill, size: 12, color: colors.tertiary),
+                        child: Icon(CupertinoIcons.arrowshape_turn_up_left_fill, size: 12, color: colors.waiting),
                       ),
                     ),
                 ],
@@ -532,12 +526,12 @@ class _ConversationRowState extends State<ConversationRow> {
                     if (subject.tag.isNotEmpty)
                       TextSpan(
                         text: '${subject.tag} ',
-                        style: TextStyle(color: colors.onSurfaceVariant, fontWeight: FontWeight.w400),
+                        style: TextStyle(color: colors.secondaryLabel, fontWeight: FontWeight.w400),
                       ),
                     TextSpan(
                       text: subject.title.isEmpty ? '(no subject)' : subject.title,
                       style: TextStyle(
-                        color: colors.onSurface,
+                        color: colors.label,
                         fontWeight: c.unread ? FontWeight.w500 : FontWeight.w400,
                       ),
                     ),
@@ -546,7 +540,7 @@ class _ConversationRowState extends State<ConversationRow> {
                 ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: text.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
+                style: text.body.copyWith(color: colors.secondaryLabel),
               ),
               marks: [
                 if (topic != null) ...[const SizedBox(width: 8), _TopicLabel(topic)],
@@ -568,7 +562,7 @@ class _ConversationRowState extends State<ConversationRow> {
                     // Starts from transparent when first built, so the pill still fades in.
                     child: TweenAnimationBuilder<double>(
                       tween: Tween(begin: 0, end: _hover ? 1 : 0),
-                      duration: Durations.short3,
+                      duration: Motion.quick,
                       onEnd: () {
                         if (mounted && !_hover) setState(() => _actions = false);
                       },
@@ -600,7 +594,7 @@ class _TopicLabel extends StatelessWidget {
       decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(9)),
       child: Text(
         topic,
-        style: context.text.labelSmall?.copyWith(fontSize: 11, color: color, fontWeight: FontWeight.w600),
+        style: context.text.subheadline.copyWith(fontSize: 11, color: color, fontWeight: FontWeight.w600),
       ),
     );
   }
@@ -645,7 +639,7 @@ class BundleRow extends StatelessWidget {
             children: [
               Text(
                 bundle.category.title,
-                style: text.bodyMedium?.copyWith(color: colors.onSurface, fontWeight: strong),
+                style: text.body.copyWith(color: colors.label, fontWeight: strong),
               ),
               const SizedBox(width: 8),
               Container(
@@ -655,25 +649,25 @@ class BundleRow extends StatelessWidget {
                 decoration: BoxDecoration(color: tone.background.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(9)),
                 child: Text(
                   unread > 0 ? '$unread new' : '${items.length}',
-                  style: text.labelSmall?.copyWith(color: tone.background, fontWeight: FontWeight.w600),
+                  style: text.subheadline.copyWith(color: tone.background, fontWeight: FontWeight.w600),
                 ),
               ),
             ],
           ),
-          meta: Text(listDate(items.first.date, now), style: text.labelMedium?.copyWith(color: colors.onSurfaceVariant, fontWeight: FontWeight.w400)),
+          meta: Text(listDate(items.first.date, now), style: text.callout.copyWith(color: colors.secondaryLabel, fontWeight: FontWeight.w400)),
           subtitle: Text.rich(
             TextSpan(
               children: [
                 TextSpan(
                   text: senders,
-                  style: TextStyle(color: colors.onSurface, fontWeight: unread > 0 ? FontWeight.w600 : FontWeight.w400),
+                  style: TextStyle(color: colors.label, fontWeight: unread > 0 ? FontWeight.w600 : FontWeight.w400),
                 ),
                 TextSpan(text: '  —  ${splitSubject(items.first.subject).title}'),
               ],
             ),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: text.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
+            style: text.body.copyWith(color: colors.secondaryLabel),
           ),
         ),
       ),

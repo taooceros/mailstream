@@ -1,6 +1,6 @@
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 import 'package:macos_ui/macos_ui.dart';
@@ -96,7 +96,7 @@ class ReaderState extends State<Reader> {
       const SizedBox(height: 24),
       if (messages == null && thread.error == null)
         const Padding(padding: EdgeInsets.symmetric(vertical: 48), child: Center(child: Spinner())),
-      if (thread.error != null) Text(thread.error!, style: context.text.bodyMedium?.copyWith(color: colors.error)),
+      if (thread.error != null) Text(thread.error!, style: context.text.body.copyWith(color: colors.red)),
       if (messages != null)
         if (_chat)
           _ChatLog(messages: messages, now: now, state: widget.state, onReply: reply, focus: focus, focusKey: _focusKey)
@@ -118,20 +118,17 @@ class ReaderState extends State<Reader> {
       const SizedBox(height: 120),
     ];
 
-    return Material(
-      color: colors.surface,
+    return ColoredBox(
+      color: colors.background,
       child: Stack(
         children: [
-          Scrollbar(
+          SingleChildScrollView(
             controller: _scroll,
-            child: SingleChildScrollView(
-              controller: _scroll,
-              padding: EdgeInsets.fromLTRB(32, widget.topInset + 16, 32, 0),
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: Reader.column),
-                  child: SelectionArea(child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: body)),
-                ),
+            padding: EdgeInsets.fromLTRB(32, widget.topInset + 16, 32, 0),
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: Reader.column),
+                child: Selectable(child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: body)),
               ),
             ),
           ),
@@ -186,22 +183,21 @@ class _Header extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(subject.title, style: context.text.headlineSmall?.copyWith(color: colors.onSurface, fontWeight: FontWeight.w700)),
+        Text(subject.title, style: context.text.title1.copyWith(color: colors.label, fontWeight: FontWeight.w700)),
         const SizedBox(height: 12),
         Wrap(
           spacing: 8,
           runSpacing: 8,
           children: [
             if (c.waiting)
-              Chip(
-                visualDensity: VisualDensity.compact,
-                avatar: Icon(CupertinoIcons.arrowshape_turn_up_left_fill, size: 13, color: colors.onTertiaryContainer),
-                backgroundColor: colors.tertiaryContainer,
-                labelStyle: context.text.labelMedium?.copyWith(color: colors.onTertiaryContainer),
-                label: const Text('Waiting on you'),
-                deleteIcon: Icon(CupertinoIcons.checkmark_circle, size: 15, color: colors.onTertiaryContainer),
-                deleteButtonTooltipMessage: 'Resolve (D)',
-                onDeleted: () => state.setWaiting(c, waiting: false),
+              Pill(
+                label: 'Waiting on you',
+                leading: MacosIcon(CupertinoIcons.arrowshape_turn_up_left_fill, size: 12, color: colors.onWaitingFill),
+                background: colors.waitingFill,
+                foreground: colors.onWaitingFill,
+                deleteIcon: CupertinoIcons.checkmark_circle,
+                deleteTooltip: 'Resolve (D)',
+                onDelete: () => state.setWaiting(c, waiting: false),
               ),
             if (subject.tag.isNotEmpty) MarkChip(label: subject.tag),
             for (final label in c.labels) MarkChip(label: label, mark: topicColor(label, context.brightness)),
@@ -243,12 +239,14 @@ class _MessageCard extends StatelessWidget {
     final m = message;
     final sender = m.sender;
     // Mail's message: the window's surface inside a hairline, rounded.
-    return Card(
-      color: colors.surface,
+    return Container(
       clipBehavior: Clip.antiAlias,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(Panes.corner),
-        side: BorderSide(color: colors.outlineVariant, width: 0.5),
+      decoration: ShapeDecoration(
+        color: colors.background,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(Panes.corner),
+          side: BorderSide(color: colors.separator, width: 0.5),
+        ),
       ),
       child: AnimatedSize(
         duration: Motion.enter,
@@ -257,8 +255,9 @@ class _MessageCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            InkWell(
+            Hoverable(
               onTap: onToggle,
+              radius: 0,
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
                 child: Row(
@@ -272,9 +271,9 @@ class _MessageCard extends StatelessWidget {
                               children: [
                                 Text.rich(
                                   TextSpan(children: [
-                                    TextSpan(text: sender.displayName, style: text.titleSmall),
+                                    TextSpan(text: sender.displayName, style: text.headline),
                                     if (sender.name != null)
-                                      TextSpan(text: '  <${sender.email}>', style: text.bodySmall?.copyWith(color: colors.onSurfaceVariant)),
+                                      TextSpan(text: '  <${sender.email}>', style: text.subheadline.copyWith(color: colors.secondaryLabel)),
                                   ]),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
@@ -284,21 +283,21 @@ class _MessageCard extends StatelessWidget {
                                   'to ${[...m.to, ...m.cc].map((a) => a.displayName).join(', ')}',
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: text.bodySmall?.copyWith(color: colors.onSurfaceVariant),
+                                  style: text.subheadline.copyWith(color: colors.secondaryLabel),
                                 ),
                               ],
                             )
                           : Text.rich(
                               TextSpan(children: [
-                                TextSpan(text: sender.displayName, style: text.titleSmall),
-                                TextSpan(text: '   ${_preview(m)}', style: text.bodyMedium?.copyWith(color: colors.onSurfaceVariant)),
+                                TextSpan(text: sender.displayName, style: text.headline),
+                                TextSpan(text: '   ${_preview(m)}', style: text.body.copyWith(color: colors.secondaryLabel)),
                               ]),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
                     ),
                     const SizedBox(width: 12),
-                    Text(messageDate(m.date, now), style: text.labelMedium?.copyWith(color: colors.onSurfaceVariant)),
+                    Text(messageDate(m.date, now), style: text.callout.copyWith(color: colors.secondaryLabel)),
                     if (expanded) ...[
                       const SizedBox(width: 4),
                       ToolButton(tooltip: 'Reply', icon: CupertinoIcons.arrowshape_turn_up_left, onPressed: () => onReply()),
@@ -358,15 +357,15 @@ class _Body extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    if (message.error != null) return Text(message.error!, style: context.text.bodyMedium?.copyWith(color: colors.error));
+    if (message.error != null) return Text(message.error!, style: context.text.body.copyWith(color: colors.red));
     final html = message.html;
     if (html != null && html.trim().isNotEmpty) {
       return Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: MacosColors.white,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: colors.outlineVariant),
+          border: Border.all(color: colors.separator),
         ),
         child: MailHtml(html: html),
       );
@@ -535,12 +534,12 @@ class FoldedText extends StatelessWidget {
     String join(Iterable<String> part) => part.join('\n').trim();
     final shown = join(lines.take(cut));
     final folded = join(lines.skip(cut));
-    final style = context.text.bodyLarge?.copyWith(height: 1.5);
+    final style = context.text.body.copyWith(height: 1.5);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (shown.isNotEmpty) Text(shown, style: style),
-        if (folded.isNotEmpty) _Fold(child: Text(folded, style: style?.copyWith(color: context.colors.onSurfaceVariant))),
+        if (folded.isNotEmpty) _Fold(child: Text(folded, style: style.copyWith(color: context.colors.secondaryLabel))),
       ],
     );
   }
@@ -571,23 +570,20 @@ class _FoldState extends State<_Fold> {
         children: [
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Tooltip(
+            child: MacosTooltip(
               message: _open ? 'Hide quoted text' : 'Show quoted text',
-              child: Material(
-                color: colors.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(8),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(8),
-                  onTap: () => setState(() => _open = !_open),
-                  child: SizedBox(width: 32, height: 18, child: Icon(CupertinoIcons.ellipsis, size: 14, color: colors.onSurfaceVariant)),
-                ),
+              child: Hoverable(
+                onTap: () => setState(() => _open = !_open),
+                selected: true,
+                selectedColor: colors.strongFill,
+                child: SizedBox(width: 32, height: 18, child: Icon(CupertinoIcons.ellipsis, size: 14, color: colors.secondaryLabel)),
               ),
             ),
           ),
           if (_open)
             Container(
               padding: const EdgeInsets.only(left: 12),
-              decoration: BoxDecoration(border: Border(left: BorderSide(color: colors.outlineVariant, width: 2))),
+              decoration: BoxDecoration(border: Border(left: BorderSide(color: colors.separator, width: 2))),
               child: widget.child,
             ),
         ],
@@ -628,12 +624,12 @@ class _ChatLog extends StatelessWidget {
         children.add(Padding(
           padding: const EdgeInsets.symmetric(vertical: 12),
           child: Row(children: [
-            const Expanded(child: Divider()),
+            const Expanded(child: Hairline()),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Text(dayDivider(date, now), style: context.text.labelMedium?.copyWith(color: context.colors.onSurfaceVariant)),
+              child: Text(dayDivider(date, now), style: context.text.callout.copyWith(color: context.colors.secondaryLabel)),
             ),
-            const Expanded(child: Divider()),
+            const Expanded(child: Hairline()),
           ]),
         ));
       }
@@ -675,11 +671,11 @@ class _ChatMessageState extends State<_ChatMessage> {
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
       child: AnimatedContainer(
-        duration: Durations.short3,
+        duration: Motion.quick,
         margin: EdgeInsets.only(top: widget.continued ? 0 : 8),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         decoration: BoxDecoration(
-          color: _hover ? colors.surfaceContainerLow : Colors.transparent,
+          color: _hover ? colors.fill : MacosColors.transparent,
           borderRadius: BorderRadius.circular(12),
         ),
         child: Stack(
@@ -694,8 +690,8 @@ class _ChatMessageState extends State<_ChatMessage> {
                           padding: const EdgeInsets.only(top: 4),
                           child: AnimatedOpacity(
                             opacity: _hover ? 1 : 0,
-                            duration: Durations.short3,
-                            child: Text(messageTime(m.date), style: text.labelSmall?.copyWith(color: colors.outline)),
+                            duration: Motion.quick,
+                            child: Text(messageTime(m.date), style: text.subheadline.copyWith(color: colors.border)),
                           ),
                         )
                       : Align(alignment: Alignment.topLeft, child: PersonAvatar(address: m.sender, photo: widget.state.avatar(m.sender.email))),
@@ -708,8 +704,8 @@ class _ChatMessageState extends State<_ChatMessage> {
                         Padding(
                           padding: const EdgeInsets.only(bottom: 4),
                           child: Text.rich(TextSpan(children: [
-                            TextSpan(text: m.sender.displayName, style: text.titleSmall),
-                            TextSpan(text: '  ${messageTime(m.date)}', style: text.labelSmall?.copyWith(color: colors.onSurfaceVariant)),
+                            TextSpan(text: m.sender.displayName, style: text.headline),
+                            TextSpan(text: '  ${messageTime(m.date)}', style: text.subheadline.copyWith(color: colors.secondaryLabel)),
                           ])),
                         ),
                       body,
@@ -733,7 +729,7 @@ class _ChatMessageState extends State<_ChatMessage> {
                 ignoring: !_hover,
                 child: AnimatedOpacity(
                   opacity: _hover ? 1 : 0,
-                  duration: Durations.short3,
+                  duration: Motion.quick,
                   child: RaisedCapsule(
                     child: Row(mainAxisSize: MainAxisSize.min, children: [
                       ToolButton(tooltip: 'Reply', icon: CupertinoIcons.arrowshape_turn_up_left, onPressed: () => widget.onReply()),
@@ -866,13 +862,14 @@ class _ComposerState extends State<_Composer> {
           }
         },
       },
-      child: Card(
-        elevation: 12,
-        shadowColor: Colors.black.withValues(alpha: 0.35),
-        color: colors.surface,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(Panes.sheetCorner),
-          side: BorderSide(color: colors.outlineVariant, width: 0.5),
+      child: Container(
+        decoration: ShapeDecoration(
+          color: colors.background,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(Panes.sheetCorner),
+            side: BorderSide(color: colors.separator, width: 0.5),
+          ),
+          shadows: [BoxShadow(color: MacosColors.black.withValues(alpha: 0.18), blurRadius: 24, offset: const Offset(0, 8))],
         ),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 12, 12, 16),
@@ -881,17 +878,17 @@ class _ComposerState extends State<_Composer> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Row(children: [
-                Icon(widget.all ? CupertinoIcons.arrowshape_turn_up_left_2 : CupertinoIcons.arrowshape_turn_up_left, size: 17, color: colors.onSurfaceVariant),
+                Icon(widget.all ? CupertinoIcons.arrowshape_turn_up_left_2 : CupertinoIcons.arrowshape_turn_up_left, size: 17, color: colors.secondaryLabel),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text.rich(
                     TextSpan(children: [
-                      TextSpan(text: 'To  ', style: TextStyle(color: colors.onSurfaceVariant)),
+                      TextSpan(text: 'To  ', style: TextStyle(color: colors.secondaryLabel)),
                       TextSpan(text: _recipients),
                     ]),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: text.bodyMedium,
+                    style: text.body,
                   ),
                 ),
                 ToolButton(
@@ -908,14 +905,14 @@ class _ComposerState extends State<_Composer> {
                 autofocus: true,
                 minLines: 3,
                 maxLines: 12,
-                style: text.bodyLarge,
+                style: text.body,
                 placeholder: 'Write a reply',
               ),
               const SizedBox(height: 12),
               Row(children: [
                 Expanded(
                   child: Text('The original is quoted below your text.  ⌘ Return sends.',
-                      style: text.bodySmall?.copyWith(color: colors.onSurfaceVariant)),
+                      style: text.subheadline.copyWith(color: colors.secondaryLabel)),
                 ),
                 PushButton(
                   controlSize: ControlSize.large,
