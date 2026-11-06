@@ -7,11 +7,13 @@ import 'package:macos_ui/macos_ui.dart';
 
 import 'package:mailstream/mailstream.dart' as engine;
 
+import '../backend/models.dart';
 import '../state/mail_state.dart';
 import 'common.dart';
 import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
+import 'people.dart';
 
 /// The window's files (`MainFlutterWindow`): `accept` turns drops on the window on or off,
 /// `pick` shows an open panel and `pasted` answers the files on the clipboard; the window calls
@@ -78,6 +80,13 @@ bool _validEmail(String email) {
     recipients.add(part);
   }
   return (recipients: recipients, invalid: null);
+}
+
+/// [person] as a recipient: `Name <address>`, the name quoted when it holds a separator.
+String _recipient(Address person) {
+  final name = person.name?.replaceAll('"', '').trim();
+  if (name == null || name.isEmpty || name == person.email) return person.email;
+  return RegExp(r'[,;<>@()\[\]:\\.]').hasMatch(name) ? '"$name" <${person.email}>' : '$name <${person.email}>';
 }
 
 /// A new message: From, To, Cc (Bcc on request), Subject, a plain-text body and attachments
@@ -456,22 +465,54 @@ class _ComposeWindowState extends State<ComposeWindow> {
     );
   }
 
+  /// A recipient field, completing the address being typed (the one after the last comma) to
+  /// the people `contacts.search` finds, as the native compose window does.
   Widget _recipients(BuildContext context, _Field field, {Widget? trailing}) => _row(
     context,
     label: field.label,
     invalid: _invalid.contains(field),
     trailing: trailing,
-    child: _bareField(
+    child: PeopleCompletion(
+      state: widget.state,
       controller: _fields[field]!,
-      focusNode: _focus[field],
-      enabled: !_sending,
-      autofocus: field == _Field.to,
-      style: context.text.body,
-      onChanged: (_) {
-        if (_invalid.contains(field)) setState(() => _invalid.remove(field));
-      },
+      focusNode: _focus[field]!,
+      suggest: _suggest,
+      onPick: (person) => _complete(field, person.address),
+      child: _bareField(
+        controller: _fields[field]!,
+        focusNode: _focus[field],
+        enabled: !_sending,
+        autofocus: field == _Field.to,
+        style: context.text.body,
+        onChanged: (_) {
+          if (_invalid.contains(field)) setState(() => _invalid.remove(field));
+        },
+      ),
     ),
   );
+
+  /// The people for the address being typed in a field, without those already in To, Cc or Bcc.
+  Future<List<Suggestion>> _suggest(String text) async {
+    final typed = _splitRecipients(text).last.trim();
+    if (typed.isEmpty || _sending) return const [];
+    final people = await widget.state.searchContacts(typed);
+    final chosen = {
+      for (final field in _Field.values)
+        for (final part in _splitRecipients(_fields[field]!.text))
+          if (part.trim().isNotEmpty && part.trim() != typed) Address.parse(part).email.toLowerCase(),
+    };
+    return [for (final person in people) if (!chosen.contains(person.email.toLowerCase())) Suggestion(person)];
+  }
+
+  /// Puts [person] in place of the address being typed in [field], ready for the next one.
+  void _complete(_Field field, Address person) {
+    final controller = _fields[field]!;
+    final typing = _splitRecipients(controller.text).last;
+    final before = controller.text.substring(0, controller.text.length - typing.length);
+    final text = '${before.isEmpty || before.endsWith(' ') ? before : '$before '}${_recipient(person)}, ';
+    controller.value = TextEditingValue(text: text, selection: TextSelection.collapsed(offset: text.length));
+    if (_invalid.contains(field)) setState(() => _invalid.remove(field));
+  }
 
   Widget _fromPicker(BuildContext context) {
     final accounts = widget.state.accounts;

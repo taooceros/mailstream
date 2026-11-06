@@ -712,6 +712,18 @@ class MailState extends ChangeNotifier {
   /// provider's error) for the compose window to show.
   Future<void> send(engine.Draft draft) async => _sentToast(await mail.send(draft: draft, confirm: true));
 
+  /// People whose name, a word of it, or address starts with `query`, best first (`contacts.search`:
+  /// the accounts' Google and Outlook directories and recent correspondents), for completing
+  /// recipients; none when the engine cannot say.
+  Future<List<Address>> searchContacts(String query, {int limit = 8}) async {
+    try {
+      final people = await mail.searchContacts(query: query, limit: limit);
+      return [for (final person in people) Address(name: person.name, email: person.email)];
+    } on engine.MailException {
+      return const [];
+    }
+  }
+
   void _sentToast(engine.Sent sent) => showToast('Sent to ${sent.to.map((a) => Address.parse(a).displayName).join(', ')}');
 
   /// Opens a file in its app, or a link in the browser.

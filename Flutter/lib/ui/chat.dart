@@ -17,6 +17,7 @@ import 'conversation_list.dart';
 import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
+import 'people.dart';
 
 /// A Chat person's picture: the engine's cached file for an address (Google Chat publishes it
 /// there), else Google's own link, else their initial.
@@ -969,6 +970,10 @@ class _NewChatDialogState extends State<_NewChatDialog> {
   bool _starting = false;
   String? _error;
 
+  /// Bumped when the people offered change without an edit: chat partners loaded, someone
+  /// added or removed.
+  int _revision = 0;
+
   ChatState get chat => widget.state.chat;
 
   @override
@@ -993,6 +998,7 @@ class _NewChatDialogState extends State<_NewChatDialog> {
       setState(() {
         _known = people.people;
         _canStart = people.canStart;
+        _revision++;
       });
     } on engine.MailException {
       // Suggestions stay empty; typed addresses still work.
@@ -1015,8 +1021,37 @@ class _NewChatDialogState extends State<_NewChatDialog> {
 
   void _add(String email) {
     final key = email.toLowerCase();
-    if (!_people.contains(key)) setState(() => _people.add(key));
+    if (!_people.contains(key)) {
+      setState(() {
+        _people.add(key);
+        _revision++;
+      });
+    }
     _error = null;
+  }
+
+  /// People to complete to, as the native New Chat sheet offers them: the account's chat
+  /// partners first (all of them while nothing is typed), then everyone `contacts.search` finds;
+  /// an address typed out in full first of all.
+  Future<List<Suggestion>> _suggest(String text) async {
+    final query = text.trim().toLowerCase();
+    final partners = [
+      for (final person in _known)
+        if (person.email case final email?
+            when !_people.contains(email.toLowerCase()) &&
+                (query.isEmpty || person.name.toLowerCase().contains(query) || email.toLowerCase().contains(query)))
+          Suggestion(Address(name: person.name, email: email), photoUrl: person.avatarUrl),
+    ];
+    final seen = {..._people, for (final p in partners) p.address.email.toLowerCase()};
+    final contacts = query.isEmpty ? const <Address>[] : await widget.state.searchContacts(query);
+    final people = [
+      ...partners,
+      for (final person in contacts)
+        if (seen.add(person.email.toLowerCase())) Suggestion(person),
+    ];
+    final exact = people.indexWhere((p) => p.address.email.toLowerCase() == query);
+    if (exact > 0) people.insert(0, people.removeAt(exact));
+    return people.take(8).toList();
   }
 
   Future<void> _start() async {
@@ -1040,14 +1075,6 @@ class _NewChatDialogState extends State<_NewChatDialog> {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    final query = _field.text.trim().toLowerCase();
-    final suggestions = [
-      for (final person in _known)
-        if (person.email != null &&
-            !_people.contains(person.email!.toLowerCase()) &&
-            (query.isEmpty || person.name.toLowerCase().contains(query) || person.email!.toLowerCase().contains(query)))
-          person,
-    ].take(8).toList();
     final text = context.text;
     return Sheet(
       width: 460,
@@ -1087,6 +1114,7 @@ class _NewChatDialogState extends State<_NewChatDialog> {
                           setState(() {
                             _account = value;
                             _known = const [];
+                            _revision++;
                           });
                           _loadPeople();
                         },
@@ -1097,7 +1125,15 @@ class _NewChatDialogState extends State<_NewChatDialog> {
             if (_people.isNotEmpty) ...[
               Wrap(spacing: 6, runSpacing: 6, children: [
                 for (final email in _people)
-                  Pill(label: email, onDelete: _starting ? null : () => setState(() => _people.remove(email))),
+                  Pill(
+                    label: email,
+                    onDelete: _starting
+                        ? null
+                        : () => setState(() {
+                            _people.remove(email);
+                            _revision++;
+                          }),
+                  ),
               ]),
               const SizedBox(height: 10),
             ],
@@ -1112,48 +1148,27 @@ class _NewChatDialogState extends State<_NewChatDialog> {
                 },
                 const SingleActivator(LogicalKeyboardKey.enter, meta: true): _start,
               },
-              child: MacosTextField(
+              child: PeopleCompletion(
+                state: widget.state,
                 controller: _field,
                 focusNode: _focus,
-                autofocus: true,
-                enabled: !_starting,
-                style: text.body,
-                placeholder: 'Name or email address',
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
-              ),
-            ),
-            if (suggestions.isNotEmpty)
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 280),
-                child: ListView(
-                  shrinkWrap: true,
-                  padding: const EdgeInsets.only(top: 6),
-                  children: [
-                    for (final person in suggestions)
-                      Hoverable(
-                        onTap: () {
-                          _add(person.email!);
-                          _field.clear();
-                          _focus.requestFocus();
-                        },
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                          child: Row(children: [
-                            ChatAvatar(state: widget.state, avatarKey: person.avatarKey, name: person.name, url: person.avatarUrl, size: 28),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                Text(person.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: text.body.copyWith(color: colors.label)),
-                                Text(person.email!, maxLines: 1, overflow: TextOverflow.ellipsis,
-                                    style: text.subheadline.copyWith(color: colors.secondaryLabel)),
-                              ]),
-                            ),
-                          ]),
-                        ),
-                      ),
-                  ],
+                suggest: _suggest,
+                revision: _revision,
+                onPick: (person) {
+                  _add(person.address.email);
+                  _field.clear();
+                },
+                child: MacosTextField(
+                  controller: _field,
+                  focusNode: _focus,
+                  autofocus: true,
+                  enabled: !_starting,
+                  style: text.body,
+                  placeholder: 'Name or email address',
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
                 ),
               ),
+            ),
             if (!_canStart)
               Padding(
                 padding: const EdgeInsets.only(top: 12),
