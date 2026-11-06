@@ -1,40 +1,62 @@
-import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:macos_ui/macos_ui.dart';
 import 'package:mailstream_ui/ui/chat_markup.dart';
 
-String plain(String block) {
-  final spans = ChatMarkup.inline(
-    block,
-    code: const TextStyle(),
-    link: const TextStyle(),
-    mention: const TextStyle(),
-    names: {'users/1': 'Brent'},
-    open: (_) => TapGestureRecognizer(),
+/// Every run of text `ChatText` draws, with whether it is bold, italic or struck through.
+Future<List<String>> draw(WidgetTester tester, String markdown) async {
+  await tester.pumpWidget(
+    MacosTheme(
+      data: MacosThemeData.light(),
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: ChatText(text: markdown, names: const {'users/1': 'Brent'}, onOpen: (_) {}),
+      ),
+    ),
   );
-  return TextSpan(children: spans).toPlainText();
+  final runs = <String>[];
+  void walk(InlineSpan span, TextStyle inherited) {
+    if (span is! TextSpan) return;
+    final style = inherited.merge(span.style);
+    if (span.text case final text?) {
+      final marks = [
+        if (style.fontWeight == FontWeight.w700) 'b',
+        if (style.fontStyle == FontStyle.italic) 'i',
+        if (style.decoration == TextDecoration.lineThrough) 's',
+      ].join();
+      runs.add(marks.isEmpty ? text : '$marks:$text');
+    }
+    for (final child in span.children ?? const <InlineSpan>[]) {
+      walk(child, style);
+    }
+  }
+
+  for (final text in tester.widgetList<RichText>(find.byType(RichText))) {
+    walk(text.text, const TextStyle());
+  }
+  return runs;
 }
 
 void main() {
-  test('escapes, emphasis, lists, code', () {
-    final blocks = ChatMarkup.blocks(
-      'Title: *PhaseMorph* \\*\\*not bold\\*\\* 1\\. done\\!\n* item _one_\n    * nested\n```\na\\*b\n```\nsee <https://x.y|site> <users/1>',
+  testWidgets('Google Chat Markdown, as the API answers it', (tester) async {
+    final runs = await draw(
+      tester,
+      '**Office:** CSE 592\n'
+      'line two *it* ~~gone~~ \\*\\*literal\\*\\* 1\\. done\\!\n'
+      '\n'
+      '* item\n'
+      '    * nested\n'
+      '\n'
+      '1. first\n'
+      '2. second\n'
+      '\n'
+      '```\na\\*b\n```\n'
+      'see [site](https://x.y) and <chat-user data-user="users/1"></chat-user> &amp; https://bare.example',
     );
-    final texts = [
-      for (final b in blocks)
-        switch (b) {
-          ChatParagraph(:final text) => 'P:${plain(text)}',
-          ChatBullet(:final text, :final depth) => 'B$depth:${plain(text)}',
-          ChatCode(:final text) => 'C:$text',
-          ChatQuote(:final text) => 'Q:${plain(text)}',
-        },
-    ];
-    expect(texts, [
-      'P:Title: PhaseMorph **not bold** 1. done!',
-      'B0:item one',
-      'B1:nested',
-      r'C:a\*b',
-      'P:see site @Brent',
-    ]);
+    expect(runs, containsAllInOrder(['b:Office:', ' CSE 592\nline two ', 'i:it', 's:gone']));
+    expect(runs.join(), contains('**literal** 1. done!'));
+    expect(runs, containsAllInOrder(['•', 'item', '•', 'nested', '1.', 'first', '2.', 'second']));
+    expect(runs, contains(r'a\*b'));
+    expect(runs.join(), contains('see site and @Brent & https://bare.example'));
   });
 }

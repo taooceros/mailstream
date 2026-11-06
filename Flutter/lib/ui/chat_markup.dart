@@ -1,199 +1,38 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
+import 'package:markdown/markdown.dart' as md;
 
 import 'design.dart';
 
-/// One block of a Chat message.
-sealed class ChatBlock {
-  const ChatBlock();
-}
+/// A Chat message's `formattedText` as Markdown nodes. Google answers projects without a Chat app
+/// configuration (Mailstream's) in Markdown: CommonMark with GitHub's extensions (`~~strike~~`,
+/// tables, bare links), escapes for what is meant literally (`\*\*`, `1\.`), and mentions as
+/// `<chat-user data-user="users/…">` or `data-email="…"`.
+List<md.Node> parseChatMarkdown(String text) => md.Document(
+  extensionSet: md.ExtensionSet.gitHubFlavored,
+  inlineSyntaxes: [_MentionSyntax()],
+  encodeHtml: false,
+).parse(text);
 
-/// Lines of text; line breaks are kept.
-final class ChatParagraph extends ChatBlock {
-  const ChatParagraph(this.text);
+/// `<chat-user data-user="users/…"></chat-user>` (or `data-email`) as a `mention` element whose
+/// `user` or `email` attribute names the person.
+class _MentionSyntax extends md.InlineSyntax {
+  _MentionSyntax() : super(r'<chat-user\s+data-(user|email)="([^"]*)"[^>]*>(?:\s*</chat-user>)?', startCharacter: 0x3C);
 
-  final String text;
-}
-
-/// A ```monospace block```.
-final class ChatCode extends ChatBlock {
-  const ChatCode(this.text);
-
-  final String text;
-}
-
-/// A `* item` or `- item` line; four spaces before the marker per level of nesting.
-final class ChatBullet extends ChatBlock {
-  const ChatBullet(this.text, this.depth);
-
-  final String text;
-  final int depth;
-}
-
-/// Lines starting with `>`.
-final class ChatQuote extends ChatBlock {
-  const ChatQuote(this.text);
-
-  final String text;
-}
-
-/// Google Chat's message markup, as the API's `formattedText` carries it and the Chat web app
-/// draws it: ```monospace blocks```, `* `/`- ` bulleted lists (four spaces per nesting level),
-/// `>` block quotes, and inline `*bold*`, `_italic_`, `~strike~`, `` `monospace` ``,
-/// `<url|label>` links, `<users/…>` mentions and bare links. Everything else is plain text with
-/// its line breaks. Google escapes punctuation it means literally (`\*\*not bold\*\*`, `1\.`);
-/// those show without the backslash, except in monospace, which Google leaves unescaped.
-abstract final class ChatMarkup {
-  static final _fence = RegExp(r'```\n?([\s\S]*?)\n?```');
-  static final _bullet = RegExp(r'^( *)[*-] (.*)$');
-  static final _quote = RegExp(r'^> ?(.*)$');
-  static final _escape = RegExp(r'\\([!-/:-@\[-`{-~])');
-
-  /// Escaped characters stand in the private-use area from here while the markup is parsed, so
-  /// no rule takes them for markup.
-  static const _hidden = 0xE000;
-
-  static String _hide(String text) =>
-      text.replaceAllMapped(_escape, (m) => String.fromCharCode(_hidden + m.group(1)!.codeUnitAt(0)));
-
-  /// The text as shown: escaped characters without their backslash, or (`literal`, monospace)
-  /// with it.
-  static String _show(String text, {bool literal = false}) {
-    if (!text.codeUnits.any((c) => c >= _hidden && c < _hidden + 0x80)) return text;
-    final out = StringBuffer();
-    for (final c in text.codeUnits) {
-      if (c >= _hidden && c < _hidden + 0x80) {
-        if (literal) out.write(r'\');
-        out.writeCharCode(c - _hidden);
-      } else {
-        out.writeCharCode(c);
-      }
-    }
-    return out.toString();
-  }
-
-  /// Blocks whose text still carries escapes hidden; `inline` shows them.
-  static List<ChatBlock> blocks(String text) {
-    final hidden = _hide(text);
-    final out = <ChatBlock>[];
-    var cursor = 0;
-    for (final match in _fence.allMatches(hidden)) {
-      _lines(hidden.substring(cursor, match.start), out);
-      out.add(ChatCode(_show(match.group(1)!, literal: true)));
-      cursor = match.end;
-    }
-    _lines(hidden.substring(cursor), out);
-    return out;
-  }
-
-  /// Splits text outside monospace blocks into paragraphs, bullets and quotes.
-  static void _lines(String text, List<ChatBlock> out) {
-    // The run of plain or quoted lines being gathered.
-    final run = <String>[];
-    var quoting = false;
-    void flush() {
-      if (quoting) {
-        out.add(ChatQuote(run.join('\n')));
-      } else {
-        // Blank lines at a paragraph's edges belong to the gap between blocks.
-        final first = run.indexWhere((l) => l.trim().isNotEmpty);
-        final last = run.lastIndexWhere((l) => l.trim().isNotEmpty);
-        if (first >= 0) out.add(ChatParagraph(run.sublist(first, last + 1).join('\n')));
-      }
-      run.clear();
-    }
-
-    for (final line in text.split('\n')) {
-      if (_bullet.firstMatch(line) case final bullet?) {
-        if (run.isNotEmpty) flush();
-        out.add(ChatBullet(bullet.group(2)!, bullet.group(1)!.length ~/ 4));
-        continue;
-      }
-      final quoted = _quote.firstMatch(line);
-      if (run.isNotEmpty && quoting != (quoted != null)) flush();
-      quoting = quoted != null;
-      run.add(quoted?.group(1) ?? line);
-    }
-    if (run.isNotEmpty) flush();
-  }
-
-  static final _code = RegExp(r'`([^`\n]+)`');
-  static final _token = RegExp(r'<(https?://[^|>\s]+)(?:\|([^>\n]*))?>|<(users/[^>\s]+)>');
-  static final _link = RegExp(r'''\b(?:https?://|mailto:)[^\s<>"']+''');
-  static final _emphasis = RegExp(
-    r'(?<![\w*])\*(?=\S)([^*\n]*?\S)\*(?![\w*])|(?<![\w_])_(?=\S)([^_\n]*?\S)_(?![\w_])|(?<![\w~])~(?=\S)([^~\n]*?\S)~(?![\w~])',
-  );
-
-  /// One block's inline markup as spans. `link` makes a span open a URL; `names` maps
-  /// `users/<id>` to the names mentions show.
-  static List<InlineSpan> inline(
-    String text, {
-    required TextStyle code,
-    required TextStyle link,
-    required TextStyle mention,
-    required Map<String, String> names,
-    required GestureRecognizer Function(String url) open,
-  }) {
-    final out = <InlineSpan>[];
-    _split(text, _code, (match) {
-      out.add(TextSpan(text: _show(match.group(1)!, literal: true), style: code));
-    }, (part) {
-      _split(part, _token, (match) {
-        if (match.group(1) case final hiddenUrl?) {
-          final url = _show(hiddenUrl);
-          final label = _show(match.group(2) ?? '');
-          out.add(TextSpan(text: label.isEmpty ? url : label, style: link, recognizer: open(url)));
-        } else {
-          out.add(TextSpan(text: '@${names[match.group(3)] ?? 'user'}', style: mention));
-        }
-      }, (part) {
-        _split(part, _link, (match) {
-          var url = match.group(0)!;
-          // Sentence punctuation after a link is not part of it.
-          final trailing = RegExp(r'''[.,;:!?)\]'"]+$''').firstMatch(url)?.group(0) ?? '';
-          url = _show(url.substring(0, url.length - trailing.length));
-          out.add(TextSpan(text: url, style: link, recognizer: open(url)));
-          if (trailing.isNotEmpty) out.addAll(_emphasized(trailing));
-        }, (part) => out.addAll(_emphasized(part)));
-      });
-    });
-    return out;
-  }
-
-  /// `*bold*`, `_italic_` and `~strike~`, nested in any order.
-  static List<InlineSpan> _emphasized(String text) {
-    final out = <InlineSpan>[];
-    _split(text, _emphasis, (match) {
-      final TextStyle added;
-      final String inner;
-      if (match.group(1) != null) {
-        added = const TextStyle(fontWeight: FontWeight.w700);
-        inner = match.group(1)!;
-      } else if (match.group(2) != null) {
-        added = const TextStyle(fontStyle: FontStyle.italic);
-        inner = match.group(2)!;
-      } else {
-        added = const TextStyle(decoration: TextDecoration.lineThrough);
-        inner = match.group(3)!;
-      }
-      out.add(TextSpan(style: added, children: _emphasized(inner)));
-    }, (part) => out.add(TextSpan(text: _show(part))));
-    return out;
-  }
-
-  static void _split(String text, RegExp regex, void Function(RegExpMatch) match, void Function(String) rest) {
-    var cursor = 0;
-    for (final found in regex.allMatches(text)) {
-      if (found.start > cursor) rest(text.substring(cursor, found.start));
-      match(found);
-      cursor = found.end;
-    }
-    if (cursor < text.length) rest(text.substring(cursor));
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    parser.addNode(md.Element.empty('mention')..attributes[match[1]!] = match[2]!);
+    return true;
   }
 }
 
-/// A Chat message's text, drawn as Google Chat draws its markup. Selectable across blocks;
-/// links open in the browser through `onOpen`.
+const _blockTags = {
+  'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'blockquote', 'ul', 'ol', 'li', 'hr', 'table', //
+};
+
+/// A Chat message's text, drawn as Google Chat draws its Markdown: paragraphs keep their line
+/// breaks, lists, quotes, monospace blocks and tables are laid out, links open in the browser
+/// through `onOpen`, and mentions show the person's name.
 class ChatText extends StatefulWidget {
   const ChatText({super.key, required this.text, required this.names, required this.onOpen});
 
@@ -209,6 +48,13 @@ class ChatText extends StatefulWidget {
 
 class _ChatTextState extends State<ChatText> {
   final List<TapGestureRecognizer> _recognizers = [];
+  late List<md.Node> _nodes = parseChatMarkdown(widget.text);
+
+  @override
+  void didUpdateWidget(ChatText old) {
+    super.didUpdateWidget(old);
+    if (old.text != widget.text) _nodes = parseChatMarkdown(widget.text);
+  }
 
   @override
   void dispose() {
@@ -223,30 +69,93 @@ class _ChatTextState extends State<ChatText> {
     _recognizers.clear();
   }
 
-  GestureRecognizer _open(String url) {
-    final recognizer = TapGestureRecognizer()..onTap = () => widget.onOpen(url);
-    _recognizers.add(recognizer);
-    return recognizer;
-  }
-
   @override
   Widget build(BuildContext context) {
     _disposeRecognizers();
     final colors = context.colors;
     final body = context.text.body;
     final mono = body.copyWith(fontFamily: 'Menlo', fontSize: (body.fontSize ?? 13) * 0.92);
-    final code = mono.copyWith(backgroundColor: colors.strongFill, color: colors.label);
-    final link = TextStyle(color: colors.accent, decoration: TextDecoration.underline, decorationColor: colors.accent);
-    final mention = TextStyle(color: colors.accent, fontWeight: FontWeight.w600);
-    List<InlineSpan> spans(String text) =>
-        ChatMarkup.inline(text, code: code, link: link, mention: mention, names: widget.names, open: _open);
+    final renderer = _Renderer(
+      colors: colors,
+      body: body,
+      mono: mono,
+      code: mono.copyWith(backgroundColor: colors.strongFill, color: colors.label),
+      link: TextStyle(color: colors.accent, decoration: TextDecoration.underline, decorationColor: colors.accent),
+      mention: TextStyle(color: colors.accent, fontWeight: FontWeight.w600),
+      names: widget.names,
+      open: (url) {
+        final recognizer = TapGestureRecognizer()..onTap = () => widget.onOpen(url);
+        _recognizers.add(recognizer);
+        return recognizer;
+      },
+    );
+    return renderer.column(_nodes, body);
+  }
+}
 
+/// Lays Markdown nodes out as widgets and their inline content as spans.
+class _Renderer {
+  _Renderer({
+    required this.colors,
+    required this.body,
+    required this.mono,
+    required this.code,
+    required this.link,
+    required this.mention,
+    required this.names,
+    required this.open,
+  });
+
+  final MailColors colors;
+  final TextStyle body, mono, code, link, mention;
+  final Map<String, String> names;
+  final GestureRecognizer Function(String url) open;
+
+  static bool _isBlock(md.Node node) => node is md.Element && _blockTags.contains(node.tag);
+
+  /// `nodes` one below the other: runs of inline nodes (a tight list item's text) become one
+  /// paragraph in `style`.
+  Widget column(List<md.Node> nodes, TextStyle style) {
     final children = <Widget>[];
-    for (final block in ChatMarkup.blocks(widget.text)) {
-      if (children.isNotEmpty) children.add(const SizedBox(height: 4));
-      children.add(switch (block) {
-        ChatParagraph(:final text) => Text.rich(TextSpan(children: spans(text)), style: body),
-        ChatCode(:final text) => Container(
+    final run = <md.Node>[];
+    void flush() {
+      if (run.isEmpty) return;
+      final spans = _trimmed(run);
+      if (spans.isNotEmpty) children.add(Text.rich(TextSpan(children: spans), style: style));
+      run.clear();
+    }
+
+    for (final node in nodes) {
+      if (_isBlock(node)) {
+        flush();
+        children.add(_block(node as md.Element, style));
+      } else {
+        run.add(node);
+      }
+    }
+    flush();
+    if (children.length == 1) return children.single;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (final (i, child) in children.indexed) ...[if (i > 0) const SizedBox(height: 6), child],
+      ],
+    );
+  }
+
+  Widget _block(md.Element element, TextStyle style) {
+    final children = element.children ?? const <md.Node>[];
+    switch (element.tag) {
+      case 'p':
+        return Text.rich(TextSpan(children: _trimmed(children)), style: style);
+      case 'h1' || 'h2' || 'h3' || 'h4' || 'h5' || 'h6':
+        final scale = switch (element.tag) { 'h1' => 1.4, 'h2' => 1.25, 'h3' => 1.12, _ => 1.0 };
+        final heading = style.copyWith(fontWeight: FontWeight.w700, fontSize: (style.fontSize ?? 13) * scale);
+        return Text.rich(TextSpan(children: _trimmed(children)), style: heading);
+      case 'pre':
+        var text = element.textContent;
+        if (text.endsWith('\n')) text = text.substring(0, text.length - 1);
+        return Container(
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: BoxDecoration(
@@ -255,24 +164,109 @@ class _ChatTextState extends State<ChatText> {
             borderRadius: BorderRadius.circular(6),
           ),
           child: Text(text, style: mono),
-        ),
-        ChatBullet(:final text, :final depth) => Padding(
-          padding: EdgeInsets.only(left: 4 + depth * 20.0),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SizedBox(width: 16, child: Text(depth.isEven ? '•' : '◦', style: body)),
-              Expanded(child: Text.rich(TextSpan(children: spans(text)), style: body)),
-            ],
-          ),
-        ),
-        ChatQuote(:final text) => Container(
+        );
+      case 'blockquote':
+        return Container(
           padding: const EdgeInsets.only(left: 10),
           decoration: BoxDecoration(border: Border(left: BorderSide(color: colors.border, width: 3))),
-          child: Text.rich(TextSpan(children: spans(text)), style: body.copyWith(color: colors.secondaryLabel)),
-        ),
-      });
+          child: column(children, style.copyWith(color: colors.secondaryLabel)),
+        );
+      case 'ul' || 'ol':
+        final ordered = element.tag == 'ol';
+        var number = int.tryParse(element.attributes['start'] ?? '') ?? 1;
+        final items = children.whereType<md.Element>().where((e) => e.tag == 'li');
+        return Padding(
+          padding: const EdgeInsets.only(left: 4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final item in items)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(width: ordered ? 22 : 16, child: Text(ordered ? '${number++}.' : '•', style: style)),
+                      Expanded(child: column(item.children ?? const [], style)),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        );
+      case 'hr':
+        return Container(height: 1, color: colors.separator);
+      case 'table':
+        final rows = <md.Element>[
+          for (final section in children.whereType<md.Element>())
+            ...(section.children ?? const <md.Node>[]).whereType<md.Element>().where((e) => e.tag == 'tr'),
+        ];
+        return Table(
+          defaultColumnWidth: const IntrinsicColumnWidth(),
+          border: TableBorder.all(color: colors.separator),
+          children: [
+            for (final row in rows)
+              TableRow(
+                children: [
+                  for (final cell in (row.children ?? const <md.Node>[]).whereType<md.Element>())
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      child: Text.rich(
+                        TextSpan(children: _trimmed(cell.children ?? const [])),
+                        style: cell.tag == 'th' ? style.copyWith(fontWeight: FontWeight.w600) : style,
+                      ),
+                    ),
+                ],
+              ),
+          ],
+        );
+      default: // li outside a list
+        return column(children, style);
     }
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: children);
+  }
+
+  /// Inline nodes as spans, without the line breaks that end a paragraph.
+  List<InlineSpan> _trimmed(List<md.Node> nodes) {
+    final spans = [for (final node in nodes) _inline(node)];
+    while (spans.isNotEmpty && spans.last is TextSpan && (spans.last as TextSpan).toPlainText().trim().isEmpty) {
+      spans.removeLast();
+    }
+    return spans;
+  }
+
+  /// One inline node; `tap` is the link it sits in.
+  InlineSpan _inline(md.Node node, [GestureRecognizer? tap]) {
+    if (node is md.Text) return TextSpan(text: node.text, recognizer: tap);
+    if (node is! md.Element) return TextSpan(text: node.textContent, recognizer: tap);
+    List<InlineSpan> children([GestureRecognizer? inner]) => [
+      for (final child in node.children ?? const <md.Node>[]) _inline(child, inner ?? tap),
+    ];
+
+    switch (node.tag) {
+      case 'strong':
+        return TextSpan(style: const TextStyle(fontWeight: FontWeight.w700), children: children());
+      case 'em':
+        return TextSpan(style: const TextStyle(fontStyle: FontStyle.italic), children: children());
+      case 'del':
+        return TextSpan(style: const TextStyle(decoration: TextDecoration.lineThrough), children: children());
+      case 'code':
+        return TextSpan(text: node.textContent, style: code, recognizer: tap);
+      case 'br':
+        return const TextSpan(text: '\n');
+      case 'a':
+        final href = node.attributes['href'];
+        return TextSpan(style: link, children: children(href == null ? null : open(href)));
+      case 'img':
+        final src = node.attributes['src'];
+        final alt = node.attributes['alt'];
+        final label = alt == null || alt.isEmpty ? (src ?? '') : alt;
+        return TextSpan(text: label, style: link, recognizer: src == null ? tap : open(src));
+      case 'mention':
+        final user = node.attributes['user'];
+        final name = user == null ? node.attributes['email'] : (user == 'users/all' ? 'all' : names[user]);
+        return TextSpan(text: '@${name ?? 'user'}', style: mention);
+      default:
+        return TextSpan(children: children());
+    }
   }
 }
