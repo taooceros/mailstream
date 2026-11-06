@@ -72,7 +72,7 @@ class ReaderState extends State<Reader> {
   /// Forwards the latest message in a new compose tab: its text under a forwarded-message header
   /// (as the native app's), the caret above it.
   void forward() {
-    final messages = widget.state.thread(c.id).messages;
+    final messages = widget.state.thread(c).messages;
     final latest = messages?.lastWhere((m) => m.role != MailboxRole.drafts, orElse: () => messages.last);
     final lower = c.subject.trimLeft().toLowerCase();
     final subject = lower.startsWith('fwd:') || lower.startsWith('fw:') ? c.subject : 'Fwd: ${c.subject}';
@@ -101,8 +101,12 @@ class ReaderState extends State<Reader> {
 
   @override
   Widget build(BuildContext context) {
+    final thread = widget.state.thread(c);
+    return ListenableBuilder(listenable: thread, builder: (context, _) => _body(context, thread));
+  }
+
+  Widget _body(BuildContext context, ThreadEntry thread) {
     final colors = context.colors;
-    final thread = widget.state.thread(c.id);
     final messages = thread.messages;
     final now = DateTime.now();
 

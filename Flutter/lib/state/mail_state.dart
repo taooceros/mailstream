@@ -77,12 +77,15 @@ class ListEntry {
 }
 
 /// A conversation's messages, as `mail show` returned them.
-class ThreadEntry {
-  ThreadEntry(this.future);
+class ThreadEntry extends ChangeNotifier {
+  ThreadEntry(this.conversation, {this.messages});
 
-  final Future<List<MessageDetail>> future;
+  final Conversation conversation;
+  late final Future<List<MessageDetail>> future;
   List<MessageDetail>? messages;
   String? error;
+
+  void completed() => notifyListeners();
 }
 
 /// A message for a snack bar; each one shows once.
@@ -219,6 +222,7 @@ class MailState extends ChangeNotifier {
   Timer? _changes;
   bool _accountsChanged = false;
   bool _listsChanged = false;
+  bool _disposed = false;
 
   /// Conversations whose preview `previews` is loading or has answered.
   final Set<String> _previewRequested = {};
@@ -257,6 +261,7 @@ class MailState extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _changes?.cancel();
     _searchDebounce?.cancel();
     super.dispose();
@@ -420,6 +425,7 @@ class MailState extends ChangeNotifier {
           ..error = error;
       }
       entry.fetchedAt = DateTime.now();
+      changed |= _updateReader(page);
       _loadPreviews(page);
       _loadAvatars(page);
     } on engine.MailException catch (error) {
@@ -468,6 +474,7 @@ class MailState extends ChangeNotifier {
       entry
         ..items = [...entry.items, ...page]
         ..next = listing.next;
+      _updateReader(page);
       _loadPreviews(page);
       _loadAvatars(page);
     } on engine.MailException catch (error) {
@@ -609,6 +616,7 @@ class MailState extends ChangeNotifier {
         _search
           ..items = found
           ..fetchedAt = DateTime.now();
+        _updateReader(found);
         _loadPreviews(found);
         _loadAvatars(found);
       } on engine.MailException catch (error) {
@@ -629,7 +637,8 @@ class MailState extends ChangeNotifier {
 
   void open(Conversation conversation) {
     opened = conversation;
-    thread(conversation.id);
+    final entry = thread(conversation);
+    if (entry.error != null) _loadThread(conversation, previous: entry.messages);
     notifyListeners();
     if (conversation.unread) setRead(conversation, read: true);
   }
@@ -645,31 +654,55 @@ class MailState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// The thread's messages: loaded once and kept while the app runs. Resting on a row starts it, so
-  /// opening renders with the bodies already in.
-  ThreadEntry thread(String id) {
-    final existing = _threads[id];
-    if (existing != null && existing.error == null) return existing;
-    late final ThreadEntry entry;
-    entry = ThreadEntry(() async {
+  /// A listing refreshes the selected summary and invalidates only bodies whose message set
+  /// changed. Flags, tags and previews do not refetch otherwise valid content.
+  bool _updateReader(List<Conversation> page) {
+    var changed = false;
+    for (final c in page) {
+      final cached = _threads[c.id];
+      if (cached != null &&
+          (cached.conversation.date != c.date || cached.conversation.messageCount != c.messageCount)) {
+        _threads.remove(c.id);
+        if (opened?.id == c.id) _loadThread(c, previous: cached.messages);
+      }
+      if (opened case final current? when current.id == c.id) {
+        final fresh = _keep(current, c);
+        changed |= !identical(current, fresh);
+        opened = fresh;
+      }
+    }
+    return changed;
+  }
+
+  /// Resting on a row loads its bodies. Valid entries survive navigation and unrelated changes.
+  ThreadEntry thread(Conversation conversation) => _threads[conversation.id] ?? _loadThread(conversation);
+
+  ThreadEntry _loadThread(Conversation conversation, {List<MessageDetail>? previous}) {
+    final id = conversation.id;
+    final entry = ThreadEntry(conversation, messages: previous);
+    _threads[id] = entry;
+    entry.future = () async {
       try {
         final thread = await mail.show_(id: id, maxChars: 400000, html: true);
         final messages = thread.messages.map(MessageDetail.of).toList();
-        entry.messages = messages;
-        requestAvatars([for (final m in messages) (m.sender.email, false)]);
+        // A newer revision may have started while this body was loading.
+        if (!_disposed && identical(_threads[id], entry)) {
+          entry.messages = messages;
+          requestAvatars([for (final m in messages) (m.sender.email, false)]);
+        }
         return messages;
       } on engine.MailException catch (error) {
-        entry.error = describe(error);
+        if (!_disposed && identical(_threads[id], entry)) entry.error = describe(error);
         rethrow;
       } finally {
-        notifyListeners();
+        if (!_disposed && identical(_threads[id], entry)) entry.completed();
       }
-    }());
+    }();
     entry.future.ignore();
-    return _threads[id] = entry;
+    return entry;
   }
 
-  void prefetch(Conversation conversation) => thread(conversation.id);
+  void prefetch(Conversation conversation) => thread(conversation);
 
   // MARK: - Actions
 

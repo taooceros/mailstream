@@ -57,6 +57,16 @@ HTML mail is drawn by WebKit: `macos/Runner/MailHtmlView.swift` is a platform vi
 remote images without cookies, zooms out a body wider than the column, and reports its
 content height so the body scrolls with the conversation.
 
+The open reader follows the normal conversation-list updates: a changed message count or latest
+date refreshes that conversation's cached bodies and summary, without closing the pane or
+clearing the content while it loads. Unchanged threads (including flag/tag-only updates) keep
+their cached bodies. Body completions notify the reader alone, and superseded requests cannot
+replace a newer thread revision or change the selected conversation.
+
+`flutter test test/reader_refresh_test.dart` covers live arrival in a mounted reader, valid
+cache reuse, lazy refresh after prefetch, overlapping answers, conversation switching and
+failed refreshes retaining the previous content.
+
 | Path | Role |
 | --- | --- |
 | `packages/mailstream` | The engine's Dart binding and the build hook that bundles its libraries |
