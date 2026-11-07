@@ -1,174 +1,177 @@
 # AGENTS.md
 
-## Current product focus: Flutter
+## Current focus: Flutter
 
-- For now, Flutter is the focus for product work, active feature development and UI acceptance.
-  Unless the user specifies another front end, implement and demonstrate the requested behavior
-  in `Flutter/`; default automatic release delivery targets the installed Flutter app.
-- Keep the native Swift/AppKit and GPUI front ends; they are not deprecated or being removed.
-  Do not proactively expand their features or turn Flutter work into a cross-front-end rewrite.
-- Keep necessary compatibility when changing the shared backend/FFI: update affected callers
-  and run targeted compatibility checks where needed. This does not require duplicating new
-  Flutter features or doing a full native/GPUI release and UI acceptance pass for every change.
+- Product work, new features and UI acceptance go to `Flutter/` unless the user names another
+  front end; automatic release delivery targets the installed Flutter app.
+- The AppKit and GPUI front ends stay; they are not deprecated. Don't grow their features or
+  turn Flutter work into a cross-front-end rewrite.
+- Engine/FFI changes keep them working: update affected callers and run targeted compatibility
+  checks. Porting new Flutter features or a full native/GPUI release and acceptance pass is not
+  required.
 
 ## Version control: jj
 
-This repo is a colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` (public).
+Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` (public).
 
-- Use `jj`, not raw `git`, for commits and history: `jj st`, `jj diff`, `jj describe -m "…"`, `jj new`, `jj log`.
-- Finish each change as its own described commit: `jj describe -m "<what and why>"`, then `jj new`.
-  Do it unprompted as soon as a change is built and verified, then push; never leave finished work
-  uncommitted in `@`.
-- Push: `jj bookmark set main -r @-` then `jj git push`.
+- Use `jj`, not raw `git`: `jj st`, `jj diff`, `jj describe -m "…"`, `jj new`, `jj log`.
+- Each change is its own described commit (`jj describe -m "<what and why>"`, then `jj new`),
+  made unprompted as soon as it is built and verified, then pushed: `jj bookmark set main -r @-`,
+  then `jj git push`. Never leave finished work uncommitted in `@`.
 - One line: every front end (the AppKit app, `GPUI/`, `Flutter/`) and the engine they share
-  live on `main`. Every workspace works on `main`; the old `gpui-ui` and `flutter-ui` bookmarks
-  are history and take no new commits. A change to the engine (`Sources/MailstreamKit`, `FFI/`)
+  (`Sources/MailstreamKit`, `FFI/`) live on `main`, and every workspace works on it; the
+  `gpui-ui` and `flutter-ui` bookmarks are history and take no new commits. An engine change
   updates every front end that calls what it changed, in the same change.
 - The repo is public: never commit secrets, tokens, OAuth client files or personal mail data.
 
 ## Work tracking: Linear
 
-Work is tracked in Linear: team `MS`, split into projects by effort. Issue IDs look like
-`MS-12`. Use omp's Linear tools; the issue, not the session, is the record other sessions read.
+Team `MS`, split into projects by effort; issue IDs look like `MS-12`. Use omp's Linear tools.
+The issue, not the session, is the record other sessions read.
 
-- Language: write everything on Linear (issue titles, descriptions, comments) in plain Chinese
-  that someone who has not read the code understands at once. Lead with the conclusion, then
-  say what happened, how it affects the user, what was done and what remains. Explain any
-  technical term the reader needs in a few words; leave out terms and long logs they don't.
-  No defensive writing: don't hedge, don't repeat disclaimers such as "未授权", "不代表" or
-  "不算通过", and own mistakes directly. Keep real unknowns and risks as concrete facts, and
-  never present something uncertain or unverified as done. Code identifiers, paths, commands
-  and commit hashes stay as they are.
-- Labels: every issue carries one type (`Bug`, `Feature`, `Improvement`, `Performance`,
-  `Regression`) plus one `Area` label (Linear allows one; for work across areas, the one most of
-  it is in). Area names match the jj workspaces (`chat`, `concurrency`, `flutter`, `gpui`,
-  `motion`, `ui-shell`) or the layer (`sync`, `cache`, `ffi`); an issue is worked in its area's
-  workspace. Issues about the repo's own tooling (AGENTS.md, scripts, CI, build setup) take no
-  Area label and are worked on main. Label issues you file when creating them. Issues the user
-  files often have none: whoever claims one adds the missing labels first (the polling session
-  before handing it out, so it goes to the area's workspace; otherwise the agent, before its
-  start comment).
-- Projects: every issue belongs to the team's project whose scope (its description) it fits,
-  set together with the labels. When none fits, create a new project: team `MS`, a short
-  Chinese name, a one-line description of its scope, lead taooceros; then put the issue in it.
-  Sub-issues go in their parent's project.
-- Claim before working: every agent, subagents included, works under an issue it has claimed.
-  With no issue for the work yet, create one first and claim it. Work that serves another issue
-  is a sub-issue of it: set Linear's parent field (`parentId`) when creating it, so Linear shows
-  it as a sub-issue; naming the parent only in the text does not count. The start comment names
-  the agent doing the work (its subagent/roster id), so each issue shows which subagent owns it.
+### Writing
+
+- Write everything on Linear (titles, descriptions, comments) in plain Chinese that someone who
+  has not read the code understands at once. Lead with the conclusion, then what happened, how it
+  affects the user, what was done and what remains. Explain any technical term the reader needs
+  in a few words; leave out terms and long logs they don't.
+- No defensive writing: don't hedge, don't repeat disclaimers such as "未授权", "不代表" or
+  "不算通过", and own mistakes directly. Keep real unknowns and risks as concrete facts; never
+  present something uncertain or unverified as done.
+- Code identifiers, paths, commands and commit hashes stay as they are.
+
+### Filing
+
+- Labels: one type (`Bug`, `Feature`, `Improvement`, `Performance`, `Regression`) plus one `Area`
+  (Linear allows one; for work across areas, the one most of it is in). Areas match the jj
+  workspaces (`chat`, `concurrency`, `flutter`, `gpui`, `motion`, `ui-shell`) or the layer
+  (`sync`, `cache`, `ffi`); an issue is worked in its area's workspace. Repo tooling (AGENTS.md,
+  scripts, CI, build setup) takes no Area and is worked on `main`.
+- Project: the team project whose description the issue fits. When none fits, create one (team
+  `MS`, short Chinese name, one-line scope description, lead taooceros). Sub-issues go in their
+  parent's project.
+- Label and place issues you file when creating them. Issues the user files often have neither:
+  whoever claims one adds them first (the polling session before handing it out, so it reaches
+  the area's workspace; otherwise the agent, before its start comment).
+- File your own issues in Backlog; only the user adds `omp`. Problems found outside the current
+  change get their own Backlog issue; don't fix them in passing.
+
+### Working an issue
+
+- Claim before working: every agent, subagents included, works under an issue it has claimed;
+  with none for the work yet, create one and claim it. Work that serves another issue is its
+  sub-issue: set Linear's parent field (`parentId`) when creating it; naming the parent only in
+  the text does not count.
 - Start: read the issue and its comments. Skip issues already In Progress unless the user or the
   polling session hands one over. Move it to In Progress, comment
-  `[omp @ <workspace>] start (<agent id>): <plan>`, then add the `claimed` label: it says an
-  agent is on the issue now, and the start comment says which. Taking over or resuming an issue
-  counts as starting it: post a new start comment with your own id. Remove `claimed` when you
-  stop (In Review, Todo with a question, Backlog when blocked).
+  `[omp @ <workspace>] start (<agent id>): <plan>` (the subagent/roster id, so the issue shows
+  who owns it), then add the `claimed` label. Taking over or resuming counts as starting: post a
+  new start comment with your own id. Remove `claimed` when you stop (In Review, Todo with a
+  question, Backlog when blocked).
 - Progress: record decisions, blockers and dead ends as comments; the next session only sees
   what is on the issue.
-- Blocked by another issue (it needs that issue's change first, or the user said to wait for
-  it): mark it on Linear with a "blocked by" relation to that issue (file that issue first if
-  there is none), comment what it waits for, move it out of In Progress (to Backlog) so the
-  workspace frees up, and stop. When every blocker reaches In Review, Done or Canceled, the poll
-  hands the issue out again and its agent carries on from the comments.
-- Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work).
-  After targeted verification, commit and integrate into current `main`, then install affected
-  already-installed front ends as signed releases using the delivery procedure below. A commit,
-  passing tests, or a Debug/test app alone is not completion. Only after installed-copy smoke
-  verification, move the issue to In Review and comment the changes, deployed commit, exact
-  `/Applications` targets, checks and remaining limitations; the user moves it to Done. If the
-  issue has a parent, check its other sub-issues: when none is left in Backlog, Todo or In
-  Progress, finish the parent too (a summary listing each sub-issue and what remains, then In
-  Review). Nobody else picks up a parent an agent filed.
-- UI changes (a new or changed view, flow or interaction, in any front end): take screenshots
-  of the running app showing the change, every state it adds included, and attach them to the
-  finishing comment. Work without them is not ready for review.
-- Questions only the user can decide: ask instead of guessing, and make the question impossible
-  to miss: assign the issue to the user (taooceros), move it to Todo, and start the comment with
-  `**❓ 需要你回答：**` followed by the question(s), each answerable on its own. Then stop.
-- Problems found outside the current change: file a Backlog issue with labels; do not fix them
-  in passing.
-- An omp session polls `scripts/linear-poll.sh` every minute and hands each issue it claims to a
-  subagent working in the area's workspace; when another issue holds that workspace, the issue
-  goes to the subagent working related code, or to a private workspace. It claims Todo issues the
-  user created, once each, unless a blocker is still open; issues it claimed before, once all
-  their blockers are resolved; and any issue labelled `omp` (then removes the label). An In
-  Progress issue still `claimed` by an agent that is no longer running is reported stale, and the
-  session wakes that agent or hands the issue to a new one; `claimed` is dropped from issues out
-  of In Progress whose agent has stopped. Every comment the user posts reaches the subagent
-  working that issue, or starts one. Only the user adds `omp`; file your own issues in Backlog.
-  `scripts/linear-omp.sh MS-12` opens one issue in a new Tern tab instead (Linear's "Work on
-  issue → Custom script").
-- Who gets an issue: the polling session reuses an agent it already started over starting a new
-  one, whenever that agent has related context and room left. Related, in this order: it worked
-  this issue before (resumed, or a user comment on it); it worked the parent, a sub-issue, a
-  blocker or a blocked issue; it worked the same files in the same workspace. Room left: its
-  context is under 400K tokens (40% of the 1M window, the `ctx` figure the session sees).
-  An agent still running another issue gets the new one only after it finishes, unless it is
-  the same issue. At or over 400K, start a new agent instead; it picks up from the issue's
-  comments, as after a session restart. A reused agent claims the new issue like any other: its
-  own start comment, In Progress, `claimed`, working in its own workspace.
+- Blocked by another issue (it needs that change first, or the user said to wait for it): add a
+  "blocked by" relation (file the blocker first if it doesn't exist), comment what it waits for,
+  move it to Backlog so the workspace frees up, and stop. Once every blocker is In Review, Done
+  or Canceled, the poll hands it out again and its agent carries on from the comments.
+- Questions only the user can decide: don't guess. Assign the issue to the user (taooceros), move
+  it to Todo, start the comment with `**❓ 需要你回答：**` followed by the question(s), each
+  answerable on its own, and stop.
+- Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work),
+  integrate it into `main` and deliver it ([Release delivery](#release-delivery)). A commit,
+  passing tests or a Debug/test app is not completion. Only after the installed copy passes its
+  smoke check, move the issue to In Review and comment what changed, the deployed commit, the
+  exact `/Applications` targets, the checks run and what remains; the user moves it to Done.
+- UI changes (a new or changed view, flow or interaction, in any front end): attach screenshots
+  of the running app showing the change, every state it adds included, to the finishing comment.
+  Without them the work is not ready for review.
+- Parents: when finishing a sub-issue, check its siblings. Once none is left in Backlog, Todo or
+  In Progress, finish the parent too: a summary comment listing each sub-issue and what remains,
+  then In Review. Nobody else picks up a parent an agent filed.
+
+### Polling session
+
+- An omp session runs `scripts/linear-poll.sh` every minute and hands each issue it claims to a
+  subagent in the area's workspace; when another issue holds that workspace, the issue goes to
+  the subagent working related code, or to a private workspace. `scripts/linear-omp.sh MS-12`
+  opens one issue in a new Tern tab instead (Linear's "Work on issue → Custom script").
+- It claims: Todo issues the user created, once each, unless a blocker is still open; issues it
+  claimed before, once all their blockers are resolved; any issue labelled `omp` (then removes
+  the label). Every comment the user posts reaches the subagent working that issue, or starts
+  one.
+- An In Progress issue still `claimed` by an agent that is no longer running is reported stale;
+  the session wakes that agent or hands the issue to a new one. `claimed` is dropped from issues
+  out of In Progress whose agent has stopped.
+- Who gets an issue: reuse an agent already started over a new one when it has related context
+  and room left. Related, in order: it worked this issue before (resumed, or a user comment on
+  it); it worked the parent, a sub-issue, a blocker or a blocked issue; it worked the same files
+  in the same workspace. Room left: context under 400K tokens (40% of the 1M window, the `ctx`
+  figure the session sees); at or over that, start a new agent, which picks up from the issue's
+  comments. An agent still running another issue gets the new one only after it finishes,
+  unless it is the same issue. A reused agent claims the issue like any other: its own start
+  comment, In Progress, `claimed`, its own workspace.
 
 ## Building
 
-- Every Rust build (cargo here, in FFI/, GPUI/, and Turso) goes through rcache (`~/projects/rcache`),
-  the copy-on-write rustc cache shared across jj workspaces: `~/.cargo/config.toml` sets
-  `build.rustc-wrapper` to it, and `scripts/ffi.sh`/`turso.sh` export `RUSTC_WRAPPER=rcache`.
-  Don't set `RUSTC_WRAPPER`/`RCACHE_DISABLE` to bypass it; `rcache stats` shows hits.
+- Every Rust build (cargo here, in `FFI/`, `GPUI/` and Turso) goes through rcache
+  (`~/projects/rcache`), the copy-on-write rustc cache shared across jj workspaces:
+  `~/.cargo/config.toml` sets `build.rustc-wrapper` to it, and `scripts/ffi.sh`/`turso.sh` export
+  `RUSTC_WRAPPER=rcache`. Don't set `RUSTC_WRAPPER`/`RCACHE_DISABLE` to bypass it; `rcache stats`
+  shows hits.
 - The app links the Turso database engine (`.turso/lib/libturso_sqlite3.a`). Run `scripts/turso.sh`
-  once before `swift build` (it needs rustup; `bundle.sh` runs it too). It builds the pinned version
-  with cargo in a few minutes and returns at once after that.
+  once before `swift build` (it needs rustup; `bundle.sh` runs it too). It builds the pinned
+  version with cargo in a few minutes and returns at once after that.
 - Check with `swift build` and launch with `scripts/run.sh`: both use the incremental debug build
   (seconds per edit). A release build (`scripts/bundle.sh`, `CONFIG=release`) re-optimizes the
   whole module single-threaded, ~30 s per edit; build it only to check performance or ship.
-- Finished fixes are delivered to `/Applications` automatically as part of the agent's work,
-  not only on a separate request. Use the release delivery procedure below; never deploy Debug.
 - All Swift code is in the `MailstreamKit` target (`Sources/MailstreamKit`); the `Mailstream`
   executable only calls `MailstreamApp.main()`. `MailstreamKit` is also the dynamic library FFI
   front ends load: `scripts/ffi.sh` builds it with the UniFFI crate in `FFI/`. New commands go in
   `CommandSpec`/`ControlService`, then get a typed method in `FFI/src/lib.rs`; GPUI uses that
-  crate directly, Flutter through the Dart binding `ffi.sh` generates (`Flutter/README.md`). The
-  engine keeps the state every front end shares (the open chat space and its history, as for
+  crate directly, Flutter through the Dart binding `ffi.sh` generates (`Flutter/README.md`).
+- The engine keeps the state every front end shares (the open chat space and its history, as for
   the native reader); front ends re-read it on the engine's change events.
-- Test only what you changed: build, then exercise the parts your change touches (the view, flow or command you edited). Do not re-run the whole app checklist or every CLI case after each change; we iterate in small steps.
+- Test only what you changed: build, then exercise the parts your change touches (the view, flow
+  or command you edited). Don't re-run the whole app checklist or every CLI case after each
+  change; we iterate in small steps.
 
-### Release delivery after verification
+## Release delivery
 
-1. Default to the installed Flutter app for automatic delivery. Determine any additional targets
-   from the user's request and actual affected code/callers: `flutter` = `Mailstream Flutter.app`,
-   `native` = `Mailstream.app`, `gpui` = `Mailstream GPUI.app` in `/Applications`. Shared backend/FFI
-   changes must retain necessary native/GPUI compatibility, but do not trigger an unrelated full
-   three-front-end release: install another front end only when its installed behavior is directly
-   affected and needs verification, or the user requests it. Do not install unrelated/new apps.
-   Tooling-only rules changes normally need no app replacement; changes to deployment mechanics
-   must exercise the real path, prioritizing Flutter. Do not claim another issue's pending checks
-   passed.
-2. After targeted tests/smoke checks, describe the issue-referencing commit, `jj new`, integrate
-   it into live `main` without losing other agents' changes, and push. Read
-   `skill://mailstream-install-frontend` when available. Create a uniquely named private build
-   workspace with `jj workspace add --name <unique-build-name> -r main <unused-path>`. Never
-   move an area's `@` or build from the stale default checkout/old front-end bookmarks. Do not
-   copy `target/` or `.build/` from another workspace; keep rcache enabled.
-3. In that fresh workspace run `./scripts/install.sh flutter` by default; add `native` or `gpui`
-   only for the additional affected targets identified above. It refuses
-   stale/modified source and missing installed targets, builds release using the existing
-   scripts, records `MSInstalledRevision` in the bundle, requires shared Apple Development
-   signing (team `K7HG6KZNNP`, signing identifier `dev.mailstream.Mailstream`), verifies the
-   signature, and replaces only those installed bundles. If main advances during the build,
-   rebuild from its new tip. It only terminates the matching `/Applications` executable, never
-   another agent's Debug, `/tmp`, test or workspace process; do not use broad `pkill`/`killall`.
-   Deployments are serialized by `/tmp/mailstream-release-install.lock`; coordinate with its
-   owner rather than deleting another agent's lock or overwriting a newer installed release.
-4. Launch each exact `/Applications/...app` with computer helpers. Verify the running executable,
-   bundle revision and `codesign --verify --deep --strict`; inspect the real window for loaded
-   UI/engine data, and exercise the affected behavior without sending mail or destructive actions.
-   For GPUI also check `otool -l` has no workspace rpath and `vmmap <pid>` loads
-   `libMailstreamKit.dylib` from the installed bundle. Keep personal content out of public
-   screenshots/logs. A build, `open` success or a process name alone is not UI/engine proof.
-5. Record actual evidence on the issue, not an unperformed checklist. If installation, signing,
-   launch or smoke verification fails, record the exact blocker rather than reporting success.
-   Only after successful smoke checks, forget and remove your own temporary build workspace
-   (including its retained previous bundles); preserve all pre-existing workspaces/artifacts.
+Finished fixes go to `/Applications` as part of the work, without a separate request, always as
+signed release builds, never Debug.
 
+1. Targets: the installed Flutter app (`Mailstream Flutter.app`) by default. Add `native`
+   (`Mailstream.app`) or `gpui` (`Mailstream GPUI.app`) only when the user asks or its installed
+   behavior is directly affected and needs verifying; a shared engine/FFI change alone does not
+   call for a three-front-end release. Don't install apps that aren't installed yet.
+   Tooling-only changes normally replace no app; changes to deployment itself exercise the real
+   path, Flutter first. Never claim another issue's pending checks passed.
+2. After targeted checks, describe the issue-referencing commit, `jj new`, integrate it into live
+   `main` without losing other agents' changes, and push. Read `skill://mailstream-install-frontend`
+   when available. Build in a fresh private workspace:
+   `jj workspace add --name <unique-build-name> -r main <unused-path>`. Never move an area's `@`
+   or build from the stale default checkout or the old front-end bookmarks. Don't copy `target/`
+   or `.build/` from another workspace; keep rcache on.
+3. There, run `./scripts/install.sh flutter`, plus `native`/`gpui` per step 1. It refuses stale or
+   modified source and targets not installed, builds release with the existing scripts, records
+   `MSInstalledRevision` in the bundle, requires the shared Apple Development signing (team
+   `K7HG6KZNNP`, identifier `dev.mailstream.Mailstream`), verifies the signature and replaces only
+   those bundles. If `main` moves during the build, rebuild from its new tip. It terminates only
+   the matching `/Applications` executable; never kill another agent's Debug, `/tmp`, test or
+   workspace process (no broad `pkill`/`killall`). `/tmp/mailstream-release-install.lock`
+   serializes deployments: coordinate with its owner rather than deleting it or overwriting a
+   newer installed release.
+4. Smoke the installed copy: launch each exact `/Applications/…app` with computer helpers; check
+   the running executable, the bundle revision and `codesign --verify --deep --strict`; check the
+   real window shows loaded UI and engine data and exercise the affected behavior, without sending
+   mail or destructive actions. For GPUI also check `otool -l` shows no workspace rpath and
+   `vmmap <pid>` loads `libMailstreamKit.dylib` from the installed bundle. A build, a successful
+   `open` or a process name alone proves nothing. Keep personal content out of public screenshots
+   and logs.
+5. Record the actual evidence on the issue, not a checklist; if install, signing, launch or smoke
+   fails, record the exact blocker instead of success. Only after the smoke checks pass, forget
+   and remove your build workspace (with its retained previous bundles); leave every pre-existing
+   workspace and artifact alone.
 
 ## Performance: 120 fps
 
