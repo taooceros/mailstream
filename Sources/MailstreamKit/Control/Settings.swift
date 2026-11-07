@@ -1,3 +1,6 @@
+#if os(Windows)
+import CWindows
+#endif
 import Foundation
 
 /// Every user setting. The file `~/Library/Application Support/Mailstream/settings.json` holds the
@@ -307,12 +310,24 @@ final class Settings {
         guard watcher == nil else { return }
         try? FileManager.default.createDirectory(at: SettingsFile.directory, withIntermediateDirectories: true)
         watcher = Task.immediate(name: "Settings file") { [weak self] in
+            #if os(Windows)
+            // Windows: a change notification on the directory (writes, creations, deletions,
+            // renames of the files in it), checked twice a second without blocking.
+            let watch = ms_watch_directory(SettingsFile.directory.path)
+            defer { if let watch { ms_watch_close(watch) } }
+            self?.reload()
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+                if let watch, ms_watch_changed(watch) != 0 { self?.reload() }
+            }
+            #else
             while !Task.isCancelled {
                 let changes = FileChanges.stream([(SettingsFile.directory.path, [.write, .rename]),
                                                   (SettingsFile.url.path, [.write, .extend, .delete, .rename])])
                 self?.reload()
                 for await _ in changes { break }
             }
+            #endif
         }
     }
 
@@ -343,6 +358,7 @@ final class Settings {
     }
 }
 
+#if !os(Windows)
 /// File-system events as an async sequence: one element per burst of changes to any of the
 /// watched paths (those that exist), until iteration stops.
 private nonisolated enum FileChanges {
@@ -362,3 +378,4 @@ private nonisolated enum FileChanges {
         }
     }
 }
+#endif

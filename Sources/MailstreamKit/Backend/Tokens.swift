@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(Security)
 import Security
+#endif
 
 /// OAuth access tokens by account id, refreshed from the refresh tokens kept in the Keychain.
 /// Concurrent callers for one account share a single refresh; the Keychain item is read once and
@@ -178,6 +180,7 @@ nonisolated struct SignIns: Codable, Equatable, Sendable {
     var lastClients: [String: OAuthClient] = [:]
 }
 
+#if canImport(Security)
 /// Sign-ins in the login keychain: one generic password (service `dev.mailstream.Mailstream.oauth`,
 /// account `refresh-tokens`) holding `SignIns` as JSON, so macOS asks about Mailstream's access
 /// once rather than per account. Items from before clients were stored hold a bare object of
@@ -245,3 +248,4 @@ nonisolated enum Keychain {
          kSecAttrAccount as String: account]
     }
 }
+#endif

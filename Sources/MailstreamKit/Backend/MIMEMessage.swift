@@ -1,5 +1,4 @@
 import Foundation
-import UniformTypeIdentifiers
 
 /// An outgoing message as RFC 5322 bytes with CRLF line ends: the raw message Gmail sends and
 /// Graph's MIME `sendMail` takes. Both providers drop the Bcc header when they send.
@@ -70,7 +69,7 @@ nonisolated enum MIMEMessage {
     private static func attachment(_ url: URL) throws -> Entity {
         let bytes = try Data(contentsOf: url)
         let name = url.lastPathComponent.precomposedStringWithCanonicalMapping.filter { !$0.isNewline }
-        let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+        let mime = Platform.mimeType(forExtension: url.pathExtension) ?? "application/octet-stream"
         let typeName = isPlainASCII(name) ? quoted(name) : "\"" + encodedWords(name).joined(separator: "\r\n ") + "\""
         let filename = isPlainASCII(name) ? "filename=" + quoted(name) : "filename*=UTF-8''" + percentEncoded(name)
         return Entity(headers: ["Content-Type: \(mime);\r\n name=\(typeName)",

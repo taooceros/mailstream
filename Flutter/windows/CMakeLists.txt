@@ -93,6 +93,23 @@ install(DIRECTORY "${NATIVE_ASSETS_DIR}"
    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
    COMPONENT Runtime)
 
+# The Swift runtime the engine (MailstreamKit.dll, a native asset above) links: swiftCore,
+# Foundation, dispatch and the rest, from the installed Swift toolchain's runtime directory
+# (SWIFT_RUNTIME_BIN, else the one on PATH holding swiftCore.dll). Copied whole so the app runs
+# on machines without Swift.
+if(DEFINED ENV{SWIFT_RUNTIME_BIN})
+  set(SWIFT_RUNTIME_BIN "$ENV{SWIFT_RUNTIME_BIN}")
+else()
+  find_path(SWIFT_RUNTIME_BIN swiftCore.dll PATHS ENV PATH NO_DEFAULT_PATH)
+endif()
+if(NOT SWIFT_RUNTIME_BIN OR NOT EXISTS "${SWIFT_RUNTIME_BIN}/swiftCore.dll")
+  message(FATAL_ERROR "No Swift runtime (swiftCore.dll) found: install Swift for Windows or set SWIFT_RUNTIME_BIN.")
+endif()
+install(DIRECTORY "${SWIFT_RUNTIME_BIN}/"
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  COMPONENT Runtime
+  FILES_MATCHING PATTERN "*.dll")
+
 # Fully re-copy the assets directory on each build to avoid having stale files
 # from a previous install.
 set(FLUTTER_ASSET_DIR_NAME "flutter_assets")

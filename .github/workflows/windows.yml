@@ -1,0 +1,143 @@
+name: Windows
+
+# The Flutter front end and the engine it runs in-process, built and started on Windows x64:
+# the Turso library, the Swift engine (MailstreamKit.dll), the UniFFI crate (mailstream.dll) and
+# its Dart bindings, the Flutter app with the Swift runtime beside it. The engine smoke test and a
+# launch of the app run without accounts, secrets or private mail.
+on:
+  push:
+    branches: [main, 'ms91/**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Scripts, the Turso patch and the header it is compared with stay byte for byte as committed.
+      - run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+
+      - uses: compnerd/gha-setup-swift@v0.5.1
+        with:
+          swift-version: swift-6.3.3-release
+          swift-build: 6.3.3-RELEASE
+
+      - name: Toolchains
+        run: |
+          swift --version
+          rustup default stable
+          cargo --version
+          # The Swift runtime's DLLs, which the app ships beside its executable.
+          RUNTIME=$(dirname "$(where swiftCore.dll | head -1)")
+          echo "SWIFT_RUNTIME_BIN=$(cygpath -w "$RUNTIME")" >> "$GITHUB_ENV"
+          echo "Swift runtime: $RUNTIME"
+
+      - uses: actions/cache@v4
+        with:
+          path: .turso/lib
+          key: turso-${{ runner.os }}-${{ hashFiles('scripts/turso.sh', 'scripts/turso-multiprocess.patch', 'Sources/CTurso/sqlite3.h') }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            FFI/target
+          key: ffi-cargo-${{ runner.os }}-${{ hashFiles('FFI/Cargo.lock', 'FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml') }}
+          restore-keys: ffi-cargo-${{ runner.os }}-
+
+      - name: Turso
+        run: ./scripts/turso.sh
+
+      - name: Engine (MailstreamKit.dll)
+        run: |
+          swift build -c release --product MailstreamKit
+          ls "$(swift build -c release --show-bin-path)" | grep -i mailstreamkit
+
+      - name: UniFFI crate and Dart bindings
+        run: |
+          export MAILSTREAM_KIT_DIR="$(swift build -c release --show-bin-path)"
+          (cd FFI && cargo build --release -p mailstream --example smoke)
+          (cd FFI && cargo run -q -p mailstream-bindgen -- target/release/mailstream.dll --out-dir ../Flutter/packages/mailstream/lib/src)
+          # The Flutter build hook bundles the engine from .build/release.
+          [ -f .build/release/MailstreamKit.dll ] || { mkdir -p .build/release && cp "$MAILSTREAM_KIT_DIR"/MailstreamKit.dll .build/release/; }
+
+      - name: Engine smoke test
+        run: |
+          # The engine and the Swift runtime beside the test, as in the app.
+          cp .build/release/MailstreamKit.dll FFI/target/release/examples/
+          FFI/target/release/examples/smoke.exe
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter (release)
+        run: cd Flutter && flutter build windows --release
+
+      - name: Launch and screenshot
+        shell: pwsh
+        run: |
+          $app = "Flutter\build\windows\x64\runner\Release"
+          Get-ChildItem $app -Filter *.dll | Select-Object -ExpandProperty Name
+          # Without Swift on PATH: the app must run from the DLLs beside it.
+          $env:Path = ($env:Path -split ';' | Where-Object { $_ -notmatch 'Swift' }) -join ';'
+          $process = Start-Process -FilePath "$app\mailstream_ui.exe" -PassThru `
+            -RedirectStandardOutput launch.out.txt -RedirectStandardError launch.err.txt
+          Start-Sleep -Seconds 30
+          if ($process.HasExited) { Get-Content launch.out.txt, launch.err.txt; throw "The app exited with $($process.ExitCode)" }
+          Add-Type -AssemblyName System.Drawing
+          Add-Type @"
+          using System; using System.Runtime.InteropServices;
+          public static class Win {
+            [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+            public struct RECT { public int Left, Top, Right, Bottom; }
+          }
+          "@
+          $process.Refresh()
+          $window = $process.MainWindowHandle
+          [Win]::SetForegroundWindow($window) | Out-Null
+          Start-Sleep -Seconds 2
+          $rect = New-Object Win+RECT
+          [Win]::GetWindowRect($window, [ref]$rect) | Out-Null
+          $width = $rect.Right - $rect.Left; $height = $rect.Bottom - $rect.Top
+          Write-Host "Window: $($process.MainWindowTitle) $width x $height"
+          $bitmap = New-Object System.Drawing.Bitmap $width, $height
+          $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+          $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+          $bitmap.Save("windows-launch.png")
+          Stop-Process -Id $process.Id
+          Get-Content launch.out.txt, launch.err.txt
+
+      - name: Package
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path Flutter\build\windows\x64\runner\Release) {
+            Compress-Archive -Path Flutter\build\windows\x64\runner\Release\* -DestinationPath Mailstream-Flutter-Windows.zip
+          }
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: Mailstream-Flutter-Windows-${{ github.sha }}
+          path: |
+            Mailstream-Flutter-Windows.zip
+            windows-launch.png
+            launch.*.txt
+          retention-days: 14

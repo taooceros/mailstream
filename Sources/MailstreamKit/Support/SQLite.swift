@@ -33,8 +33,13 @@ nonisolated final class SQLiteConnection {
     private let handle: OpaquePointer
 
     /// Every process that opens mail.db (the app, FFI front ends) shares it through Turso's
-    /// multi-process WAL; Turso refuses a file open in both modes at once.
-    private static let multiprocess: Void = turso_enable_multiprocess_wal()
+    /// multi-process WAL; Turso refuses a file open in both modes at once. On Windows only the
+    /// Flutter app opens it, and Turso's Windows file layer has no shared WAL, so it stays off.
+    private static let multiprocess: Void = {
+        #if !os(Windows)
+        turso_enable_multiprocess_wal()
+        #endif
+    }()
 
     init(path: String) throws {
         _ = Self.multiprocess

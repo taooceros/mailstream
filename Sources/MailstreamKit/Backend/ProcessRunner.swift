@@ -90,10 +90,13 @@ nonisolated enum ProcessRunner {
         } onCancel: {
             if let process = child.withLock({ $0.take() }), process.isRunning {
                 process.terminate()
+                // On Windows `terminate` already ends the process outright.
+                #if !os(Windows)
                 Task {
                     try? await Task.sleep(for: killGrace)
                     if process.isRunning { kill(process.processIdentifier, SIGKILL) }
                 }
+                #endif
             }
             try? out.fileHandleForReading.close()
             try? err?.fileHandleForReading.close()
@@ -103,7 +106,22 @@ nonisolated enum ProcessRunner {
     private static func drain(_ pipe: Pipe?) async throws -> Data {
         guard let pipe else { return Data() }
         var data = Data()
+        #if os(Windows)
+        // Windows' Foundation has no `FileHandle.bytes`: the readability callback hands chunks over.
+        let (chunks, continuation) = AsyncStream.makeStream(of: Data.self)
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                continuation.finish()
+            } else {
+                continuation.yield(chunk)
+            }
+        }
+        for await chunk in chunks { data.append(chunk) }
+        #else
         for try await byte in pipe.fileHandleForReading.bytes { data.append(byte) }
+        #endif
         return data
     }
 }

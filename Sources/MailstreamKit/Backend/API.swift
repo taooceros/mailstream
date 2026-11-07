@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 nonisolated enum RequestPriority: Sendable {
     case interactive, background

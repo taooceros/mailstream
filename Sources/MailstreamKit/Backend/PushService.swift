@@ -1,5 +1,11 @@
+#if canImport(AppKit)
 import AppKit
 import Network
+#endif
+import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Observation
 
 /// Live mail changes through the push relay: one WebSocket carrying Gmail Pub/Sub and Graph change
@@ -16,7 +22,9 @@ final class PushService {
     @ObservationIgnored private var started = false
     /// Account changes, network paths and the hourly renewal.
     @ObservationIgnored private var watchers: [Task<Void, Never>] = []
+    #if canImport(AppKit)
     @ObservationIgnored private var wake: NotificationCenter.ObservationToken?
+    #endif
     @ObservationIgnored private var pathSatisfied = true
 
     @ObservationIgnored private var socket: URLSessionWebSocketTask?
@@ -59,7 +67,9 @@ final class PushService {
         listener?.cancel()
         heartbeat?.cancel()
         reconnect?.cancel()
+        #if canImport(AppKit)
         if let wake { NSWorkspace.shared.notificationCenter.removeObserver(wake) }
+        #endif
     }
 
     /// Connects the socket and registers every account; follows account changes, wake and
@@ -72,9 +82,6 @@ final class PushService {
             Task.immediate(name: "Push account changes") { [weak self] in
                 for await _ in Observations({ accounts.records }).dropFirst() { self?.checkRegistrations() }
             },
-            Task(name: "Push network path") { [weak self] in
-                for await path in NWPathMonitor() { self?.pathChanged(satisfied: path.status == .satisfied) }
-            },
             Task(name: "Push renewal") { [weak self] in
                 while true {
                     do { try await Task.sleep(for: .seconds(3600)) } catch { return }
@@ -82,10 +89,16 @@ final class PushService {
                 }
             },
         ]
+        // Windows has neither: there the heartbeat finds a dead socket and reconnects.
+        #if canImport(AppKit)
+        watchers.append(Task(name: "Push network path") { [weak self] in
+            for await path in NWPathMonitor() { self?.pathChanged(satisfied: path.status == .satisfied) }
+        })
         wake = NSWorkspace.shared.notificationCenter.addObserver(of: NSWorkspace.shared, for: .didWake) { [weak self] _ in
             self?.reconnectNow()
             self?.checkRegistrations()
         }
+        #endif
         // A removed account's registration is stopped before its token goes.
         accounts.beforeSignOut = { [weak self] in await self?.registration.settle() }
         connect()

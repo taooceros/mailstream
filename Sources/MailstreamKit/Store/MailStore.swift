@@ -1,4 +1,4 @@
-import AppKit
+import Foundation
 import Observation
 
 nonisolated enum Selection: Hashable, Sendable {

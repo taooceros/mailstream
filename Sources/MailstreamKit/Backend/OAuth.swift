@@ -1,6 +1,12 @@
-import AppKit
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
+import Foundation
+#if canImport(Network)
 import Network
+#endif
 
 nonisolated extension Provider {
     var authorizeURL: URL {
@@ -131,7 +137,7 @@ nonisolated enum OAuth {
         let listener = try RedirectListener(state: state)
         let code = try await withThrowingTaskGroup { group in
             group.addTask { try await listener.code() }
-            if await listener.ready() { NSWorkspace.shared.open(url) }
+            if await listener.ready() { Platform.open(url) }
             guard let code = try await group.next() else { throw CancellationError() }
             return code
         }
@@ -215,11 +221,63 @@ nonisolated enum OAuth {
     }
 }
 
+/// The OAuth redirect as the loopback listener answers it, whichever system listens.
+nonisolated enum RedirectPage {
+    static let port: UInt16 = 49152
+
+    /// The end of the request head in `buffer`, once it has arrived.
+    static func head(in buffer: Data) -> String? {
+        buffer.range(of: Data("\r\n\r\n".utf8)).map { String(decoding: buffer[..<$0.lowerBound], as: UTF8.self) }
+    }
+
+    /// The response to send for request `head`, and the sign-in's result when this was the
+    /// redirect. Accepts only `GET /?code=…&state=…` (or the provider's `error=…`) with this
+    /// sign-in's state; anything else (a favicon, a stale tab) is answered and ignored.
+    static func answer(head: String, state: String) -> (response: Data, outcome: Result<String, any Error>?) {
+        let requestLine = head.components(separatedBy: "\r\n").first ?? ""
+        let parts = requestLine.split(separator: " ")
+        guard parts.count == 3, parts[0] == "GET",
+              let components = URLComponents(string: "http://localhost" + String(parts[1])), components.path == "/" else {
+            return (response(status: "404 Not Found", text: "Not found."), nil)
+        }
+        let query = Dictionary((components.queryItems ?? []).map { ($0.name, $0.value ?? "") }) { first, _ in first }
+        guard query["state"] == state else {
+            return (response(status: "400 Bad Request", text: "This sign-in page is out of date. Start again from Mailstream."), nil)
+        }
+        if let code = query["code"], !code.isEmpty {
+            return (response(status: "200 OK", text: nil), .success(code))
+        }
+        let reason = query["error_description"]?.nilIfEmpty
+            ?? query["error"] ?? "The provider sent no authorization code."
+        return (response(status: "200 OK", text: "Sign-in failed: \(reason)"),
+                .failure(OAuthError(code: query["error"] ?? "response", message: "Sign-in failed: \(reason)")))
+    }
+
+    static func failure(_ error: any Error) -> OAuthError {
+        OAuthError(code: "listener", message: "Could not listen for the sign-in on port \(port): \(error.localizedDescription)")
+    }
+
+    /// `text` nil: the success page.
+    private static func response(status: String, text: String?) -> Data {
+        let message = text ?? "You can close this tab and return to Mailstream."
+        let html = """
+            <!doctype html><html><head><meta charset="utf-8"><title>Mailstream</title></head>\
+            <body style="font: 15px -apple-system, 'Segoe UI', sans-serif; margin: 4em auto; max-width: 32em; text-align: center">\
+            <p>\(HTMLText.escape(message))</p></body></html>
+            """
+        let body = Data(html.utf8)
+        let head = "HTTP/1.1 \(status)\r\nContent-Type: text/html; charset=utf-8\r\n"
+            + "Content-Length: \(body.count)\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n"
+        return Data(head.utf8) + body
+    }
+}
+
+#if canImport(Network)
 /// One-shot HTTP listener on the loopback interface for the OAuth redirect. Answers the browser
 /// with a small page and stops at the first sign-in result, after five minutes, or when the
 /// task running `code()` is cancelled.
-private nonisolated struct RedirectListener: Sendable {
-    private static let port: NWEndpoint.Port = 49152
+nonisolated struct RedirectListener: Sendable {
+    private static let port = NWEndpoint.Port(rawValue: RedirectPage.port)!
 
     private let listener: NetworkListener<TCP>
     private let state: String
@@ -234,7 +292,7 @@ private nonisolated struct RedirectListener: Sendable {
             listener = try NetworkListener(using: .parameters { TCP() }
                 .localPort(Self.port).requiredInterfaceType(.loopback).localEndpointReuseAllowed(true))
         } catch {
-            throw Self.failure(error)
+            throw RedirectPage.failure(error)
         }
         self.state = state
         let (readiness, opened) = AsyncStream.makeStream(of: Void.self)
@@ -243,7 +301,7 @@ private nonisolated struct RedirectListener: Sendable {
         listener.onStateUpdate { _, update in
             switch update {
             case .ready: opened.yield()
-            case .failed(let error): report.yield(.failure(Self.failure(error)))
+            case .failed(let error): report.yield(.failure(RedirectPage.failure(error)))
             default: break
             }
         }
@@ -265,7 +323,7 @@ private nonisolated struct RedirectListener: Sendable {
                         if let outcome = await Self.serve(connection, state: state) { report.yield(outcome) }
                     }
                 } catch {
-                    throw Task.isCancelled ? CancellationError() : Self.failure(error)
+                    throw Task.isCancelled ? CancellationError() : RedirectPage.failure(error)
                 }
                 throw CancellationError()
             }
@@ -284,10 +342,6 @@ private nonisolated struct RedirectListener: Sendable {
         }
     }
 
-    private static func failure(_ error: any Error) -> OAuthError {
-        OAuthError(code: "listener", message: "Could not listen for the sign-in on port 49152: \(error.localizedDescription)")
-    }
-
     /// Reads up to the end of the request head and answers it; returns the sign-in's result when
     /// this was the redirect. A connection that fails or ends early is dropped.
     private static func serve(_ connection: NetworkConnection<TCP>, state: String) async -> Result<String, any Error>? {
@@ -296,9 +350,10 @@ private nonisolated struct RedirectListener: Sendable {
             while true {
                 let (data, metadata) = try await connection.receive(atMost: 16_384)
                 buffer.append(data)
-                if let end = buffer.range(of: Data("\r\n\r\n".utf8)) {
-                    return try await handle(connection, head: String(decoding: buffer[..<end.lowerBound], as: UTF8.self),
-                                            state: state)
+                if let head = RedirectPage.head(in: buffer) {
+                    let (response, outcome) = RedirectPage.answer(head: head, state: state)
+                    try await connection.send(response, endOfStream: true)
+                    return outcome
                 }
                 if metadata.endOfStream || buffer.count > 65_536 { return nil }
             }
@@ -306,45 +361,5 @@ private nonisolated struct RedirectListener: Sendable {
             return nil
         }
     }
-
-    /// Accepts only `GET /?code=…&state=…` (or the provider's `error=…`) with this sign-in's state;
-    /// anything else (a favicon, a stale tab) is answered and ignored.
-    private static func handle(_ connection: NetworkConnection<TCP>, head: String,
-                               state: String) async throws -> Result<String, any Error>? {
-        let requestLine = head.components(separatedBy: "\r\n").first ?? ""
-        let parts = requestLine.split(separator: " ")
-        guard parts.count == 3, parts[0] == "GET",
-              let components = URLComponents(string: "http://localhost" + String(parts[1])), components.path == "/" else {
-            try await respond(connection, status: "404 Not Found", text: "Not found.")
-            return nil
-        }
-        let query = Dictionary((components.queryItems ?? []).map { ($0.name, $0.value ?? "") }) { first, _ in first }
-        guard query["state"] == state else {
-            try await respond(connection, status: "400 Bad Request",
-                              text: "This sign-in page is out of date. Start again from Mailstream.")
-            return nil
-        }
-        if let code = query["code"], !code.isEmpty {
-            try await respond(connection, status: "200 OK", text: nil)
-            return .success(code)
-        }
-        let reason = query["error_description"]?.nilIfEmpty
-            ?? query["error"] ?? "The provider sent no authorization code."
-        try await respond(connection, status: "200 OK", text: "Sign-in failed: \(reason)")
-        return .failure(OAuthError(code: query["error"] ?? "response", message: "Sign-in failed: \(reason)"))
-    }
-
-    /// `text` nil: the success page.
-    private static func respond(_ connection: NetworkConnection<TCP>, status: String, text: String?) async throws {
-        let message = text ?? "You can close this tab and return to Mailstream."
-        let html = """
-            <!doctype html><html><head><meta charset="utf-8"><title>Mailstream</title></head>\
-            <body style="font: 15px -apple-system, sans-serif; margin: 4em auto; max-width: 32em; text-align: center">\
-            <p>\(HTMLText.escape(message))</p></body></html>
-            """
-        let body = Data(html.utf8)
-        let head = "HTTP/1.1 \(status)\r\nContent-Type: text/html; charset=utf-8\r\n"
-            + "Content-Length: \(body.count)\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n"
-        try await connection.send(Data(head.utf8) + body, endOfStream: true)
-    }
 }
+#endif

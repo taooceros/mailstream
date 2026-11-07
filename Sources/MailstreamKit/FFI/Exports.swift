@@ -10,9 +10,11 @@ import Foundation
 /// socket. Events are `{"event": "<what changed>"}`; a front end re-reads what it shows.
 ///
 /// The engine is main-actor code: the host must run the main thread's run loop (an AppKit,
-/// Flutter or GPUI app does; a command-line host calls `mailstream_run_main_loop`). Answers
-/// arrive on a background thread and events on the main thread; the bytes a callback gets are
-/// valid only during the call.
+/// Flutter or GPUI app does; a command-line host calls `mailstream_run_main_loop`). On Windows the
+/// main actor is the main dispatch queue, which nothing drains by itself: the Flutter runner's
+/// message loop waits on its handle too and drains it (`Flutter/windows/runner/main.cpp`).
+/// Answers arrive on a background thread and events on the main thread; the bytes a callback gets
+/// are valid only during the call.
 public typealias MailstreamCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>?, Int) -> Void
 
 /// A C callback with its context, handed to the main actor.
@@ -56,7 +58,11 @@ public nonisolated func mailstreamSubscribe(_ context: UnsafeMutableRawPointer?,
 /// Runs the main thread's run loop for a host without one; never returns. Call on the main thread.
 @_cdecl("mailstream_run_main_loop")
 public nonisolated func mailstreamRunMainLoop() {
+    #if os(Windows)
+    dispatchMain()
+    #else
     while true { CFRunLoopRun() }
+    #endif
 }
 
 /// The engine as an FFI host runs it: the app's stores without its windows or control socket

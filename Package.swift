@@ -11,6 +11,46 @@ let swiftSettings: [SwiftSetting] = [
     .enableUpcomingFeature("MemberImportVisibility"),
 ]
 
+let turso = LinkerSetting.unsafeFlags(["-L\(Context.packageDirectory)/.turso/lib"])
+
+#if os(Windows)
+// Windows builds the engine alone, for the Flutter front end: no AppKit app (`App/`, `UI/`) and no
+// control socket or `mailstream` CLI, which talk over a Unix socket to that app. The system calls
+// the Mac makes through Apple frameworks go through `CWindows`; SHA-256 through swift-crypto.
+let package = Package(
+    name: "Mailstream",
+    products: [
+        .library(name: "MailstreamKit", type: .dynamic, targets: ["MailstreamKit"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-crypto.git", exact: "5.1.1"),
+    ],
+    targets: [
+        .systemLibrary(name: "CTurso", path: "Sources/CTurso"),
+        .target(
+            name: "CWindows",
+            path: "Sources/CWindows",
+            linkerSettings: ["crypt32", "dnsapi", "icu", "ole32", "oleaut32", "shell32", "windowscodecs", "ws2_32", "advapi32"]
+                .map { .linkedLibrary($0) }
+        ),
+        .target(
+            name: "MailstreamKit",
+            dependencies: ["CTurso", "CWindows", .product(name: "Crypto", package: "swift-crypto")],
+            path: "Sources/MailstreamKit",
+            exclude: ["App", "UI", "Control/CLI.swift", "Control/ControlSocket.swift"],
+            swiftSettings: swiftSettings,
+            // The Turso static library is Rust's: it needs the system libraries Rust's std links.
+            linkerSettings: [turso] + ["bcrypt", "ntdll", "userenv", "ws2_32", "advapi32", "kernel32", "synchronization", "dbghelp"]
+                .map { .linkedLibrary($0) }
+        ),
+        .testTarget(
+            name: "MailstreamKitTests",
+            dependencies: ["MailstreamKit"],
+            swiftSettings: swiftSettings
+        ),
+    ]
+)
+#else
 let package = Package(
     name: "Mailstream",
     platforms: [.macOS(.v26)],
@@ -33,7 +73,7 @@ let package = Package(
                 .linkedFramework("WebKit"),
                 .linkedFramework("Security"),
                 .linkedFramework("CoreFoundation"),
-                .unsafeFlags(["-L\(Context.packageDirectory)/.turso/lib"]),
+                turso,
             ]
         ),
         .executableTarget(
@@ -49,3 +89,4 @@ let package = Package(
         ),
     ]
 )
+#endif

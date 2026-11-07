@@ -33,17 +33,10 @@ final class RecipientCompletion: NSObject, NSTokenFieldDelegate {
             .filter { !$0.isEmpty }
     }
 
-    /// People whose name, a word of it, or address starts with `typed`, best first; an address
-    /// typed out in full first of all.
+    /// People whose name, a word of it, or address starts with `typed`, best first, without the
+    /// ones already chosen.
     func suggestions(for typed: String) -> [Contact] {
-        let needle = Contact.fold(typed.trimmingCharacters(in: .whitespaces))
-        guard !needle.isEmpty else { return [] }
-        let taken = taken()
-        var matches = Array(contacts.lazy.filter { !taken.contains($0.address.normalizedEmail) && $0.matches(needle) }.prefix(12))
-        if let exact = matches.firstIndex(where: { Contact.fold($0.address.email) == needle }) {
-            matches.insert(matches.remove(at: exact), at: 0)
-        }
-        return matches
+        Contact.suggestions(for: typed, in: contacts, taken: taken())
     }
 
     func controlTextDidChange(_ obj: Notification) {

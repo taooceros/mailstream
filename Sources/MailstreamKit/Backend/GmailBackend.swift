@@ -15,8 +15,7 @@ nonisolated final class GmailBackend: MailBackend {
     }
 
     private static func cacheFile(_ account: String) -> URL {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("dev.mailstream.Mailstream/gmail-envelopes-v1/\(MailCache.hash(account)).json")
+        Platform.caches.appendingPathComponent("dev.mailstream.Mailstream/gmail-envelopes-v1/\(MailCache.hash(account)).json")
     }
 
     /// Drops the signed-out `account`'s envelope cache, off the caller's actor.

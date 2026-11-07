@@ -1,4 +1,8 @@
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 
 /// What Mailstream has fetched and worked out, kept so launches paint the last known state before
@@ -20,8 +24,7 @@ nonisolated final class MailCache: Sendable {
     private let writes: AsyncStream<@Sendable () async -> Void>.Continuation
 
     init() {
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        root = caches.appendingPathComponent("dev.mailstream.Mailstream", isDirectory: true)
+        root = Platform.caches.appendingPathComponent("dev.mailstream.Mailstream", isDirectory: true)
         database = MailDatabase(url: URL.applicationSupportDirectory.appending(path: "Mailstream/mail.db"), files: root)
         let (queue, writes) = AsyncStream.makeStream(of: (@Sendable () async -> Void).self)
         self.writes = writes

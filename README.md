@@ -193,6 +193,45 @@ DART_OUT=path/to/lib/src ./scripts/ffi.sh         # and the Dart bindings (asset
   dynamic library IDs and dependencies using `install_name_tool` without manual relinking or
   temporary `RUSTFLAGS`.
 
+### Windows
+
+The Flutter front end also runs on Windows x64 (MS-91), with the same engine in its process.
+`Package.swift` builds `MailstreamKit.dll` there without the AppKit app, the control socket or
+the `mailstream` CLI; the Mac-only system calls go through `Sources/CWindows`:
+
+| Mac | Windows |
+| --- | --- |
+| Keychain item holding the sign-ins | One file, `%LOCALAPPDATA%\Mailstream\sign-ins.dat`, sealed with DPAPI for the Windows user |
+| `NetworkListener` for the OAuth redirect | A non-blocking WinSock socket on `127.0.0.1:49152` |
+| `NSWorkspace.open` | `ShellExecuteW` |
+| AppKit drawing of avatars | Windows Imaging Component |
+| `dnssd` (BIMI TXT records) | `DnsQueryEx` |
+| `UTType` (attachment MIME types) | the registry's `Content Type` |
+| CoreFoundation charsets | the system ICU (`icu.dll`) |
+| vnode watch of `settings.json` | a directory change notification, checked twice a second |
+| Darwin notification for AI tags | in-process: Windows has one engine process |
+| CryptoKit | [swift-crypto](https://github.com/apple/swift-crypto) |
+
+Data lives in `%LOCALAPPDATA%\Mailstream` (settings, accounts, `mail.db`) and its `Caches`
+folder (attachments, avatars). Turso's Windows file layer has no shared WAL, so `mail.db` is
+opened single-process. The main actor is libdispatch's main queue, which the Flutter runner's
+message loop drains (`Flutter/windows/runner/main.cpp`); the app ships the Swift runtime's DLLs
+beside its executable. Push (needs the relay settings from a Mac build's `Info.plist`) and the
+network-change and wake triggers are Mac only: Windows polls. A build has no OAuth client of its
+own, so the first sign-in asks for one.
+
+Build from Git Bash with Swift 6.3 for Windows, rustup (MSVC) and Flutter:
+
+```sh
+CONFIG=release DART_OUT=$PWD/Flutter/packages/mailstream/lib/src ./scripts/ffi.sh
+(cd FFI && cargo run --release --example smoke)  # engine check on a profile without sign-ins
+cd Flutter && flutter build windows --release    # build/windows/x64/runner/Release
+```
+
+`.github/workflows/windows.yml` does the same on every push of `main` and `ms91/*`, runs the
+smoke test, starts the app without Swift on PATH, screenshots it and keeps the folder as
+`Mailstream-Flutter-Windows.zip` (unsigned).
+
 ## Build and run
 
 ```sh

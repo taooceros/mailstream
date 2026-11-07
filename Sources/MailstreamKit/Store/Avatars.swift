@@ -1,6 +1,20 @@
+#if canImport(AppKit)
 import AppKit
+#endif
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
+#if canImport(dnssd)
 import dnssd
+#else
+import CWindows
+#endif
+import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Observation
 import Synchronization
 
@@ -18,9 +32,11 @@ final class AvatarStore {
     private(set) var revision = 0
 
     @ObservationIgnored private let resolver: AvatarResolver
+    #if canImport(AppKit)
     @ObservationIgnored private let images = NSCache<NSString, NSImage>()
     @ObservationIgnored private let pngs = NSCache<NSString, NSData>()
     @ObservationIgnored private let large = NSCache<NSString, NSImage>()
+    #endif
     @ObservationIgnored private var missing = Set<String>()
     @ObservationIgnored private var pending = Set<String>()
     /// Address or Chat user id (`users/…`) → the picture that person publishes.
@@ -72,9 +88,12 @@ final class AvatarStore {
         guard !key.isEmpty, published[key] != url else { return }
         published[key] = url
         missing.remove(key)
+        #if canImport(AppKit)
         if images.object(forKey: key as NSString) != nil { request(key, automated: false) }
+        #endif
     }
 
+    #if canImport(AppKit)
     /// The picture for `key` (an address, or a Chat user id with a published picture) when it is
     /// already known; otherwise starts looking and returns nil, bumping `revision` if one turns up.
     /// `automated` allows the domain's site icon.
@@ -102,6 +121,7 @@ final class AvatarStore {
         else { return nil }
         return keep(decoded, in: large, as: key)
     }
+    #endif
 
     /// The file holding `key`'s picture at the row size, looked up first if it is not cached;
     /// nil when there is none. For front ends that draw from files.
@@ -116,6 +136,7 @@ final class AvatarStore {
     /// contact directory has been fetched once.
     func directoryPeople() async -> [DirectoryPerson] { await resolver.people() }
 
+    #if canImport(AppKit)
     /// `cache`'s entry for the lowercased `key`; a miss starts looking for the picture.
     private func lookUp<Object: AnyObject>(_ cache: NSCache<NSString, Object>, _ key: String, automated: Bool) -> Object? {
         if let object = cache.object(forKey: key as NSString) { return object }
@@ -157,6 +178,7 @@ final class AvatarStore {
             revision += 1
         }
     }
+    #endif
 }
 
 /// Finds and caches one normalized PNG per sender and size: 96 px for rows and the reader, 512 px
@@ -788,6 +810,7 @@ actor AvatarResolver {
     /// then it sits inside on white like an icon.
     private nonisolated enum Style { case photo, logo, icon }
 
+    #if canImport(AppKit)
     /// A square PNG at the drawn size: photos and logos fill it; site icons sit inside on white,
     /// as their transparent corners and odd shapes don't survive a circular crop. Decodes off the
     /// resolver, so lookups holding permits decode in parallel.
@@ -830,6 +853,29 @@ actor AvatarResolver {
         }
         return rep.representation(using: .png, properties: [:])
     }
+    #else
+    /// A square PNG at the drawn size: photos and logos fill it; site icons sit inside on white,
+    /// as their transparent corners and odd shapes don't survive a circular crop. Decoded and drawn
+    /// by the Windows Imaging Component, off the resolver.
+    @concurrent private nonisolated static func normalize(_ data: Data, style: Style, side: Int) async -> Data? {
+        var pixels: Int32 = 0
+        var cornersClear: Int32 = 0
+        let png = data.withUnsafeBytes { bytes -> Data? in
+            var png: UnsafeMutablePointer<UInt8>?
+            var length = 0
+            let mode = Int32(style == .icon ? MS_IMAGE_INSET : MS_IMAGE_FILL)
+            guard ms_image_draw(bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count, mode, Int32(side),
+                                &png, &length, &pixels, &cornersClear) == 0, let png else { return nil }
+            defer { ms_free(png) }
+            return Data(bytes: png, count: length)
+        }
+        guard let png else { return nil }
+        // Raster icons must be big enough to scale down cleanly.
+        if style == .icon, pixels < 32 { return nil }
+        if style == .logo, cornersClear != 0 { return await normalize(data, style: .icon, side: side) }
+        return png
+    }
+    #endif
 }
 
 /// DNS TXT lookups through the system resolver, without blocking; empty after 4 s or on failure.
@@ -849,6 +895,7 @@ nonisolated enum DNSText {
     }
 }
 
+#if canImport(dnssd)
 /// One query. DNSService has no async API and answers only on a dispatch queue, so this bridge
 /// keeps one; a `Mutex` guards the state its callbacks share with the caller.
 private nonisolated final class TXTQuery: Sendable {
@@ -925,6 +972,62 @@ private nonisolated final class TXTQuery: Sendable {
         continuation?.resume(returning: records)
     }
 }
+#else
+/// One query through Windows' asynchronous `DnsQueryEx`, which answers on a system thread; a
+/// `Mutex` guards the state its callback shares with the caller.
+private nonisolated final class TXTQuery: Sendable {
+    private struct State {
+        var continuation: CheckedContinuation<[String], Never>?
+        /// Held until this object goes, so `cancel` never meets a released query.
+        var query: OpaquePointer?
+        var finished = false
+    }
+
+    private let state = Mutex(State())
+
+    deinit {
+        if let query = state.withLock({ $0.query }) { ms_dns_txt_release(query) }
+    }
+
+    func start(_ name: String, _ continuation: CheckedContinuation<[String], Never>) {
+        let finished = state.withLock { state in
+            if !state.finished { state.continuation = continuation }
+            return state.finished
+        }
+        // Cancelled before it began.
+        if finished { return continuation.resume(returning: []) }
+        // The callback runs exactly once and releases this retain.
+        let context = Unmanaged.passRetained(self).toOpaque()
+        let query = ms_dns_txt_start(name, { context, records, count in
+            guard let context else { return }
+            let texts = (0..<count).compactMap { records?[$0].map { String(cString: $0) } }
+            Unmanaged<TXTQuery>.fromOpaque(context).takeRetainedValue().finish(texts)
+        }, context)
+        guard let query else {
+            Unmanaged<TXTQuery>.fromOpaque(context).release()
+            return finish([])
+        }
+        state.withLock { $0.query = query }
+    }
+
+    /// Ends the query with what it has.
+    func cancel() {
+        let query = state.withLock { state -> OpaquePointer? in
+            if state.query == nil { state.finished = true }
+            return state.query
+        }
+        if let query { ms_dns_txt_cancel(query) } else { finish([]) }
+    }
+
+    private func finish(_ records: [String]) {
+        let continuation = state.withLock { state in
+            defer { state.continuation = nil; state.finished = true }
+            return state.continuation
+        }
+        continuation?.resume(returning: records)
+    }
+}
+#endif
 
 /// An account whose contacts give sender photos.
 nonisolated struct PhotoAccount: Sendable {

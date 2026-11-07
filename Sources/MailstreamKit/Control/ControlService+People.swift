@@ -9,9 +9,8 @@ extension ControlService {
         let query = args.string("query") ?? ""
         guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
         let limit = min(max(args.int("limit") ?? 10, 1), 12)
-        let completion = RecipientCompletion()
-        completion.contacts = await contacts()
-        return .array(completion.suggestions(for: query).prefix(limit).map { contact in
+        let contacts = await contacts()
+        return .array(Contact.suggestions(for: query, in: contacts).prefix(limit).map { contact in
             let address = contact.address
             let name = address.displayName == address.email ? nil : address.displayName
             return ["name": name.json, "email": .string(address.email)]

@@ -25,13 +25,21 @@ nonisolated struct ToolEnvironment: Sendable {
     }
 
     /// Executable files called `name` on the recovered PATH, in PATH order, one per resolved target.
+    /// On Windows, `name` with the extensions programs run with (`omp.exe`, npm's `omp.cmd`).
     func executables(named name: String) async throws -> [String] {
         let fm = FileManager.default
         var seen = Set<String>()
+        #if os(Windows)
+        let path = try await environment.first { $0.key.uppercased() == "PATH" }?.value ?? ""
+        return path.split(separator: ";")
+            .flatMap { dir in ["exe", "cmd"].map { "\(dir)\\\(name).\($0)" } }
+            .filter { fm.fileExists(atPath: $0) && seen.insert($0.lowercased()).inserted }
+        #else
         return (try await environment["PATH"] ?? "").split(separator: ":")
             .map { "\($0)/\(name)" }
             .filter { fm.isExecutableFile(atPath: $0)
                 && seen.insert(URL(fileURLWithPath: $0).resolvingSymlinksInPath().path).inserted }
+        #endif
     }
 
     /// Runs a short-lived command for its output, giving up after three seconds.
@@ -41,9 +49,14 @@ nonisolated struct ToolEnvironment: Sendable {
         return output.map { String(decoding: $0.stdout, as: UTF8.self) }
     }
 
+    /// On Windows a program started from the Start menu already has the user's PATH.
     @concurrent
     private static func recover() async -> [String: String] {
         var env = ProcessInfo.processInfo.environment
+        env["NO_COLOR"] = "1"
+        #if os(Windows)
+        return env
+        #else
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         var dirs: [String] = []
         if let loginPath = await loginShellPath(environment: env) {
@@ -54,8 +67,8 @@ nonisolated struct ToolEnvironment: Sendable {
         var seen = Set<String>()
         dirs = dirs.filter { !$0.isEmpty && seen.insert($0).inserted }
         env["PATH"] = dirs.joined(separator: ":")
-        env["NO_COLOR"] = "1"
         return env
+        #endif
     }
 
     private static func loginShellPath(environment: [String: String]) async -> String? {

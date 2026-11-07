@@ -70,6 +70,18 @@ nonisolated struct Contact: Sendable {
         keys.contains { $0.hasPrefix(needle) }
     }
 
+    /// People in `contacts` (best first) whose name, a word of it, or address starts with `typed`,
+    /// leaving out the normalized addresses in `taken`; an address typed out in full first of all.
+    static func suggestions(for typed: String, in contacts: [Contact], taken: Set<String> = []) -> [Contact] {
+        let needle = fold(typed.trimmingCharacters(in: .whitespaces))
+        guard !needle.isEmpty else { return [] }
+        var matches = Array(contacts.lazy.filter { !taken.contains($0.address.normalizedEmail) && $0.matches(needle) }.prefix(12))
+        if let exact = matches.firstIndex(where: { fold($0.address.email) == needle }) {
+            matches.insert(matches.remove(at: exact), at: 0)
+        }
+        return matches
+    }
+
     /// `Name <address>` as a completion shows it, without the characters that end a token, so
     /// picking it gives one token.
     static func label(_ address: Address) -> String {

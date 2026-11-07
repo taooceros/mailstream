@@ -1043,19 +1043,12 @@ final class AvatarView: NSView {
     }
 }
 
-/// A sender's letter and a stable per-address color, shared by the sidebar and the reader.
-enum Avatar {
+/// A sender's stable per-address color, shared by the sidebar and the reader.
+extension Avatar {
     nonisolated static func color(for email: String) -> NSColor {
         let palette: [NSColor] = [.systemBlue, .systemPurple, .systemPink, .systemRed, .systemOrange,
                                   .systemGreen, .systemTeal, .systemIndigo, .systemBrown, .systemMint, .systemCyan]
         return palette[stableIndex(of: email.lowercased(), in: palette.count)]
-    }
-
-    /// The first letter of the name (or the address), uppercased; "?" when there is none.
-    nonisolated static func initials(for address: Address) -> String {
-        let name = address.displayName.trimmingCharacters(in: .whitespaces)
-        guard let first = name.first(where: { $0.isLetter || $0.isNumber }) else { return "?" }
-        return String(first).uppercased()
     }
 }
 

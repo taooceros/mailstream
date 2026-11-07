@@ -123,8 +123,9 @@ nonisolated enum HeaderText {
 
     /// `data` in `charset` (IANA name), else UTF-8, else ISO-8859-1.
     static func string(_ data: Data, charset: String?) -> String {
-        if let charset, let encoding = encoding(charset), let text = String(data: data, encoding: encoding) {
-            return text
+        if let charset {
+            let name = charset.lowercased()
+            if let text = Platform.decode(data, charset: aliases[name] ?? name) { return text }
         }
         if let text = String(data: data, encoding: .utf8) { return text }
         return String(data: data, encoding: .isoLatin1) ?? ""
@@ -145,13 +146,6 @@ nonisolated enum HeaderText {
     /// Supersets of charsets senders commonly mislabel.
     private static let aliases = ["gb2312": "gb18030", "gbk": "gb18030", "x-gbk": "gb18030",
                                   "iso-8859-1": "windows-1252", "latin1": "windows-1252"]
-
-    private static func encoding(_ charset: String) -> String.Encoding? {
-        let name = charset.lowercased()
-        let cf = CFStringConvertIANACharSetNameToEncoding((aliases[name] ?? name) as CFString)
-        guard cf != kCFStringEncodingInvalidId else { return nil }
-        return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cf))
-    }
 
     private static func quoted(_ text: Substring) -> Data {
         var bytes = Data()
