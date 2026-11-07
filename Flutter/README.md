@@ -60,6 +60,14 @@ HTML mail is drawn by WebKit: `macos/Runner/MailHtmlView.swift` is a platform vi
 remote images without cookies, zooms out a body wider than the column, and reports its
 content height so the body scrolls with the conversation.
 
+Conversation changes fade the reader without scaling its native viewport. The scale-in
+transition can leave native WebKit content offset relative to the Flutter body card (MS-82).
+The HTML, card insets and WebKit sizing stay unchanged.
+`flutter test test/reader_transition_test.dart` checks both readers throughout a conversation
+switch. For native rendering/selection/scroll/resize checks without private mail, run
+`flutter run -d macos -t test/html_alignment_app.dart`: open either synthetic conversation,
+switch between them, scroll the long one, resize the window and close/reopen the reader.
+
 The open reader follows the normal conversation-list updates: a changed message count or latest
 date refreshes that conversation's cached bodies and summary, without closing the pane or
 clearing the content while it loads. Unchanged threads (including flag/tag-only updates) keep

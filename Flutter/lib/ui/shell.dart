@@ -604,10 +604,12 @@ class _MailShellState extends State<MailShell> {
         child: AnimatedSwitcher(
           duration: Motion.medium,
           switchInCurve: Motion.curve,
-          // Fade through: the old conversation fades out as the next one scales in.
+          // Keep WebKit's native viewport unscaled: its asynchronously composited page
+          // can drift relative to the Flutter card during a scale transition (MS-82).
+          // Fading preserves the transition without changing native clip geometry.
           transitionBuilder: (child, animation) => FadeTransition(
             opacity: animation,
-            child: ScaleTransition(scale: Tween(begin: 0.98, end: 1.0).animate(animation), child: child),
+            child: child,
           ),
           child: KeyedSubtree(
             key: ValueKey(opened.id),
