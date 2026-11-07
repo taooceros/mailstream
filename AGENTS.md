@@ -54,11 +54,15 @@ Work is tracked in Linear: team `MS`, split into projects by effort. Issue IDs l
   there is none), comment what it waits for, move it out of In Progress (to Backlog) so the
   workspace frees up, and stop. When every blocker reaches In Review, Done or Canceled, the poll
   hands the issue out again and its agent carries on from the comments.
-- Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work),
-  move it to In Review and comment what changed, how it was verified and what remains. The user
-  moves it to Done. If the issue has a parent, check its other sub-issues: when none is left in
-  Backlog, Todo or In Progress, finish the parent too (a summary comment listing each sub-issue
-  and what remains, then In Review). Nobody else picks up a parent an agent filed.
+- Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work).
+  After targeted verification, commit and integrate into current `main`, then install affected
+  already-installed front ends as signed releases using the delivery procedure below. A commit,
+  passing tests, or a Debug/test app alone is not completion. Only after installed-copy smoke
+  verification, move the issue to In Review and comment the changes, deployed commit, exact
+  `/Applications` targets, checks and remaining limitations; the user moves it to Done. If the
+  issue has a parent, check its other sub-issues: when none is left in Backlog, Todo or In
+  Progress, finish the parent too (a summary listing each sub-issue and what remains, then In
+  Review). Nobody else picks up a parent an agent filed.
 - UI changes (a new or changed view, flow or interaction, in any front end): take screenshots
   of the running app showing the change, every state it adds included, and attach them to the
   finishing comment. Work without them is not ready for review.
@@ -100,8 +104,8 @@ Work is tracked in Linear: team `MS`, split into projects by effort. Issue IDs l
 - Check with `swift build` and launch with `scripts/run.sh`: both use the incremental debug build
   (seconds per edit). A release build (`scripts/bundle.sh`, `CONFIG=release`) re-optimizes the
   whole module single-threaded, ~30 s per edit; build it only to check performance or ship.
-- Deploying to `/Applications/Mailstream.app` is always a release build: `CONFIG=release
-  ./scripts/bundle.sh`, then replace the bundle (the running copy keeps working until relaunched).
+- Finished fixes are delivered to `/Applications` automatically as part of the agent's work,
+  not only on a separate request. Use the release delivery procedure below; never deploy Debug.
 - All Swift code is in the `MailstreamKit` target (`Sources/MailstreamKit`); the `Mailstream`
   executable only calls `MailstreamApp.main()`. `MailstreamKit` is also the dynamic library FFI
   front ends load: `scripts/ffi.sh` builds it with the UniFFI crate in `FFI/`. New commands go in
@@ -110,6 +114,42 @@ Work is tracked in Linear: team `MS`, split into projects by effort. Issue IDs l
   engine keeps the state every front end shares (the open chat space and its history, as for
   the native reader); front ends re-read it on the engine's change events.
 - Test only what you changed: build, then exercise the parts your change touches (the view, flow or command you edited). Do not re-run the whole app checklist or every CLI case after each change; we iterate in small steps.
+
+### Release delivery after verification
+
+1. Determine affected front ends from changed code/callers and the apps actually installed in
+   `/Applications`: `native` = `Mailstream.app`, `flutter` = `Mailstream Flutter.app`, `gpui` =
+   `Mailstream GPUI.app`. A shared backend/FFI change includes every installed front end that
+   consumes it, not only the UI used during development. Do not install unrelated/new front ends.
+   Tooling-only changes normally need no app replacement; changes to this delivery path must
+   exercise it against the installed targets. Do not claim another issue's pending checks passed.
+2. After targeted tests/smoke checks, describe the issue-referencing commit, `jj new`, integrate
+   it into live `main` without losing other agents' changes, and push. Read
+   `skill://mailstream-install-frontend` when available. Create a uniquely named private build
+   workspace with `jj workspace add --name <unique-build-name> -r main <unused-path>`. Never
+   move an area's `@` or build from the stale default checkout/old front-end bookmarks. Do not
+   copy `target/` or `.build/` from another workspace; keep rcache enabled.
+3. In that fresh workspace run `./scripts/install.sh <affected targets>` (for example,
+   `./scripts/install.sh flutter` or `./scripts/install.sh native flutter gpui`). It refuses
+   stale/modified source and missing installed targets, builds release using the existing
+   scripts, records `MSInstalledRevision` in the bundle, requires shared Apple Development
+   signing (team `K7HG6KZNNP`, signing identifier `dev.mailstream.Mailstream`), verifies the
+   signature, and replaces only those installed bundles. If main advances during the build,
+   rebuild from its new tip. It only terminates the matching `/Applications` executable, never
+   another agent's Debug, `/tmp`, test or workspace process; do not use broad `pkill`/`killall`.
+   Deployments are serialized by `/tmp/mailstream-release-install.lock`; coordinate with its
+   owner rather than deleting another agent's lock or overwriting a newer installed release.
+4. Launch each exact `/Applications/...app` with computer helpers. Verify the running executable,
+   bundle revision and `codesign --verify --deep --strict`; inspect the real window for loaded
+   UI/engine data, and exercise the affected behavior without sending mail or destructive actions.
+   For GPUI also check `otool -l` has no workspace rpath and `vmmap <pid>` loads
+   `libMailstreamKit.dylib` from the installed bundle. Keep personal content out of public
+   screenshots/logs. A build, `open` success or a process name alone is not UI/engine proof.
+5. Record actual evidence on the issue, not an unperformed checklist. If installation, signing,
+   launch or smoke verification fails, record the exact blocker rather than reporting success.
+   Only after successful smoke checks, forget and remove your own temporary build workspace
+   (including its retained previous bundles); preserve all pre-existing workspaces/artifacts.
+
 
 ## Performance: 120 fps
 
