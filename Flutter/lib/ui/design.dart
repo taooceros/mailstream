@@ -18,6 +18,7 @@ abstract final class MailTheme {
 final class MailColors {
   const MailColors._({
     required this.brightness,
+    required this.window,
     required this.background,
     required this.tray,
     required this.label,
@@ -42,6 +43,7 @@ final class MailColors {
 
   static const light = MailColors._(
     brightness: Brightness.light,
+    window: Color(0xFFE4E5EA),
     background: MacosColors.white,
     tray: Color(0xFFF5F6FA),
     label: Color(0xFF1D1D1F),
@@ -66,6 +68,7 @@ final class MailColors {
 
   static const dark = MailColors._(
     brightness: Brightness.dark,
+    window: Color(0xFF2A2A2D),
     background: Color(0xFF1E1E1E),
     tray: Color(0xFF18181A),
     label: Color(0xFFF5F5F7),
@@ -89,6 +92,10 @@ final class MailColors {
   );
 
   final Brightness brightness;
+
+  /// The window behind the islands where no system glass is under the Flutter view (Windows):
+  /// set apart from [background] and [tray], as the Mac's glass reads behind the islands.
+  final Color window;
 
   /// Islands, sheets and fields.
   final Color background;

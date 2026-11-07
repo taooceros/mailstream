@@ -7,6 +7,7 @@ import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
 
 import '../backend/models.dart';
+import '../platform.dart';
 import 'design.dart';
 
 /// A sender's picture from the app's avatar cache (else one at `photoUrl`, such as the picture
@@ -423,19 +424,22 @@ class Selectable extends StatelessWidget {
 
 const _window = MethodChannel('mailstream/window');
 
-/// The title bar area: drags the window, double-click zooms it.
+/// The title bar area: drags the window, double-click zooms it. Off the Mac the system's own
+/// title bar moves and maximizes the window, and this is only [child].
 class WindowDragArea extends StatelessWidget {
   const WindowDragArea({super.key, required this.child});
 
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
-    behavior: HitTestBehavior.translucent,
-    onPanStart: (_) => _window.invokeMethod<void>('drag'),
-    onDoubleTap: () => _window.invokeMethod<void>('zoom'),
-    child: child,
-  );
+  Widget build(BuildContext context) => !Host.mac
+      ? child
+      : GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onPanStart: (_) => _window.invokeMethod<void>('drag'),
+          onDoubleTap: () => _window.invokeMethod<void>('zoom'),
+          child: child,
+        );
 }
 
 /// SF Symbols' mailbox glyphs, as Mail's sidebar shows them.

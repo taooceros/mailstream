@@ -4,10 +4,12 @@ import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
+import 'package:path/path.dart' as p;
 
 import 'package:mailstream/mailstream.dart' as engine;
 
 import '../backend/models.dart';
+import '../platform.dart';
 import '../state/mail_state.dart';
 import 'common.dart';
 import 'design.dart';
@@ -15,9 +17,11 @@ import 'format.dart';
 import 'glass.dart';
 import 'people.dart';
 
-/// The window's files (`MainFlutterWindow`): `accept` turns drops on the window on or off,
-/// `pick` shows an open panel and `pasted` answers the files on the clipboard; the window calls
-/// back with `hover` and `drop`.
+/// The window's files (`MainFlutterWindow` on the Mac, `windows/runner/window_channels.cpp` on
+/// Windows): `accept` turns drops on the window on or off, `editing` says whether the compose
+/// column has focus, `pick` shows an open panel and `pasted` answers the files on the clipboard
+/// (copied image pixels written to a PNG first); the window calls back with `hover` and `drop`,
+/// and on the Mac with `paste` from the Edit menu.
 const _files = MethodChannel('mailstream/files');
 
 enum _Field {
@@ -274,7 +278,7 @@ class _ComposeTabBar extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 4),
-            ToolButton(tooltip: 'New draft tab (⌘N)', icon: CupertinoIcons.plus, onPressed: state.composeNew),
+            ToolButton(tooltip: 'New draft tab (${Host.shortcut('N')})', icon: CupertinoIcons.plus, onPressed: state.composeNew),
           ],
         ),
       ),
@@ -369,8 +373,8 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
 
   Future<void> _pick() async => attach(await _files.invokeListMethod<String>('pick') ?? const []);
 
-  /// AppKit's Edit > Paste enters here; dispatch through EditableText's overridable action
-  /// so ordinary text retains the editor's selection, caret and undo behavior.
+  /// The Mac's Edit > Paste, and Ctrl+V off the Mac, enter here; dispatch through EditableText's
+  /// overridable action so ordinary text retains the editor's selection, caret and undo behavior.
   void paste() {
     final focused = primaryFocus?.context;
     if (focused != null) Actions.maybeInvoke(focused, const PasteTextIntent(SelectionChangedCause.keyboard));
@@ -472,8 +476,10 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
       actions: {PasteTextIntent: AttachmentPasteAction(_pasteAttachments)},
       child: CallbackShortcuts(
         bindings: {
-          const SingleActivator(LogicalKeyboardKey.enter, meta: true): _send,
-          const SingleActivator(LogicalKeyboardKey.keyW, meta: true): requestClose,
+          Host.command(LogicalKeyboardKey.enter): _send,
+          Host.command(LogicalKeyboardKey.keyW): requestClose,
+          // The Mac's Edit menu takes ⌘V before Flutter and calls `paste` through the channel.
+          if (!Host.mac) Host.command(LogicalKeyboardKey.keyV): paste,
           const SingleActivator(LogicalKeyboardKey.escape): _escape,
         },
         child: Column(
@@ -554,7 +560,7 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
   /// A file's name and size, and a button removing it.
   Widget _attachmentChip(BuildContext context, String path) {
     final size = d.attachmentSizes[path];
-    final name = path.substring(path.lastIndexOf('/') + 1);
+    final name = p.basename(path);
     return MacosTooltip(
       message: path,
       child: ConstrainedBox(
@@ -631,7 +637,7 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                ToolButton(tooltip: 'Close draft (⌘W)', icon: CupertinoIcons.xmark, onPressed: d.sending ? null : requestClose),
+                ToolButton(tooltip: 'Close draft (${Host.shortcut('W')})', icon: CupertinoIcons.xmark, onPressed: d.sending ? null : requestClose),
                 ToolButton(
                   tooltip: 'Minimize to bottom-right',
                   icon: CupertinoIcons.minus,
@@ -650,7 +656,7 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (state.composes.length == 1)
-                  ToolButton(tooltip: 'New message (⌘N)', icon: CupertinoIcons.plus, onPressed: state.composeNew),
+                  ToolButton(tooltip: 'New message (${Host.shortcut('N')})', icon: CupertinoIcons.plus, onPressed: state.composeNew),
                 if (!floating)
                   ToolButton(
                     tooltip: state.composeSwapped ? 'Move column to right edge' : 'Swap column position',
@@ -672,7 +678,7 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
           ),
           const SizedBox(width: 8),
           MacosTooltip(
-            message: '⌘ Return',
+            message: Host.shortcut('Return'),
             child: PushButton(
               controlSize: ControlSize.large,
               onPressed: d.sending ? null : _send,
@@ -863,7 +869,7 @@ class StashedComposeBar extends StatelessWidget {
               ),
             ),
           ),
-          ToolButton(tooltip: 'New draft (⌘N)', icon: CupertinoIcons.plus, onPressed: state.composeNew),
+          ToolButton(tooltip: 'New draft (${Host.shortcut('N')})', icon: CupertinoIcons.plus, onPressed: state.composeNew),
         ],
       ),
     );

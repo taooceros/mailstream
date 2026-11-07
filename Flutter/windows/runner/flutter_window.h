@@ -7,8 +7,10 @@
 #include <memory>
 
 #include "win32_window.h"
+#include "window_channels.h"
 
-// A window that does nothing but host a Flutter view.
+// The app's window: hosts the Flutter view and the channels the Dart UI asks
+// the window for (files, opening files and links).
 class FlutterWindow : public Win32Window {
  public:
   // Creates a new FlutterWindow hosting a Flutter view running |project|.
@@ -28,6 +30,9 @@ class FlutterWindow : public Win32Window {
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
+
+  // `mailstream/files` and `mailstream/shell`.
+  std::unique_ptr<WindowChannels> channels_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

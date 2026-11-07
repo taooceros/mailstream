@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
 
 import '../backend/models.dart';
+import '../platform.dart';
 import '../state/mail_state.dart';
 import 'common.dart';
 import 'compose.dart';
@@ -403,6 +404,8 @@ class _AttachmentChip extends StatelessWidget {
 }
 
 /// A body: HTML mail on a white sheet, as mail is designed for; plain text in the theme's type.
+/// HTML is drawn by WebKit on the Mac; Windows has no HTML view yet (MS-106) and shows the
+/// message's text under a notice saying so ([HtmlTextFallback]).
 class _Body extends StatelessWidget {
   const _Body({required this.conversation, required this.message});
 
@@ -415,6 +418,7 @@ class _Body extends StatelessWidget {
     if (message.error != null) return Text(message.error!, style: context.text.body.copyWith(color: colors.red));
     final html = message.html;
     if (html != null && html.trim().isNotEmpty) {
+      if (!Host.mac) return HtmlTextFallback(key: ValueKey(message.id), text: message.text, html: html);
       return Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
@@ -430,6 +434,82 @@ class _Body extends StatelessWidget {
       );
     }
     return FoldedText(text: message.text ?? '');
+  }
+}
+
+/// An HTML body where the app has no HTML view (Windows, until MS-106): a small notice that the
+/// HTML is not shown, then the message's text drawn as plain text ([FoldedText]). The text is
+/// the engine's (the message's text part, else its HTML read as text); when that is empty, the
+/// HTML's text is read here, in a background isolate ([toText]).
+class HtmlTextFallback extends StatefulWidget {
+  const HtmlTextFallback({super.key, required this.text, required this.html, this.toText = htmlTextInBackground});
+
+  final String? text;
+  final String html;
+  final Future<String> Function(String html) toText;
+
+  static const notice = "This message is shown as plain text: HTML mail isn't drawn on Windows yet (MS-106).";
+
+  @override
+  State<HtmlTextFallback> createState() => _HtmlTextFallbackState();
+}
+
+class _HtmlTextFallbackState extends State<HtmlTextFallback> {
+  String? _derived;
+  int _request = 0;
+
+  String? get _given => (widget.text?.trim().isEmpty ?? true) ? null : widget.text;
+
+  @override
+  void initState() {
+    super.initState();
+    _derive();
+  }
+
+  @override
+  void didUpdateWidget(HtmlTextFallback old) {
+    super.didUpdateWidget(old);
+    if (old.html != widget.html || old.text != widget.text) _derive();
+  }
+
+  void _derive() {
+    final request = ++_request;
+    _derived = null;
+    if (_given != null) return;
+    widget.toText(widget.html).then((text) {
+      if (mounted && request == _request) setState(() => _derived = text);
+    }, onError: (Object error, StackTrace stack) {
+      FlutterError.reportError(FlutterErrorDetails(exception: error, stack: stack, library: 'mail HTML'));
+      if (mounted && request == _request) setState(() => _derived = '');
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final text = _given ?? _derived;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: MacosIcon(CupertinoIcons.info_circle, size: 13, color: colors.secondaryLabel),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(HtmlTextFallback.notice, style: context.text.subheadline.copyWith(color: colors.secondaryLabel)),
+          ),
+        ]),
+        const SizedBox(height: 10),
+        if (text == null)
+          const SizedBox(height: 40, child: Center(child: Spinner()))
+        else if (text.trim().isEmpty)
+          Text('This message has no text.', style: context.text.body.copyWith(color: colors.secondaryLabel))
+        else
+          FoldedText(text: text),
+      ],
+    );
   }
 }
 
@@ -1046,8 +1126,8 @@ class _ComposerState extends State<_Composer> {
     final text = context.text;
     return CallbackShortcuts(
       bindings: {
-        const SingleActivator(LogicalKeyboardKey.enter, meta: true): _send,
-        const SingleActivator(LogicalKeyboardKey.keyO, meta: true, shift: true): _popOut,
+        Host.command(LogicalKeyboardKey.enter): _send,
+        Host.command(LogicalKeyboardKey.keyO, shift: true): _popOut,
         const SingleActivator(LogicalKeyboardKey.escape): () {
           if (_text.text.trim().isEmpty) {
             _discard();
@@ -1091,7 +1171,7 @@ class _ComposerState extends State<_Composer> {
                   onPressed: () => widget.onAll(!widget.all),
                 ),
                 ToolButton(
-                  tooltip: 'Open in compose column (⌘⇧O)',
+                  tooltip: 'Open in compose column (${Host.shortcut('O', shift: true)})',
                   icon: CupertinoIcons.sidebar_right,
                   onPressed: _popOut,
                 ),
@@ -1110,7 +1190,7 @@ class _ComposerState extends State<_Composer> {
               const SizedBox(height: 12),
               Row(children: [
                 Expanded(
-                  child: Text('The original is quoted below your text.  ⌘ Return sends.',
+                  child: Text('The original is quoted below your text.  ${Host.shortcut('Return')} sends.',
                       style: text.subheadline.copyWith(color: colors.secondaryLabel)),
                 ),
                 PushButton(

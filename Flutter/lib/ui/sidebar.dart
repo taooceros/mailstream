@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
 
 import '../backend/models.dart';
+import '../platform.dart';
 import '../state/mail_state.dart';
 import 'common.dart';
 import 'design.dart';
@@ -172,7 +173,8 @@ class Rail extends StatelessWidget {
       child: Column(children: [
         WindowDragArea(
           child: Padding(
-            padding: const EdgeInsets.only(top: 36, bottom: 8),
+            // Room under the Mac's traffic lights; Windows' title bar is above the content.
+            padding: EdgeInsets.only(top: Host.mac ? 36 : 8, bottom: 8),
             child: Center(child: ToolButton(tooltip: 'Show sidebar', icon: CupertinoIcons.sidebar_left, onPressed: onMenu)),
           ),
         ),

@@ -43,6 +43,29 @@ HtmlParts splitMailHtml(String html) {
   return (document.outerHtml, '<html>$head<body>$quoted</body></html>');
 }
 
+/// The text of an HTML body, read in a background isolate, for a reader without an HTML view.
+Future<String> htmlTextInBackground(String html) => Isolate.run(() => mailHtmlText(html), debugName: 'mail-html-text');
+
+/// Block elements end their line in [mailHtmlText].
+const _blocks = 'p, div, tr, li, h1, h2, h3, h4, h5, h6, table, blockquote, pre, ul, ol, section, article, header, footer';
+
+/// [html]'s visible text: no scripts, styles or head; line breaks and blocks end lines.
+String mailHtmlText(String html) {
+  final document = html_parser.parse(html);
+  final body = document.body;
+  if (body == null) return '';
+  for (final hidden in body.querySelectorAll('script, style, template')) {
+    hidden.remove();
+  }
+  for (final br in body.querySelectorAll('br')) {
+    br.replaceWith(dom.Text('\n'));
+  }
+  for (final block in body.querySelectorAll(_blocks)) {
+    block.append(dom.Text('\n'));
+  }
+  return body.text;
+}
+
 /// Reopening/rebuilding unchanged mail reuses its parts, including in-flight work.
 /// One active isolate bounds CPU pressure when a thread contains many HTML messages.
 class HtmlPartsCache {

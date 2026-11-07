@@ -3,6 +3,7 @@ import 'package:macos_ui/macos_ui.dart';
 
 import 'package:mailstream/mailstream.dart' as engine;
 
+import 'platform.dart';
 import 'state/mail_state.dart';
 import 'ui/design.dart';
 import 'ui/frame_rate.dart';
@@ -11,8 +12,8 @@ import 'ui/shell.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // macos_ui's controls dim with the window and follow the accent color through the window
-  // delegate macos_window_utils installs.
-  await WindowManipulator.initialize(enableWindowDelegate: true);
+  // delegate macos_window_utils installs. The plugin is the Mac's alone.
+  if (Host.mac) await WindowManipulator.initialize(enableWindowDelegate: true);
   // The engine starts in this process: it paints from the shared cache and syncs every account.
   final state = MailState(engine.Mailstream())..start();
   runApp(MailstreamApp(state: state));
@@ -30,6 +31,11 @@ class MailstreamApp extends StatelessWidget {
     theme: MailTheme.macos(Brightness.light),
     darkTheme: MailTheme.macos(Brightness.dark),
     home: MailShell(state: state),
-    builder: (context, child) => FrameRateLayer(state: state, child: child!),
+    // On the Mac the window's glass shows around the islands; elsewhere nothing is under the
+    // Flutter view, so the app paints the window's color itself.
+    builder: (context, child) {
+      final layer = FrameRateLayer(state: state, child: child!);
+      return Host.mac ? layer : ColoredBox(color: context.colors.window, child: layer);
+    },
   );
 }

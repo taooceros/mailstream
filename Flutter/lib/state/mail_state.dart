@@ -2,11 +2,17 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import 'package:mailstream/mailstream.dart' as engine;
 
 import '../backend/models.dart';
+import '../platform.dart';
 import 'chat_state.dart';
+
+/// Off the Mac, the runner opens files and links (`windows/runner/window_channels.cpp`: the
+/// shell's default verb, as Explorer's double-click and the browser's link handling do).
+const _shell = MethodChannel('mailstream/shell');
 
 /// What the list shows: one role across every account, or one account's mailbox.
 sealed class Selection {
@@ -877,8 +883,17 @@ class MailState extends ChangeNotifier {
 
   void _sentToast(engine.Sent sent) => showToast('Sent to ${sent.to.map((a) => Address.parse(a).displayName).join(', ')}');
 
-  /// Opens a file in its app, or a link in the browser.
-  void openExternal(String pathOrUrl) => Process.run('open', [pathOrUrl]);
+  /// Opens a file in its app, or a link in the browser: `open` on the Mac, the runner's shell
+  /// elsewhere.
+  void openExternal(String pathOrUrl) {
+    if (Host.mac) {
+      Process.run('open', [pathOrUrl]);
+      return;
+    }
+    _shell.invokeMethod<void>('open', pathOrUrl).catchError((Object error) {
+      _report('Could not open “$pathOrUrl”: ${error is PlatformException ? error.message : error}');
+    });
+  }
 
   // MARK: - Settings and accounts
 

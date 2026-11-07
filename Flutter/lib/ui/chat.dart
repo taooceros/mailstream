@@ -9,6 +9,7 @@ import 'package:mailstream/mailstream.dart' as engine;
 import 'package:video_player/video_player.dart';
 
 import '../backend/models.dart';
+import '../platform.dart';
 import '../state/chat_state.dart';
 import '../state/mail_state.dart';
 import 'chat_markup.dart';
@@ -182,7 +183,7 @@ class _ChatListPaneState extends State<ChatListPane> {
               ),
               GlassCapsule(
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  ToolButton(tooltip: 'Refresh (⌘R)', icon: CupertinoIcons.arrow_clockwise, onPressed: chat.refresh),
+                  ToolButton(tooltip: 'Refresh (${Host.shortcut('R')})', icon: CupertinoIcons.arrow_clockwise, onPressed: chat.refresh),
                   ToolButton(
                     tooltip: 'New chat',
                     icon: CupertinoIcons.square_pencil,
@@ -459,7 +460,7 @@ class _ChatReaderState extends State<ChatReader> {
               child: Row(children: [
                 GlassCapsule(
                   child: ToolButton(
-                    tooltip: widget.twoPane ? 'Close (Esc or ⌘W)' : 'Back (Esc or ⌘W)',
+                    tooltip: '${widget.twoPane ? 'Close' : 'Back'} (Esc or ${Host.shortcut('W')})',
                     icon: widget.twoPane ? CupertinoIcons.xmark : CupertinoIcons.chevron_left,
                     onPressed: widget.onBack,
                   ),
@@ -768,7 +769,9 @@ class _ChatImage extends StatelessWidget {
 }
 
 /// A video sent in Chat, played in the log: clicking downloads it (once) and plays; then a click
-/// pauses or resumes, the bar seeks, and the corner button opens it in QuickTime.
+/// pauses or resumes, the bar seeks, and the corner button opens it in the system's player
+/// (QuickTime on the Mac). `video_player` plays it with AVFoundation on the Mac and, through
+/// `video_player_win`, with Media Foundation on Windows.
 class _ChatVideo extends StatefulWidget {
   const _ChatVideo({super.key, required this.state, required this.account, required this.attachment});
 
@@ -1165,7 +1168,7 @@ class _NewChatDialogState extends State<_NewChatDialog> {
                     _commitTyped();
                   }
                 },
-                const SingleActivator(LogicalKeyboardKey.enter, meta: true): _start,
+                Host.command(LogicalKeyboardKey.enter): _start,
               },
               child: PeopleCompletion(
                 state: widget.state,
