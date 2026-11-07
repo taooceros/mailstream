@@ -1,6 +1,7 @@
 #!/bin/bash
-# One pass over Linear: claims what an omp session should act on now and prints it as JSON lines,
-# which that session hands to subagents, each in its own omp checkout (`isolated: true`).
+# One pass over Linear (`watch`: one a minute until one has output): claims what an omp session
+# should act on now and prints it as JSON lines, which that session hands to subagents, each in
+# its own omp checkout (`isolated: true`).
 #   {"kind": "issue", "id", "identifier", "resume", "unblockedBy"}: an issue to
 #     start. Claimed when it is
 #     - in Todo, created by a workspace member (not an app, a guest or a GitHub import: the repo
@@ -23,14 +24,23 @@
 #     labelled `claimed` whose owner, the agent named in its latest start comment
 #     (`[omp @ <checkout>] start (<agent id>): …`, posted at claimedAt), is not in RUNNING, and
 #     whose claim is at least 10 minutes old. agent is null when no start comment names one. Each
-#     start comment is reported once: whoever takes the issue over posts a new one. Needs RUNNING
-#     (JSON array of the agent ids running now, as the caller sees them); without it nothing is
-#     reported stale. Issues out of In Progress whose owner is not running lose `claimed`.
+#     start comment is reported once: whoever takes the issue over posts a new one. Needs the
+#     agent ids running now, as the caller sees them, as a JSON array: in RUNNING_FILE (re-read
+#     each pass; wins when the file exists) or RUNNING; without either nothing is reported stale.
+#     Issues out of In Progress whose owner is not running lose `claimed`.
 # Claims are kept in ~/.local/state/linear-poll/: `launched` (issue ids), `comments` (comment
 # ids), `unblocked` (issue id and the blocker ids it was claimed with), `stale` (issue id and the
 # start comment reported).
-# DRY_RUN=1 prints without claiming. `linear-poll.sh seen comment|issue <id>` puts omp's 👀 on a
-# comment or issue once the caller has handed it to a subagent, so the user sees it was picked up.
+# DRY_RUN=1 prints without claiming (unclaim lines included). `linear-poll.sh seen comment|issue
+# <id>` puts omp's 👀 on a comment or issue once the caller has handed it to a subagent, so the
+# user sees it was picked up.
+# `linear-poll.sh watch` runs a pass every INTERVAL seconds (default 60) and exits after the first
+# pass that prints lines, with that pass's lines and status; passes with nothing to print (unclaims
+# included) keep it looping silently. A failed pass (network, Linear error, token renewal) is
+# logged to stderr and retried next interval; after MAX_FAILURES (default 10) failures in a row it
+# exits 1. The caller starts it once as a background job with no deadline, waits for its result,
+# handles the lines and starts it again, and rewrites RUNNING_FILE whenever its agents start or
+# finish. With DRY_RUN=1 it exits after the first plan holding a line other than unclaim.
 # The caller hands each issue to a new subagent spawned with `isolated: true`; a finished
 # isolated agent can't be resumed, and the new one picks up from the issue's comments. A user
 # comment on an issue whose agent is still running goes to that agent (`write agent://<id>`),
@@ -55,12 +65,13 @@ gql() {
   local body out renewed=
   body=$(jq -nc --arg q "$1" --argjson v "$2" '{query: $q, variables: $v}')
   while :; do
-    out=$(curl -sS https://api.linear.app/graphql \
+    out=$(curl -sS --max-time 60 https://api.linear.app/graphql \
       -H "Authorization: Bearer $(security find-generic-password -s linear-omp -a access_token -w)" \
-      -H 'Content-Type: application/json' -d "$body")
+      -H 'Content-Type: application/json' -d "$body") || { log "linear request failed"; return 1; }
+    jq -e 'type == "object"' <<<"$out" >/dev/null 2>&1 || { log "linear: unreadable response: ${out:0:200}"; return 1; }
     if [ -z "$renewed" ] && jq -e 'any(.errors[]?; .extensions.code == "AUTHENTICATION_ERROR")' <<<"$out" >/dev/null; then
       log "token rejected; renewing"
-      "$RENEW" >/dev/null
+      "$RENEW" >/dev/null || { log "token renewal failed"; return 1; }
       renewed=1
       continue
     fi
@@ -80,7 +91,30 @@ if [ "${1:-}" = seen ]; then
   exit 0
 fi
 
+if [ "${1:-}" = watch ]; then
+  failures=0
+  while :; do
+    out=$("$0") && status=0 || status=$?
+    # Real passes print only what the caller handles; a dry run also shows unclaim lines.
+    if [ -n "$(grep -v '^{"kind":"unclaim"' <<<"$out")" ]; then
+      echo "$out"
+      exit "$status"
+    fi
+    if [ "$status" = 0 ]; then
+      failures=0
+    else
+      failures=$((failures + 1))
+      if [ "$failures" -ge "${MAX_FAILURES:-10}" ]; then log "pass failed $failures times in a row; giving up"; exit 1; fi
+      log "pass failed (exit $status); retrying in ${INTERVAL:-60}s"
+    fi
+    sleep "${INTERVAL:-60}"
+  done
+fi
+
 RUNNING=${RUNNING:-null}
+if [ -n "${RUNNING_FILE:-}" ] && [ -e "$RUNNING_FILE" ]; then
+  RUNNING=$(jq -ce 'arrays' "$RUNNING_FILE") || { log "RUNNING_FILE $RUNNING_FILE is not a JSON array"; exit 1; }
+fi
 
 DATA=$(gql 'query($team: ID!, $label: String!, $claimed: String!) {
   queued: issues(first: 100, filter: {

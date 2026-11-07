@@ -102,12 +102,15 @@ hashes stay as they are.
 
 ### Polling session
 
-An omp session runs `scripts/linear-poll.sh` every minute and hands the issues it claims, and
-the user's comments, to subagents; the script's header says what it claims and how the session
-picks the agent. When an isolated subagent finishes, its commits sit on top of the default
-checkout's `main`: the session pushes them, delivers them ([Release delivery](#release-delivery))
-and finishes the issue with the evidence. `scripts/linear-omp.sh MS-12` opens one issue in a new
-Tern tab instead.
+An omp session runs `RUNNING_FILE=~/.local/state/linear-poll/running scripts/linear-poll.sh watch`
+as one background bash job with no deadline (`timeout: 0`) and `wait`s on it: the script checks
+Linear every minute and returns only once it has claimed something. The session hands the issues
+it claims, and the user's comments, to subagents, then starts it again. It keeps that file a JSON
+array of its running agent ids, rewritten whenever one starts or finishes; the script re-reads it
+each pass. The script's header says what it claims and how the session picks the agent. When an
+isolated subagent finishes, its commits sit on top of the default checkout's `main`: the session
+pushes them, delivers them ([Release delivery](#release-delivery)) and finishes the issue with the
+evidence. `scripts/linear-omp.sh MS-12` opens one issue in a new Tern tab instead.
 
 ## Building
 
