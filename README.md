@@ -107,6 +107,7 @@ listed under `settingsIssues` in `mailstream status`.
 | `sync.pollSeconds` | `90` | polling while push is down |
 | `sync.pushPollSeconds` | `900` | safety-net polling while push is up |
 | `chat.pollSeconds` | `20` | Google Chat polling |
+| `flutter.showFrameRate` | `false` | frame rate meter in Mailstream Flutter (also its View ▸ Show Frame Rate) |
 
 Every other command goes to the running app over a Unix socket,
 `~/Library/Application Support/Mailstream/control.sock` (mode 0600 in that directory, which the

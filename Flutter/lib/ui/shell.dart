@@ -69,9 +69,26 @@ class _MailShellState extends State<MailShell> {
     FocusManager.instance.addListener(_keepFocus);
     state.addListener(_showToast);
     state.addListener(_offerSignIn);
+    state.addListener(_checkFrameRateMenu);
     _window.setMethodCallHandler((call) async {
-      if (call.method == 'settings') _settings();
+      switch (call.method) {
+        case 'settings':
+          _settings();
+        case 'toggleFrameRate':
+          state.toggleFrameRate();
+      }
     });
+  }
+
+  /// View ▸ Show Frame Rate (⌥⌘P) asks the window channel to toggle `flutter.showFrameRate`;
+  /// the menu item's check mark follows the setting, whoever changes it.
+  bool _frameRateShown = false;
+
+  void _checkFrameRateMenu() {
+    final shown = state.showFrameRate;
+    if (shown == _frameRateShown) return;
+    _frameRateShown = shown;
+    _window.invokeMethod<void>('frameRate', shown);
   }
 
   /// The last toast the engine raised: each one shows once, as a notice floating over the bottom
@@ -123,6 +140,7 @@ class _MailShellState extends State<MailShell> {
     _window.setMethodCallHandler(null);
     state.removeListener(_showToast);
     state.removeListener(_offerSignIn);
+    state.removeListener(_checkFrameRateMenu);
     _toastTimer?.cancel();
     _focus.dispose();
     _searchFocus.dispose();

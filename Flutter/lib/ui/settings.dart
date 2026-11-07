@@ -22,6 +22,7 @@ const _sections = [
   ('Sync', ['sync.', 'chat.']),
   ('AI tagging', ['aiTagging.']),
   ('Remote content', ['remoteContent.']),
+  ('Performance', ['flutter.showFrameRate']),
 ];
 
 /// Short names for the keys; the engine's description sits under each.
@@ -36,6 +37,7 @@ const _titles = {
   'sync.pollSeconds': 'Mail polling',
   'sync.pushPollSeconds': 'Polling while push is connected',
   'chat.pollSeconds': 'Google Chat polling',
+  'flutter.showFrameRate': 'Show frame rate',
 };
 
 class SettingsWindow extends StatelessWidget {

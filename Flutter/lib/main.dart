@@ -5,6 +5,7 @@ import 'package:mailstream/mailstream.dart' as engine;
 
 import 'state/mail_state.dart';
 import 'ui/design.dart';
+import 'ui/frame_rate.dart';
 import 'ui/shell.dart';
 
 Future<void> main() async {
@@ -29,5 +30,6 @@ class MailstreamApp extends StatelessWidget {
     theme: MailTheme.macos(Brightness.light),
     darkTheme: MailTheme.macos(Brightness.dark),
     home: MailShell(state: state),
+    builder: (context, child) => FrameRateLayer(state: state, child: child!),
   );
 }

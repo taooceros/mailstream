@@ -8,6 +8,9 @@ class MainFlutterWindow: NSWindow {
   /// A view-level destination: Flutter's view handles drags before NSWindow gets them.
   private var composeFiles: ComposeFileDropView?
   private var composing = false
+  /// Whether Flutter shows its frame rate meter (`flutter.showFrameRate`), for the check mark of
+  /// View ▸ Show Frame Rate.
+  private var frameRateShown = false
 
   /// The window's Liquid Glass: it fills the window under the Flutter view, which leaves it open
   /// around the islands it paints (the list, the conversation), so the desktop shows through
@@ -50,6 +53,9 @@ class MainFlutterWindow: NSWindow {
         result(nil)
       case "zoom":
         self?.performZoom(nil)
+        result(nil)
+      case "frameRate":
+        self?.frameRateShown = call.arguments as? Bool ?? false
         result(nil)
       default:
         result(FlutterMethodNotImplemented)
@@ -111,6 +117,19 @@ class MainFlutterWindow: NSWindow {
   /// The app menu's Settings… (⌘,), which Flutter opens.
   @objc func showSettings(_ sender: Any?) {
     chrome?.invokeMethod("settings", arguments: nil)
+  }
+
+  /// View ▸ Show Frame Rate (⌥⌘P), which Flutter toggles in settings.json.
+  @objc func toggleFrameRate(_ sender: Any?) {
+    chrome?.invokeMethod("toggleFrameRate", arguments: nil)
+  }
+
+  override func validateMenuItem(_ item: NSMenuItem) -> Bool {
+    if item.action == #selector(toggleFrameRate(_:)) {
+      item.state = frameRateShown ? .on : .off
+      return true
+    }
+    return super.validateMenuItem(item)
   }
 
   @objc private func pasteIntoComposer(_ sender: Any?) {

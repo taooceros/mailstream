@@ -15,6 +15,7 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
     case pollSeconds = "sync.pollSeconds"
     case pushPollSeconds = "sync.pushPollSeconds"
     case chatPollSeconds = "chat.pollSeconds"
+    case flutterShowFrameRate = "flutter.showFrameRate"
 
     enum Kind: Sendable {
         case bool
@@ -42,6 +43,9 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         case .pollSeconds: (.int(15...3600), 90, "Mail polling interval while push is not connected.")
         case .pushPollSeconds: (.int(60...86_400), 900, "Safety-net polling interval while push is connected.")
         case .chatPollSeconds: (.int(5...3600), 20, "Google Chat polling interval.")
+        case .flutterShowFrameRate:
+            (.bool, false,
+             "Show the frame rate and the slowest recent frame in a corner of Mailstream Flutter's window (also View ▸ Show Frame Rate).")
         }
     }
 

@@ -218,6 +218,16 @@ replace a newer thread revision or change the selected conversation.
 cache reuse, lazy refresh after prefetch, overlapping answers, conversation switching and
 failed refreshes retaining the previous content.
 
+The frame rate meter (`flutter.showFrameRate`, off by default; Settings ▸ Performance or View ▸
+Show Frame Rate, ⌥⌘P) floats in the window's bottom leading corner above every sheet. It shows
+the rate of frames drawn back to back, from the engine's `FrameTiming`s (a pause at rest is not a
+dropped frame), and the slowest frame's max(build, raster) since its last update, each red past the
+display's rate or frame budget, dimmed while nothing draws. Release builds report timings about
+once a second, so it updates at that pace (at most every 500 ms otherwise). Off, nothing listens
+for timings. `flutter test test/frame_rate_test.dart` covers the counting and the switch;
+`flutter build macos --release -t test/frame_rate_app.dart` runs the real shell over synthetic
+mail with the setting kept in memory, for screenshots.
+
 | Path | Role |
 | --- | --- |
 | `packages/mailstream` | The engine's Dart binding and the build hook that bundles its libraries |
@@ -237,11 +247,12 @@ failed refreshes retaining the previous content.
 | `lib/ui/people.dart` | `PeopleCompletion`: people suggested under a recipient field as it is typed in (`contacts.search`, through `MailState.searchContacts`); ↑/↓, Return or Tab, Esc |
 | `lib/ui/settings.dart` | Settings (⌘,, the sidebar's Add Account…, or by itself at launch with no account): accounts (browser sign-in with an OAuth client, filled in with the one used last through `accounts.client`, whose secret stays in the engine; rename, remove) and every key of the settings.json Mailstream.app and `mailstream config` share (`config.*` over FFI), following edits made elsewhere |
 | `lib/ui/slide_layer.dart` | Bundles (and, in one pane, the reader) slide over the list, which stays mounted; trackpad swipe back |
+| `lib/ui/frame_rate.dart` | The frame rate meter (`FrameRateLayer` over the app in `main.dart`, `FrameRateMeter`, `FrameRateCounter`) |
 | `lib/bench.dart` | The frame measurement `scripts/bench.sh flutter` runs (`MAILSTREAM_BENCH=scroll`): the list scrolls itself and every frame's `FrameTiming` is logged |
 
 Keys: ↑/↓ or J/K move (beside an open conversation they open the next one), Return or Space
 opens, Esc or ⌘[ goes back, ⌘W closes the open conversation or chat space, E archives, ⌫ trashes, S stars, U toggles read, D resolves "Waiting on you" (or puts it back), R replies (⇧R or
-A replies to all), F forwards, ⌘N writes a new message, ⌘F searches, ⌘R refreshes, ⌘, opens Settings. In the compose column
+A replies to all), F forwards, ⌘N writes a new message, ⌘F searches, ⌘R refreshes, ⌘, opens Settings, ⌥⌘P shows or hides the frame rate. In the compose column
 ⌘Return sends, ⌘V with files or images on the clipboard attaches them, Esc hands the
 keyboard back to the list and conversation (closing the draft when nothing is written), and ⌘W
 closes the draft (asking first when something is written).

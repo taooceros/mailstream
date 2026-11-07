@@ -909,6 +909,26 @@ class MailState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// The frame rate meter over the window: `flutter.showFrameRate`, off by default, also
+  /// View ▸ Show Frame Rate.
+  static const frameRateSetting = 'flutter.showFrameRate';
+
+  bool get showFrameRate {
+    for (final entry in settings?.settings ?? const <engine.SettingEntry>[]) {
+      final value = entry.value;
+      if (entry.key == frameRateSetting) return value is engine.FlagSettingValue && value.enabled;
+    }
+    return false;
+  }
+
+  Future<void> toggleFrameRate() async {
+    try {
+      await setSetting(frameRateSetting, engine.FlagSettingValue(!showFrameRate));
+    } on engine.MailException catch (error) {
+      _report('Could not change the frame rate setting: ${describe(error)}');
+    }
+  }
+
   Future<void> renameAccount(String account, String label) async {
     try {
       await mail.renameAccount(account: account, label: label);
