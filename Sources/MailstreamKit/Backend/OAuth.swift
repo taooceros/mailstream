@@ -4,6 +4,9 @@ import CryptoKit
 import Crypto
 #endif
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 #if canImport(Network)
 import Network
 #endif

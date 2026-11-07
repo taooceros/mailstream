@@ -50,7 +50,7 @@ final class PushService {
 
     private static let session = URLSession(configuration: .ephemeral)
     private static let subscriptions = Endpoints.graph.appending(path: "subscriptions")
-    private static let file = URL.applicationSupportDirectory.appending(path: "Mailstream/push.json")
+    private static let file = Platform.support.appendingPathComponent("push.json")
     /// Requested lifetime of a Graph subscription (70 h); renewed with a day left.
     private static let graphLifetime: TimeInterval = 4200 * 60
 

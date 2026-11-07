@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Gmail over its REST API. Mailbox ids are label ids plus the virtual `ALL` (All Mail: every
 /// message but spam and trash). Envelopes' immutable fields are cached by message id on disk and

@@ -48,9 +48,11 @@ final class AvatarStore {
         let resolver = AvatarResolver(accounts: Self.photoAccounts(accounts),
                                       root: root.appendingPathComponent("avatars", isDirectory: true))
         self.resolver = resolver
+        #if canImport(AppKit)
         images.countLimit = 400
         pngs.countLimit = 400
         large.countLimit = 12
+        #endif
         accountWatch = Task.immediate(name: "Avatar accounts") {
             for await _ in Observations({ accounts.records }).dropFirst() {
                 await resolver.use(Self.photoAccounts(accounts))
@@ -976,17 +978,22 @@ private nonisolated final class TXTQuery: Sendable {
 /// One query through Windows' asynchronous `DnsQueryEx`, which answers on a system thread; a
 /// `Mutex` guards the state its callback shares with the caller.
 private nonisolated final class TXTQuery: Sendable {
+    /// The C query; its functions may be called from any thread.
+    private struct Handle: @unchecked Sendable {
+        let query: OpaquePointer
+    }
+
     private struct State {
         var continuation: CheckedContinuation<[String], Never>?
         /// Held until this object goes, so `cancel` never meets a released query.
-        var query: OpaquePointer?
+        var handle: Handle?
         var finished = false
     }
 
     private let state = Mutex(State())
 
     deinit {
-        if let query = state.withLock({ $0.query }) { ms_dns_txt_release(query) }
+        if let handle = state.withLock({ $0.handle }) { ms_dns_txt_release(handle.query) }
     }
 
     func start(_ name: String, _ continuation: CheckedContinuation<[String], Never>) {
@@ -1007,16 +1014,17 @@ private nonisolated final class TXTQuery: Sendable {
             Unmanaged<TXTQuery>.fromOpaque(context).release()
             return finish([])
         }
-        state.withLock { $0.query = query }
+        let handle = Handle(query: query)
+        state.withLock { $0.handle = handle }
     }
 
     /// Ends the query with what it has.
     func cancel() {
-        let query = state.withLock { state -> OpaquePointer? in
-            if state.query == nil { state.finished = true }
-            return state.query
+        let handle = state.withLock { state -> Handle? in
+            if state.handle == nil { state.finished = true }
+            return state.handle
         }
-        if let query { ms_dns_txt_cancel(query) } else { finish([]) }
+        if let handle { ms_dns_txt_cancel(handle.query) } else { finish([]) }
     }
 
     private func finish(_ records: [String]) {

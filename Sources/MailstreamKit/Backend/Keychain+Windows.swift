@@ -7,7 +7,7 @@ import Foundation
 /// file, `%LOCALAPPDATA%\Mailstream\sign-ins.dat`. Other users, and copies of the file taken to
 /// another account or machine, cannot decrypt it.
 nonisolated enum Keychain {
-    private static let file = URL.applicationSupportDirectory.appending(path: "Mailstream/sign-ins.dat")
+    private static let file = Platform.support.appendingPathComponent("sign-ins.dat")
 
     struct Failure: LocalizedError, Sendable {
         let action: String

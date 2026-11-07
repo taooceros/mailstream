@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// The Google Chat REST resources `Chat` reads and writes.
 /// Reference: <https://developers.google.com/workspace/chat/api/reference/rest>.

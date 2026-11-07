@@ -25,7 +25,7 @@ nonisolated final class MailCache: Sendable {
 
     init() {
         root = Platform.caches.appendingPathComponent("dev.mailstream.Mailstream", isDirectory: true)
-        database = MailDatabase(url: URL.applicationSupportDirectory.appending(path: "Mailstream/mail.db"), files: root)
+        database = MailDatabase(url: Platform.support.appendingPathComponent("mail.db"), files: root)
         let (queue, writes) = AsyncStream.makeStream(of: (@Sendable () async -> Void).self)
         self.writes = writes
         Task(name: "Cache writer", priority: .utility) {

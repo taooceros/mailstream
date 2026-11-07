@@ -901,7 +901,7 @@ final class MailStore {
     /// With `undoManager`, Undo puts the messages back.
     @discardableResult
     func archive(_ conversation: Conversation, from primary: Set<MailboxKey>? = nil,
-                 undoManager: UndoManager? = nil) -> Task<Void, any Error> {
+                 undoManager: (any MoveUndo)? = nil) -> Task<Void, any Error> {
         guard let target = archiveMailbox(account: conversation.account) else {
             return .failed(StoreError(message: "\(conversation.account) has no archive mailbox."))
         }
@@ -915,7 +915,7 @@ final class MailStore {
     /// Moves the conversation to the trash; messages already there are deleted for good, which
     /// Undo cannot take back.
     @discardableResult
-    func trash(_ conversation: Conversation, undoManager: UndoManager? = nil) -> Task<Void, any Error> {
+    func trash(_ conversation: Conversation, undoManager: (any MoveUndo)? = nil) -> Task<Void, any Error> {
         guard let trash = mailbox(account: conversation.account, role: .trash) else {
             let error = StoreError(message: "No trash mailbox found.")
             report(error, context: conversation.account, alert: true)
@@ -944,7 +944,7 @@ final class MailStore {
 
     /// Moves the conversation's trashed or junk messages to the inbox.
     @discardableResult
-    func restore(_ conversation: Conversation, undoManager: UndoManager? = nil) -> Task<Void, any Error> {
+    func restore(_ conversation: Conversation, undoManager: (any MoveUndo)? = nil) -> Task<Void, any Error> {
         guard let inbox = mailbox(account: conversation.account, role: .inbox) else {
             return .failed(StoreError(message: "\(conversation.account) has no inbox."))
         }
@@ -955,16 +955,15 @@ final class MailStore {
         return move(targets, to: inbox, undoManager: undoManager, name: "Move to Inbox")
     }
 
-    private func move(_ targets: [MailMessage], to destination: Mailbox, undoManager: UndoManager? = nil,
+    private func move(_ targets: [MailMessage], to destination: Mailbox, undoManager: (any MoveUndo)? = nil,
                       name: String = "Move") -> Task<Void, any Error> {
         let targets = targets.filter { $0.ref.mailbox != destination.id }
         guard !targets.isEmpty else { return .done }
         removeEnvelopes(targets)
         if let undoManager {
-            undoManager.registerUndo(withTarget: self) { store in
+            undoManager.register(name, on: self) { store in
                 store.putBack(targets, from: destination, undoManager: undoManager, name: name)
             }
-            undoManager.setActionName(name)
         }
         let requests = Dictionary(grouping: targets, by: \.ref.mailboxKey).map { key, messages in
             providerRequest(key.account, resync: true) {
@@ -976,7 +975,7 @@ final class MailStore {
 
     /// Undo of `move`: `messages` (as they were listed before it) leave `destination` for the
     /// mailboxes they came from, and show there again at once. Redo moves them again.
-    private func putBack(_ messages: [MailMessage], from destination: Mailbox, undoManager: UndoManager, name: String) {
+    private func putBack(_ messages: [MailMessage], from destination: Mailbox, undoManager: any MoveUndo, name: String) {
         removeEnvelopes(messages.map { message in
             MailMessage(ref: MessageRef(account: message.ref.account, mailbox: destination.id, id: message.ref.id),
                         envelope: message.envelope, role: destination.role)
@@ -994,10 +993,9 @@ final class MailStore {
         }
         adjustUnread(messages.filter { !$0.envelope.isSeen }, delta: 1)
         rebuild.request()
-        undoManager.registerUndo(withTarget: self) { store in
+        undoManager.register(name, on: self) { store in
             _ = store.move(messages, to: destination, undoManager: undoManager, name: name)
         }
-        undoManager.setActionName(name)
         for (key, group) in groups {
             _ = providerRequest(key.account, resync: true, rethrowing: false) {
                 try await $0.move(ids: group.map(\.ref.id), from: destination.id, to: key.mailbox)

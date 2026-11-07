@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 /// The engine's C API, for front ends in other languages that load `libMailstreamKit.dylib`.
 /// The Rust crate in `FFI/` is its one client; UniFFI generates the Dart (and other) bindings

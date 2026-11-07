@@ -2,6 +2,7 @@
 import CWindows
 #endif
 import Foundation
+import Observation
 
 /// Every user setting. The file `~/Library/Application Support/Mailstream/settings.json` holds the
 /// ones changed from their default as a flat object of dotted keys (`"sync.pollSeconds": 120`);

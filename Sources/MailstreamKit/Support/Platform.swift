@@ -9,11 +9,16 @@ import UniformTypeIdentifiers
 /// The few system services the engine needs that the Mac reaches through Apple frameworks and
 /// Windows through `CWindows`.
 nonisolated enum Platform {
+    /// Mailstream's folder for its data (settings, accounts, mail.db): in ~/Library/Application
+    /// Support on the Mac, %LOCALAPPDATA% on Windows.
+    static let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Mailstream", isDirectory: true)
+
     /// The user's caches folder: ~/Library/Caches on the Mac. Windows has none, so it is a folder
     /// in Mailstream's under %LOCALAPPDATA%.
     static let caches: URL = {
         #if os(Windows)
-        URL.applicationSupportDirectory.appending(path: "Mailstream/Caches", directoryHint: .isDirectory)
+        support.appendingPathComponent("Caches", isDirectory: true)
         #else
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         #endif

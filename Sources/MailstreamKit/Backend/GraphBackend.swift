@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// A Microsoft account's mail over Microsoft Graph. Every request asks for immutable ids, so a
 /// message keeps its id across moves; folder ids are mailbox ids.

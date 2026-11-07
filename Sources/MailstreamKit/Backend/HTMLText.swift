@@ -17,23 +17,54 @@ nonisolated enum HTMLText {
         return out
     }
 
-    private static let urlDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-
     /// Plain text as HTML with its URLs linked: the text between links goes through `plain`
     /// (escaping by default), and only URLs with one of `schemes` count when given.
     static func linkify(_ text: String, schemes: Set<String>? = nil, plain: (String) -> String = escape) -> String {
-        guard let detector = urlDetector, text.contains(where: { $0 == "." || $0 == ":" }) else { return plain(text) }
+        guard text.contains(where: { $0 == "." || $0 == ":" }) else { return plain(text) }
         let ns = text as NSString
         var out = ""
         var cursor = 0
-        for match in detector.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-            guard let url = match.url, schemes?.contains(url.scheme?.lowercased() ?? "") ?? true else { continue }
-            out += plain(ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor)))
-            out += "<a href=\"\(escape(url.absoluteString))\">\(escape(ns.substring(with: match.range)))</a>"
-            cursor = NSMaxRange(match.range)
+        for (range, url) in links(in: text) {
+            guard schemes?.contains(url.scheme?.lowercased() ?? "") ?? true else { continue }
+            out += plain(ns.substring(with: NSRange(location: cursor, length: range.location - cursor)))
+            out += "<a href=\"\(escape(url.absoluteString))\">\(escape(ns.substring(with: range)))</a>"
+            cursor = NSMaxRange(range)
         }
         return out + plain(ns.substring(from: cursor))
     }
+
+    #if canImport(Darwin)
+    private static let urlDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+    /// The links in `text` the system's data detector finds, with the URL each stands for.
+    private static func links(in text: String) -> [(NSRange, URL)] {
+        guard let urlDetector else { return [] }
+        return urlDetector.matches(in: text, range: NSRange(location: 0, length: (text as NSString).length))
+            .compactMap { match in match.url.map { (match.range, $0) } }
+    }
+    #else
+    /// Windows' Foundation has no data detectors: web and mail addresses written out
+    /// (`https://…`, `www.…`, `mailto:…`, `name@example.com`), without trailing punctuation.
+    private static let urlPattern = try! NSRegularExpression(
+        pattern: #"\b(?:(?:https?://|www\.)[^\s<>"]+|mailto:[^\s<>"]+|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"#,
+        options: [.caseInsensitive])
+
+    private static func links(in text: String) -> [(NSRange, URL)] {
+        let ns = text as NSString
+        return urlPattern.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
+            var range = match.range
+            while range.length > 0, let last = ns.substring(with: NSRange(location: NSMaxRange(range) - 1, length: 1)).first,
+                  ".,;:!?)]}'".contains(last) {
+                range.length -= 1
+            }
+            let found = ns.substring(with: range)
+            let lower = found.lowercased()
+            let address = lower.hasPrefix("http://") || lower.hasPrefix("https://") || lower.hasPrefix("mailto:") ? found
+                : lower.hasPrefix("www.") ? "http://" + found : "mailto:" + found
+            return URL(string: address).map { (range, $0) }
+        }
+    }
+    #endif
 
     /// Compiled once. `String.range(of:options: .regularExpression)` runs Swift's regex engine,
     /// which spends a 100 KB body in retain/release: ~60 ms a call, and far more when several
