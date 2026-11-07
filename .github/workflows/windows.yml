@@ -45,7 +45,9 @@ jobs:
           echo "SWIFT_RUNTIME_BIN=$(cygpath -w "$RUNTIME")" >> "$GITHUB_ENV"
           echo "Swift runtime: $RUNTIME"
 
-      - uses: actions/cache@v4
+      # Restored here and saved right after its step, so a later step's failure keeps it.
+      - uses: actions/cache/restore@v4
+        id: turso
         with:
           path: .turso/lib
           key: turso-${{ runner.os }}-${{ hashFiles('scripts/turso.sh', 'scripts/turso-multiprocess.patch', 'Sources/CTurso/sqlite3.h') }}
@@ -62,6 +64,12 @@ jobs:
       - name: Turso
         run: ./scripts/turso.sh
 
+      - uses: actions/cache/save@v4
+        if: steps.turso.outputs.cache-hit != 'true'
+        with:
+          path: .turso/lib
+          key: ${{ steps.turso.outputs.cache-primary-key }}
+
       - name: Engine (MailstreamKit.dll)
         run: |
           swift build -c release --product MailstreamKit
@@ -70,7 +78,8 @@ jobs:
       - name: UniFFI crate and Dart bindings
         run: |
           export MAILSTREAM_KIT_DIR="$(swift build -c release --show-bin-path)"
-          (cd FFI && cargo build --release -p mailstream --example smoke)
+          # --lib too: --example alone builds only the example, not the crate's mailstream.dll.
+          (cd FFI && cargo build --release -p mailstream --lib --example smoke)
           (cd FFI && cargo run -q -p mailstream-bindgen -- target/release/mailstream.dll --out-dir ../Flutter/packages/mailstream/lib/src)
           # The Flutter build hook bundles the engine from .build/release.
           [ -f .build/release/MailstreamKit.dll ] || { mkdir -p .build/release && cp "$MAILSTREAM_KIT_DIR"/MailstreamKit.dll .build/release/; }
