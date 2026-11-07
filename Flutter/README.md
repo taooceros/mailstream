@@ -30,10 +30,10 @@ errors, authenticated installation and relaunch. Checks do not start mail sync. 
 downloads are off initially, system profiling is disabled, and the automatic-check preference
 is Sparkle's own persisted preference (not reset on launch).
 
-The production update trust anchor is intentionally not yet configured: no production
-Ed25519 key has been authorized/provided. Such builds show **Updates Aren’t Configured**
-when manually checked, disable automatic checks, and make no update request. This is not a
-live distribution channel. Do not substitute the existing ad-hoc `nightly` DMGs.
+The approved production Ed25519 public key is embedded in the app. Normal builds keep
+`MAILSTREAM_UPDATE_FEED_URL` empty until the owner publishes the first signed feed.
+They show **Updates Aren’t Configured**, explain that the feed is not enabled, disable
+automatic checks and make no update request. Do not substitute the ad-hoc `nightly` DMGs.
 
 Current builds explicitly opt into `prerelease` through `MAILSTREAM_UPDATE_CHANNEL`.
 Sparkle accepts signed appcast items tagged `prerelease` (and ordinary stable items).
@@ -42,11 +42,15 @@ Both use one monotonically increasing `CFBundleVersion` sequence: neither a prer
 label nor a newer publication date permits a downgrade. There is no `/releases/latest`
 request, so a repository containing only GitHub prereleases is supported.
 
-After the publisher approves its key custody and distribution:
+After configuring the approved signing material:
 
-1. Set the approved **public** key in `macos/Runner/Configs/AppInfo.xcconfig`
-   (`MAILSTREAM_UPDATE_PUBLIC_KEY`). An ignored `Updates.local.xcconfig` beside it can override
-   the key for a release builder or isolated tests. Never put a private key there.
+1. Keep `MAILSTREAM_UPDATE_PUBLIC_KEY` in `macos/Runner/Configs/AppInfo.xcconfig` equal to
+   the `updates` environment's public variable of the same name. The ignored
+   `Updates.local.xcconfig` beside it can override public build settings for CI or isolated
+   tests. Never put a private key there. CI sets the canonical HTTPS feed URL for prepared
+   artifacts; a local release builder must supply the same override when preparing the
+   initial unpublished package (`https:/$()/github.com/taooceros/mailstream/releases/download/updates/appcast.xml`
+   is the xcconfig form, escaping `//` so it is not parsed as a comment).
 2. Increment `pubspec.yaml`'s build number for **every** update; Sparkle compares
    `CFBundleVersion`, not a commit SHA. Keep build versions increasing, including locally
    installed builds, and never replace the bytes of a published version.
@@ -71,6 +75,13 @@ After the publisher approves its key custody and distribution:
    then the validated appcast (replace only the feed). Keep old packages so a client which
    already fetched the previous feed can finish its download. Do not delete/recreate this
    channel the way the unrelated rolling nightly does.
+
+After the first signed feed is published and verified at that exact HTTPS URL, set
+`MAILSTREAM_UPDATE_FEED_URL` in the tracked `AppInfo.xcconfig` to the same escaped URL,
+then build, sign and manually install a bootstrap release with `scripts/install.sh flutter`.
+That first manual install pins the production key and enabled feed; subsequent normal
+builds inherit the feed and Sparkle can update them. Key/CI setup alone does not activate
+the public channel.
 
 `.github/workflows/prepare-update.yml` is manual, runs **only from `main`**, and **only
 prepares artifacts**. Its job references an `updates` environment. The owner must create

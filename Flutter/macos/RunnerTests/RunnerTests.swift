@@ -30,7 +30,7 @@ class RunnerTests: XCTestCase {
   }
 
   func testInsecureOrCredentialBearingFeedFailsClosed() {
-    for feed in ["http://localhost/appcast.xml", "file:///tmp/appcast.xml",
+    for feed in ["", "http://localhost/appcast.xml", "file:///tmp/appcast.xml",
                  "https://name:password@example.com/appcast.xml", "not a URL"] {
       var info = valid
       info["SUFeedURL"] = feed

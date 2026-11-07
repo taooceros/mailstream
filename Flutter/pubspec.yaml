@@ -1,7 +1,7 @@
 name: mailstream_ui
 description: "Flutter macOS front end for Mailstream, over its control socket."
 publish_to: 'none'
-version: 0.1.1+3
+version: 0.1.1+4
 
 environment:
   sdk: ^3.13.7

@@ -29,7 +29,7 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>SUFeedURL</key>
-	<string>https://github.com/taooceros/mailstream/releases/download/updates/appcast.xml</string>
+	<string>$(MAILSTREAM_UPDATE_FEED_URL)</string>
 	<key>SUPublicEDKey</key>
 	<string>$(MAILSTREAM_UPDATE_PUBLIC_KEY)</string>
 	<key>SUVerifyUpdateBeforeExtraction</key>

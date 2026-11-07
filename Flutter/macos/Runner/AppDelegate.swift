@@ -43,7 +43,7 @@ final class AppUpdater: NSObject, NSMenuItemValidation, SPUUpdaterDelegate {
     }
     guard let feed = info["SUFeedURL"] as? String, let url = URL(string: feed),
           url.scheme == "https", url.host != nil, url.user == nil, url.password == nil else {
-      return "This build has no secure HTTPS update feed. Contact the publisher for a configured build."
+      return "The publisher has not enabled a secure update feed for this build. Automatic updates will be available after the signed feed is published."
     }
     guard info["SUVerifyUpdateBeforeExtraction"] as? Bool == true else {
       return "This build does not require authenticated update archives. Contact the publisher for a configured build."
