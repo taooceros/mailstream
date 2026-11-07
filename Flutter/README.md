@@ -172,6 +172,23 @@ switch. For native rendering/selection/scroll/resize checks without private mail
 `flutter run -d macos -t test/html_alignment_app.dart`: open either synthetic conversation,
 switch between them, scroll the long one, resize the window and close/reopen the reader.
 
+Reader back swipes keep their current position when a new horizontal gesture takes over an
+entrance or spring; vertical scrolling does not stop that motion. The live list stays mounted
+under the single-pane layer and widens behind the split reader. Neither path scales WebKit,
+waits for message loading, nor rebuilds the shell on animation ticks.
+`flutter test test/split_detail_test.dart` covers dismissal, cancellation, interrupted springs
+and vertical input. For private-mail-free native release measurements, build
+`flutter build macos --release -t test/reader_motion_app.dart`, then launch its executable with
+`MAILSTREAM_BENCH=reader-dismiss MAILSTREAM_BENCH_OUT=/tmp/reader-motion`. Park that window at
+1240×800 on a private 120 Hz display before its 12-second warmup ends. The real shell uses
+1,000 synthetic conversations and native WebKit; six short-cancel/long-complete pairs enter
+through Flutter's trackpad event dispatch (not physical trackpad hardware). The TSV files
+record `FrameTiming` vsync start and max(build, raster) in milliseconds, as in `lib/bench.dart`,
+split into continuous gesture/settle spans so idle time is not counted as dropped frames.
+Record the display rate and load alongside each run; do not inspect AX or capture screenshots
+during timing, as either can disturb composition. Without the environment flag the same
+fixture stays open for native visual/interaction checks.
+
 The open reader follows the normal conversation-list updates: a changed message count or latest
 date refreshes that conversation's cached bodies and summary, without closing the pane or
 clearing the content while it loads. Unchanged threads (including flag/tag-only updates) keep

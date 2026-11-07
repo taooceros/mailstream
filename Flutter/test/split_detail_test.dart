@@ -88,4 +88,93 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('page')), findsNothing);
   });
+
+  testWidgets('a new swipe picks up the split where its canceled swipe is settling', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    await tester.pumpWidget(Directionality(
+      textDirection: TextDirection.ltr,
+      child: SplitDetail(
+        list: const SizedBox.expand(),
+        listWidth: 400,
+        onDismiss: () {},
+        detail: const ColoredBox(key: Key('detail'), color: Color(0xFFFFFFFF)),
+      ),
+    ));
+    final at = tester.getCenter(find.byKey(const Key('detail')));
+    final first = TestPointer(1, PointerDeviceKind.trackpad);
+    await tester.sendEventToBinding(first.panZoomStart(at));
+    await tester.sendEventToBinding(first.panZoomUpdate(at, pan: const Offset(160, 0)));
+    await tester.pump();
+    await tester.sendEventToBinding(first.panZoomEnd());
+    await tester.pump(const Duration(milliseconds: 40));
+    final before = tester.getTopLeft(find.byKey(const Key('detail'))).dx;
+    final next = TestPointer(2, PointerDeviceKind.trackpad);
+    await tester.sendEventToBinding(next.panZoomStart(at));
+    await tester.sendEventToBinding(next.panZoomUpdate(at, pan: const Offset(8, 0)));
+    await tester.pump();
+    expect(tester.getTopLeft(find.byKey(const Key('detail'))).dx, moreOrLessEquals(before + 8, epsilon: 0.5));
+    await tester.sendEventToBinding(next.panZoomUpdate(at, pan: const Offset(-8, 0)));
+    await tester.pump();
+    expect(tester.getTopLeft(find.byKey(const Key('detail'))).dx, moreOrLessEquals(before - 8, epsilon: 0.5));
+    await tester.sendEventToBinding(next.panZoomEnd());
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('a vertical gesture does not freeze the split spring', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    await tester.pumpWidget(Directionality(
+      textDirection: TextDirection.ltr,
+      child: SplitDetail(
+        list: const SizedBox.expand(),
+        listWidth: 400,
+        onDismiss: () {},
+        detail: const ColoredBox(key: Key('detail'), color: Color(0xFFFFFFFF)),
+      ),
+    ));
+    final at = tester.getCenter(find.byKey(const Key('detail')));
+    final first = TestPointer(1, PointerDeviceKind.trackpad);
+    await tester.sendEventToBinding(first.panZoomStart(at));
+    await tester.sendEventToBinding(first.panZoomUpdate(at, pan: const Offset(160, 0)));
+    await tester.pump();
+    await tester.sendEventToBinding(first.panZoomEnd());
+    await tester.pump(const Duration(milliseconds: 40));
+    final before = tester.getTopLeft(find.byKey(const Key('detail'))).dx;
+    final vertical = TestPointer(2, PointerDeviceKind.trackpad);
+    await tester.sendEventToBinding(vertical.panZoomStart(at));
+    await tester.sendEventToBinding(vertical.panZoomUpdate(at, pan: const Offset(0, 30)));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(tester.getTopLeft(find.byKey(const Key('detail'))).dx, lessThan(before - 20));
+    await tester.sendEventToBinding(vertical.panZoomEnd());
+    await tester.pumpAndSettle();
+  });
+
+  for (final vertical in [false, true]) {
+    testWidgets('the narrow layer ${vertical ? 'keeps settling during vertical input' : 'continues an interrupted swipe without jumping'}', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(800, 800));
+      await tester.pumpWidget(Directionality(
+        textDirection: TextDirection.ltr,
+        child: SlideLayer(
+          onDismiss: () {},
+          child: const ColoredBox(key: Key('page'), color: Color(0xFFFFFFFF)),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      final page = find.byKey(const Key('page'));
+      final at = tester.getCenter(page);
+      final first = TestPointer(1, PointerDeviceKind.trackpad);
+      await tester.sendEventToBinding(first.panZoomStart(at));
+      await tester.sendEventToBinding(first.panZoomUpdate(at, pan: const Offset(160, 0)));
+      await tester.pump();
+      await tester.sendEventToBinding(first.panZoomEnd());
+      await tester.pump(const Duration(milliseconds: 40));
+      final before = tester.getTopLeft(page).dx;
+      final next = TestPointer(2, PointerDeviceKind.trackpad);
+      await tester.sendEventToBinding(next.panZoomStart(at));
+      await tester.sendEventToBinding(next.panZoomUpdate(at, pan: vertical ? const Offset(0, 30) : const Offset(8, 0)));
+      await tester.pump(vertical ? const Duration(milliseconds: 300) : Duration.zero);
+      expect(tester.getTopLeft(page).dx, vertical ? lessThan(before - 20) : moreOrLessEquals(before + 8, epsilon: 0.5));
+      await tester.sendEventToBinding(next.panZoomEnd());
+      await tester.pumpAndSettle();
+    });
+  }
 }

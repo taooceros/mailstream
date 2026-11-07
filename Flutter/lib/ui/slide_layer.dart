@@ -31,6 +31,9 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
 
   final _swipe = HorizontalSwipe();
 
+  /// Captured only once the gesture is horizontal, so scrolling never interrupts a spring.
+  double? _dragOrigin;
+
   /// The layer's width at the last layout, which closing slides it by.
   double _width = 0;
 
@@ -83,11 +86,19 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
 
   void _start(PointerPanZoomStartEvent event) {
     _swipe.start(event);
-    _drag.stop();
+    _dragOrigin = null;
   }
 
   void _update(PointerPanZoomUpdateEvent event) {
-    if (_swipe.update(event)) _drag.value = event.pan.dx;
+    if (widget.child == null || !_swipe.update(event)) return;
+    if (_dragOrigin == null) {
+      _drag.stop();
+      _presence.stop();
+      _dragOrigin = _drag.value + (1 - Motion.curve.transform(_presence.value)) * _width;
+      _presence.value = 1;
+      _swipedAway = false;
+    }
+    _drag.value = _dragOrigin! + event.pan.dx;
   }
 
   void _end(double width) {
@@ -208,6 +219,7 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
   /// animations and directly by the fingers while swiping.
   late final _split = AnimationController.unbounded(vsync: this);
   final _swipe = HorizontalSwipe();
+  double? _splitOrigin;
   Widget? _shown;
 
   /// Set once a swipe closed the split, which is already springing shut: closing follows on its own.
@@ -253,14 +265,19 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
   void _start(PointerPanZoomStartEvent event) {
     if (widget.detail == null) return;
     _swipe.start(event);
-    _split.stop();
+    _splitOrigin = null;
   }
 
   void _update(PointerPanZoomUpdateEvent event, double travel) {
     if (widget.detail == null || !_swipe.update(event)) return;
-    // Only rightward drags close; leftward ones resist, so the page cannot be pulled past open.
-    final dx = event.pan.dx;
-    _split.value = 1 - (dx >= 0 ? dx : dx / 4) / travel;
+    if (_splitOrigin == null) {
+      _split.stop();
+      _splitOrigin = _split.value.clamp(0.0, 1.0);
+      _swipedAway = false;
+    }
+    // Moving back toward open follows the fingers too; only pulling past open resists.
+    final offset = (1 - _splitOrigin!) * travel + event.pan.dx;
+    _split.value = 1 - (offset >= 0 ? offset : offset / 4) / travel;
   }
 
   void _end(double travel) {
