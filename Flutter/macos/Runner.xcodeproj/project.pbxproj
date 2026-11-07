@@ -29,6 +29,7 @@
 		33CC11132044BFA00003C045 /* MainFlutterWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33CC11122044BFA00003C045 /* MainFlutterWindow.swift */; };
 		5A11E7D12F0A00010000A001 /* MailHtmlView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A11E7D02F0A00010000A001 /* MailHtmlView.swift */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
+		90AA00012F00000000000001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 90AA00022F00000000000001 /* Sparkle */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -97,6 +98,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */,
+				90AA00012F00000000000001 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -225,6 +227,7 @@
 			name = Runner;
 			packageProductDependencies = (
 				78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */,
+				90AA00022F00000000000001 /* Sparkle */,
 			);
 			productName = Runner;
 			productReference = 33CC10ED2044A3C60003C045 /* mailstream_ui.app */;
@@ -272,6 +275,7 @@
 			mainGroup = 33CC10E42044A3C60003C045;
 			packageReferences = (
 				781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage" */,
+				90AA00042F00000000000001 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			productRefGroup = 33CC10EE2044A3C60003C045 /* Products */;
 			projectDirPath = "";
@@ -402,7 +406,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.mailstream.mailstreamUi.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/mailstream_ui.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/mailstream_ui";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mailstream Flutter.app/Contents/MacOS/Mailstream Flutter";
 			};
 			name = Debug;
 		};
@@ -416,7 +420,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.mailstream.mailstreamUi.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/mailstream_ui.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/mailstream_ui";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mailstream Flutter.app/Contents/MacOS/Mailstream Flutter";
 			};
 			name = Release;
 		};
@@ -430,7 +434,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.mailstream.mailstreamUi.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/mailstream_ui.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/mailstream_ui";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mailstream Flutter.app/Contents/MacOS/Mailstream Flutter";
 			};
 			name = Profile;
 		};
@@ -722,7 +726,20 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		90AA00042F00000000000001 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = { kind = exactVersion; version = 2.10.1; };
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
+		90AA00022F00000000000001 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 90AA00042F00000000000001 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
 		78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = FlutterGeneratedPluginSwiftPackage;

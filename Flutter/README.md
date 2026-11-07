@@ -21,6 +21,69 @@ flutter build macos --release           # build/macos/Build/Products/Release/Mai
 Signing with the app's identifier and team lets the engine read the sign-ins Mailstream keeps
 in the Keychain. The build is arm64 only. The app is not sandboxed.
 
+## Application updates (macOS)
+
+The application menu contains **Check for Updates…** and **Automatically Check for
+Updates**. Sparkle 2.10.1 owns its standard consent prompt, daily scheduling, progress,
+errors, authenticated installation and relaunch. Checks do not start mail sync. Automatic
+downloads are off initially, system profiling is disabled, and the automatic-check preference
+is Sparkle's own persisted preference (not reset on launch).
+
+The production update trust anchor is intentionally not yet configured: no production
+Ed25519 key has been authorized/provided. Such builds show **Updates Aren’t Configured**
+when manually checked, disable automatic checks, and make no update request. This is not a
+live distribution channel. Do not substitute the existing ad-hoc `nightly` DMGs.
+
+After the publisher approves its key custody and distribution:
+
+1. Set the approved **public** key in `macos/Runner/Configs/AppInfo.xcconfig`
+   (`MAILSTREAM_UPDATE_PUBLIC_KEY`). An ignored `Updates.local.xcconfig` beside it can override
+   the key for a release builder or isolated tests. Never put a private key there.
+2. Increment `pubspec.yaml`'s build number for **every** update; Sparkle compares
+   `CFBundleVersion`, not a commit SHA. Keep build versions increasing, including locally
+   installed builds, and never replace the bytes of a published version.
+3. Build release and sign with `scripts/sign.sh`, retaining the shared Apple signing team
+   `K7HG6KZNNP` and host signing identifier `dev.mailstream.Mailstream`. It signs Sparkle's
+   nested helpers inside-out without changing their identifiers.
+4. Prepare artifacts from those exact signed bytes:
+   `python3 scripts/prepare-update.py "/path/Mailstream Flutter.app" /new/output/directory
+   --sparkle-bin /path/to/Sparkle/bin`. The pinned Sparkle distribution is 2.10.1, SHA-256
+   `1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27`.
+   Sparkle uses an existing Keychain signing key, or `--key-file /private/path` outside the
+   repository. The script never creates keys or publishes anything. It checks the app signature,
+   generates the appcast using Sparkle, verifies the archive against the app's public key,
+   and emits the versioned zip, `appcast.xml`, and a byte-length/SHA-256/revision manifest.
+5. The separately approved channel is this repository's `updates` GitHub Release:
+   `https://github.com/taooceros/mailstream/releases/download/updates/appcast.xml`.
+   Only after explicit publication approval, upload the immutable versioned zip first,
+   then the validated appcast (replace only the feed). Keep old packages so a client which
+   already fetched the previous feed can finish its download. Do not delete/recreate this
+   channel the way the unrelated rolling nightly does.
+
+`.github/workflows/prepare-update.yml` is manual and **only prepares artifacts**. It fails
+closed unless the approved public repository variable `MAILSTREAM_UPDATE_PUBLIC_KEY`,
+`MAILSTREAM_SIGNING_P12` / `MAILSTREAM_SIGNING_P12_PASSWORD`, and
+`MAILSTREAM_UPDATE_PRIVATE_KEY` secrets exist. It imports signing material only into a
+temporary CI keychain and never uploads keys. Configuring credentials or publishing is a
+separate owner action, not an automatic side effect of merging.
+
+Ed25519 authenticates the downloaded archive **before extraction**; Apple signing protects
+bundle identity and shared Keychain access. The existing Apple Development signature supports
+local signed-install testing but is not Developer ID notarized/Gatekeeper public distribution.
+Public distribution still requires the owner's decision about Developer ID/notarization,
+production key custody and initial release publication. Neither missing credential is silently
+bypassed. Once a trust key is shipped, do not rotate it casually.
+
+Targeted checks: `python3 -m unittest discover -s Tests -p test_update_package.py` exercises
+feed/package matching and real Ed25519 rejection of altered bytes/wrong keys. The native
+`RunnerTests` cover production configuration rejection. `Tests/UpdaterFixture.swift` is a
+synthetic AppKit host of the same standard Sparkle updater for isolated real install/relaunch
+tests: compile against the pinned framework, copy its framework into the fixture bundle,
+give it a unique bundle ID/profile and temporary test key, then sign with the existing identity.
+Its loopback HTTP feed is test-only and is rejected by the production app's configuration
+policy. Never point it at the user's email store or publish its keys/packages.
+
+
 The look is macOS 26's Liquid Glass laid out as islands, after the Dia browser: the whole window
 is the system's glass (`NSGlassEffectView`, which `macos/Runner/MainFlutterWindow.swift` places
 under the transparent Flutter view, through `macos_window_utils`), the sidebar sits on it, and the

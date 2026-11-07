@@ -14,5 +14,16 @@ if [ -z "$IDENTITY" ]; then
   IDENTITY="-"
 fi
 for target in "$@"; do
+  # Sparkle's installer and relaunch helpers must keep their own identifiers, but share
+  # the host's signing identity. Sign inside-out; never use --deep for signing.
+  sparkle="$target/Contents/Frameworks/Sparkle.framework"
+  if [ -d "$sparkle" ]; then
+    for helper in "$sparkle/Versions/Current/XPCServices/Downloader.xpc" \
+      "$sparkle/Versions/Current/XPCServices/Installer.xpc" \
+      "$sparkle/Versions/Current/Autoupdate" \
+      "$sparkle/Versions/Current/Updater.app" "$sparkle"; do
+      codesign --force --sign "$IDENTITY" --preserve-metadata=identifier,entitlements "$helper" >/dev/null
+    done
+  fi
   codesign --force --sign "$IDENTITY" --identifier "$IDENTIFIER" "$target" >/dev/null
 done

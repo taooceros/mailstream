@@ -1,0 +1,76 @@
+name: Prepare signed Flutter update
+
+# This workflow prepares artifacts only. Publishing a public release is a separate,
+# explicitly approved operation; the ad-hoc rolling nightly is never an update feed.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
+      UPDATE_PUBLIC_KEY: ${{ vars.MAILSTREAM_UPDATE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Require configured trust and signing material
+        env:
+          CERTIFICATE: ${{ secrets.MAILSTREAM_SIGNING_P12 }}
+          UPDATE_KEY: ${{ secrets.MAILSTREAM_UPDATE_PRIVATE_KEY }}
+        run: |
+          test -n "$UPDATE_PUBLIC_KEY" || { echo 'Missing approved public update key'; exit 1; }
+          test -n "$CERTIFICATE" || { echo 'Missing shared Apple signing certificate'; exit 1; }
+          test -n "$UPDATE_KEY" || { echo 'Missing update signing seed'; exit 1; }
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: actions/cache@v4
+        with:
+          path: .turso/lib
+          key: turso-${{ runner.os }}-${{ hashFiles('scripts/turso.sh', 'scripts/turso-multiprocess.patch', 'Sources/CTurso/sqlite3.h') }}
+      - name: Configure public key
+        run: printf 'MAILSTREAM_UPDATE_PUBLIC_KEY = %s\n' "$UPDATE_PUBLIC_KEY" > Flutter/macos/Runner/Configs/Updates.local.xcconfig
+      - name: Build release
+        run: |
+          CONFIG=release DART_OUT="$PWD/Flutter/packages/mailstream/lib/src" ./scripts/ffi.sh
+          cd Flutter
+          flutter pub get
+          flutter build macos --release
+      - name: Sign and prepare authenticated package
+        env:
+          CERTIFICATE: ${{ secrets.MAILSTREAM_SIGNING_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MAILSTREAM_SIGNING_P12_PASSWORD }}
+          UPDATE_KEY: ${{ secrets.MAILSTREAM_UPDATE_PRIVATE_KEY }}
+        run: |
+          set -eu
+          umask 077
+          work=$(mktemp -d)
+          keychain="$work/signing.keychain-db"
+          password=$(openssl rand -hex 24)
+          cleanup() { security delete-keychain "$keychain" || true; rm -rf "$work"; }
+          trap cleanup EXIT
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$work/signing.p12"
+          printf '%s' "$UPDATE_KEY" > "$work/update-key"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$work/signing.p12" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          app='Flutter/build/macos/Build/Products/Release/Mailstream Flutter.app'
+          /usr/libexec/PlistBuddy -c "Add :MSInstalledRevision string $GITHUB_SHA" "$app/Contents/Info.plist"
+          ./scripts/sign.sh "$app"
+          curl --fail --location --output "$work/Sparkle.tar.xz" https://github.com/sparkle-project/Sparkle/releases/download/2.10.1/Sparkle-2.10.1.tar.xz
+          printf '1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27  %s\n' "$work/Sparkle.tar.xz" | shasum -a 256 -c -
+          tar -xf "$work/Sparkle.tar.xz" -C "$work"
+          python3 scripts/prepare-update.py "$app" build/update --sparkle-bin "$work/bin" --key-file "$work/update-key"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Mailstream-authenticated-update-${{ github.sha }}
+          path: build/update/
+          retention-days: 14
