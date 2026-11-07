@@ -1,7 +1,7 @@
 #!/bin/bash
 # One pass over Linear (`watch`: one a minute until one has output): claims what an omp session
-# should act on now and prints it as JSON lines, which that session hands to subagents, each in
-# its own omp checkout (`isolated: true`).
+# should act on now and prints it as JSON lines, which that session hands to subagents, each
+# working in its own ovnfs checkout (AGENTS.md, Version control).
 #   {"kind": "issue", "id", "identifier", "resume", "unblockedBy"}: an issue to
 #     start. Claimed when it is
 #     - in Todo, created by a workspace member (not an app, a guest or a GitHub import: the repo
@@ -43,12 +43,13 @@
 # finish. With DRY_RUN=1 it exits after the first plan holding a line other than unclaim.
 # The caller keeps context while it is still in the prompt cache (1 h on a Claude subscription,
 # 5 min on an API key). A user comment or rework on an issue goes to the agent that worked it,
-# woken with `write agent://<id>` even after it finished (it resumes in its own checkout and reads
-# its transcript from cache), when its last request is under ~55 minutes old and its context under
-# 400K tokens. Otherwise, and for any other issue or a stale one, a new isolated agent picks up
-# from the issue's comments and posts its own start comment: rewriting an expired transcript costs
-# more than re-reading the files the work needs. An agent that is running gets more work only on
-# its own issue.
+# woken with `write agent://<id>` even after it finished (it reads its transcript from cache, even
+# parked), when its last request is under ~55 minutes old and its context under 400K tokens.
+# Otherwise, and for any other issue or a stale one, a new agent picks up from the issue's
+# comments and posts its own start comment: rewriting an expired transcript costs more than
+# re-reading the files the work needs. Forking an agent's session (`omp --fork`) saves nothing: the
+# fork runs with the main system prompt and tools, so its prefix misses the cache. An agent that is
+# running gets more work only on its own issue.
 set -euo pipefail
 TEAM_ID=${TEAM_ID:-9f8fe59f-3788-4542-8c18-4e5c5dd5ddc2} # Mailstream; the id survives key renames
 LABEL=${LABEL:-omp}
