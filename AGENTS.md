@@ -31,9 +31,14 @@ This repo is a colocated jj repo (`.jj` + `.git`), pushed to `github.com/taoocer
 Work is tracked in Linear: team `MS`, split into projects by effort. Issue IDs look like
 `MS-12`. Use omp's Linear tools; the issue, not the session, is the record other sessions read.
 
-- Language: write everything on Linear (issue titles, descriptions, comments) in Chinese, plainly
-  enough that someone who has not read the code understands what is wrong, what was done and what
-  remains. Code identifiers, paths, commands and commit hashes stay as they are.
+- Language: write everything on Linear (issue titles, descriptions, comments) in plain Chinese
+  that someone who has not read the code understands at once. Lead with the conclusion, then
+  say what happened, how it affects the user, what was done and what remains. Explain any
+  technical term the reader needs in a few words; leave out terms and long logs they don't.
+  No defensive writing: don't hedge, don't repeat disclaimers such as "未授权", "不代表" or
+  "不算通过", and own mistakes directly. Keep real unknowns and risks as concrete facts, and
+  never present something uncertain or unverified as done. Code identifiers, paths, commands
+  and commit hashes stay as they are.
 - Labels: every issue carries one type (`Bug`, `Feature`, `Improvement`, `Performance`,
   `Regression`) plus one `Area` label (Linear allows one; for work across areas, the one most of
   it is in). Area names match the jj workspaces (`chat`, `concurrency`, `flutter`, `gpui`,
