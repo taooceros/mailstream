@@ -7,6 +7,7 @@ import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart' hide Sidebar;
 
 import '../backend/models.dart';
+import '../platform.dart';
 import '../state/chat_state.dart';
 import '../state/mail_state.dart';
 import 'chat.dart';
@@ -102,7 +103,8 @@ class _MailShellState extends State<MailShell> {
 
   void _compose() => state.composeNew();
 
-  /// The app menu's Settings… (⌘,) asks the window channel; once, over the main window only.
+  /// The Mac's app menu's Settings… (⌘,) asks the window channel; once, over the main window
+  /// only. Without that menu, Ctrl+, opens it from the keys (`_onKey`).
   static const _window = MethodChannel('mailstream/window');
 
   void _settings() {
@@ -228,7 +230,7 @@ class _MailShellState extends State<MailShell> {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return KeyEventResult.ignored;
     final key = event.logicalKey;
     final keyboard = HardwareKeyboard.instance;
-    if (keyboard.isMetaPressed) {
+    if (Host.commandPressed) {
       if (key == LogicalKeyboardKey.keyF) {
         _searchFocus.requestFocus();
         _search.selection = TextSelection(baseOffset: 0, extentOffset: _search.text.length);
@@ -243,6 +245,8 @@ class _MailShellState extends State<MailShell> {
         // column takes ⌘W itself while it has focus.
         if (state.chat.active ? state.chat.opened == null : state.opened == null) return KeyEventResult.ignored;
         _back();
+      } else if (key == LogicalKeyboardKey.comma && event is KeyDownEvent && !Host.mac) {
+        _settings();
       } else {
         return KeyEventResult.ignored;
       }
@@ -639,7 +643,7 @@ class _MailShellState extends State<MailShell> {
       child: Row(children: [
         GlassCapsule(
           child: ToolButton(
-            tooltip: _twoPane ? 'Close (Esc or ⌘W)' : 'Back (Esc or ⌘W)',
+            tooltip: '${_twoPane ? 'Close' : 'Back'} (Esc or ${Host.shortcut('W')})',
             icon: _twoPane ? CupertinoIcons.xmark : CupertinoIcons.chevron_left,
             onPressed: _back,
           ),
@@ -655,7 +659,7 @@ class _MailShellState extends State<MailShell> {
                 onPressed: () => state.setWaiting(opened, waiting: false),
               ),
             ToolButton(tooltip: 'Archive (E)', icon: CupertinoIcons.archivebox, onPressed: () => _act(state.archive)),
-            ToolButton(tooltip: 'Delete (⌫)', icon: CupertinoIcons.trash, onPressed: () => _act(state.trash)),
+            ToolButton(tooltip: 'Delete (${Host.deleteKey})', icon: CupertinoIcons.trash, onPressed: () => _act(state.trash)),
             ToolButton(
               tooltip: opened.unread ? 'Mark as read (U)' : 'Mark as unread (U)',
               icon: opened.unread ? CupertinoIcons.envelope_open : CupertinoIcons.envelope_badge,
@@ -757,8 +761,8 @@ class _ListHeader extends StatelessWidget {
         ),
         GlassCapsule(
           child: Row(mainAxisSize: MainAxisSize.min, children: [
-            ToolButton(tooltip: 'Refresh (⌘R)', icon: CupertinoIcons.arrow_clockwise, onPressed: onRefresh),
-            ToolButton(tooltip: 'New message (⌘N)', icon: CupertinoIcons.square_pencil, onPressed: onCompose),
+            ToolButton(tooltip: 'Refresh (${Host.shortcut('R')})', icon: CupertinoIcons.arrow_clockwise, onPressed: onRefresh),
+            ToolButton(tooltip: 'New message (${Host.shortcut('N')})', icon: CupertinoIcons.square_pencil, onPressed: onCompose),
           ]),
         ),
         const SizedBox(width: 10),

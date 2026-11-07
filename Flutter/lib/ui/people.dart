@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
 
 import '../backend/models.dart';
+import '../platform.dart';
 import '../state/mail_state.dart';
 import 'common.dart';
 import 'design.dart';
@@ -148,8 +149,8 @@ class _PeopleCompletionState extends State<PeopleCompletion> {
     }
     if (event is KeyRepeatEvent) return KeyEventResult.ignored;
     if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter || key == LogicalKeyboardKey.tab) {
-      // ⌘Return still sends; ⇧Tab still moves back.
-      if (_highlight < 0 || HardwareKeyboard.instance.isMetaPressed || HardwareKeyboard.instance.isShiftPressed) {
+      // ⌘Return (Ctrl+Enter off the Mac) still sends; ⇧Tab still moves back.
+      if (_highlight < 0 || Host.commandPressed || HardwareKeyboard.instance.isShiftPressed) {
         return KeyEventResult.ignored;
       }
       _pick(_people[_highlight]);

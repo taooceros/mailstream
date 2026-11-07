@@ -2,13 +2,18 @@
 /// glass (`NSGlassEffectView`, under the transparent Flutter view: `macos/Runner/MainFlutterWindow.swift`),
 /// the sidebar sits on it, and the list and the conversation are [Island]s. Toolbar groups float
 /// on [GlassCapsule]s, real system glass over the content scrolling under them; the controls
-/// that float over a row are [RaisedCapsule]s, a little skeuomorphic.
+/// that float over a row are [RaisedCapsule]s, a little skeuomorphic. Off the Mac there is no
+/// system glass under the Flutter view: the window is a color (`MailColors.window`) and the
+/// capsules are frosted by Flutter.
 library;
+
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
 import 'package:macos_ui/macos_ui.dart';
 
+import '../platform.dart';
 import 'design.dart';
 
 /// A rounded island on the window's glass, in the window's background color (or `color`): a
@@ -47,7 +52,8 @@ class Island extends StatelessWidget {
 
 /// Controls grouped on a capsule of the system's glass, as macOS 26 groups toolbar items. The
 /// glass is an AppKit view under the controls (the `mailstream/glass` platform view), so it
-/// refracts whatever Flutter draws beneath it.
+/// refracts whatever Flutter draws beneath it. Off the Mac, Flutter frosts the capsule itself:
+/// what scrolls under it blurs behind a translucent fill with a hairline rim.
 class GlassCapsule extends StatelessWidget {
   const GlassCapsule({super.key, required this.child});
 
@@ -57,23 +63,55 @@ class GlassCapsule extends StatelessWidget {
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => SizedBox(
-    height: height,
-    child: Stack(
-      children: [
-        const Positioned.fill(
-          child: IgnorePointer(
-            child: AppKitView(
-              viewType: 'mailstream/glass',
-              creationParams: {'radius': height / 2},
-              creationParamsCodec: StandardMessageCodec(),
+  Widget build(BuildContext context) {
+    final controls = Padding(padding: const EdgeInsets.all(3), child: child);
+    if (!Host.mac) return SizedBox(height: height, child: _FrostedCapsule(child: controls));
+    return SizedBox(
+      height: height,
+      child: Stack(
+        children: [
+          const Positioned.fill(
+            child: IgnorePointer(
+              child: AppKitView(
+                viewType: 'mailstream/glass',
+                creationParams: {'radius': height / 2},
+                creationParamsCodec: StandardMessageCodec(),
+              ),
             ),
           ),
+          controls,
+        ],
+      ),
+    );
+  }
+}
+
+/// [GlassCapsule] without system glass: a blur of what lies beneath, a translucent fill and a
+/// hairline rim, in a capsule.
+class _FrostedCapsule extends StatelessWidget {
+  const _FrostedCapsule({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final light = context.colors.brightness == Brightness.light;
+    return ClipRRect(
+      borderRadius: const BorderRadius.all(Radius.circular(GlassCapsule.height / 2)),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+        child: DecoratedBox(
+          decoration: ShapeDecoration(
+            color: light ? MacosColors.white.withValues(alpha: 0.72) : const Color(0xFF3A3A3C).withValues(alpha: 0.72),
+            shape: StadiumBorder(
+              side: BorderSide(color: light ? MacosColors.black.withValues(alpha: 0.08) : MacosColors.white.withValues(alpha: 0.12), width: 0.5),
+            ),
+          ),
+          child: child,
         ),
-        Padding(padding: const EdgeInsets.all(3), child: child),
-      ],
-    ),
-  );
+      ),
+    );
+  }
 }
 
 /// A raised capsule drawn by Flutter, for controls over a row: lit from above (a top-to-bottom
@@ -149,8 +187,9 @@ Future<T?> showSheet<T>(BuildContext context, WidgetBuilder builder) => showMaco
 
 /// A sheet, as the Mac drops them over a window: a rounded panel in the window's background
 /// color with a hairline rim and a deep shadow, an optional [title] over [child] and the
-/// [actions] (push buttons, the default last) at its bottom trailing edge. Esc and ⌘W close it;
-/// when no field inside takes focus, the sheet itself holds it, so they do from the start.
+/// [actions] (push buttons, the default last) at its bottom trailing edge. Esc and ⌘W (Ctrl+W
+/// off the Mac) close it; when no field inside takes focus, the sheet itself holds it, so they do
+/// from the start.
 class Sheet extends StatefulWidget {
   const Sheet({super.key, required this.width, this.height, this.title, this.actions = const [], required this.child});
 
@@ -222,7 +261,7 @@ class _SheetState extends State<Sheet> {
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.escape): close,
-        const SingleActivator(LogicalKeyboardKey.keyW, meta: true): close,
+        Host.command(LogicalKeyboardKey.keyW): close,
       },
       child: Focus(
         focusNode: _focus,

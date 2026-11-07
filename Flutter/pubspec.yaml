@@ -1,5 +1,5 @@
 name: mailstream_ui
-description: "Flutter macOS front end for Mailstream, over its control socket."
+description: "Flutter desktop front end (macOS, Windows) for Mailstream, running its engine in process."
 publish_to: 'none'
 version: 0.1.1+4
 
@@ -15,7 +15,10 @@ dependencies:
   mailstream:
     path: packages/mailstream
   macos_ui: ^2.2.2
+  path: ^1.9.1
   video_player: ^2.14.1
+  # video_player's Windows implementation (Media Foundation); the Mac keeps AVFoundation.
+  video_player_win: ^3.3.1
   markdown: ^7.3.1
 
 dev_dependencies:
