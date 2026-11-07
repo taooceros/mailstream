@@ -179,8 +179,12 @@ beat synchronous parsing. This is a parsing comparison, not the 120 Hz scrolling
 Conversation changes fade the reader without scaling its native viewport. The scale-in
 transition can leave native WebKit content offset relative to the Flutter body card (MS-82).
 The HTML, card insets and WebKit sizing stay unchanged.
-`flutter test test/reader_transition_test.dart` checks both readers throughout a conversation
-switch. For native rendering/selection/scroll/resize checks without private mail, run
+The reader occupies the pane's full height from its first frame. Delayed messages and native
+HTML measurements grow the content inside that viewport instead of recentering the whole page
+(MS-102).
+`flutter test test/reader_transition_test.dart` checks unscaled conversation fades and stable
+page bounds when delayed content grows. For native rendering/selection/scroll/resize checks
+without private mail, run
 `flutter run -d macos -t test/html_alignment_app.dart`: open either synthetic conversation,
 switch between them, scroll the long one, resize the window and close/reopen the reader.
 

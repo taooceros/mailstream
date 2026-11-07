@@ -144,6 +144,8 @@ class ReaderState extends State<Reader> {
     return ColoredBox(
       color: colors.background,
       child: Stack(
+        // Body measurements change the content, not the pane's viewport.
+        fit: StackFit.expand,
         children: [
           NotificationListener<Notification>(
             onNotification: _pin.follow,
