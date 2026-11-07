@@ -17,8 +17,10 @@
             <connections>
                 <outlet property="applicationMenu" destination="uQy-DD-JDr" id="XBo-yE-nKs"/>
                 <outlet property="mainFlutterWindow" destination="QvC-M9-y7g" id="gIp-Ho-8D9"/>
+                <outlet property="appUpdater" destination="UPD-Co-nt1" id="UPD-De-lg1"/>
             </connections>
         </customObject>
+        <customObject id="UPD-Co-nt1" customClass="AppUpdater" customModule="Runner" customModuleProvider="target"/>
         <customObject id="YLy-65-1bz" customClass="NSFontManager"/>
         <menu title="Main Menu" systemMenu="main" id="AYu-sK-qS6">
             <items>
@@ -33,6 +35,17 @@
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="VOq-y0-SEH"/>
+                            <menuItem title="Check for Updates…" id="UPD-Me-nu1">
+                                <connections>
+                                    <action selector="checkForUpdates:" target="UPD-Co-nt1" id="UPD-Ac-ti1"/>
+                                </connections>
+                            </menuItem>
+                            <menuItem title="Automatically Check for Updates" id="UPD-Me-nu2">
+                                <connections>
+                                    <action selector="toggleAutomaticChecks:" target="UPD-Co-nt1" id="UPD-Ac-ti2"/>
+                                </connections>
+                            </menuItem>
+                            <menuItem isSeparatorItem="YES" id="UPD-Se-pa1"/>
                             <menuItem title="Settings…" keyEquivalent="," id="BOF-NM-1cW">
                                 <connections>
                                     <action selector="showSettings:" target="-1" id="Set-Ac-T01"/>

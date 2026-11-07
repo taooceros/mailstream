@@ -4,12 +4,7 @@ import Sparkle
 
 @main
 class AppDelegate: FlutterAppDelegate {
-  private var appUpdater: AppUpdater?
-
-  override func applicationDidFinishLaunching(_ notification: Notification) {
-    super.applicationDidFinishLaunching(notification)
-    appUpdater = AppUpdater()
-  }
+  @IBOutlet var appUpdater: AppUpdater!
   override func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     return true
   }
@@ -21,7 +16,7 @@ class AppDelegate: FlutterAppDelegate {
 
 /// Sparkle owns scheduling, consent, downloading, authentication, replacement and relaunch.
 /// Mail sync and the engine are deliberately not involved.
-final class AppUpdater: NSObject, NSMenuItemValidation {
+final class AppUpdater: NSObject, NSMenuItemValidation, SPUUpdaterDelegate {
   private var controller: SPUStandardUpdaterController?
   private var configurationError: String?
 
@@ -30,7 +25,7 @@ final class AppUpdater: NSObject, NSMenuItemValidation {
     configurationError = Self.configurationError(Bundle.main.infoDictionary ?? [:])
     if configurationError == nil {
       let controller = SPUStandardUpdaterController(
-        startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
+        startingUpdater: false, updaterDelegate: self, userDriverDelegate: nil)
       self.controller = controller
       do {
         try controller.updater.start()
@@ -39,15 +34,6 @@ final class AppUpdater: NSObject, NSMenuItemValidation {
         self.controller = nil
       }
     }
-    guard let menu = NSApp.mainMenu?.items.first?.submenu else { return }
-    let check = NSMenuItem(title: "Check for Updates…",
-                          action: #selector(checkForUpdates(_:)), keyEquivalent: "")
-    check.target = self
-    menu.insertItem(check, at: min(2, menu.numberOfItems))
-    let automatic = NSMenuItem(title: "Automatically Check for Updates",
-                              action: #selector(toggleAutomaticChecks(_:)), keyEquivalent: "")
-    automatic.target = self
-    menu.insertItem(automatic, at: min(3, menu.numberOfItems))
   }
 
   static func configurationError(_ info: [String: Any]) -> String? {
@@ -62,7 +48,23 @@ final class AppUpdater: NSObject, NSMenuItemValidation {
     guard info["SUVerifyUpdateBeforeExtraction"] as? Bool == true else {
       return "This build does not require authenticated update archives. Contact the publisher for a configured build."
     }
+    guard info["SURequireSignedFeed"] as? Bool == true,
+          info["SUSignedFeedFailureExpirationInterval"] as? Int == 0 else {
+      return "This build does not require authenticated update information. Contact the publisher for a configured build."
+    }
+    guard let channel = info["MSUpdateChannel"] as? String,
+          channel == "stable" || channel == "prerelease" else {
+      return "This build has no supported update channel. Contact the publisher for a configured build."
+    }
     return nil
+  }
+
+  static func updateChannels(in info: [String: Any]) -> Set<String> {
+    info["MSUpdateChannel"] as? String == "prerelease" ? ["prerelease"] : []
+  }
+
+  func allowedChannels(for updater: SPUUpdater) -> Set<String> {
+    Self.updateChannels(in: Bundle.main.infoDictionary ?? [:])
   }
 
   @objc private func checkForUpdates(_ sender: Any?) {

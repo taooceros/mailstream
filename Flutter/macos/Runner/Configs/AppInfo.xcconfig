@@ -16,4 +16,6 @@ PRODUCT_COPYRIGHT = Copyright © 2026 dev.mailstream. All rights reserved.
 // Public trust anchor, not a private signing key. Remains unconfigured until the
 // publisher approves/provides its production key. Local/test builds can override it.
 MAILSTREAM_UPDATE_PUBLIC_KEY =
+// Current distributions are prereleases. Stable builders override this explicitly.
+MAILSTREAM_UPDATE_CHANNEL = prerelease
 #include? "Updates.local.xcconfig"

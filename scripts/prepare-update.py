@@ -34,6 +34,10 @@ def validate_info(info):
         raise ValueError("app must use the separate Mailstream updates feed, never ad-hoc nightly")
     if info.get("SUVerifyUpdateBeforeExtraction") is not True:
         raise ValueError("archive verification before extraction is required")
+    if info.get("SURequireSignedFeed") is not True or info.get("SUSignedFeedFailureExpirationInterval") != 0:
+        raise ValueError("signed appcasts without expiration fallback are required")
+    if info.get("MSUpdateChannel") not in ("stable", "prerelease"):
+        raise ValueError("bundle needs an explicit stable or prerelease update channel")
     version = info.get("CFBundleVersion", "")
     if not re.fullmatch(r"[1-9][0-9]{0,3}(?:\.[0-9]{1,2}){0,2}", version):
         raise ValueError("CFBundleVersion must be incremented for every release (up to 4.2.2 digits)")
@@ -42,12 +46,15 @@ def validate_info(info):
     return version
 
 
-def validate_feed(feed, archive, version):
+def validate_feed(feed, archive, version, channel):
     root = ET.parse(feed).getroot()
     matches = [item for item in root.findall("./channel/item")
                if item.findtext(f"{{{SPARKLE_NS}}}version") == version]
     if len(matches) != 1:
         raise ValueError("generated appcast must contain exactly this bundle version")
+    item_channel = matches[0].findtext(f"{{{SPARKLE_NS}}}channel")
+    if item_channel != (None if channel == "stable" else channel):
+        raise ValueError("appcast channel does not match the built application's release type")
     enclosure = matches[0].find("enclosure")
     if enclosure is None or enclosure.get("url") != FEED_ROOT + archive.name:
         raise ValueError("appcast URL does not name the prepared archive")
@@ -78,14 +85,20 @@ def prepare(app, output, tools, key_file):
             run("ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(app), str(archive))
             args = [str(tools / "generate_appcast"), "--maximum-deltas", "0",
                     "--download-url-prefix", FEED_ROOT]
+            if info["MSUpdateChannel"] == "prerelease":
+                args += ["--channel", "prerelease"]
             if key_file:
                 args += ["--ed-key-file", str(key_file)]
             run(*args, str(staging))
             feed = staging / "appcast.xml"
-            ed_signature = validate_feed(feed, archive, version)
+            ed_signature = validate_feed(feed, archive, version, info["MSUpdateChannel"])
             # Verify against the PUBLIC key embedded in the app, not just the signing key.
             run("swift", str(Path(__file__).with_name("verify-update.swift")),
                 info["SUPublicEDKey"], str(archive), ed_signature)
+            verify_feed = [str(tools / "sign_update"), "--verify"]
+            if key_file:
+                verify_feed += ["--ed-key-file", str(key_file)]
+            run(*verify_feed, str(feed))
             digest = hashlib.sha256()
             with archive.open("rb") as file:
                 for chunk in iter(lambda: file.read(1024 * 1024), b""):
@@ -94,6 +107,7 @@ def prepare(app, output, tools, key_file):
                         "revision": info.get("MSInstalledRevision"), "archive": archive.name,
                         "bytes": archive.stat().st_size,
                         "sha256": digest.hexdigest(),
+                        "channel": info["MSUpdateChannel"],
                         "feedURL": FEED_ROOT + "appcast.xml", "published": False}
             # Move only the validated final artifacts, never keys, cache, apps or extra files.
             archive.rename(output / archive.name)

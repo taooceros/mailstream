@@ -34,6 +34,12 @@
 	<string>$(MAILSTREAM_UPDATE_PUBLIC_KEY)</string>
 	<key>SUVerifyUpdateBeforeExtraction</key>
 	<true/>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUSignedFeedFailureExpirationInterval</key>
+	<integer>0</integer>
+	<key>MSUpdateChannel</key>
+	<string>$(MAILSTREAM_UPDATE_CHANNEL)</string>
 	<key>SUEnableSystemProfiling</key>
 	<false/>
 	<key>SUAutomaticallyUpdate</key>

@@ -34,6 +34,13 @@ Ed25519 key has been authorized/provided. Such builds show **Updates Aren’t Co
 when manually checked, disable automatic checks, and make no update request. This is not a
 live distribution channel. Do not substitute the existing ad-hoc `nightly` DMGs.
 
+Current builds explicitly opt into `prerelease` through `MAILSTREAM_UPDATE_CHANNEL`.
+Sparkle accepts signed appcast items tagged `prerelease` (and ordinary stable items).
+A `stable` build only accepts untagged stable items; it does not silently opt into previews.
+Both use one monotonically increasing `CFBundleVersion` sequence: neither a prerelease
+label nor a newer publication date permits a downgrade. There is no `/releases/latest`
+request, so a repository containing only GitHub prereleases is supported.
+
 After the publisher approves its key custody and distribution:
 
 1. Set the approved **public** key in `macos/Runner/Configs/AppInfo.xcconfig`
@@ -51,10 +58,14 @@ After the publisher approves its key custody and distribution:
    `1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27`.
    Sparkle uses an existing Keychain signing key, or `--key-file /private/path` outside the
    repository. The script never creates keys or publishes anything. It checks the app signature,
-   generates the appcast using Sparkle, verifies the archive against the app's public key,
-   and emits the versioned zip, `appcast.xml`, and a byte-length/SHA-256/revision manifest.
-5. The separately approved channel is this repository's `updates` GitHub Release:
-   `https://github.com/taooceros/mailstream/releases/download/updates/appcast.xml`.
+   generates and signs the appcast using Sparkle with the bundle's stable/prerelease channel,
+   verifies both signatures, verifies the archive against the app's public key, and emits
+   the versioned zip, signed `appcast.xml`, and a byte-length/SHA-256/revision/channel manifest.
+5. The proposed endpoint (not yet published or authorized) is this repository's `updates`
+   GitHub Release: `https://github.com/taooceros/mailstream/releases/download/updates/appcast.xml`.
+   It can itself be a GitHub **prerelease**, as current distributions are; direct asset URLs
+   do not depend on GitHub treating it as the latest stable release. Sparkle's item channel
+   controls client eligibility independently of the GitHub release flag.
    Only after explicit publication approval, upload the immutable versioned zip first,
    then the validated appcast (replace only the feed). Keep old packages so a client which
    already fetched the previous feed can finish its download. Do not delete/recreate this
@@ -66,17 +77,22 @@ closed unless the approved public repository variable `MAILSTREAM_UPDATE_PUBLIC_
 `MAILSTREAM_UPDATE_PRIVATE_KEY` secrets exist. It imports signing material only into a
 temporary CI keychain and never uploads keys. Configuring credentials or publishing is a
 separate owner action, not an automatic side effect of merging.
+Its `channel` input defaults to `prerelease`; `stable` must be selected explicitly and is
+baked into the bundle before signing. The prepare command derives the signed item channel
+from that bundle, not a later publication label.
 
-Ed25519 authenticates the downloaded archive **before extraction**; Apple signing protects
-bundle identity and shared Keychain access. The existing Apple Development signature supports
+Ed25519 authenticates the appcast (including channel/version metadata) and the downloaded
+archive **before extraction**. Signed-feed failures never expire into an unsigned fallback.
+Apple signing protects bundle identity and shared Keychain access. The existing Apple Development signature supports
 local signed-install testing but is not Developer ID notarized/Gatekeeper public distribution.
 Public distribution still requires the owner's decision about Developer ID/notarization,
 production key custody and initial release publication. Neither missing credential is silently
 bypassed. Once a trust key is shipped, do not rotate it casually.
 
 Targeted checks: `python3 -m unittest discover -s Tests -p test_update_package.py` exercises
-feed/package matching and real Ed25519 rejection of altered bytes/wrong keys. The native
-`RunnerTests` cover production configuration rejection. `Tests/UpdaterFixture.swift` is a
+feed/package/channel matching and real Ed25519 rejection of altered bytes/wrong keys. The native
+`RunnerTests` cover production configuration rejection, version ordering, channel eligibility
+and actual nib menu ownership/actions. `Tests/UpdaterFixture.swift` is a
 synthetic AppKit host of the same standard Sparkle updater for isolated real install/relaunch
 tests: compile against the pinned framework, copy its framework into the fixture bundle,
 give it a unique bundle ID/profile and temporary test key, then sign with the existing identity.

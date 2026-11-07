@@ -22,8 +22,7 @@ struct UpdaterFixture {
     withExtendedLifetime(delegate) {}
   }
 }
-
-final class FixtureDelegate: NSObject, NSApplicationDelegate {
+final class FixtureDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
   private var window: NSWindow!
   private var updater: SPUStandardUpdaterController!
 
@@ -34,7 +33,7 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate {
     root.submenu = appMenu
     main.addItem(root)
     NSApp.mainMenu = main
-    updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
     let check = NSMenuItem(title: "Check for Updates…", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "u")
     check.target = updater
     appMenu.addItem(check)
@@ -47,9 +46,19 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate {
     let label = NSTextField(wrappingLabelWithString: "Synthetic update profile\nInstalled build: \(version)\n\nNo accounts, mail database, telemetry or production release.\nUse Check for Updates… in the application menu.")
     label.frame = NSRect(x: 30, y: 40, width: 500, height: 180)
     window.contentView?.addSubview(label)
-    window.center()
+    if let displayID = Bundle.main.object(forInfoDictionaryKey: "MSFixtureDisplayID") as? UInt32,
+       let screen = NSScreen.screens.first(where: {
+         ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
+       }) {
+      window.setFrameOrigin(NSPoint(x: screen.frame.minX + 100, y: screen.frame.minY + 100))
+    } else {
+      window.center()
+    }
     window.makeKeyAndOrderFront(nil)
   }
 
+  func allowedChannels(for updater: SPUUpdater) -> Set<String> {
+    Bundle.main.object(forInfoDictionaryKey: "MSUpdateChannel") as? String == "prerelease" ? ["prerelease"] : []
+  }
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }

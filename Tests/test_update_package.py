@@ -19,6 +19,9 @@ class UpdatePackageTests(unittest.TestCase):
             "SUPublicEDKey": base64.b64encode(bytes(range(32))).decode(),
             "SUFeedURL": package.FEED_ROOT + "appcast.xml",
             "SUVerifyUpdateBeforeExtraction": True,
+            "SURequireSignedFeed": True,
+            "SUSignedFeedFailureExpirationInterval": 0,
+            "MSUpdateChannel": "prerelease",
         }
 
     def test_production_configuration(self):
@@ -27,6 +30,9 @@ class UpdatePackageTests(unittest.TestCase):
     def test_unconfigured_or_insecure_channel_is_rejected(self):
         for key, value in [("SUPublicEDKey", ""), ("SUPublicEDKey", "not a key"),
                            ("SUVerifyUpdateBeforeExtraction", False),
+                           ("SURequireSignedFeed", False),
+                           ("SUSignedFeedFailureExpirationInterval", 1728000),
+                           ("MSUpdateChannel", "unknown"),
                            ("SUFeedURL", "http://example.com/feed.xml"),
                            ("SUFeedURL", package.FEED_ROOT.replace("updates", "nightly") + "appcast.xml"),
                            ("CFBundleIdentifier", "dev.mailstream.MailstreamGPUI"),
@@ -42,17 +48,23 @@ class UpdatePackageTests(unittest.TestCase):
             signature = base64.b64encode(bytes(64)).decode()
             xml = f'''<rss xmlns:sparkle="{package.SPARKLE_NS}"><channel><item>
               <sparkle:version>2</sparkle:version>
+              <sparkle:channel>prerelease</sparkle:channel>
               <enclosure url="{package.FEED_ROOT}{archive.name}" length="13"
                 sparkle:edSignature="{signature}"/></item></channel></rss>'''
             feed.write_text(xml)
-            self.assertEqual(package.validate_feed(feed, archive, "2"), signature)
+            self.assertEqual(package.validate_feed(feed, archive, "2", "prerelease"), signature)
             for changed in [xml.replace('length="13"', 'length="12"'),
                             xml.replace(archive.name, "another.zip"),
                             xml.replace("<sparkle:version>2", "<sparkle:version>1"),
+                            xml.replace("<sparkle:channel>prerelease", "<sparkle:channel>stable"),
                             xml.replace(signature, "unsigned")]:
                 feed.write_text(changed)
                 with self.assertRaises(ValueError):
-                    package.validate_feed(feed, archive, "2")
+                    package.validate_feed(feed, archive, "2", "prerelease")
+            feed.write_text(xml.replace("<sparkle:channel>prerelease</sparkle:channel>", ""))
+            self.assertEqual(package.validate_feed(feed, archive, "2", "stable"), signature)
+            with self.assertRaises(ValueError):
+                package.validate_feed(feed, archive, "2", "prerelease")
 
     def test_real_signature_matches_pinned_key_not_just_signer(self):
         # An ephemeral test key never enters Keychain or the repository.
