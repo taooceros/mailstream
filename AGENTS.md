@@ -14,8 +14,14 @@ Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` 
 - Each change is its own described commit (`jj describe -m "<what and why>"`, then `jj new`),
   made unprompted as soon as it is built and verified, then pushed: `jj bookmark set main -r @-`,
   then `jj git push`. Never leave finished work uncommitted in `@`.
+- Isolation is omp's own, never `jj workspace add` (the `../mailstream-*` workspaces take no new
+  work). The polling session spawns subagents with `isolated: true`, so each works in its own
+  ovnfs checkout; any other separate copy (an interactive session, a release build) is
+  `ovnfs new --rev main --name <unique>`, removed with `ovnfs rm <name>` when done. A checkout has
+  a private `.git` and no `.jj`: first run `jj git init --colocate && jj bookmark track
+  main@origin`, then work as above and push `main` from the checkout itself.
 - One line: every front end (the AppKit app, `GPUI/`, `Flutter/`) and the engine they share
-  (`Sources/MailstreamKit`, `FFI/`) live on `main`, and every workspace works on it; the
+  (`Sources/MailstreamKit`, `FFI/`) live on `main`, and every checkout works on it; the
   `gpui-ui` and `flutter-ui` bookmarks are history and take no new commits. An engine change
   updates every front end that calls what it changed, in the same change.
 - The repo is public: never commit secrets, tokens, OAuth client files or personal mail data.
@@ -37,16 +43,15 @@ hashes stay as they are.
 ### Filing
 
 - Labels: one type (`Bug`, `Feature`, `Improvement`, `Performance`, `Regression`) plus one `Area`
-  (Linear allows one; for work across areas, the one most of it is in). Areas match the jj
-  workspaces (`chat`, `concurrency`, `flutter`, `gpui`, `motion`, `ui-shell`) or the layer
-  (`sync`, `cache`, `ffi`); an issue is worked in its area's workspace. Repo tooling (AGENTS.md,
-  scripts, CI, build setup) takes no Area and is worked on `main`.
+  (Linear allows one; for work across areas, the one most of it is in). Areas are the parts of
+  the app (`chat`, `concurrency`, `flutter`, `gpui`, `motion`, `ui-shell`) or the layer (`sync`,
+  `cache`, `ffi`). Repo tooling (AGENTS.md, scripts, CI, build setup) takes no Area.
 - Project: the team project whose description the issue fits. When none fits, create one (team
   `MS`, short Chinese name, one-line scope description, lead taooceros). Sub-issues go in their
   parent's project.
 - Label and place issues you file when creating them. Issues the user files often have neither:
-  whoever claims one adds them first (the polling session before handing it out, so it reaches
-  the area's workspace; otherwise the agent, before its start comment).
+  whoever claims one adds them first (the polling session before handing it out, otherwise the
+  agent before its start comment).
 - File your own issues in Backlog; only the user adds `omp`. Problems found outside the current
   change get their own Backlog issue; don't fix them in passing.
 
@@ -58,7 +63,7 @@ hashes stay as they are.
   the text does not count.
 - Start: read the issue and its comments. Skip issues already In Progress unless the user or the
   polling session hands one over. Move it to In Progress, comment
-  `[omp @ <workspace>] start (<agent id>): <plan>` (the subagent/roster id, so the issue shows
+  `[omp @ <checkout>] start (<agent id>): <plan>` (the subagent/roster id, so the issue shows
   who owns it), then add the `claimed` label. Taking over or resuming counts as starting: post a
   new start comment with your own id. Remove `claimed` when you stop (In Review, Todo with a
   question, Backlog when blocked).
@@ -66,8 +71,8 @@ hashes stay as they are.
   what is on the issue.
 - Blocked by another issue (it needs that change first, or the user said to wait for it): add a
   "blocked by" relation (file the blocker first if it doesn't exist), comment what it waits for,
-  move it to Backlog so the workspace frees up, and stop. Once every blocker is In Review, Done
-  or Canceled, the poll hands it out again and its agent carries on from the comments.
+  move it to Backlog and stop. Once every blocker is In Review, Done or Canceled, the poll hands
+  it out again and its agent carries on from the comments.
 - Questions only the user can decide: don't guess. Assign the issue to the user (taooceros), move
   it to Todo, start the comment with `**❓ 需要你回答：**` followed by the question(s), each
   answerable on its own, and stop.
@@ -92,7 +97,7 @@ picks the agent. `scripts/linear-omp.sh MS-12` opens one issue in a new Tern tab
 ## Building
 
 - Every Rust build (cargo here, in `FFI/`, `GPUI/` and Turso) goes through rcache
-  (`~/projects/rcache`), the rustc cache shared across jj workspaces. Don't set
+  (`~/projects/rcache`), the rustc cache shared across checkouts. Don't set
   `RUSTC_WRAPPER`/`RCACHE_DISABLE` to bypass it.
 - The app links the Turso database engine (`.turso/lib/libturso_sqlite3.a`). Run `scripts/turso.sh`
   once before `swift build` (it needs rustup; `bundle.sh` runs it too). It builds the pinned
@@ -120,11 +125,13 @@ Finished fixes go to `/Applications` as part of the work, as signed release buil
    affected; never install an app that isn't installed yet. Tooling-only changes install
    nothing; changes to deployment itself exercise the real path.
 2. Push the issue-referencing commit to live `main` without losing other agents' changes. Build
-   in a fresh private workspace, `jj workspace add --name <unique-build-name> -r main <unused-path>`,
-   never an area workspace or the default checkout, and without copying another workspace's
-   `target/` or `.build/`. There run `./scripts/install.sh <targets>`: it checks source, signing
-   and the deploy lock itself and stops only the installed copy. If `main` moves meanwhile,
-   rebuild from its tip. Never delete another agent's lock or kill its processes.
+   in a fresh checkout at `main` (`ovnfs new --rev main --name <unique-build-name>`, jj set up as
+   in [Version control](#version-control-jj)), never an area workspace or the default checkout.
+   The checkout carries the default checkout's build output: delete `.build`, `FFI/target` and
+   `GPUI/target` in it first (that only touches the checkout). There run
+   `./scripts/install.sh <targets>`: it checks source, signing and the deploy lock itself and
+   stops only the installed copy. If `main` moves meanwhile, rebuild from its tip. Never delete
+   another agent's lock or kill its processes.
 3. Smoke each installed `/Applications/…app` with computer helpers: the running executable, the
    bundle revision, `codesign --verify --deep --strict`, the real window showing loaded data, and
    the affected behavior (no sending mail, nothing destructive). GPUI also: `otool -l` shows no
@@ -132,8 +139,8 @@ Finished fixes go to `/Applications` as part of the work, as signed release buil
    `open` or a process name alone proves nothing. Keep personal content out of screenshots and
    logs.
 4. Record the evidence you gathered, or the exact blocker, on the issue; never claim another
-   issue's pending checks passed. Then forget and remove your build workspace; leave every other
-   workspace alone.
+   issue's pending checks passed. Then `ovnfs rm` your build checkout; leave every other checkout
+   and workspace alone.
 
 ## Performance: 120 fps
 

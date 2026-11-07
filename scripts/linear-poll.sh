@@ -1,8 +1,7 @@
 #!/bin/bash
 # One pass over Linear: claims what an omp session should act on now and prints it as JSON lines,
-# which that session hands to subagents. dir is the jj workspace to work in (../mailstream-<area>
-# for the issue's Area label, else this repo).
-#   {"kind": "issue", "id", "identifier", "dir", "busy", "resume", "unblockedBy"}: an issue to
+# which that session hands to subagents, each in its own omp checkout (`isolated: true`).
+#   {"kind": "issue", "id", "identifier", "resume", "unblockedBy"}: an issue to
 #     start. Claimed when it is
 #     - in Todo, created by a workspace member (not an app, a guest or a GitHub import: the repo
 #       is public and the subagents run with full access), not claimed before and not yet
@@ -16,16 +15,13 @@
 #     before (the subagent carries on from the issue's comments); unblockedBy lists the
 #     identifiers of its resolved blockers. Agents file their own issues in Backlog and move
 #     issues to Todo to ask the user something, so neither is picked up unless it was claimed
-#     before and gets unblocked. Issues share their area's workspace: busy is true when that
-#     workspace has an In Progress issue, is listed in BUSY (JSON array of dirs, e.g. the caller's
-#     running subagents) or got an earlier issue this pass; the caller then hands the issue to the
-#     subagent already working nearby code, or gives it a private workspace. Nothing waits.
-#   {"kind": "comment", "id", "issue", "issueId", "state", "dir", "createdAt", "body"}: a comment a
+#     before and gets unblocked.
+#   {"kind": "comment", "id", "issue", "issueId", "state", "createdAt", "body"}: a comment a
 #     workspace member (not an app, a guest or a GitHub sync) posted on any team issue in the last
 #     7 days, each once. The caller routes it to the issue's subagent or starts one.
-#   {"kind": "stale", "id", "identifier", "dir", "agent", "claimedAt"}: an In Progress issue
+#   {"kind": "stale", "id", "identifier", "agent", "claimedAt"}: an In Progress issue
 #     labelled `claimed` whose owner, the agent named in its latest start comment
-#     (`[omp @ <workspace>] start (<agent id>): …`, posted at claimedAt), is not in RUNNING, and
+#     (`[omp @ <checkout>] start (<agent id>): …`, posted at claimedAt), is not in RUNNING, and
 #     whose claim is at least 10 minutes old. agent is null when no start comment names one. Each
 #     start comment is reported once: whoever takes the issue over posts a new one. Needs RUNNING
 #     (JSON array of the agent ids running now, as the caller sees them); without it nothing is
@@ -38,14 +34,13 @@
 # The caller hands each issue to a subagent, reusing one it already started over a new one when
 # that agent has related context and room left. Related, in order: it worked this issue before
 # (resumed, or a user comment on it); it worked the parent, a sub-issue, a blocker or a blocked
-# issue; it worked the same files in the same workspace. Room left: context under 400K tokens
+# issue; it worked the same files. Room left: context under 400K tokens
 # (40% of the 1M window, the `ctx` figure the session sees); at or over that, start a new agent,
 # which picks up from the issue's comments. An agent still running another issue gets the new
 # one only after it finishes, unless it is the same issue. A reused agent claims the issue like
-# any other: its own start comment, In Progress, `claimed`, its own workspace. For a stale issue
+# any other: its own start comment, In Progress, `claimed`, its own checkout. For a stale issue
 # the caller wakes its agent or hands it to a new one.
 set -euo pipefail
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TEAM_ID=${TEAM_ID:-9f8fe59f-3788-4542-8c18-4e5c5dd5ddc2} # Mailstream; the id survives key renames
 LABEL=${LABEL:-omp}
 CLAIMED=${CLAIMED:-claimed}
@@ -89,10 +84,6 @@ if [ "${1:-}" = seen ]; then
   exit 0
 fi
 
-# Areas with their own workspace (../mailstream-<area>); every other issue runs in this repo.
-WORKSPACES=$(for d in "$ROOT"/../mailstream-*/; do [ -d "$d.jj" ] && basename "$d"; done |
-  sed 's/^mailstream-//' | jq -Rnc '[inputs]')
-BUSY=${BUSY:-[]}
 RUNNING=${RUNNING:-null}
 
 DATA=$(gql 'query($team: ID!, $label: String!, $claimed: String!) {
@@ -101,28 +92,22 @@ DATA=$(gql 'query($team: ID!, $label: String!, $claimed: String!) {
     or: [{ labels: { some: { name: { eq: $label } } } }, { state: { name: { eq: "Todo" } } },
       { hasBlockedByRelations: { eq: true } }] }) {
     nodes { id identifier number state { name } creator { app guest }
-      labels { nodes { id name parent { name } } } comments(first: 100) { nodes { user { app } } }
+      labels { nodes { id name } } comments(first: 100) { nodes { user { app } } }
       inverseRelations(first: 50) { nodes { type issue { id identifier state { name type } } } } } }
-  active: issues(first: 100, filter: {
-    team: { id: { eq: $team } }, state: { name: { eq: "In Progress" } } }) {
-    nodes { labels { nodes { name parent { name } } } } }
   claimed: issues(first: 100, filter: {
     team: { id: { eq: $team } }, labels: { some: { name: { eq: $claimed } } } }) {
-    nodes { id identifier state { name } labels { nodes { id name parent { name } } }
+    nodes { id identifier state { name } labels { nodes { id name } }
       comments(first: 100) { nodes { id createdAt body user { app } } } } }
   comments(first: 100, filter: { createdAt: { gt: "-P7D" }, issue: { team: { id: { eq: $team } } } }) {
     nodes { id createdAt body user { app guest }
-      issue { id identifier state { name } labels { nodes { name parent { name } } } } } }
+      issue { id identifier state { name } } } }
 }' "$(jq -nc --arg team "$TEAM_ID" --arg label "$LABEL" --arg claimed "$CLAIMED" \
   '{team: $team, label: $label, claimed: $claimed}')")
 
-# Issue lines oldest first, one per free workspace, then stale and comment lines oldest first.
-PLAN=$(jq -c --argjson ws "$WORKSPACES" --argjson busy "$BUSY" --argjson running "$RUNNING" \
-  --arg root "$ROOT" --arg label "$LABEL" --arg claimedLabel "$CLAIMED" \
+# Issue lines oldest first, then stale and comment lines oldest first.
+PLAN=$(jq -c --argjson running "$RUNNING" --arg label "$LABEL" --arg claimedLabel "$CLAIMED" \
   --rawfile launched "$LAUNCHED" --rawfile handled "$HANDLED" --rawfile unblocked "$UNBLOCKED" \
   --rawfile stale "$STALE" --arg now "$(date -u +%FT%TZ)" '
-  def dir: ([.labels.nodes[] | select(.parent.name == "Area") | .name][0] // "") as $a
-    | if $ws | index($a) then ($root | sub("/[^/]*$"; "")) + "/mailstream-\($a)" else $root end;
   def labelled: [.labels.nodes[] | select(.name == $label) | .id][0];
   def member: . != null and .app != true and .guest != true;
   def blockers: [.inverseRelations.nodes[] | select(.type == "blocks") | .issue];
@@ -144,12 +129,8 @@ PLAN=$(jq -c --argjson ws "$WORKSPACES" --argjson busy "$BUSY" --argjson running
           or ($claimed and $key != null and ($key as $k | $freed | index($k) | not)))))
       | . + {resume: $claimed, unblockedBy: [blockers[] | select(resolved) | .identifier],
           unblockKey: $key}] as $todo
-  | (reduce ($todo | sort_by(.number))[] as $i (
-      {busy: ([.active.nodes[] | dir] + $busy), out: []};
-      ($i | dir) as $d
-      | .out += [$i + {dir: $d, busy: (.busy | index($d) != null)}] | .busy += [$d])
-    | .out[] | {kind: "issue", id, identifier, dir, busy, resume, unblockedBy,
-        label: labelled, unblockKey}),
+  | ($todo | sort_by(.number)[]
+    | {kind: "issue", id, identifier, resume, unblockedBy, label: labelled, unblockKey}),
     (if $running == null then empty else .claimed.nodes[]
       | ([.comments.nodes[] | select(.user.app == true)
           | select(.body | test("^\\[omp @ [^\\]]*\\] start \\("))] | sort_by(.createdAt) | last)
@@ -162,12 +143,12 @@ PLAN=$(jq -c --argjson ws "$WORKSPACES" --argjson busy "$BUSY" --argjson running
         else "\(.id) \($start.id // "none")" as $key
           | select(($reported | index($key) | not) and ($start == null
               or $t - ($start.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) >= 600))
-          | {kind: "stale", id, identifier, dir: dir, agent: $agent,
+          | {kind: "stale", id, identifier, agent: $agent,
              claimedAt: $start.createdAt, staleKey: $key} end end),
     (.comments.nodes | sort_by(.createdAt)[]
       | select((.user | member) and (.id as $id | $seen | index($id) | not))
       | {kind: "comment", id, issue: .issue.identifier, issueId: .issue.id,
-         state: .issue.state.name, dir: (.issue | dir), createdAt, body})' <<<"$DATA")
+         state: .issue.state.name, createdAt, body})' <<<"$DATA")
 
 [ -n "$PLAN" ] || exit 0
 if [ -n "${DRY_RUN:-}" ]; then echo "$PLAN"; exit 0; fi

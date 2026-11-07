@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install affected, already-installed front ends from a clean private workspace at main.
+# Install affected, already-installed front ends from a clean private checkout at main.
 # Usage: scripts/install.sh native|flutter|gpui [native|flutter|gpui ...]
 # Launch and inspect each installed app with computer helpers before completing the issue.
 set -eu
@@ -20,8 +20,8 @@ for frontend in "$@"; do
 done
 revision=$(jj log --no-graph -r main -T commit_id)
 [ -n "$(jj log --no-graph -r 'main & (@ | @-)' -T commit_id)" ] ||
-  fail "create a clean private workspace at current main; do not deploy an area workspace"
-[ -z "$(jj diff --from main --to @ --name-only)" ] || fail "workspace differs from main"
+  fail "create a clean private checkout at current main (ovnfs new --rev main); do not deploy an area workspace"
+[ -z "$(jj diff --from main --to @ --name-only)" ] || fail "checkout differs from main"
 # sign.sh may fall back to ad hoc for development/CI, but installed releases must not.
 security find-identity -v -p codesigning | /usr/bin/grep -q '"Apple Development: ' ||
   fail "Apple Development signing identity is required"
