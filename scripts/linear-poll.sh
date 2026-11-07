@@ -41,13 +41,14 @@
 # exits 1. The caller starts it once as a background job with no deadline, waits for its result,
 # handles the lines and starts it again, and rewrites RUNNING_FILE whenever its agents start or
 # finish. With DRY_RUN=1 it exits after the first plan holding a line other than unclaim.
-# The caller keeps context where it pays. A user comment or rework on an issue goes to the agent
-# that worked it, woken with `write agent://<id>` even after it finished (it resumes in its own
-# checkout), unless its context is over 400K tokens. A related issue (parent, sub-issue, blocker,
-# same code) goes to a new isolated agent given the earlier agent's transcript path to consult
-# through a `seance` subagent. Anything else, and a stale issue, goes to a new isolated agent,
-# which picks up from the issue's comments and posts its own start comment. An agent that is
-# running gets more work only on its own issue.
+# The caller keeps context while it is still in the prompt cache (1 h on a Claude subscription,
+# 5 min on an API key). A user comment or rework on an issue goes to the agent that worked it,
+# woken with `write agent://<id>` even after it finished (it resumes in its own checkout and reads
+# its transcript from cache), when its last request is under ~55 minutes old and its context under
+# 400K tokens. Otherwise, and for any other issue or a stale one, a new isolated agent picks up
+# from the issue's comments and posts its own start comment: rewriting an expired transcript costs
+# more than re-reading the files the work needs. An agent that is running gets more work only on
+# its own issue.
 set -euo pipefail
 TEAM_ID=${TEAM_ID:-9f8fe59f-3788-4542-8c18-4e5c5dd5ddc2} # Mailstream; the id survives key renames
 LABEL=${LABEL:-omp}
