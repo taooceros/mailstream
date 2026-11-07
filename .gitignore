@@ -4,7 +4,6 @@ build/
 .DS_Store
 Push/.wrangler/
 node_modules/
-Engine/
 .turso/
 # Rust/Cargo build output anywhere in the tree
 target/

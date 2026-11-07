@@ -9,9 +9,15 @@
 //! The engine runs on the main thread's run loop. App hosts (Flutter, GPUI, AppKit) already run
 //! one; a command-line host calls [`run_main_loop`] on its main thread and works elsewhere.
 //! Futures here need no particular executor; listeners are called on the main thread.
+//!
+//! With `MAILSTREAM_ENGINE=rust` in the environment the process runs the Rust engine
+//! (`Engine/`, replacing the Swift one phase by phase, MS-110) instead: the Swift engine never
+//! starts, requests go to the Rust engine directly as JSON values, and commands it does not have
+//! yet fail with `unported`. It works on its own threads; listeners are still called on the
+//! main thread.
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use futures_channel::oneshot;
 use serde::Deserialize;
@@ -605,7 +611,11 @@ impl Mailstream {
     /// starts syncing every signed-in account.
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
-        unsafe { mailstream_start() };
+        if *USE_RUST_ENGINE {
+            LazyLock::force(&RUST_ENGINE);
+        } else {
+            unsafe { mailstream_start() };
+        }
         Arc::new(Self {})
     }
 
@@ -856,6 +866,13 @@ impl Mailstream {
 
     /// Calls `listener` on the main thread for every change from now on, while the process runs.
     pub fn subscribe(&self, listener: Arc<dyn EventListener>) {
+        if *USE_RUST_ENGINE {
+            RUST_ENGINE.subscribe(move |event| {
+                let listener = listener.clone();
+                on_main_thread(move || listener.on_event(Change { event: Event::named(event) }));
+            });
+            return;
+        }
         let context = Box::into_raw(Box::new(listener)).cast::<c_void>();
         unsafe { mailstream_subscribe(context, deliver_event) };
     }
@@ -881,7 +898,29 @@ struct ErrorBody {
     message: Option<String>,
 }
 
+/// Whether this process runs the Rust engine instead of the Swift one, decided once at start.
+static USE_RUST_ENGINE: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("MAILSTREAM_ENGINE").is_ok_and(|engine| engine == "rust"));
+
+/// The process's Rust engine, started on first use.
+static RUST_ENGINE: LazyLock<mailstream_engine::Engine> =
+    LazyLock::new(|| mailstream_engine::Engine::start(mailstream_engine::Config::for_this_app()));
+
 pub(crate) async fn call<T: DeserializeOwned>(command: &str, args: Value) -> Result<T, MailError> {
+    let result = if *USE_RUST_ENGINE {
+        RUST_ENGINE
+            .call(command, args)
+            .await
+            .map_err(|error| MailError::Failed { code: error.code, message: error.message })?
+    } else {
+        swift_call(command, args).await?
+    };
+    serde_json::from_value(result)
+        .map_err(|error| MailError::new("decode", format!("Unexpected result of {command}: {error}")))
+}
+
+/// The Swift engine's result for one request, through its C API.
+async fn swift_call(command: &str, args: Value) -> Result<Value, MailError> {
     let request = serde_json::to_vec(&json!({ "command": command, "args": args })).expect("JSON values encode");
     let (sender, receiver) = oneshot::channel::<Vec<u8>>();
     let context = Box::into_raw(Box::new(sender)).cast::<c_void>();
@@ -896,8 +935,27 @@ pub(crate) async fn call<T: DeserializeOwned>(command: &str, args: Value) -> Res
             message: error.message.unwrap_or_else(|| format!("{command} failed.")),
         });
     }
-    serde_json::from_value(answer.result.unwrap_or(Value::Null))
-        .map_err(|error| MailError::new("decode", format!("Unexpected result of {command}: {error}")))
+    Ok(answer.result.unwrap_or(Value::Null))
+}
+
+/// Runs `work` on the main thread, where the Swift engine calls listeners too: uniffi-dart's
+/// callbacks only run on the Dart isolate's thread, which is Flutter's main thread.
+fn on_main_thread(work: impl FnOnce() + Send + 'static) {
+    #[repr(C)]
+    struct DispatchQueue {
+        _opaque: [u8; 0],
+    }
+    unsafe extern "C" {
+        /// libdispatch's main queue, which `dispatch_get_main_queue()` returns.
+        static _dispatch_main_q: DispatchQueue;
+        fn dispatch_async_f(queue: *const DispatchQueue, context: *mut c_void, work: extern "C" fn(*mut c_void));
+    }
+    extern "C" fn run(context: *mut c_void) {
+        let work = unsafe { Box::from_raw(context.cast::<Box<dyn FnOnce() + Send>>()) };
+        work();
+    }
+    let work: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(work));
+    unsafe { dispatch_async_f(&raw const _dispatch_main_q, Box::into_raw(work).cast(), run) };
 }
 
 /// The engine's answer to one request: the context is that request's sender, used once.

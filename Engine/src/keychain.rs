@@ -1,0 +1,206 @@
+//! Sign-ins in the login keychain, shared with the Swift engine: one generic password (service
+//! `dev.mailstream.Mailstream.oauth`, account `refresh-tokens`, label `Mailstream sign-ins`)
+//! holding [`SignIns`] as key-sorted JSON, so macOS asks about Mailstream's access once rather
+//! than per account. Items from before clients were stored hold a bare object of refresh token
+//! by account id.
+// Security's status constants (`errSecSuccess`) are matched by their C names.
+#![allow(non_upper_case_globals)]
+use std::collections::BTreeMap;
+use std::fmt;
+
+use core_foundation::base::{CFType, TCFType};
+use core_foundation::boolean::CFBoolean;
+use core_foundation::data::CFData;
+use core_foundation::dictionary::CFDictionary;
+use core_foundation::string::CFString;
+use core_foundation_sys::base::{CFTypeRef, OSStatus};
+use security_framework_sys::base::{SecCopyErrorMessageString, errSecItemNotFound, errSecSuccess};
+use security_framework_sys::item::{
+    kSecAttrAccount, kSecAttrLabel, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecReturnData, kSecValueData,
+};
+use security_framework_sys::keychain_item::{SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate};
+use serde::{Deserialize, Serialize};
+
+use crate::oauth::OAuthClient;
+
+/// The service the apps' sign-ins live under. Tests use another one: an unsigned test binary
+/// reading this item makes macOS ask the person for access.
+pub const SERVICE: &str = "dev.mailstream.Mailstream.oauth";
+const ACCOUNT: &str = "refresh-tokens";
+const LABEL: &str = "Mailstream sign-ins";
+
+/// What the item keeps, by account id and provider.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignIns {
+    pub refresh_tokens: BTreeMap<String, String>,
+    /// The client each account's refresh token was issued to.
+    pub clients: BTreeMap<String, OAuthClient>,
+    /// The client last signed in with, by provider (`google`, `microsoft`), offered next time.
+    pub last_clients: BTreeMap<String, OAuthClient>,
+}
+
+impl SignIns {
+    /// The item's contents: the current format, else the old bare object, else nothing.
+    pub fn decode(data: &[u8]) -> Self {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Current {
+            refresh_tokens: BTreeMap<String, String>,
+            clients: BTreeMap<String, OAuthClient>,
+            last_clients: BTreeMap<String, OAuthClient>,
+        }
+        if let Ok(current) = serde_json::from_slice::<Current>(data) {
+            return Self {
+                refresh_tokens: current.refresh_tokens,
+                clients: current.clients,
+                last_clients: current.last_clients,
+            };
+        }
+        let legacy = serde_json::from_slice::<BTreeMap<String, String>>(data).unwrap_or_default();
+        Self { refresh_tokens: legacy, ..Self::default() }
+    }
+
+    /// Compact, key-sorted, slashes escaped: what the Swift engine's encoder writes.
+    pub fn encode(&self) -> Vec<u8> {
+        let value = serde_json::to_value(self).expect("sign-ins encode");
+        crate::json::encode(&value, false, true)
+    }
+}
+
+/// A failed Keychain call.
+#[derive(Clone, Debug)]
+pub struct KeychainError(OSStatus);
+
+impl fmt::Display for KeychainError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let reason = unsafe {
+            let message = SecCopyErrorMessageString(self.0, std::ptr::null_mut());
+            if message.is_null() { None } else { Some(CFString::wrap_under_create_rule(message).to_string()) }
+        };
+        match reason {
+            Some(reason) => write!(formatter, "Keychain: {reason}"),
+            None => write!(formatter, "Keychain: OSStatus {}", self.0),
+        }
+    }
+}
+
+/// The sign-ins item under one service.
+#[derive(Clone, Debug)]
+pub struct Keychain {
+    service: String,
+}
+
+impl Keychain {
+    pub fn new(service: impl Into<String>) -> Self {
+        Self { service: service.into() }
+    }
+
+    /// The stored sign-ins; empty when there are none.
+    pub fn load(&self) -> Result<SignIns, KeychainError> {
+        let mut query = self.base();
+        unsafe {
+            query.push((CFString::wrap_under_get_rule(kSecReturnData), CFBoolean::true_value().into_CFType()));
+        }
+        let query = CFDictionary::from_CFType_pairs(&query);
+        let mut result: CFTypeRef = std::ptr::null();
+        let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut result) };
+        match status {
+            errSecSuccess => {
+                if result.is_null() {
+                    return Ok(SignIns::default());
+                }
+                let value = unsafe { CFType::wrap_under_create_rule(result) };
+                Ok(value.downcast::<CFData>().map(|data| SignIns::decode(data.bytes())).unwrap_or_default())
+            }
+            errSecItemNotFound => Ok(SignIns::default()),
+            status => Err(KeychainError(status)),
+        }
+    }
+
+    /// Replaces the stored sign-ins; with no refresh token and no remembered client left the item
+    /// is deleted.
+    pub fn store(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
+        let base = CFDictionary::from_CFType_pairs(&self.base());
+        if sign_ins.refresh_tokens.is_empty() && sign_ins.last_clients.is_empty() {
+            let deleted = unsafe { SecItemDelete(base.as_concrete_TypeRef()) };
+            return match deleted {
+                errSecSuccess | errSecItemNotFound => Ok(()),
+                status => Err(KeychainError(status)),
+            };
+        }
+        let data = CFData::from_buffer(&sign_ins.encode());
+        let value_key = unsafe { CFString::wrap_under_get_rule(kSecValueData) };
+        let update = CFDictionary::from_CFType_pairs(&[(value_key.clone(), data.clone().into_CFType())]);
+        match unsafe { SecItemUpdate(base.as_concrete_TypeRef(), update.as_concrete_TypeRef()) } {
+            errSecSuccess => Ok(()),
+            errSecItemNotFound => {
+                let mut item = self.base();
+                item.push((value_key, data.into_CFType()));
+                item.push((
+                    unsafe { CFString::wrap_under_get_rule(kSecAttrLabel) },
+                    CFString::new(LABEL).into_CFType(),
+                ));
+                let item = CFDictionary::from_CFType_pairs(&item);
+                match unsafe { SecItemAdd(item.as_concrete_TypeRef(), std::ptr::null_mut()) } {
+                    errSecSuccess => Ok(()),
+                    status => Err(KeychainError(status)),
+                }
+            }
+            status => Err(KeychainError(status)),
+        }
+    }
+
+    fn base(&self) -> Vec<(CFString, CFType)> {
+        unsafe {
+            vec![
+                (
+                    CFString::wrap_under_get_rule(kSecClass),
+                    CFString::wrap_under_get_rule(kSecClassGenericPassword).into_CFType(),
+                ),
+                (CFString::wrap_under_get_rule(kSecAttrService), CFString::new(&self.service).into_CFType()),
+                (CFString::wrap_under_get_rule(kSecAttrAccount), CFString::new(ACCOUNT).into_CFType()),
+            ]
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client(id: &str, secret: Option<&str>) -> OAuthClient {
+        OAuthClient { id: id.into(), secret: secret.map(String::from) }
+    }
+
+    #[test]
+    fn reads_and_writes_the_swift_format() {
+        let swift = br#"{"clients":{"a@b.c":{"id":"i"}},"lastClients":{"google":{"id":"g","secret":"s"}},"refreshTokens":{"a@b.c":"1\/\/x"}}"#;
+        let sign_ins = SignIns::decode(swift);
+        assert_eq!(sign_ins.refresh_tokens["a@b.c"], "1//x");
+        assert_eq!(sign_ins.clients["a@b.c"], client("i", None));
+        assert_eq!(sign_ins.last_clients["google"], client("g", Some("s")));
+        assert_eq!(sign_ins.encode(), swift.to_vec());
+        // The bare object of refresh tokens from before clients were stored.
+        let legacy = SignIns::decode(br#"{"a@b.c":"tok"}"#);
+        assert_eq!((legacy.refresh_tokens["a@b.c"].as_str(), legacy.clients.len()), ("tok", 0));
+        assert_eq!(SignIns::decode(b"garbage"), SignIns::default());
+    }
+
+    #[test]
+    fn keeps_one_item_under_its_service() {
+        let keychain = Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::tests::unique()));
+        assert_eq!(keychain.load().unwrap(), SignIns::default());
+        let mut sign_ins = SignIns::default();
+        sign_ins.refresh_tokens.insert("a@b.c".into(), "one".into());
+        sign_ins.last_clients.insert("google".into(), client("g", Some("s")));
+        keychain.store(&sign_ins).unwrap();
+        assert_eq!(keychain.load().unwrap(), sign_ins);
+        sign_ins.refresh_tokens.insert("a@b.c".into(), "two".into());
+        keychain.store(&sign_ins).unwrap();
+        assert_eq!(keychain.load().unwrap(), sign_ins);
+        // Nothing left to keep deletes the item.
+        keychain.store(&SignIns::default()).unwrap();
+        assert_eq!(keychain.load().unwrap(), SignIns::default());
+    }
+}
