@@ -1,7 +1,9 @@
 // Summarizes frame logs the front ends write in bench mode (scripts/bench.sh), the same way for
 // every front end. A log is "# key=value …" header lines, then one line per frame:
-// "<start ms>\t<work ms>", where start is when the frame began for its vsync and work is the
-// longest single-thread stage of the frame (see AGENTS.md, "Performance: 120 fps").
+// "<start ms>\t<work ms>". start is when the frame began for its vsync (Flutter: `FrameTiming`
+// vsync start; GPUI: the window's render on the display link tick); work is the longest
+// single-thread stage of the frame (Flutter: build or raster; GPUI: render to the end of paint
+// on the main thread). Pass criteria: AGENTS.md, "Performance: 120 fps".
 // Usage: swift scripts/frame-stats.swift [--hz 120] LOG…
 import Foundation
 

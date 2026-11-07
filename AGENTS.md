@@ -3,12 +3,8 @@
 ## Current focus: Flutter
 
 - Product work, new features and UI acceptance go to `Flutter/` unless the user names another
-  front end; automatic release delivery targets the installed Flutter app.
-- The AppKit and GPUI front ends stay; they are not deprecated. Don't grow their features or
-  turn Flutter work into a cross-front-end rewrite.
-- Engine/FFI changes keep them working: update affected callers and run targeted compatibility
-  checks. Porting new Flutter features or a full native/GPUI release and acceptance pass is not
-  required.
+  front end. The AppKit and GPUI front ends stay (not deprecated) and keep working through
+  engine changes, but don't grow their features or port new Flutter features to them.
 
 ## Version control: jj
 
@@ -31,14 +27,12 @@ The issue, not the session, is the record other sessions read.
 
 ### Writing
 
-- Write everything on Linear (titles, descriptions, comments) in plain Chinese that someone who
-  has not read the code understands at once. Lead with the conclusion, then what happened, how it
-  affects the user, what was done and what remains. Explain any technical term the reader needs
-  in a few words; leave out terms and long logs they don't.
-- No defensive writing: don't hedge, don't repeat disclaimers such as "未授权", "不代表" or
-  "不算通过", and own mistakes directly. Keep real unknowns and risks as concrete facts; never
-  present something uncertain or unverified as done.
-- Code identifiers, paths, commands and commit hashes stay as they are.
+Everything on Linear is plain Chinese that someone who has not read the code understands at
+once: conclusion first, then what happened, how it affects the user, what was done and what
+remains. Explain the terms the reader needs in a few words; leave out the rest and long logs. No
+hedging or repeated disclaimers ("未授权", "不代表", "不算通过"); own mistakes; state real unknowns
+as facts and never present the unverified as done. Identifiers, paths, commands and commit
+hashes stay as they are.
 
 ### Filing
 
@@ -91,33 +85,15 @@ The issue, not the session, is the record other sessions read.
 
 ### Polling session
 
-- An omp session runs `scripts/linear-poll.sh` every minute and hands each issue it claims to a
-  subagent in the area's workspace; when another issue holds that workspace, the issue goes to
-  the subagent working related code, or to a private workspace. `scripts/linear-omp.sh MS-12`
-  opens one issue in a new Tern tab instead (Linear's "Work on issue → Custom script").
-- It claims: Todo issues the user created, once each, unless a blocker is still open; issues it
-  claimed before, once all their blockers are resolved; any issue labelled `omp` (then removes
-  the label). Every comment the user posts reaches the subagent working that issue, or starts
-  one.
-- An In Progress issue still `claimed` by an agent that is no longer running is reported stale;
-  the session wakes that agent or hands the issue to a new one. `claimed` is dropped from issues
-  out of In Progress whose agent has stopped.
-- Who gets an issue: reuse an agent already started over a new one when it has related context
-  and room left. Related, in order: it worked this issue before (resumed, or a user comment on
-  it); it worked the parent, a sub-issue, a blocker or a blocked issue; it worked the same files
-  in the same workspace. Room left: context under 400K tokens (40% of the 1M window, the `ctx`
-  figure the session sees); at or over that, start a new agent, which picks up from the issue's
-  comments. An agent still running another issue gets the new one only after it finishes,
-  unless it is the same issue. A reused agent claims the issue like any other: its own start
-  comment, In Progress, `claimed`, its own workspace.
+An omp session runs `scripts/linear-poll.sh` every minute and hands the issues it claims, and
+the user's comments, to subagents; the script's header says what it claims and how the session
+picks the agent. `scripts/linear-omp.sh MS-12` opens one issue in a new Tern tab instead.
 
 ## Building
 
 - Every Rust build (cargo here, in `FFI/`, `GPUI/` and Turso) goes through rcache
-  (`~/projects/rcache`), the copy-on-write rustc cache shared across jj workspaces:
-  `~/.cargo/config.toml` sets `build.rustc-wrapper` to it, and `scripts/ffi.sh`/`turso.sh` export
-  `RUSTC_WRAPPER=rcache`. Don't set `RUSTC_WRAPPER`/`RCACHE_DISABLE` to bypass it; `rcache stats`
-  shows hits.
+  (`~/projects/rcache`), the rustc cache shared across jj workspaces. Don't set
+  `RUSTC_WRAPPER`/`RCACHE_DISABLE` to bypass it.
 - The app links the Turso database engine (`.turso/lib/libturso_sqlite3.a`). Run `scripts/turso.sh`
   once before `swift build` (it needs rustup; `bundle.sh` runs it too). It builds the pinned
   version with cargo in a few minutes and returns at once after that.
@@ -137,63 +113,35 @@ The issue, not the session, is the record other sessions read.
 
 ## Release delivery
 
-Finished fixes go to `/Applications` as part of the work, without a separate request, always as
-signed release builds, never Debug.
+Finished fixes go to `/Applications` as part of the work, as signed release builds, never Debug.
 
-1. Targets: the installed Flutter app (`Mailstream Flutter.app`) by default. Add `native`
-   (`Mailstream.app`) or `gpui` (`Mailstream GPUI.app`) only when the user asks or its installed
-   behavior is directly affected and needs verifying; a shared engine/FFI change alone does not
-   call for a three-front-end release. Don't install apps that aren't installed yet.
-   Tooling-only changes normally replace no app; changes to deployment itself exercise the real
-   path, Flutter first. Never claim another issue's pending checks passed.
-2. After targeted checks, describe the issue-referencing commit, `jj new`, integrate it into live
-   `main` without losing other agents' changes, and push. Read `skill://mailstream-install-frontend`
-   when available. Build in a fresh private workspace:
-   `jj workspace add --name <unique-build-name> -r main <unused-path>`. Never move an area's `@`
-   or build from the stale default checkout or the old front-end bookmarks. Don't copy `target/`
-   or `.build/` from another workspace; keep rcache on.
-3. There, run `./scripts/install.sh flutter`, plus `native`/`gpui` per step 1. It refuses stale or
-   modified source and targets not installed, builds release with the existing scripts, records
-   `MSInstalledRevision` in the bundle, requires the shared Apple Development signing (team
-   `K7HG6KZNNP`, identifier `dev.mailstream.Mailstream`), verifies the signature and replaces only
-   those bundles. If `main` moves during the build, rebuild from its new tip. It terminates only
-   the matching `/Applications` executable; never kill another agent's Debug, `/tmp`, test or
-   workspace process (no broad `pkill`/`killall`). `/tmp/mailstream-release-install.lock`
-   serializes deployments: coordinate with its owner rather than deleting it or overwriting a
-   newer installed release.
-4. Smoke the installed copy: launch each exact `/Applications/…app` with computer helpers; check
-   the running executable, the bundle revision and `codesign --verify --deep --strict`; check the
-   real window shows loaded UI and engine data and exercise the affected behavior, without sending
-   mail or destructive actions. For GPUI also check `otool -l` shows no workspace rpath and
-   `vmmap <pid>` loads `libMailstreamKit.dylib` from the installed bundle. A build, a successful
-   `open` or a process name alone proves nothing. Keep personal content out of public screenshots
-   and logs.
-5. Record the actual evidence on the issue, not a checklist; if install, signing, launch or smoke
-   fails, record the exact blocker instead of success. Only after the smoke checks pass, forget
-   and remove your build workspace (with its retained previous bundles); leave every pre-existing
-   workspace and artifact alone.
+1. Targets: `flutter` (`Mailstream Flutter.app`) by default. Add `native` (`Mailstream.app`) or
+   `gpui` (`Mailstream GPUI.app`) only when the user asks or its installed behavior is directly
+   affected; never install an app that isn't installed yet. Tooling-only changes install
+   nothing; changes to deployment itself exercise the real path.
+2. Push the issue-referencing commit to live `main` without losing other agents' changes. Build
+   in a fresh private workspace, `jj workspace add --name <unique-build-name> -r main <unused-path>`,
+   never an area workspace or the default checkout, and without copying another workspace's
+   `target/` or `.build/`. There run `./scripts/install.sh <targets>`: it checks source, signing
+   and the deploy lock itself and stops only the installed copy. If `main` moves meanwhile,
+   rebuild from its tip. Never delete another agent's lock or kill its processes.
+3. Smoke each installed `/Applications/…app` with computer helpers: the running executable, the
+   bundle revision, `codesign --verify --deep --strict`, the real window showing loaded data, and
+   the affected behavior (no sending mail, nothing destructive). GPUI also: `otool -l` shows no
+   workspace rpath and `vmmap <pid>` loads `libMailstreamKit.dylib` from the bundle. A build, an
+   `open` or a process name alone proves nothing. Keep personal content out of screenshots and
+   logs.
+4. Record the evidence you gathered, or the exact blocker, on the issue; never claim another
+   issue's pending checks passed. Then forget and remove your build workspace; leave every other
+   workspace alone.
 
 ## Performance: 120 fps
 
-The front ends aim at 120 fps. Measure frame rate one way, so numbers compare across front ends
-and changes: `scripts/bench.sh flutter|gpui [RUNS]` on a release build.
-
-- Setup: the window (1240×800) is parked on a private 120 Hz virtual display (`scripts/vdisplay.m`;
-  the front ends draw at the rate of the display they are on, so a 60 Hz display caps them at
-  60). Each run waits for the 1-minute load average to fall below 4 (other workspaces' builds
-  skew frame times) and records it.
-- Scenario `scroll` (`MAILSTREAM_BENCH=scroll`, log to `MAILSTREAM_BENCH_OUT`): 12 s after launch,
-  once the list has rows, the app scrolls its conversation list itself, setting the offset each
-  frame from the time: 8 legs of 3 s, down 4000 px and back (less while the list is shorter;
-  pages load as in normal use). It logs every frame, then quits.
-- Per frame: start (Flutter: `FrameTiming` vsync start; GPUI: the window's render on the display
-  link tick) and work, the longest single-thread stage (Flutter: build or raster; GPUI: render
-  to the end of paint on the main thread).
-- `scripts/frame-stats.swift` reports fps, dropped vsyncs, the interval p50/p95/p99/max and work
-  percentiles. A run passes at 120 Hz when at most 1% of vsyncs are dropped and the interval p99
-  is at most 12.5 ms (1.5 frames). Report 3 runs with their load; work over 8.3 ms shows where
-  time goes.
-- Other scenarios get their own `MAILSTREAM_BENCH` value and the same log format.
+The front ends aim at 120 fps. Measure only with `scripts/bench.sh flutter|gpui [RUNS]` on a
+release build (setup, scenario and log format in its header and `scripts/frame-stats.swift`). A
+run passes when at most 1% of vsyncs drop and the interval p99 is at most 12.5 ms (1.5 frames).
+Report 3 runs with their load; work over 8.3 ms shows where time goes. New scenarios get their own
+`MAILSTREAM_BENCH` value and the same log format.
 
 ## Swift: concurrency and state
 

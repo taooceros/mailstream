@@ -35,6 +35,15 @@
 # start comment reported).
 # DRY_RUN=1 prints without claiming. `linear-poll.sh seen comment|issue <id>` puts omp's 👀 on a
 # comment or issue once the caller has handed it to a subagent, so the user sees it was picked up.
+# The caller hands each issue to a subagent, reusing one it already started over a new one when
+# that agent has related context and room left. Related, in order: it worked this issue before
+# (resumed, or a user comment on it); it worked the parent, a sub-issue, a blocker or a blocked
+# issue; it worked the same files in the same workspace. Room left: context under 400K tokens
+# (40% of the 1M window, the `ctx` figure the session sees); at or over that, start a new agent,
+# which picks up from the issue's comments. An agent still running another issue gets the new
+# one only after it finishes, unless it is the same issue. A reused agent claims the issue like
+# any other: its own start comment, In Progress, `claimed`, its own workspace. For a stale issue
+# the caller wakes its agent or hands it to a new one.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TEAM_ID=${TEAM_ID:-9f8fe59f-3788-4542-8c18-4e5c5dd5ddc2} # Mailstream; the id survives key renames
