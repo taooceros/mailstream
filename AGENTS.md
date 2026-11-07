@@ -12,14 +12,23 @@ Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` 
 
 - Use `jj`, not raw `git`: `jj st`, `jj diff`, `jj describe -m "…"`, `jj new`, `jj log`.
 - Each change is its own described commit (`jj describe -m "<what and why>"`, then `jj new`),
-  made unprompted as soon as it is built and verified, then pushed: `jj bookmark set main -r @-`,
-  then `jj git push`. Never leave finished work uncommitted in `@`.
+  made unprompted as soon as it is built and verified. Never leave finished work uncommitted in
+  `@`. Whoever integrates pushes it: `jj git fetch`, rebase onto `main@origin` if it moved,
+  `jj bookmark set main -r <tip>`, `jj git push`.
 - Isolation is omp's own, never `jj workspace add` (the `../mailstream-*` workspaces take no new
-  work). The polling session spawns subagents with `isolated: true`, so each works in its own
-  ovnfs checkout; any other separate copy (an interactive session, a release build) is
-  `ovnfs new --rev main --name <unique>`, removed with `ovnfs rm <name>` when done. A checkout has
-  a private `.git` and no `.jj`: first run `jj git init --colocate && jj bookmark track
-  main@origin`, then work as above and push `main` from the checkout itself.
+  work). The polling session spawns every subagent with `isolated: true`: omp gives it its own
+  checkout of the default checkout (jj included) and, when it finishes, cherry-picks its commits
+  onto the default checkout, where the polling session pushes them and delivers. A subagent
+  therefore commits in its checkout but never fetches, rebases or pushes (rebasing onto a newer
+  `main` would carry other agents' commits into the cherry-pick). The default checkout holds only
+  `main` and what omp lands there: the polling session commits its own edits before spawning,
+  since a new checkout copies uncommitted edits too.
+- Any other separate copy (an interactive session, a release build) is
+  `ovnfs new --rev main --name <unique>`, removed with `ovnfs rm <name>` when done. It has a
+  private `.git` and no `.jj`: first run `jj git init --colocate && jj bookmark track
+  main@origin`. An interactive session pushes `main` from its checkout itself. Work the user
+  keeps off `main` (a standalone trial) stays in its own existing checkout, by a subagent spawned
+  without isolation.
 - One line: every front end (the AppKit app, `GPUI/`, `Flutter/`) and the engine they share
   (`Sources/MailstreamKit`, `FFI/`) live on `main`, and every checkout works on it; the
   `gpui-ui` and `flutter-ui` bookmarks are history and take no new commits. An engine change
@@ -80,7 +89,10 @@ hashes stay as they are.
   integrate it into `main` and deliver it ([Release delivery](#release-delivery)). A commit,
   passing tests or a Debug/test app is not completion. Only after the installed copy passes its
   smoke check, move the issue to In Review and comment what changed, the deployed commit, the
-  exact `/Applications` targets, the checks run and what remains; the user moves it to Done.
+  exact `/Applications` targets, the checks run and what remains; the user moves it to Done. An
+  isolated subagent stops at its commits: it comments what is ready to deliver (the targets, the
+  behavior to smoke, the UI states to screenshot, the checks it ran), removes `claimed`, leaves
+  the issue In Progress and yields; the polling session integrates, delivers and finishes it.
 - UI changes (a new or changed view, flow or interaction, in any front end): attach screenshots
   of the running app showing the change, every state it adds included, to the finishing comment.
   Without them the work is not ready for review.
@@ -92,7 +104,10 @@ hashes stay as they are.
 
 An omp session runs `scripts/linear-poll.sh` every minute and hands the issues it claims, and
 the user's comments, to subagents; the script's header says what it claims and how the session
-picks the agent. `scripts/linear-omp.sh MS-12` opens one issue in a new Tern tab instead.
+picks the agent. When an isolated subagent finishes, its commits sit on top of the default
+checkout's `main`: the session pushes them, delivers them ([Release delivery](#release-delivery))
+and finishes the issue with the evidence. `scripts/linear-omp.sh MS-12` opens one issue in a new
+Tern tab instead.
 
 ## Building
 
