@@ -1,5 +1,16 @@
 # AGENTS.md
 
+## Current product focus: Flutter
+
+- For now, Flutter is the focus for product work, active feature development and UI acceptance.
+  Unless the user specifies another front end, implement and demonstrate the requested behavior
+  in `Flutter/`; default automatic release delivery targets the installed Flutter app.
+- Keep the native Swift/AppKit and GPUI front ends; they are not deprecated or being removed.
+  Do not proactively expand their features or turn Flutter work into a cross-front-end rewrite.
+- Keep necessary compatibility when changing the shared backend/FFI: update affected callers
+  and run targeted compatibility checks where needed. This does not require duplicating new
+  Flutter features or doing a full native/GPUI release and UI acceptance pass for every change.
+
 ## Version control: jj
 
 This repo is a colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` (public).
@@ -117,20 +128,23 @@ Work is tracked in Linear: team `MS`, split into projects by effort. Issue IDs l
 
 ### Release delivery after verification
 
-1. Determine affected front ends from changed code/callers and the apps actually installed in
-   `/Applications`: `native` = `Mailstream.app`, `flutter` = `Mailstream Flutter.app`, `gpui` =
-   `Mailstream GPUI.app`. A shared backend/FFI change includes every installed front end that
-   consumes it, not only the UI used during development. Do not install unrelated/new front ends.
-   Tooling-only changes normally need no app replacement; changes to this delivery path must
-   exercise it against the installed targets. Do not claim another issue's pending checks passed.
+1. Default to the installed Flutter app for automatic delivery. Determine any additional targets
+   from the user's request and actual affected code/callers: `flutter` = `Mailstream Flutter.app`,
+   `native` = `Mailstream.app`, `gpui` = `Mailstream GPUI.app` in `/Applications`. Shared backend/FFI
+   changes must retain necessary native/GPUI compatibility, but do not trigger an unrelated full
+   three-front-end release: install another front end only when its installed behavior is directly
+   affected and needs verification, or the user requests it. Do not install unrelated/new apps.
+   Tooling-only rules changes normally need no app replacement; changes to deployment mechanics
+   must exercise the real path, prioritizing Flutter. Do not claim another issue's pending checks
+   passed.
 2. After targeted tests/smoke checks, describe the issue-referencing commit, `jj new`, integrate
    it into live `main` without losing other agents' changes, and push. Read
    `skill://mailstream-install-frontend` when available. Create a uniquely named private build
    workspace with `jj workspace add --name <unique-build-name> -r main <unused-path>`. Never
    move an area's `@` or build from the stale default checkout/old front-end bookmarks. Do not
    copy `target/` or `.build/` from another workspace; keep rcache enabled.
-3. In that fresh workspace run `./scripts/install.sh <affected targets>` (for example,
-   `./scripts/install.sh flutter` or `./scripts/install.sh native flutter gpui`). It refuses
+3. In that fresh workspace run `./scripts/install.sh flutter` by default; add `native` or `gpui`
+   only for the additional affected targets identified above. It refuses
    stale/modified source and missing installed targets, builds release using the existing
    scripts, records `MSInstalledRevision` in the bundle, requires shared Apple Development
    signing (team `K7HG6KZNNP`, signing identifier `dev.mailstream.Mailstream`), verifies the
