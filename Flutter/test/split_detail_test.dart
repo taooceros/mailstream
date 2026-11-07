@@ -11,6 +11,7 @@ void main() {
       Directionality(
         textDirection: TextDirection.ltr,
         child: SplitDetail(
+          pageId: 'detail',
           list: const SizedBox.expand(key: Key('list')),
           listWidth: 400,
           onDismiss: () => dismissed++,
@@ -47,6 +48,7 @@ void main() {
     Widget split(bool open) => Directionality(
       textDirection: TextDirection.ltr,
       child: SplitDetail(
+        pageId: open ? 'detail' : null,
         list: const SizedBox.expand(key: Key('list')),
         listWidth: 400,
         onDismiss: () {},
@@ -76,6 +78,7 @@ void main() {
     Widget layer(bool open) => Directionality(
       textDirection: TextDirection.ltr,
       child: SlideLayer(
+        pageId: open ? 'page' : null,
         onDismiss: () {},
         child: open ? const SizedBox.expand(key: Key('page')) : null,
       ),
@@ -94,6 +97,7 @@ void main() {
     await tester.pumpWidget(Directionality(
       textDirection: TextDirection.ltr,
       child: SplitDetail(
+        pageId: 'detail',
         list: const SizedBox.expand(),
         listWidth: 400,
         onDismiss: () {},
@@ -125,6 +129,7 @@ void main() {
     await tester.pumpWidget(Directionality(
       textDirection: TextDirection.ltr,
       child: SplitDetail(
+        pageId: 'detail',
         list: const SizedBox.expand(),
         listWidth: 400,
         onDismiss: () {},
@@ -154,6 +159,7 @@ void main() {
       await tester.pumpWidget(Directionality(
         textDirection: TextDirection.ltr,
         child: SlideLayer(
+          pageId: 'page',
           onDismiss: () {},
           child: const ColoredBox(key: Key('page'), color: Color(0xFFFFFFFF)),
         ),
@@ -175,6 +181,92 @@ void main() {
       expect(tester.getTopLeft(page).dx, vertical ? lessThan(before - 20) : moreOrLessEquals(before + 8, epsilon: 0.5));
       await tester.sendEventToBinding(next.panZoomEnd());
       await tester.pumpAndSettle();
+    });
+  }
+
+  testWidgets('a completed split swipe removes its native detail after the owner closes it', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    final open = ValueNotifier(true);
+    addTearDown(open.dispose);
+    await tester.pumpWidget(Directionality(
+      textDirection: TextDirection.ltr,
+      child: ValueListenableBuilder(
+        valueListenable: open,
+        builder: (context, shown, _) => SplitDetail(
+          pageId: shown ? 'detail' : null,
+          list: const SizedBox.expand(key: Key('list')),
+          listWidth: 400,
+          onDismiss: () => open.value = false,
+          detail: shown ? const ColoredBox(key: Key('detail'), color: Color(0xFFFFFFFF)) : null,
+        ),
+      ),
+    ));
+    final at = tester.getCenter(find.byKey(const Key('detail')));
+    final pointer = TestPointer(1, PointerDeviceKind.trackpad);
+    await tester.sendEventToBinding(pointer.panZoomStart(at));
+    await tester.sendEventToBinding(pointer.panZoomUpdate(at, pan: const Offset(500, 0)));
+    await tester.pump();
+    await tester.sendEventToBinding(pointer.panZoomEnd());
+    await tester.pumpAndSettle();
+    expect(open.value, isFalse);
+    expect(tester.getSize(find.byKey(const Key('list'))).width, moreOrLessEquals(1200, epsilon: 0.5));
+    expect(find.byKey(const Key('detail')), findsNothing);
+  });
+
+  for (final split in [false, true]) {
+    testWidgets('${split ? 'split' : 'layer'} closing never removes a newly opened page', (tester) async {
+      await tester.binding.setSurfaceSize(Size(split ? 1200 : 800, 800));
+      final page = ValueNotifier<int?>(1);
+      addTearDown(page.dispose);
+      var dismissed = 0;
+      void dismiss() {
+        dismissed++;
+        page.value = null;
+      }
+      await tester.pumpWidget(Directionality(
+        textDirection: TextDirection.ltr,
+        child: ValueListenableBuilder(
+          valueListenable: page,
+          builder: (context, id, _) {
+            final child = id == null ? null : ColoredBox(key: ValueKey(id), color: const Color(0xFFFFFFFF));
+            return split
+                ? SplitDetail(pageId: id, list: const SizedBox.expand(), detail: child, listWidth: 400, onDismiss: dismiss)
+                : SlideLayer(pageId: id, onDismiss: dismiss, child: child);
+          },
+        ),
+      ));
+      await tester.pumpAndSettle();
+      Future<void> swipe(int id, int pointerId) async {
+        final at = tester.getCenter(find.byKey(ValueKey(id)));
+        final pointer = TestPointer(pointerId, PointerDeviceKind.trackpad);
+        await tester.sendEventToBinding(pointer.panZoomStart(at));
+        await tester.sendEventToBinding(pointer.panZoomUpdate(at, pan: const Offset(500, 0)));
+        await tester.pump();
+        await tester.sendEventToBinding(pointer.panZoomEnd());
+        await tester.pump(const Duration(milliseconds: 40));
+      }
+      await swipe(1, 1);
+      page.value = 2;
+      await tester.pumpAndSettle();
+      expect(dismissed, 0);
+      expect(find.byKey(const ValueKey(1)), findsNothing);
+      expect(find.byKey(const ValueKey(2)), findsOneWidget);
+      expect(tester.getTopLeft(find.byKey(const ValueKey(2))).dx, moreOrLessEquals(split ? 408 : 0, epsilon: 0.5));
+
+      page.value = null;
+      await tester.pump(const Duration(milliseconds: 40));
+      page.value = 3;
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey(3)), findsOneWidget);
+      expect(dismissed, 0);
+
+      // A normal rebuild of the same page must not cancel its pending dismissal.
+      await swipe(3, 2);
+      page.notifyListeners();
+      await tester.pumpAndSettle();
+      expect(dismissed, 1);
+      expect(page.value, isNull);
+      expect(find.byKey(const ValueKey(3)), findsNothing);
     });
   }
 }

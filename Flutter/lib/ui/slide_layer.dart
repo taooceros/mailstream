@@ -8,7 +8,10 @@ import 'design.dart';
 /// the list, a bundle over the inbox. A two-finger horizontal swipe on the trackpad drags it off
 /// that side and goes back once past a third of its width or flicked.
 class SlideLayer extends StatefulWidget {
-  const SlideLayer({super.key, required this.child, required this.onDismiss});
+  const SlideLayer({super.key, required this.pageId, required this.child, required this.onDismiss});
+
+  /// Stable identity of the open page, even when its widget rebuilds.
+  final Object? pageId;
 
   /// Nil hides the layer, sliding the last child out.
   final Widget? child;
@@ -49,7 +52,7 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
     super.didUpdateWidget(old);
     final child = widget.child;
     if (child != null) {
-      final entering = old.child == null;
+      final entering = old.child == null || (_swipedAway && old.pageId != widget.pageId);
       if (entering) {
         _swipedAway = false;
         if (_shown == null) {
@@ -199,6 +202,7 @@ class SplitDetail extends StatefulWidget {
     super.key,
     required this.list,
     required this.detail,
+    required this.pageId,
     required this.listWidth,
     required this.onDismiss,
   });
@@ -207,6 +211,9 @@ class SplitDetail extends StatefulWidget {
 
   /// Null closes the split; the page last shown slides out.
   final Widget? detail;
+
+  /// Stable identity lets a new page interrupt an old page's pending dismissal.
+  final Object? pageId;
   final double listWidth;
   final VoidCallback onDismiss;
 
@@ -241,14 +248,19 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
     final detail = widget.detail;
     if (detail != null) {
       _shown = detail;
-      if (old.detail == null) {
+      if (old.detail == null || (_swipedAway && old.pageId != widget.pageId)) {
         _swipedAway = false;
         _split.animateTo(1, duration: Motion.enter, curve: Motion.curve);
       }
-    } else if (old.detail != null && !_swipedAway) {
-      // Closes on the spring a swipe settles on, carrying whatever speed the split has, so it moves
-      // at once and the list eases into the full width rather than hitting it at top speed.
-      _split.animateWith(_settle(_split.value, 0, _split.velocity, pixels: _travel)).whenComplete(_hide);
+    } else if (old.detail != null) {
+      if (_swipedAway) {
+        // The owner has now cleared the detail; remove its native views in this rebuild.
+        _shown = null;
+        _split.value = 0;
+      } else {
+        // Closes on the spring a swipe settles on, carrying whatever speed the split has.
+        _split.animateWith(_settle(_split.value, 0, _split.velocity, pixels: _travel)).whenComplete(_hide);
+      }
     }
   }
 
@@ -287,10 +299,7 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
     final splitVelocity = -velocity / travel;
     if (offset > 0 && HorizontalSwipe.dismisses(offset, velocity, travel)) {
       _swipedAway = true;
-      _split.animateWith(_settle(_split.value, 0, splitVelocity, pixels: travel)).whenComplete(() {
-        widget.onDismiss();
-        _hide();
-      });
+      _split.animateWith(_settle(_split.value, 0, splitVelocity, pixels: travel)).whenComplete(widget.onDismiss);
     } else {
       _split.animateWith(_settle(_split.value, 1, splitVelocity, pixels: travel));
     }

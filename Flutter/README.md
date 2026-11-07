@@ -187,8 +187,11 @@ Reader back swipes keep their current position when a new horizontal gesture tak
 entrance or spring; vertical scrolling does not stop that motion. The live list stays mounted
 under the single-pane layer and widens behind the split reader. Neither path scales WebKit,
 waits for message loading, nor rebuilds the shell on animation ticks.
-`flutter test test/split_detail_test.dart` covers dismissal, cancellation, interrupted springs
-and vertical input. For private-mail-free native release measurements, build
+Swipe completion removes the old native reader when its owner clears the detail, rather than
+trying to remove it before that rebuild. Stable logical `pageId`s let a newly opened page
+cancel the old page's dismissal; an ordinary rebuild of the same page keeps that dismissal.
+`flutter test test/split_detail_test.dart` covers dismissal, cancellation, interrupted springs,
+vertical input, native-detail teardown and reopening during close. For private-mail-free native release measurements, build
 `flutter build macos --release -t test/reader_motion_app.dart`, then launch its executable with
 `MAILSTREAM_BENCH=reader-dismiss MAILSTREAM_BENCH_OUT=/tmp/reader-motion`. Park that window at
 1240×800 on a private 120 Hz display before its 12-second warmup ends. The real shell uses

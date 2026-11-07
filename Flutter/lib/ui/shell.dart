@@ -403,11 +403,11 @@ class _MailShellState extends State<MailShell> {
     // resizing the column moves only the edge being dragged.
     final listWidth = dockedCompose ? (contentWidth * 0.3).clamp(300.0, 460.0) : (width * 0.36).clamp(400.0, 520.0);
     final Widget mailContent = _twoPane
-        ? SplitDetail(list: listPane, listWidth: listWidth, onDismiss: onDismiss, detail: detail)
+        ? SplitDetail(pageId: space ?? opened?.id, list: listPane, listWidth: listWidth, onDismiss: onDismiss, detail: detail)
         : Stack(
             fit: StackFit.expand,
             clipBehavior: Clip.none,
-            children: [listPane, SlideLayer(onDismiss: onDismiss, child: detail)],
+            children: [listPane, SlideLayer(pageId: space ?? opened?.id, onDismiss: onDismiss, child: detail)],
           );
 
     final composePane = hasCompose && !stashedCompose
@@ -556,6 +556,7 @@ class _MailShellState extends State<MailShell> {
                   emptyText: state.searchQuery != null ? 'No matches' : 'No conversations',
                 ),
                 SlideLayer(
+                  pageId: bundle?.name,
                   onDismiss: () => state.showBundle(null),
                   child: bundle == null
                       ? null
