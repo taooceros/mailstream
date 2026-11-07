@@ -60,6 +60,24 @@ HTML mail is drawn by WebKit: `macos/Runner/MailHtmlView.swift` is a platform vi
 remote images without cookies, zooms out a body wider than the column, and reports its
 content height so the body scrolls with the conversation.
 
+HTML DOM parsing, quote traversal and serialization run in a background Dart isolate before
+creating the WebKit bodies (MS-87). A shared eight-entry LRU reuses unchanged HTML and shares
+in-flight requests; only one parse isolate runs at a time. Main/quoted parts retain the original
+head styling and Gmail/Outlook/Thunderbird/Apple quote rules, including keeping pure-quote mail
+whole. A refresh retains the mounted body until replacement parts arrive; message keys and
+request generations prevent a disposed or superseded request from replacing another selection.
+Opening/closing a quote never reparses HTML or creates its WebKit view before expansion.
+
+`flutter test test/html_parts_test.dart` covers output, caching, replacement/disposal races and
+fold behavior. `flutter run -d macos --release -t test/html_parts_app.dart` opens a synthetic-only
+native reader without accounts or private mail. Set `MAILSTREAM_HTML_BENCH_OUT=/tmp/html-parts.json`
+when launching that fixture to compare the exact pre-MS-87 synchronous algorithm (a1fc4b3d)
+with queued isolate parsing in the same release runtime: 20 alternating-order pairs each for
+small and 2,500-row HTML, reporting enqueue/synchronous time, total preparation latency,
+maximum 1 ms event-loop heartbeat gap and cache-hit latency. The gap includes scheduling noise;
+enqueue time alone is not the total main-thread cost, and isolate latency is not assumed to
+beat synchronous parsing. This is a parsing comparison, not the 120 Hz scrolling benchmark.
+
 Conversation changes fade the reader without scaling its native viewport. The scale-in
 transition can leave native WebKit content offset relative to the Flutter body card (MS-82).
 The HTML, card insets and WebKit sizing stay unchanged.

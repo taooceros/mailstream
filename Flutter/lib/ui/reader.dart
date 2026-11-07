@@ -3,8 +3,6 @@ import 'dart:math' as math;
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
-import 'package:html/dom.dart' as dom;
-import 'package:html/parser.dart' as html_parser;
 import 'package:macos_ui/macos_ui.dart';
 
 import '../backend/models.dart';
@@ -14,6 +12,7 @@ import 'compose.dart';
 import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
+import 'html_parts.dart';
 
 /// One conversation: a reading column with the subject and its chips, then message cards
 /// (service mail) or a chat log (people), and reply buttons at the bottom that open an inline
@@ -416,7 +415,7 @@ class _Body extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: colors.separator),
         ),
-        child: MailHtml(html: html),
+        child: MailHtml(key: ValueKey(message.id), html: html),
       );
     }
     return FoldedText(text: message.text ?? '');
@@ -427,63 +426,65 @@ class _Body extends StatelessWidget {
 /// Quoted history (Gmail, Outlook, Thunderbird, Apple Mail markup) is cut out of the body and
 /// folds behind a toggle, in a view of its own made when it opens.
 class MailHtml extends StatefulWidget {
-  const MailHtml({super.key, required this.html});
+  const MailHtml({super.key, required this.html, this.partsCache});
 
   final String html;
+
+  /// Overrides preparation for deterministic tests; rendering stays on the native view path.
+  final HtmlPartsCache? partsCache;
 
   @override
   State<MailHtml> createState() => _MailHtmlState();
 }
 
 class _MailHtmlState extends State<MailHtml> {
-  late (String, String?) _parts = _split(widget.html);
+  HtmlParts? _parts;
+  Object? _error;
+  int _request = 0;
+
+  HtmlPartsCache get _cache => widget.partsCache ?? HtmlPartsCache.shared;
+
+  @override
+  void initState() {
+    super.initState();
+    _prepare();
+  }
 
   @override
   void didUpdateWidget(MailHtml old) {
     super.didUpdateWidget(old);
-    if (old.html != widget.html) _parts = _split(widget.html);
+    if (old.html != widget.html || old.partsCache != widget.partsCache) _prepare();
   }
 
-  static bool _isQuote(dom.Element e) =>
-      e.classes.contains('gmail_quote') ||
-      e.classes.contains('gmail_quote_container') ||
-      e.classes.contains('moz-cite-prefix') ||
-      e.id == 'divRplyFwdMsg' ||
-      e.id == 'appendonsend' ||
-      (e.localName == 'blockquote' && e.attributes['type'] == 'cite');
-
-  /// The body without its quoted history, and that history with the body's styles; the whole
-  /// body when nothing would stay above the fold.
-  static (String, String?) _split(String html) {
-    final document = html_parser.parse(html);
-    final body = document.body;
-    if (body == null) return (html, null);
-    final quotes = <dom.Element>[];
-    void collect(dom.Element element) {
-      for (final child in element.children) {
-        if (_isQuote(child)) {
-          quotes.add(child);
-        } else {
-          collect(child);
-        }
-      }
+  void _prepare() {
+    final request = ++_request;
+    final html = widget.html;
+    _error = null;
+    final cached = _cache.peek(html);
+    if (cached != null) {
+      _parts = cached;
+      return;
     }
-
-    collect(body);
-    if (quotes.isEmpty) return (html, null);
-    final quoted = quotes.map((q) => q.outerHtml).join();
-    for (final quote in quotes) {
-      quote.remove();
-    }
-    final kept = body.text.trim().isNotEmpty || body.querySelector('img') != null;
-    if (!kept) return (html, null);
-    final head = document.head?.outerHtml ?? '';
-    return (document.outerHtml, '<html>$head<body>$quoted</body></html>');
+    // A refresh keeps this message's mounted body/fold until its replacement is ready.
+    // Different messages have different keys in _Body, so never show the previous mail.
+    _cache.load(html).then((parts) {
+      if (!mounted || request != _request) return;
+      setState(() => _parts = parts);
+    }, onError: (Object error, StackTrace stack) {
+      if (!mounted || request != _request) return;
+      FlutterError.reportError(FlutterErrorDetails(exception: error, stack: stack, library: 'mail HTML'));
+      setState(() => _error = error);
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    final (main, quoted) = _parts;
+    final parts = _parts;
+    if (parts == null) {
+      if (_error != null) return Text('Could not prepare HTML: $_error', style: context.text.body);
+      return const SizedBox(height: 40, child: Center(child: Spinner()));
+    }
+    final (main, quoted) = parts;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
