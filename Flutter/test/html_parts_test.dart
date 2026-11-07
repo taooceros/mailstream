@@ -88,20 +88,101 @@ void main() {
     expect(calls.where((html) => html == 'bad').length, 2);
   });
 
+  /// Platform views made, oldest first; the width each asked its height at; the page's answer.
+  final views = <int>[];
+  final pulls = <int, Object?>{};
+  late Future<Object?> Function(int view) answer;
+
   setUp(() {
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
-      SystemChannels.platform_views,
-      (call) async => null,
-    );
+    views.clear();
+    pulls.clear();
+    answer = (_) async => null;
+    final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform_views, (call) async {
+      if (call.method == 'create') {
+        final id = (call.arguments as Map)['id'] as int;
+        views.add(id);
+        // The runner's page host, which answers the height Flutter asks for once it listens.
+        messenger.setMockMethodCallHandler(MethodChannel('mailstream/html/$id'), (call) async {
+          pulls[id] = call.arguments;
+          return answer(id);
+        });
+      }
+      return null;
+    });
   });
 
+  const owner = (account: 'account', conversation: 'conversation', message: 'message');
   Widget host(String html, HtmlPartsCache cache, {String message = 'same'}) => MacosApp(
     theme: MailTheme.macos(Brightness.light),
-    home: Center(child: MailHtml(key: ValueKey(message), html: html, partsCache: cache)),
+    home: Center(child: MailHtml(key: ValueKey(message), owner: owner, html: html, partsCache: cache)),
   );
   List<String> rendered(WidgetTester tester) => tester.widgetList<AppKitView>(find.byType(AppKitView))
       .map((view) => (view.creationParams as Map)['html'] as String).toList();
   Finder toggle() => find.byIcon(CupertinoIcons.ellipsis);
+  double height(WidgetTester tester, [int index = 0]) => tester.getSize(find.byType(AppKitView).at(index)).height;
+  Future<void> measured(WidgetTester tester, int view, List<Object> height) async {
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      'mailstream/html/$view',
+      const StandardMethodCodec().encodeMethodCall(MethodCall('height', height)),
+      (_) {},
+    );
+    await tester.pump();
+  }
+
+  testWidgets('each part asks for its page by message and HTML, then for its height at its width', (tester) async {
+    final cache = HtmlPartsCache(split: (html) async => ('main', 'quote'));
+    answer = (_) async => [120.0, 3];
+    await tester.pumpWidget(host('a', cache));
+    await tester.pumpAndSettle();
+    await tester.tap(toggle());
+    await tester.pumpAndSettle();
+    final params = tester.widgetList<AppKitView>(find.byType(AppKitView)).map((view) => view.creationParams).toList();
+    expect(params, [
+      {'owner': ['account', 'conversation', 'message', 'body'], 'html': 'main'},
+      {'owner': ['account', 'conversation', 'message', 'quote'], 'html': 'quote'},
+    ]);
+    expect(pulls[views.first], tester.getSize(find.byType(AppKitView).first).width);
+    expect(height(tester), 120);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a late, older height cannot replace a newer one', (tester) async {
+    final cache = HtmlPartsCache(split: (html) async => (html, null));
+    final pull = Completer<Object?>();
+    answer = (_) => pull.future;
+    await tester.pumpWidget(host('a', cache));
+    await tester.pumpAndSettle();
+    expect(height(tester), 40);
+    await measured(tester, views.single, [300.0, 4]);
+    expect(height(tester), 300);
+    pull.complete([120.0, 3]);
+    await tester.pump();
+    expect(height(tester), 300);
+    await measured(tester, views.single, [90.0, 2]);
+    expect(height(tester), 300);
+    await measured(tester, views.single, [310.0, 5]);
+    expect(height(tester), 310);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a view gone before its page answers changes nothing', (tester) async {
+    final cache = HtmlPartsCache(split: (html) async => (html, null));
+    final pull = Completer<Object?>();
+    answer = (view) => view == views.first ? pull.future : Future.value(null);
+    await tester.pumpWidget(host('a', cache, message: 'a'));
+    await tester.pumpAndSettle();
+    final gone = views.single;
+    await tester.pumpWidget(host('b', cache, message: 'b'));
+    await tester.pumpAndSettle();
+    // The old page's host went with its view; its height reaches nobody.
+    pull.completeError(MissingPluginException());
+    await measured(tester, gone, [500.0, 9]);
+    expect(tester.takeException(), isNull);
+    expect(rendered(tester), ['b']);
+    expect(height(tester), 40);
+    await tester.pumpWidget(const SizedBox());
+  });
 
   testWidgets('pending replacement cannot overwrite refreshed content or reopen a fold', (tester) async {
     final stale = Completer<HtmlParts>();

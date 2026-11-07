@@ -134,7 +134,10 @@ class _HtmlPartsAppState extends State<HtmlPartsApp> {
         const SizedBox(height: 16),
         Expanded(child: SingleChildScrollView(child: Container(
           color: const Color(0xffffffff), padding: const EdgeInsets.all(20),
-          child: MailHtml(html: sample(3, _revision)),
+          child: MailHtml(
+            owner: (account: 'synthetic', conversation: 'synthetic', message: 'synthetic'),
+            html: sample(3, _revision),
+          ),
         ))),
       ]),
     ),

@@ -158,6 +158,14 @@ HTML mail is drawn by WebKit: `macos/Runner/MailHtmlView.swift` is a platform vi
 remote images without cookies, zooms out a body wider than the column, and reports its
 content height so the body scrolls with the conversation.
 
+Creating a WebKit page and loading its HTML holds the main thread for 20–35 ms, so each platform
+view is a light host around a page (MS-109). When a reader or fold closes, its page waits idle (at
+most eight) and is shown again only for the same account, conversation, message, part (body or
+quote) and full HTML; a page never loads other HTML and is never taken from a host still showing
+it. Heights carry a per-page number, and the Dart view asks for the latest height at its own
+width once it listens, so a late or stale height cannot resize another showing; a page reused at
+another width measures again.
+
 HTML DOM parsing, quote traversal and serialization run in a background Dart isolate before
 creating the WebKit bodies (MS-87). A shared eight-entry LRU reuses unchanged HTML and shares
 in-flight requests; only one parse isolate runs at a time. Main/quoted parts retain the original
@@ -166,8 +174,9 @@ whole. A refresh retains the mounted body until replacement parts arrive; messag
 request generations prevent a disposed or superseded request from replacing another selection.
 Opening/closing a quote never reparses HTML or creates its WebKit view before expansion.
 
-`flutter test test/html_parts_test.dart` covers output, caching, replacement/disposal races and
-fold behavior. `flutter run -d macos --release -t test/html_parts_app.dart` opens a synthetic-only
+`flutter test test/html_parts_test.dart` covers output, caching, replacement/disposal races,
+fold behavior and the height protocol (owner parameters, the pull, late older heights, views
+gone before they answer). `flutter run -d macos --release -t test/html_parts_app.dart` opens a synthetic-only
 native reader without accounts or private mail. Set `MAILSTREAM_HTML_BENCH_OUT=/tmp/html-parts.json`
 when launching that fixture to compare the exact pre-MS-87 synchronous algorithm (a1fc4b3d)
 with queued isolate parsing in the same release runtime: 20 alternating-order pairs each for

@@ -118,6 +118,7 @@ class ReaderState extends State<Reader> {
       if (messages != null)
         if (_chat)
           _ChatLog(
+            conversation: c,
             messages: messages,
             now: now,
             state: widget.state,
@@ -129,6 +130,7 @@ class ReaderState extends State<Reader> {
             Padding(
               padding: const EdgeInsets.only(bottom: 12),
               child: _MessageCard(
+                conversation: c,
                 message: m,
                 state: widget.state,
                 now: now,
@@ -267,6 +269,7 @@ class _Header extends StatelessWidget {
 
 class _MessageCard extends StatelessWidget {
   const _MessageCard({
+    required this.conversation,
     required this.message,
     required this.state,
     required this.now,
@@ -275,6 +278,7 @@ class _MessageCard extends StatelessWidget {
     required this.onReply,
   });
 
+  final Conversation conversation;
   final MessageDetail message;
   final MailState state;
   final DateTime now;
@@ -358,7 +362,7 @@ class _MessageCard extends StatelessWidget {
               ),
             ),
             if (expanded) ...[
-              Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), child: _Body(message: m)),
+              Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), child: _Body(conversation: conversation, message: m)),
               if (m.attachments.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
@@ -400,8 +404,9 @@ class _AttachmentChip extends StatelessWidget {
 
 /// A body: HTML mail on a white sheet, as mail is designed for; plain text in the theme's type.
 class _Body extends StatelessWidget {
-  const _Body({required this.message});
+  const _Body({required this.conversation, required this.message});
 
+  final Conversation conversation;
   final MessageDetail message;
 
   @override
@@ -417,7 +422,11 @@ class _Body extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: colors.separator),
         ),
-        child: MailHtml(key: ValueKey(message.id), html: html),
+        child: MailHtml(
+          key: ValueKey(message.id),
+          owner: (account: conversation.account, conversation: conversation.id, message: message.id),
+          html: html,
+        ),
       );
     }
     return FoldedText(text: message.text ?? '');
@@ -428,8 +437,11 @@ class _Body extends StatelessWidget {
 /// Quoted history (Gmail, Outlook, Thunderbird, Apple Mail markup) is cut out of the body and
 /// folds behind a toggle, in a view of its own made when it opens.
 class MailHtml extends StatefulWidget {
-  const MailHtml({super.key, required this.html, this.partsCache});
+  const MailHtml({super.key, required this.owner, required this.html, this.partsCache});
 
+  /// The message the HTML belongs to: a WebKit page closed with its reader is shown again only
+  /// for the same message and HTML.
+  final HtmlOwner owner;
   final String html;
 
   /// Overrides preparation for deterministic tests; rendering stays on the native view path.
@@ -438,6 +450,8 @@ class MailHtml extends StatefulWidget {
   @override
   State<MailHtml> createState() => _MailHtmlState();
 }
+
+typedef HtmlOwner = ({String account, String conversation, String message});
 
 class _MailHtmlState extends State<MailHtml> {
   HtmlParts? _parts;
@@ -487,11 +501,13 @@ class _MailHtmlState extends State<MailHtml> {
       return const SizedBox(height: 40, child: Center(child: Spinner()));
     }
     final (main, quoted) = parts;
+    final owner = widget.owner;
+    List<String> part(String name) => [owner.account, owner.conversation, owner.message, name];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _WebBody(key: ValueKey(main), html: main),
-        if (quoted != null) _Fold(child: _WebBody(key: ValueKey(quoted), html: quoted)),
+        _WebBody(key: ValueKey(main), owner: part('body'), html: main),
+        if (quoted != null) _Fold(child: _WebBody(key: ValueKey(quoted), owner: part('quote'), html: quoted)),
       ],
     );
   }
@@ -499,8 +515,10 @@ class _MailHtmlState extends State<MailHtml> {
 
 /// One WebKit view, as tall as the page it holds says it is.
 class _WebBody extends StatefulWidget {
-  const _WebBody({super.key, required this.html});
+  const _WebBody({super.key, required this.owner, required this.html});
 
+  /// Account, conversation, message and part (body or quote).
+  final List<String> owner;
   final String html;
 
   @override
@@ -513,16 +531,38 @@ class _WebBodyState extends State<_WebBody> {
   /// Until the page measures itself: about two lines.
   double _height = 40;
 
+  /// The number of the height shown: the page numbers its heights, so an older one arriving late
+  /// is dropped.
+  int _version = 0;
+
   void _created(int id) {
-    _channel = MethodChannel('mailstream/html/$id')
+    if (!mounted) return;
+    final channel = _channel = MethodChannel('mailstream/html/$id')
       ..setMethodCallHandler((call) async {
-        if (call.method == 'height' && mounted) setState(() => _height = (call.arguments as num).toDouble());
+        if (call.method == 'height') _measured(call.arguments);
       });
+    // A page shown before (or measured before this listened) has its height already: ask for it
+    // at this width.
+    final box = context.findRenderObject();
+    final width = box is RenderBox && box.hasSize ? box.size.width : null;
+    channel.invokeMethod<Object?>('height', width).then(_measured, onError: (Object error) {
+      // The view can go before it answers.
+      if (mounted && _channel == channel) throw error;
+    });
+  }
+
+  void _measured(Object? height) {
+    if (!mounted || height is! List || height.length != 2) return;
+    final version = height[1] as int;
+    if (version <= _version) return;
+    _version = version;
+    setState(() => _height = (height[0] as num).toDouble());
   }
 
   @override
   void dispose() {
     _channel?.setMethodCallHandler(null);
+    _channel = null;
     super.dispose();
   }
 
@@ -531,7 +571,7 @@ class _WebBodyState extends State<_WebBody> {
     height: _height,
     child: AppKitView(
       viewType: 'mailstream/html',
-      creationParams: {'html': widget.html},
+      creationParams: {'owner': widget.owner, 'html': widget.html},
       creationParamsCodec: const StandardMessageCodec(),
       onPlatformViewCreated: _created,
     ),
@@ -652,6 +692,7 @@ class _FoldState extends State<_Fold> {
 /// next message always clears the last.
 class _ChatLog extends StatefulWidget {
   const _ChatLog({
+    required this.conversation,
     required this.messages,
     required this.now,
     required this.state,
@@ -659,6 +700,7 @@ class _ChatLog extends StatefulWidget {
     required this.topInset,
   });
 
+  final Conversation conversation;
   final List<MessageDetail> messages;
   final DateTime now;
   final MailState state;
@@ -701,6 +743,7 @@ class _ChatLogState extends State<_ChatLog> {
         ));
       }
       children.add(_ChatMessage(
+        conversation: widget.conversation,
         message: m,
         state: widget.state,
         onReply: widget.onReply,
@@ -719,6 +762,7 @@ class _ChatLogState extends State<_ChatLog> {
 /// float on its top edge, over the gap above rather than over the text.
 class _ChatMessage extends StatefulWidget {
   const _ChatMessage({
+    required this.conversation,
     required this.message,
     required this.state,
     required this.onReply,
@@ -727,6 +771,7 @@ class _ChatMessage extends StatefulWidget {
     required this.topInset,
   });
 
+  final Conversation conversation;
   final MessageDetail message;
   final MailState state;
   final void Function({bool all}) onReply;
@@ -820,7 +865,9 @@ class _ChatMessageState extends State<_ChatMessage> {
     final text = context.text;
     final m = widget.message;
     final hover = _hover;
-    final body = (m.text ?? '').trim().isEmpty && m.html != null ? _Body(message: m) : FoldedText(text: m.text ?? '');
+    final body = (m.text ?? '').trim().isEmpty && m.html != null
+        ? _Body(conversation: widget.conversation, message: m)
+        : FoldedText(text: m.text ?? '');
     return MouseRegion(
       onEnter: _enter,
       onExit: _exit,
