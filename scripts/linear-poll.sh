@@ -41,11 +41,13 @@
 # exits 1. The caller starts it once as a background job with no deadline, waits for its result,
 # handles the lines and starts it again, and rewrites RUNNING_FILE whenever its agents start or
 # finish. With DRY_RUN=1 it exits after the first plan holding a line other than unclaim.
-# The caller hands each issue to a new subagent spawned with `isolated: true`; a finished
-# isolated agent can't be resumed, and the new one picks up from the issue's comments. A user
-# comment on an issue whose agent is still running goes to that agent (`write agent://<id>`),
-# otherwise to a new one. An agent that is running gets more work only on its own issue. A
-# stale issue goes to a new agent, which posts its own start comment.
+# The caller keeps context where it pays. A user comment or rework on an issue goes to the agent
+# that worked it, woken with `write agent://<id>` even after it finished (it resumes in its own
+# checkout), unless its context is over 400K tokens. A related issue (parent, sub-issue, blocker,
+# same code) goes to a new isolated agent given the earlier agent's transcript path to consult
+# through a `seance` subagent. Anything else, and a stale issue, goes to a new isolated agent,
+# which picks up from the issue's comments and posts its own start comment. An agent that is
+# running gets more work only on its own issue.
 set -euo pipefail
 TEAM_ID=${TEAM_ID:-9f8fe59f-3788-4542-8c18-4e5c5dd5ddc2} # Mailstream; the id survives key renames
 LABEL=${LABEL:-omp}

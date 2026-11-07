@@ -108,9 +108,13 @@ Linear every minute and returns only once it has claimed something. The session 
 it claims, and the user's comments, to subagents, then starts it again. It keeps that file a JSON
 array of its running agent ids, rewritten whenever one starts or finishes; the script re-reads it
 each pass. The script's header says what it claims and how the session picks the agent. When an
-isolated subagent finishes, its commits sit on top of the default checkout's `main`: the session
-pushes them, delivers them ([Release delivery](#release-delivery)) and finishes the issue with the
-evidence. `scripts/linear-omp.sh MS-12` opens one issue in a new Tern tab instead.
+isolated subagent finishes, omp lands its commits on the default checkout's git HEAD, which a
+remaining `jj workspace` may have moved: the session rebases only that agent's commits onto
+`main@origin` (`jj rebase -r …`), pushes them, delivers them ([Release delivery](#release-delivery)),
+finishes the issue with the evidence and returns to `jj new main`. Commits an agent makes after
+being woken are not landed: `ovnfs apply <its checkout> --branch <b>` brings its commits in, and
+only those after its first landing are rebased and pushed. `scripts/linear-omp.sh MS-12` opens one
+issue in a new Tern tab instead.
 
 ## Building
 
