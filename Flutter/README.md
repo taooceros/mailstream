@@ -14,6 +14,7 @@ Mailstream.app need not run.
 # at the repository root: release dylibs and the Dart bindings (packages/mailstream/lib/src, not committed)
 CONFIG=release DART_OUT=$PWD/Flutter/packages/mailstream/lib/src ./scripts/ffi.sh
 cd Flutter
+flutter test                              # targeted/unit tests (header padding allows install_name rewriting)
 flutter build macos --release           # build/macos/Build/Products/Release/Mailstream Flutter.app
 ../scripts/sign.sh "build/macos/Build/Products/Release/Mailstream Flutter.app"
 ```

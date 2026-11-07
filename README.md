@@ -188,6 +188,10 @@ DART_OUT=path/to/lib/src ./scripts/ffi.sh         # and the Dart bindings (asset
   sign-ins relied on the client in the app's `Info.plist`, which other hosts lack. The app
   stores that client the next time it refreshes such a token, and from then on other hosts
   can refresh it too.
+- **Mach-O header padding.** `FFI/build.rs` automatically links the macOS `cdylib` with
+  `-headerpad_max_install_names`. Flutter test preparation and native asset hooks can rewrite
+  dynamic library IDs and dependencies using `install_name_tool` without manual relinking or
+  temporary `RUSTFLAGS`.
 
 ## Build and run
 

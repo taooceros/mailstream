@@ -18,6 +18,11 @@ fn main() {
     // their own rpath (@executable_path/../Frameworks). The rpath reaches this package's own
     // binaries; other crates' binaries add it from `DEP_MAILSTREAMKIT_DIR`.
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dir.display());
+    // On macOS cdylib, reserve Mach-O header padding so `install_name_tool` (run when Flutter
+    // bundles or tests native assets) can rewrite IDs and rpaths without relinking.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-headerpad_max_install_names");
+    }
     println!("cargo:dir={}", dir.display());
     println!("cargo:rerun-if-changed={}", dir.join("libMailstreamKit.dylib").display());
 }
