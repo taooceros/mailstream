@@ -17,6 +17,10 @@ permissions:
 
 jobs:
   prepare:
+    if: github.ref == 'refs/heads/main'
+    # Configure reviewers and a main-only deployment policy on this environment
+    # before adding credentials. Naming it here does not create those protections.
+    environment: updates
     runs-on: macos-26
     timeout-minutes: 60
     env:
@@ -27,12 +31,14 @@ jobs:
       - uses: actions/checkout@v7
       - name: Require configured trust and signing material
         env:
-          CERTIFICATE: ${{ secrets.MAILSTREAM_SIGNING_P12 }}
-          UPDATE_KEY: ${{ secrets.MAILSTREAM_UPDATE_PRIVATE_KEY }}
+          HAS_CERTIFICATE: ${{ secrets.MAILSTREAM_SIGNING_P12 != '' }}
+          HAS_CERTIFICATE_PASSWORD: ${{ secrets.MAILSTREAM_SIGNING_P12_PASSWORD != '' }}
+          HAS_UPDATE_KEY: ${{ secrets.MAILSTREAM_UPDATE_PRIVATE_KEY != '' }}
         run: |
           test -n "$UPDATE_PUBLIC_KEY" || { echo 'Missing approved public update key'; exit 1; }
-          test -n "$CERTIFICATE" || { echo 'Missing shared Apple signing certificate'; exit 1; }
-          test -n "$UPDATE_KEY" || { echo 'Missing update signing seed'; exit 1; }
+          test "$HAS_CERTIFICATE" = true || { echo 'Missing shared Apple signing certificate'; exit 1; }
+          test "$HAS_CERTIFICATE_PASSWORD" = true || { echo 'Missing Apple signing certificate password'; exit 1; }
+          test "$HAS_UPDATE_KEY" = true || { echo 'Missing update signing seed'; exit 1; }
       - uses: subosito/flutter-action@v2
         with:
           channel: stable

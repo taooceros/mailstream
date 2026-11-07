@@ -72,12 +72,18 @@ After the publisher approves its key custody and distribution:
    already fetched the previous feed can finish its download. Do not delete/recreate this
    channel the way the unrelated rolling nightly does.
 
-`.github/workflows/prepare-update.yml` is manual and **only prepares artifacts**. It fails
-closed unless the approved public repository variable `MAILSTREAM_UPDATE_PUBLIC_KEY`,
-`MAILSTREAM_SIGNING_P12` / `MAILSTREAM_SIGNING_P12_PASSWORD`, and
-`MAILSTREAM_UPDATE_PRIVATE_KEY` secrets exist. It imports signing material only into a
-temporary CI keychain and never uploads keys. Configuring credentials or publishing is a
-separate owner action, not an automatic side effect of merging.
+`.github/workflows/prepare-update.yml` is manual, runs **only from `main`**, and **only
+prepares artifacts**. Its job references an `updates` environment. The owner must create
+that environment, require reviewers, restrict deployments to `main`, and store
+`MAILSTREAM_SIGNING_P12`, `MAILSTREAM_SIGNING_P12_PASSWORD` and
+`MAILSTREAM_UPDATE_PRIVATE_KEY` there before using it. The YAML reference alone does not
+configure GitHub's approval or branch protections. Set the public
+`MAILSTREAM_UPDATE_PUBLIC_KEY` variable at environment or repository scope.
+
+Preflight receives only secret-presence booleans; private material is injected only into
+the final signing step, written to a temporary CI keychain/files and removed on exit.
+Build caches and uploaded artifacts never include that directory. Configuring credentials
+or publishing remains a separate owner action, not a side effect of merging.
 Its `channel` input defaults to `prerelease`; `stable` must be selected explicitly and is
 baked into the bundle before signing. The prepare command derives the signed item channel
 from that bundle, not a later publication label.
