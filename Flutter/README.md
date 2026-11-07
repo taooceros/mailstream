@@ -30,10 +30,10 @@ errors, authenticated installation and relaunch. Checks do not start mail sync. 
 downloads are off initially, system profiling is disabled, and the automatic-check preference
 is Sparkle's own persisted preference (not reset on launch).
 
-The approved production Ed25519 public key is embedded in the app. Normal builds keep
-`MAILSTREAM_UPDATE_FEED_URL` empty until the owner publishes the first signed feed.
-They show **Updates Aren’t Configured**, explain that the feed is not enabled, disable
-automatic checks and make no update request. Do not substitute the ad-hoc `nightly` DMGs.
+The approved production Ed25519 public key and canonical HTTPS feed are configured in
+`macos/Runner/Configs/AppInfo.xcconfig`. The signed feed is published in the repository's
+[`updates` prerelease](https://github.com/taooceros/mailstream/releases/tag/updates),
+independently of the ad-hoc `nightly` DMGs.
 
 Current builds explicitly opt into `prerelease` through `MAILSTREAM_UPDATE_CHANNEL`.
 Sparkle accepts signed appcast items tagged `prerelease` (and ordinary stable items).
@@ -47,10 +47,10 @@ After configuring the approved signing material:
 1. Keep `MAILSTREAM_UPDATE_PUBLIC_KEY` in `macos/Runner/Configs/AppInfo.xcconfig` equal to
    the `updates` environment's public variable of the same name. The ignored
    `Updates.local.xcconfig` beside it can override public build settings for CI or isolated
-   tests. Never put a private key there. CI sets the canonical HTTPS feed URL for prepared
-   artifacts; a local release builder must supply the same override when preparing the
-   initial unpublished package (`https:/$()/github.com/taooceros/mailstream/releases/download/updates/appcast.xml`
-   is the xcconfig form, escaping `//` so it is not parsed as a comment).
+   tests. Never put a private key there. CI inherits the feed from the tracked configuration;
+   it overrides only the public key and selected channel. The canonical feed is
+   `https://github.com/taooceros/mailstream/releases/download/updates/appcast.xml`;
+   its xcconfig spelling escapes `//` as `/$()/` so it is not parsed as a comment.
 2. Increment `pubspec.yaml`'s build number for **every** update; Sparkle compares
    `CFBundleVersion`, not a commit SHA. Keep build versions increasing, including locally
    installed builds, and never replace the bytes of a published version.
@@ -66,22 +66,20 @@ After configuring the approved signing material:
    generates and signs the appcast using Sparkle with the bundle's stable/prerelease channel,
    verifies both signatures, verifies the archive against the app's public key, and emits
    the versioned zip, signed `appcast.xml`, and a byte-length/SHA-256/revision/channel manifest.
-5. The proposed endpoint (not yet published or authorized) is this repository's `updates`
-   GitHub Release: `https://github.com/taooceros/mailstream/releases/download/updates/appcast.xml`.
-   It can itself be a GitHub **prerelease**, as current distributions are; direct asset URLs
-   do not depend on GitHub treating it as the latest stable release. Sparkle's item channel
-   controls client eligibility independently of the GitHub release flag.
+5. Publish to this repository's `updates` GitHub Release, whose feed URL is shown above.
+   It is a GitHub **prerelease**; direct asset URLs do not depend on GitHub treating it as
+   the latest stable release. Sparkle's item channel controls client eligibility
+   independently of the GitHub release flag.
    Only after explicit publication approval, upload the immutable versioned zip first,
    then the validated appcast (replace only the feed). Keep old packages so a client which
    already fetched the previous feed can finish its download. Do not delete/recreate this
    channel the way the unrelated rolling nightly does.
 
-After the first signed feed is published and verified at that exact HTTPS URL, set
-`MAILSTREAM_UPDATE_FEED_URL` in the tracked `AppInfo.xcconfig` to the same escaped URL,
-then build, sign and manually install a bootstrap release with `scripts/install.sh flutter`.
-That first manual install pins the production key and enabled feed; subsequent normal
-builds inherit the feed and Sparkle can update them. Key/CI setup alone does not activate
-the public channel.
+The initial signed feed and build 4 archive have been published and verified at the canonical
+HTTPS URLs. Apps installed before feed activation need one manual bootstrap install with
+`scripts/install.sh flutter`; the published CI build 4 also already contains the enabled feed.
+Subsequent normal builds inherit the same feed. Installing that initial bootstrap is not a
+version upgrade by itself, and Sparkle never downgrades a newer locally installed build.
 
 `.github/workflows/prepare-update.yml` is manual, runs **only from `main`**, and **only
 prepares artifacts**. Its job references an `updates` environment. The owner must create
@@ -93,19 +91,22 @@ configure GitHub's approval or branch protections. Set the public
 
 Preflight receives only secret-presence booleans; private material is injected only into
 the final signing step, written to a temporary CI keychain/files and removed on exit.
-Build caches and uploaded artifacts never include that directory. Configuring credentials
-or publishing remains a separate owner action, not a side effect of merging.
+Build caches and uploaded artifacts never include that directory. Local credential
+export/upload keeps private values out of process arguments. On the protected disposable
+CI runner, the standard `security` CLI briefly uses certificate/keychain passwords as
+arguments; the signing seed remains a private file, never an argument. Configuring
+credentials or publishing remains a separate owner action, not a side effect of merging.
 Its `channel` input defaults to `prerelease`; `stable` must be selected explicitly and is
 baked into the bundle before signing. The prepare command derives the signed item channel
 from that bundle, not a later publication label.
 
 Ed25519 authenticates the appcast (including channel/version metadata) and the downloaded
 archive **before extraction**. Signed-feed failures never expire into an unsigned fallback.
-Apple signing protects bundle identity and shared Keychain access. The existing Apple Development signature supports
-local signed-install testing but is not Developer ID notarized/Gatekeeper public distribution.
-Public distribution still requires the owner's decision about Developer ID/notarization,
-production key custody and initial release publication. Neither missing credential is silently
-bypassed. Once a trust key is shipped, do not rotate it casually.
+Apple signing protects bundle identity and shared Keychain access. The `updates` channel uses
+Apple Development signing for self-use and registered development devices (Apple Silicon,
+macOS 26+); it is not a Developer ID-notarized general-public distribution. Broader distribution
+needs the appropriate Developer ID signing/notarization setup. Once a trust key is shipped,
+do not rotate it casually or bypass verification.
 
 Targeted checks: `python3 -m unittest discover -s Tests -p test_update_package.py` exercises
 feed/package/channel matching and real Ed25519 rejection of altered bytes/wrong keys. The native

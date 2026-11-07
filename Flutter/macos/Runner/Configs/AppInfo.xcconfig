@@ -18,7 +18,7 @@ PRODUCT_COPYRIGHT = Copyright © 2026 dev.mailstream. All rights reserved.
 MAILSTREAM_UPDATE_PUBLIC_KEY = eIwn7DyQN0GOIdjlzo6AKRm5GVCOorozSzfbC+4XG4s=
 // Current distributions are prereleases. Stable builders override this explicitly.
 MAILSTREAM_UPDATE_CHANNEL = prerelease
-// Enable only after the initial signed feed is published and verified. CI
-// preparation supplies the canonical URL in Updates.local.xcconfig.
-MAILSTREAM_UPDATE_FEED_URL =
+// The signed updates feed is published independently of the ad-hoc nightly.
+// Escape // so xcconfig does not treat the HTTPS URL as a comment.
+MAILSTREAM_UPDATE_FEED_URL = https:/$()/github.com/taooceros/mailstream/releases/download/updates/appcast.xml
 #include? "Updates.local.xcconfig"
