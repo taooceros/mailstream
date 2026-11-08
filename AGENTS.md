@@ -118,6 +118,22 @@ Python (standard library only) so both machines run the same ones; on Windows th
 `python`, and the poller also needs `HOST_LABEL=windows LINEAR_TOKEN_FILE=~/.config/linear/token.json
 LINEAR_CREDENTIALS=~/.config/linear/credentials`.
 
+Cost rules (MS-157): at most three heavy agents (ones that write code) run at once; other
+claimed issues wait in the queue of `~/.local/state/linear-poll/session.md`, moved to Backlog
+with a comment saying they are queued, and start in order as slots free. Code is written by the
+default model; build, install, smoke checks and screenshots that need no code go to a cheaper
+agent. Agents write their full report on the issue and yield only two or three lines (result,
+commit, issue state, anything the user must do).
+
+The session hands over to a fresh one once its own context passes about 150K tokens: every wake
+re-reads the whole conversation. It waits until no agent of its own is running (their results
+can't reach another session), writes `session.md` (queued issues in order, what waits on the
+user, open benchmarks or checks, anything else the next session needs; running agents are
+none by then), empties RUNNING_FILE, opens
+`tern new tab --cwd ~/projects/mailstream -- omp "Polling session: read AGENTS.md and
+~/.local/state/linear-poll/session.md, then start the poller."` and stops (it does not start
+the script again). The new session reads `session.md`, starts the queued issues and the script.
+
 The Mac (app `omp`) and the Windows machine (app `windows-omp`) talk only through Linear. New
 work for the other machine is an issue (a sub-issue when it serves one) labelled `omp`, plus
 `windows` for Windows (or in team `WIN` when it is a chore on that machine, not repo work): its
