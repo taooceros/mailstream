@@ -41,6 +41,16 @@ CONFIG=release DART_OUT=$PWD/Flutter/packages/mailstream/lib/src python scripts/
 cd Flutter && flutter build windows --release   # build/windows/x64/runner/Release/mailstream_ui.exe
 ```
 
+Without the "C++ CMake tools" component (installing it takes the Visual Studio Installer, as
+administrator), `flutter build windows` stops at "Unable to find suitable Visual Studio
+toolchain" after writing `windows/flutter/ephemeral/generated_config.cmake`. Any CMake 3.14 or
+newer then runs the two steps it would:
+
+```sh
+cmake -S windows -B build/windows/x64 -G "Visual Studio 17 2022" -A x64 -DFLUTTER_TARGET_PLATFORM=windows-x64
+cmake --build build/windows/x64 --config Release --target INSTALL
+```
+
 Flutter links plugins with symbolic links, which need Windows' Developer Mode; without it,
 junctions made by hand in `windows/flutter/ephemeral/.plugin_symlinks` (`mklink /J <plugin>
 <its folder in the pub cache>`, as `.flutter-plugins-dependencies` lists them) work too.

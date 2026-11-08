@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:macos_ui/macos_ui.dart';
 import 'package:mailstream/mailstream.dart' as engine;
 import 'package:mailstream_ui/backend/models.dart';
+import 'package:mailstream_ui/platform.dart';
 import 'package:mailstream_ui/state/mail_state.dart';
 import 'package:mailstream_ui/ui/design.dart';
 import 'package:mailstream_ui/ui/glass.dart';
@@ -430,6 +431,9 @@ void main() {
   });
 
   testWidgets('a prefetched conversation draws its bodies in its first frame; pending prefetch waits for the open one', (tester) async {
+    // Prefetch splits bodies only where the reader draws HTML (the Mac's WebKit view; MS-106).
+    Host.debugMacOverride = true;
+    addTearDown(() => Host.debugMacOverride = null);
     final (:calls, :answers, :cache) = held();
     final mail = ReaderMail();
     final state = MailState(mail);
