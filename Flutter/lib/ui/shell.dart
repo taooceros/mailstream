@@ -7,6 +7,7 @@ import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart' hide Sidebar;
 
 import '../backend/models.dart';
+import '../bench.dart';
 import '../platform.dart';
 import '../state/chat_state.dart';
 import '../state/mail_state.dart';
@@ -71,6 +72,7 @@ class _MailShellState extends State<MailShell> {
     state.addListener(_showToast);
     state.addListener(_offerSignIn);
     state.addListener(_checkFrameRateMenu);
+    ReaderDismissBench.attach(state);
     _window.setMethodCallHandler((call) async {
       switch (call.method) {
         case 'settings':

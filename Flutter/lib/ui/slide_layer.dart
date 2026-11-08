@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/gestures.dart';
-import 'package:flutter/widgets.dart';
 import 'package:flutter/physics.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter/widgets.dart';
 
 import 'design.dart';
 
@@ -28,6 +31,7 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
   /// layer slides out.
   late final _drag = AnimationController.unbounded(vsync: this);
   Widget? _shown;
+  late final _ready = SwipeReadiness(this);
 
   /// Set once a swipe dismissed the layer, which is already off screen: no slide-out follows.
   bool _swipedAway = false;
@@ -45,6 +49,7 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
     super.initState();
     _shown = widget.child;
     if (_shown != null) _presence.forward();
+    _ready.shown = _shown != null;
   }
 
   @override
@@ -75,13 +80,16 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
         _presence.value = 1;
         _drag.animateWith(_settle(_drag.value, _width, 0)).whenComplete(() {
           if (mounted && widget.child == null) setState(() => _shown = null);
+          if (mounted) _ready.shown = _shown != null;
         });
       }
     }
+    _ready.shown = _shown != null;
   }
 
   @override
   void dispose() {
+    _ready.dispose();
     _presence.dispose();
     _drag.dispose();
     super.dispose();
@@ -90,11 +98,13 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
   void _start(PointerPanZoomStartEvent event) {
     _swipe.start(event);
     _dragOrigin = null;
+    _ready.fingersDown();
   }
 
   void _update(PointerPanZoomUpdateEvent event) {
     if (widget.child == null || !_swipe.update(event)) return;
     if (_dragOrigin == null) {
+      _ready.swipeTookOver();
       _drag.stop();
       _presence.stop();
       _dragOrigin = _drag.value + (1 - Motion.curve.transform(_presence.value)) * _width;
@@ -105,6 +115,7 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
   }
 
   void _end(double width) {
+    _ready.swipeTookOver();
     final velocity = _swipe.end();
     if (velocity == null) return;
     final offset = _drag.value;
@@ -194,6 +205,55 @@ Simulation _settle(double from, double to, double velocity, {double pixels = 1})
   tolerance: Tolerance(distance: 0.5 / pixels, velocity: 20 / pixels),
 );
 
+/// Keeps the window ready to draw a swipe at the display's full rate while a page it can swipe
+/// away is shown. After a rest the first frames of an animation take two to four times their
+/// usual raster time: the macOS embedder drops its cached drawing surfaces after a second without
+/// a frame, so the next frames each make window-sized ones again, and the first frame after any
+/// pause runs slow as well. A swipe after a few seconds of reading dropped its first frames that
+/// way, every time (MS-132). So while a page is [shown] a frame is drawn every [keepAlive], under
+/// that second, and frames run from the moment fingers land on the trackpad (macOS starts the pan
+/// then, before they move) until the swipe takes over or [warmUp] passes: the slow ones are drawn
+/// while the page is still.
+class SwipeReadiness {
+  SwipeReadiness(TickerProvider vsync) {
+    _warm = vsync.createTicker((elapsed) {
+      if (elapsed >= warmUp) _warm.stop();
+    });
+  }
+
+  static const keepAlive = Duration(milliseconds: 800);
+  static const warmUp = Duration(milliseconds: 250);
+
+  late final Ticker _warm;
+  Timer? _keep;
+  bool _shown = false;
+
+  set shown(bool shown) {
+    _shown = shown;
+    if (shown) {
+      _keep ??= Timer.periodic(keepAlive, (_) => SchedulerBinding.instance.scheduleFrame());
+    } else {
+      _keep?.cancel();
+      _keep = null;
+      _warm.stop();
+    }
+  }
+
+  void fingersDown() {
+    if (!_shown) return;
+    _warm
+      ..stop()
+      ..start();
+  }
+
+  void swipeTookOver() => _warm.stop();
+
+  void dispose() {
+    _keep?.cancel();
+    _warm.dispose();
+  }
+}
+
 /// The list-detail split of wide windows: the list beside the opened page, which slides in from
 /// the trailing edge as the list narrows. A two-finger swipe to the right on the page drags it
 /// out, the list widening behind it, and closes it once past a third of its width or flicked.
@@ -221,13 +281,14 @@ class SplitDetail extends StatefulWidget {
   State<SplitDetail> createState() => _SplitDetailState();
 }
 
-class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStateMixin {
+class _SplitDetailState extends State<SplitDetail> with TickerProviderStateMixin {
   /// How far the split is open: 0 the list alone, 1 the page fully in. Driven by the open/close
   /// animations and directly by the fingers while swiping.
   late final _split = AnimationController.unbounded(vsync: this);
   final _swipe = HorizontalSwipe();
   double? _splitOrigin;
   Widget? _shown;
+  late final _ready = SwipeReadiness(this);
 
   /// Set once a swipe closed the split, which is already springing shut: closing follows on its own.
   bool _swipedAway = false;
@@ -240,6 +301,7 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
     super.initState();
     _shown = widget.detail;
     if (_shown != null) _split.value = 1;
+    _ready.shown = _shown != null;
   }
 
   @override
@@ -262,14 +324,17 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
         _split.animateWith(_settle(_split.value, 0, _split.velocity, pixels: _travel)).whenComplete(_hide);
       }
     }
+    _ready.shown = _shown != null;
   }
 
   void _hide() {
     if (mounted && widget.detail == null) setState(() => _shown = null);
+    if (mounted) _ready.shown = _shown != null;
   }
 
   @override
   void dispose() {
+    _ready.dispose();
     _split.dispose();
     super.dispose();
   }
@@ -278,11 +343,13 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
     if (widget.detail == null) return;
     _swipe.start(event);
     _splitOrigin = null;
+    _ready.fingersDown();
   }
 
   void _update(PointerPanZoomUpdateEvent event, double travel) {
     if (widget.detail == null || !_swipe.update(event)) return;
     if (_splitOrigin == null) {
+      _ready.swipeTookOver();
       _split.stop();
       _splitOrigin = _split.value.clamp(0.0, 1.0);
       _swipedAway = false;
@@ -293,6 +360,7 @@ class _SplitDetailState extends State<SplitDetail> with SingleTickerProviderStat
   }
 
   void _end(double travel) {
+    _ready.swipeTookOver();
     final velocity = _swipe.end();
     if (velocity == null || widget.detail == null) return;
     final offset = (1 - _split.value) * travel;

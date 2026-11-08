@@ -269,4 +269,50 @@ void main() {
       expect(find.byKey(const ValueKey(3)), findsNothing);
     });
   }
+
+  // MS-132: after a rest the first frames render slowly, so a swipe that starts while reading must
+  // not be the first to draw.
+  for (final split in [false, true]) {
+    testWidgets('${split ? 'split' : 'layer'} keeps drawing while a page is shown and warms up as fingers land', (tester) async {
+      await tester.binding.setSurfaceSize(Size(split ? 1200 : 800, 800));
+      Widget build(bool open) {
+        final page = open ? const ColoredBox(key: Key('page'), color: Color(0xFFFFFFFF)) : null;
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: split
+              ? SplitDetail(pageId: open ? 'page' : null, list: const SizedBox.expand(), listWidth: 400, onDismiss: () {}, detail: page)
+              : SlideLayer(pageId: open ? 'page' : null, onDismiss: () {}, child: page),
+        );
+      }
+
+      await tester.pumpWidget(build(true));
+      await tester.pumpAndSettle();
+      expect(tester.binding.hasScheduledFrame, isFalse);
+      // A frame comes before the embedder's one-second idle timeout drops its surfaces.
+      await tester.binding.delayed(SwipeReadiness.keepAlive);
+      expect(tester.binding.hasScheduledFrame, isTrue);
+      await tester.pump();
+
+      // Fingers resting on the page draw frames before they move it, for a while.
+      final at = tester.getCenter(find.byKey(const Key('page')));
+      final left = tester.getTopLeft(find.byKey(const Key('page'))).dx;
+      final pointer = TestPointer(1, PointerDeviceKind.trackpad);
+      await tester.sendEventToBinding(pointer.panZoomStart(at));
+      expect(tester.binding.hasScheduledFrame, isTrue);
+      var frames = 0;
+      while (tester.binding.hasScheduledFrame && frames < 100) {
+        await tester.pump(const Duration(milliseconds: 8));
+        frames++;
+      }
+      expect(frames * 8, inInclusiveRange(SwipeReadiness.warmUp.inMilliseconds, SwipeReadiness.warmUp.inMilliseconds + 24));
+      expect(tester.getTopLeft(find.byKey(const Key('page'))).dx, left);
+      await tester.sendEventToBinding(pointer.panZoomEnd());
+
+      // Closed, the window rests.
+      await tester.pumpWidget(build(false));
+      await tester.pumpAndSettle();
+      await tester.binding.delayed(const Duration(seconds: 2));
+      expect(tester.binding.hasScheduledFrame, isFalse);
+    });
+  }
 }

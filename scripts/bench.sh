@@ -1,9 +1,11 @@
 #!/bin/sh
 # Measures a front end's frame rate the same way for every front end (AGENTS.md, "Performance:
-# 120 fps"): its release build runs on a private virtual display at BENCH_HZ, scrolls its
-# conversation list by itself (MAILSTREAM_BENCH=scroll), logs every frame and quits;
-# scripts/frame-stats.swift then summarizes the logs.
+# 120 fps"): its release build runs on a private virtual display at BENCH_HZ, plays a scenario
+# by itself, logs every frame and quits; scripts/frame-stats.swift then summarizes the logs.
 # Usage: scripts/bench.sh flutter|gpui [RUNS]
+#   BENCH_SCENARIO picks the scenario (MAILSTREAM_BENCH): scroll (default; every front end)
+#   scrolls the conversation list; reader-swipe (Flutter) opens conversations and swipes each
+#   reader away with two fingers.
 #   Build the release first: Flutter/README.md, or CONFIG=release GPUI/run.sh.
 #   BENCH_HZ (120) is the display's refresh rate. Each run first waits up to 2 minutes for the
 #   1-minute load average to fall below BENCH_MAX_LOAD (4): builds in other workspaces skew
@@ -19,11 +21,19 @@ RUNS=${2:-3}
 HZ=${BENCH_HZ:-120}
 MAX_LOAD=${BENCH_MAX_LOAD:-4}
 DIR=${BENCH_DIR:-/tmp/mailstream-bench}
+SCENARIO=${BENCH_SCENARIO:-scroll}
 case $FRONTEND in
   flutter) BINARY="Flutter/build/macos/Build/Products/Release/Mailstream Flutter.app/Contents/MacOS/Mailstream Flutter" ;;
   gpui) BINARY=GPUI/target/release/mailstream-gpui ;;
   *)
     echo "usage: scripts/bench.sh flutter|gpui [RUNS]" >&2
+    exit 2
+    ;;
+esac
+case $FRONTEND/$SCENARIO in
+  */scroll | flutter/reader-swipe) ;;
+  *)
+    echo "error: no $SCENARIO scenario in $FRONTEND" >&2
     exit 2
     ;;
 esac
@@ -65,15 +75,15 @@ for run in $(seq "$RUNS"); do
     sleep 5
     waited=$((waited + 5))
   done
-  LOG="$DIR/$FRONTEND-$run.tsv"
+  LOG="$DIR/$FRONTEND-$SCENARIO-$run.tsv"
   rm -f "$LOG"
   START_LOAD=$(load)
   echo "run $run/$RUNS (load $START_LOAD)…" >&2
   if [ -n "${BENCH_HOME:-}" ]; then
     HOME="$BENCH_HOME" CFFIXED_USER_HOME="$BENCH_HOME" MAILSTREAM_KEYCHAIN_SERVICE=dev.mailstream.bench.frames \
-      MAILSTREAM_BENCH=scroll MAILSTREAM_BENCH_OUT="$LOG" "$BINARY" > "$DIR/$FRONTEND-$run.out" 2>&1 &
+      MAILSTREAM_BENCH="$SCENARIO" MAILSTREAM_BENCH_OUT="$LOG" "$BINARY" > "$DIR/$FRONTEND-$run.out" 2>&1 &
   else
-    MAILSTREAM_BENCH=scroll MAILSTREAM_BENCH_OUT="$LOG" "$BINARY" > "$DIR/$FRONTEND-$run.out" 2>&1 &
+    MAILSTREAM_BENCH="$SCENARIO" MAILSTREAM_BENCH_OUT="$LOG" "$BINARY" > "$DIR/$FRONTEND-$run.out" 2>&1 &
   fi
   APP_PID=$!
   # The same window size on the virtual display for every front end.
@@ -93,7 +103,7 @@ for run in $(seq "$RUNS"); do
     echo "error: could not move the window onto the virtual display (System Events needs Accessibility access)" >&2
     exit 1
   fi
-  # The app settles, scrolls for about half a minute, writes the log and quits.
+  # The app settles, plays the scenario for under a minute, writes the log and quits.
   for _ in $(seq 240); do
     kill -0 "$APP_PID" 2> /dev/null || break
     sleep 0.5

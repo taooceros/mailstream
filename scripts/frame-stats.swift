@@ -3,7 +3,9 @@
 // "<start ms>\t<work ms>". start is when the frame began for its vsync (Flutter: `FrameTiming`
 // vsync start; GPUI: the window's render on the display link tick); work is the longest
 // single-thread stage of the frame (Flutter: build or raster; GPUI: render to the end of paint
-// on the main thread). Pass criteria: AGENTS.md, "Performance: 120 fps".
+// on the main thread). A "# segment" line starts a stretch of frames of its own: the app rested
+// before it, so the time since the previous frame is no interval (scenarios that animate in
+// bursts, like MAILSTREAM_BENCH=reader-swipe). Pass criteria: AGENTS.md, "Performance: 120 fps".
 // Usage: swift scripts/frame-stats.swift [--hz 120] LOG…
 import Foundation
 
@@ -40,13 +42,26 @@ for path in paths {
     var header: [String] = []
     var starts: [Double] = []
     var work: [Double] = []
+    /// Frame-to-frame times within each segment, and the time the segments span.
+    var intervals: [Double] = []
+    var span = 0.0
+    var segmentStarts = true
     for line in text.split(separator: "\n") {
+        if line == "# segment" {
+            segmentStarts = true
+            continue
+        }
         if line.hasPrefix("#") {
             header.append(line.dropFirst().trimmingCharacters(in: .whitespaces))
             continue
         }
         let fields = line.split(separator: "\t").compactMap { Double($0) }
         guard fields.count == 2 else { continue }
+        if !segmentStarts, let previous = starts.last {
+            intervals.append(fields[0] - previous)
+            span += fields[0] - previous
+        }
+        segmentStarts = false
         starts.append(fields[0])
         work.append(fields[1])
     }
@@ -55,12 +70,12 @@ for path in paths {
         failed = true
         continue
     }
-    let intervals = zip(starts.dropFirst(), starts).map { $0 - $1 }.sorted()
+    intervals.sort()
     // Each interval spans a whole number of vsyncs; every one past the first is a frame not shown.
     let vsyncs = intervals.map { max(1, ($0 / period).rounded()) }
     let dropped = vsyncs.reduce(0) { $0 + $1 - 1 }
     let droppedShare = dropped / vsyncs.reduce(0, +) * 100
-    let fps = Double(intervals.count) / (starts.last! - starts.first!) * 1000
+    let fps = Double(intervals.count) / span * 1000
     let p99 = percentile(intervals, 99)
     let sortedWork = work.sorted()
     let pass = droppedShare <= 1 && p99 <= period * 1.5

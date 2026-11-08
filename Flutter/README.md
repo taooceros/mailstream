@@ -260,7 +260,13 @@ Swipe completion removes the old native reader when its owner clears the detail,
 trying to remove it before that rebuild. Stable logical `pageId`s let a newly opened page
 cancel the old page's dismissal; an ordinary rebuild of the same page keeps that dismissal.
 `flutter test test/split_detail_test.dart` covers dismissal, cancellation, interrupted springs,
-vertical input, native-detail teardown and reopening during close. For private-mail-free native release measurements, build
+vertical input, native-detail teardown and reopening during close. While a page can be swiped
+away, `SwipeReadiness` draws a frame every 0.8 s (the macOS embedder drops its cached surfaces
+after a second without one) and keeps drawing from the moment fingers land on the trackpad until
+the swipe moves the page: after a rest the first few frames render two to four times slower, and
+a swipe that started with them dropped frames every time (MS-132). `scripts/bench.sh` measures
+that on the real app with `BENCH_SCENARIO=reader-swipe` (`ReaderDismissBench` in `lib/bench.dart`).
+For private-mail-free native release measurements of cancel/complete pairs, build
 `flutter build macos --release -t test/reader_motion_app.dart`, then launch its executable with
 `MAILSTREAM_BENCH=reader-dismiss MAILSTREAM_BENCH_OUT=/tmp/reader-motion`. Park that window at
 1240×800 on a private 120 Hz display before its 12-second warmup ends. The real shell uses
@@ -313,7 +319,7 @@ mail with the setting kept in memory, for screenshots.
 | `lib/ui/settings.dart` | Settings (⌘,, the sidebar's Add Account…, or by itself at launch with no account): accounts (browser sign-in with an OAuth client, filled in with the one used last through `accounts.client`, whose secret stays in the engine; rename, remove) and every key of the settings.json Mailstream.app and `mailstream config` share (`config.*` over FFI), following edits made elsewhere |
 | `lib/ui/slide_layer.dart` | Bundles (and, in one pane, the reader) slide over the list, which stays mounted; trackpad swipe back |
 | `lib/ui/frame_rate.dart` | The frame rate meter (`FrameRateLayer` over the app in `main.dart`, `FrameRateMeter`, `FrameRateCounter`) |
-| `lib/bench.dart` | The frame measurement `scripts/bench.sh flutter` runs (`MAILSTREAM_BENCH=scroll`): the list scrolls itself and every frame's `FrameTiming` is logged |
+| `lib/bench.dart` | The frame measurements `scripts/bench.sh flutter` runs: `MAILSTREAM_BENCH=scroll` (the list scrolls itself) and `reader-swipe` (conversations open and are swiped away after a rest); every frame's `FrameTiming` is logged |
 
 Keys: ↑/↓ or J/K move (beside an open conversation they open the next one), Return or Space
 opens, Esc or ⌘[ goes back, ⌘W closes the open conversation or chat space, E archives, ⌫ trashes, S stars, U toggles read, D resolves "Waiting on you" (or puts it back), R replies (⇧R or
