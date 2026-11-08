@@ -119,6 +119,12 @@ struct State {
     /// The pass in flight, and whether another was requested since it started (`CoalescedTask`).
     pass: Option<tokio::task::JoinHandle<()>>,
     pending: bool,
+    /// What passes offer, as of the last `schedule` (`TagStore.candidates`); threading the list
+    /// is not redone for each pass, so a retag costs no more than in the Swift engine.
+    candidates: Arc<Candidates>,
+    /// `candidates` reflects the list's last change; false until first read, and after a
+    /// change while tagging was off.
+    fresh: bool,
 }
 
 pub struct Tagging {
@@ -132,6 +138,9 @@ pub struct Tagging {
     state: Mutex<State>,
     /// The conversations to offer, set once mail starts.
     source: OnceLock<Source>,
+    /// Held by the pass running. A pass aborted between awaits finishes that stretch before it
+    /// stops; the next one waits for it, so passes never overlap (`CoalescedTask`).
+    running: tokio::sync::Mutex<()>,
 }
 
 impl Tagging {
@@ -161,6 +170,7 @@ impl Tagging {
             runtime: tokio::runtime::Handle::current(),
             state: Mutex::new(state),
             source: OnceLock::new(),
+            running: tokio::sync::Mutex::new(()),
         });
         let weak: Weak<Self> = Arc::downgrade(&tagging);
         events.listen(move |event| {
@@ -307,6 +317,7 @@ impl Tagging {
     pub fn schedule(self: &Arc<Self>) {
         let mut state = self.state();
         if !state.enabled {
+            state.fresh = false;
             return;
         }
         if let Some(debounce) = state.debounce.take() {
@@ -316,6 +327,7 @@ impl Tagging {
         state.debounce = Some(self.runtime.spawn(async move {
             tokio::time::sleep(DEBOUNCE).await;
             if let Some(tagging) = weak.upgrade() {
+                tagging.state().fresh = false;
                 tagging.state().debounce = None;
                 tagging.request();
             }
@@ -331,6 +343,7 @@ impl Tagging {
         }
         let tagging = self.clone();
         state.pass = Some(self.runtime.spawn(async move {
+            let _running = tagging.running.lock().await;
             loop {
                 {
                     let mut state = tagging.state();
@@ -393,21 +406,34 @@ impl Tagging {
 
     fn untagged_items(&self, limit: usize) -> Vec<Item> {
         let Some(source) = self.source.get() else { return Vec::new() };
-        let candidates = source();
-        let state = self.state();
-        let mut keys = HashSet::new();
-        let mut items = Vec::new();
-        for conversation in &candidates.conversations {
-            if items.len() >= limit {
-                break;
-            }
-            let key = key(conversation);
-            if state.tags.contains_key(&key) || state.attempted.contains(&key) || !keys.insert(key.clone()) {
-                continue;
-            }
-            items.push(self.item(conversation, key, &candidates.own));
+        if !self.state().fresh {
+            let candidates = Arc::new(source());
+            let mut state = self.state();
+            state.candidates = candidates;
+            state.fresh = true;
         }
-        items
+        // Picks under the lock, builds the items (snippets, addresses) after it, so commands
+        // that take the lock meanwhile (a burst of retags) don't wait on that work.
+        let (candidates, picked) = {
+            let state = self.state();
+            let mut keys = HashSet::new();
+            let mut picked = Vec::new();
+            for (index, conversation) in state.candidates.conversations.iter().enumerate() {
+                if picked.len() >= limit {
+                    break;
+                }
+                let key = key(conversation);
+                if state.tags.contains_key(&key) || state.attempted.contains(&key) || !keys.insert(key.clone()) {
+                    continue;
+                }
+                picked.push((index, key));
+            }
+            (state.candidates.clone(), picked)
+        };
+        picked
+            .into_iter()
+            .map(|(index, key)| self.item(&candidates.conversations[index], key, &candidates.own))
+            .collect()
     }
 
     fn item(&self, conversation: &Conversation, key: String, own: &HashSet<String>) -> Item {
