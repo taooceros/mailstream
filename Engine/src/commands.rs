@@ -73,6 +73,7 @@ pub(crate) const PORTED: &[Spec] = &[
     Spec { id: "mail.search", arguments: &[positional("query"), option("account"), number("limit", 25)] },
     Spec { id: "mail.show", arguments: &[positional("id"), number("max-chars", 20_000), option("html")] },
     Spec { id: "mail.previews", arguments: &[positional("ids")] },
+    Spec { id: "refresh", arguments: &[] },
 ];
 
 /// The Swift engine's other commands, ported in later phases (MS-114 to MS-118).
@@ -88,7 +89,6 @@ pub(crate) const UNPORTED: &[&str] = &[
     "mail.retag",
     "mail.send",
     "mail.reply",
-    "refresh",
     "contacts.search",
     "chat.spaces",
     "chat.more",

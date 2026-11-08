@@ -23,8 +23,8 @@ use crate::cache::{CachedListing, MailCache};
 use crate::commands::Arguments;
 use crate::content::Contents;
 use crate::model::{
-    Account, Address, CATEGORIES, Conversation, ConversationTag, DISTANT_FUTURE, DISTANT_PAST, Envelope, MailMessage, Mailbox,
-    MailboxKey, MailboxRole, date_from_unix, iso8601, now, unix_seconds,
+    Account, Address, CATEGORIES, Conversation, ConversationTag, DISTANT_FUTURE, DISTANT_PAST, Date, Envelope, MailMessage,
+    Mailbox, MailboxKey, MailboxRole, date_from_unix, iso8601, now, unix_seconds,
 };
 use crate::settings::{Setting, Settings};
 use crate::tokens::Tokens;
@@ -70,6 +70,18 @@ struct State {
     tags: HashMap<String, ConversationTag>,
     /// The latest failure, until a refresh clears it.
     problem: Option<String>,
+    /// A refresh of the default list is running (the Swift engine's `isLoading`): the `sync`
+    /// event follows it, and polling skips a turn while it runs.
+    loading: bool,
+    /// Refreshes started; only the latest one's end clears `loading`.
+    refreshes: u64,
+    /// When the default list last finished refreshing, for `status`.
+    last_refresh: Option<Date>,
+    /// Every account's first load finished: identities are known and a reconnecting push socket
+    /// has a list to catch up.
+    connected: bool,
+    /// Accounts push reported a change of, waiting out the coalescing delay.
+    account_refreshes: HashSet<String>,
 }
 
 type CacheRead = Shared<BoxFuture<'static, ()>>;
@@ -179,6 +191,7 @@ impl Mail {
             let mut state = self.state();
             state.tags = tags;
             state.accounts = restored.clone();
+            state.connected = restored.is_empty();
         }
         if restored.is_empty() {
             return;
@@ -192,7 +205,11 @@ impl Mail {
 
     async fn connect(self: Arc<Self>, names: Vec<String>) {
         futures::future::join_all(names.iter().map(|name| self.load_account(name))).await;
-        let accounts = self.state().accounts.clone();
+        let accounts = {
+            let mut state = self.state();
+            state.connected = true;
+            state.accounts.clone()
+        };
         self.cache.save_accounts(&accounts);
         self.clone().refresh();
         self.refresh_counts();
@@ -363,30 +380,49 @@ impl Mail {
     pub fn refresh_counts(self: &Arc<Self>) {
         let names: Vec<String> = self.state().accounts.iter().map(|account| account.name.clone()).collect();
         for name in names {
-            let Some(backend) = self.backend(&name) else { continue };
-            let mail = self.clone();
-            tokio::spawn(async move {
-                let Ok(fresh) = backend.mailboxes(true).await else { return };
-                let counts: HashMap<String, (Option<i64>, Option<i64>)> =
-                    fresh.into_iter().map(|mailbox| (mailbox.id, (mailbox.unread, mailbox.total))).collect();
-                let mut state = mail.state();
-                let Some(list) = state.mailboxes.get(&name) else { return };
-                let mut updated = list.clone();
-                for mailbox in &mut updated {
-                    if let Some((unread, total)) = counts.get(&mailbox.id) {
-                        mailbox.unread = unread.or(mailbox.unread);
-                        mailbox.total = total.or(mailbox.total);
-                    }
-                }
-                if Some(&updated) == state.mailboxes.get(&name) {
-                    return;
-                }
-                mail.cache.save_mailboxes(&updated, &name);
-                state.mailboxes.insert(name, updated);
-                drop(state);
-                mail.events.emit_soon("mailboxes");
-            });
+            self.refresh_account_counts(name);
         }
+    }
+
+    fn refresh_account_counts(self: &Arc<Self>, name: String) {
+        let Some(backend) = self.backend(&name) else { return };
+        let mail = self.clone();
+        tokio::spawn(async move {
+            let Ok(fresh) = backend.mailboxes(true).await else { return };
+            let counts: HashMap<String, (Option<i64>, Option<i64>)> =
+                fresh.into_iter().map(|mailbox| (mailbox.id, (mailbox.unread, mailbox.total))).collect();
+            let mut state = mail.state();
+            let Some(list) = state.mailboxes.get(&name) else { return };
+            let mut updated = list.clone();
+            for mailbox in &mut updated {
+                if let Some((unread, total)) = counts.get(&mailbox.id) {
+                    mailbox.unread = unread.or(mailbox.unread);
+                    mailbox.total = total.or(mailbox.total);
+                }
+            }
+            if Some(&updated) == state.mailboxes.get(&name) {
+                return;
+            }
+            mail.cache.save_mailboxes(&updated, &name);
+            state.mailboxes.insert(name, updated);
+            drop(state);
+            mail.events.emit_soon("mailboxes");
+        });
+    }
+
+    /// A refresh of the default list is running.
+    pub fn is_loading(&self) -> bool {
+        self.state().loading
+    }
+
+    /// When the default list last finished refreshing.
+    pub fn last_refresh(&self) -> Option<Date> {
+        self.state().last_refresh
+    }
+
+    /// Every account's first load has finished.
+    pub fn is_connected(&self) -> bool {
+        self.state().connected
     }
 
     // MARK: - Lookup
@@ -515,21 +551,57 @@ impl Mail {
         futures::future::join_all(reads).await;
     }
 
-    /// The default list's mailboxes, fetched afresh.
+    /// The default list's mailboxes, fetched afresh. `loading` holds until the latest refresh
+    /// ends, and each change of it sends `sync`.
     pub fn refresh(self: Arc<Self>) {
-        let keys = {
+        let (keys, mine) = {
             let mut state = self.state();
             if state.problem.take().is_some() {
                 self.events.emit_soon("problems");
             }
-            Self::default_keys(&state)
+            let keys = Self::default_keys(&state);
+            if keys.is_empty() {
+                return;
+            }
+            state.refreshes += 1;
+            if !state.loading {
+                state.loading = true;
+                self.events.emit_soon("sync");
+            }
+            (keys, state.refreshes)
         };
-        if keys.is_empty() {
-            return;
-        }
         tokio::spawn(async move {
             self.load_cached_listings(&keys).await;
             self.fetch_first_pages(&keys).await;
+            let mut state = self.state();
+            if state.refreshes == mine {
+                state.loading = false;
+                state.last_refresh = Some(now());
+                drop(state);
+                self.events.emit_soon("sync");
+            }
+        });
+    }
+
+    /// Picks up a change push reported for `account`: its mailboxes in the default list and its
+    /// counts. Bursts (a sync touching many messages) coalesce into one pass half a second later.
+    pub fn refresh_account(self: &Arc<Self>, account: &str) {
+        if !self.state().account_refreshes.insert(account.to_string()) {
+            return;
+        }
+        let (mail, account) = (self.clone(), account.to_string());
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let keys: Vec<MailboxKey> = {
+                let mut state = mail.state();
+                state.account_refreshes.remove(&account);
+                if !state.accounts.iter().any(|known| known.name == account) {
+                    return;
+                }
+                Self::default_keys(&state).into_iter().filter(|key| key.account == account).collect()
+            };
+            mail.refresh_account_counts(account);
+            mail.fetch_first_pages(&keys).await;
         });
     }
 

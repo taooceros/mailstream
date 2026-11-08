@@ -93,6 +93,8 @@ const CASES: &[Case] = &[
         args: |i| json!({ "ids": (0..20).map(|n| conversation_id(i + n * 5)).collect::<Vec<_>>() }),
         write: false,
     },
+    // Starts a refresh and answers at once; with no refresh token the fetch stops at the token.
+    Case { name: "refresh", command: "refresh", args: |_| json!({}), write: false },
 ];
 
 /// Bench account `n` (0 to 4) and its provider: three Gmail, two Outlook.

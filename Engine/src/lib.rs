@@ -23,7 +23,10 @@ mod keychain;
 pub mod mail;
 pub mod model;
 mod oauth;
+mod polling;
+pub mod push;
 mod settings;
+pub mod signal;
 pub mod text;
 mod threader;
 mod tokens;
@@ -31,6 +34,8 @@ mod tokens;
 mod fake;
 #[cfg(test)]
 mod mail_tests;
+#[cfg(test)]
+mod push_tests;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -95,6 +100,8 @@ pub struct Config {
     pub oauth: OAuthConfig,
     /// The providers' API roots; tests use a local server.
     pub endpoints: backend::Endpoints,
+    /// The push relay; none (tests, builds without it) polls only.
+    pub push: push::PushConfig,
 }
 
 impl Config {
@@ -112,6 +119,7 @@ impl Config {
             built_in_clients: bundle::built_in_clients(),
             oauth: OAuthConfig::default(),
             endpoints: backend::Endpoints::default(),
+            push: bundle::push_config(),
         }
     }
 }
@@ -132,6 +140,11 @@ impl Events {
         for listener in listeners {
             listener(event);
         }
+    }
+
+    /// Calls `listener` with each event from now on, on whichever thread sends it.
+    pub fn listen(&self, listener: impl Fn(&'static str) + Send + Sync + 'static) {
+        self.listeners.lock().expect("events lock").push(Arc::new(listener));
     }
 
     /// `event` a moment from now, once however often it is asked for meanwhile: a burst of
@@ -158,6 +171,8 @@ struct Core {
     oauth: Arc<OAuth>,
     events: Arc<Events>,
     mail: Arc<mail::Mail>,
+    push: Arc<push::Push>,
+    polling: Arc<polling::Polling>,
 }
 
 /// One engine; the FFI host keeps one per process.
@@ -170,7 +185,8 @@ pub struct Engine {
 
 impl Engine {
     /// Reads the settings and accounts, starts following settings.json, and starts the mail
-    /// store: it paints from mail.db and loads every account's mailboxes and inboxes.
+    /// store (it paints from mail.db and loads every account's mailboxes and inboxes), polling
+    /// and push.
     pub fn start(config: Config) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .thread_name("mailstream-engine")
@@ -201,9 +217,36 @@ impl Engine {
             settings.clone(),
             events.clone(),
         ));
-        let core = Arc::new(Core { settings, accounts, tokens, oauth, events, mail: mail.clone() });
+        let push = Arc::new(push::Push::new(
+            config.push.clone(),
+            directory.clone(),
+            &config.endpoints,
+            accounts.clone(),
+            mail.clone(),
+        ));
+        let polling = Arc::new(polling::Polling::new(mail.clone(), push.clone(), settings.clone(), events.clone()));
+        let reschedule = Arc::downgrade(&polling);
+        events.listen(move |event| {
+            if event == "settings"
+                && let Some(polling) = reschedule.upgrade()
+            {
+                polling.settings_changed();
+            }
+        });
+        let core = Arc::new(Core {
+            settings,
+            accounts,
+            tokens,
+            oauth,
+            events,
+            mail: mail.clone(),
+            push: push.clone(),
+            polling: polling.clone(),
+        });
         let watcher = Self::follow_settings(&core);
         runtime.spawn(mail.start());
+        polling.start();
+        push.start();
         drop(_entered);
         Self { core, _watcher: watcher, runtime }
     }
@@ -253,9 +296,9 @@ impl Engine {
     }
 
     /// Calls `listener` with each change from now on (`accounts`, `settings`, `mailboxes`,
-    /// `conversations`, `previews`, `problems`), on an engine thread.
+    /// `conversations`, `previews`, `problems`, `sync`), on an engine thread.
     pub fn subscribe(&self, listener: impl Fn(&'static str) + Send + Sync + 'static) {
-        self.core.events.listeners.lock().expect("events lock").push(Arc::new(listener));
+        self.core.events.listen(listener);
     }
 
     /// Whether remote images and fonts of conversation `id` (from a listing) load on their own,
@@ -301,6 +344,7 @@ impl Core {
             "mailboxes" | "mail.list" | "mail.search" | "mail.show" | "mail.previews" => {
                 return self.mail.run(command, &args).await;
             }
+            "refresh" => Ok(self.polling.refresh()),
             "accounts.list" => Ok(json!(self.accounts.list().iter().map(|record| record.json()).collect::<Vec<_>>())),
             "accounts.rename" => {
                 let record = self.record(&args)?;
@@ -335,12 +379,15 @@ impl Core {
                         ),
                     ));
                 }
-                // The Swift engine also stops push first; that arrives with push (MS-115).
+                // Push stops the account's registration with its API, taken before it goes,
+                // while the token still works; the token goes after.
+                let api = self.mail.api(&record.id);
                 self.accounts.remove(&record.id).map_err(EngineError::failed)?;
                 self.mail.accounts_changed();
+                self.events.emit("accounts");
+                self.push.sign_out(&record.id, api).await;
                 let _ = std::fs::remove_file(gmail::cache_file(&self.mail.cache_root(), &record.id));
                 self.tokens.forget(&record.id);
-                self.events.emit("accounts");
                 Ok(json!({ "removed": record.id }))
             }
             _ => unreachable!("{command} is a ported command"),
@@ -383,6 +430,7 @@ impl Core {
         let record = self.accounts.signed_in(provider, &grant).map_err(EngineError::failed)?;
         self.events.emit("accounts");
         self.mail.accounts_changed();
+        self.push.check();
         Ok(record.json())
     }
 }
@@ -427,6 +475,8 @@ pub(crate) mod tests {
                 },
                 graph: "http://127.0.0.1:9/v1.0/".into(),
             },
+            // No relay: no test registers push with a provider unless it sets a fake one.
+            push: push::PushConfig::default(),
         }
     }
 

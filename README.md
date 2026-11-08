@@ -197,9 +197,11 @@ DART_OUT=path/to/lib/src ./scripts/ffi.sh         # and the Dart bindings (asset
   phase by phase. A host started with `MAILSTREAM_ENGINE=rust` runs it instead of the Swift
   one, through the same `Mailstream` methods and events (still on the main thread); it has
   its own threads and reads and writes the same settings.json, accounts.json and Keychain
-  item. So far it answers `config.*` and `accounts.*` (sign-in included); every other
+  item. So far it answers `config.*`, `accounts.*` (sign-in included), `mailboxes`, the
+  `mail.*` reads and `refresh`, polls and follows push like the Swift engine; every other
   command fails with `unported`. Without the variable nothing changes. `cd Engine && cargo
-  test` uses a Keychain item of its own, never the apps' sign-ins.
+  test` uses a Keychain item of its own, never the apps' sign-ins, and fake provider and
+  relay servers, never the real ones.
 - **Engine benchmark.** After `CONFIG=release ./scripts/ffi.sh`, `cd FFI &&
   MAILSTREAM_KIT_CONFIG=release cargo run --release --example bench` runs both engines through
   the same `Mailstream` path, each in its own process with a throwaway home folder and Keychain
@@ -251,7 +253,7 @@ for mail and asks for your OAuth client at sign-in. Dragged to Applications, it 
 | Accounts | `Backend/Accounts.swift`, `OAuth.swift`, `Tokens.swift`, `AppConfig.swift`, `UI/AccountsWindowController.swift` | Signed-in accounts, browser sign-in (authorization code with PKCE, loopback redirect), refresh tokens in the Keychain, build-time defaults from `Info.plist`, the Settings window |
 | Control | `Control/Settings.swift`, `Commands.swift`, `CLI.swift`, `ControlSocket.swift`, `ControlService.swift`, `MailStore+Control.swift` | settings.json with live reload (an observable `Settings`), the `mailstream` command table, the CLI, the control socket (a `NetworkListener` on a Unix-domain path) and the app side of each command |
 | FFI | `FFI/Exports.swift`, `FFI/` (Rust crate) | The engine without windows for other front ends: a C API over `ControlService` in `libMailstreamKit.dylib`, and the UniFFI crate that types it for Rust and Dart |
-| Rust engine | `Engine/` (Rust crate) | The engine's Rust rewrite behind `MAILSTREAM_ENGINE=rust`: its own tokio runtime, the command table, settings.json, accounts.json, the Keychain sign-ins item, token refresh and browser sign-in, so far |
+| Rust engine | `Engine/` (Rust crate) | The engine's Rust rewrite behind `MAILSTREAM_ENGINE=rust`: its own tokio runtime, the command table, settings.json, accounts.json, the Keychain sign-ins item, token refresh and browser sign-in, receiving mail with mail.db, polling (`polling.rs`), push through the relay with push.json shared with the Swift engine (`push.rs`) and the Darwin notifications both engines post (`signal.rs`), so far |
 | Backend | `Backend/API.swift`, `MailBackend.swift`, `GmailBackend.swift`, `MIMEMessage.swift`, `GraphBackend.swift`, `MessageAssembly.swift`, `HTMLText.swift`, `AsyncSemaphore.swift`, `QuotaBudget.swift` | `API` sends authorized requests per account (token refresh on 401, backoff on 429 and 5xx; a rate-limit refusal pauses the whole account's quota budget; Gmail runs 6 interactive / 3 background requests at a time within a 3,000-units-a-minute budget, Graph 3 / 1 for Outlook's limit of four per mailbox). Gmail and Graph implement one `MailBackend` protocol: mailboxes with roles, cursor-paged envelopes, search, message content (bodies, inline `cid:` parts and attachments written to the cache), flags, moves, sending |
 | Chat | `Backend/Chat.swift`, `ChatAPI.swift`, `Store/ChatStore.swift`, `UI/ChatPage.swift`, `UI/ChatReader.swift` | Google Chat REST API for Google accounts granted Chat access; main-actor spaces and message state with a disk cache, rendered into the reader's page |
 | Push | `Backend/PushService.swift`, `Push/` | One WebSocket to the relay; registers Gmail watches and Graph subscriptions for every account and asks the store to refresh the account a notification names |
