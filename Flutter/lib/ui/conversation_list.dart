@@ -9,6 +9,7 @@ import 'common.dart';
 import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
+import 'reader.dart';
 
 /// One line of the list: a date group header, a conversation, or a Smart Inbox bundle.
 sealed class ListItem {
@@ -472,7 +473,8 @@ class _ConversationRowState extends State<ConversationRow> {
   /// without them build a fraction of the widgets, which keeps scrolling cheap.
   bool _actions = false;
 
-  /// Resting on a row for 80 ms loads the conversation, so opening it renders the bodies at once.
+  /// Resting on a row for 80 ms loads the conversation and prepares its HTML, so opening it
+  /// renders the bodies at once.
   Future<void>? _rest;
 
   void _hovered(bool hover) {
@@ -483,7 +485,7 @@ class _ConversationRowState extends State<ConversationRow> {
     if (!hover) return;
     final rest = _rest = Future.delayed(const Duration(milliseconds: 80));
     rest.then((_) {
-      if (mounted && _hover && identical(rest, _rest)) widget.state.prefetch(widget.conversation);
+      if (mounted && _hover && identical(rest, _rest)) Reader.prefetch(widget.state, widget.conversation);
     });
   }
 

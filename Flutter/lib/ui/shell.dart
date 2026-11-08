@@ -216,7 +216,7 @@ class _MailShellState extends State<MailShell> {
       if (_twoPane && state.opened != null) {
         state.open(item.conversation);
       } else {
-        state.prefetch(item.conversation);
+        Reader.prefetch(state, item.conversation);
       }
     }
   }

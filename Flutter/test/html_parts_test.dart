@@ -4,9 +4,15 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:macos_ui/macos_ui.dart';
+import 'package:mailstream/mailstream.dart' as engine;
+import 'package:mailstream_ui/backend/models.dart';
+import 'package:mailstream_ui/state/mail_state.dart';
 import 'package:mailstream_ui/ui/design.dart';
+import 'package:mailstream_ui/ui/glass.dart';
 import 'package:mailstream_ui/ui/html_parts.dart';
 import 'package:mailstream_ui/ui/reader.dart';
+
+import 'reader_fixture.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -86,6 +92,129 @@ void main() {
     expect(cache.peek('0'), ('0', null));
     await expectLater(cache.load('bad'), throwsStateError);
     expect(calls.where((html) => html == 'bad').length, 2);
+  });
+
+  /// A split per HTML that answers when the test completes it, recording the order they start in.
+  ({List<String> calls, Map<String, Completer<HtmlParts>> answers, HtmlPartsCache cache}) held() {
+    final calls = <String>[];
+    final answers = <String, Completer<HtmlParts>>{};
+    return (
+      calls: calls,
+      answers: answers,
+      cache: HtmlPartsCache(split: (html) {
+        calls.add(html);
+        return (answers[html] = Completer<HtmlParts>()).future;
+      }),
+    );
+  }
+
+  test('queued work every request released is never split; the next reader runs right after the running split', () async {
+    final (:calls, :answers, :cache) = held();
+    final a1 = cache.request('a1');
+    final a2 = cache.request('a2');
+    final shared = cache.request('a3');
+    final a3 = cache.request('a3');
+    expect(calls, ['a1']);
+    a1.release();
+    a2.release();
+    a3.release();
+    final b = cache.request('b');
+    answers['a1']!.complete(('a1', null));
+    await Future<void>.delayed(Duration.zero);
+    expect(calls, ['a1', 'a3'], reason: 'a3 still has a request; a2 has none');
+    shared.release();
+    answers['a3']!.complete(('a3', null));
+    await Future<void>.delayed(Duration.zero);
+    expect(calls, ['a1', 'a3', 'b']);
+    expect(cache.peek('a1'), ('a1', null), reason: 'a running split finishes and is kept');
+    answers['b']!.complete(('b', null));
+    expect(await b.parts, ('b', null));
+    expect(calls, ['a1', 'a3', 'b']);
+  });
+
+  test('prefetch work waits for every reader, yields to a newer batch and joins a reader asking for it', () async {
+    final (:calls, :answers, :cache) = held();
+    final r1 = cache.request('r1');
+    cache.warm(['w1', 'w2']);
+    final r2 = cache.request('r2');
+    answers['r1']!.complete(('r1', null));
+    await r1.parts;
+    await Future<void>.delayed(Duration.zero);
+    expect(calls, ['r1', 'r2']);
+    cache.warm(['w3', 'w4']);
+    answers['r2']!.complete(('r2', null));
+    await r2.parts;
+    await Future<void>.delayed(Duration.zero);
+    expect(calls, ['r1', 'r2', 'w3'], reason: 'the newer batch replaced w1 and w2');
+    final running = cache.request('w3');
+    final queued = cache.request('w4');
+    answers['w3']!.complete(('w3', null));
+    expect(await running.parts, ('w3', null));
+    await Future<void>.delayed(Duration.zero);
+    expect(calls, ['r1', 'r2', 'w3', 'w4']);
+    answers['w4']!.complete(('w4', null));
+    expect(await queued.parts, ('w4', null));
+  });
+
+  test("prefetched parts never push a reader's parts out", () async {
+    final cache = HtmlPartsCache(split: (html) async => (html, null));
+    for (var i = 0; i < HtmlPartsCache.capacity; i++) {
+      await cache.load('r$i');
+    }
+    cache.warm([for (var i = 0; i < HtmlPartsCache.capacity; i++) 'w$i']);
+    await Future<void>.delayed(Duration.zero);
+    for (var i = 0; i < HtmlPartsCache.capacity; i++) {
+      expect(cache.peek('r$i'), ('r$i', null));
+    }
+    expect(cache.peek('w0'), ('w0', null));
+  });
+
+  engine.Message message(String id, {String? html, String? text, bool unread = false, String? error}) => engine.Message(
+    id: id,
+    mailbox: 'INBOX',
+    role: 'inbox',
+    from: ['Alex <alex@example.test>'],
+    to: ['reader@example.test'],
+    cc: [],
+    date: DateTime.utc(2026, 11, 6, 12).toIso8601String(),
+    subject: 'Synthetic',
+    unread: unread,
+    starred: false,
+    text: text,
+    truncated: false,
+    attachments: [],
+    html: html,
+    error: error,
+  );
+
+  test('a reader opens with the latest and unread HTML bodies, or a chat log with those without text', () {
+    final messages = [
+      message('1', html: 'old'),
+      message('2', html: 'unread', unread: true),
+      message('3', html: 'failed', unread: true, error: 'gone'),
+      message('4', text: 'plain', unread: true),
+      message('5', html: ' '),
+      message('6', html: 'latest', text: 'latest as text'),
+    ].map(MessageDetail.of).toList();
+    Conversation of(String category) => Conversation.of(engine.Conversation(
+      id: 'c',
+      account: 'reader@example.test',
+      subject: 'Synthetic',
+      date: null,
+      from: null,
+      participants: [],
+      messageCount: messages.length,
+      unread: true,
+      starred: false,
+      hasAttachment: false,
+      mailboxes: ['inbox'],
+      snippet: '',
+      category: category,
+      waiting: false,
+      labels: [],
+    ));
+    expect(Reader.openingHtml(of('notification'), messages), ['latest', 'unread']);
+    expect(Reader.openingHtml(of('people'), messages), ['unread', 'old']);
   });
 
   /// Platform views made, oldest first; the width each asked its height at; the page's answer.
@@ -271,6 +400,75 @@ void main() {
       expect(rendered(tester), [html]);
       expect(toggle(), findsNothing);
     }
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  Widget bodies(HtmlPartsCache cache, Map<String, String> htmlByMessage) => MacosApp(
+    theme: MailTheme.macos(Brightness.light),
+    home: Column(children: [
+      for (final MapEntry(key: message, value: html) in htmlByMessage.entries)
+        MailHtml(key: ValueKey(message), owner: (account: 'account', conversation: 'c', message: message), html: html, partsCache: cache),
+    ]),
+  );
+
+  testWidgets("a closed conversation's queued bodies are skipped; the next one splits right after the running one", (tester) async {
+    final (:calls, :answers, :cache) = held();
+    await tester.pumpWidget(bodies(cache, {'1': 'a1', '2': 'a2', '3': 'a3'}));
+    // A refresh with new HTML releases the old.
+    await tester.pumpWidget(bodies(cache, {'1': 'a1', '2': 'a2 revised', '3': 'a3'}));
+    await tester.pumpWidget(bodies(cache, {'b': 'b'}));
+    expect(calls, ['a1']);
+    expect(find.byType(Spinner), findsOneWidget);
+    answers['a1']!.complete(('a1', null));
+    await tester.pump();
+    expect(calls, ['a1', 'b']);
+    answers['b']!.complete(('b', null));
+    await tester.pump();
+    expect(rendered(tester), ['b']);
+    expect(calls, ['a1', 'b']);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a prefetched conversation draws its bodies in its first frame; pending prefetch waits for the open one', (tester) async {
+    final (:calls, :answers, :cache) = held();
+    final mail = ReaderMail();
+    final state = MailState(mail);
+    addTearDown(state.dispose);
+    await state.start();
+    final [a, b] = state.conversations;
+    void answer(int index, String html) => mail.requests[index].answer.complete(engine.Thread(
+      conversation: mail.rows[index],
+      messages: [message('${mail.rows[index].id}-1', html: html)],
+    ));
+
+    Reader.prefetch(state, a, partsCache: cache);
+    answer(0, 'A');
+    await tester.pump();
+    expect(calls, ['A']);
+    Reader.prefetch(state, b, partsCache: cache);
+    answer(1, 'B');
+    await tester.pump();
+    expect(calls, ['A'], reason: 'one split at a time; B waits');
+
+    // Another conversation opens while A is being prepared and B waits.
+    await tester.pumpWidget(bodies(cache, {'c-1': 'C'}));
+    expect(find.byType(Spinner), findsOneWidget);
+    answers['A']!.complete(('A', null));
+    await tester.pump();
+    expect(calls, ['A', 'C'], reason: 'the open reader goes before pending prefetch work');
+    answers['C']!.complete(('C', null));
+    await tester.pump();
+    expect(rendered(tester), ['C']);
+    expect(calls, ['A', 'C', 'B']);
+    answers['B']!.complete(('B', null));
+    await tester.pump();
+
+    for (final (message, html) in [('b-1', 'B'), ('a-1', 'A')]) {
+      await tester.pumpWidget(bodies(cache, {message: html}));
+      expect(find.byType(Spinner), findsNothing);
+      expect(rendered(tester), [html]);
+    }
+    expect(calls, ['A', 'C', 'B']);
     await tester.pumpWidget(const SizedBox());
   });
 }

@@ -29,6 +29,38 @@ class Reader extends StatefulWidget {
 
   static const column = 760.0;
 
+  /// Conversations between people with more than one message read as a chat log.
+  static bool chat(Conversation c) => c.messageCount > 1 && (c.category == null || c.category == MailCategory.people);
+
+  /// The latest and unread messages open; the rest are one-line previews.
+  static bool opensExpanded(List<MessageDetail> messages, int index) =>
+      index == messages.length - 1 || messages[index].unread;
+
+  /// The HTML bodies a reader of [c] draws as it opens, latest first: the open cards' or, in a
+  /// chat log, those of the messages without text.
+  static List<String> openingHtml(Conversation c, List<MessageDetail> messages) {
+    final chatLog = chat(c);
+    return [
+      for (var i = messages.length - 1; i >= 0; i--)
+        if (messages[i] case MessageDetail(error: null, :final html?)
+            when html.trim().isNotEmpty &&
+                (chatLog ? (messages[i].text ?? '').trim().isEmpty : opensExpanded(messages, i)))
+          html,
+    ];
+  }
+
+  /// Loads [c]'s messages ahead of opening it (a pointer resting on its row, a keyboard step)
+  /// and splits the HTML its reader opens with behind any open reader's, so opening it draws
+  /// the bodies at once.
+  static void prefetch(MailState state, Conversation c, {HtmlPartsCache? partsCache}) {
+    final entry = state.prefetch(c);
+    if (!Host.mac) return;
+    entry.future.then((messages) {
+      // A newer load replaced this one: it warms its own messages when prefetched.
+      if (identical(entry.messages, messages)) (partsCache ?? HtmlPartsCache.shared).warm(openingHtml(c, messages));
+    }, onError: (Object _) {});
+  }
+
   @override
   State<Reader> createState() => ReaderState();
 }
@@ -45,8 +77,7 @@ class ReaderState extends State<Reader> {
 
   Conversation get c => widget.conversation;
 
-  /// Conversations between people with more than one message read as a chat log.
-  bool get _chat => c.messageCount > 1 && (c.category == null || c.category == MailCategory.people);
+  bool get _chat => Reader.chat(c);
 
   @override
   void initState() {
@@ -135,8 +166,7 @@ class ReaderState extends State<Reader> {
                 message: m,
                 state: widget.state,
                 now: now,
-                // The latest and unread messages open; the rest are one-line previews.
-                expanded: _expanded.contains(m.id) != (i == messages.length - 1 || m.unread),
+                expanded: _expanded.contains(m.id) != Reader.opensExpanded(messages, i),
                 onToggle: () => _toggle(m.id),
                 onReply: reply,
               ),
@@ -536,7 +566,10 @@ typedef HtmlOwner = ({String account, String conversation, String message});
 class _MailHtmlState extends State<MailHtml> {
   HtmlParts? _parts;
   Object? _error;
-  int _request = 0;
+
+  /// The split this body waits for, released when it goes or shows other HTML so queued work
+  /// for mail no longer shown is skipped.
+  HtmlPartsRequest? _pending;
 
   HtmlPartsCache get _cache => widget.partsCache ?? HtmlPartsCache.shared;
 
@@ -552,8 +585,15 @@ class _MailHtmlState extends State<MailHtml> {
     if (old.html != widget.html || old.partsCache != widget.partsCache) _prepare();
   }
 
+  @override
+  void dispose() {
+    _pending?.release();
+    super.dispose();
+  }
+
   void _prepare() {
-    final request = ++_request;
+    _pending?.release();
+    _pending = null;
     final html = widget.html;
     _error = null;
     final cached = _cache.peek(html);
@@ -563,11 +603,14 @@ class _MailHtmlState extends State<MailHtml> {
     }
     // A refresh keeps this message's mounted body/fold until its replacement is ready.
     // Different messages have different keys in _Body, so never show the previous mail.
-    _cache.load(html).then((parts) {
-      if (!mounted || request != _request) return;
+    final pending = _pending = _cache.request(html);
+    pending.parts.then((parts) {
+      if (!mounted || !identical(pending, _pending)) return;
+      _pending = null;
       setState(() => _parts = parts);
     }, onError: (Object error, StackTrace stack) {
-      if (!mounted || request != _request) return;
+      if (!mounted || !identical(pending, _pending)) return;
+      _pending = null;
       FlutterError.reportError(FlutterErrorDetails(exception: error, stack: stack, library: 'mail HTML'));
       setState(() => _error = error);
     });

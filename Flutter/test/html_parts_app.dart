@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:ui' show FrameTiming;
 
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';

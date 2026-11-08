@@ -722,7 +722,7 @@ class MailState extends ChangeNotifier {
     return entry;
   }
 
-  void prefetch(Conversation conversation) => thread(conversation);
+  ThreadEntry prefetch(Conversation conversation) => thread(conversation);
 
   // MARK: - Actions
 
