@@ -54,8 +54,8 @@ hashes stay as they are.
 - Label and place issues you file when creating them. Issues the user files often have neither:
   whoever claims one adds them first (the polling session before handing it out, otherwise the
   agent before its start comment).
-- File your own issues in Backlog; only the user adds `omp`. Problems found outside the current
-  change get their own Backlog issue; don't fix them in passing.
+- File your own issues in Backlog; only the user starts them (moving one to Todo or adding `omp`).
+  Problems found outside the current change get their own Backlog issue; don't fix them in passing.
 
 ### Working an issue
 
@@ -74,7 +74,10 @@ hashes stay as they are.
 - Blocked by another issue (it needs that change first, or the user said to wait for it): add a
   "blocked by" relation (file the blocker first if it doesn't exist), comment what it waits for,
   move it to Backlog and stop. Once every blocker is In Review, Done or Canceled, the poll hands
-  it out again and its agent carries on from the comments.
+  it out again and its agent carries on from the comments. A blocked issue in Todo (the user
+  wants it worked) is handed out as soon as every blocker has started, without waiting for
+  review: build on what the blockers have pushed to `main`; park it as above only for blocker
+  work that is not there yet.
 - Questions only the user can decide: don't guess. Assign the issue to the user (taooceros), move
   it to Todo, start the comment with `**❓ 需要你回答：**` followed by the question(s), each
   answerable on its own, and stop.
