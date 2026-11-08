@@ -1,0 +1,479 @@
+part of 'render_hyper_box.dart';
+
+extension RenderHyperBoxSelection on RenderHyperBox {
+  // ── Binary-search helper ──────────────────────────────────────────────────
+
+  /// Returns the index of the [LineInfo] in [_lines] whose vertical span
+  /// contains [dy], or -1 when [dy] falls outside all lines.
+  ///
+  /// Lines are laid out top-to-bottom with monotonically increasing [top]
+  /// values, so binary search gives O(log N) instead of the previous O(N)
+  /// linear scan — critical for long documents during handle-drag selection.
+  ///
+  /// When [clampOutOfBounds] is true, a [dy] above the first line snaps to
+  /// index 0 and a [dy] below the last line snaps to the last index. This
+  /// is what selection-handle dragging wants so that a finger drifting a
+  /// pixel above the first line — or into the margin below the last line —
+  /// still extends the selection rather than freezing. Tap hit-testing must
+  /// pass `false` so that clicks in empty margins don't accidentally
+  /// resolve to a link in the nearest line.
+  int _lineIndexAt(double dy, {bool clampOutOfBounds = false}) {
+    if (_lines.isEmpty) return -1;
+    if (clampOutOfBounds) {
+      if (dy < _lines.first.top) return 0;
+      final last = _lines.last;
+      if (dy >= last.top + last.height) return _lines.length - 1;
+    }
+    int lo = 0, hi = _lines.length - 1;
+    while (lo <= hi) {
+      final mid = (lo + hi) >>> 1;
+      final line = _lines[mid];
+      if (dy < line.top) {
+        hi = mid - 1;
+      } else if (dy >= line.top + line.height) {
+        lo = mid + 1;
+      } else {
+        return mid;
+      }
+    }
+    return -1;
+  }
+
+  // ── Hit testing ───────────────────────────────────────────────────────────
+
+  /// The topmost `position: relative` fragment painted at [position].
+  ///
+  /// Line lookups can't find these: a moved fragment stays listed on its
+  /// original line, which may be nowhere near where it is painted.
+  Fragment? _findDisplacedFragmentAt(Offset position) {
+    for (final fragment in _displacedOnLines.reversed) {
+      final rect = fragment.rect;
+      if (rect != null && rect.contains(position)) return fragment;
+    }
+    return null;
+  }
+
+  Fragment? _findFragmentAtPosition(Offset position) {
+    final displaced = _findDisplacedFragmentAt(position);
+    if (displaced != null) return displaced;
+    final lineIdx = _lineIndexAt(position.dy);
+    if (lineIdx < 0) return null;
+    for (final fragment in _lines[lineIdx].fragments) {
+      final rect = fragment.rect;
+      if (rect != null && rect.contains(position)) return fragment;
+    }
+    return null;
+  }
+
+  int _getCharacterPositionAtOffset(Offset position) {
+    final displaced = _findDisplacedFragmentAt(position);
+    if (displaced != null &&
+        displaced.text != null &&
+        (displaced.type == FragmentType.text ||
+            displaced.type == FragmentType.ruby)) {
+      final painter =
+          _getTextPainter(displaced.text!, _effectiveFragmentStyle(displaced));
+      final localX = position.dx - displaced.offset!.dx;
+      return displaced.globalOffset +
+          painter.getPositionForOffset(Offset(localX, 0)).offset;
+    }
+
+    // Selection drag is lenient — a finger that drifts above the first
+    // line or into the margin below the last line should still extend
+    // the selection to the nearest edge, not freeze.
+    final lineIdx = _lineIndexAt(position.dy, clampOutOfBounds: true);
+    if (lineIdx < 0) return -1;
+
+    final line = _lines[lineIdx];
+    // O(1) lookup of cumulative char count before this line
+    // (populated by _buildCharacterMapping after every layout pass).
+    int lastOffset =
+        lineIdx < _lineStartOffsets.length ? _lineStartOffsets[lineIdx] : 0;
+
+    for (final fragment in line.fragments) {
+      if ((fragment.type == FragmentType.text && fragment.text != null) ||
+          fragment.type == FragmentType.ruby) {
+        final text = fragment.text!;
+        // Painted elsewhere, so its rect says nothing about this line. Keep
+        // counting its characters for the end-of-line fallback.
+        if (_displaced.containsKey(fragment)) {
+          lastOffset = fragment.globalOffset + text.length;
+          continue;
+        }
+        final fragmentOffset = fragment.offset ?? Offset.zero;
+        // On a justify line the glyphs are widened by word-spacing, so both
+        // the hit rect and the painter must use the justified width/style.
+        final effStyle = _effectiveFragmentStyle(fragment);
+        final effWidth = fragment.width +
+            (fragment.justifyWordSpacing == 0
+                ? 0.0
+                : _spaceCount(text) * fragment.justifyWordSpacing);
+        final fragmentRect = Rect.fromLTWH(
+          fragmentOffset.dx,
+          fragmentOffset.dy,
+          effWidth,
+          fragment.height,
+        );
+
+        // Click is before this fragment — place cursor at start of fragment.
+        if (position.dx < fragmentRect.left) return fragment.globalOffset;
+
+        if (position.dx <= fragmentRect.right) {
+          // Click is within this fragment — find exact character position.
+          final painter = _getTextPainter(text, effStyle);
+          final localX = position.dx - fragmentRect.left;
+          final textPosition = painter.getPositionForOffset(Offset(localX, 0));
+          return fragment.globalOffset + textPosition.offset;
+        }
+
+        lastOffset = fragment.globalOffset + text.length;
+      }
+    }
+    // Click was past all fragments (right margin) — return end of line.
+    return lastOffset;
+  }
+
+  /// Get selected text
+  ///
+  /// Iterates [_fragments] in order, inserting '\n' whenever a
+  /// [_BlockEndFragment] is encountered so that block-level boundaries
+  /// (e.g. <li> → <h3>, <p> → <p>) are reflected in the copied text.
+  String? getSelectedText() {
+    if (_selection == null || !_selection!.isValid || _selection!.isCollapsed) {
+      return null;
+    }
+
+    final buffer = StringBuffer();
+    bool pendingNewline = false;
+
+    for (final fragment in _fragments) {
+      if (fragment is _BlockStartFragment) continue;
+      if (fragment is _BlockEndFragment) {
+        if (buffer.isNotEmpty) pendingNewline = true;
+        continue;
+      }
+
+      final isText = (fragment.type == FragmentType.text ||
+              fragment.type == FragmentType.ruby) &&
+          fragment.text != null;
+      if (!isText) continue;
+
+      // Honor CSS text-overflow:ellipsis — never surface characters that
+      // were clipped at paint time. ellipsisVisibleLength == 0 means the
+      // whole fragment was swallowed by the "…"; a positive value caps
+      // the visible prefix.
+      final fragmentLength =
+          fragment.ellipsisVisibleLength ?? fragment.text!.length;
+      if (fragmentLength == 0) continue;
+      final fragmentStart = fragment.globalOffset;
+      final fragmentEnd = fragmentStart + fragmentLength;
+
+      // Outside selection range — skip.
+      if (fragmentEnd <= _selection!.start ||
+          fragmentStart >= _selection!.end) {
+        continue;
+      }
+
+      // Flush the pending newline now that we have real text to follow it.
+      if (pendingNewline) {
+        buffer.write('\n');
+        pendingNewline = false;
+      }
+
+      final selectStart = math.max(0, _selection!.start - fragmentStart);
+      final selectEnd =
+          math.min(fragmentLength, _selection!.end - fragmentStart);
+
+      if (selectStart >= selectEnd) continue;
+
+      final fragmentText = fragment.text!;
+      // SAFETY: Ensure we don't split Unicode surrogate pairs by snapping
+      // to valid character boundaries if the selection offsets fall in the middle.
+      int safeStart = selectStart;
+      if (safeStart > 0 && safeStart < fragmentText.length) {
+        final codeUnit = fragmentText.codeUnitAt(safeStart);
+        if (codeUnit >= 0xDC00 && codeUnit <= 0xDFFF) {
+          safeStart--; // Move back to lead surrogate
+        }
+      }
+      int safeEnd = selectEnd;
+      if (safeEnd > 0 && safeEnd < fragmentText.length) {
+        final codeUnit = fragmentText.codeUnitAt(safeEnd);
+        if (codeUnit >= 0xDC00 && codeUnit <= 0xDFFF) {
+          safeEnd--; // Exclude the split trailing surrogate
+        }
+      }
+
+      if (fragment.type == FragmentType.ruby) {
+        // For Ruby, we only include the furigana in brackets if the
+        // ENTIRE base text is within the selection range.
+        // Otherwise, we only include the selected portion of the base text.
+        final isFullRubySelected =
+            selectStart == 0 && selectEnd == fragmentLength;
+        final base = fragmentText.substring(safeStart, safeEnd);
+
+        if (isFullRubySelected &&
+            fragment.rubyText != null &&
+            fragment.rubyText!.isNotEmpty) {
+          buffer.write('$base(${fragment.rubyText})');
+        } else {
+          buffer.write(base);
+        }
+      } else {
+        buffer.write(fragmentText.substring(safeStart, safeEnd));
+      }
+    }
+
+    return buffer.isEmpty ? null : buffer.toString();
+  }
+
+  /// Copy selected text to clipboard
+  Future<void> copySelection() async {
+    final text = getSelectedText();
+    if (text != null) {
+      await Clipboard.setData(ClipboardData(text: text));
+    }
+  }
+
+  /// Clear selection
+  void clearSelection() {
+    _selection = null;
+    markNeedsPaint();
+    _notifySelectionChanged();
+  }
+
+  /// Select all text
+  void selectAll() {
+    if (_totalCharacterCount > 0) {
+      _selection = HyperTextSelection(start: 0, end: _totalCharacterCount);
+      markNeedsPaint();
+      _notifySelectionChanged();
+    }
+  }
+
+  /// Computes bounding boxes for a single text or ruby [fragment] overlapping
+  /// `[rangeStart, rangeEnd)`.
+  ///
+  /// When [lineTop] and [lineHeight] are provided (as in [getBoxesForCharRange]),
+  /// the returned rects span the full vertical line grid. When omitted (as in
+  /// [getSelectionRects]), boxes use tight glyph height relative to the fragment offset.
+  List<Rect> _getFragmentBoxesForRange({
+    required Fragment fragment,
+    required int rangeStart,
+    required int rangeEnd,
+    double? lineTop,
+    double? lineHeight,
+    bool trimBoundarySpacesOnly = false,
+  }) {
+    if ((fragment.type != FragmentType.text &&
+            fragment.type != FragmentType.ruby) ||
+        fragment.text == null) {
+      return const [];
+    }
+
+    final fragmentLength =
+        fragment.ellipsisVisibleLength ?? fragment.text!.length;
+    if (fragmentLength == 0) return const [];
+    final fragmentStart = fragment.globalOffset;
+    final fragmentEnd = fragmentStart + fragmentLength;
+
+    if (fragmentEnd <= rangeStart || fragmentStart >= rangeEnd) {
+      return const [];
+    }
+
+    final selectStart = math.max(0, rangeStart - fragmentStart);
+    final selectEnd = math.min(fragmentLength, rangeEnd - fragmentStart);
+
+    final text = fragment.text!;
+    int visualStart = selectStart;
+    int visualEnd = selectEnd;
+    final ws = fragment.style.whiteSpace;
+    final isPreformatted =
+        ws == 'pre' || ws == 'pre-wrap' || ws == 'break-spaces';
+    if (!isPreformatted) {
+      if (!trimBoundarySpacesOnly || fragmentStart <= rangeStart) {
+        while (visualStart < visualEnd && text[visualStart] == ' ') {
+          visualStart++;
+        }
+      }
+      if (!trimBoundarySpacesOnly || fragmentEnd >= rangeEnd) {
+        while (visualEnd > visualStart && text[visualEnd - 1] == ' ') {
+          visualEnd--;
+        }
+      }
+    }
+
+    if (visualStart >= visualEnd) return const [];
+
+    final fragmentOffset = fragment.offset ?? Offset.zero;
+    final useLineHeight = lineTop != null && lineHeight != null;
+
+    if (fragment.type == FragmentType.ruby) {
+      return [
+        Rect.fromLTWH(
+          fragmentOffset.dx,
+          useLineHeight ? lineTop : fragmentOffset.dy,
+          fragment.width,
+          useLineHeight ? lineHeight : fragment.height,
+        ),
+      ];
+    }
+
+    final painter = _getTextPainter(text, _effectiveFragmentStyle(fragment));
+    final boxes = painter.getBoxesForSelection(
+      TextSelection(baseOffset: visualStart, extentOffset: visualEnd),
+      boxHeightStyle: ui.BoxHeightStyle.tight,
+    );
+
+    final result = <Rect>[];
+    for (final box in boxes) {
+      if (box.right <= box.left) continue;
+      result.add(Rect.fromLTRB(
+        fragmentOffset.dx + box.left,
+        useLineHeight ? lineTop : fragmentOffset.dy + box.top,
+        fragmentOffset.dx + box.right,
+        useLineHeight ? lineTop + lineHeight : fragmentOffset.dy + box.bottom,
+      ));
+    }
+    return result;
+  }
+
+  /// Get selection rects for rendering handles
+  List<Rect> getSelectionRects() {
+    if (_selection == null || !_selection!.isValid || _selection!.isCollapsed) {
+      return [];
+    }
+
+    final rects = <Rect>[];
+
+    for (final line in _lines) {
+      for (final fragment in line.fragments) {
+        rects.addAll(_getFragmentBoxesForRange(
+          fragment: fragment,
+          rangeStart: _selection!.start,
+          rangeEnd: _selection!.end,
+        ));
+      }
+    }
+
+    return rects;
+  }
+
+  /// Returns bounding boxes for characters in `[charStart, charEnd)` within
+  /// this RenderHyperBox's local coordinate space.
+  ///
+  /// Offsets are local to this [RenderHyperBox]. In virtualized/auto mode
+  /// (>10k chars), each chunk has its own box, and offsets restart at 0.
+  ///
+  /// Glyph x-boundaries come from [TextPainter.getBoxesForSelection] with
+  /// [ui.BoxHeightStyle.tight]; vertical bounds use `line.top` and
+  /// `line.height` to align highlights with the rendered line grid. Adjacent
+  /// text boxes merge unless an atomic fragment separates them.
+  List<Rect> getBoxesForCharRange(int charStart, int charEnd) {
+    if (charEnd <= charStart || _lines.isEmpty) return const [];
+    final rects = <Rect>[];
+
+    for (final line in _lines) {
+      final currentLineRects = <({Rect rect, int mergeGroup})>[];
+      var mergeGroup = 0;
+
+      for (final fragment in line.fragments) {
+        if (fragment.type == FragmentType.atomic) {
+          mergeGroup++;
+          continue;
+        }
+
+        // A moved fragment no longer sits on the line grid, so it must not
+        // merge with its neighbours on either side.
+        final shift = _displaced[fragment];
+        if (shift != null) mergeGroup++;
+
+        final fragmentBoxes = _getFragmentBoxesForRange(
+          fragment: fragment,
+          rangeStart: charStart,
+          rangeEnd: charEnd,
+          lineTop: line.top + (shift?.dy ?? 0),
+          lineHeight: line.height,
+          trimBoundarySpacesOnly: true,
+        );
+
+        for (final box in fragmentBoxes) {
+          currentLineRects.add((rect: box, mergeGroup: mergeGroup));
+        }
+
+        if (shift != null) mergeGroup++;
+      }
+
+      if (currentLineRects.isEmpty) continue;
+
+      currentLineRects.sort((a, b) => a.rect.left.compareTo(b.rect.left));
+      var current = currentLineRects.first.rect;
+      var currentGroup = currentLineRects.first.mergeGroup;
+      final maxGap = math.max(16.0, line.height);
+      for (var i = 1; i < currentLineRects.length; i++) {
+        final next = currentLineRects[i];
+        if (next.mergeGroup == currentGroup &&
+            next.rect.left <= current.right + maxGap) {
+          current = Rect.fromLTRB(
+            current.left,
+            math.min(current.top, next.rect.top),
+            math.max(current.right, next.rect.right),
+            math.max(current.bottom, next.rect.bottom),
+          );
+        } else {
+          rects.add(current);
+          current = next.rect;
+          currentGroup = next.mergeGroup;
+        }
+      }
+      rects.add(current);
+    }
+
+    return rects;
+  }
+
+  /// Get the rect for start handle
+  Rect? getStartHandleRect() {
+    final rects = getSelectionRects();
+    if (rects.isEmpty) return null;
+    return rects.first;
+  }
+
+  /// Get the rect for end handle
+  Rect? getEndHandleRect() {
+    final rects = getSelectionRects();
+    if (rects.isEmpty) return null;
+    return rects.last;
+  }
+
+  /// Update selection from handle drag
+  void updateSelectionFromHandle(
+    bool isStartHandle,
+    Offset localPosition,
+  ) {
+    final charPos = _getCharacterPositionAtOffset(localPosition);
+    if (charPos < 0 || _selection == null) return;
+
+    final HyperTextSelection newSel;
+    if (isStartHandle) {
+      if (charPos <= _selection!.end) {
+        newSel = HyperTextSelection(start: charPos, end: _selection!.end);
+      } else {
+        // Start dragged past end — swap anchors so selection inverts smoothly.
+        newSel = HyperTextSelection(start: _selection!.end, end: charPos);
+      }
+    } else {
+      if (charPos >= _selection!.start) {
+        newSel = HyperTextSelection(start: _selection!.start, end: charPos);
+      } else {
+        // End dragged past start — swap anchors so selection inverts smoothly.
+        newSel = HyperTextSelection(start: charPos, end: _selection!.start);
+      }
+    }
+
+    if (newSel == _selection) return;
+    _selection = newSel;
+    markNeedsPaint();
+    _notifySelectionChanged();
+  }
+}

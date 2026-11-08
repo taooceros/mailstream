@@ -11,7 +11,10 @@ import 'package:mailstream_ui/state/mail_state.dart';
 import 'package:mailstream_ui/ui/design.dart';
 import 'package:mailstream_ui/ui/glass.dart';
 import 'package:mailstream_ui/ui/html_parts.dart';
+import 'package:mailstream_ui/ui/hyper_body.dart';
+import 'package:mailstream_ui/ui/hyper_resources.dart';
 import 'package:mailstream_ui/ui/reader.dart';
+import 'package:mailstream_ui/ui/reader_renderer.dart';
 
 import 'reader_fixture.dart';
 
@@ -223,7 +226,11 @@ void main() {
   final pulls = <int, Object?>{};
   late Future<Object?> Function(int view) answer;
 
+  /// The renderer the bodies below draw with; WebKit-only tests leave it on WebKit.
+  var renderer = ReaderRenderer.webKit;
+
   setUp(() {
+    renderer = ReaderRenderer.webKit;
     // The WebKit view path is the Mac's (Windows draws WebView2 bodies: windows_platform_test).
     Host.debugMacOverride = true;
     addTearDown(() => Host.debugMacOverride = null);
@@ -246,12 +253,21 @@ void main() {
   });
 
   const owner = (account: 'account', conversation: 'conversation', message: 'message');
-  Widget host(String html, HtmlPartsCache cache, {String message = 'same'}) => MacosApp(
+  Widget scoped(Widget child) => MacosApp(
     theme: MailTheme.macos(Brightness.light),
-    home: Center(child: MailHtml(key: ValueKey(message), owner: owner, html: html, onOpenLink: (_) {}, partsCache: cache)),
+    home: ReaderRendererScope(controller: ValueNotifier(renderer), child: child),
   );
-  List<String> rendered(WidgetTester tester) => tester.widgetList<AppKitView>(find.byType(AppKitView))
-      .map((view) => (view.creationParams as Map)['html'] as String).toList();
+  Widget host(String html, HtmlPartsCache cache, {String message = 'same'}) =>
+      scoped(Center(child: MailHtml(key: ValueKey(message), owner: owner, html: html, onOpenLink: (_) {}, partsCache: cache)));
+  /// The HTML each mounted body draws; only the selected renderer's bodies are mounted.
+  List<String> rendered(WidgetTester tester) {
+    expect(find.byType(renderer == ReaderRenderer.hyper ? AppKitView : HyperBody), findsNothing);
+    return [
+      for (final view in tester.widgetList<AppKitView>(find.byType(AppKitView)))
+        ((view.creationParams as Map)['html'] as String).replaceFirst(webKitDocument(''), ''),
+      for (final body in tester.widgetList<HyperBody>(find.byType(HyperBody))) body.html,
+    ];
+  }
   Finder toggle() => find.byIcon(CupertinoIcons.ellipsis);
   double height(WidgetTester tester, [int index = 0]) => tester.getSize(find.byType(AppKitView).at(index)).height;
   Future<void> measured(WidgetTester tester, int view, List<Object> height) async {
@@ -272,8 +288,8 @@ void main() {
     await tester.pumpAndSettle();
     final params = tester.widgetList<AppKitView>(find.byType(AppKitView)).map((view) => view.creationParams).toList();
     expect(params, [
-      {'owner': ['account', 'conversation', 'message', 'body'], 'html': 'main'},
-      {'owner': ['account', 'conversation', 'message', 'quote'], 'html': 'quote'},
+      {'owner': ['account', 'conversation', 'message', 'body'], 'html': webKitDocument('main')},
+      {'owner': ['account', 'conversation', 'message', 'quote'], 'html': webKitDocument('quote')},
     ]);
     expect(pulls[views.first], tester.getSize(find.byType(AppKitView).first).width);
     expect(height(tester), 120);
@@ -317,103 +333,106 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('pending replacement cannot overwrite refreshed content or reopen a fold', (tester) async {
-    final stale = Completer<HtmlParts>();
-    final fresh = Completer<HtmlParts>();
-    final firstCache = HtmlPartsCache(split: (_) => stale.future);
-    final freshCache = HtmlPartsCache(split: (_) => fresh.future);
-    await tester.pumpWidget(host('old', firstCache));
-    expect(rendered(tester), isEmpty);
-    await tester.pumpWidget(host('fresh', freshCache));
-    fresh.complete(('<p>fresh</p>', '<p>fresh history</p>'));
-    await tester.pumpAndSettle();
-    expect(rendered(tester), ['<p>fresh</p>']);
-    await tester.tap(toggle());
-    await tester.pumpAndSettle();
-    expect(rendered(tester), ['<p>fresh</p>', '<p>fresh history</p>']);
-    stale.complete(('<p>stale</p>', '<p>stale history</p>'));
-    await tester.pumpAndSettle();
-    expect(rendered(tester), ['<p>fresh</p>', '<p>fresh history</p>']);
-    await tester.tap(toggle());
-    await tester.pumpAndSettle();
-    expect(rendered(tester), ['<p>fresh</p>']);
-    await tester.pumpWidget(const SizedBox());
-  });
+  // The anti-crosstalk rules (MS-87, MS-79) hold whichever renderer draws the bodies.
+  for (final drawn in ReaderRenderer.values) {
+    group('drawn by ${drawn.title}', () {
+      setUp(() => renderer = drawn);
+      testWidgets('pending replacement cannot overwrite refreshed content or reopen a fold', (tester) async {
+        final stale = Completer<HtmlParts>();
+        final fresh = Completer<HtmlParts>();
+        final firstCache = HtmlPartsCache(split: (_) => stale.future);
+        final freshCache = HtmlPartsCache(split: (_) => fresh.future);
+        await tester.pumpWidget(host('old', firstCache));
+        expect(rendered(tester), isEmpty);
+        await tester.pumpWidget(host('fresh', freshCache));
+        fresh.complete(('<p>fresh</p>', '<p>fresh history</p>'));
+        await tester.pumpAndSettle();
+        expect(rendered(tester), ['<p>fresh</p>']);
+        await tester.tap(toggle());
+        await tester.pumpAndSettle();
+        expect(rendered(tester), ['<p>fresh</p>', '<p>fresh history</p>']);
+        stale.complete(('<p>stale</p>', '<p>stale history</p>'));
+        await tester.pumpAndSettle();
+        expect(rendered(tester), ['<p>fresh</p>', '<p>fresh history</p>']);
+        await tester.tap(toggle());
+        await tester.pumpAndSettle();
+        expect(rendered(tester), ['<p>fresh</p>']);
+        await tester.pumpWidget(const SizedBox());
+      });
 
-  testWidgets('refresh retains loaded body while pending and preserves the open fold', (tester) async {
-    final answer = Completer<HtmlParts>();
-    final cache = HtmlPartsCache(split: (html) async => html == 'a' ? ('main a', 'quote a') : answer.future);
-    await tester.pumpWidget(host('a', cache));
-    await tester.pumpAndSettle();
-    await tester.tap(toggle());
-    await tester.pumpAndSettle();
-    await tester.pumpWidget(host('b', cache));
-    expect(rendered(tester), ['main a', 'quote a']);
-    answer.complete(('main b', 'quote b'));
-    await tester.pumpAndSettle();
-    expect(rendered(tester), ['main b', 'quote b']);
-    await tester.tap(toggle());
-    await tester.pumpAndSettle();
-    expect(rendered(tester), ['main b']);
-    await tester.pumpWidget(host('b', cache));
-    await tester.pumpAndSettle();
-    expect(rendered(tester), ['main b']);
-    await tester.pumpWidget(const SizedBox());
-  });
+      testWidgets('refresh retains loaded body while pending and preserves the open fold', (tester) async {
+        final answer = Completer<HtmlParts>();
+        final cache = HtmlPartsCache(split: (html) async => html == 'a' ? ('main a', 'quote a') : answer.future);
+        await tester.pumpWidget(host('a', cache));
+        await tester.pumpAndSettle();
+        await tester.tap(toggle());
+        await tester.pumpAndSettle();
+        await tester.pumpWidget(host('b', cache));
+        expect(rendered(tester), ['main a', 'quote a']);
+        answer.complete(('main b', 'quote b'));
+        await tester.pumpAndSettle();
+        expect(rendered(tester), ['main b', 'quote b']);
+        await tester.tap(toggle());
+        await tester.pumpAndSettle();
+        expect(rendered(tester), ['main b']);
+        await tester.pumpWidget(host('b', cache));
+        await tester.pumpAndSettle();
+        expect(rendered(tester), ['main b']);
+        await tester.pumpWidget(const SizedBox());
+      });
 
-  testWidgets('quick message switching and disposal never display another message', (tester) async {
-    final a = Completer<HtmlParts>();
-    final b = Completer<HtmlParts>();
-    final cacheA = HtmlPartsCache(split: (_) => a.future);
-    final cacheB = HtmlPartsCache(split: (_) => b.future);
-    await tester.pumpWidget(host('a', cacheA, message: 'a'));
-    await tester.pumpWidget(host('b', cacheB, message: 'b'));
-    a.complete(('main a', 'quote a'));
-    await tester.pump();
-    expect(rendered(tester), isEmpty);
-    await tester.pumpWidget(const SizedBox());
-    b.complete(('main b', null));
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(host('a', cacheA, message: 'a'));
-    expect(rendered(tester), ['main a']);
-    await tester.pumpWidget(const SizedBox());
-  });
+      testWidgets('quick message switching and disposal never display another message', (tester) async {
+        final a = Completer<HtmlParts>();
+        final b = Completer<HtmlParts>();
+        final cacheA = HtmlPartsCache(split: (_) => a.future);
+        final cacheB = HtmlPartsCache(split: (_) => b.future);
+        await tester.pumpWidget(host('a', cacheA, message: 'a'));
+        await tester.pumpWidget(host('b', cacheB, message: 'b'));
+        a.complete(('main a', 'quote a'));
+        await tester.pump();
+        expect(rendered(tester), isEmpty);
+        await tester.pumpWidget(const SizedBox());
+        b.complete(('main b', null));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(host('a', cacheA, message: 'a'));
+        expect(rendered(tester), ['main a']);
+        await tester.pumpWidget(const SizedBox());
+      });
 
-  testWidgets('a loaded selection is removed immediately when switching to pending mail', (tester) async {
-    final pending = Completer<HtmlParts>();
-    final cache = HtmlPartsCache(split: (html) async => html == 'a' ? ('main a', 'quote a') : pending.future);
-    await tester.pumpWidget(host('a', cache, message: 'a'));
-    await tester.pumpAndSettle();
-    await tester.tap(toggle());
-    await tester.pumpAndSettle();
-    expect(rendered(tester), ['main a', 'quote a']);
-    await tester.pumpWidget(host('b', cache, message: 'b'));
-    expect(rendered(tester), isEmpty);
-    pending.complete(('main b', 'quote b'));
-    await tester.pumpAndSettle();
-    expect(rendered(tester), ['main b']);
-    await tester.pumpWidget(const SizedBox());
-  });
+      testWidgets('a loaded selection is removed immediately when switching to pending mail', (tester) async {
+        final pending = Completer<HtmlParts>();
+        final cache = HtmlPartsCache(split: (html) async => html == 'a' ? ('main a', 'quote a') : pending.future);
+        await tester.pumpWidget(host('a', cache, message: 'a'));
+        await tester.pumpAndSettle();
+        await tester.tap(toggle());
+        await tester.pumpAndSettle();
+        expect(rendered(tester), ['main a', 'quote a']);
+        await tester.pumpWidget(host('b', cache, message: 'b'));
+        expect(rendered(tester), isEmpty);
+        pending.complete(('main b', 'quote b'));
+        await tester.pumpAndSettle();
+        expect(rendered(tester), ['main b']);
+        await tester.pumpWidget(const SizedBox());
+      });
 
-  testWidgets('no-quote and pure-quote results have no fold control', (tester) async {
-    final cache = HtmlPartsCache(split: (html) async => (html, null));
-    for (final html in ['<p>only main</p>', quotePatterns.last]) {
-      await cache.load(html);
-      await tester.pumpWidget(host(html, cache, message: html));
-      expect(rendered(tester), [html]);
-      expect(toggle(), findsNothing);
-    }
-    await tester.pumpWidget(const SizedBox());
-  });
+      testWidgets('no-quote and pure-quote results have no fold control', (tester) async {
+        final cache = HtmlPartsCache(split: (html) async => (html, null));
+        for (final html in ['<p>only main</p>', quotePatterns.last]) {
+          await cache.load(html);
+          await tester.pumpWidget(host(html, cache, message: html));
+          expect(rendered(tester), [html]);
+          expect(toggle(), findsNothing);
+        }
+        await tester.pumpWidget(const SizedBox());
+      });
+    });
+  }
 
-  Widget bodies(HtmlPartsCache cache, Map<String, String> htmlByMessage) => MacosApp(
-    theme: MailTheme.macos(Brightness.light),
-    home: Column(children: [
-      for (final MapEntry(key: message, value: html) in htmlByMessage.entries)
-        MailHtml(key: ValueKey(message), owner: (account: 'account', conversation: 'c', message: message), html: html, onOpenLink: (_) {}, partsCache: cache),
-    ]),
-  );
+  Widget bodies(HtmlPartsCache cache, Map<String, String> htmlByMessage) => scoped(Column(children: [
+    for (final MapEntry(key: message, value: html) in htmlByMessage.entries)
+      MailHtml(key: ValueKey(message), owner: (account: 'account', conversation: 'c', message: message), html: html, onOpenLink: (_) {}, partsCache: cache),
+  ]));
 
   testWidgets("a closed conversation's queued bodies are skipped; the next one splits right after the running one", (tester) async {
     final (:calls, :answers, :cache) = held();

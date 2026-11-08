@@ -225,10 +225,29 @@ files from the paperclip picker, file drops on the window, or ⌘V (Finder files
 pixels/screenshots). Normal text paste still edits the focused field. Attachments can be removed
 before sending and remain with their draft when switching tabs or browsing other mail.
 
-HTML mail is drawn by WebKit: `macos/Runner/MailHtmlView.swift` is a platform view
-(`mailstream/html`) that runs none of the mail's scripts, opens links in the browser, loads
-remote images without cookies, zooms out a body wider than the column, and reports its
-content height so the body scrolls with the conversation.
+HTML mail on the Mac is drawn by HyperRender (`hyper_render` 1.14.1, in Flutter; `lib/ui/hyper_body.dart`)
+unless the reader's switch (beside the header's chips, "Renderer: HyperRender" or "Renderer:
+WebView (original)") picks WebKit (MS-138). Every launch starts in HyperRender; the choice holds
+until the app quits and nothing changes it but the switch: a body HyperRender draws poorly never
+falls back to the WebView by itself. Both draw the same prepared parts, so switching keeps the
+message, its open quote and the parts cache; only the chosen renderer's bodies are mounted.
+Known HyperRender gaps: a rule made only of top/bottom borders is not drawn, cell percentage
+widths are ignored, `<center>`/`<font>` are dropped.
+
+Preparation (`prepareHyperResources` in `lib/ui/hyper_resources.dart`) is the one resource
+policy for both: inline parts (`file://` copies under Mailstream's `messages-v2` cache, canonical
+paths only, raster bytes checked) become data URLs, images that are not HTTPS or raster data are
+removed, and `align`/`valign`/`bgcolor`/`border`/`cellpadding` get `data-ms-*` copies that
+HyperRender's sanitizer keeps. `lib/ui/hyper_table.dart` lays mail tables out as mail clients
+do: no grid unless `border="1"`, widths fit the reading column. HyperRender's core is vendored in
+`third_party/hyper_render_core` with one change: the image widget builder reaches table cells.
+Links open through the runner's `MailLink` (HTTP(S) with a host, or mailto), in either renderer.
+
+The WebView is `macos/Runner/MailHtmlView.swift`, a platform view (`mailstream/html`) that runs
+none of the mail's scripts, loads the page without a base URL under a content policy allowing
+HTTPS and data resources only, allows only its own first load (no redirects, frames or meta
+refreshes), loads remote images without cookies, zooms out a body wider than the column, and
+reports its content height so the body scrolls with the conversation.
 
 Creating a WebKit page and loading its HTML holds the main thread for 20–35 ms, so each platform
 view is a light host around a page (MS-109). When a reader or fold closes, its page waits idle (at
@@ -255,8 +274,9 @@ replaces the queued one, and prefetched parts wait in an LRU of their own until 
 them, so they never push a reader's parts out. Opening a prefetched conversation then draws its
 bodies in the first frame instead of a spinner.
 
-`flutter test test/html_parts_test.dart` covers output, caching, replacement/disposal races,
-queue skipping and prefetch priority, fold behavior and the height protocol (owner parameters, the
+`flutter test test/hyper_render_test.dart` covers the resource policy, mail tables and the
+renderer switch; `test/html_parts_test.dart` output, caching, replacement/disposal races (in both
+renderers), queue skipping and prefetch priority, fold behavior and the height protocol (owner parameters, the
 pull, late older heights, views gone before they answer). `flutter run -d macos --release -t test/html_parts_app.dart` opens a synthetic-only
 native reader without accounts or private mail. Set `MAILSTREAM_HTML_BENCH_OUT=/tmp/html-parts.json`
 when launching that fixture to compare the exact pre-MS-87 synchronous algorithm (a1fc4b3d)

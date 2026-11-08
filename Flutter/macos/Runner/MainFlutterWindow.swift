@@ -54,6 +54,12 @@ class MainFlutterWindow: NSWindow {
       case "zoom":
         self?.performZoom(nil)
         result(nil)
+      case "openMailLink":
+        // A link tapped in a HyperRender body, under the WebView's rules.
+        guard let value = call.arguments as? String, let url = URL(string: value), MailLink.open(url) else {
+          return result(FlutterError(code: "link", message: "Unsupported mail link", details: nil))
+        }
+        result(nil)
       case "frameRate":
         self?.frameRateShown = call.arguments as? Bool ?? false
         result(nil)

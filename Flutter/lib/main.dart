@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart' show DefaultMaterialLocalizations;
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
 
@@ -7,6 +8,7 @@ import 'platform.dart';
 import 'state/mail_state.dart';
 import 'ui/design.dart';
 import 'ui/frame_rate.dart';
+import 'ui/reader_renderer.dart';
 import 'ui/shell.dart';
 
 Future<void> main() async {
@@ -19,22 +21,38 @@ Future<void> main() async {
   runApp(MailstreamApp(state: state));
 }
 
-class MailstreamApp extends StatelessWidget {
+class MailstreamApp extends StatefulWidget {
   const MailstreamApp({super.key, required this.state});
 
   final MailState state;
 
   @override
+  State<MailstreamApp> createState() => _MailstreamAppState();
+}
+
+class _MailstreamAppState extends State<MailstreamApp> {
+  /// The reader's renderer: HyperRender on every launch, switched only by hand.
+  final _renderer = ValueNotifier(ReaderRenderer.hyper);
+
+  @override
+  void dispose() {
+    _renderer.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) => MacosApp(
     title: 'Mailstream',
     debugShowCheckedModeBanner: false,
+    // HyperRender's selection menus ask for Material's strings.
+    localizationsDelegates: const [DefaultMaterialLocalizations.delegate],
     theme: MailTheme.macos(Brightness.light),
     darkTheme: MailTheme.macos(Brightness.dark),
-    home: MailShell(state: state),
+    home: ReaderRendererScope(controller: _renderer, child: MailShell(state: widget.state)),
     // On the Mac the window's glass shows around the islands; elsewhere nothing is under the
     // Flutter view, so the app paints the window's color itself.
     builder: (context, child) {
-      final layer = FrameRateLayer(state: state, child: child!);
+      final layer = FrameRateLayer(state: widget.state, child: child!);
       return Host.mac ? layer : ColoredBox(color: context.colors.window, child: layer);
     },
   );

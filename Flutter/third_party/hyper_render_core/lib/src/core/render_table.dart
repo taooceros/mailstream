@@ -1,0 +1,1477 @@
+import 'dart:math' as math;
+
+import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+
+import '../model/computed_style.dart';
+import '../model/node.dart';
+
+/// Maximum colspan/rowspan value accepted from HTML attributes.
+///
+/// Browsers cap at 1 000; values beyond this trigger [List.generate] calls
+/// that allocate millions of grid cells, causing OOM on adversarial or
+/// malformed markup.
+const int _kMaxSpan = 1000;
+
+/// Maximum nesting depth for tables-within-tables.
+///
+/// The 2-pass layout algorithm in [_RenderHyperTable] has O(2^depth)
+/// complexity for deeply nested tables: measuring column widths triggers
+/// each child's layout, which for nested tables triggers another 2 passes,
+/// doubling per level.  At depth ≥ [_kMaxTableNestingDepth], [HyperTable]
+/// renders a lightweight placeholder instead, preventing ANR on adversarial
+/// or poorly-authored HTML.
+///
+/// Browsers themselves cap nested table rendering at ~6–10 levels.
+const int _kMaxTableNestingDepth = 6;
+
+/// Hard cap on `rowCount × columnCount` for a single table grid.
+///
+/// Per-cell colspan/rowspan are already clamped by [_kMaxSpan], but a
+/// malicious or generated document can still combine many rows with
+/// moderate colspans to allocate millions of `null` refs (each ~8 bytes
+/// on 64-bit Dart). 100 000 cells × 8 B ≈ 800 KB — large but recoverable;
+/// 1 M cells crosses 8 MB and starts triggering UI-thread freezes on
+/// mid-range mobile devices. When this cap is hit we abandon the grid
+/// layout and fall back to a flat plain-text rendering of the cell text.
+const int _kMaxTotalCells = 100000;
+
+// ── Nesting-depth tracker (InheritedWidget) ───────────────────────────────────
+//
+// Propagated through the widget tree so any descendant [HyperTable] can read
+// the current depth without requiring changes to constructor signatures.
+class _TableNestingDepth extends InheritedWidget {
+  const _TableNestingDepth({required this.depth, required super.child});
+
+  final int depth;
+
+  /// Returns the current table nesting depth, or 0 if outside any table.
+  static int of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<_TableNestingDepth>()?.depth ??
+      0;
+
+  @override
+  bool updateShouldNotify(_TableNestingDepth old) => depth != old.depth;
+}
+
+/// Shown in place of a table that exceeds [_kMaxTableNestingDepth].
+class _TableDepthExceededPlaceholder extends StatelessWidget {
+  const _TableDepthExceededPlaceholder();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        border: Border.all(color: const Color(0xFFBDBDBD)),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: const Text(
+        '[table]',
+        style: TextStyle(color: Color(0xFF9E9E9E), fontSize: 12),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PUBLIC API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Strategy for tables wider than the available viewport.
+enum TableStrategy {
+  /// Constrain to available width (content may wrap aggressively).
+  fitWidth,
+
+  /// Scale the table down with FittedBox.scaleDown.
+  autoScale,
+
+  /// Wrap in a horizontal SingleChildScrollView.
+  horizontalScroll,
+}
+
+/// Wraps [HyperTable] with a strategy for handling wide tables.
+///
+/// All three strategies avoid [LayoutBuilder] entirely.  [LayoutBuilder]
+/// blocks intrinsic-dimension queries that outer [IntrinsicHeight] widgets
+/// (used in parent table rows) propagate down the tree.  Instead the
+/// strategy is resolved statically at build time.
+class SmartTableWrapper extends StatelessWidget {
+  final TableNode tableNode;
+  final TableStrategy strategy;
+
+  /// Ignored. The auto-switching logic this fed was replaced by the statically
+  /// resolved [TableStrategy]; the value is stored but never read.
+  @Deprecated(
+    'Ignored since the strategy became static — setting it has no effect. '
+    'Use `strategy` instead; this parameter will be removed in v2.0.',
+  )
+  final double minScaleFactor;
+
+  /// Ignored. See [minScaleFactor].
+  @Deprecated(
+    'Ignored since the strategy became static — setting it has no effect. '
+    'Use `strategy` instead; this parameter will be removed in v2.0.',
+  )
+  final double minColumnWidth;
+
+  final TextStyle? baseStyle;
+  final void Function(String url)? onLinkTap;
+  final bool selectable;
+  final Widget Function(TableCellNode)? cellContentBuilder;
+
+  const SmartTableWrapper({
+    super.key,
+    required this.tableNode,
+    this.strategy = TableStrategy.horizontalScroll,
+    this.minScaleFactor = 0.6,
+    this.minColumnWidth = 60.0,
+    this.baseStyle,
+    this.onLinkTap,
+    this.selectable = true,
+    this.cellContentBuilder,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final table = HyperTable(
+      tableNode: tableNode,
+      baseStyle: baseStyle,
+      onLinkTap: onLinkTap,
+      selectable: selectable,
+      cellContentBuilder: cellContentBuilder,
+    );
+
+    switch (strategy) {
+      case TableStrategy.horizontalScroll:
+        // _RenderHyperTable handles double.infinity width correctly — no
+        // IntrinsicWidth wrapper needed (no Expanded children that could crash).
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          physics: const AlwaysScrollableScrollPhysics(),
+          dragStartBehavior: DragStartBehavior.down,
+          child: table,
+        );
+
+      case TableStrategy.fitWidth:
+        // Parent constraints propagate directly into _RenderHyperTable.
+        return table;
+
+      case TableStrategy.autoScale:
+        // FittedBox gives the child unconstrained width.  _RenderHyperTable
+        // detects double.infinity and uses natural (max-intrinsic) column
+        // widths.  FittedBox then scales the result down if needed.
+        return FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.topLeft,
+          child: table,
+        );
+    }
+  }
+}
+
+/// Custom HTML table widget.
+///
+/// Renders a [TableNode] using [_RenderHyperTable] — a custom [RenderBox]
+/// that performs W3C-inspired table layout without [IntrinsicHeight] or
+/// [LayoutBuilder].  This makes it compatible with nested tables (where an
+/// outer [IntrinsicHeight] must query intrinsic dimensions of this widget).
+class HyperTable extends StatefulWidget {
+  final TableNode tableNode;
+  final TextStyle? baseStyle;
+  final void Function(String url)? onLinkTap;
+  final Color borderColor;
+  final double borderWidth;
+  final EdgeInsets cellPadding;
+  final bool selectable;
+  final Widget Function(TableCellNode)? cellContentBuilder;
+
+  /// Mailstream trial patch: builds the slot of every primary cell (padding, background, border,
+  /// placement) around [content], the cell content HyperTable builds itself, instead of the fixed
+  /// [cellPadding] container.
+  final Widget Function(TableCellNode cell, TableRowNode row, Widget content)? cellBuilder;
+
+  /// Mailstream trial patch: widen the columns to the full available width, as a table with a
+  /// declared width does; otherwise the table stays as narrow as its content allows.
+  final bool fillWidth;
+
+  const HyperTable({
+    super.key,
+    required this.tableNode,
+    this.baseStyle,
+    this.onLinkTap,
+    this.borderColor = const Color(0xFFE0E0E0),
+    this.borderWidth = 1.0,
+    this.cellPadding = const EdgeInsets.all(8.0),
+    this.selectable = true,
+    this.cellContentBuilder,
+    this.cellBuilder,
+    this.fillWidth = false,
+  });
+
+  @override
+  State<HyperTable> createState() => _HyperTableState();
+}
+
+class _HyperTableState extends State<HyperTable> {
+  final List<GestureRecognizer> _recognizers = [];
+
+  @override
+  void dispose() {
+    for (final r in _recognizers) {
+      r.dispose();
+    }
+    _recognizers.clear();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Clear old recognizers before rebuilding spans
+    for (final r in _recognizers) {
+      r.dispose();
+    }
+    _recognizers.clear();
+
+    // Guard against exponential 2-pass layout complexity in deeply nested tables.
+    final depth = _TableNestingDepth.of(context);
+    if (depth >= _kMaxTableNestingDepth) {
+      return const _TableDepthExceededPlaceholder();
+    }
+
+    final grid = _TableGrid.fromTableNode(widget.tableNode);
+    if (grid.exceededLimit) {
+      // Surface the cap visibly so a user (or QA) can see why a huge table
+      // didn't render, instead of an invisible empty box.
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Text(
+          'Table too large to render (over $_kMaxTotalCells cells).',
+          style: widget.baseStyle?.copyWith(fontStyle: FontStyle.italic) ??
+              const TextStyle(fontStyle: FontStyle.italic),
+        ),
+      );
+    }
+    if (grid.isEmpty) return const SizedBox.shrink();
+
+    // Only primary cells become children of _HyperTableWidget.
+    // Non-primary cells (covered by colspan/rowspan) are tracked entirely
+    // inside _RenderHyperTable using the grid metadata.
+    final children = <Widget>[];
+    for (int row = 0; row < grid.rowCount; row++) {
+      for (int col = 0; col < grid.columnCount; col++) {
+        final cell = grid.cells[row][col];
+        if (cell != null && cell.isPrimary) {
+          // Cell background: explicit cell bg > row bg > transparent.
+          // This is required for patterns like <tr style="background:#1a237e;">
+          // where the row sets the background but individual cells do not.
+          final cellBg = cell.cellNode.style.backgroundColor ??
+              cell.rowNode.style.backgroundColor;
+          // Resolve vertical-align: cell > row > top (table-cell default).
+          // ComputedStyle.verticalAlign defaults to `baseline`; we use that
+          // as the sentinel for "not explicitly set".  An explicit `top`
+          // value (from valign="top" or vertical-align:top) is != baseline
+          // and therefore takes precedence correctly.
+          final cellVAlign = cell.cellNode.style.verticalAlign;
+          final rowVAlign = cell.rowNode.style.verticalAlign;
+          final effectiveVAlign = cellVAlign != HyperVerticalAlign.baseline
+              ? cellVAlign
+              : rowVAlign != HyperVerticalAlign.baseline
+                  ? rowVAlign
+                  : HyperVerticalAlign.top;
+          final content = _buildCellContent(cell.cellNode);
+          final cellContent = widget.cellBuilder?.call(cell.cellNode, cell.rowNode, content) ?? Container(
+            padding: widget.cellPadding,
+            color: cellBg,
+            child: content,
+          );
+          children.add(_TableCellSlot(
+            row: row,
+            col: col,
+            colspan: cell.colspan,
+            rowspan: cell.rowspan,
+            verticalAlign: effectiveVAlign,
+            child: cell.cellNode.isHeader
+                ? Semantics(header: true, child: cellContent)
+                : cellContent,
+          ));
+        }
+      }
+    }
+
+    // border-collapse / border-spacing come from the <table> element's own
+    // computed style. Default is `collapse` (grid rendering); `separate` uses
+    // the UA-default 2px gap unless border-spacing overrides it.
+    final tableStyle = widget.tableNode.style;
+    final borderCollapse = tableStyle.borderCollapse;
+    final borderSpacing = tableStyle.borderSpacing ?? 2.0;
+
+    final tableWidget = _HyperTableWidget(
+      columnCount: grid.columnCount,
+      rowCount: grid.rowCount,
+      borderColor: widget.borderColor,
+      borderWidth: widget.borderWidth,
+      borderCollapse: borderCollapse,
+      borderSpacing: borderSpacing,
+      fillWidth: widget.fillWidth,
+      stretchCells: widget.cellBuilder != null,
+      children: children,
+    );
+
+    // Increment depth for any nested tables inside cells.
+    final depthWrapped = _TableNestingDepth(
+      depth: depth + 1,
+      child:
+          widget.selectable ? SelectionArea(child: tableWidget) : tableWidget,
+    );
+
+    // Announce the table structure to screen readers: "Table, N rows, M columns".
+    // Each <th> cell is already marked with Semantics(header: true) above.
+    return Semantics(
+      container: true,
+      label: 'Table, ${grid.rowCount} rows, ${grid.columnCount} columns',
+      child: depthWrapped,
+    );
+  }
+
+  Widget _buildCellContent(TableCellNode cellNode) {
+    final spans = <InlineSpan>[];
+    bool hasNonInline = false;
+
+    for (final child in cellNode.children) {
+      final span = _buildSpan(child);
+      if (span != null) {
+        spans.add(span);
+      } else {
+        hasNonInline = true;
+      }
+    }
+
+    if (hasNonInline && widget.cellContentBuilder != null) {
+      return widget.cellContentBuilder!(cellNode);
+    }
+
+    // Default fallback when the caller didn't supply a [cellContentBuilder]
+    // but the cell still contains block-level children (a <div>, <p>, nested
+    // table, etc.). Without this branch _buildSpan returns null for every
+    // such child and the block content silently disappears from the cell.
+    // We render the inline run (if any) followed by each block child via a
+    // plain [Text] / placeholder so the user sees *something* — callers that
+    // want full fidelity should still supply a cellContentBuilder.
+    if (hasNonInline && widget.cellContentBuilder == null) {
+      final inlineRun = spans.isEmpty
+          ? null
+          : Text.rich(
+              TextSpan(
+                children: spans,
+                style: TextStyle(
+                  fontWeight:
+                      cellNode.isHeader ? FontWeight.bold : FontWeight.normal,
+                  color: cellNode.style.color,
+                ),
+              ),
+              softWrap: true,
+            );
+      final blockChildren = <Widget>[
+        if (inlineRun != null) inlineRun,
+        for (final child in cellNode.children)
+          if (_buildSpan(child) == null) _buildBlockFallback(child),
+      ];
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: blockChildren,
+      );
+    }
+
+    if (spans.isEmpty) return const SizedBox.shrink();
+
+    // Include cell-level color so that CSS color inheritance from <tr> → <td>
+    // → text nodes is honoured.  Without this, a <tr style="color:white"> with
+    // plain <td> children renders white text against whatever background the
+    // Flutter widget tree provides (usually white → invisible text).
+    // word-break: break-all / overflow-wrap: break-word — prevent long
+    // unbreakable strings (URLs, code without spaces) from overflowing cells.
+    final wb = cellNode.style.wordBreak;
+    final ow = cellNode.style.overflowWrap;
+    final forceClip = wb == 'break-all' ||
+        ow == 'break-word' ||
+        ow == 'anywhere' ||
+        wb == 'break-word';
+
+    return Text.rich(
+      TextSpan(
+        children: spans,
+        style: TextStyle(
+          fontWeight: cellNode.isHeader ? FontWeight.bold : FontWeight.normal,
+          color: cellNode.style.color,
+        ),
+      ),
+      softWrap: true,
+      overflow: forceClip ? TextOverflow.clip : TextOverflow.visible,
+    );
+  }
+
+  /// Plain-text rendering for a block-level child inside a cell when no
+  /// [cellContentBuilder] is supplied. Walks the subtree, concatenates
+  /// `TextNode` text, and emits a single [Text] widget so the content at
+  /// least becomes visible (proper layout / nested tables / images still
+  /// need a builder for full fidelity).
+  Widget _buildBlockFallback(UDTNode node) {
+    final buffer = StringBuffer();
+    void walk(UDTNode n) {
+      if (n is TextNode) {
+        buffer.write(n.text);
+      }
+      for (final c in n.children) {
+        walk(c);
+      }
+    }
+
+    walk(node);
+    final text = buffer.toString().trim();
+    if (text.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Text(
+        text,
+        style: TextStyle(color: node.style.color),
+      ),
+    );
+  }
+
+  InlineSpan? _buildSpan(UDTNode node) {
+    if (node is TextNode) {
+      return TextSpan(text: node.text, style: node.style.toTextStyle());
+    }
+    if (node.type == NodeType.inline) {
+      final children = <InlineSpan>[];
+      for (final child in node.children) {
+        final span = _buildSpan(child);
+        if (span != null) children.add(span);
+      }
+
+      TapGestureRecognizer? recognizer;
+      if (node.tagName == 'a') {
+        final href = node.attributes['href'];
+        if (href != null && widget.onLinkTap != null) {
+          recognizer = TapGestureRecognizer()
+            ..onTap = () => widget.onLinkTap!(href);
+          _recognizers.add(recognizer);
+        }
+      }
+
+      return TextSpan(
+        children: children,
+        style: node.style.toTextStyle(),
+        recognizer: recognizer,
+      );
+    }
+    if (node.type == NodeType.lineBreak) return const TextSpan(text: '\n');
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GRID MODEL  (unchanged from before)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _TableGrid {
+  final List<List<_GridCell?>> cells;
+  final int columnCount;
+  final int rowCount;
+
+  /// True when [_TableGrid.fromTableNode] refused to allocate the grid
+  /// because `rowCount * columnCount` exceeded [_kMaxTotalCells]. Surfaced
+  /// so the build path can show a "table too large" placeholder instead
+  /// of silently rendering nothing.
+  final bool exceededLimit;
+
+  _TableGrid({
+    required this.cells,
+    required this.columnCount,
+    required this.rowCount,
+    this.exceededLimit = false,
+  });
+
+  bool get isEmpty => rowCount == 0 || columnCount == 0;
+
+  factory _TableGrid.fromTableNode(TableNode tableNode) {
+    // A `display: none` row is removed from the table entirely (CSS): it must
+    // not occupy a grid row or contribute height. Filtered here so the rest of
+    // the grid algorithm never sees it.
+    bool isVisible(UDTNode n) => n.style.display != DisplayType.none;
+
+    final rows = <TableRowNode>[];
+    for (final child in tableNode.children) {
+      if (child is TableRowNode) {
+        if (isVisible(child)) rows.add(child);
+      } else if (child.type == NodeType.block) {
+        for (final grandChild in child.children) {
+          if (grandChild is TableRowNode && isVisible(grandChild)) {
+            rows.add(grandChild);
+          }
+        }
+      }
+    }
+    if (rows.isEmpty) {
+      return _TableGrid(cells: [], columnCount: 0, rowCount: 0);
+    }
+
+    // Clamp per-cell colspan to [_kMaxSpan] so adversarial or malformed HTML
+    // (e.g. colspan="1000000") cannot trigger an OOM List.generate call.
+    int maxCols = 0;
+    for (final row in rows) {
+      int colCount = 0;
+      for (final cell in row.children) {
+        if (cell is TableCellNode && isVisible(cell)) {
+          colCount += cell.colspan.clamp(1, _kMaxSpan);
+        }
+      }
+      if (colCount > maxCols) maxCols = colCount;
+    }
+
+    final rowCount = rows.length;
+
+    // Total-cell cap: even with per-cell span clamped to [_kMaxSpan], a wide
+    // table with many rows (e.g. 1000 rows × 1000 effective columns) would
+    // allocate 1M `null` refs (~8 MB) and freeze the UI thread for the rest
+    // of layout. Refuse to build the grid above [_kMaxTotalCells] and let
+    // the caller / placeholder layer fall back to a flat rendering.
+    if (rowCount > 0 && maxCols > 0 && rowCount * maxCols > _kMaxTotalCells) {
+      return _TableGrid(
+        cells: const [],
+        columnCount: 0,
+        rowCount: 0,
+        exceededLimit: true,
+      );
+    }
+
+    final grid = List.generate(
+      rowCount,
+      (_) => List<_GridCell?>.filled(maxCols, null),
+    );
+
+    for (int rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+      int colIdx = 0;
+      for (final child in rows[rowIdx].children) {
+        if (child is TableCellNode && isVisible(child)) {
+          while (colIdx < maxCols && grid[rowIdx][colIdx] != null) {
+            colIdx++;
+          }
+          if (colIdx >= maxCols) break;
+
+          final colspan = child.colspan.clamp(1, _kMaxSpan);
+          final rowspan = child.rowspan.clamp(1, _kMaxSpan);
+          final rowNode = rows[rowIdx];
+          final primary = _GridCell(
+            cellNode: child,
+            rowNode: rowNode,
+            row: rowIdx,
+            col: colIdx,
+            colspan: colspan,
+            rowspan: rowspan,
+            isPrimary: true,
+          );
+
+          for (int r = rowIdx; r < rowIdx + rowspan && r < rowCount; r++) {
+            for (int c = colIdx; c < colIdx + colspan && c < maxCols; c++) {
+              grid[r][c] = (r == rowIdx && c == colIdx)
+                  ? primary
+                  : _GridCell(
+                      cellNode: child,
+                      rowNode: rowNode,
+                      row: rowIdx,
+                      col: colIdx,
+                      colspan: colspan,
+                      rowspan: rowspan,
+                      isPrimary: false,
+                    );
+            }
+          }
+          colIdx += colspan;
+        }
+      }
+    }
+
+    return _TableGrid(cells: grid, columnCount: maxCols, rowCount: rowCount);
+  }
+}
+
+class _GridCell {
+  final TableCellNode cellNode;
+
+  /// The parent row node — used to inherit row-level background-color and color
+  /// when the cell itself has no explicit background/color set.
+  final TableRowNode rowNode;
+  final int row;
+  final int col;
+  final int colspan;
+  final int rowspan;
+  final bool isPrimary;
+
+  _GridCell({
+    required this.cellNode,
+    required this.rowNode,
+    required this.row,
+    required this.col,
+    required this.colspan,
+    required this.rowspan,
+    required this.isPrimary,
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RENDER LAYER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Parent data carried by every primary table cell.
+class _TableCellParentData extends ContainerBoxParentData<RenderBox> {
+  int row = 0;
+  int col = 0;
+  int colspan = 1;
+  int rowspan = 1;
+
+  /// CSS `vertical-align` for this cell.  Defaults to [HyperVerticalAlign.top]
+  /// which is the CSS table-cell initial value (not `baseline`, which applies
+  /// to inline contexts).
+  HyperVerticalAlign verticalAlign = HyperVerticalAlign.top;
+}
+
+/// [ParentDataWidget] that injects row/col/colspan/rowspan/verticalAlign into
+/// each cell's [_TableCellParentData] so [_RenderHyperTable] can read it
+/// during layout.
+class _TableCellSlot extends ParentDataWidget<_TableCellParentData> {
+  final int row;
+  final int col;
+  final int colspan;
+  final int rowspan;
+  final HyperVerticalAlign verticalAlign;
+
+  const _TableCellSlot({
+    required this.row,
+    required this.col,
+    required this.colspan,
+    required this.rowspan,
+    this.verticalAlign = HyperVerticalAlign.top,
+    required super.child,
+  });
+
+  @override
+  void applyParentData(RenderObject renderObject) {
+    final pd = renderObject.parentData! as _TableCellParentData;
+    bool changed = false;
+    if (pd.row != row) {
+      pd.row = row;
+      changed = true;
+    }
+    if (pd.col != col) {
+      pd.col = col;
+      changed = true;
+    }
+    if (pd.colspan != colspan) {
+      pd.colspan = colspan;
+      changed = true;
+    }
+    if (pd.rowspan != rowspan) {
+      pd.rowspan = rowspan;
+      changed = true;
+    }
+    if (pd.verticalAlign != verticalAlign) {
+      pd.verticalAlign = verticalAlign;
+      changed = true;
+    }
+    if (changed) {
+      final parent = renderObject.parent;
+      if (parent is RenderObject) {
+        parent.markNeedsLayout();
+      }
+    }
+  }
+
+  @override
+  Type get debugTypicalAncestorWidgetClass => _HyperTableWidget;
+}
+
+/// [MultiChildRenderObjectWidget] backed by [_RenderHyperTable].
+class _HyperTableWidget extends MultiChildRenderObjectWidget {
+  final int columnCount;
+  final int rowCount;
+  final Color borderColor;
+  final double borderWidth;
+  final HyperBorderCollapse borderCollapse;
+  final double borderSpacing;
+  final bool fillWidth;
+  final bool stretchCells;
+
+  const _HyperTableWidget({
+    required this.columnCount,
+    required this.rowCount,
+    required this.borderColor,
+    required this.borderWidth,
+    required this.borderCollapse,
+    required this.borderSpacing,
+    required this.fillWidth,
+    required this.stretchCells,
+    required super.children,
+  });
+
+  @override
+  _RenderHyperTable createRenderObject(BuildContext context) {
+    return _RenderHyperTable(
+      columnCount: columnCount,
+      rowCount: rowCount,
+      borderColor: borderColor,
+      borderWidth: borderWidth,
+      borderCollapse: borderCollapse,
+      borderSpacing: borderSpacing,
+      fillWidth: fillWidth,
+      stretchCells: stretchCells,
+    );
+  }
+
+  @override
+  void updateRenderObject(
+      BuildContext context, _RenderHyperTable renderObject) {
+    renderObject
+      ..columnCount = columnCount
+      ..rowCount = rowCount
+      ..borderColor = borderColor
+      ..borderWidth = borderWidth
+      ..borderCollapse = borderCollapse
+      ..borderSpacing = borderSpacing
+      ..fillWidth = fillWidth
+      ..stretchCells = stretchCells;
+  }
+}
+
+/// Custom table [RenderBox] — the heart of the new architecture.
+///
+/// ## Why a custom RenderObject?
+///
+/// Flutter's widget-composition approach to tables (Column → IntrinsicHeight →
+/// Row → Expanded) requires [IntrinsicHeight] to equalize row heights.
+/// [IntrinsicHeight] calls [getMaxIntrinsicHeight] on every descendant.  Any
+/// descendant wrapped in [LayoutBuilder] (or [SingleChildScrollView] in the
+/// wrong axis) will throw "LayoutBuilder does not support returning intrinsic
+/// dimensions" and crash the entire layout.
+///
+/// A custom [RenderBox] sidesteps this entirely: row-height equalization is
+/// done inside [performLayout] by calling [layout] on children directly — no
+/// [IntrinsicHeight] widget is needed.  The render object itself implements
+/// [computeMaxIntrinsicHeight] so that if THIS table is nested inside an outer
+/// table cell that uses [IntrinsicHeight], the query propagates correctly.
+///
+/// ## Layout algorithm (W3C-inspired, 2-pass)
+///
+/// **Column widths** ([_distributeColumnWidths]):
+///   1. Collect min/max intrinsic widths from each primary cell (split across
+///      spanned columns for colspan > 1).
+///   2. If total-min >= available width → use min widths (table may overflow;
+///      caller wraps in horizontal scroll).
+///   3. Otherwise distribute the surplus proportionally to max widths.
+///
+/// **Row heights** ([_computeRowHeights]):
+///   1. Layout every cell with its allocated cell width.
+///   2. For rowspan = 1 cells: contribute height to that row.
+///   3. For rowspan > 1 cells: if their height overflows the spanned rows,
+///      distribute the excess equally across those rows.
+///   4. Re-layout rowspan > 1 cells with tight height so they visually fill
+///      their allocated space (cell background covers the full span).
+///
+/// **Borders** are painted as filled rectangles after children.
+class _RenderHyperTable extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _TableCellParentData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _TableCellParentData> {
+  // ── mutable properties ───────────────────────────────────────────────────
+
+  int _columnCount;
+  int _rowCount;
+  Color _borderColor;
+  double _borderWidth;
+  HyperBorderCollapse _borderCollapse;
+  double _borderSpacing;
+  bool _fillWidth;
+  bool _stretchCells;
+
+  /// Spacing reserved between adjacent cells (and around the table edge) during
+  /// layout, positioning and intrinsic sizing.
+  ///
+  /// In `collapse` mode this is exactly [_borderWidth] — so every layout term
+  /// is byte-identical to the pre-`border-spacing` renderer, and the collapse
+  /// output is unchanged by construction. In `separate` mode it becomes
+  /// [_borderSpacing] (the CSS gap), while [_borderWidth] is used only for the
+  /// per-cell border *thickness* drawn in paint.
+  double get _cellGap => _borderCollapse == HyperBorderCollapse.separate
+      ? _borderSpacing
+      : _borderWidth;
+
+  // ── layout cache ─────────────────────────────────────────────────────────
+
+  List<double>? _colWidths;
+  List<double>? _rowHeights;
+
+  // ── child snapshot (rebuilt once per performLayout pass) ──────────────────
+  // Eliminates 5 separate linked-list traversals per layout (O(N²) → O(N)).
+  List<(RenderBox, _TableCellParentData)>? _childList;
+
+  // ── intrinsic column-width cache ──────────────────────────────────────────
+  // When the Flutter framework (e.g. outer IntrinsicHeight) calls
+  // computeMaxIntrinsicHeight repeatedly for the same width, we reuse the
+  // last _distributeColumnWidths result instead of re-traversing children.
+  double? _intrinsicCacheWidth;
+  List<double>? _intrinsicColWidthsCache;
+
+  // -- intrinsic dimension cache --
+  double? _lastMinIntrinsicWidthHeight;
+  double? _minIntrinsicWidthCache;
+  double? _lastMaxIntrinsicWidthHeight;
+  double? _maxIntrinsicWidthCache;
+
+  _RenderHyperTable({
+    required int columnCount,
+    required int rowCount,
+    required Color borderColor,
+    required double borderWidth,
+    required HyperBorderCollapse borderCollapse,
+    required double borderSpacing,
+    required bool fillWidth,
+    required bool stretchCells,
+  })  : _columnCount = columnCount,
+        _rowCount = rowCount,
+        _borderColor = borderColor,
+        _borderWidth = borderWidth,
+        _borderCollapse = borderCollapse,
+        _borderSpacing = borderSpacing,
+        _fillWidth = fillWidth,
+        _stretchCells = stretchCells;
+
+  set columnCount(int v) {
+    if (_columnCount != v) {
+      _columnCount = v;
+      markNeedsLayout();
+    }
+  }
+
+  set rowCount(int v) {
+    if (_rowCount != v) {
+      _rowCount = v;
+      markNeedsLayout();
+    }
+  }
+
+  set borderColor(Color v) {
+    if (_borderColor != v) {
+      _borderColor = v;
+      markNeedsPaint();
+    }
+  }
+
+  set borderWidth(double v) {
+    if (_borderWidth != v) {
+      _borderWidth = v;
+      markNeedsLayout();
+    }
+  }
+
+  set borderCollapse(HyperBorderCollapse v) {
+    if (_borderCollapse != v) {
+      _borderCollapse = v;
+      markNeedsLayout();
+    }
+  }
+
+  set borderSpacing(double v) {
+    if (_borderSpacing != v) {
+      _borderSpacing = v;
+      // Only affects layout in separate mode, but the setter is cheap and a
+      // mode switch may arrive in the same frame — always re-layout.
+      markNeedsLayout();
+    }
+  }
+
+  set fillWidth(bool v) {
+    if (_fillWidth != v) {
+      _fillWidth = v;
+      markNeedsLayout();
+    }
+  }
+
+  set stretchCells(bool v) {
+    if (_stretchCells != v) {
+      _stretchCells = v;
+      markNeedsLayout();
+    }
+  }
+
+  @override
+  void markNeedsLayout() {
+    _childList = null;
+    _intrinsicColWidthsCache = null;
+    _intrinsicCacheWidth = null;
+    _lastMinIntrinsicWidthHeight = null;
+    _minIntrinsicWidthCache = null;
+    _lastMaxIntrinsicWidthHeight = null;
+    _maxIntrinsicWidthCache = null;
+    super.markNeedsLayout();
+  }
+
+  // ── parentData setup ─────────────────────────────────────────────────────
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _TableCellParentData) {
+      child.parentData = _TableCellParentData();
+    }
+  }
+
+  // ── intrinsic dimensions ─────────────────────────────────────────────────
+
+  @override
+  double computeMinIntrinsicWidth(double height) {
+    if (_columnCount == 0) return 0;
+    if (_lastMinIntrinsicWidthHeight == height &&
+        _minIntrinsicWidthCache != null) {
+      return _minIntrinsicWidthCache!;
+    }
+
+    final minW = List<double>.filled(_columnCount, 0.0);
+    _walkChildren((child, pd) {
+      final span = pd.colspan.clamp(1, _columnCount - pd.col);
+      final childMin = child.getMinIntrinsicWidth(double.infinity);
+      final perCol = childMin / span;
+      for (int c = pd.col; c < pd.col + span && c < _columnCount; c++) {
+        if (perCol > minW[c]) minW[c] = perCol;
+      }
+    });
+
+    final result =
+        minW.fold(0.0, (s, v) => s + v) + _cellGap * (_columnCount + 1);
+    _lastMinIntrinsicWidthHeight = height;
+    _minIntrinsicWidthCache = result;
+    return result;
+  }
+
+  @override
+  double computeMaxIntrinsicWidth(double height) {
+    if (_columnCount == 0) return 0;
+    if (_lastMaxIntrinsicWidthHeight == height &&
+        _maxIntrinsicWidthCache != null) {
+      return _maxIntrinsicWidthCache!;
+    }
+
+    final maxW = List<double>.filled(_columnCount, 0.0);
+    _walkChildren((child, pd) {
+      final span = pd.colspan.clamp(1, _columnCount - pd.col);
+      final childMax = child.getMaxIntrinsicWidth(double.infinity);
+      final perCol = childMax / span;
+      for (int c = pd.col; c < pd.col + span && c < _columnCount; c++) {
+        if (perCol > maxW[c]) maxW[c] = perCol;
+      }
+    });
+
+    final result =
+        maxW.fold(0.0, (s, v) => s + v) + _cellGap * (_columnCount + 1);
+    _lastMaxIntrinsicWidthHeight = height;
+    _maxIntrinsicWidthCache = result;
+    return result;
+  }
+
+  /// Called when THIS table is a child of [IntrinsicHeight] (i.e. it is nested
+  /// inside a cell of an outer table).  Must NOT call [layout] — uses
+  /// [getMaxIntrinsicHeight] on children instead.
+  @override
+  double computeMaxIntrinsicHeight(double width) {
+    if (_columnCount == 0 || _rowCount == 0) return 0;
+    // Reuse cached column widths when the same width is queried repeatedly
+    // (e.g. outer IntrinsicHeight calling once per row — O(R×N) → O(N)).
+    final colW =
+        (_intrinsicCacheWidth == width && _intrinsicColWidthsCache != null)
+            ? _intrinsicColWidthsCache!
+            : () {
+                final w = _distributeColumnWidths(width);
+                _intrinsicCacheWidth = width;
+                _intrinsicColWidthsCache = w;
+                return w;
+              }();
+    final rowH = List<double>.filled(_rowCount, 0.0);
+
+    // Only rowspan = 1 cells contribute reliably without a layout pass.
+    _walkChildren((child, pd) {
+      if (pd.rowspan == 1) {
+        final cellW = _cellWidth(pd.col, pd.colspan, colW);
+        final h = child.getMaxIntrinsicHeight(cellW);
+        if (h > rowH[pd.row]) rowH[pd.row] = h;
+      }
+    });
+
+    // rowspan > 1 cells: use their intrinsic height and distribute if needed.
+    _walkChildren((child, pd) {
+      if (pd.rowspan > 1) {
+        final cellW = _cellWidth(pd.col, pd.colspan, colW);
+        final h = child.getMaxIntrinsicHeight(cellW);
+        final endRow = math.min(pd.row + pd.rowspan, _rowCount);
+        double spanned = _cellGap * (endRow - pd.row - 1);
+        for (int r = pd.row; r < endRow; r++) {
+          spanned += rowH[r];
+        }
+        final overflow = h - spanned;
+        if (overflow > 0) {
+          final extra = overflow / (endRow - pd.row);
+          for (int r = pd.row; r < endRow; r++) {
+            rowH[r] += extra;
+          }
+        }
+      }
+    });
+
+    return rowH.fold(0.0, (s, v) => s + v) + _cellGap * (_rowCount + 1);
+  }
+
+  // ── layout ───────────────────────────────────────────────────────────────
+
+  @override
+  void performLayout() {
+    if (_columnCount == 0 || _rowCount == 0) {
+      size = constraints.constrain(Size.zero);
+      return;
+    }
+
+    // Build child snapshot once — avoids 5 separate O(N) linked-list traversals.
+    final children = _buildChildList();
+
+    // Step 1 — column widths
+    _colWidths = _distributeColumnWidths(constraints.maxWidth, children);
+
+    // Step 2 — row heights (lays out all cells as a side-effect)
+    _rowHeights = _computeRowHeights(_colWidths!, children);
+
+    // Step 3 — position every cell
+    _positionCells(_colWidths!, _rowHeights!, children);
+
+    // Step 4 — own size
+    final totalW =
+        _colWidths!.fold(0.0, (s, v) => s + v) + _cellGap * (_columnCount + 1);
+    final totalH =
+        _rowHeights!.fold(0.0, (s, v) => s + v) + _cellGap * (_rowCount + 1);
+    size = constraints.constrain(Size(totalW, totalH));
+  }
+
+  // ── column-width distribution ─────────────────────────────────────────────
+
+  /// Column widths for [availW]; with [_fillWidth] any width the content leaves over is shared
+  /// between the columns in proportion to their widths (equally when all are empty).
+  List<double> _distributeColumnWidths(double availW,
+      [List<(RenderBox, _TableCellParentData)>? children]) {
+    final widths = _autoColumnWidths(availW, children);
+    if (!_fillWidth || availW.isInfinite || widths.isEmpty) return widths;
+    final contentW =
+        (availW - _cellGap * (_columnCount + 1)).clamp(0.0, double.infinity);
+    final total = widths.fold(0.0, (s, v) => s + v);
+    final rest = contentW - total;
+    if (rest <= 0) return widths;
+    return [
+      for (final w in widths)
+        total > 0 ? w + rest * w / total : w + rest / widths.length,
+    ];
+  }
+
+  /// W3C-inspired two-pass column-width distribution.
+  ///
+  /// When [availW] is [double.infinity] (inside [FittedBox] / horizontal
+  /// [SingleChildScrollView]) the table uses its natural (max-intrinsic) widths.
+  List<double> _autoColumnWidths(double availW,
+      [List<(RenderBox, _TableCellParentData)>? children]) {
+    if (_columnCount == 0) return [];
+
+    // Unconstrained — return natural column widths.
+    if (availW.isInfinite) {
+      final maxW = List<double>.filled(_columnCount, 0.0);
+      _forEach((child, pd) {
+        final span = pd.colspan.clamp(1, _columnCount - pd.col);
+        final childMax = child.getMaxIntrinsicWidth(double.infinity);
+        final perCol = childMax / span;
+        for (int c = pd.col; c < pd.col + span && c < _columnCount; c++) {
+          if (perCol > maxW[c]) maxW[c] = perCol;
+        }
+      }, children);
+      return maxW;
+    }
+
+    // Content width after reserving space for inter-cell gaps.
+    final contentW =
+        (availW - _cellGap * (_columnCount + 1)).clamp(0.0, double.infinity);
+
+    final minW = List<double>.filled(_columnCount, 0.0);
+    final maxW = List<double>.filled(_columnCount, 0.0);
+
+    _forEach((child, pd) {
+      final span = pd.colspan.clamp(1, _columnCount - pd.col);
+      final childMin = child.getMinIntrinsicWidth(double.infinity);
+      final childMax = child.getMaxIntrinsicWidth(double.infinity);
+      final perColMin = childMin / span;
+      final perColMax = childMax / span;
+      for (int c = pd.col; c < pd.col + span && c < _columnCount; c++) {
+        if (perColMin > minW[c]) minW[c] = perColMin;
+        if (perColMax > maxW[c]) maxW[c] = perColMax;
+      }
+    }, children);
+
+    final totalMin = minW.fold(0.0, (s, v) => s + v);
+
+    // Not enough room — clamp to min widths (table may overflow / scroll).
+    if (totalMin >= contentW) return List<double>.from(minW);
+
+    final surplus = contentW - totalMin;
+
+    // W3C: distribute surplus proportionally to each column's *flexibility*
+    // (maxW − minW), not its raw maxW.  Using raw maxW over-allocates to
+    // columns whose minW is already large (e.g. a fixed-width image cell),
+    // pushing them past their maxIntrinsicWidth and starving truly flexible
+    // columns.
+    final flex = List<double>.generate(
+      _columnCount,
+      (c) => math.max(0.0, maxW[c] - minW[c]),
+    );
+    final totalFlex = flex.fold(0.0, (s, v) => s + v);
+
+    // No flexibility anywhere (all columns already at their natural size) →
+    // fall back to equal distribution of any remaining space.
+    // Mailstream trial patch: a table that does not fill keeps its natural
+    // width, as CSS auto layout does; [_distributeColumnWidths] fills.
+    if (totalFlex <= 0) {
+      if (_stretchCells && !_fillWidth) return List<double>.from(maxW);
+      return List<double>.generate(
+          _columnCount, (c) => minW[c] + surplus / _columnCount);
+    }
+
+    // Phase 1 — proportional allocation by flexibility.
+    final widths = List<double>.generate(
+      _columnCount,
+      (c) => minW[c] + surplus * (flex[c] / totalFlex),
+    );
+
+    // Phase 2 — cap any column that would exceed its natural maxW and
+    // redistribute the freed-up space equally among the still-uncapped ones.
+    // A single redistribution pass is sufficient for all practical tables.
+    double excess = 0;
+    int uncapped = 0;
+    for (int c = 0; c < _columnCount; c++) {
+      if (widths[c] > maxW[c]) {
+        excess += widths[c] - maxW[c];
+        widths[c] = maxW[c];
+      } else {
+        uncapped++;
+      }
+    }
+    if (excess > 0 && uncapped > 0) {
+      final extra = excess / uncapped;
+      for (int c = 0; c < _columnCount; c++) {
+        if (widths[c] < maxW[c]) widths[c] += extra;
+      }
+    }
+
+    return widths;
+  }
+
+  // ── row-height computation ────────────────────────────────────────────────
+
+  /// Lays out every primary cell and computes the final row heights.
+  ///
+  /// Three sub-passes:
+  ///   1. Initial layout → rowspan=1 cells set their row's height.
+  ///   2. rowspan>1 overflow → excess distributed across spanned rows.
+  ///   3. Re-layout rowspan>1 cells with tight height so they fill the span.
+  List<double> _computeRowHeights(List<double> colWidths,
+      [List<(RenderBox, _TableCellParentData)>? children]) {
+    final rowH = List<double>.filled(_rowCount, 0.0);
+
+    // — Pass 1: layout every cell; rowspan=1 cells determine row heights ——
+    _forEach((child, pd) {
+      final cellW = _cellWidth(pd.col, pd.colspan, colWidths);
+      child.layout(BoxConstraints(maxWidth: cellW), parentUsesSize: true);
+      if (pd.rowspan == 1) {
+        if (child.size.height > rowH[pd.row]) rowH[pd.row] = child.size.height;
+      }
+    }, children);
+
+    // — Pass 2: distribute overflow from rowspan>1 cells ———————————————————
+    _forEach((child, pd) {
+      if (pd.rowspan > 1) {
+        final endRow = math.min(pd.row + pd.rowspan, _rowCount);
+        double spanned = _cellGap * (endRow - pd.row - 1);
+        for (int r = pd.row; r < endRow; r++) {
+          spanned += rowH[r];
+        }
+        final overflow = child.size.height - spanned;
+        if (overflow > 0) {
+          final extra = overflow / (endRow - pd.row);
+          for (int r = pd.row; r < endRow; r++) {
+            rowH[r] += extra;
+          }
+        }
+      }
+    }, children);
+
+    // — Pass 3: re-layout rowspan>1 cells with tight height so their
+    //           background fills the full visual span ————————————————————————
+    //           (Mailstream trial patch: with [_stretchCells], every cell
+    //           fills its slot; a [HyperTable.cellBuilder] cell places its own
+    //           content, vertical alignment included.)
+    _forEach((child, pd) {
+      final cellW = _cellWidth(pd.col, pd.colspan, colWidths);
+      if (pd.rowspan > 1 ||
+          (_stretchCells &&
+              (child.size.height < rowH[pd.row] || child.size.width < cellW))) {
+        final endRow = math.min(pd.row + pd.rowspan, _rowCount);
+        double totalH = _cellGap * (endRow - pd.row - 1);
+        for (int r = pd.row; r < endRow; r++) {
+          totalH += rowH[r];
+        }
+        child.layout(
+          BoxConstraints(
+            minWidth: cellW,
+            maxWidth: cellW,
+            minHeight: totalH,
+            maxHeight: totalH,
+          ),
+          parentUsesSize: true,
+        );
+      }
+    }, children);
+
+    return rowH;
+  }
+
+  // ── cell-width helper ─────────────────────────────────────────────────────
+
+  /// Width allocated to a cell spanning [colspan] columns starting at [col],
+  /// including the internal border segments between those columns.
+  double _cellWidth(int col, int colspan, List<double> colWidths) {
+    final end = math.min(col + colspan, _columnCount);
+    double w = 0;
+    for (int c = col; c < end; c++) {
+      w += colWidths[c];
+    }
+    // Add the internal gaps between spanned columns (but not the outer ones).
+    w += _cellGap * (end - col - 1).clamp(0, _columnCount);
+    return w.clamp(0.0, double.infinity);
+  }
+
+  // ── cell positioning ──────────────────────────────────────────────────────
+
+  void _positionCells(List<double> colWidths, List<double> rowHeights,
+      [List<(RenderBox, _TableCellParentData)>? children]) {
+    // Precompute the left edge of each column (including the leading gap).
+    final colX = List<double>.filled(_columnCount + 1, 0.0);
+    colX[0] = _cellGap;
+    for (int c = 0; c < _columnCount; c++) {
+      colX[c + 1] = colX[c] + colWidths[c] + _cellGap;
+    }
+
+    // Precompute the top edge of each row (including the leading gap).
+    final rowY = List<double>.filled(_rowCount + 1, 0.0);
+    rowY[0] = _cellGap;
+    for (int r = 0; r < _rowCount; r++) {
+      rowY[r + 1] = rowY[r] + rowHeights[r] + _cellGap;
+    }
+
+    _forEach((child, pd) {
+      // Compute the total height available to this cell (spanned rows + inner
+      // borders between them).  For rowspan=1 this equals rowHeights[row].
+      final endRow = math.min(pd.row + pd.rowspan, _rowCount);
+      double cellSlotH = _cellGap * (endRow - pd.row - 1);
+      for (int r = pd.row; r < endRow; r++) {
+        cellSlotH += rowHeights[r];
+      }
+
+      // Vertical offset inside the slot (0 for top/baseline, centred for
+      // middle, pushed to bottom for bottom).
+      final cellH = child.size.height;
+      final slack = math.max(0.0, cellSlotH - cellH);
+      final double dy;
+      if (pd.verticalAlign == HyperVerticalAlign.middle) {
+        dy = slack / 2;
+      } else if (pd.verticalAlign == HyperVerticalAlign.bottom ||
+          pd.verticalAlign == HyperVerticalAlign.textBottom) {
+        dy = slack;
+      } else {
+        dy = 0; // top / baseline / text-top
+      }
+
+      pd.offset = Offset(colX[pd.col], rowY[pd.row] + dy);
+    }, children);
+  }
+
+  // ── paint ─────────────────────────────────────────────────────────────────
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    // Paint cell contents first.
+    defaultPaint(context, offset);
+
+    // Paint grid borders on top so they are always visible.
+    if (_colWidths == null || _rowHeights == null) return;
+    _paintBorders(context.canvas, offset);
+  }
+
+  void _paintBorders(Canvas canvas, Offset offset) {
+    if (_borderCollapse == HyperBorderCollapse.separate) {
+      _paintSeparateBorders(canvas, offset);
+      return;
+    }
+
+    // ── collapse (default) — merged grid bars ────────────────────────────────
+    // Unchanged from the pre-border-spacing renderer: in collapse mode
+    // `_cellGap == _borderWidth`, so the layout size computed with `_cellGap`
+    // matches the `_borderWidth` arithmetic here exactly.
+    final paint = Paint()
+      ..color = _borderColor
+      ..style = PaintingStyle.fill;
+
+    final totalW = _colWidths!.fold(0.0, (s, v) => s + v) +
+        _borderWidth * (_columnCount + 1);
+    final totalH = _rowHeights!.fold(0.0, (s, v) => s + v) +
+        _borderWidth * (_rowCount + 1);
+
+    // Horizontal lines (one per row boundary, plus top and bottom).
+    double y = offset.dy;
+    for (int r = 0; r <= _rowCount; r++) {
+      canvas.drawRect(
+        Rect.fromLTWH(offset.dx, y, totalW, _borderWidth),
+        paint,
+      );
+      if (r < _rowCount) y += _borderWidth + _rowHeights![r];
+    }
+
+    // Vertical lines (one per column boundary, plus left and right).
+    double x = offset.dx;
+    for (int c = 0; c <= _columnCount; c++) {
+      canvas.drawRect(
+        Rect.fromLTWH(x, offset.dy, _borderWidth, totalH),
+        paint,
+      );
+      if (c < _columnCount) x += _borderWidth + _colWidths![c];
+    }
+  }
+
+  /// `border-collapse: separate` — each cell keeps its own outline, separated
+  /// by `border-spacing` (the `_cellGap`). The border thickness is
+  /// [_borderWidth]; the gap between adjacent cells shows the table background.
+  ///
+  /// Every primary cell is a child of this render object, so one stroked
+  /// rectangle per child covers the whole grid. The stroke is inset by half its
+  /// width so it stays inside the cell's laid-out slot and never bleeds into the
+  /// spacing gap.
+  void _paintSeparateBorders(Canvas canvas, Offset offset) {
+    if (_borderWidth <= 0) return;
+
+    final colWidths = _colWidths!;
+    final rowHeights = _rowHeights!;
+
+    // Left/top edges of each column/row — identical to _positionCells.
+    final colX = List<double>.filled(_columnCount + 1, 0.0);
+    colX[0] = _cellGap;
+    for (int c = 0; c < _columnCount; c++) {
+      colX[c + 1] = colX[c] + colWidths[c] + _cellGap;
+    }
+    final rowY = List<double>.filled(_rowCount + 1, 0.0);
+    rowY[0] = _cellGap;
+    for (int r = 0; r < _rowCount; r++) {
+      rowY[r + 1] = rowY[r] + rowHeights[r] + _cellGap;
+    }
+
+    final paint = Paint()
+      ..color = _borderColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = _borderWidth;
+    final inset = _borderWidth / 2;
+
+    _walkChildren((child, pd) {
+      final cellW = _cellWidth(pd.col, pd.colspan, colWidths);
+      final endRow = math.min(pd.row + pd.rowspan, _rowCount);
+      double cellH = _cellGap * (endRow - pd.row - 1);
+      for (int r = pd.row; r < endRow; r++) {
+        cellH += rowHeights[r];
+      }
+      final rect = Rect.fromLTWH(
+        offset.dx + colX[pd.col],
+        offset.dy + rowY[pd.row],
+        cellW,
+        cellH,
+      ).deflate(inset);
+      if (rect.width > 0 && rect.height > 0) {
+        canvas.drawRect(rect, paint);
+      }
+    });
+  }
+
+  // ── hit testing ───────────────────────────────────────────────────────────
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    return defaultHitTestChildren(result, position: position);
+  }
+
+  // ── utility ───────────────────────────────────────────────────────────────
+
+  /// Returns the cached child snapshot, building it on first call per layout cycle.
+  ///
+  /// The cache is invalidated by [markNeedsLayout], so it stays fresh across
+  /// all methods called within a single layout pass (intrinsic queries +
+  /// [performLayout] share one traversal instead of five).
+  List<(RenderBox, _TableCellParentData)> _buildChildList() {
+    if (_childList != null) return _childList!;
+    final list = <(RenderBox, _TableCellParentData)>[];
+    _walkChildren((c, pd) => list.add((c, pd)));
+    _childList = list;
+    return list;
+  }
+
+  /// Iterates children using [children] snapshot when available (O(N) array
+  /// traversal), or falls back to [_walkChildren] (O(N) linked-list traversal).
+  void _forEach(void Function(RenderBox child, _TableCellParentData pd) fn,
+      [List<(RenderBox, _TableCellParentData)>? children]) {
+    if (children != null) {
+      for (final (child, pd) in children) {
+        fn(child, pd);
+      }
+    } else {
+      _walkChildren(fn);
+    }
+  }
+
+  void _walkChildren(
+      void Function(RenderBox child, _TableCellParentData pd) fn) {
+    RenderBox? child = firstChild;
+    while (child != null) {
+      fn(child, child.parentData! as _TableCellParentData);
+      child = childAfter(child);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Legacy public symbol — kept so external code that references TableParentData
+// by name does not break at compile time.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Unused: [HyperTable] attaches `_TableCellParentData` to its cells, so an
+/// instance of this class is never created or read by the renderer. It is kept
+/// only so existing code that names the type still compiles.
+///
+/// NOTE: this previously carried only a `/// @deprecated` doc comment, which
+/// the analyzer does not act on — callers got no warning at all. The real
+/// annotation below makes the deprecation visible before the symbol is removed.
+@Deprecated(
+  'Unused by the renderer — HyperTable uses its own internal parent data. '
+  'Remove any reference to it; this class will be deleted in v2.0.',
+)
+class TableParentData extends ContainerBoxParentData<RenderBox> {
+  int column = 0;
+  int row = 0;
+  int colspan = 1;
+  int rowspan = 1;
+}

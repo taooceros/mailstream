@@ -95,19 +95,29 @@ final class MailHtmlHost: NSView {
   }
 }
 
-/// One body. The mail's own scripts never run; links open in the browser; remote images load,
-/// without cookies. Inline parts are `file://` copies in Mailstream's cache, which the page may
-/// read. A body wider than the column (a fixed 600 px newsletter) zooms out to fit.
+/// The links mail may open, in either renderer: HTTP(S) with a host, or mailto, without
+/// credentials. Anything else (file, javascript, custom schemes) is refused.
+enum MailLink {
+  static func open(_ url: URL) -> Bool {
+    guard let scheme = url.scheme?.lowercased(), url.user == nil, url.password == nil,
+          scheme == "mailto" || (["https", "http"].contains(scheme) && !(url.host ?? "").isEmpty)
+    else { return false }
+    NSWorkspace.shared.open(url)
+    return true
+  }
+}
+
+/// One body. The mail's own scripts never run; links open in the browser only through
+/// `MailLink`; nothing navigates the view. The page has no base URL, so it may read no local
+/// file: the reader hands over prepared HTML whose inline cache images are already data URLs,
+/// with a content policy allowing HTTPS and data resources only. Remote images load, without
+/// cookies. A body wider than the column (a fixed 600 px newsletter) zooms out to fit.
 final class MailHtmlView: WKWebView {
   /// What a page shows, for its whole life.
   struct Key: Equatable {
     let owner: [String]
     let html: String
   }
-
-  /// Mailstream's cache: inline parts live under it.
-  private static let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-    .appendingPathComponent("dev.mailstream.Mailstream", isDirectory: true)
 
   /// Bodies share one cookie-less store, so tracking pixels see no history.
   private static let store = WKWebsiteDataStore.nonPersistent()
@@ -142,7 +152,7 @@ final class MailHtmlView: WKWebView {
     bridge.view = self
     navigationDelegate = bridge
     setValue(false, forKey: "drawsBackground")
-    loadHTMLString(key.html, baseURL: Self.cache)
+    loadHTMLString(key.html, baseURL: nil)
   }
 
   @available(*, unavailable)
@@ -249,6 +259,8 @@ final class MailHtmlView: WKWebView {
 /// The view's navigation delegate and message handler, held weakly by WebKit's controller.
 private final class Bridge: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
   weak var view: MailHtmlView?
+  /// The body's own load has been allowed; every later navigation is refused.
+  private var loaded = false
 
   func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
     guard let size = message.body as? [String: Any],
@@ -263,16 +275,21 @@ private final class Bridge: NSObject, WKNavigationDelegate, WKScriptMessageHandl
     view?.terminated = true
   }
 
-  /// The body loads; a clicked link opens in the default browser (or mail app) instead.
+  /// Only the body's own load (the first, main-frame about: navigation) proceeds: no frames,
+  /// redirects or meta refreshes, not even back to about:blank. A clicked link opens in the
+  /// browser (or mail app) when `MailLink` allows.
   func webView(
     _ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
     decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
   ) {
     if action.navigationType == .linkActivated, let url = action.request.url {
-      NSWorkspace.shared.open(url)
+      _ = MailLink.open(url)
       decisionHandler(.cancel)
     } else {
-      decisionHandler(action.navigationType == .other ? .allow : .cancel)
+      let initial = !loaded && action.navigationType == .other && action.targetFrame?.isMainFrame == true
+        && (action.request.url?.scheme ?? "about") == "about"
+      if initial { loaded = true }
+      decisionHandler(initial ? .allow : .cancel)
     }
   }
 }

@@ -5,11 +5,20 @@ import 'dart:isolate';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 
+import '../platform.dart';
+import 'hyper_resources.dart';
+
 typedef HtmlParts = (String main, String? quoted);
 
 /// Only strings cross the isolate boundary; native views and channels stay in the reader.
 Future<HtmlParts> splitMailHtmlInBackground(String html) =>
     Isolate.run(() => splitMailHtml(html), debugName: 'mail-html');
+
+/// The Mac reader's preparation, shared by both its renderers: inline cache images become data
+/// URLs, unsafe sources go, presentational attributes get `data-ms-*` copies, then quotes are
+/// split. Windows' WebView2 bodies get the plain split.
+Future<HtmlParts> prepareMailHtmlInBackground(String html) =>
+    Isolate.run(() async => splitMailHtml(await prepareHyperResources(html)), debugName: 'mail-html');
 
 /// The body's original quote policy, shared with the runtime comparison harness.
 HtmlParts splitMailHtml(String html) {
@@ -65,7 +74,7 @@ String windowsMailPage(String html) {
 class HtmlPartsCache {
   HtmlPartsCache({this._split = splitMailHtmlInBackground});
 
-  static final shared = HtmlPartsCache();
+  static final shared = HtmlPartsCache(split: Host.mac ? prepareMailHtmlInBackground : splitMailHtmlInBackground);
   static const capacity = 8;
   final Future<HtmlParts> Function(String) _split;
   final _ready = <String, HtmlParts>{};

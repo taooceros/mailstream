@@ -1,0 +1,2008 @@
+import 'dart:collection';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
+
+import 'package:flutter/foundation.dart';
+
+import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
+
+import '../model/computed_style.dart';
+import '../model/fragment.dart';
+import '../model/node.dart';
+import '../util/html_whitespace.dart';
+import 'animation_controller.dart';
+import 'hyper_render_config.dart';
+import 'hyper_render_debug_hooks.dart';
+import 'image_provider.dart';
+import 'kinsoku_processor.dart';
+import 'lazy_image_queue.dart';
+
+part 'render_hyper_box_types.dart';
+part 'render_hyper_box_fragments.dart';
+part 'render_hyper_box_layout.dart';
+part 'render_hyper_box_paint.dart';
+part 'render_hyper_box_selection.dart';
+part 'render_hyper_box_accessibility.dart';
+part 'render_hyper_box_animation.dart';
+
+// ── Library-level cached Paint objects ────────────────────────────────────────
+//
+// These paints have fixed colors AND fixed properties so a single instance is
+// shared across all RenderHyperBox instances. Declared at library scope so
+// part files (render_hyper_box_paint.dart) can access them without any class
+// qualifier. Safe because Flutter's rendering pipeline is single-threaded and
+// paint() is never re-entrant.
+
+/// Empty paint used for `canvas.saveLayer` calls (backdrop-filter / CSS filter).
+final Paint _sLayerPaint = Paint();
+
+// Skeleton placeholder:
+final Paint _skeletonBasePaint = Paint()
+  ..color = const Color(0xFFEEEEEE)
+  ..isAntiAlias = true;
+final Paint _skeletonBorderPaint = Paint()
+  ..color = const Color(0xFFE0E0E0)
+  ..style = PaintingStyle.stroke
+  ..strokeWidth = 1.0
+  ..isAntiAlias = true;
+final Paint _skeletonIndicatorPaint = Paint()
+  ..color = const Color(0xFFE0E0E0)
+  ..isAntiAlias = true;
+
+/// Shimmer highlight — [shader] is replaced each frame; the Paint wrapper is reused.
+final Paint _shimmerHighlightPaint = Paint()..isAntiAlias = true;
+
+// Error placeholder:
+final Paint _errorBgPaint = Paint()
+  ..color = const Color(0xFFFAFAFA)
+  ..isAntiAlias = true;
+final Paint _errorBorderPaint = Paint()
+  ..color = const Color(0xFFE0E0E0)
+  ..style = PaintingStyle.stroke
+  ..strokeWidth = 1.0
+  ..isAntiAlias = true;
+final Paint _errorFramePaint = Paint()
+  ..color = const Color(0xFFD1D5DB)
+  ..style = PaintingStyle.stroke
+  ..strokeWidth = 1.5
+  ..isAntiAlias = true;
+final Paint _errorSlashPaint = Paint()
+  ..color = const Color(0xFFF87171)
+  ..style = PaintingStyle.stroke
+  ..strokeWidth = 1.5
+  ..strokeCap = StrokeCap.round
+  ..isAntiAlias = true;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Compiled-once regex constants for hot paths in RenderHyperBox.
+// Using a library-level final avoids re-compiling the DFA on every call.
+// Uses the CSS-precise cssWhitespaceRun (space/tab/LF/CR/FF only), not a
+// bare `\s+` — Dart's `\s` also matches U+00A0 (`&nbsp;`), which must
+// survive whitespace collapsing/word-splitting since it's a normal,
+// non-breaking printing character, not decorative source whitespace.
+final _kWhitespaceSplitter = cssWhitespaceRun;
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Callback for handling link taps
+typedef HyperLinkTapCallback = void Function(String url);
+
+/// Callback for building custom widgets for embedded content
+typedef HyperWidgetBuilder = Widget? Function(UDTNode node);
+
+/// Callback when image loading state changes
+typedef ImageLoadCallback = void Function(String src, ImageLoadState state);
+
+/// RenderHyperBox - The core custom rendering engine
+///
+/// This RenderObject implements:
+/// - Fragment-based inline layout (IFC - Inline Formatting Context)
+/// - Float layout (CSS float: left/right)
+/// - Margin collapsing
+/// - CJK line-breaking (Kinsoku)
+/// - Text selection support
+/// - Inline background/border for wrapped text
+/// - Async image loading
+///
+class RenderHyperBox extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, HyperBoxParentData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, HyperBoxParentData> {
+  /// The document tree to render
+  DocumentNode? _document;
+
+  /// Base text style
+  TextStyle _baseStyle;
+
+  /// System/host accessibility text scaler (see [textScaler]).
+  TextScaler _textScaler;
+
+  /// Link tap callback
+  HyperLinkTapCallback? onLinkTap;
+
+  /// Custom image loader (defaults to defaultImageLoader if not provided)
+  HyperImageLoader? _imageLoader;
+
+  /// Whether text selection is enabled
+  bool _selectable;
+
+  /// Text direction for layout (LTR or RTL)
+  TextDirection _textDirection;
+
+  /// Max width constraint (for line wrapping)
+  double _maxWidth = double.infinity;
+
+  /// Cached fragments after tokenization
+  List<Fragment> _fragments = [];
+
+  /// Cached lines after layout
+  final List<LineInfo> _lines = [];
+
+  /// Active float areas
+  final List<_FloatArea> _leftFloats = [];
+  final List<_FloatArea> _rightFloats = [];
+
+  /// Tunable cache sizes, concurrency, chunk size.
+  HyperRenderConfig _config;
+
+  /// Internal cache for TextPainters shared across all RenderHyperBox instances.
+  ///
+  /// Shared so that multiple sections in a virtualized list reuse painters for
+  /// common styles (~80% cache-hit rate on typical documents).
+  /// Size is driven by [HyperRenderConfig.textPainterCacheSize] (default 5000).
+  /// Call [setGlobalTextCacheSize] from HyperViewer to apply a custom size.
+  static _LruCache<_TextPainterKey, TextPainter> _globalTextPainters =
+      _LruCache(
+    maxSize: HyperRenderConfig.defaults.textPainterCacheSize,
+    onEvict: (painter) => painter.dispose(),
+  );
+
+  /// Current capacity of the global TextPainter LRU cache.
+  ///
+  /// Exposed so [HyperViewer] can compare before calling [setGlobalTextCacheSize],
+  /// enabling the ref-counted multi-viewer size management without requiring
+  /// access to the private [_globalTextPainters] instance.
+  static int get globalTextCacheSize => _globalTextPainters.maxSize;
+
+  /// Updates the global TextPainter cache capacity.
+  ///
+  /// Rebuilds the cache with the new size, evicting all existing entries
+  /// (painters are disposed via the onEvict callback). Safe to call at any
+  /// point; no-ops when the size is already correct.
+  static void setGlobalTextCacheSize(int size) {
+    if (_globalTextPainters.maxSize == size) return;
+    final old = _globalTextPainters;
+    _globalTextPainters = _LruCache(
+      maxSize: size,
+      onEvict: (painter) => painter.dispose(),
+    );
+    old.clear();
+  }
+
+  /// Reference to the cache being used.
+  _LruCache<_TextPainterKey, TextPainter> get _textPainters =>
+      _globalTextPainters;
+
+  /// Reusable TextPainter for measuring line-breaking candidate prefixes during
+  /// layout without polluting the global LRU cache.
+  TextPainter? _scratchCandidatePainter;
+
+  /// Last collapsed margin (for margin collapsing between blocks)
+  double _lastBlockMarginBottom = 0;
+
+  /// Inline decorations for painting backgrounds/borders
+  final List<_InlineDecoration> _inlineDecorations = [];
+
+  /// Block decorations for painting border-left, backgrounds
+  final List<_BlockDecoration> _blockDecorations = [];
+
+  /// Whether the document has any `position: relative` element, including
+  /// inside flex and grid containers. Documents without one skip all of the
+  /// relative handling.
+  bool _hasRelative = false;
+
+  /// Flex and grid containers holding a `position: relative` item. Their items
+  /// move inside a child widget, invisible to the fragment pass, so the whole
+  /// container paints with the moved content.
+  final Set<UDTNode> _relativeWidgetBoxes = Set.identity();
+
+  /// Cumulative `position: relative` shift of each node in this box's document.
+  final Map<UDTNode, Offset> _relativeShifts = Map.identity();
+
+  /// Every fragment `position: relative` moved, with how far. Used to undo the
+  /// shift before the next line layout, since not every fragment gets re-placed.
+  final Map<Fragment, Offset> _displaced = Map.identity();
+
+  /// The moved fragments that sit on a line. They stay listed on that line for
+  /// document order and selection, so anything that finds a fragment by line
+  /// must check this list as well.
+  final List<Fragment> _displacedOnLines = [];
+
+  /// Whether any painted thing moved, which turns on the clipped paint pass.
+  bool _hasMovedContent = false;
+
+  /// Clips the moved-content paint pass to this box. See [_paint].
+  final LayerHandle<ClipRectLayer> _relativeClipLayer =
+      LayerHandle<ClipRectLayer>();
+
+  /// Whether `position: relative` moved any content in the last layout.
+  @visibleForTesting
+  bool get debugHasDisplacedContent => _hasMovedContent;
+
+  /// Runtime animation state for every node currently carrying a resolvable
+  /// `animation-name` (canvas-painted block animation — see
+  /// render_hyper_box_animation.dart). Rebuilt on every [performLayout].
+  final Map<UDTNode, _BlockAnimationState> _blockAnimations = {};
+
+  /// Per-node paint rect for animated blocks, precomputed once per layout
+  /// (not per paint frame) from [_blockDecorations] / [_lines].
+  final Map<UDTNode, Rect> _animatedBlockRects = {};
+
+  /// The node's own [_BlockDecoration], if it has one (background/border),
+  /// keyed for O(1) lookup during [_paintAnimatedBlocks] instead of a linear
+  /// scan of [_blockDecorations] per animated node.
+  final Map<UDTNode, _BlockDecoration> _animatedBlockDecorations = {};
+
+  /// Fragments owned by each animated block (nearest-animated-ancestor
+  /// grouping), precomputed once per layout alongside [_animatedBlockRects].
+  final Map<UDTNode, List<Fragment>> _animatedBlockFragments = {};
+
+  /// Memoized `UDTNode -> nearest animated ancestor` lookup, cleared whenever
+  /// [_blockAnimations] is rebuilt.
+  final Map<UDTNode, UDTNode?> _animatedAncestorCache = {};
+
+  /// Nodes actually painted by [_paintAnimatedBlocks] this frame (a node can
+  /// be in [_blockAnimations] but still within its `animation-delay` window,
+  /// in which case it paints normally instead). Cleared at the top of every
+  /// [paint] call.
+  final Set<UDTNode> _paintedThisFrameByAnimation = {};
+
+  /// Pending [SchedulerBinding] frame callback id for the block-animation
+  /// loop — see the "Shimmer Animation" section below for why a raw frame
+  /// callback is used instead of an [AnimationController].
+  int? _animCallbackId;
+
+  /// LRU image cache — bounded by [HyperRenderConfig.imageCacheSize].
+  ///
+  /// When an entry is evicted (LRU overflow or [_disposeImages] call), the
+  /// [onEvict] callback calls `ci.image?.dispose()` to decrement the
+  /// Flutter engine's ref-count on the GPU texture.  Without this, evicted
+  /// images are only released when Dart GC runs, which on mobile can take
+  /// seconds — causing steady GPU memory growth on image-heavy documents.
+  late final _LruCache<String, CachedImage> _imageCache = _LruCache(
+    maxSize: _config.imageCacheSize,
+    onEvict: (ci) => ci.image?.dispose(),
+  );
+
+  /// Subscription tokens returned by [LazyImageQueue.enqueue].
+  /// Cancelled in [_disposeImages] so in-flight callbacks are dropped safely.
+  final Set<int> _imageTokens = {};
+
+  /// Shimmer animation state.
+  /// [_shimmerEpoch] marks when animation started; null = not animating.
+  /// [_shimmerCallbackId] holds the pending [SchedulerBinding] frame callback
+  /// id so we can cancel it in [dispose] to avoid callbacks on dead objects.
+  Duration? _shimmerEpoch;
+  int? _shimmerCallbackId;
+
+  /// Returns a 0.0→1.0 phase value that advances with time, looping every
+  /// [periodMs] milliseconds. Returns 0.0 when no loading is happening.
+  /// Used by [_paintSkeletonPlaceholder] to animate the shimmer sweep.
+  double get _shimmerPhase {
+    final epoch = _shimmerEpoch;
+    if (epoch == null) return 0.0;
+    final elapsed = SchedulerBinding.instance.currentFrameTimeStamp - epoch;
+    const periodMs =
+        1400.0; // 1.4 s per sweep — matches Material skeleton speed
+    return (elapsed.inMicroseconds / 1000.0 % periodMs) / periodMs;
+  }
+
+  /// Current text selection
+  HyperTextSelection? _selection;
+
+  /// Selection start position (for drag selection)
+  int? _selectionStartPosition;
+
+  /// Position recorded on PointerDown — used to detect tap-vs-drag for links.
+  Offset? _pointerDownPosition;
+
+  /// Total character count in document
+  int _totalCharacterCount = 0;
+
+  /// Cached intrinsic widths (invalidated on layout change)
+  double? _cachedMinIntrinsicWidth;
+  double? _cachedMaxIntrinsicWidth;
+
+  /// Cumulative character count at the start of each line.
+  ///
+  /// `_lineStartOffsets[i]` is the number of text/ruby characters that
+  /// appear in all lines *before* line `i`.  Built by [_buildCharacterMapping]
+  /// after every layout; used by [_getCharacterPositionAtOffset] to avoid
+  /// scanning all preceding lines when the user drags a selection handle
+  /// (O(log N) binary-search instead of O(N) linear scan).
+  final List<int> _lineStartOffsets = [];
+
+  /// Color for text selection highlight
+  Color? _selectionColor;
+
+  /// Callback when selection changes
+  VoidCallback? onSelectionChanged;
+
+  /// When true, draws colored outlines over each fragment/line for debugging.
+  /// Equivalent to Flutter's [debugPaintSizeEnabled] but scoped to this widget.
+  bool debugShowBounds = false;
+
+  // ── Plugin registry tag sets ───────────────────────────────────────────────
+  //
+  // Copied from [HyperPluginRegistry] when a registry is provided.  Stored as
+  // plain [Set<String>] so the render object has no direct dependency on the
+  // plugin registry class (avoids circular imports with the interfaces layer).
+  //
+  // Empty const sets are shared singletons — no allocation cost when no
+  // plugins are registered.
+
+  /// Tag names handled by **block-tier** plugins (full-width widget).
+  Set<String> _blockPluginTags = const {};
+  Set<String> get blockPluginTags => _blockPluginTags;
+  set blockPluginTags(Set<String> value) {
+    if (_blockPluginTags == value) return;
+    _blockPluginTags = value;
+    _invalidateLayout();
+    markNeedsLayout();
+  }
+
+  /// Tag names handled by **inline-tier** plugins (inline widget).
+  Set<String> _inlinePluginTags = const {};
+  Set<String> get inlinePluginTags => _inlinePluginTags;
+  set inlinePluginTags(Set<String> value) {
+    if (_inlinePluginTags == value) return;
+    _inlinePluginTags = value;
+    _invalidateLayout();
+    markNeedsLayout();
+  }
+
+  /// When false, skips `canvas.saveLayer` for `backdrop-filter` and CSS
+  /// `filter` effects. Disable on low-end devices or when profiling shows
+  /// excessive rasterization cost from complex filters.
+  bool enableComplexFilters = true;
+
+  /// When true, suppresses the top margin of the first block element in
+  /// this render box. Used in virtualized mode where each section is a
+  /// separate RenderHyperBox — without suppression, the last block margin of
+  /// section N and the first block margin of section N+1 both render in full,
+  /// producing double-spacing at section boundaries instead of CSS margin
+  /// collapsing.
+  bool _suppressFirstBlockMarginTop = false;
+  bool get suppressFirstBlockMarginTop => _suppressFirstBlockMarginTop;
+  set suppressFirstBlockMarginTop(bool value) {
+    if (_suppressFirstBlockMarginTop == value) return;
+    _suppressFirstBlockMarginTop = value;
+    _invalidateLayout();
+    markNeedsLayout();
+  }
+
+  /// Floats inherited from the previous virtualized section.
+  ///
+  /// When set, [_performLineLayout] seeds [_leftFloats]/[_rightFloats] from
+  /// these carryovers before processing any fragments, so that text in this
+  /// section wraps around floats that began in the preceding section.
+  List<FloatCarryover> _initialFloats = const [];
+  List<FloatCarryover> get initialFloats => _initialFloats;
+  set initialFloats(List<FloatCarryover> value) {
+    // Compare by content (not identity) so that a new list object
+    // with the same FloatCarryover values does NOT trigger a full layout
+    // invalidation. The old code used `identical` which is always false for
+    // freshly constructed lists, causing _invalidateLayout() on every frame
+    // even when float geometry hadn't changed.
+    if (value.length == _initialFloats.length) {
+      bool same = true;
+      for (int i = 0; i < value.length; i++) {
+        final a = value[i];
+        final b = _initialFloats[i];
+        if (a.direction != b.direction ||
+            a.width != b.width ||
+            a.overhangHeight != b.overhangHeight ||
+            a.imagePixelOffset != b.imagePixelOffset) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return;
+    }
+    _initialFloats = value;
+    _invalidateLayout();
+    markNeedsLayout();
+  }
+
+  /// Returns floats from this section that extend below its natural text height.
+  ///
+  /// Pass the result to the next section's [initialFloats] so its text wraps
+  /// correctly alongside the continuation of tall float elements.
+  ///
+  /// Returns an empty list when no floats dangle past the section boundary.
+  /// Only valid to call after layout has completed.
+  List<FloatCarryover> get danglingFloats {
+    // Natural height = bottom of last line (before float extension).
+    // If no lines were laid out (e.g. chunk only contained a float),
+    // natural height is 0 and the entire float overhangs.
+    final naturalHeight =
+        _lines.isEmpty ? 0.0 : (_lines.last.bounds?.bottom ?? 0.0);
+    final result = <FloatCarryover>[];
+    for (final float in _leftFloats) {
+      if (float.rect.bottom > naturalHeight) {
+        result.add(FloatCarryover(
+          direction: float.direction,
+          width: float.rect.width,
+          overhangHeight: float.rect.bottom - naturalHeight,
+          imagePixelOffset: naturalHeight - float.rect.top,
+          imageSrc: float.imageSrc,
+        ));
+      }
+    }
+    for (final float in _rightFloats) {
+      if (float.rect.bottom > naturalHeight) {
+        result.add(FloatCarryover(
+          direction: float.direction,
+          width: float.rect.width,
+          overhangHeight: float.rect.bottom - naturalHeight,
+          imagePixelOffset: naturalHeight - float.rect.top,
+          imageSrc: float.imageSrc,
+        ));
+      }
+    }
+    return result;
+  }
+
+  /// Track list item indices for ordered lists
+  final Map<UDTNode, int> _listItemIndices = {};
+
+  /// Maps fragment → its linked child RenderBox for O(1) paint-time lookup.
+  /// Rebuilt at the end of [_layoutChildren]; cleared by [_invalidateLayout].
+  final Map<Fragment, RenderBox> _fragmentChildMap = {};
+
+  /// Maps CSS `id` attribute values → their y-offset within this RenderObject.
+  /// Populated during [_performLineLayout]; cleared by [_invalidateLayout].
+  /// Consumed by [HyperViewerController.scrollToId].
+  final Map<String, double> anchorOffsets = {};
+
+  /// Heading anchors collected during [_performLineLayout].
+  /// Each entry: `(level, text, cssId-or-null, yOffset)`.
+  /// Cleared by [_invalidateLayout].
+  final List<({int level, String text, String? cssId, double yOffset})>
+      headingAnchors = [];
+
+  /// Called after each layout pass with the updated [anchorOffsets] and
+  /// [headingAnchors]. Consumers (e.g. [HyperViewerController]) use this to
+  /// build scroll-to-id and TOC features.
+  void Function(
+    Map<String, double> offsets,
+    List<({int level, String text, String? cssId, double yOffset})> headings,
+  )? onAnchorLayout;
+
+  /// Called after each layout pass with the list of floats that overhang the
+  /// bottom of this section.  Pass the result to the next section's
+  /// [initialFloats] to enable cross-chunk float continuity.
+  ///
+  /// Receives an empty list when no floats dangle past the section boundary.
+  void Function(List<FloatCarryover> carryovers)? onFloatCarryover;
+
+  /// Cached semantic nodes for headings and links.
+  ///
+  /// Reusing the same [SemanticsNode] objects across [assembleSemanticsNode]
+  /// calls avoids the parentDataDirty assertion that fires in debug mode when
+  /// newly created nodes are adopted by [SemanticsNode.updateWith].
+  /// Modelled after the same pattern in Flutter's [RenderParagraph].
+  final List<SemanticsNode> _cachedSemanticAnchorNodes = [];
+
+  // ── Per-instance cached Paint objects ─────────────────────────────────────
+  //
+  // paint() runs at 60 fps during scrolling/animations. Allocating Paint()
+  // inside the loop body generates GC pressure: a typical document with 10+
+  // code blocks / blockquotes / tables creates 25-40 Paint objects per frame.
+  // Solution: mutate a small set of cached instances instead.
+  //
+  // Instance fields are used for paints whose color/strokeWidth vary per draw.
+  // Library-level constants (see top of file) cover paints with fixed properties.
+
+  /// Reusable fill paint. Set `.color` (and optionally `.shader`) before use.
+  final Paint _fillPaint = Paint()..isAntiAlias = true;
+
+  /// Reusable stroke paint. Set `.color`, `.strokeWidth`, `.strokeCap` before
+  /// use. `style` is always `PaintingStyle.stroke`.
+  final Paint _strokePaint = Paint()
+    ..isAntiAlias = true
+    ..style = PaintingStyle.stroke;
+
+  /// Reusable filter paint for saveLayer / drawRect with imageFilter.
+  /// Set `.imageFilter` (and optionally `.blendMode`) before use; always reset
+  /// both to null/srcOver afterward so the object is safe to reuse next frame.
+  final Paint _filterPaint = Paint();
+
+  // ── Incremental layout dirty tracking ─────────────────────────────────────
+  /// Bumped each time _fragments is rebuilt (via _ensureFragments).
+  /// Line layout skips when this matches [_linesFragmentsVersion] AND
+  /// [_linesMaxWidth] equals the current constraint width.
+  int _fragmentsVersion = 0;
+
+  /// True when the current fragment list contains at least one [_DetailsFragment].
+  ///
+  /// Set during [_ensureFragments] tokenization, reset in [_invalidateLayout].
+  /// Replaces the O(N) `.any()` scan in [performLayout] with an O(1) read.
+  bool _hasDetailFragments = false;
+
+  /// The [_fragmentsVersion] value when _lines was last successfully built.
+  int _linesFragmentsVersion = -1;
+
+  /// The [_maxWidth] value when _lines was last successfully built.
+  double _linesMaxWidth = double.nan;
+
+  /// Cache available width for the current line to avoid O(N_floats) lookup
+  /// for every single fragment. Only needs recalculating when currentY changes
+  /// or when new floats are added to the line.
+  double? _cachedAvailableWidth;
+
+  /// List of floats added during the CURRENT line. They are kept separate
+  /// so that text on the current line doesn't wrap around a float that
+  /// it triggered (which would cause infinite line-wrapping loops).
+  /// They are flushed to the main float lists at the end of finishLine().
+  final List<_FloatArea> _pendingLineLeftFloats = [];
+  final List<_FloatArea> _pendingLineRightFloats = [];
+
+  /// Default placeholder width for images without known dimensions.
+  /// Driven by [HyperRenderConfig.defaultImagePlaceholderWidth].
+  double get _defaultImageWidth => _config.defaultImagePlaceholderWidth;
+
+  // Note: default height is computed from width / aspect ratio
+  static const double _defaultAspectRatio = 16.0 / 9.0;
+
+  /// Ruby annotation size ratio (furigana is typically 50% of base text)
+  static const double rubyFontSizeRatio = 0.5;
+
+  /// Gap between ruby text and base text
+  static const double rubyGap = 2.0;
+
+  /// Default float size when not specified in CSS
+  static const double defaultFloatSize = 100.0;
+
+  /// Stable identifier for this renderer instance.
+  ///
+  /// Used by [HyperRenderDebugHooks] so DevTools can address a specific
+  /// renderer across layout passes.  Based on identity hash so it never
+  /// changes for the lifetime of this object.
+  late final String _debugId = 'r${identityHashCode(this).toRadixString(16)}';
+
+  RenderHyperBox({
+    DocumentNode? document,
+    TextStyle baseStyle =
+        const TextStyle(fontSize: 16, color: Color(0xFF000000)),
+    this.onLinkTap,
+    HyperImageLoader? imageLoader,
+    bool selectable = true,
+    TextDirection textDirection = TextDirection.ltr,
+    Color? selectionColor,
+    this.onSelectionChanged,
+    HyperRenderConfig config = HyperRenderConfig.defaults,
+    TextScaler textScaler = TextScaler.noScaling,
+  })  : _document = document,
+        _baseStyle = baseStyle,
+        _imageLoader = imageLoader,
+        _selectable = selectable,
+        _textDirection = textDirection,
+        _selectionColor = selectionColor,
+        _config = config,
+        _textScaler = textScaler;
+
+  // ============================================
+  // Properties
+  // ============================================
+
+  DocumentNode? get document => _document;
+  set document(DocumentNode? value) {
+    if (_document == value) return;
+    _document = value;
+    _invalidateLayout();
+    // Trigger image loading when a document arrives after initial attach.
+    // Required for the async-parse path: attach() fires _loadImages() while
+    // _document is still null; when the parsed document arrives via
+    // updateRenderObject we must retry so images are actually queued.
+    if (attached) _loadImages();
+    markNeedsLayout();
+  }
+
+  TextStyle get baseStyle => _baseStyle;
+  set baseStyle(TextStyle value) {
+    if (_baseStyle == value) return;
+    _baseStyle = value;
+    _invalidateLayout();
+    markNeedsLayout();
+  }
+
+  /// System/host text scaling (accessibility "large text" setting) applied to
+  /// every measured/painted text fragment — WCAG 2.1 AA §1.4.4 (Resize Text).
+  /// Sourced from `MediaQuery.textScalerOf(context)` by [HyperRenderWidget],
+  /// or a caller-supplied override. Defaults to [TextScaler.noScaling].
+  TextScaler get textScaler => _textScaler;
+  set textScaler(TextScaler value) {
+    if (_textScaler == value) return;
+    _textScaler = value;
+    // Must _invalidateLayout() (not a bare markNeedsLayout): a scaler-only
+    // change leaves _fragmentsVersion / _maxWidth untouched, so performLayout
+    // would otherwise skip _measureFragments()/_performLineLayout() and text
+    // would keep its old size. _invalidateLayout() also clears the intrinsic-
+    // width caches, which likewise depend on the measured glyph sizes.
+    _invalidateLayout();
+    markNeedsLayout();
+  }
+
+  HyperRenderConfig get config => _config;
+  set config(HyperRenderConfig value) {
+    if (_config == value) return;
+    _config = value;
+    // TextPainter cache size cannot be changed on an existing LRU instance
+    // (the late-final field is already initialized). Changing cache size
+    // requires a full layout invalidation so the cache is rebuilt next frame.
+    markNeedsLayout();
+  }
+
+  HyperImageLoader? get imageLoader => _imageLoader;
+  set imageLoader(HyperImageLoader? value) {
+    if (_imageLoader == value) return;
+    _imageLoader = value;
+    // Dispose GPU resources before clearing, then re-trigger loading with the
+    // new loader so images are not left in a permanent "loading" state after
+    // the loader is swapped at runtime.
+    _disposeImages();
+    if (attached) _loadImages();
+    markNeedsLayout();
+  }
+
+  bool get selectable => _selectable;
+  set selectable(bool value) {
+    if (_selectable == value) return;
+    _selectable = value;
+    if (!value) {
+      _selection = null;
+    }
+    markNeedsPaint();
+  }
+
+  /// Total character count in this render box (available after first layout).
+  /// Used by VirtualizedSelectionController to register chunk sizes.
+  int get totalCharacterCount => _totalCharacterCount;
+
+  /// Public wrapper for the private _getCharacterPositionAtOffset.
+  /// Used by VirtualizedSelectionController to map a pointer position to a
+  /// char offset within this chunk.
+  int getCharacterPositionAtOffset(Offset localPosition) =>
+      _getCharacterPositionAtOffset(localPosition);
+
+  HyperTextSelection? get selection => _selection;
+  set selection(HyperTextSelection? value) {
+    if (_selection == value) return;
+    _selection = value;
+    markNeedsPaint();
+    _notifySelectionChanged();
+  }
+
+  TextDirection get textDirection => _textDirection;
+  set textDirection(TextDirection value) {
+    if (_textDirection == value) return;
+    _textDirection = value;
+    _invalidateLayout();
+    markNeedsLayout();
+  }
+
+  Color? get selectionColor => _selectionColor;
+  set selectionColor(Color? value) {
+    if (_selectionColor == value) return;
+    _selectionColor = value;
+    markNeedsPaint();
+  }
+
+  /// Whether the text direction is right-to-left
+  bool get isRTL => _textDirection == TextDirection.rtl;
+
+  // ============================================
+  // RenderBox Setup
+  // ============================================
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! HyperBoxParentData) {
+      child.parentData = HyperBoxParentData();
+    }
+  }
+
+  @override
+  void attach(PipelineOwner owner) {
+    super.attach(owner);
+    // Load images when attached
+    _loadImages();
+    if (kDebugMode) {
+      HyperRenderDebugHooks.onRendererAttached?.call(_debugId, () => _document);
+      // detach() makes DevTools forget this renderer's selection; force the
+      // next paint to re-report it if the box comes back still selected
+      // (keep-alive / reparenting). An unselected box needs no report:
+      // "no entry" already reads as no selection.
+      if (_selection != null) _debugReportedSelection = (null, -1);
+    }
+  }
+
+  @override
+  void detach() {
+    if (kDebugMode) {
+      HyperRenderDebugHooks.onRendererDetached?.call(_debugId);
+    }
+    // Cancel the shimmer loop and reset its epoch. Without this, a
+    // ListView item that detaches mid-shimmer (scrolled out of cache) and
+    // later re-attaches keeps a stale _shimmerEpoch from the previous mount,
+    // producing a wrong initial phase (visible 1-frame jump) until the
+    // periodic modulo recovers.
+    if (_shimmerCallbackId != null) {
+      SchedulerBinding.instance.cancelFrameCallbackWithId(_shimmerCallbackId!);
+      _shimmerCallbackId = null;
+    }
+    _shimmerEpoch = null;
+    // Same reasoning as the shimmer reset above: drop in-flight block
+    // animation progress on detach so a ListView item that scrolls back into
+    // view restarts its animations from zero instead of jumping to wherever
+    // an unbounded accumulated elapsed time would place them.
+    _cancelBlockAnimationLoop();
+    _blockAnimations.clear();
+    _animatedAncestorCache.clear();
+    super.detach();
+  }
+
+  @override
+  void dispose() {
+    _relativeClipLayer.layer = null;
+    // Cancel pending shimmer frame callback to prevent callbacks on a disposed
+    // RenderObject. SchedulerBinding.cancelFrameCallbackWithId is safe to call
+    // with an id that has already fired (it's a no-op in that case).
+    if (_shimmerCallbackId != null) {
+      SchedulerBinding.instance.cancelFrameCallbackWithId(_shimmerCallbackId!);
+      _shimmerCallbackId = null;
+    }
+    _cancelBlockAnimationLoop();
+    _disposeImages();
+    _scratchCandidatePainter?.dispose();
+    _scratchCandidatePainter = null;
+    // Do NOT call detach() on cached semantic anchor nodes here.
+    // Flutter's semantics teardown already detaches them during widget
+    // unmounting — calling detach() again asserts inside SemanticsOwner
+    // that the node is still in _nodes, which it no longer is.
+    _cachedSemanticAnchorNodes.clear();
+    super.dispose();
+  }
+
+  /// Releases in-memory caches without destroying the render object.
+  ///
+  /// Call this when the system signals low memory (e.g. from
+  /// [WidgetsBindingObserver.didHaveMemoryPressure]). TextPainters are
+  /// disposed; image cache is dropped AND re-queued so visible images
+  /// reload through the LazyImageQueue priority pipeline.
+  ///
+  /// Without the re-queue step, [_loadImages] would never run again for
+  /// this RenderObject (it's only called from [attach], [set document],
+  /// and [set imageLoader]) — leaving every on-screen image stuck in the
+  /// empty-placeholder state until the user scrolls the section out and
+  /// back into view to force a detach+attach cycle.
+  ///
+  /// ```dart
+  /// // In your State:
+  /// @override
+  /// void didHaveMemoryPressure() {
+  ///   (context.findRenderObject() as RenderHyperBox?)?.clearMemoryCaches();
+  /// }
+  /// ```
+  void clearMemoryCaches() {
+    _disposeTextPainters();
+    _disposeImages();
+    // Re-queue image loads: cache was just cleared, so containsKey() is false
+    // for every src and _loadImages() will re-enqueue them. The LRU bound and
+    // concurrency cap on LazyImageQueue prevent re-OOMing on memory-pressed
+    // devices. Only run when attached — _loadImages() assumes a live RO.
+    if (attached) _loadImages();
+    markNeedsLayout(); // Re-measure text after cache clear
+  }
+
+  void _disposeTextPainters() {
+    // LRU cache will call dispose on each painter via onEvict callback
+    _textPainters.clear();
+  }
+
+  void _disposeImages() {
+    // Cancel all pending/in-flight subscriptions so callbacks are not invoked
+    // on this (now-disposing) RenderBox. For in-flight loads the queue will
+    // dispose the ui.Image itself if no other subscribers remain.
+    for (final token in _imageTokens) {
+      LazyImageQueue.instance.cancel(token);
+    }
+    _imageTokens.clear();
+
+    // _LruCache.clear() calls onEvict on every entry; the onEvict callback
+    // calls ci.image?.dispose() to free GPU textures (Dart GC alone cannot
+    // release native GPU memory — only ui.Image.dispose() does that).
+    _imageCache.clear();
+  }
+
+  void _invalidateLayout() {
+    _fragments.clear();
+    _hasDetailFragments = false;
+    _lines.clear();
+    _linesFragmentsVersion = -1;
+    _leftFloats.clear();
+    _rightFloats.clear();
+    _inlineDecorations.clear();
+    _blockDecorations.clear();
+    _lineStartOffsets.clear();
+    _fragmentChildMap.clear();
+
+    anchorOffsets.clear();
+    headingAnchors.clear();
+    _totalCharacterCount = 0;
+    _cachedMinIntrinsicWidth = null;
+    _cachedMaxIntrinsicWidth = null;
+    _disposeTextPainters();
+  }
+
+  /// Lighter invalidation that preserves the text painter cache.
+  ///
+  /// Called when image dimensions change: fragments must be re-tokenized
+  /// so [_tokenizeAtomic] reads the new image size, but text measurements
+  /// are still valid and can be reused.
+  void _invalidateFragments() {
+    _fragments.clear();
+    _lines.clear();
+    _linesFragmentsVersion = -1;
+    _leftFloats.clear();
+    _rightFloats.clear();
+    _inlineDecorations.clear();
+    _blockDecorations.clear();
+    _lineStartOffsets.clear();
+    _totalCharacterCount = 0;
+    _cachedMinIntrinsicWidth = null;
+    _cachedMaxIntrinsicWidth = null;
+    // _textPainters intentionally preserved: text metrics are unaffected
+    // by image dimension changes.
+  }
+
+  void _notifySelectionChanged() {
+    // Guard with attached check: selection events can fire during the dispose
+    // sequence (e.g., a pointer gesture that completes after the widget is
+    // removed from the tree). Calling onSelectionChanged after detach can
+    // invoke state on a disposed widget.
+    if (!attached) return;
+    onSelectionChanged?.call();
+  }
+
+  // ============================================
+  // Shimmer Animation
+  // ============================================
+  //
+  // NOTE — Architectural choice:
+  // We drive the shimmer with [SchedulerBinding.scheduleFrameCallback]
+  // instead of an [AnimationController] + [TickerProvider]. Pros: zero API
+  // surface — `RenderHyperBox` stays self-contained and doesn't force every
+  // caller to provide a TickerProvider. Cons: render objects driving their
+  // own frame loop is non-idiomatic.
+  //
+  // Lifecycle correctness is ensured by:
+  //   • [dispose]: cancels the pending callback id
+  //   • [detach]: cancels callback + resets [_shimmerEpoch] for clean re-attach
+  //   • Flutter's scheduler auto-pauses when [AppLifecycleState] != resumed,
+  //     so background apps don't burn CPU.
+  //
+  // If shimmer state issues appear in production (visible phase jumps,
+  // lingering CPU after detach), the proper refactor is to add a
+  // `vsync: TickerProvider` to [HyperRenderWidget] and drive shimmer
+  // through a real [AnimationController]. That refactor is API-breaking
+  // and was deemed too risky for v1.3.2 (1646 tests + many call sites).
+
+  /// Starts the per-frame shimmer loop if not already running.
+  /// Safe to call repeatedly — no-ops when already scheduled.
+  void _ensureShimmerRunning() {
+    if (_shimmerCallbackId != null) return;
+    _shimmerCallbackId =
+        SchedulerBinding.instance.scheduleFrameCallback(_onShimmerTick);
+  }
+
+  void _onShimmerTick(Duration timestamp) {
+    _shimmerCallbackId = null;
+    if (!attached) return;
+
+    // Record start time on first tick.
+    _shimmerEpoch ??= timestamp;
+
+    final hasLoading =
+        _imageCache.values.any((c) => c.state == ImageLoadState.loading);
+    if (hasLoading) {
+      markNeedsPaint();
+      // Schedule the next frame to keep the animation going.
+      _shimmerCallbackId =
+          SchedulerBinding.instance.scheduleFrameCallback(_onShimmerTick);
+    } else {
+      // No more loading images — stop the loop and reset epoch.
+      _shimmerEpoch = null;
+    }
+  }
+
+  // ============================================
+  // Image Loading
+  // ============================================
+
+  void _loadImages() {
+    if (_document == null) return;
+
+    // Collect images with their approximate document y-position for priority.
+    final images = <({String src, int priority})>[];
+
+    _document!.traverse((node) {
+      if (node is AtomicNode && node.tagName == 'img') {
+        final src = node.src;
+        if (src != null && src.isNotEmpty && !_imageCache.containsKey(src)) {
+          // Use the fragment's y-position as priority (top = 0 = highest).
+          // Before layout, fall back to document order (index in list).
+          final yPos = _findFragmentY(node);
+          images.add((src: src, priority: yPos));
+        }
+      }
+    });
+
+    for (final img in images) {
+      _loadImage(img.src, priority: img.priority);
+    }
+  }
+
+  /// Returns the y-pixel offset of the first fragment belonging to [node],
+  /// or a large value if not yet laid out (loads after visible images).
+  int _findFragmentY(AtomicNode node) {
+    for (final line in _lines) {
+      for (final frag in line.fragments) {
+        if (frag.sourceNode == node) {
+          return line.top.toInt();
+        }
+      }
+    }
+    return 999999; // not laid out yet — lowest priority
+  }
+
+  void _loadImage(String src, {int priority = 999999}) {
+    _imageCache.put(src, const CachedImage(state: ImageLoadState.loading));
+    // Start the shimmer animation loop as soon as the first image starts loading.
+    if (attached) _ensureShimmerRunning();
+
+    final loader = _imageLoader ?? defaultImageLoader;
+
+    // Use a nullable `pendingToken` rather than `late final` because the loader
+    // may call onLoad **synchronously** (e.g. image already in Flutter's cache).
+    // When that happens enqueue() hasn't returned yet, so pendingToken == null:
+    //   • remove(null) is a no-op — correct, token not in _imageTokens yet.
+    //   • callbackCompleted is set to true so we skip _imageTokens.add below.
+    // Without the flag the token would be added AFTER the callback already ran,
+    // leaving a stale entry in _imageTokens that cancel() can never clean up.
+    int? pendingToken;
+    bool callbackCompleted = false;
+
+    final token = LazyImageQueue.instance.enqueue(
+      url: src,
+      priority: priority,
+      loader: loader,
+      onLoad: (ui.Image image) {
+        if (!attached) {
+          // Safety net: token should have been cancelled by _disposeImages(),
+          // but guard here in case of unusual teardown ordering.
+          // Each callback receives its own clone from the queue, so disposing
+          // here does not affect other viewers sharing the same URL.
+          image.dispose();
+          return;
+        }
+        callbackCompleted = true;
+        _imageTokens.remove(pendingToken);
+        _imageCache.put(
+            src,
+            CachedImage(
+              image: image,
+              state: ImageLoadState.loaded,
+            ));
+        // Invalidate fragments so _tokenizeAtomic re-reads actual image
+        // dimensions. Preserves text painter cache (text metrics unchanged).
+        _invalidateFragments();
+        markNeedsLayout();
+        markNeedsPaint();
+      },
+      onError: (Object error) {
+        if (!attached) return;
+        callbackCompleted = true;
+        _imageTokens.remove(pendingToken);
+        _imageCache.put(
+            src,
+            CachedImage(
+              state: ImageLoadState.error,
+              error: error.toString(),
+            ));
+        markNeedsPaint();
+      },
+    );
+    pendingToken = token;
+    // Only track the token when the callback hasn't already fired synchronously.
+    // If it fired sync, the image is already in _imageCache and the token has
+    // been removed from LazyImageQueue._tokenToUrl — cancel() would be a no-op,
+    // so there is nothing to track.
+    if (!callbackCompleted) {
+      _imageTokens.add(token);
+    }
+  }
+
+  // ============================================
+  // Intrinsic Dimensions
+  // ============================================
+
+  @override
+  double computeMinIntrinsicWidth(double height) {
+    if (_document == null) return 0;
+
+    // Use cached value if available
+    if (_cachedMinIntrinsicWidth != null) {
+      return _cachedMinIntrinsicWidth!;
+    }
+
+    _ensureFragments();
+    double maxWidth = 0;
+
+    // ── O(F) strategy — one TextPainter call per text fragment ──────────────
+    //
+    // Previously this was O(W) — one layout call per word across the entire
+    // document.  For a 3000-word article that means ~3000 TextPainter.layout()
+    // calls synchronously on the main thread, causing 200–400 ms jank when the
+    // widget is wrapped in IntrinsicWidth or DataTable.
+    //
+    // Key insight: the longest *measured* word is almost always the longest
+    // *character-count* word.  The only edge case is a short wide-glyph run
+    // ("WWW") vs a long narrow-glyph run ("iiiiiiiii"), which is negligible
+    // for real prose.  By picking only the longest-by-char-count word per
+    // fragment we reduce TextPainter calls from O(totalWords) to O(fragments).
+    //
+    // Two painters — one per text direction — are reused across all fragments
+    // to avoid repeated native-object allocation.  They are NOT stored in
+    // _textPainters so per-word spans don't pollute the LRU cache.
+    final ltrPainter = TextPainter(
+        textDirection: ui.TextDirection.ltr, textScaler: _textScaler);
+    final rtlPainter = TextPainter(
+        textDirection: ui.TextDirection.rtl, textScaler: _textScaler);
+
+    for (final fragment in _fragments) {
+      if (fragment.type == FragmentType.text && fragment.text != null) {
+        final text = fragment.text!;
+        String longestWord = '';
+
+        if (KinsokuProcessor.containsCjk(text)) {
+          // CJK characters can break anywhere. The minimum intrinsic width is
+          // the width of the widest single character, or the longest non-CJK word.
+          final words = text.split(_kWhitespaceSplitter);
+          for (final w in words) {
+            if (KinsokuProcessor.containsCjk(w)) {
+              if (longestWord.isEmpty && w.isNotEmpty) {
+                longestWord = w[0];
+              }
+              // Extract the longest non-CJK sequence including punctuation and fullwidth forms
+              final nonCjkParts = w.split(RegExp(
+                  r'[\u4E00-\u9FFF\u3000-\u303F\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7A3\uFF00-\uFFEF]'));
+              for (final part in nonCjkParts) {
+                if (part.length > longestWord.length) longestWord = part;
+              }
+            } else {
+              if (w.length > longestWord.length) longestWord = w;
+            }
+          }
+          if (longestWord.isEmpty && text.isNotEmpty) {
+            longestWord = text[0]; // fallback
+          }
+        } else {
+          final words = text.split(_kWhitespaceSplitter);
+          for (final w in words) {
+            if (w.length > longestWord.length) longestWord = w;
+          }
+        }
+
+        if (longestWord.isEmpty) continue;
+
+        final isRtl = fragment.style.isRtl;
+        final measurePainter = isRtl ? rtlPainter : ltrPainter;
+        final mergedStyle = _baseStyle.merge(fragment.style.toTextStyle());
+
+        // Wide-glyph guard: icon fonts (Material Icons, Font Awesome) use the
+        // Unicode PUA block U+E000–U+F8FF, where a single code point renders
+        // ~3× wider than a typical Latin glyph. Emoji (U+1F000+) and CJK
+        // symbols (U+2E80+) likewise break the "longest char-count word ≈
+        // longest measured word" heuristic. For these we measure the FULL
+        // fragment text so IntrinsicWidth doesn't clip them.
+        String candidate = longestWord;
+        if (_containsWideGlyph(text) && text.length < 200) {
+          candidate = text;
+        }
+
+        measurePainter.text = TextSpan(text: candidate, style: mergedStyle);
+        measurePainter.layout();
+        if (kDebugMode) HyperRenderDebugHooks.onTextPainterLayout?.call();
+        if (measurePainter.width > maxWidth) {
+          maxWidth = measurePainter.width;
+        }
+      } else if (fragment.type == FragmentType.atomic ||
+          fragment.type == FragmentType.ruby) {
+        // Ensure fragment is measured if it hasn't been already
+        if (fragment.measuredSize == null) _measureFragment(fragment);
+        // Guard against negative/NaN widths (e.g. unloaded image or ZWJ glyph
+        // before its font is ready).
+        final w = fragment.width;
+        if (w.isFinite && w > maxWidth) {
+          maxWidth = w;
+        }
+      }
+    }
+
+    ltrPainter.dispose();
+    rtlPainter.dispose();
+
+    _cachedMinIntrinsicWidth = maxWidth;
+    return maxWidth;
+  }
+
+  @override
+  double computeMaxIntrinsicWidth(double height) {
+    if (_document == null) return 0;
+
+    // Use cached value if available
+    if (_cachedMaxIntrinsicWidth != null) {
+      return _cachedMaxIntrinsicWidth!;
+    }
+
+    _ensureFragments();
+    _measureFragments(); // Ensures all fragments have a measured size.
+
+    // Walk fragments and track the width of each "logical line" (reset at block
+    // boundaries and explicit line breaks).  Return the widest such line.
+    // Summing all widths (the previous approach) produced values orders of
+    // magnitude too large for documents with many paragraphs.
+    double maxWidth = 0;
+    double lineWidth = 0;
+    // Horizontal padding and margins of the open blocks. Layout takes these off
+    // the line, so a host sizing to this width must leave room for them.
+    final insets = <(UDTNode, double)>[];
+
+    void flushLine() {
+      final total = lineWidth > 0
+          ? lineWidth + (insets.isEmpty ? 0 : insets.last.$2)
+          : 0.0;
+      if (total > maxWidth) maxWidth = total;
+      lineWidth = 0;
+    }
+
+    for (final fragment in _fragments) {
+      if (fragment is _BlockStartFragment) {
+        flushLine();
+        final margin = fragment.appliesHorizontalMargins
+            ? fragment.style.margin.left + fragment.style.margin.right
+            : 0.0;
+        final own = fragment.paddingLeft + fragment.paddingRight + margin;
+        insets.add((
+          fragment.sourceNode,
+          math.max(0.0, (insets.isEmpty ? 0.0 : insets.last.$2) + own),
+        ));
+      } else if (fragment is _BlockEndFragment) {
+        flushLine();
+        // A first block may have skipped its start fragment, so check the owner.
+        if (insets.isNotEmpty && insets.last.$1 == fragment.sourceNode) {
+          insets.removeLast();
+        }
+      } else if (fragment.type == FragmentType.lineBreak) {
+        flushLine();
+      } else if (fragment.type == FragmentType.text ||
+          fragment.type == FragmentType.atomic ||
+          fragment.type == FragmentType.ruby) {
+        // Guard against negative or NaN widths that can arise when a ZWJ
+        // sequence is measured before its font is loaded, or when an atomic
+        // fragment has not yet received its intrinsic size from the image
+        // decoder.  Such values would produce garbage (negative) results that
+        // confuse IntrinsicWidth parents and trigger assertion failures.
+        final w = fragment.width;
+        if (w.isFinite && w > 0) lineWidth += w;
+      }
+    }
+    flushLine(); // flush any trailing line
+
+    _cachedMaxIntrinsicWidth = maxWidth;
+    return maxWidth;
+  }
+
+  @override
+  double computeMinIntrinsicHeight(double width) {
+    return _computeHeightForWidth(width);
+  }
+
+  @override
+  double computeMaxIntrinsicHeight(double width) {
+    return _computeHeightForWidth(width);
+  }
+
+  double _computeHeightForWidth(double width) {
+    if (_document == null) return 0;
+
+    // Same unbounded-constraint guard as performLayout: callers that pass
+    // double.infinity (intrinsic queries from unbounded parents) would
+    // propagate infinity into flex child layout and trip an assertion.
+    _maxWidth = width.isFinite ? width : _kUnboundedWidthFallback;
+    _ensureFragments();
+    _performLineLayout(intrinsicMode: true);
+
+    final result = _lines.isEmpty ? 0.0 : _lines.last.top + _lines.last.height;
+
+    // Invalidate the layout-version cache so that the next performLayout()
+    // always re-runs _performLineLayout at the real constraint width.
+    // Without this, _performLineLayout overwrites _lines at the intrinsic
+    // width but leaves _linesMaxWidth / _linesFragmentsVersion pointing at
+    // that intrinsic run.  If the real constraint width happens to equal the
+    // intrinsic width, performLayout() sees "already up-to-date" and skips
+    // the full layout — leaving _lines built in intrinsicMode (no child
+    // layout calls), which causes all child widgets to be mispositioned.
+    _linesMaxWidth = double.nan;
+    _linesFragmentsVersion = -1;
+
+    return result;
+  }
+
+  // ============================================
+  // Layout
+  // ============================================
+
+  @override
+  void performLayout() {
+    final onTiming = kDebugMode ? HyperRenderDebugHooks.onFrameTiming : null;
+    if (onTiming == null) {
+      _performLayout();
+      return;
+    }
+    final sw = Stopwatch()..start();
+    _performLayout();
+    onTiming(_debugId, 'layout', sw.elapsedMicroseconds);
+  }
+
+  void _performLayout() {
+    if (_document == null) {
+      size = constraints.smallest;
+      return;
+    }
+
+    // Sync canvas-painted block animation state before the rest of layout.
+    // Cheap (one tree walk) and only runs here, not on every animation-driven
+    // paint frame — see render_hyper_box_animation.dart.
+    _rebuildBlockAnimations();
+
+    try {
+      // Unbounded horizontal constraints (e.g. inside a horizontal
+      // SingleChildScrollView, an unconstrained Row, or an
+      // IntrinsicWidth that defers to maxWidth) would propagate
+      // double.infinity into child layouts — notably _FlexFragment.layout
+      // which fails the `minWidth < double.infinity` assertion. Fall back
+      // to a finite width so downstream measurement stays well-defined.
+      _maxWidth = constraints.maxWidth.isFinite
+          ? constraints.maxWidth
+          : _kUnboundedWidthFallback;
+
+      // Step 1: Tokenization — rebuilds only if _fragments was cleared.
+      _ensureFragments();
+
+      // Step 1.5: Link children to fragments, then immediately build the O(1)
+      // lookup map so that _performLineLayout (Step 3) can call
+      // _findChildForFragment in O(1) rather than falling through to the O(M)
+      // linear scan.  Without the early _buildFragmentChildMap() call the map
+      // was empty until _layoutChildren (Step 7) finished, causing every flex/
+      // table/image lookup during line layout to scan the full child list.
+      _linkFragmentsToChildrenByOrder();
+      _buildFragmentChildMap();
+
+      // Step 1.7: For inline-plugin fragments the widget size is unknown at
+      // tokenization time.  Now that children are linked we can query each
+      // child's intrinsic dimensions and store them on the fragment so that
+      // Step 2 (_measureFragments) skips them (measuredSize != null).
+      if (_inlinePluginTags.isNotEmpty) {
+        _measureInlinePluginFragments();
+      }
+
+      // Steps 2–6: Measure + line layout.
+      // Run full line layout (including text measurement) only when document
+      // content or constraint width has changed.  A <details> expand/collapse
+      // only changes block heights — text fragments are untouched — so
+      // _measureFragments() can be skipped for those frames.
+      final bool fragmentsOrWidthChanged =
+          _linesFragmentsVersion != _fragmentsVersion ||
+              _linesMaxWidth != _maxWidth ||
+              _lines.isEmpty;
+      final bool hasDetailsFragments = _hasDetailFragments;
+
+      if (fragmentsOrWidthChanged) {
+        // Full rebuild: text or constraint width changed.
+        // Step 2: Measure all fragments
+        _measureFragments();
+
+        // Step 3: Line Breaking with Float Support
+        _performLineLayout();
+
+        // Step 4: Position fragments within lines (baseline alignment)
+        _positionFragments();
+
+        // Step 4.5: Apply position: relative, once line positions are final.
+        _applyRelativeOffsets();
+
+        // Step 5: Build inline decorations
+        _buildInlineDecorations();
+
+        // Step 6: Build character mapping for selection
+        _buildCharacterMapping();
+
+        _linesFragmentsVersion = _fragmentsVersion;
+        _linesMaxWidth = _maxWidth;
+      } else if (hasDetailsFragments) {
+        // A details child changed height (each animation frame during
+        // expand/collapse).  Re-run line layout to update block y-offsets, but
+        // skip _measureFragments() — TextPainter output is identical because
+        // text content and constraint width are both unchanged.
+        _performLineLayout();
+        _positionFragments();
+        _applyRelativeOffsets();
+        _buildInlineDecorations();
+        _buildCharacterMapping();
+      }
+
+      // Step 7: Layout child RenderBoxes (always — child constraints may change)
+      _layoutChildren();
+
+      // Precompute animated-block paint rects/fragment groups now that lines
+      // and decorations are current (no-op when nothing is animating).
+      _recomputeAnimatedBlockGeometry();
+
+      // Calculate final size
+      double height = 0;
+      if (_lines.isNotEmpty) {
+        final lastLine = _lines.last;
+        height = lastLine.top + lastLine.height;
+      }
+
+      // Block-level widgets (details, tables, code blocks, flex/grid containers)
+      // update currentY but don't push a line.  When the content consists
+      // ENTIRELY of such blocks _lines stays empty and height stays 0.
+      // Extend height from fragment offsets + sizes for these block types.
+      for (final fragment in _fragments) {
+        if (fragment is _DetailsFragment ||
+            fragment is _TableFragment ||
+            fragment is _CodeBlockFragment ||
+            fragment is _FlexFragment) {
+          final offset = fragment.offset;
+          final measured = fragment.measuredSize;
+          if (offset != null && measured != null) {
+            // In-flow position: `position: relative` must not change the height.
+            final flowY = offset.dy - (_displaced[fragment]?.dy ?? 0);
+            final bottom = flowY + measured.height + 4; // +4 = block margin
+            if (bottom > height) height = bottom;
+          }
+        }
+      }
+
+      // Extend height to include the full float so it is never visually clipped.
+      // NOTE — "wasted space" trade-off: when a float is taller than the text
+      // that flows alongside it, this produces empty whitespace to the side of
+      // the float's lower portion.  In a true browser (no chunking) subsequent
+      // paragraphs would fill that space.  Here they can't because they live in
+      // a different RenderHyperBox chunk.  The HtmlAdapter._containsFloatChild
+      // heuristic reduces the occurrence by keeping float-bearing blocks and
+      // their immediate successors in the same chunk.  A full cross-chunk
+      // FloatCarryover (image-split across ListView items) is tracked as a
+      // future improvement in ROADMAP.md.
+      for (final float in _leftFloats) {
+        if (float.rect.bottom > height) {
+          height = float.rect.bottom;
+        }
+      }
+      for (final float in _rightFloats) {
+        if (float.rect.bottom > height) {
+          height = float.rect.bottom;
+        }
+      }
+
+      size = constraints.constrain(Size(_maxWidth, height));
+
+      // Notify anchor/TOC consumers after layout is complete.
+      if (onAnchorLayout != null &&
+          (anchorOffsets.isNotEmpty || headingAnchors.isNotEmpty)) {
+        onAnchorLayout!(
+          Map.unmodifiable(anchorOffsets),
+          List.unmodifiable(headingAnchors),
+        );
+      }
+
+      // Notify float-carryover consumer so the next virtualized section can
+      // seed its float insets and avoid text overflowing a dangling float.
+      final carryover = onFloatCarryover;
+      if (carryover != null) {
+        carryover(danglingFloats);
+      }
+
+      // Notify DevTools of layout completion (debug mode only, no-op if no
+      // listener is registered — HyperRenderDebugHooks.onLayoutComplete is
+      // null in release builds and when devtools is not initialised).
+      if (kDebugMode) {
+        HyperRenderDebugHooks.onLayoutComplete?.call(
+          _debugId,
+          debugFragments,
+          debugLines,
+        );
+      }
+    } catch (e, stack) {
+      FlutterError.reportError(FlutterErrorDetails(
+        exception: e,
+        stack: stack,
+        library: 'HyperRender',
+        context: ErrorDescription('during performLayout() in RenderHyperBox'),
+      ));
+      // In debug mode rethrow so layout bugs surface immediately rather than
+      // being silently swallowed behind a zero-height box.
+      if (kDebugMode) rethrow;
+      size = constraints.constrain(Size(constraints.maxWidth, 0));
+    }
+  }
+
+  // ============================================
+  // Painting
+  // ============================================
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    if (!kDebugMode) {
+      _paint(context, offset);
+      return;
+    }
+    final onTiming = HyperRenderDebugHooks.onFrameTiming;
+    final sw = onTiming == null ? null : (Stopwatch()..start());
+    _paint(context, offset);
+    if (onTiming != null) onTiming(_debugId, 'paint', sw!.elapsedMicroseconds);
+    _debugReportSelection();
+  }
+
+  /// Last selection pushed to [HyperRenderDebugHooks.onSelectionChanged].
+  /// Every selection change repaints, so checking here catches them all
+  /// without touching each of the selection setters.
+  (int?, int?) _debugReportedSelection = (null, null);
+
+  void _debugReportSelection() {
+    final onSelection = HyperRenderDebugHooks.onSelectionChanged;
+    if (onSelection == null) return;
+    final sel = _selection;
+    final current = (sel?.start, sel?.end);
+    if (current == _debugReportedSelection) return;
+    _debugReportedSelection = current;
+    onSelection(_debugId, current.$1, current.$2);
+  }
+
+  void _paint(PaintingContext context, Offset offset) {
+    try {
+      _paintedThisFrameByAnimation.clear();
+      _paintPass(context, offset, moved: false);
+
+      // `position: relative` content goes last, which stacks it above normal
+      // content as in CSS, and in its own clip. It can be moved anywhere and the
+      // sanitizer doesn't filter CSS properties, so untrusted HTML must not be
+      // able to draw over the host app. Content outside this box isn't
+      // hit-testable either, so what's visible stays what's tappable. Normal
+      // content stays unclipped: one moved span mustn't crop a box-shadow
+      // elsewhere in the document.
+      if (_hasMovedContent) {
+        _relativeClipLayer.layer = context.pushClipRect(
+          needsCompositing,
+          offset,
+          Offset.zero & size,
+          (context, offset) => _paintPass(context, offset, moved: true),
+          oldLayer: _relativeClipLayer.layer,
+        );
+      } else {
+        _relativeClipLayer.layer = null;
+      }
+
+      // Debug bounds overlay (only when debugShowBounds is true)
+      if (debugShowBounds) {
+        _paintDebugBounds(context.canvas, offset);
+      }
+    } catch (e, stack) {
+      // Error boundary: prevent full app crash, but report to Flutter framework
+      // so Crashlytics / Sentry / FlutterError.onError can capture it.
+      FlutterError.reportError(FlutterErrorDetails(
+        exception: e,
+        stack: stack,
+        library: 'HyperRender',
+        context: ErrorDescription('during paint() in RenderHyperBox'),
+      ));
+
+      // Fallback: Paint error indicator (red box) to show something went wrong
+      final paint = Paint()
+        ..color = const Color(0x33FF0000) // Semi-transparent red
+        ..style = PaintingStyle.fill
+        ..isAntiAlias = true;
+      context.canvas.drawRect(offset & size, paint);
+
+      // Draw error text
+      final textPainter = TextPainter(
+        text: const TextSpan(
+          text: '⚠ Render Error',
+          style: TextStyle(color: Color(0xFFFF0000), fontSize: 12),
+        ),
+        textDirection: ui.TextDirection.ltr,
+      );
+      textPainter.layout();
+      textPainter.paint(context.canvas, offset + const Offset(8, 8));
+      textPainter.dispose(); // dispose to free native Skia/Impeller resources
+    }
+  }
+
+  // ============================================
+  // Hit Testing & Selection
+  // ============================================
+
+  @override
+  bool hitTestSelf(Offset position) => true;
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    // Custom hit test that skips children without valid size
+    RenderBox? child = lastChild;
+    while (child != null) {
+      final childParentData = child.parentData as HyperBoxParentData;
+
+      // Skip children that don't have a valid size
+      if (!child.hasSize) {
+        child = childParentData.previousSibling;
+        continue;
+      }
+
+      final bool isHit = result.addWithPaintOffset(
+        offset: childParentData.offset,
+        position: position,
+        hitTest: (BoxHitTestResult result, Offset transformed) {
+          return child!.hitTest(result, position: transformed);
+        },
+      );
+
+      if (isHit) {
+        return true;
+      }
+
+      child = childParentData.previousSibling;
+    }
+    return false;
+  }
+
+  // ── Public selection API (driven by widget-layer gesture recognizers) ─────────
+  //
+  // Selection is no longer tracked via raw PointerMove events in handleEvent
+  // because handleEvent bypasses the gesture arena — it fired during parent
+  // ScrollView scrolls, creating unwanted selections on every scroll attempt.
+  //
+  // Instead, HyperSelectionOverlay / VirtualizedChunk use a
+  // LongPressGestureRecognizer (arena-based) so the OS correctly arbitrates:
+  //   • quick touch + move  → scroll wins, long-press cancelled → no selection
+  //   • hold 500 ms + drag  → long-press wins, scroll frozen    → selection
+  //
+  // These two methods are the only entry points for selection from gestures.
+
+  /// Anchors the selection at [localPosition].  Call from `onLongPressStart`.
+  void startSelectionAt(Offset localPosition) {
+    if (!_selectable) return;
+    final charPos = _getCharacterPositionAtOffset(localPosition);
+    if (charPos < 0) return;
+    _selectionStartPosition = charPos;
+    _selection = HyperTextSelection(start: charPos, end: charPos);
+    markNeedsPaint();
+  }
+
+  /// Extends the selection end to [localPosition].  Call from
+  /// `onLongPressMoveUpdate` and handle `onPanUpdate`.
+  void extendSelectionTo(Offset localPosition) {
+    if (!_selectable || _selectionStartPosition == null) return;
+    final charPos = _getCharacterPositionAtOffset(localPosition);
+    if (charPos < 0) return;
+    final start = math.min(_selectionStartPosition!, charPos);
+    final end = math.max(_selectionStartPosition!, charPos);
+    final hadSelection = _selection != null && !_selection!.isCollapsed;
+    _selection = HyperTextSelection(start: start, end: end);
+    if (!hadSelection && !_selection!.isCollapsed) {
+      HapticFeedback.selectionClick();
+    }
+    markNeedsPaint();
+  }
+
+  @override
+  void handleEvent(PointerEvent event, BoxHitTestEntry entry) {
+    if (event is PointerDownEvent) {
+      final position = event.localPosition;
+      _pointerDownPosition = position;
+      // Selection is now initiated via LongPressGestureRecognizer at the widget
+      // layer (see HyperSelectionOverlay / VirtualizedChunk).  Raw PointerDown
+      // no longer starts selection so that quick touch-moves go to the scroll
+      // view without accidentally extending selection.
+    } else if (event is PointerUpEvent) {
+      final upPosition = event.localPosition;
+      final downPosition = _pointerDownPosition;
+      _pointerDownPosition = null;
+      _selectionStartPosition = null;
+
+      // Fire link tap on PointerUp only when the finger hasn't moved (tap, not drag).
+      //
+      // Use Flutter's computeHitSlop() instead of a hardcoded pixel constant so
+      // the threshold automatically matches platform gesture physics:
+      //   - Mouse/trackpad: kPrecisePointerHitSlop  (1.0 px — very precise)
+      //   - Touch:          DeviceGestureSettings.touchSlop ?? kTouchSlop (18.0)
+      //   - Stylus:         same as touch by default
+      // A hardcoded 8.0 was too tight for some touch screens (missed taps) and
+      // too loose for mouse clicks (stray drags triggered taps).
+      final tapSlop = computeHitSlop(
+        event.kind,
+        // DeviceGestureSettings is only available via MediaQuery in widget
+        // context; pass null so computeHitSlop falls back to kTouchSlop (18 px)
+        // for touch/stylus and kPrecisePointerHitSlop (1 px) for mouse.
+        null,
+      );
+      // CRITICAL: when downPosition is null, the pointer-down did NOT happen
+      // inside this widget — the finger entered from outside the hit area
+      // (e.g. a swipe that crosses the widget boundary). Treating this as a
+      // tap would let an unintended lift-up trigger onLinkTap. Require BOTH
+      // a recorded down position AND a movement within tapSlop.
+      final isTap = downPosition != null &&
+          (upPosition - downPosition).distance < tapSlop;
+
+      if (isTap && onLinkTap != null) {
+        final clickedFragment = _findFragmentAtPosition(upPosition);
+        if (clickedFragment != null) {
+          // Walk up the UDT parent chain to find the nearest <a> ancestor.
+          // The fragment's sourceNode is always a TextNode or AtomicNode — it
+          // is never the InlineNode for <a> itself.
+          UDTNode? node = clickedFragment.sourceNode;
+          while (node != null) {
+            if (node.tagName == 'a') {
+              final href = node.attributes['href'];
+              if (href != null) {
+                // Scheme security: always block javascript:, data:, file: etc.
+                // The built-in safe set covers standard web links; apps can add
+                // their own deep-link schemes via HyperRenderConfig.extraLinkSchemes
+                // (e.g. 'myapp', 'shopee', 'fb', 'momo').
+                const builtinSchemes = {'http', 'https', 'mailto', 'tel'};
+                final scheme = Uri.tryParse(href)?.scheme.toLowerCase() ?? '';
+                final allowed = builtinSchemes.contains(scheme) ||
+                    _config.extraLinkSchemes.contains(scheme);
+                if (allowed) {
+                  onLinkTap!(href);
+                } else if (kDebugMode) {
+                  debugPrint(
+                    '[HyperRender] Blocked link tap — scheme "$scheme" not in '
+                    'built-in set or HyperRenderConfig.extraLinkSchemes: $href',
+                  );
+                }
+              }
+              break;
+            }
+            node = node.parent;
+          }
+        }
+      }
+
+      // Notify selection changed when user finishes drag-selection.
+      if (_selection != null && !_selection!.isCollapsed) {
+        _notifySelectionChanged();
+      }
+    }
+
+    super.handleEvent(event, entry);
+  }
+
+  // ============================================
+  // Accessibility (Semantics)
+  // ============================================
+
+  @override
+  void describeSemanticsConfiguration(SemanticsConfiguration config) {
+    super.describeSemanticsConfiguration(config);
+    config
+      ..isSemanticBoundary = true
+      ..label = _buildTextContentForSemantics()
+      ..textDirection = _textDirection;
+  }
+
+  @override
+  void assembleSemanticsNode(
+    SemanticsNode node,
+    SemanticsConfiguration config,
+    Iterable<SemanticsNode> children,
+  ) {
+    // Build semantic nodes for headings (h1–h6) and links (<a href>).
+    //
+    // These two element types are the primary WCAG 2.1 AA requirements for
+    // a read-only renderer:
+    //   • Headings: TalkBack/VoiceOver "swipe to next heading" navigation
+    //   • Links:    double-tap to activate via the accessibility service
+    //
+    // Regular paragraph text is announced via the flat `label` set in
+    // describeSemanticsConfiguration and does not need per-fragment nodes.
+    //
+    // We reuse the same SemanticsNode objects across calls (pooled in
+    // _cachedSemanticAnchorNodes) instead of creating new ones every frame.
+    // This mirrors the pattern used by Flutter's own RenderParagraph: newly
+    // created SemanticsNodes get parentDataDirty=true when adopted, which
+    // fires an assertion in flushSemantics() in debug mode.
+    final anchors = _collectSemanticAnchors();
+    final pool = List<SemanticsNode>.of(_cachedSemanticAnchorNodes);
+    final newCache = <SemanticsNode>[];
+
+    for (final anchor in anchors) {
+      // Reuse a pooled node when available; only allocate a new one if needed.
+      final semanticsNode =
+          pool.isNotEmpty ? pool.removeAt(0) : SemanticsNode();
+      newCache.add(semanticsNode);
+
+      final cfg = SemanticsConfiguration()
+        ..textDirection = _textDirection
+        ..label = anchor.label;
+
+      if (anchor.isHeading) {
+        cfg.isHeader = true;
+      } else if (anchor.isImage) {
+        // Image with alt text: informational node — no role flags, just label.
+        // Screen readers announce the label at the image's rect position so
+        // users can navigate element-by-element (WCAG 1.1.1).
+      } else {
+        cfg.isLink = true;
+        final href = anchor.href;
+        if (href != null && onLinkTap != null) {
+          cfg.onTap = () {
+            onLinkTap!(href);
+          };
+        }
+      }
+
+      semanticsNode
+        ..rect = anchor.rect
+        ..updateWith(config: cfg, childrenInInversePaintOrder: const []);
+    }
+
+    // Do NOT call detach() on surplus pool nodes: node.updateWith() below
+    // will call _replaceChildren, which calls _dropChild → detach() for any
+    // node not in the new childrenInInversePaintOrder list.  Calling detach()
+    // ourselves before updateWith() would leave them half-torn-down.
+    _cachedSemanticAnchorNodes
+      ..clear()
+      ..addAll(newCache);
+
+    node.updateWith(
+      config: config,
+      // Anchors first (painted below child widgets), then child RenderObjects
+      // (HyperDetailsWidget, HyperTable, CodeBlockWidget, etc.).
+      childrenInInversePaintOrder: [
+        ..._cachedSemanticAnchorNodes.reversed,
+        ...children,
+      ],
+    );
+  }
+
+  @override
+  bool get isRepaintBoundary => true;
+
+  // ============================================
+  // Debug / DevTools API
+  // ============================================
+
+  /// Serialize the current UDT document tree to JSON-compatible maps.
+  /// Used by the HyperRender DevTools extension.
+  List<Map<String, dynamic>> debugUdtTree() {
+    final doc = _document;
+    if (doc == null) return [];
+    return [_serializeNode(doc)];
+  }
+
+  /// Serialize current fragment list to JSON-compatible maps.
+  List<Map<String, dynamic>> debugFragments() {
+    return _fragments.map((f) {
+      return <String, dynamic>{
+        'type': f.type.name,
+        'text': f.text,
+        'width': f.measuredSize?.width,
+        'height': f.measuredSize?.height,
+        'offsetX': f.offset?.dx,
+        'offsetY': f.offset?.dy,
+        'nodeId': f.sourceNode.id,
+        'nodeTag': f.sourceNode.tagName,
+        'globalOffset': f.globalOffset,
+        'charLength': f.ellipsisVisibleLength ?? f.text?.length ?? 0,
+        if (f.rubyText != null) 'rubyText': f.rubyText,
+        if (f.rubyHeight != null) 'rubyHeight': f.rubyHeight,
+      };
+    }).toList();
+  }
+
+  /// Serialize current line list to JSON-compatible maps.
+  List<Map<String, dynamic>> debugLines() {
+    return _lines.map((l) {
+      return <String, dynamic>{
+        'fragmentCount': l.fragments.length,
+        'top': l.top,
+        'baseline': l.baseline,
+        'width': l.width,
+        'height': l.height,
+      };
+    }).toList();
+  }
+
+  /// Serialize the fragments of every laid-out line, in layout order.
+  ///
+  /// [debugFragments] reports the tokenizer output. When a text node wraps, the
+  /// pieces it was split into are new fragments that the layout positions but
+  /// never adds back to the tokenizer's list, so [debugFragments] reports the
+  /// original fragment — unpositioned — for text that was in fact laid out and
+  /// painted. This method walks the lines instead, so every entry carries the
+  /// position the renderer actually used and the [Fragment.globalOffset] that
+  /// the selection and IME character space already works in.
+  ///
+  /// Character ranges are non-contiguous by design. Whitespace trimmed at a
+  /// wrap belongs to no fragment, so a range may land in a gap and correctly
+  /// have no rect. Consumers must tolerate gaps rather than assume that one
+  /// fragment's `charEnd` is the next fragment's `charStart`.
+  ///
+  /// This also exposes [Fragment.ellipsisVisibleLength] separately from the
+  /// derived character length in [debugFragments], so consumers can tell how
+  /// much of a truncated fragment reached the screen.
+  List<Map<String, dynamic>> debugLineFragments() {
+    final result = <Map<String, dynamic>>[];
+    for (var lineIndex = 0; lineIndex < _lines.length; lineIndex++) {
+      final line = _lines[lineIndex];
+      for (final fragment in line.fragments) {
+        final rect = fragment.rect;
+        if (rect == null) continue;
+        final text = fragment.text;
+        final charLength =
+            fragment.ellipsisVisibleLength ?? (text?.length ?? 0);
+        result.add(<String, dynamic>{
+          'type': fragment.type.name,
+          'text': text,
+          'rubyText': fragment.rubyText,
+          'charStart': fragment.globalOffset,
+          'charEnd': fragment.globalOffset + charLength,
+          'ellipsisVisibleLength': fragment.ellipsisVisibleLength,
+          'lineIndex': lineIndex,
+          'lineTop': line.top,
+          'lineHeight': line.height,
+          'offsetX': rect.left,
+          'offsetY': rect.top,
+          'width': rect.width,
+          'height': rect.height,
+          'nodeId': fragment.sourceNode.id,
+          'nodeTag': fragment.sourceNode.tagName,
+        });
+      }
+    }
+    return result;
+  }
+
+  Map<String, dynamic> _serializeNode(UDTNode node) {
+    return {
+      'id': node.id,
+      'type': node.type.name,
+      'tagName': node.tagName,
+      'childCount': node.children.length,
+      'children': node.children.map(_serializeNode).toList(),
+    };
+  }
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties.add(IntProperty('fragmentCount', _fragments.length));
+    properties.add(IntProperty('lineCount', _lines.length));
+    properties.add(IntProperty('leftFloats', _leftFloats.length));
+    properties.add(IntProperty('rightFloats', _rightFloats.length));
+    properties.add(IntProperty('totalCharacters', _totalCharacterCount));
+    properties.add(DiagnosticsProperty('selection', _selection));
+  }
+
+  /// Returns true if [text] contains a code point that typically renders
+  /// significantly wider than a Latin glyph. Used by [computeMinIntrinsicWidth]
+  /// to fall back to whole-fragment measurement when "longest word by char
+  /// count" is unreliable.
+  ///
+  /// Ranges:
+  /// - U+E000–U+F8FF: Private Use Area (Material Icons, Font Awesome, etc.)
+  /// - U+1F000+: SMP emoji, mathematical/pictographic symbols
+  /// - U+2600–U+27BF: Miscellaneous Symbols & Dingbats
+  static bool _containsWideGlyph(String text) {
+    for (final r in text.runes) {
+      if (r >= 0xE000 && r <= 0xF8FF) return true;
+      if (r >= 0x2600 && r <= 0x27BF) return true;
+      if (r >= 0x1F000) return true;
+    }
+    return false;
+  }
+
+  BoxFit _getBoxFit(String? cssValue) {
+    if (cssValue == null) return BoxFit.cover;
+    switch (cssValue.toLowerCase().trim()) {
+      case 'contain':
+        return BoxFit.contain;
+      case 'fill':
+        return BoxFit.fill;
+      case 'none':
+        return BoxFit.none;
+      case 'scale-down':
+        return BoxFit.scaleDown;
+      case 'fit-width':
+        return BoxFit.fitWidth;
+      case 'fit-height':
+        return BoxFit.fitHeight;
+      case 'cover':
+      default:
+        return BoxFit.cover;
+    }
+  }
+
+  ImageRepeat _getImageRepeat(String? cssValue) {
+    switch (cssValue?.toLowerCase().trim()) {
+      case 'repeat-x':
+        return ImageRepeat.repeatX;
+      case 'repeat-y':
+        return ImageRepeat.repeatY;
+      case 'no-repeat':
+        return ImageRepeat.noRepeat;
+      case 'repeat':
+      case 'space':
+      case 'round':
+      default:
+        return ImageRepeat.repeat;
+    }
+  }
+
+  Alignment _getBackgroundAlignment(String? cssValue) {
+    if (cssValue == null) return Alignment.topLeft;
+    final v = cssValue.toLowerCase().trim();
+    switch (v) {
+      case 'center':
+        return Alignment.center;
+      case 'top':
+      case 'top center':
+      case 'center top':
+        return Alignment.topCenter;
+      case 'bottom':
+      case 'bottom center':
+      case 'center bottom':
+        return Alignment.bottomCenter;
+      case 'left':
+      case 'left center':
+      case 'center left':
+        return Alignment.centerLeft;
+      case 'right':
+      case 'right center':
+      case 'center right':
+        return Alignment.centerRight;
+      case 'top left':
+      case 'left top':
+        return Alignment.topLeft;
+      case 'top right':
+      case 'right top':
+        return Alignment.topRight;
+      case 'bottom left':
+      case 'left bottom':
+        return Alignment.bottomLeft;
+      case 'bottom right':
+      case 'right bottom':
+        return Alignment.bottomRight;
+      default:
+        return Alignment.topLeft;
+    }
+  }
+}

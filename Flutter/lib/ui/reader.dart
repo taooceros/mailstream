@@ -15,6 +15,9 @@ import 'format.dart';
 import 'glass.dart';
 import 'html_parts.dart';
 import 'mail_html_windows.dart';
+import 'hyper_body.dart';
+import 'hyper_resources.dart';
+import 'reader_renderer.dart';
 
 /// One conversation: a reading column with the subject and its chips, then message cards
 /// (service mail) or a chat log (people), and reply buttons at the bottom that open an inline
@@ -289,6 +292,7 @@ class _Header extends StatelessWidget {
               MarkChip(label: account.title, mark: accountPalette[state.accountIndex(account.id) % accountPalette.length], bar: true),
             for (final role in c.mailboxes.where((r) => r != MailboxRole.inbox && r != MailboxRole.other)) MarkChip(label: role.title),
             if (c.messageCount > 1) MarkChip(label: '${c.messageCount} messages'),
+            const ReaderRendererSwitch(),
           ],
         ),
       ],
@@ -466,10 +470,12 @@ class _Body extends StatelessWidget {
   }
 }
 
-/// An HTML body, drawn by WebKit on the Mac (`MailHtmlView` in the runner) and WebView2 on
-/// Windows ([WindowsMailHtml]), at the height of its content.
+/// An HTML body at the height of its content. On the Mac the reader's switch picks the renderer
+/// ([ReaderRendererScope]): HyperRender ([HyperBody]) by default, or WebKit (`MailHtmlView` in
+/// the runner); both draw the same prepared parts, only the chosen one is mounted, and switching
+/// keeps the parts and the fold. Windows draws with WebView2 ([WindowsMailHtml]).
 /// Quoted history (Gmail, Outlook, Thunderbird, Apple Mail markup) is cut out of the body and
-/// folds behind a toggle, in a view of its own made when it opens.
+/// folds behind a toggle, drawn when it opens.
 class MailHtml extends StatefulWidget {
   const MailHtml({super.key, required this.owner, required this.html, required this.onOpenLink, this.partsCache});
 
@@ -481,7 +487,7 @@ class MailHtml extends StatefulWidget {
   /// Opens a clicked link on Windows; the Mac's runner opens links itself.
   final ValueChanged<String> onOpenLink;
 
-  /// Overrides preparation for deterministic tests; rendering stays on the native view path.
+  /// Overrides preparation for deterministic tests.
   final HtmlPartsCache? partsCache;
 
   @override
@@ -553,9 +559,12 @@ class _MailHtmlState extends State<MailHtml> {
     final (main, quoted) = parts;
     final owner = widget.owner;
     List<String> part(String name) => [owner.account, owner.conversation, owner.message, name];
-    Widget view(String html, String name) => Host.mac
-        ? _WebBody(key: ValueKey(html), owner: part(name), html: html)
-        : WindowsMailHtml(key: ValueKey(html), html: html, onOpenLink: widget.onOpenLink);
+    final hyper = ReaderRendererScope.current(context) == ReaderRenderer.hyper;
+    Widget view(String html, String name) => !Host.mac
+        ? WindowsMailHtml(key: ValueKey(html), html: html, onOpenLink: widget.onOpenLink)
+        : hyper
+        ? HyperBody(key: ValueKey(html), html: html)
+        : _WebBody(key: ValueKey(html), owner: part(name), html: html);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -566,7 +575,7 @@ class _MailHtmlState extends State<MailHtml> {
   }
 }
 
-/// One WebKit view, as tall as the page it holds says it is.
+/// One WebKit view, as tall as the page it holds says it is, under [webKitContentPolicy].
 class _WebBody extends StatefulWidget {
   const _WebBody({super.key, required this.owner, required this.html});
 
@@ -587,6 +596,9 @@ class _WebBodyState extends State<_WebBody> {
   /// The number of the height shown: the page numbers its heights, so an older one arriving late
   /// is dropped.
   int _version = 0;
+
+  /// The body's key is its HTML, so the document is fixed for this state's lifetime.
+  late final _document = webKitDocument(widget.html);
 
   void _created(int id) {
     if (!mounted) return;
@@ -624,7 +636,7 @@ class _WebBodyState extends State<_WebBody> {
     height: _height,
     child: AppKitView(
       viewType: 'mailstream/html',
-      creationParams: {'owner': widget.owner, 'html': widget.html},
+      creationParams: {'owner': widget.owner, 'html': _document},
       creationParamsCodec: const StandardMessageCodec(),
       onPlatformViewCreated: _created,
     ),

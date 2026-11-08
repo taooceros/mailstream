@@ -1,0 +1,117 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:html/parser.dart' as html_parser;
+
+const maxInlineImageBytes = 20 * 1024 * 1024;
+const rasterMimeTypes = {'image/png', 'image/jpeg', 'image/gif', 'image/webp'};
+
+String get inlineCacheRoot => '${Platform.environment['HOME']}/Library/Caches/dev.mailstream.Mailstream/messages-v2';
+
+Uint8List? inlineImageBytes(String source) {
+  try {
+    final data = Uri.parse(source).data;
+    if (data == null || !rasterMimeTypes.contains(data.mimeType.toLowerCase()) || source.length > maxInlineImageBytes * 2) return null;
+    final bytes = data.contentAsBytes();
+    return bytes.length <= maxInlineImageBytes ? bytes : null;
+  } on FormatException {
+    return null;
+  }
+}
+
+/// Read only canonical descendants of the application's existing inline-part cache.
+/// File URLs never reach HyperRender: valid raster bytes become sanitized data URLs.
+Future<String?> cachedImageData(String source, {String? cacheRoot}) async {
+  try {
+    final uri = Uri.parse(source);
+    if (uri.scheme != 'file' || uri.host.isNotEmpty || uri.hasQuery || uri.hasFragment) return null;
+    final root = await Directory(cacheRoot ?? inlineCacheRoot).resolveSymbolicLinks();
+    final file = File.fromUri(uri);
+    final canonical = await file.resolveSymbolicLinks();
+    if (!canonical.startsWith('$root/')) return null;
+    final resolved = File(canonical);
+    if (await resolved.length() > maxInlineImageBytes) return null;
+    final bytes = await resolved.readAsBytes();
+    // MIME comes from the bytes, not an attacker-controlled extension.
+    final mime = rasterMime(bytes);
+    if (mime == null) return null;
+    return 'data:$mime;base64,${base64Encode(bytes)}';
+  } on FileSystemException {
+    return null;
+  } on FormatException {
+    return null;
+  } on ArgumentError {
+    return null;
+  }
+}
+
+String? rasterMime(List<int> b) {
+  if (b.length >= 8 && b[0] == 137 && b[1] == 80 && b[2] == 78 && b[3] == 71 && b[4] == 13 && b[5] == 10 && b[6] == 26 && b[7] == 10) return 'image/png';
+  if (b.length >= 3 && b[0] == 255 && b[1] == 216 && b[2] == 255) return 'image/jpeg';
+  if (b.length >= 6 && ascii.decode(b.take(6).toList(), allowInvalid: true).startsWith('GIF8')) return 'image/gif';
+  if (b.length >= 12 && ascii.decode(b.take(4).toList(), allowInvalid: true) == 'RIFF' && ascii.decode(b.sublist(8, 12), allowInvalid: true) == 'WEBP') return 'image/webp';
+  return null;
+}
+
+bool isMailLink(String source) {
+  final uri = Uri.tryParse(source);
+  return uri != null && {'https', 'http', 'mailto'}.contains(uri.scheme.toLowerCase()) && uri.userInfo.isEmpty && (uri.scheme == 'mailto' || uri.host.isNotEmpty);
+}
+
+/// The policy WebKit applies to a body: the same resources HyperRender may use
+/// (HTTPS and data images, styles and fonts), nothing else. Inline cache images are data URLs by
+/// then, so no `file:` source is needed; mail scripts stay disabled in the view's configuration.
+const webKitContentPolicy = "default-src 'none'; img-src https: data:; style-src 'unsafe-inline' https:; "
+    "font-src https: data:; base-uri 'none'; form-action 'none'";
+
+final _webKitPrologue = RegExp(r'^(?:\s|<!--[\s\S]*?-->)*<!doctype[^>]*>', caseSensitive: false);
+
+/// [html] with [webKitContentPolicy] ahead of everything but a leading doctype: the parser puts
+/// the meta into the (implied) head, and a standards-mode body is not laid out in quirks mode.
+String webKitDocument(String html) {
+  const meta = '<meta http-equiv="Content-Security-Policy" content="$webKitContentPolicy">';
+  final at = _webKitPrologue.firstMatch(html)?.end ?? 0;
+  return '${html.substring(0, at)}$meta${html.substring(at)}';
+}
+
+/// Mail's presentational attributes that HyperRender's sanitizer drops (it keeps `width` and
+/// `height`). Preparation copies them, lower-cased, to inert `data-ms-*` attributes, which the
+/// sanitizer keeps when data attributes are allowed and the WebView ignores.
+const presentationalAttributes = ['align', 'valign', 'bgcolor', 'border', 'cellpadding'];
+final _presentational = RegExp(r'\s(?:align|valign|bgcolor|border|cellpadding)\s*=', caseSensitive: false);
+
+Future<String> prepareHyperResources(String html) async {
+  final images = html.toLowerCase().contains('<img');
+  final hints = _presentational.hasMatch(html);
+  if (!images && !hints) return html;
+  final document = html_parser.parse(html);
+  if (hints) {
+    for (final element in document.querySelectorAll(presentationalAttributes.map((name) => '[$name]').join(','))) {
+      for (final name in presentationalAttributes) {
+        final value = element.attributes[name];
+        if (value != null) element.attributes['data-ms-$name'] = value.trim().toLowerCase();
+      }
+    }
+  }
+  for (final image in document.querySelectorAll('img')) {
+    final source = image.attributes['src'] ?? '';
+    final uri = Uri.tryParse(source);
+    String? safe;
+    if (uri?.scheme == 'file') {
+      safe = await cachedImageData(source);
+    } else if (uri?.scheme == 'data' && inlineImageBytes(source) != null) {
+      safe = source;
+    } else if (uri?.scheme == 'https' && uri!.host.isNotEmpty && uri.userInfo.isEmpty) {
+      safe = source;
+    }
+    image.attributes.remove('srcset');
+    if (safe == null) {
+      image.attributes.remove('src');
+      image.attributes['alt'] = '[Image unavailable: unsupported or outside inline cache] ${image.attributes['alt'] ?? ''}';
+    } else {
+      image.attributes['src'] = safe;
+    }
+  }
+  return document.outerHtml;
+}

@@ -1,0 +1,4387 @@
+import 'dart:ui' as ui;
+
+import 'package:csslib/parser.dart' as css_parser;
+import 'package:csslib/visitor.dart' as css_ast;
+import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/painting.dart' hide BorderStyle, TextDirection;
+
+import '../model/computed_style.dart';
+import '../model/node.dart';
+import '../util/url_safety.dart';
+
+/// CSS Style Resolver
+///
+/// Resolves styles for UDT nodes following CSS cascade rules.
+///
+/// The resolver traverses the tree Top-Down:
+/// 1. User Agent Styles - Browser defaults (h1 is bold, etc.)
+/// 2. External/Internal CSS - CSS rules from <style> tags
+/// 3. Inline Styles - style attribute on elements
+/// 4. Inheritance - Properties like color, font-family from parent
+///
+/// **CSS `!important` support**
+///
+/// `!important` declarations are stored separately in [CssRule.importantDeclarations]
+/// and applied after inline styles in step 4 of the cascade, matching the CSS spec.
+/// Higher-specificity `!important` rules still win over lower-specificity ones.
+// ── Compiled CSS regex constants ──────────────────────────────────────────────
+//
+// ALL RegExp objects are kept here as `static final` to ensure they are
+// compiled exactly once per process lifetime (Dart compiles a regex to a DFA
+// on first instantiation).  Creating `RegExp(r'...')` inside a method or loop
+// allocates a new object and re-compiles every call.  With 5000+ styled nodes,
+// that produced tens of thousands of short-lived RegExp objects and measurable
+// GC pressure.
+//
+// Naming convention:
+//   _Re.whitespace      general `\s+` splitter
+//   _Re.idIndex         id selector in the rule-index builder
+//   _Re.idMatch         id selector in combined-selector matcher (wider charset)
+//   _Re.spec*           specificity calculation patterns
+//   _Re.combinator*     CSS combinator handling
+//   _Re.pseudo*         pseudo-class/element patterns
+//   _Re.*               all other value/color/layout patterns
+// ─────────────────────────────────────────────────────────────────────────────
+abstract final class _Re {
+  // ── General ───────────────────────────────────────────────────────────────
+  static final whitespace = RegExp(r'\s+');
+  static final multiSpace = RegExp(r' {2,}');
+
+  // ── Timing functions ──────────────────────────────────────────────────────
+  static final cubicBezier = RegExp(
+      r'^cubic-bezier\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)$');
+  static final stepsFn =
+      RegExp(r'^steps\(\s*(\d+)\s*(?:,\s*(?:jump-)?(start|end)\s*)?\)$');
+
+  // ── Selectors — rule-index builder ───────────────────────────────────────
+  // These use [a-zA-Z_] as the first character (stricter, used when building
+  // the O(1) lookup index from parsed CSS rules).
+  static final idIndex = RegExp(r'#([a-zA-Z_][a-zA-Z0-9_-]*)');
+  static final classIndex = RegExp(r'\.([a-zA-Z_][a-zA-Z0-9_-]*)');
+  static final tagName = RegExp(r'^([a-zA-Z][a-zA-Z0-9]*)');
+
+  // ── Selectors — combined selector matcher ─────────────────────────────────
+  // These use [a-zA-Z_-] as the first character (looser, handles edge cases
+  // like `-webkit-` prefixed custom selectors in authored CSS).
+  static final idMatch = RegExp(r'#([a-zA-Z_-][a-zA-Z0-9_-]*)');
+  static final classMatch = RegExp(r'\.([a-zA-Z_-][a-zA-Z0-9_-]*)');
+
+  // ── Specificity ───────────────────────────────────────────────────────────
+  static final specId = RegExp(r'#[a-zA-Z_-]+');
+  static final specClass = RegExp(r'\.[a-zA-Z_-]+');
+  static final specAttr = RegExp(r'\[[^\]]+\]');
+  static final specPseudo = RegExp(r':[a-zA-Z_-]+');
+  static final specParts = RegExp(r'[\s>+~]+');
+  static final startsWithLetter = RegExp(r'^[a-zA-Z]');
+
+  // ── Combinators ───────────────────────────────────────────────────────────
+  static final combinatorSplit = RegExp(r'\s*[>+~]\s*|\s+');
+  static final combinatorCapture = RegExp(r'\s*([>+~])\s*');
+
+  // Trailing `!important` on an inline declaration.
+  static final importantSuffix =
+      RegExp(r'\s*!\s*important\s*$', caseSensitive: false);
+
+  // ── Pseudo-classes / pseudo-elements ─────────────────────────────────────
+  static final pseudoExtract = RegExp(r'::?[a-zA-Z-]+(?:\([^()]*\))?');
+  static final nthChild = RegExp(r'^:nth-child\(([^)]+)\)$');
+  static final nthLastChild = RegExp(r'^:nth-last-child\(([^)]+)\)$');
+  static final nthExpr = RegExp(r'^(-?\d*)?n(?:\+(\d+))?$');
+
+  // ── CSS value functions ───────────────────────────────────────────────────
+  // url('/image.png') or url(image.png) — group(1) = URL
+  static final urlFunc = RegExp(r'''url\(\s*['"]?([^'")\s]+)['"]?\s*\)''');
+  // var(--prop) or var(--prop, fallback) — group(1) = prop, group(2) = fallback
+  static final cssVar = RegExp(r'var\(\s*(--[^,)]+?)(?:\s*,\s*([^)]*))?\s*\)');
+  static final calcInner = RegExp(r'calc\(([^()]+)\)');
+  static final calcToken = RegExp(r'(-?[\d.]+)(px|em|rem|%)?\s*|([+\-*/])');
+
+  // ── Layout values ─────────────────────────────────────────────────────────
+  // "span 2" or "span 12" — group(1) = count
+  static final gridSpan = RegExp(r'span\s+(\d+)', caseSensitive: false);
+
+  // ── Color & gradient ─────────────────────────────────────────────────────
+  // rgb(r, g, b) — groups 1/2/3 = r/g/b (supports negative clamped values)
+  static final rgb =
+      RegExp(r'rgb\(\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\)');
+  // rgba(r, g, b, a) — groups 1/2/3/4 = r/g/b/a
+  static final rgba = RegExp(
+      r'rgba\(\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?[\d.]+)\s*\)');
+  // linear-gradient(content) — group(1) = full content incl. nested parens
+  static final linearGrad = RegExp(r'linear-gradient\((.*)\)', dotAll: true);
+  // angle like "90deg" or "-45deg"
+  static final degAngle = RegExp(r'-?\d*\.?\d+deg');
+  // leading numeric value from a string (for angle extraction)
+  static final leadingDigit = RegExp(r'^-?[\d.]+');
+  // color-stop: group(1) = color, group(2) = stop% (may be empty string)
+  static final colorStopPart = RegExp(r'^(.*?)\s*([\d.]+%|)$');
+  // percentage value: group(1) = numeric part
+  static final percentage = RegExp(r'^([\d.]+)%');
+
+  // ── Filters ───────────────────────────────────────────────────────────────
+  // CSS filter functions: group(1) = name, group(2) = args
+  static final filterFunc = RegExp(
+    r'(blur|brightness|contrast|grayscale|hue-rotate|invert|opacity|saturate|sepia)\(([^)]*)\)',
+  );
+}
+
+/// The one property that must be resolved before every other declaration in
+/// the same block, because other properties reference it (`line-height` in
+/// absolute units, and any `em` length).
+const String _kFontSizeProperty = 'font-size';
+
+class StyleResolver {
+  /// Parsed CSS rules from <style> tags
+  final List<CssRule> _cssRules = [];
+
+  /// Get parsed CSS rules (for debugging)
+  List<CssRule> get cssRules => List.unmodifiable(_cssRules);
+
+  /// Replacement values for CSS custom properties, keyed by `--name`.
+  ///
+  /// Wherever a `--name` declaration is cascaded (stylesheet, inline or
+  /// `!important`), the override's value is stored instead, so every
+  /// `var(--name)` read afterwards — including one later in the same rule —
+  /// sees it. Variables that are never declared are not affected (their
+  /// `var()` fallback still applies). Used by DevTools live editing via
+  /// [HyperRenderDebugHooks.cssVariableOverrides].
+  Map<String, String> customPropertyOverrides = const {};
+
+  /// Whether any parsed rule declares a custom property. Lets elements in
+  /// documents without them skip the custom-property pre-pass entirely.
+  bool _rulesDeclareCustomProperties = false;
+
+  /// Final custom-property values of the element being resolved, computed
+  /// before its other declarations (see [_cascadeCustomProperties]). While
+  /// set, every `--name` write in the cascade stores this final value, so
+  /// no `var()` can observe an intermediate one.
+  Map<String, String>? _elementCustomProps;
+
+  // ── Rule index for O(1) candidate lookup ────────────────────────────────
+  // After _extractRules, rules are partitioned by their "key" selector part:
+  //   _rulesByTag['p']    — rules whose rightmost simple part is the element "p"
+  //   _rulesByClass['foo'] — rules that require class "foo"
+  //   _rulesById['bar']   — rules that require id "bar"
+  //   _universalRules     — rules that can match anything (universal "*",
+  //                         attribute selectors, combinators, pseudo-classes)
+  //
+  // _getCandidateRules(node) returns the union of all buckets that are relevant
+  // for the given node, avoiding full iteration over unrelated rules.
+  final Map<String, List<CssRule>> _rulesByTag = {};
+  final Map<String, List<CssRule>> _rulesByClass = {};
+  final Map<String, List<CssRule>> _rulesById = {};
+  final List<CssRule> _universalRules = [];
+
+  /// User agent (default) styles
+  static final Map<String, ComputedStyle> _userAgentStyles = {
+    'h1': ComputedStyle(
+      display: DisplayType.block,
+      fontSize: 32,
+      fontWeight: FontWeight.bold,
+      margin: const EdgeInsets.symmetric(vertical: 21.44),
+    ),
+    'h2': ComputedStyle(
+      display: DisplayType.block,
+      fontSize: 24,
+      fontWeight: FontWeight.bold,
+      margin: const EdgeInsets.symmetric(vertical: 19.92),
+    ),
+    'h3': ComputedStyle(
+      display: DisplayType.block,
+      fontSize: 18.72,
+      fontWeight: FontWeight.bold,
+      margin: const EdgeInsets.symmetric(vertical: 18.72),
+    ),
+    'h4': ComputedStyle(
+      display: DisplayType.block,
+      fontSize: 16,
+      fontWeight: FontWeight.bold,
+      margin: const EdgeInsets.symmetric(vertical: 12),
+    ),
+    'h5': ComputedStyle(
+      display: DisplayType.block,
+      fontSize: 14,
+      fontWeight: FontWeight.bold,
+      margin: const EdgeInsets.symmetric(vertical: 10),
+    ),
+    'h6': ComputedStyle(
+      display: DisplayType.block,
+      fontSize: 13,
+      fontWeight: FontWeight.bold,
+      color: const Color(0xFF6B7280), // Muted — h6 is lowest priority
+      margin: const EdgeInsets.symmetric(vertical: 8),
+    ),
+    'p': ComputedStyle(
+      display: DisplayType.block,
+      margin: const EdgeInsets.symmetric(vertical: 16),
+    ),
+    'div': ComputedStyle(display: DisplayType.block),
+    'section': ComputedStyle(display: DisplayType.block),
+    'article': ComputedStyle(display: DisplayType.block),
+    'main': ComputedStyle(display: DisplayType.block),
+    'header': ComputedStyle(display: DisplayType.block),
+    'footer': ComputedStyle(display: DisplayType.block),
+    'aside': ComputedStyle(display: DisplayType.block),
+    'span': ComputedStyle(display: DisplayType.inline),
+    'strong': ComputedStyle(fontWeight: FontWeight.bold),
+    'b': ComputedStyle(fontWeight: FontWeight.bold),
+    'em': ComputedStyle(fontStyle: FontStyle.italic),
+    'i': ComputedStyle(fontStyle: FontStyle.italic),
+    'u': ComputedStyle(textDecoration: TextDecoration.underline),
+    's': ComputedStyle(textDecoration: TextDecoration.lineThrough),
+    'del': ComputedStyle(textDecoration: TextDecoration.lineThrough),
+    'a': ComputedStyle(
+      color: const Color(0xFF1976D2), // Material Blue 700
+      textDecoration: TextDecoration.underline,
+    ),
+    'hr': ComputedStyle(
+      display: DisplayType.block,
+      margin: const EdgeInsets.symmetric(vertical: 16),
+      borderWidth: const EdgeInsets.only(top: 1),
+      borderColor: const Color(0xFFDDDDDD),
+    ),
+    'mark': ComputedStyle(
+      backgroundColor:
+          const Color(0xFFFEF08A), // Softer yellow (Tailwind yellow-200)
+      color: const Color(0xFF713F12), // Warm brown text — readable on yellow
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+    ),
+    'sub': ComputedStyle(
+      fontSize: 12,
+      verticalAlign: HyperVerticalAlign.bottom,
+    ),
+    'sup': ComputedStyle(
+      fontSize: 12,
+      verticalAlign: HyperVerticalAlign.top,
+    ),
+    'small': ComputedStyle(
+      fontSize: 13,
+    ),
+    'kbd': ComputedStyle(
+      fontFamily: 'monospace',
+      backgroundColor: const Color(0xFFF5F5F5),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      borderWidth: const EdgeInsets.all(1),
+      borderColor: const Color(0xFFCCCCCC),
+      borderRadius: BorderRadius.circular(4),
+      fontSize: 13,
+    ),
+    'code': ComputedStyle(
+      fontFamily: 'monospace',
+      backgroundColor: const Color(0xFFF6F8FA), // GitHub-style light gray
+      color:
+          const Color(0xFF0550AE), // GitHub-style blue — readable, professional
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      borderRadius: BorderRadius.circular(4),
+      fontSize: 13,
+    ),
+    'pre': ComputedStyle(
+      display: DisplayType.block,
+      fontFamily: 'monospace',
+      whiteSpace: 'pre',
+      // Visual styling (background, padding, borderRadius) is intentionally omitted
+      // here because <pre> blocks are rendered as CodeBlockWidget children that
+      // handle their own visual presentation. Keeping these here causes a double-
+      // painted dark background that covers the code widget's own background.
+      margin: const EdgeInsets.symmetric(vertical: 12),
+      fontSize: 13,
+      lineHeight: 1.6,
+    ),
+    'blockquote': ComputedStyle(
+      display: DisplayType.block,
+      margin: const EdgeInsets.fromLTRB(0, 16, 0, 16),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      borderWidth: const EdgeInsets.only(left: 4),
+      borderColor: const Color(0xFF6366F1), // Indigo accent — clearly visible
+      backgroundColor:
+          const Color(0xFFF8F8FF), // Ghost white — clean, not harsh
+    ),
+    'ul': ComputedStyle(
+      display: DisplayType.block,
+      padding: const EdgeInsets.only(left: 40),
+      margin: const EdgeInsets.symmetric(vertical: 16),
+    ),
+    'ol': ComputedStyle(
+      display: DisplayType.block,
+      padding: const EdgeInsets.only(left: 40),
+      margin: const EdgeInsets.symmetric(vertical: 16),
+    ),
+    'li': ComputedStyle(
+      display: DisplayType.block,
+      margin: const EdgeInsets.symmetric(vertical: 4),
+    ),
+    'details': ComputedStyle(
+      display: DisplayType.block,
+      margin: const EdgeInsets.symmetric(vertical: 4),
+    ),
+    'summary': ComputedStyle(
+      display: DisplayType.block,
+    ),
+    'table': ComputedStyle(
+      display: DisplayType.table,
+      margin: const EdgeInsets.symmetric(vertical: 16),
+      borderWidth: const EdgeInsets.all(1),
+      borderColor: const Color(0xFFDDDDDD),
+    ),
+    'thead': ComputedStyle(
+      display: DisplayType.block,
+      backgroundColor: const Color(0xFFF5F5F5),
+    ),
+    'tr': ComputedStyle(
+      display: DisplayType.tableRow,
+      borderWidth: const EdgeInsets.only(bottom: 1),
+      borderColor: const Color(0xFFEEEEEE),
+    ),
+    'td': ComputedStyle(
+      display: DisplayType.tableCell,
+      padding: const EdgeInsets.all(12),
+      borderWidth: const EdgeInsets.all(1),
+      borderColor: const Color(0xFFEEEEEE),
+    ),
+    'th': ComputedStyle(
+      display: DisplayType.tableCell,
+      fontWeight: FontWeight.bold,
+      padding: const EdgeInsets.all(12),
+      backgroundColor: const Color(0xFFF5F5F5),
+      borderWidth: const EdgeInsets.all(1),
+      borderColor: const Color(0xFFDDDDDD),
+    ),
+  };
+
+  /// Parse CSS string and store rules
+  void parseCss(String cssString) {
+    if (cssString.isEmpty) return;
+
+    try {
+      final stylesheet = css_parser.parse(cssString);
+      _extractRules(stylesheet);
+    } catch (e) {
+      // Silently ignore CSS parsing errors in production
+    }
+  }
+
+  /// Extract CSS rules from parsed stylesheet
+  void _extractRules(css_ast.StyleSheet stylesheet) {
+    int sourceIndex = 0;
+    for (final topLevel in stylesheet.topLevels) {
+      if (topLevel is css_ast.RuleSet) {
+        // One RuleSet may contain multiple comma-separated selectors.
+        _cssRules.addAll(_convertRuleSet(topLevel, sourceIndex: sourceIndex++));
+      }
+    }
+
+    // Stable sort: lower specificity first; same specificity preserves source order
+    _cssRules.sort((a, b) {
+      final cmp = a.specificity.compareTo(b.specificity);
+      return cmp != 0 ? cmp : a.sourceIndex.compareTo(b.sourceIndex);
+    });
+
+    _buildRuleIndex();
+  }
+
+  /// Build O(1)-lookup index over [_cssRules].
+  ///
+  /// Each rule is placed into the most specific bucket we can identify from its
+  /// selector string without full parsing:
+  /// - Has `#id`   → [_rulesById]   (most specific)
+  /// - Has `.cls`  → [_rulesByClass]
+  /// - Starts with or ends in an element name → [_rulesByTag]
+  /// - Otherwise   → [_universalRules]
+  ///
+  /// A rule can be in **multiple** buckets (e.g. `div.foo` → both tag and class).
+  /// [_getCandidateRules] deduplicates with a Set when merging results.
+  void _buildRuleIndex() {
+    _rulesByTag.clear();
+    _rulesByClass.clear();
+    _rulesById.clear();
+    _universalRules.clear();
+    _rulesDeclareCustomProperties = _cssRules.any((r) =>
+        r.declaresCustomProperties || r.declaresImportantCustomProperties);
+
+    _rootColorHtml = _rootColorHtmlImportant = null;
+    _rootColorBody = _rootColorBodyImportant = null;
+    int htmlAt = -1, htmlImpAt = -1, bodyAt = -1, bodyImpAt = -1;
+
+    for (final rule in _cssRules) {
+      // Later source order wins within each selector. A rule's declarations are
+      // a Map, so `color` appears at most once per rule.
+      final sel = rule.selector.trim().toLowerCase();
+      if (sel == 'html' || sel == 'body') {
+        final isHtml = sel == 'html';
+        final c = rule.declarations['color'];
+        if (c != null && rule.sourceIndex >= (isHtml ? htmlAt : bodyAt)) {
+          if (isHtml) {
+            _rootColorHtml = c;
+            htmlAt = rule.sourceIndex;
+          } else {
+            _rootColorBody = c;
+            bodyAt = rule.sourceIndex;
+          }
+        }
+        final ci = rule.importantDeclarations['color'];
+        if (ci != null &&
+            rule.sourceIndex >= (isHtml ? htmlImpAt : bodyImpAt)) {
+          if (isHtml) {
+            _rootColorHtmlImportant = ci;
+            htmlImpAt = rule.sourceIndex;
+          } else {
+            _rootColorBodyImportant = ci;
+            bodyImpAt = rule.sourceIndex;
+          }
+        }
+      }
+
+      // Extract the rightmost simple selector part (after any combinator).
+      final rightmost = _rightmostSimplePart(rule.selector);
+
+      bool indexed = false;
+
+      // Index by id (#foo)
+      final idMatch = _Re.idIndex.firstMatch(rightmost);
+      if (idMatch != null) {
+        (_rulesById[idMatch.group(1)!] ??= []).add(rule);
+        indexed = true;
+      }
+
+      // Index by class (.foo) — may be multiple classes
+      for (final m in _Re.classIndex.allMatches(rightmost)) {
+        (_rulesByClass[m.group(1)!] ??= []).add(rule);
+        indexed = true;
+      }
+
+      // Index by tag (starts with letter, no # or .)
+      final tagMatch = _Re.tagName.firstMatch(rightmost);
+      if (tagMatch != null) {
+        (_rulesByTag[tagMatch.group(1)!.toLowerCase()] ??= []).add(rule);
+        indexed = true;
+      }
+
+      if (!indexed) {
+        _universalRules.add(rule);
+      }
+    }
+  }
+
+  /// Returns the rightmost simple selector part (after the last combinator).
+  ///
+  /// For `div > p.lead` → `p.lead`; for `h1 + p` → `p`; for `*` → `*`.
+  static String _rightmostSimplePart(String selector) {
+    // Split on combinator tokens (space, >, +, ~) and take the last part.
+    final parts = selector.split(_Re.combinatorSplit);
+    return parts.last.trim();
+  }
+
+  /// Returns the deduplicated set of candidate rules for [node].
+  ///
+  /// Merges: universal + tag-indexed + class-indexed + id-indexed buckets.
+  /// The returned list is in insertion (specificity-sorted) order because
+  /// [_buildRuleIndex] preserves [_cssRules] sort order within each bucket.
+  List<CssRule> _getCandidateRules(UDTNode node) {
+    final seen = <CssRule>{};
+    final result = <CssRule>[];
+
+    void add(List<CssRule>? bucket) {
+      if (bucket == null) return;
+      for (final r in bucket) {
+        if (seen.add(r)) result.add(r);
+      }
+    }
+
+    add(_universalRules);
+
+    final tag = node.tagName?.toLowerCase();
+    if (tag != null) add(_rulesByTag[tag]);
+
+    final classAttr = node.attributes['class'];
+    if (classAttr != null) {
+      for (final cls in classAttr.split(_Re.whitespace)) {
+        if (cls.isNotEmpty) add(_rulesByClass[cls]);
+      }
+    }
+
+    final id = node.attributes['id'];
+    if (id != null && id.isNotEmpty) add(_rulesById[id]);
+
+    // Re-sort the merged candidate list by (specificity, sourceIndex) so that
+    // the cascade order is maintained correctly.
+    result.sort((a, b) {
+      final cmp = a.specificity.compareTo(b.specificity);
+      return cmp != 0 ? cmp : a.sourceIndex.compareTo(b.sourceIndex);
+    });
+
+    return result;
+  }
+
+  /// Convert a csslib RuleSet to one [CssRule] per comma-separated selector.
+  ///
+  /// Previously the inner loop overwrote [selector] on every simple selector,
+  /// which meant only the last class/element name was kept (e.g. "div p" became
+  /// just "p").  We now use [sel.span?.text] which gives the exact source text
+  /// of each selector (including combinators like space, ">", "+", "~").
+  List<CssRule> _convertRuleSet(css_ast.RuleSet ruleSet,
+      {int sourceIndex = 0}) {
+    final selectorGroup = ruleSet.selectorGroup;
+    if (selectorGroup == null || selectorGroup.selectors.isEmpty) {
+      return const [];
+    }
+
+    // Collect declaration values once — shared across all selectors in the group.
+    final declarations = <String, String>{};
+    final importantDeclarations = <String, String>{};
+
+    for (final decl in ruleSet.declarationGroup.declarations) {
+      if (decl is css_ast.Declaration) {
+        final expression = decl.expression;
+        String value = '';
+
+        if (expression is css_ast.Expressions) {
+          // rgb() FIX: csslib's FunctionTerm.span?.text only covers the
+          // argument list (e.g. "0, 255, 0)") — the function name is stored
+          // separately in FunctionTerm.text ("rgb"). The old inner-iteration
+          // code calling expr.span?.text on a FunctionTerm therefore produced
+          // "0, 255, 0)" which _parseColor can't recognise.
+          //
+          // Fix: for FunctionTerm entries, reconstruct the canonical form
+          // "name(arg, arg, ...)" by reading FunctionTerm.text + params.
+          // All other term types (LiteralTerm, HexColorTerm, etc.) still use
+          // span?.text directly — their span covers the full token.
+          final parts = <String>[];
+          for (final expr in expression.expressions) {
+            if (expr is css_ast.FunctionTerm) {
+              // In csslib 1.0.2, FunctionTerm.span?.text covers only the
+              // argument list including the closing ')' but NOT the function
+              // name or opening '(' (e.g. "0, 255, 0)" for rgb(0,255,0)).
+              // The _params field is private, so reconstruct as:
+              //   funcTerm.text  +  '('  +  funcTerm.span?.text
+              // = "rgb"          +  "("  +  "0, 255, 0)"
+              // = "rgb(0, 255, 0)" ✓
+              final argText = expr.span?.text ?? '';
+              if (argText.isNotEmpty) {
+                parts.add('${expr.text}($argText');
+              }
+            } else if (expr is css_ast.CalcTerm) {
+              // calc() / min() / max() / clamp(): text is the function name,
+              // span starts after the '(' — same quirk as FunctionTerm.
+              final argText = expr.span?.text ?? '';
+              if (argText.isNotEmpty) parts.add('${expr.text}($argText');
+            } else if (expr is css_ast.UriTerm) {
+              // url(): span is only "a.png)" — the "url(" prefix is dropped.
+              final argText = expr.span?.text ?? '';
+              if (argText.isNotEmpty) parts.add('url($argText');
+            } else if (expr is css_ast.UnicodeRangeTerm) {
+              final text = expr.span?.text ?? '';
+              if (text.isNotEmpty) parts.add('U+$text');
+            } else if (expr is css_ast.VarUsage) {
+              // Same span quirk: csslib parses var() as a VarUsage whose
+              // span is only "--name)" / "--name, fallback)". Without the
+              // "var(" prefix _resolveCssValue never recognised it, so every
+              // var() in a stylesheet (<style>, customCss) resolved to
+              // nothing — only inline style="" (a separate parser) worked.
+              final argText = expr.span?.text ?? '';
+              if (argText.isNotEmpty) parts.add('var($argText');
+            } else {
+              final text = expr.span?.text ?? '';
+              if (text.isNotEmpty) parts.add(text);
+            }
+          }
+          value = parts.join(' ');
+        } else if (expression != null) {
+          value = expression.span?.text ?? '';
+        }
+
+        if (value.isNotEmpty) {
+          if (decl.important) {
+            importantDeclarations[decl.property] = value;
+          } else {
+            declarations[decl.property] = value;
+          }
+        }
+      }
+    }
+
+    if (declarations.isEmpty && importantDeclarations.isEmpty) return const [];
+
+    // Emit one CssRule per selector in the comma-separated group.
+    final rules = <CssRule>[];
+    for (final sel in selectorGroup.selectors) {
+      // Use the span text for the full, correct selector string.
+      // This preserves combinators (descendant space, child ">", etc.) and
+      // compound selectors (e.g. "div.card > p.lead").
+      final selector = sel.span?.text.trim() ?? '';
+      if (selector.isEmpty) continue;
+
+      rules.add(CssRule(
+        selector: selector,
+        declarations: Map.unmodifiable(declarations),
+        importantDeclarations: Map.unmodifiable(importantDeclarations),
+        specificity: _calculateSpecificity(selector),
+        sourceIndex: sourceIndex,
+      ));
+    }
+    return rules;
+  }
+
+  /// Calculate CSS specificity for a selector
+  /// Reference: https://www.w3.org/TR/selectors-3/#specificity
+  int _calculateSpecificity(String selector) {
+    int specificity = 0;
+
+    // ID selectors (#id) = 100
+    specificity += _Re.specId.allMatches(selector).length * 100;
+
+    // Class selectors (.class), attribute selectors, pseudo-classes = 10
+    specificity += _Re.specClass.allMatches(selector).length * 10;
+    specificity += _Re.specAttr.allMatches(selector).length * 10;
+    specificity += _Re.specPseudo.allMatches(selector).length * 10;
+
+    // Element selectors, pseudo-elements = 1
+    // Split by combinator chars and count parts that start with a letter
+    final selectorParts = selector.split(_Re.specParts);
+    specificity += selectorParts
+        .where((p) => p.isNotEmpty && _Re.startsWithLetter.hasMatch(p))
+        .length;
+
+    return specificity;
+  }
+
+  /// Resolve styles for entire document tree
+  ///
+  /// This method traverses the tree and computes final styles for each node,
+  /// following the CSS cascade.
+  void resolveStyles(DocumentNode document, {ComputedStyle? baseStyle}) {
+    final base = baseStyle ?? ComputedStyle();
+    _resolveNode(document, base);
+  }
+
+  /// Host-supplied root color, applied to the document root **after** the
+  /// content's own `html` / `:root` / `body` color (and their `!important`
+  /// forms), so an app can force a reader theme over a publisher stylesheet.
+  /// Element-level colors (`p { color }`, inline `style`) still win — they are
+  /// resolved on their own nodes. null (default) leaves the content in charge.
+  Color? rootColorOverride;
+
+  /// When true, an element that paints its own opaque background but sets no
+  /// color of its own never inherits text that is unreadable on that
+  /// background (WCAG contrast below 3:1): it falls back to whichever of dark
+  /// gray / white reads better.
+  ///
+  /// The built-in light surfaces — `<blockquote>`, `<kbd>`, `<th>` — and any
+  /// author `background` without a `color` all assume dark text. Once the host
+  /// supplies a light default (a dark theme, or [rootColorOverride]) they would
+  /// otherwise inherit white-on-near-white. Off by default so output without a
+  /// host-supplied color is unchanged. An element's own `color` always wins.
+  bool ensureReadableOnOwnBackground = false;
+
+  /// When true, the built-in element colors that were picked for a light
+  /// surface — links, `<code>`, `<mark>`, `<h6>` — use dark-surface variants
+  /// that keep at least 4.5:1 contrast on a typical dark page (`#121212`).
+  ///
+  /// Set it when the text sits on a dark surface. `HyperViewer` does so
+  /// whenever its effective default text color is light (a dark [Theme], or a
+  /// light `textColor`). Off by default, so output is unchanged for everyone
+  /// who does not opt in. Author CSS (`a { color }`, inline `style`) is applied
+  /// after these and still wins.
+  bool darkSurface = false;
+
+  // Dark-surface variants of the UA colors. WCAG contrast, measured: on #121212
+  // (#1E1E1E cards in parentheses) link 8.5 (7.5), h6 7.4 (6.6), pre code
+  // 9.6 (8.6); inline code 7.2 and mark 6.9 against their own chip.
+  static const Color _darkLink = Color(0xFF64B5F6);
+  static const Color _darkH6 = Color(0xFF9CA3AF);
+  static const Color _darkCode = Color(0xFF79C0FF);
+  static const Color _darkCodeBg = Color(0xFF262C36);
+  static const Color _darkMark = Color(0xFFFDE68A);
+  static const Color _darkMarkBg = Color(0xFF5C4A00);
+
+  /// Replaces a UA style's light-surface colors with their dark variants.
+  void _applyDarkSurfaceColors(ComputedStyle style, String tagName) {
+    switch (tagName) {
+      case 'a':
+        style.color = _darkLink;
+      case 'h6':
+        style.color = _darkH6;
+      case 'code':
+        style.color = _darkCode;
+        style.backgroundColor = _darkCodeBg;
+      case 'mark':
+        style.color = _darkMark;
+        style.backgroundColor = _darkMarkBg;
+      default:
+        return;
+    }
+    style.markExplicitlySet('color');
+  }
+
+  static const Color _guardDark = Color(0xFF1F2937);
+  static const Color _guardLight = Color(0xFFFFFFFF);
+
+  static double _contrastRatio(Color a, Color b) {
+    final la = a.computeLuminance(), lb = b.computeLuminance();
+    final hi = la > lb ? la : lb, lo = la > lb ? lb : la;
+    return (hi + 0.05) / (lo + 0.05);
+  }
+
+  void _applyReadabilityGuard(ComputedStyle style) {
+    if (!ensureReadableOnOwnBackground || style.isExplicitlySet('color')) {
+      return;
+    }
+    final bg = style.backgroundColor;
+    // Translucent backgrounds depend on what is behind them — leave those.
+    if (bg == null || bg.a < 1.0) return;
+    if (_contrastRatio(style.color, bg) >= 3.0) return;
+    style.color =
+        _contrastRatio(_guardDark, bg) >= _contrastRatio(_guardLight, bg)
+            ? _guardDark
+            : _guardLight;
+  }
+
+  /// `html { color }` / `body { color }`.
+  ///
+  /// The adapters parse only `<body>`'s children, so no UDT node is ever tagged
+  /// `body` or `html` and those type selectors can never match. The document
+  /// root stands in for them, layered as a browser does: `html` < `:root` <
+  /// `body` (`body` is the descendant, so it wins regardless of source order).
+  /// Every element without its own color inherits the result.
+  ///
+  /// Only `color` is honoured. Other body properties (`display`, `margin`,
+  /// `background`, …) would change the root's own box, not just what children
+  /// inherit, so they stay ignored as before.
+  ///
+  /// Precomputed by [_buildRuleIndex] so each document section costs O(1).
+  String? _rootColorHtml;
+  String? _rootColorHtmlImportant;
+  String? _rootColorBody;
+  String? _rootColorBodyImportant;
+
+  /// Applies a root-selector `color` declaration to the document root.
+  ComputedStyle _applyRootColor(
+    ComputedStyle style,
+    String? value,
+    double parentFontSize,
+    ComputedStyle parentStyle,
+  ) {
+    if (value == null) return style;
+    return _applyDeclarations(style, {'color': value},
+        parentFontSize: parentFontSize,
+        inheritedCustomProps: parentStyle.customProperties);
+  }
+
+  /// Resolve styles for a single node and its children
+  void _resolveNode(UDTNode node, ComputedStyle parentStyle) {
+    // Start with default style
+    ComputedStyle style = ComputedStyle();
+
+    // Get parent font size for em/rem calculations
+    final parentFontSize = parentStyle.fontSize;
+
+    // 1. Apply user agent styles
+    final tagName = node.tagName?.toLowerCase();
+    if (tagName != null && _userAgentStyles.containsKey(tagName)) {
+      // An `<a>` without an `href` is not a hyperlink (HTML: it's a
+      // "placeholder link"), so it must not get the link colour/underline.
+      // The UA stylesheet in a browser targets `a:link`/`a:visited`, i.e.
+      // `a[href]` — mirror that here so `<a name="anchor">Text</a>` renders
+      // as plain text, matching browsers.
+      final isHreflessAnchor = tagName == 'a' &&
+          (node.attributes['href'] == null || node.attributes['href']!.isEmpty);
+      if (!isHreflessAnchor) {
+        style = _mergeStyles(style, _userAgentStyles[tagName]!);
+        if (darkSurface) _applyDarkSurfaceColors(style, tagName);
+      }
+    }
+
+    // Special case: <code> inside <pre> should NOT have inline code styling
+    // It should inherit from the pre block (dark theme with light text)
+    if (tagName == 'code' && node.parent?.tagName?.toLowerCase() == 'pre') {
+      style.backgroundColor = null; // Remove inline code background
+      style.padding = EdgeInsets.zero; // Remove inline code padding
+      // Color will be inherited from parent (pre) via _applyInheritance
+    }
+
+    // Apply dir="rtl"/"ltr" HTML attribute (maps to CSS direction)
+    final dirAttr = node.attributes['dir'];
+    if (dirAttr != null) {
+      final dir = _parseDirection(dirAttr);
+      if (dir != null) {
+        style.hyperDirection = dir;
+        style.markExplicitlySet('direction');
+      }
+    }
+
+    // HTML `valign` attribute on <td>/<th>/<tr> — lower priority than CSS.
+    final valign = node.attributes['valign'];
+    if (valign != null) {
+      final va = _parseVerticalAlign(valign);
+      if (va != null) {
+        style.verticalAlign = va;
+        style.markExplicitlySet('vertical-align');
+      }
+    }
+
+    // 2. Apply CSS rules (sorted by specificity, normal declarations only)
+    //    Use O(1) candidate lookup via _getCandidateRules to avoid iterating
+    //    over every rule for every node (previously O(Rules × Nodes)).
+    final candidates = _getCandidateRules(node);
+
+    // 1b. Custom properties first. var() is substituted while declarations
+    //     are applied, so a var() met before a later (or higher-specificity,
+    //     or !important, or inline) `--name` declaration would otherwise
+    //     resolve against the parent's value. CSS computes custom properties
+    //     before substituting them; do the same.
+    final cascadedCustom = _cascadeCustomProperties(node, candidates);
+    // Assigned unconditionally so a previous node's map can never leak in.
+    _elementCustomProps = cascadedCustom;
+    if (cascadedCustom != null) style.customProperties.addAll(cascadedCustom);
+
+    if (node is DocumentNode) {
+      style =
+          _applyRootColor(style, _rootColorHtml, parentFontSize, parentStyle);
+    }
+
+    for (final rule in candidates) {
+      if (rule.declarations.isNotEmpty &&
+          _matchesSelector(node, rule.selector)) {
+        style = _applyDeclarations(
+          style,
+          rule.declarations,
+          parentFontSize: parentFontSize,
+          inheritedCustomProps: parentStyle.customProperties,
+        );
+      }
+    }
+
+    // 3. Apply inline styles
+    final inlineStyle = node.attributes['style'];
+    if (inlineStyle != null && inlineStyle.isNotEmpty) {
+      style = _parseInlineStyle(
+        style,
+        inlineStyle,
+        parentFontSize: parentFontSize,
+        inheritedCustomProps: parentStyle.customProperties,
+      );
+    }
+
+    // 4. Apply !important declarations (win over inline styles, per CSS spec)
+    if (node is DocumentNode) {
+      style = _applyRootColor(
+          style, _rootColorHtmlImportant, parentFontSize, parentStyle);
+    }
+    for (final rule in candidates) {
+      if (rule.importantDeclarations.isNotEmpty &&
+          _matchesSelector(node, rule.selector)) {
+        style = _applyDeclarations(
+          style,
+          rule.importantDeclarations,
+          parentFontSize: parentFontSize,
+          inheritedCustomProps: parentStyle.customProperties,
+        );
+      }
+    }
+
+    if (node is DocumentNode) {
+      // `body` is a descendant of `html` / `:root`, so every body declaration —
+      // normal or !important — sits above every html / :root one, including
+      // their !important forms: an element's own declaration beats what it
+      // would inherit, whatever the inherited one's priority.
+      style =
+          _applyRootColor(style, _rootColorBody, parentFontSize, parentStyle);
+      style = _applyRootColor(
+          style, _rootColorBodyImportant, parentFontSize, parentStyle);
+      final override = rootColorOverride;
+      if (override != null) {
+        style.color = override;
+        style.markExplicitlySet('color');
+      }
+    }
+
+    _elementCustomProps = null;
+
+    // 4. Inherit from parent
+    _applyInheritance(style, parentStyle);
+    _applyReadabilityGuard(style);
+
+    // Store computed style on node
+    node.style = style;
+
+    // Resolve children
+    for (final child in node.children) {
+      _resolveNode(child, style);
+    }
+  }
+
+  /// Check if a node matches a CSS selector
+  ///
+  /// Supports:
+  /// - Element selector: `p`, `div`
+  /// - ID selector: `#myId`
+  /// - Class selector: `.myClass`
+  /// - Universal selector: `*`
+  /// - Descendant selector: `div p` (p inside div)
+  /// - Child selector: `div > p` (p direct child of div)
+  /// - Adjacent sibling: `h1 + p` (p immediately after h1)
+  /// - General sibling: `h1 ~ p` (p after h1, same parent)
+  /// - Multiple classes: `.class1.class2`
+  /// - Combined: `div.highlight`, `p#intro`
+  bool _matchesSelector(UDTNode node, String selector) {
+    selector = selector.trim();
+
+    // Normalize optional whitespace around combinators so that both `div>p`
+    // and `div > p` are treated identically.  We collapse any runs of spaces
+    // back to a single space after insertion to avoid double-space issues.
+    selector = selector
+        .replaceAllMapped(_Re.combinatorCapture, (m) => ' ${m.group(1)} ')
+        .replaceAll(_Re.multiSpace, ' ')
+        .trim();
+
+    final parts = _tokenizeCombinators(selector);
+    if (parts.isEmpty) return false;
+    if (parts.length == 1) return _matchesSimpleSelector(node, parts[0].$1);
+    return _matchesSelectorParts(node, parts, parts.length - 1);
+  }
+
+  /// Tokenizes a normalized selector string into a list of
+  /// `(simpleSelector, combinator)` pairs.
+  ///
+  /// The **last** part always has a `null` combinator (it has no right-hand
+  /// neighbour). All other parts carry the combinator that connects them to
+  /// the next part:
+  ///
+  ///   `"div > p + span"`  →
+  ///     `[("div", ">"), ("p", "+"), ("span", null)]`
+  ///
+  /// Parenthesised content (e.g. `:nth-child(2n+1)`) is treated as opaque —
+  /// the `+` inside the parens is NOT interpreted as a combinator.
+  static List<(String, String?)> _tokenizeCombinators(String selector) {
+    final parts = <(String, String?)>[];
+    final buf = StringBuffer();
+    int depth = 0;
+    int i = 0;
+
+    while (i < selector.length) {
+      final ch = selector[i];
+
+      if (ch == '(') {
+        depth++;
+        buf.write(ch);
+        i++;
+        continue;
+      }
+      if (ch == ')') {
+        depth--;
+        buf.write(ch);
+        i++;
+        continue;
+      }
+      if (depth > 0) {
+        buf.write(ch);
+        i++;
+        continue;
+      }
+
+      // At depth 0: check for combinator patterns.
+      // After normalization, explicit combinators are always " X " (space,
+      // combinator char, space).  Descendant combinator is a plain space.
+      if (ch == ' ') {
+        if (i + 2 < selector.length &&
+            '>+~'.contains(selector[i + 1]) &&
+            selector[i + 2] == ' ') {
+          // Explicit combinator: " > ", " + ", or " ~ "
+          if (buf.isNotEmpty) {
+            parts.add((buf.toString(), selector[i + 1]));
+            buf.clear();
+          }
+          i += 3; // skip ' ', combinator, ' '
+          continue;
+        }
+        // Descendant combinator (plain space between simple selectors).
+        if (buf.isNotEmpty) {
+          parts.add((buf.toString(), ' '));
+          buf.clear();
+        }
+        i++;
+        continue;
+      }
+
+      buf.write(ch);
+      i++;
+    }
+
+    if (buf.isNotEmpty) parts.add((buf.toString(), null));
+    return parts;
+  }
+
+  /// Matches [node] against a tokenized selector list, working right-to-left.
+  ///
+  /// [partIdx] starts at `parts.length - 1` (the rightmost simple selector)
+  /// and recurses leftward following each combinator.
+  ///
+  /// Examples of correctly handled mixed-combinator selectors:
+  ///   - `div > p + span`  — child then adjacent-sibling
+  ///   - `ul li:first-child` — descendant then structural pseudo-class
+  ///   - `section > div ~ p` — child then general-sibling
+  bool _matchesSelectorParts(
+      UDTNode node, List<(String, String?)> parts, int partIdx) {
+    if (!_matchesSimpleSelector(node, parts[partIdx].$1)) return false;
+    if (partIdx == 0) return true; // all parts matched
+
+    // The combinator is stored on the part to the LEFT (parts[partIdx-1].$2).
+    final combinator = parts[partIdx - 1].$2!;
+
+    switch (combinator) {
+      case '>': // child combinator
+        if (node.parent == null) return false;
+        return _matchesSelectorParts(node.parent!, parts, partIdx - 1);
+
+      case '+': // adjacent sibling combinator
+        final prev = _getPreviousSibling(node);
+        if (prev == null) return false;
+        return _matchesSelectorParts(prev, parts, partIdx - 1);
+
+      case '~': // general sibling combinator
+        final parent = node.parent;
+        if (parent == null) return false;
+        final nodeIdx = parent.children.indexOf(node);
+        for (int i = 0; i < nodeIdx; i++) {
+          if (_matchesSelectorParts(parent.children[i], parts, partIdx - 1)) {
+            return true;
+          }
+        }
+        return false;
+
+      case ' ': // descendant combinator
+        UDTNode? ancestor = node.parent;
+        while (ancestor != null) {
+          if (_matchesSelectorParts(ancestor, parts, partIdx - 1)) return true;
+          ancestor = ancestor.parent;
+        }
+        return false;
+
+      default:
+        return false;
+    }
+  }
+
+  /// Match simple selector (no combinators)
+  bool _matchesSimpleSelector(UDTNode node, String selector) {
+    selector = selector.trim();
+
+    // Universal selector
+    if (selector == '*') return true;
+
+    // Extract and evaluate pseudo-classes before structural matching.
+    // e.g. "li:first-child" → base = "li", pseudos = [":first-child"]
+    //      "div.highlight:hover" → base = "div.highlight", pseudos = [":hover"]
+    final extracted = _extractPseudoClasses(selector);
+    final base = extracted.base;
+    final pseudos = extracted.pseudos;
+
+    // Check all pseudo-classes first — if any fail, the selector doesn't match.
+    for (final pseudo in pseudos) {
+      if (!_matchesPseudoClass(node, pseudo)) return false;
+    }
+
+    // If the entire selector was just pseudo-classes, universal match.
+    if (base.isEmpty) return true;
+
+    // ID selector only: `#myId`
+    if (base.startsWith('#') && !base.contains('.')) {
+      final id = base.substring(1);
+      return node.cssId == id;
+    }
+
+    // Class selector only: `.myClass`
+    if (base.startsWith('.') && !base.contains('#')) {
+      return _matchesClassSelector(node, base);
+    }
+
+    // Element selector only: `div`
+    // Also handles:
+    //   [attr]          — pure attribute selector: `base` starts with `[`
+    //   div[attr]       — element + attribute (false-negative fix)
+    if (!base.contains('.') && !base.contains('#')) {
+      // Extract any attribute constraints from base.
+      final attrSelectors = _parseAttrSelectors(base);
+      if (attrSelectors.isNotEmpty) {
+        // Strip [...] brackets to get the optional element name.
+        final tagOnly = base.replaceAll(_kAttrSelectorAll, '').trim();
+        // Element part must match (if present).
+        if (tagOnly.isNotEmpty && tagOnly != node.tagName) return false;
+        // All attribute constraints must match.
+        return _nodeMatchesAttrSelectors(node, attrSelectors);
+      }
+      return base == node.tagName;
+    }
+
+    // Combined selectors: `div.class`, `div#id`, `div.class1.class2`
+    // Also: `div.class[attr]` — attribute constraints now checked inside.
+    return _matchesCombinedSelector(node, base);
+  }
+
+  /// Splits a simple selector into its base part and any pseudo-class/pseudo-element
+  /// suffixes.
+  ///
+  /// Example: `"li:first-child"` → `(base: "li", pseudos: [":first-child"])`
+  /// Example: `"div.foo:hover"` → `(base: "div.foo", pseudos: [":hover"])`
+  /// Example: `"p:nth-child(2n+1)"` → `(base: "p", pseudos: [":nth-child(2n+1)"])`
+  static ({String base, List<String> pseudos}) _extractPseudoClasses(
+      String selector) {
+    final pseudos = <String>[];
+    // Match ::pseudo-element or :pseudo-class (with optional parenthesised arg)
+    // The character class [^()]+ prevents greedy match from swallowing nested
+    // parens, but CSS pseudo-class args are never nested so this is sufficient.
+    final result = selector.replaceAllMapped(
+      _Re.pseudoExtract,
+      (m) {
+        pseudos.add(m.group(0)!.toLowerCase());
+        return '';
+      },
+    );
+    return (base: result.trim(), pseudos: pseudos);
+  }
+
+  /// Returns whether [node] satisfies a single pseudo-class or pseudo-element.
+  ///
+  /// **Structural pseudo-classes** — evaluated against the DOM tree:
+  /// `:first-child`, `:last-child`, `:only-child`,
+  /// `:nth-child(…)`, `:nth-last-child(…)`,
+  /// `:first-of-type`, `:last-of-type`, `:only-of-type`.
+  ///
+  /// **Behavioral / dynamic pseudo-classes** — always return `false` because
+  /// static rendering has no hover/focus/active state:
+  /// `:hover`, `:focus`, `:active`, `:visited`, `:focus-within`,
+  /// `:focus-visible`, `:checked`, `:disabled`, `:enabled`.
+  ///
+  /// **Unknown / future pseudo-classes** — return `true` (ignore) to avoid
+  /// breaking forward-compatible CSS.
+  bool _matchesPseudoClass(UDTNode node, String pseudo) {
+    // ── Behavioral states — never true in static rendering ──────────────────
+    const dynamic_ = {
+      ':hover',
+      ':focus',
+      ':active',
+      ':visited',
+      ':focus-within',
+      ':focus-visible',
+      ':focus-ring',
+      ':checked',
+      ':indeterminate',
+      ':disabled',
+      ':enabled',
+      ':placeholder-shown',
+      ':autofill',
+    };
+    if (dynamic_.contains(pseudo)) return false;
+
+    // ── Pseudo-elements — skip (not applicable to node matching) ────────────
+    if (pseudo.startsWith('::')) return true;
+
+    final parent = node.parent;
+
+    // ── :root ───────────────────────────────────────────────────────────────
+    // The document root only. It used to fall through to "unknown → match",
+    // so `:root { … }` applied to EVERY element: `:root { font-size: 62.5% }`
+    // compounded per level, and `:root { --c: … }` reset any descendant
+    // override of --c on every element below it.
+    // Top-level blocks have `parent == null` too (the adapters do not point
+    // them back at the DocumentNode), so test the node type, not the parent.
+    if (pseudo == ':root') return node is DocumentNode;
+
+    // ── :first-child ────────────────────────────────────────────────────────
+    if (pseudo == ':first-child') {
+      return parent != null &&
+          parent.children.isNotEmpty &&
+          parent.children.first == node;
+    }
+
+    // ── :last-child ─────────────────────────────────────────────────────────
+    if (pseudo == ':last-child') {
+      return parent != null &&
+          parent.children.isNotEmpty &&
+          parent.children.last == node;
+    }
+
+    // ── :only-child ─────────────────────────────────────────────────────────
+    if (pseudo == ':only-child') {
+      return parent != null && parent.children.length == 1;
+    }
+
+    // ── :nth-child(…) ───────────────────────────────────────────────────────
+    final nthChild = _Re.nthChild.firstMatch(pseudo);
+    if (nthChild != null) {
+      if (parent == null) return false;
+      final idx = parent.children.indexOf(node) + 1; // 1-based
+      return _matchesNthExpression(idx, nthChild.group(1)!.trim());
+    }
+
+    // ── :nth-last-child(…) ──────────────────────────────────────────────────
+    final nthLast = _Re.nthLastChild.firstMatch(pseudo);
+    if (nthLast != null) {
+      if (parent == null) return false;
+      final idx = parent.children.length -
+          parent.children.indexOf(node); // 1-based from end
+      return _matchesNthExpression(idx, nthLast.group(1)!.trim());
+    }
+
+    // ── :first-of-type ──────────────────────────────────────────────────────
+    if (pseudo == ':first-of-type') {
+      if (parent == null) return false;
+      return parent.children.firstWhere(
+            (c) => c.tagName == node.tagName,
+            orElse: () => node,
+          ) ==
+          node;
+    }
+
+    // ── :last-of-type ───────────────────────────────────────────────────────
+    if (pseudo == ':last-of-type') {
+      if (parent == null) return false;
+      return parent.children.lastWhere(
+            (c) => c.tagName == node.tagName,
+            orElse: () => node,
+          ) ==
+          node;
+    }
+
+    // ── :only-of-type ───────────────────────────────────────────────────────
+    if (pseudo == ':only-of-type') {
+      if (parent == null) return false;
+      return parent.children.where((c) => c.tagName == node.tagName).length ==
+          1;
+    }
+
+    // ── Unknown / future pseudo-classes → ignore (don't block matching) ─────
+    return true;
+  }
+
+  /// Evaluates CSS `An+B` notation against a 1-based child [index].
+  ///
+  /// Supports: `odd`, `even`, a plain integer `N`, and the full `An+B` form.
+  static bool _matchesNthExpression(int index, String expr) {
+    expr = expr.toLowerCase().trim();
+    if (expr == 'odd') return index % 2 == 1;
+    if (expr == 'even') return index % 2 == 0;
+
+    final plain = int.tryParse(expr);
+    if (plain != null) return index == plain;
+
+    // Parse An+B  (e.g. "2n+1", "-n+3", "n", "3n")
+    final match = _Re.nthExpr.firstMatch(expr);
+    if (match == null) return false;
+
+    final aStr = match.group(1) ?? '1';
+    final a = aStr.isEmpty || aStr == '+'
+        ? 1
+        : (aStr == '-' ? -1 : int.tryParse(aStr) ?? 1);
+    final b = int.tryParse(match.group(2) ?? '0') ?? 0;
+
+    if (a == 0) return index == b;
+    // index = a*n + b  →  n = (index - b) / a  must be a non-negative integer.
+    //
+    // Do NOT short-circuit on `numerator < 0` when a is negative:
+    //   -n+3 (a=-1, b=3) → index=1: numerator = 1-3 = -2, n = -2/-1 = 2 ✓
+    //   Removing the early-exit and relying solely on `n >= 0` handles both
+    //   positive and negative step values correctly.
+    final numerator = index - b;
+    if (numerator % a != 0) return false;
+    return numerator ~/ a >= 0;
+  }
+
+  /// Match class selector (can be multiple: `.class1.class2`)
+  bool _matchesClassSelector(UDTNode node, String selector) {
+    // Split by '.' and filter empty strings
+    final classes = selector.split('.').where((c) => c.isNotEmpty).toList();
+    if (classes.isEmpty) return false;
+
+    // All classes must match
+    for (final className in classes) {
+      if (!node.classList.contains(className)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // ── CSS Attribute Selector support ──────────────────────────────────────────
+  //
+  // Parses `[attr]`, `[attr="val"]`, `[attr^="val"]`, `[attr$="val"]`,
+  // `[attr*="val"]`, `[attr~="val"]`, `[attr|="val"]` from a selector string
+  // and evaluates them against the node's attributes map.
+  //
+  // Regex captures the interior of each [...] bracket pair.
+  static final _kAttrSelectorAll = RegExp(r'\[([^\]]+)\]');
+  // Captures: group(1)=attr-name, group(2)=operator, group(3)=value
+  static final _kAttrSelectorExpr = RegExp(
+    r'''^([a-zA-Z_-][a-zA-Z0-9_:-]*)\s*([~|^$*]?=)\s*["']?([^"']*)["']?$''',
+  );
+
+  /// Extracts every `[...]` constraint from [selector] and returns a list of
+  /// `(attr, op, val)` records.  `op` and `val` are null for presence-only `[attr]`.
+  static List<({String attr, String? op, String? val})> _parseAttrSelectors(
+      String selector) {
+    final result = <({String attr, String? op, String? val})>[];
+    for (final m in _kAttrSelectorAll.allMatches(selector)) {
+      final inside = m.group(1)!.trim();
+      final eq = _kAttrSelectorExpr.firstMatch(inside);
+      if (eq != null) {
+        result.add((
+          attr: eq.group(1)!.toLowerCase(),
+          op: eq.group(2)!,
+          val: eq.group(3)!,
+        ));
+      } else {
+        // [attr] — presence-only
+        result.add((attr: inside.toLowerCase(), op: null, val: null));
+      }
+    }
+    return result;
+  }
+
+  /// Returns true iff [node] satisfies every attribute constraint in [selectors].
+  static bool _nodeMatchesAttrSelectors(
+    UDTNode node,
+    List<({String attr, String? op, String? val})> selectors,
+  ) {
+    for (final sel in selectors) {
+      final nodeVal = node.attributes[sel.attr];
+      if (sel.op == null) {
+        if (nodeVal == null) return false; // presence check
+      } else {
+        if (nodeVal == null) return false;
+        final required = sel.val ?? '';
+        switch (sel.op) {
+          case '=':
+            if (nodeVal != required) return false;
+          case '~=':
+            if (!nodeVal.split(' ').contains(required)) return false;
+          case '^=':
+            if (!nodeVal.startsWith(required)) return false;
+          case r'$=':
+            if (!nodeVal.endsWith(required)) return false;
+          case '*=':
+            if (!nodeVal.contains(required)) return false;
+          case '|=':
+            if (nodeVal != required && !nodeVal.startsWith('$required-')) {
+              return false;
+            }
+        }
+      }
+    }
+    return true;
+  }
+
+  /// Match combined selector: `element.class`, `element#id`, `.class1.class2`
+  bool _matchesCombinedSelector(UDTNode node, String selector) {
+    String? elementPart;
+    String? idPart;
+    List<String> classParts = [];
+
+    // Parse selector parts
+    final idMatch = _Re.idMatch.firstMatch(selector);
+    if (idMatch != null) {
+      idPart = idMatch.group(1);
+    }
+
+    final classMatches = _Re.classMatch.allMatches(selector);
+    for (final match in classMatches) {
+      classParts.add(match.group(1)!);
+    }
+
+    // Element is everything before first . or #
+    final elementMatch = _Re.tagName.firstMatch(selector);
+    if (elementMatch != null) {
+      elementPart = elementMatch.group(1);
+    }
+
+    // Check element
+    if (elementPart != null && node.tagName != elementPart) {
+      return false;
+    }
+
+    // Check ID
+    if (idPart != null && node.cssId != idPart) {
+      return false;
+    }
+
+    // Check all classes
+    for (final className in classParts) {
+      if (!node.classList.contains(className)) {
+        return false;
+      }
+    }
+
+    // CSS Attribute Selector fix (false-positive bug):
+    // Previously, [attr] / [attr="val"] constraints in a combined selector like
+    // `div.card[data-active="true"]` were silently ignored, causing the rule to
+    // match ANY `div.card` regardless of attributes.
+    final attrSelectors = _parseAttrSelectors(selector);
+    if (attrSelectors.isNotEmpty &&
+        !_nodeMatchesAttrSelectors(node, attrSelectors)) {
+      return false;
+    }
+
+    return elementPart != null ||
+        idPart != null ||
+        classParts.isNotEmpty ||
+        attrSelectors.isNotEmpty;
+  }
+
+  /// Get previous sibling of a node
+  UDTNode? _getPreviousSibling(UDTNode node) {
+    final parent = node.parent;
+    if (parent == null) return null;
+
+    final index = parent.children.indexOf(node);
+    if (index <= 0) return null;
+
+    return parent.children[index - 1];
+  }
+
+  /// Merge two styles (later style wins) and mark overridden properties as explicit
+  ComputedStyle _mergeStyles(ComputedStyle base, ComputedStyle override) {
+    final result = ComputedStyle(
+      width: override.width ?? base.width,
+      height: override.height ?? base.height,
+      margin:
+          override.margin != EdgeInsets.zero ? override.margin : base.margin,
+      padding:
+          override.padding != EdgeInsets.zero ? override.padding : base.padding,
+      borderWidth: override.borderWidth != EdgeInsets.zero
+          ? override.borderWidth
+          : base.borderWidth,
+      borderColor: override.borderColor ?? base.borderColor,
+      borderRadius: override.borderRadius ?? base.borderRadius,
+      color: override.color,
+      fontSize: override.fontSize,
+      fontWeight: override.fontWeight,
+      fontStyle: override.fontStyle,
+      fontFamily: override.fontFamily ?? base.fontFamily,
+      textDecoration: override.textDecoration ?? base.textDecoration,
+      lineHeight: override.lineHeight ?? base.lineHeight,
+      textAlign: override.textAlign,
+      backgroundColor: override.backgroundColor ?? base.backgroundColor,
+      display: override.display,
+      opacity: override.opacity,
+    );
+
+    // Mark properties from user-agent styles as explicitly set
+    // This prevents them from being overridden by inheritance
+    if (override.fontSize != ComputedStyle.defaultStyle.fontSize) {
+      result.markExplicitlySet('font-size');
+    }
+    if (override.fontWeight != ComputedStyle.defaultStyle.fontWeight) {
+      result.markExplicitlySet('font-weight');
+    }
+    if (override.fontStyle != ComputedStyle.defaultStyle.fontStyle) {
+      result.markExplicitlySet('font-style');
+    }
+    if (override.color != ComputedStyle.defaultStyle.color) {
+      result.markExplicitlySet('color');
+    }
+    if (override.margin != EdgeInsets.zero) {
+      result.markExplicitlySet('margin');
+    }
+    if (override.padding != EdgeInsets.zero) {
+      result.markExplicitlySet('padding');
+    }
+    if (override.display != ComputedStyle.defaultStyle.display) {
+      result.markExplicitlySet('display');
+    }
+    if (override.textDecoration != null) {
+      result.markExplicitlySet('text-decoration');
+    }
+
+    return result;
+  }
+
+  static bool _isCustomProperty(String property) => property.startsWith('--');
+
+  /// The custom properties [node] ends up with, in cascade order (rules by
+  /// specificity, inline style, then `!important` rules), with
+  /// [customPropertyOverrides] applied. Null when nothing declares any.
+  Map<String, String>? _cascadeCustomProperties(
+      UDTNode node, List<CssRule> candidates) {
+    final inline = node.attributes['style'];
+    final inlineHasCustom = inline != null && inline.contains('--');
+    if (!_rulesDeclareCustomProperties && !inlineHasCustom) return null;
+
+    final out = <String, String>{};
+    void take(String property, String value) {
+      if (_isCustomProperty(property)) {
+        out[property] = customPropertyOverrides[property] ?? value;
+      }
+    }
+
+    if (_rulesDeclareCustomProperties) {
+      for (final rule in candidates) {
+        if (rule.declaresCustomProperties &&
+            _matchesSelector(node, rule.selector)) {
+          rule.declarations.forEach(take);
+        }
+      }
+    }
+    if (inlineHasCustom) {
+      for (final decl in _splitDeclarations(inline)) {
+        final colonIdx = decl.indexOf(':');
+        if (colonIdx <= 0) continue;
+        final value = decl.substring(colonIdx + 1).trim();
+        if (value.isNotEmpty) take(decl.substring(0, colonIdx).trim(), value);
+      }
+    }
+    if (_rulesDeclareCustomProperties) {
+      for (final rule in candidates) {
+        if (rule.declaresImportantCustomProperties &&
+            _matchesSelector(node, rule.selector)) {
+          rule.importantDeclarations.forEach(take);
+        }
+      }
+    }
+    return out.isEmpty ? null : out;
+  }
+
+  /// Apply CSS declarations to a style
+  ComputedStyle _applyDeclarations(
+    ComputedStyle style,
+    Map<String, String> declarations, {
+    double? parentFontSize,
+    Map<String, String>? inheritedCustomProps,
+  }) {
+    // `font-size` MUST be applied before any declaration that uses it as a
+    // reference — `line-height: 30px` divides by the element's own font-size to
+    // get its multiplier, and `em` lengths scale by it. In CSS a computed value
+    // never depends on source order within a block, but this loop does, so
+    // font-size is hoisted to the front. Same-property precedence is unaffected:
+    // `declarations` is a Map, so each property already appears exactly once.
+    final hoistedFontSize = declarations[_kFontSizeProperty];
+    if (hoistedFontSize != null) {
+      style = _applySingleDeclaration(
+        style,
+        _kFontSizeProperty,
+        hoistedFontSize,
+        parentFontSize: parentFontSize,
+        inheritedCustomProps: inheritedCustomProps,
+      );
+    }
+
+    for (final entry in declarations.entries) {
+      if (entry.key == _kFontSizeProperty) continue; // already applied above
+      style = _applySingleDeclaration(
+        style,
+        entry.key,
+        entry.value,
+        parentFontSize: parentFontSize,
+        inheritedCustomProps: inheritedCustomProps,
+      );
+    }
+    return style;
+  }
+
+  /// Apply a single CSS declaration
+  ComputedStyle _applySingleDeclaration(
+    ComputedStyle style,
+    String property,
+    String value, {
+    double? parentFontSize,
+    Map<String, String>? inheritedCustomProps,
+  }) {
+    // CSS Custom Properties (--name: value)
+    if (property.startsWith('--')) {
+      style.customProperties[property] = _elementCustomProps?[property] ??
+          customPropertyOverrides[property] ??
+          value;
+      return style;
+    }
+
+    // Resolve var() and calc() references before processing
+    value =
+        _resolveCssValue(value, style.customProperties, inheritedCustomProps);
+    // Nothing left (an undefined var() without fallback, or an expansion
+    // over the length limit): invalid at computed-value time — ignore it
+    // rather than apply an empty value.
+    if (value.trim().isEmpty) return style;
+
+    switch (property) {
+      case 'color':
+        final color = _parseColor(value);
+        if (color != null) {
+          style.color = color;
+          style.markExplicitlySet('color');
+        }
+        break;
+
+      case 'background':
+        // Shorthand for background-color, background-image, etc.
+        if (value.contains('gradient')) {
+          final gradient = _parseGradient(value);
+          if (gradient != null) {
+            style.backgroundGradient = gradient;
+            style.markExplicitlySet('background-gradient');
+          }
+        } else if (value.contains('url(')) {
+          final match = _Re.urlFunc.firstMatch(value);
+          // Same scheme policy as <img src>: stylesheets come from <style>
+          // blocks that bypass the HTML sanitizer.
+          if (match != null && UrlSafety.isSafe(match.group(1)!)) {
+            style.backgroundImage = match.group(1);
+            style.markExplicitlySet('background-image');
+          }
+        } else {
+          final color = _parseColor(value);
+          if (color != null) {
+            style.backgroundColor = color;
+            style.markExplicitlySet('background-color');
+          }
+        }
+
+        // Check for background-size in shorthand (simplified)
+        if (value.contains('cover')) {
+          style.backgroundSize = 'cover';
+          style.markExplicitlySet('background-size');
+        } else if (value.contains('contain')) {
+          style.backgroundSize = 'contain';
+          style.markExplicitlySet('background-size');
+        }
+        break;
+
+      case 'background-color':
+        final color = _parseColor(value);
+        if (color != null) {
+          style.backgroundColor = color;
+          style.markExplicitlySet('background-color');
+        }
+        break;
+
+      case 'background-image':
+        if (value.contains('gradient')) {
+          final gradient = _parseGradient(value);
+          if (gradient != null) {
+            style.backgroundGradient = gradient;
+            style.markExplicitlySet('background-gradient');
+          }
+        } else if (value.contains('url(')) {
+          final match = _Re.urlFunc.firstMatch(value);
+          // Same scheme policy as <img src>: stylesheets come from <style>
+          // blocks that bypass the HTML sanitizer.
+          if (match != null && UrlSafety.isSafe(match.group(1)!)) {
+            style.backgroundImage = match.group(1);
+            style.markExplicitlySet('background-image');
+          }
+        }
+        break;
+
+      case 'background-size':
+        style.backgroundSize = value.trim().toLowerCase();
+        style.markExplicitlySet('background-size');
+        break;
+
+      case 'background-repeat':
+        final repeat = value.trim().toLowerCase();
+        const validRepeats = {
+          'repeat',
+          'repeat-x',
+          'repeat-y',
+          'no-repeat',
+          'space',
+          'round',
+        };
+        if (validRepeats.contains(repeat)) {
+          style.backgroundRepeat = repeat;
+          style.markExplicitlySet('background-repeat');
+        }
+        break;
+
+      case 'background-position':
+        style.backgroundPosition = value.trim().toLowerCase();
+        style.markExplicitlySet('background-position');
+        break;
+
+      case 'font-size':
+        final size = _parseFontSize(value, parentFontSize: parentFontSize);
+        if (size != null) {
+          style.fontSize = size;
+          style.markExplicitlySet('font-size');
+        }
+        break;
+
+      case 'font-weight':
+        final weight = _parseFontWeight(value);
+        if (weight != null) {
+          style.fontWeight = weight;
+          style.markExplicitlySet('font-weight');
+        }
+        break;
+
+      case 'font-style':
+        final fontStyle = _parseFontStyle(value);
+        if (fontStyle != null) {
+          style.fontStyle = fontStyle;
+          style.markExplicitlySet('font-style');
+        }
+        break;
+
+      case 'font-family':
+        style.fontFamily = value.trim().replaceAll('"', '').replaceAll("'", '');
+        style.markExplicitlySet('font-family');
+        break;
+
+      case 'text-decoration':
+        final decoration = _parseTextDecoration(value);
+        if (decoration != null) {
+          style.textDecoration = decoration;
+          style.markExplicitlySet('text-decoration');
+        }
+        break;
+
+      case 'line-height':
+        // A length/px line-height is converted to a multiplier by dividing
+        // by the *reference* font-size — CSS defines that reference as this
+        // element's own font-size, not its parent's. If `font-size` was
+        // already processed earlier in this same declaration block (the
+        // natural `font-size` then `line-height` writing order), style.fontSize
+        // already holds that resolved value; otherwise this element doesn't
+        // override font-size at all, so it will equal the parent's via
+        // inheritance and parentFontSize is the correct reference.
+        // Without this, `h2 { font-size: 20px; line-height: 3px }` divided
+        // 3px by the PARENT's font-size (e.g. 16px) instead of 20px,
+        // producing a wildly wrong multiplier.
+        final lineHeightFontSize = style.isExplicitlySet('font-size')
+            ? style.fontSize
+            : parentFontSize;
+        final lineHeight =
+            _parseLineHeight(value, parentFontSize: lineHeightFontSize);
+        if (lineHeight != null) {
+          style.lineHeight = lineHeight;
+          style.markExplicitlySet('line-height');
+        }
+        break;
+
+      case 'letter-spacing':
+        final spacing =
+            _parseLengthWithContext(value, parentFontSize: parentFontSize);
+        if (spacing != null) {
+          style.letterSpacing = spacing;
+          style.markExplicitlySet('letter-spacing');
+        }
+        break;
+
+      case 'text-align':
+        final align = _parseTextAlign(value);
+        if (align != null) {
+          style.textAlign = align;
+          style.markExplicitlySet('text-align');
+        }
+        break;
+
+      case 'position':
+        final position = value.trim().toLowerCase();
+        if (const {'static', 'relative', 'absolute', 'fixed', 'sticky'}
+            .contains(position)) {
+          style.position = position;
+          style.markExplicitlySet('position');
+        }
+        break;
+
+      // Offsets for `position: relative`. `auto` clears an earlier value; `%`
+      // and anything else unparseable leaves it alone.
+      case 'top':
+        if (_isAutoKeyword(value)) {
+          style.insetTop = null;
+        } else {
+          style.insetTop =
+              _parseEmLength(value, style, parentFontSize) ?? style.insetTop;
+        }
+        break;
+
+      case 'right':
+        if (_isAutoKeyword(value)) {
+          style.insetRight = null;
+        } else {
+          style.insetRight =
+              _parseEmLength(value, style, parentFontSize) ?? style.insetRight;
+        }
+        break;
+
+      case 'bottom':
+        if (_isAutoKeyword(value)) {
+          style.insetBottom = null;
+        } else {
+          style.insetBottom =
+              _parseEmLength(value, style, parentFontSize) ?? style.insetBottom;
+        }
+        break;
+
+      case 'left':
+        if (_isAutoKeyword(value)) {
+          style.insetLeft = null;
+        } else {
+          style.insetLeft =
+              _parseEmLength(value, style, parentFontSize) ?? style.insetLeft;
+        }
+        break;
+
+      case 'box-sizing':
+        final sizing = value.trim().toLowerCase();
+        if (sizing == 'border-box' || sizing == 'content-box') {
+          style.boxSizing = sizing == 'border-box'
+              ? HyperBoxSizing.borderBox
+              : HyperBoxSizing.contentBox;
+          style.markExplicitlySet('box-sizing');
+        }
+        break;
+
+      case 'text-indent':
+        // `%` is relative to the containing block's content width and is
+        // resolved at layout time (stored on textIndentPercent); absolute
+        // lengths (px/em/rem/pt) go straight onto textIndent.
+        final indentPct = _parsePercent(value.trim());
+        if (indentPct != null) {
+          style.textIndentPercent = indentPct;
+          style.markExplicitlySet('text-indent');
+        } else {
+          final indent = _parseLength(value);
+          if (indent != null) {
+            style.textIndent = indent;
+            style.markExplicitlySet('text-indent');
+          }
+        }
+        break;
+
+      case 'vertical-align':
+        final vAlign = _parseVerticalAlign(value);
+        if (vAlign != null) {
+          style.verticalAlign = vAlign;
+          style.markExplicitlySet('vertical-align');
+        }
+        break;
+
+      case 'margin':
+        final margin =
+            _parseEdgeInsets(value, emBase: _emBase(style, parentFontSize));
+        if (margin != null) {
+          style.margin = margin;
+          // `auto` parses to 0 above; layout needs to know which sides it was.
+          final sides = value.trim().toLowerCase().split(_Re.whitespace);
+          style.marginRightAuto = sides.length >= 2 && sides[1] == 'auto' ||
+              sides.length == 1 && sides[0] == 'auto';
+          style.marginLeftAuto =
+              sides.length == 4 ? sides[3] == 'auto' : style.marginRightAuto;
+          style.markExplicitlySet('margin');
+        }
+        break;
+
+      case 'margin-top':
+        final val = _parseEmLength(value, style, parentFontSize);
+        if (val != null) {
+          style.margin = style.margin.copyWith(top: val);
+          style.markExplicitlySet('margin');
+        }
+        break;
+
+      case 'margin-bottom':
+        final val = _parseEmLength(value, style, parentFontSize);
+        if (val != null) {
+          style.margin = style.margin.copyWith(bottom: val);
+          style.markExplicitlySet('margin');
+        }
+        break;
+
+      case 'margin-left':
+        final isAuto = _isAutoKeyword(value);
+        final val = isAuto ? 0.0 : _parseEmLength(value, style, parentFontSize);
+        if (val != null) {
+          style.margin = style.margin.copyWith(left: val);
+          style.marginLeftAuto = isAuto;
+          style.markExplicitlySet('margin');
+        }
+        break;
+
+      case 'margin-right':
+        final isAuto = _isAutoKeyword(value);
+        final val = isAuto ? 0.0 : _parseEmLength(value, style, parentFontSize);
+        if (val != null) {
+          style.margin = style.margin.copyWith(right: val);
+          style.marginRightAuto = isAuto;
+          style.markExplicitlySet('margin');
+        }
+        break;
+
+      case 'padding':
+        final padding = _parseEdgeInsets(value);
+        if (padding != null) {
+          style.padding = padding;
+          style.markExplicitlySet('padding');
+        }
+        break;
+
+      case 'padding-top':
+        final val = _parseLength(value);
+        if (val != null) {
+          style.padding = style.padding.copyWith(top: val);
+          style.markExplicitlySet('padding');
+        }
+        break;
+
+      case 'padding-bottom':
+        final val = _parseLength(value);
+        if (val != null) {
+          style.padding = style.padding.copyWith(bottom: val);
+          style.markExplicitlySet('padding');
+        }
+        break;
+
+      case 'padding-left':
+        final val = _parseLength(value);
+        if (val != null) {
+          style.padding = style.padding.copyWith(left: val);
+          style.markExplicitlySet('padding');
+        }
+        break;
+
+      case 'padding-right':
+        final val = _parseLength(value);
+        if (val != null) {
+          style.padding = style.padding.copyWith(right: val);
+          style.markExplicitlySet('padding');
+        }
+        break;
+
+      case 'border-radius':
+        final radius = _parseBorderRadius(value);
+        if (radius != null) {
+          style.borderRadius = radius;
+          style.markExplicitlySet('border-radius');
+        }
+        break;
+
+      case 'border-left':
+        final border = _parseBorderShorthand(value);
+        if (border != null) {
+          style.borderWidth = style.borderWidth.copyWith(left: border.$1);
+          style.borderColor = border.$2;
+          if (border.$3 != null) style.borderStyle = border.$3!;
+          style.markExplicitlySet('border');
+        }
+        break;
+
+      case 'border':
+        final border = _parseBorderShorthand(value);
+        if (border != null) {
+          style.borderWidth = EdgeInsets.all(border.$1);
+          style.borderColor = border.$2;
+          if (border.$3 != null) style.borderStyle = border.$3!;
+          style.markExplicitlySet('border');
+        }
+        break;
+
+      case 'width':
+        final widthPct = _parsePercent(value.trim());
+        if (widthPct != null) {
+          style.widthPercent = widthPct; // fraction 0–1, resolved at layout
+          style.markExplicitlySet('width');
+        } else {
+          final width = _parseLength(value);
+          if (width != null) {
+            style.width = width;
+            style.markExplicitlySet('width');
+          }
+        }
+        break;
+
+      case 'height':
+        final height = _parseLength(value);
+        if (height != null) {
+          style.height = height;
+          style.markExplicitlySet('height');
+        }
+        break;
+
+      case 'display':
+        final display = _parseDisplay(value);
+        if (display != null) {
+          style.display = display;
+          style.markExplicitlySet('display');
+        }
+        break;
+
+      case 'border-collapse':
+        final v = value.trim().toLowerCase();
+        if (v == 'separate') {
+          style.borderCollapse = HyperBorderCollapse.separate;
+          style.markExplicitlySet('border-collapse');
+        } else if (v == 'collapse') {
+          style.borderCollapse = HyperBorderCollapse.collapse;
+          style.markExplicitlySet('border-collapse');
+        }
+        break;
+
+      case 'border-spacing':
+        // Only the first (horizontal) value is honoured; a second value for
+        // vertical spacing is accepted syntactically but ignored.
+        final first = value.trim().split(RegExp(r'\s+')).first;
+        final spacing = _parseLength(first);
+        if (spacing != null && spacing >= 0) {
+          style.borderSpacing = spacing;
+          style.markExplicitlySet('border-spacing');
+        }
+        break;
+
+      // Flexbox properties
+      case 'flex-direction':
+        final flexDir = _parseFlexDirection(value);
+        if (flexDir != null) {
+          style.flexDirection = flexDir;
+          style.markExplicitlySet('flex-direction');
+        }
+        break;
+
+      case 'justify-content':
+        final justify = _parseJustifyContent(value);
+        if (justify != null) {
+          style.justifyContent = justify;
+          style.markExplicitlySet('justify-content');
+        }
+        break;
+
+      case 'align-items':
+        final align = _parseAlignItems(value);
+        if (align != null) {
+          style.alignItems = align;
+          style.markExplicitlySet('align-items');
+        }
+        break;
+
+      case 'align-self':
+        final alignSelf = _parseAlignItems(value);
+        if (alignSelf != null) {
+          style.alignSelf = alignSelf;
+          style.markExplicitlySet('align-self');
+        }
+        break;
+
+      case 'flex-wrap':
+        final wrap = _parseFlexWrap(value);
+        if (wrap != null) {
+          style.flexWrap = wrap;
+          style.markExplicitlySet('flex-wrap');
+        }
+        break;
+
+      case 'gap':
+        final length = _parseLength(value);
+        if (length != null) {
+          style.gap = length;
+          style.rowGap = length;
+          style.columnGap = length;
+          style.markExplicitlySet('gap');
+        }
+        break;
+
+      case 'row-gap':
+        final length = _parseLength(value);
+        if (length != null) {
+          style.rowGap = length;
+          style.markExplicitlySet('row-gap');
+        }
+        break;
+
+      case 'column-gap':
+        final length = _parseLength(value);
+        if (length != null) {
+          style.columnGap = length;
+          style.markExplicitlySet('column-gap');
+        }
+        break;
+
+      case 'flex':
+        // Parse flex shorthand: flex-grow flex-shrink flex-basis
+        final parts = value.trim().split(_Re.whitespace);
+        if (parts.isNotEmpty) {
+          style.flexGrow = double.tryParse(parts[0]) ?? 0;
+          if (parts.length > 1) {
+            style.flexShrink = double.tryParse(parts[1]) ?? 1;
+          }
+          if (parts.length > 2) {
+            _applyFlexBasis(style, parts[2]);
+          } else {
+            // CSS: the one- and two-value forms set flex-basis to 0%, NOT auto.
+            // `flex: 1` therefore sizes purely from distributed free space.
+            style.flexBasis = null;
+            style.flexBasisPercent = 0;
+          }
+          style.markExplicitlySet('flex');
+        }
+        break;
+
+      case 'flex-grow':
+        final flexGrow = double.tryParse(value.trim());
+        if (flexGrow != null) {
+          style.flexGrow = flexGrow;
+          style.markExplicitlySet('flex-grow');
+        }
+        break;
+
+      case 'flex-shrink':
+        final flexShrink = double.tryParse(value.trim());
+        if (flexShrink != null) {
+          style.flexShrink = flexShrink;
+          style.markExplicitlySet('flex-shrink');
+        }
+        break;
+
+      case 'flex-basis':
+        if (_applyFlexBasis(style, value)) {
+          style.markExplicitlySet('flex-basis');
+        }
+        break;
+
+      case 'opacity':
+        final opacity = double.tryParse(value);
+        if (opacity != null) {
+          style.opacity = opacity.clamp(0.0, 1.0);
+          style.markExplicitlySet('opacity');
+        }
+        break;
+
+      case 'float':
+        final floatValue = _parseFloat(value);
+        if (floatValue != null) {
+          style.float = floatValue;
+          style.markExplicitlySet('float');
+        }
+        break;
+
+      case 'clear':
+        final clearValue = _parseClear(value);
+        if (clearValue != null) {
+          style.clear = clearValue;
+          style.markExplicitlySet('clear');
+        }
+        break;
+
+      case 'text-overflow':
+        final textOverflow = _parseTextOverflow(value);
+        if (textOverflow != null) {
+          style.textOverflow = textOverflow;
+          style.markExplicitlySet('text-overflow');
+        }
+        break;
+
+      case 'word-break':
+        style.wordBreak = value.trim().toLowerCase();
+        style.markExplicitlySet('word-break');
+        break;
+
+      case 'overflow-wrap':
+        style.overflowWrap = value.trim().toLowerCase();
+        style.markExplicitlySet('overflow-wrap');
+        break;
+
+      case 'object-fit':
+        final of = value.trim().toLowerCase();
+        const validObjectFitValues = {
+          'cover',
+          'contain',
+          'fill',
+          'none',
+          'scale-down',
+        };
+        if (validObjectFitValues.contains(of)) {
+          style.objectFit = of;
+          style.markExplicitlySet('object-fit');
+        }
+        break;
+
+      case 'list-style-type':
+        final lst = value.trim().toLowerCase();
+        const validListStyleTypes = {
+          'disc',
+          'circle',
+          'square',
+          'decimal',
+          'decimal-leading-zero',
+          'lower-alpha',
+          'lower-latin',
+          'upper-alpha',
+          'upper-latin',
+          'lower-roman',
+          'upper-roman',
+          'none',
+        };
+        if (validListStyleTypes.contains(lst)) {
+          style.listStyleType = lst;
+          style.markExplicitlySet('list-style-type');
+        }
+        break;
+
+      case 'list-style-position':
+        final lsp = value.trim().toLowerCase();
+        if (lsp == 'inside' || lsp == 'outside') {
+          style.listStylePosition = lsp;
+          style.markExplicitlySet('list-style-position');
+        }
+        break;
+
+      case 'list-style':
+        // Shorthand: parse each space-separated token
+        for (final token in value.trim().toLowerCase().split(RegExp(r'\s+'))) {
+          if (token == 'none') {
+            style.listStyleType = 'none';
+            style.markExplicitlySet('list-style-type');
+          } else if (token == 'inside' || token == 'outside') {
+            style.listStylePosition = token;
+            style.markExplicitlySet('list-style-position');
+          } else if (const {
+            'disc',
+            'circle',
+            'square',
+            'decimal',
+            'decimal-leading-zero',
+            'lower-alpha',
+            'lower-latin',
+            'upper-alpha',
+            'upper-latin',
+            'lower-roman',
+            'upper-roman',
+          }.contains(token)) {
+            style.listStyleType = token;
+            style.markExplicitlySet('list-style-type');
+          }
+        }
+        break;
+
+      case 'text-shadow':
+        final shadows = _parseTextShadow(value);
+        if (shadows != null && shadows.isNotEmpty) {
+          style.textShadow = shadows;
+          style.markExplicitlySet('text-shadow');
+        }
+        break;
+
+      case 'box-shadow':
+        final shadows = _parseBoxShadow(value);
+        if (shadows != null && shadows.isNotEmpty) {
+          style.boxShadow = shadows;
+          style.markExplicitlySet('box-shadow');
+        }
+        break;
+
+      case 'filter':
+        final filter = _parseFilter(value);
+        if (filter != null) {
+          style.filter = filter;
+          style.markExplicitlySet('filter');
+        }
+        break;
+
+      case 'backdrop-filter':
+        final filter = _parseFilter(value);
+        if (filter != null) {
+          style.backdropFilter = filter;
+          style.markExplicitlySet('backdrop-filter');
+        }
+        break;
+
+      case 'border-style':
+        final borderStyle = _parseBorderStyle(value);
+        if (borderStyle != null) {
+          style.borderStyle = borderStyle;
+          style.markExplicitlySet('border-style');
+        }
+        break;
+
+      case 'border-top-style':
+        final borderStyle = _parseBorderStyle(value);
+        if (borderStyle != null) {
+          style.borderTopStyle = borderStyle;
+          style.markExplicitlySet('border-top-style');
+        }
+        break;
+
+      case 'border-right-style':
+        final borderStyle = _parseBorderStyle(value);
+        if (borderStyle != null) {
+          style.borderRightStyle = borderStyle;
+          style.markExplicitlySet('border-right-style');
+        }
+        break;
+
+      case 'border-bottom-style':
+        final borderStyle = _parseBorderStyle(value);
+        if (borderStyle != null) {
+          style.borderBottomStyle = borderStyle;
+          style.markExplicitlySet('border-bottom-style');
+        }
+        break;
+
+      case 'border-left-style':
+        final borderStyle = _parseBorderStyle(value);
+        if (borderStyle != null) {
+          style.borderLeftStyle = borderStyle;
+          style.markExplicitlySet('border-left-style');
+        }
+        break;
+
+      case 'direction':
+        final direction = _parseDirection(value);
+        if (direction != null) {
+          style.hyperDirection = direction;
+          style.markExplicitlySet('direction');
+        }
+        break;
+
+      // ============================================
+      // CSS Grid Properties
+      // ============================================
+
+      case 'grid-template-columns':
+        style.gridTemplateColumns = value.trim();
+        style.markExplicitlySet('grid-template-columns');
+        break;
+
+      case 'grid-template-rows':
+        style.gridTemplateRows = value.trim();
+        style.markExplicitlySet('grid-template-rows');
+        break;
+
+      case 'grid-auto-flow':
+        style.gridAutoFlow = value.trim().toLowerCase();
+        style.markExplicitlySet('grid-auto-flow');
+        break;
+
+      case 'grid-column':
+        // Parse "span 2" or "1 / 3" or "1 / span 2"
+        final colParsed = _parseGridLine(value);
+        style.gridColumnStart = colParsed.$1;
+        style.gridColumnEnd = colParsed.$2;
+        style.gridColumnSpan = colParsed.$3;
+        style.markExplicitlySet('grid-column');
+        break;
+
+      case 'grid-row':
+        final rowParsed = _parseGridLine(value);
+        style.gridRowStart = rowParsed.$1;
+        style.gridRowEnd = rowParsed.$2;
+        style.gridRowSpan = rowParsed.$3;
+        style.markExplicitlySet('grid-row');
+        break;
+
+      case 'grid-column-start':
+        final v = int.tryParse(value.trim()) ?? 0;
+        style.gridColumnStart = v;
+        style.markExplicitlySet('grid-column-start');
+        break;
+
+      case 'grid-column-end':
+        final v = int.tryParse(value.trim()) ?? 0;
+        style.gridColumnEnd = v;
+        style.markExplicitlySet('grid-column-end');
+        break;
+
+      case 'grid-row-start':
+        final v = int.tryParse(value.trim()) ?? 0;
+        style.gridRowStart = v;
+        style.markExplicitlySet('grid-row-start');
+        break;
+
+      case 'grid-row-end':
+        final v = int.tryParse(value.trim()) ?? 0;
+        style.gridRowEnd = v;
+        style.markExplicitlySet('grid-row-end');
+        break;
+
+      case 'justify-items':
+        final ji = _parseJustifyContent(value);
+        if (ji != null) {
+          style.justifyItems = ji;
+          style.markExplicitlySet('justify-items');
+        }
+        break;
+
+      case 'align-content':
+        final ac = _parseJustifyContent(value);
+        if (ac != null) {
+          style.alignContent = ac;
+          style.markExplicitlySet('align-content');
+        }
+        break;
+
+      // ============================================
+      // Missing CSS properties (added in v1.4.0)
+      // ============================================
+
+      case 'white-space':
+        final ws = value.trim().toLowerCase();
+        if (const {
+          'normal',
+          'nowrap',
+          'pre',
+          'pre-wrap',
+          'pre-line',
+          'break-spaces'
+        }.contains(ws)) {
+          style.whiteSpace = ws;
+          style.markExplicitlySet('white-space');
+        }
+        break;
+
+      case 'word-spacing':
+        final ws = _parseLength(value);
+        if (ws != null) {
+          style.wordSpacing = ws;
+          style.markExplicitlySet('word-spacing');
+        }
+        break;
+
+      case 'text-transform':
+        final tt = value.trim().toLowerCase();
+        if (const {'none', 'uppercase', 'lowercase', 'capitalize'}
+            .contains(tt)) {
+          style.textTransform = tt;
+          style.markExplicitlySet('text-transform');
+        }
+        break;
+
+      case 'text-decoration-color':
+        final c = _parseColor(value);
+        if (c != null) {
+          style.textDecorationColor = c;
+          style.markExplicitlySet('text-decoration-color');
+        }
+        break;
+
+      case 'min-width':
+        final minPct = _parsePercent(value.trim().toLowerCase());
+        if (minPct != null) {
+          style.minWidthPercent = minPct; // fraction 0–1, resolved at layout
+          style.markExplicitlySet('min-width');
+        } else {
+          final length = _parseLength(value);
+          if (length != null) {
+            style.minWidth = length;
+            style.markExplicitlySet('min-width');
+          }
+        }
+        break;
+
+      case 'max-width':
+        final v = value.trim().toLowerCase();
+        if (v == 'none') {
+          style.maxWidth = null;
+          style.markExplicitlySet('max-width');
+        } else {
+          final pct = _parsePercent(v);
+          if (pct != null) {
+            style.maxWidthPercent = pct; // fraction 0–1, resolved at layout
+            style.markExplicitlySet('max-width');
+          } else {
+            final length = _parseLength(v);
+            if (length != null) {
+              style.maxWidth = length;
+              style.markExplicitlySet('max-width');
+            }
+          }
+        }
+        break;
+
+      case 'min-height':
+        final length = _parseLength(value);
+        if (length != null) {
+          style.minHeight = length;
+          style.markExplicitlySet('min-height');
+        }
+        break;
+
+      case 'max-height':
+        final v = value.trim().toLowerCase();
+        if (v == 'none') {
+          style.maxHeight = null;
+          style.markExplicitlySet('max-height');
+        } else {
+          final length = _parseLength(v);
+          if (length != null) {
+            style.maxHeight = length;
+            style.markExplicitlySet('max-height');
+          }
+        }
+        break;
+
+      case 'overflow':
+        final ov = _parseOverflow(value);
+        if (ov != null) {
+          style.overflowX = ov;
+          style.overflowY = ov;
+          style.markAllExplicitlySet(['overflow-x', 'overflow-y']);
+        }
+        break;
+
+      case 'overflow-x':
+        final ov = _parseOverflow(value);
+        if (ov != null) {
+          style.overflowX = ov;
+          style.markExplicitlySet('overflow-x');
+        }
+        break;
+
+      case 'overflow-y':
+        final ov = _parseOverflow(value);
+        if (ov != null) {
+          style.overflowY = ov;
+          style.markExplicitlySet('overflow-y');
+        }
+        break;
+
+      case 'border-top':
+        final parsed = _parseBorderShorthand(value);
+        if (parsed != null) {
+          final (w, c, s) = parsed;
+          style.borderWidth = style.borderWidth.copyWith(top: w);
+          style.borderColor = c;
+          if (s != null) style.borderTopStyle = s;
+          style.markExplicitlySet('border-top');
+        }
+        break;
+
+      case 'border-right':
+        final parsed = _parseBorderShorthand(value);
+        if (parsed != null) {
+          final (w, c, s) = parsed;
+          style.borderWidth = style.borderWidth.copyWith(right: w);
+          style.borderColor = c;
+          if (s != null) style.borderRightStyle = s;
+          style.markExplicitlySet('border-right');
+        }
+        break;
+
+      case 'border-bottom':
+        final parsed = _parseBorderShorthand(value);
+        if (parsed != null) {
+          final (w, c, s) = parsed;
+          style.borderWidth = style.borderWidth.copyWith(bottom: w);
+          style.borderColor = c;
+          if (s != null) style.borderBottomStyle = s;
+          style.markExplicitlySet('border-bottom');
+        }
+        break;
+
+      case 'border-color':
+        final c = _parseColor(value);
+        if (c != null) {
+          style.borderColor = c;
+          style.markExplicitlySet('border-color');
+        }
+        break;
+
+      case 'border-width':
+        // Mailstream trial patch: the `thin`/`medium`/`thick` keywords (mail
+        // writes `border-width:thin`) and one to four values, as `padding`.
+        final widths = value.trim().split(_Re.whitespace).map(_parseBorderWidth).toList();
+        if (widths.isNotEmpty && widths.length <= 4 && !widths.contains(null)) {
+          final w = widths.cast<double>();
+          style.borderWidth = switch (w.length) {
+            1 => EdgeInsets.all(w[0]),
+            2 => EdgeInsets.symmetric(vertical: w[0], horizontal: w[1]),
+            3 => EdgeInsets.fromLTRB(w[1], w[0], w[1], w[2]),
+            _ => EdgeInsets.fromLTRB(w[3], w[0], w[1], w[2]),
+          };
+          style.markExplicitlySet('border-width');
+        }
+        break;
+
+      case 'animation':
+        _parseAnimationShorthand(value, style);
+        break;
+
+      case 'animation-name':
+        style.animationName = value.trim();
+        style.markExplicitlySet('animation-name');
+        break;
+
+      case 'animation-duration':
+        final ms = _parseDuration(value);
+        if (ms != null) {
+          style.animationDuration = ms;
+          style.markExplicitlySet('animation-duration');
+        }
+        break;
+
+      case 'animation-delay':
+        final ms = _parseDuration(value);
+        if (ms != null) {
+          style.animationDelay = ms;
+          style.markExplicitlySet('animation-delay');
+        }
+        break;
+
+      case 'animation-iteration-count':
+        final v = value.trim().toLowerCase();
+        if (v == 'infinite') {
+          style.animationIterationCount = null;
+          style.markExplicitlySet('animation-iteration-count');
+        } else {
+          final count = int.tryParse(v);
+          if (count != null) {
+            style.animationIterationCount = count;
+            style.markExplicitlySet('animation-iteration-count');
+          }
+        }
+        break;
+
+      case 'animation-direction':
+        final dir = _parseAnimationDirection(value);
+        if (dir != null) {
+          style.animationDirection = dir;
+          style.markExplicitlySet('animation-direction');
+        }
+        break;
+
+      case 'animation-timing-function':
+        final tf = _parseTimingFunction(value);
+        if (tf != null) {
+          style.animationTimingFunction = tf.$1;
+          style.animationTimingParams = tf.$2;
+          style.markExplicitlySet('animation-timing-function');
+        }
+        break;
+
+      case 'animation-fill-mode':
+        final fm = _parseAnimationFillMode(value);
+        if (fm != null) {
+          style.animationFillMode = fm;
+          style.markExplicitlySet('animation-fill-mode');
+        }
+        break;
+
+      case 'animation-play-state':
+        final ps = _parseAnimationPlayState(value);
+        if (ps != null) {
+          style.animationPlayState = ps;
+          style.markExplicitlySet('animation-play-state');
+        }
+        break;
+
+      case 'transition':
+        final t = _parseTransition(value);
+        if (t != null) {
+          style.transition = t;
+          style.markExplicitlySet('transition');
+        }
+        break;
+
+      case 'aspect-ratio':
+        final ar = _parseAspectRatio(value);
+        if (ar != null) {
+          style.aspectRatio = ar;
+          style.markExplicitlySet('aspect-ratio');
+        }
+        break;
+    }
+
+    return style;
+  }
+
+  // ============================================
+  // CSS Value Preprocessor (var() and calc())
+  // ============================================
+
+  /// Resolve var() and calc() in a CSS value string.
+  String _resolveCssValue(
+    String value,
+    Map<String, String> localCustomProps,
+    Map<String, String>? inheritedCustomProps,
+  ) {
+    if (!value.contains('var(') && !value.contains('calc(')) return value;
+
+    // Resolve var() first (supports nested: var(--x, fallback)). Look up
+    // local then inherited directly: merging both maps per declaration cost
+    // O(#custom properties) for every var() on every element (Bootstrap
+    // defines hundreds on :root).
+    value = _resolveVarReferences(
+      value,
+      (name) => localCustomProps[name] ?? inheritedCustomProps?[name],
+    );
+
+    // Then evaluate calc()
+    if (value.contains('calc(')) {
+      value = _evaluateCalcInValue(value);
+    }
+
+    return value;
+  }
+
+  /// Resolve all var(--name, fallback) references in a value string.
+  ///
+  /// Resolves from innermost outward by matching only leaf var() calls
+  /// (those whose content contains no nested parens). This correctly handles
+  /// nested fallbacks like var(--a, var(--b, default)).
+  String _resolveVarReferences(
+      String value, String? Function(String name) lookup) {
+    for (int i = 0; i < _kMaxVarPasses; i++) {
+      // Leaf var() calls only ([^,)] / [^)] — no nested parens inside), so
+      // nested fallbacks resolve inside-out across passes.
+      final buffer = StringBuffer();
+      var last = 0;
+      var replaced = false;
+      for (final match in _Re.cssVar.allMatches(value)) {
+        buffer.write(value.substring(last, match.start));
+        final propName = match.group(1)!;
+        final fallback = match.group(2)?.trim() ?? '';
+        buffer.write(lookup(propName) ?? fallback);
+        last = match.end;
+        replaced = true;
+        // Checked per substitution, not per pass: one pass over a value with
+        // thousands of var() refs to a large property could otherwise
+        // allocate gigabytes before the pass ends. Each pass can multiply
+        // the length (`--b: var(--a) var(--a) …`), so untrusted <style>
+        // could crash the app; an over-long value is invalid instead.
+        if (buffer.length > _kMaxVarExpansionLength) return '';
+      }
+      if (!replaced) break;
+      buffer.write(value.substring(last));
+      value = buffer.toString();
+    }
+    return value;
+  }
+
+  /// Passes of var() substitution (one nesting level each). Bounds cycles
+  /// such as `--a: var(--b); --b: var(--a)`.
+  static const _kMaxVarPasses = 10;
+
+  /// Upper bound on a declaration value after var() substitution. Real
+  /// values are far smaller (a long font stack is < 1 KB).
+  static const _kMaxVarExpansionLength = 16 * 1024;
+
+  /// Evaluate all calc() expressions in a value string.
+  ///
+  /// Uses `[^()]+` (innermost-only) regex iterated until no more calc() remain,
+  /// so nested expressions like `calc(100% - calc(20px * 2))` are resolved
+  /// inside-out: inner `calc(20px * 2)` → `40px` first, then outer calc().
+  /// Maximum nesting depth allowed for calc() evaluation.
+  ///
+  /// Each pass resolves one nesting level (innermost-first).  Real CSS rarely
+  /// nests calc() deeper than 2–3 levels; capping at 8 prevents a maliciously
+  /// crafted stylesheet with 1000-deep nesting from looping indefinitely.
+  static const _kMaxCalcDepth = 8;
+
+  String _evaluateCalcInValue(String value) {
+    // [^()]+ matches only characters that are NOT parens, so it always finds
+    // the *innermost* calc() — the one with no nested calls inside.
+    final innerCalc = _Re.calcInner;
+    String current = value;
+    // Iterate until stable, bounded by _kMaxCalcDepth to guard against
+    // adversarial input (e.g. calc(calc(calc(...))) with 1000 levels).
+    for (int depth = 0; depth < _kMaxCalcDepth; depth++) {
+      if (!current.contains('calc(')) break;
+      final next = current.replaceAllMapped(innerCalc, (match) {
+        final expr = match.group(1)!;
+        final result = _evaluateCalcExpr(expr);
+        if (result != null) return '${result}px';
+        return match.group(0)!; // Keep original if can't evaluate
+      });
+      if (next == current) break; // No progress — expression is unresolvable
+      current = next;
+    }
+    return current;
+  }
+
+  /// Evaluate a CSS calc() arithmetic expression to a pixel value.
+  ///
+  /// Supports: px, em (×16), rem (×16), unitless numbers.
+  /// Operators: +, -, *, /
+  /// Percentage values are preserved as-is (returned as null = skip).
+  double? _evaluateCalcExpr(String expr) {
+    expr = expr.trim();
+
+    // Tokenize the expression — leading minus handled as part of number token
+    final tokenPattern = _Re.calcToken;
+    final tokens = tokenPattern.allMatches(expr).toList();
+    if (tokens.isEmpty) return null;
+
+    // Parse tokens into (value, operator) pairs
+    final values = <double>[];
+    final operators = <String>[];
+
+    for (final token in tokens) {
+      final numStr = token.group(1);
+      final unit = token.group(2) ?? '';
+      final op = token.group(3);
+
+      if (numStr != null) {
+        final num = double.tryParse(numStr);
+        if (num == null) return null;
+        double px;
+        switch (unit) {
+          case 'px':
+          case '':
+            px = num;
+            break;
+          case 'em':
+          case 'rem':
+            px = num * StyleResolver.rootFontSize;
+            break;
+          case '%':
+            // % values require a layout-context width to resolve.
+            // Log in debug mode so developers know which calc() expressions
+            // cannot be evaluated at parse time and will fall back to 0 / auto.
+            assert(() {
+              debugPrint(
+                'HyperRender: calc() contains a % value ("$expr") which '
+                'cannot be resolved without layout context — result ignored.',
+              );
+              return true;
+            }());
+            return null; // Can't resolve % without context
+          default:
+            px = num;
+        }
+        values.add(px);
+      } else if (op != null) {
+        operators.add(op);
+      }
+    }
+
+    if (values.isEmpty) return null;
+    if (values.length != operators.length + 1) return null;
+
+    // First pass: handle * and /
+    final vals = List<double>.from(values);
+    final ops = List<String>.from(operators);
+    int i = 0;
+    while (i < ops.length) {
+      if (ops[i] == '*') {
+        vals[i] = vals[i] * vals[i + 1];
+        vals.removeAt(i + 1);
+        ops.removeAt(i);
+      } else if (ops[i] == '/') {
+        if (vals[i + 1] == 0) return null;
+        vals[i] = vals[i] / vals[i + 1];
+        vals.removeAt(i + 1);
+        ops.removeAt(i);
+      } else {
+        i++;
+      }
+    }
+
+    // Second pass: handle + and -
+    double result = vals[0];
+    for (int j = 0; j < ops.length; j++) {
+      if (ops[j] == '+') {
+        result += vals[j + 1];
+      } else if (ops[j] == '-') {
+        result -= vals[j + 1];
+      }
+    }
+
+    return result;
+  }
+
+  /// Parse grid-column / grid-row shorthand.
+  /// Returns (start, end, span) tuple.
+  /// Examples: "span 2" → (0, 0, 2), "1 / 3" → (1, 3, 1), "auto" → (0, 0, 1)
+  (int, int, int) _parseGridLine(String value) {
+    value = value.trim().toLowerCase();
+    if (value == 'auto') return (0, 0, 1);
+
+    // "span N"
+    final spanMatch = _Re.gridSpan.firstMatch(value);
+    if (spanMatch != null) {
+      final span = int.tryParse(spanMatch.group(1)!) ?? 1;
+      return (0, 0, span);
+    }
+
+    // "start / end" or "start / span N"
+    if (value.contains('/')) {
+      final parts = value.split('/').map((p) => p.trim()).toList();
+      if (parts.length == 2) {
+        final start = int.tryParse(parts[0]) ?? 0;
+        final endStr = parts[1];
+        final spanMatch2 = _Re.gridSpan.firstMatch(endStr);
+        if (spanMatch2 != null) {
+          final span = int.tryParse(spanMatch2.group(1)!) ?? 1;
+          return (start, 0, span);
+        }
+        final end = int.tryParse(endStr) ?? 0;
+        return (start, end, end > start ? end - start : 1);
+      }
+    }
+
+    // Plain integer
+    final n = int.tryParse(value) ?? 0;
+    return (n, 0, 1);
+  }
+
+  /// Parse line-height value
+  double? _parseLineHeight(String value, {double? parentFontSize}) {
+    value = value.trim().toLowerCase();
+    if (value == 'normal') return null;
+    // Unitless number (multiplier)
+    final multiplier = double.tryParse(value);
+    if (multiplier != null) return multiplier;
+    // With units - convert to multiplier
+    final length =
+        _parseLengthWithContext(value, parentFontSize: parentFontSize);
+    if (length != null && parentFontSize != null && parentFontSize > 0) {
+      return length / parentFontSize;
+    }
+    return null;
+  }
+
+  /// Parse text-align value
+  HyperTextAlign? _parseTextAlign(String value) {
+    switch (value.trim().toLowerCase()) {
+      case 'left':
+        return HyperTextAlign.left;
+      case 'center':
+        return HyperTextAlign.center;
+      case 'right':
+        return HyperTextAlign.right;
+      case 'justify':
+        return HyperTextAlign.justify;
+      default:
+        return null;
+    }
+  }
+
+  /// Parse vertical-align value (CSS `vertical-align` or HTML `valign`).
+  HyperVerticalAlign? _parseVerticalAlign(String value) {
+    switch (value.trim().toLowerCase()) {
+      case 'top':
+        return HyperVerticalAlign.top;
+      case 'middle':
+        return HyperVerticalAlign.middle;
+      case 'bottom':
+        return HyperVerticalAlign.bottom;
+      case 'baseline':
+        return HyperVerticalAlign.baseline;
+      case 'text-top':
+        return HyperVerticalAlign.textTop;
+      case 'text-bottom':
+        return HyperVerticalAlign.textBottom;
+      default:
+        return null;
+    }
+  }
+
+  /// Parse border-radius value
+  BorderRadius? _parseBorderRadius(String value) {
+    final length = _parseLength(value);
+    if (length != null) {
+      return BorderRadius.circular(length);
+    }
+    return null;
+  }
+
+  /// Parse border shorthand (e.g., "1px solid red")
+  (double, Color, HyperBorderStyle?)? _parseBorderShorthand(String value) {
+    final parts = value.trim().split(_Re.whitespace);
+    double width = 1.0;
+    Color color = const Color(0xFF000000);
+    HyperBorderStyle? borderStyle;
+
+    for (final part in parts) {
+      final w = _parseBorderWidth(part);
+      if (w != null) {
+        width = w;
+        continue;
+      }
+      final s = _parseBorderStyle(part);
+      if (s != null) {
+        borderStyle = s;
+        continue;
+      }
+      final c = _parseColor(part);
+      if (c != null) {
+        color = c;
+      }
+    }
+    if (borderStyle == HyperBorderStyle.none) width = 0;
+    return (width, color, borderStyle);
+  }
+
+  /// Parse CSS float value
+  HyperFloat? _parseFloat(String value) {
+    switch (value.toLowerCase().trim()) {
+      case 'left':
+        return HyperFloat.left;
+      case 'right':
+        return HyperFloat.right;
+      case 'none':
+        return HyperFloat.none;
+      default:
+        return null;
+    }
+  }
+
+  /// Parse CSS clear value
+  HyperClear? _parseClear(String value) {
+    switch (value.toLowerCase().trim()) {
+      case 'left':
+        return HyperClear.left;
+      case 'right':
+        return HyperClear.right;
+      case 'both':
+        return HyperClear.both;
+      case 'none':
+        return HyperClear.none;
+      default:
+        return null;
+    }
+  }
+
+  /// Parse text-overflow value
+  TextOverflow? _parseTextOverflow(String value) {
+    switch (value.toLowerCase().trim()) {
+      case 'clip':
+        return TextOverflow.clip;
+      case 'ellipsis':
+        return TextOverflow.ellipsis;
+      case 'fade':
+        return TextOverflow.fade;
+      case 'visible':
+        return TextOverflow.visible;
+      default:
+        return null;
+    }
+  }
+
+  /// Parse text-shadow value
+  /// Supports multiple shadows: "2px 2px 4px rgba(0,0,0,0.5), 1px 1px 2px red"
+  List<Shadow>? _parseTextShadow(String value) {
+    if (value.toLowerCase().trim() == 'none') return null;
+
+    final shadows = <Shadow>[];
+    // Split by comma for multiple shadows
+    final shadowDefinitions = value.split(',');
+
+    for (final shadowDef in shadowDefinitions) {
+      final parts = shadowDef.trim().split(_Re.whitespace);
+      if (parts.length < 3) continue; // Need at least x y blur
+
+      double offsetX = 0;
+      double offsetY = 0;
+      double blurRadius = 0;
+      Color color = const Color(0x33000000); // Default semi-transparent black
+
+      // Parse values
+      int numIndex = 0;
+      for (final part in parts) {
+        // Try to parse as length
+        final length = _parseLength(part);
+        if (length != null) {
+          if (numIndex == 0) {
+            offsetX = length;
+          } else if (numIndex == 1) {
+            offsetY = length;
+          } else if (numIndex == 2) {
+            blurRadius = length;
+          }
+          numIndex++;
+          continue;
+        }
+
+        // Try to parse as color
+        final parsedColor = _parseColor(part);
+        if (parsedColor != null) {
+          color = parsedColor;
+        }
+      }
+
+      shadows.add(Shadow(
+        offset: Offset(offsetX, offsetY),
+        blurRadius: blurRadius,
+        color: color,
+      ));
+    }
+
+    return shadows.isEmpty ? null : shadows;
+  }
+
+  /// Parse box-shadow value
+  /// Supports multiple shadows: "2px 2px 4px rgba(0,0,0,0.5), 1px 1px 2px red"
+  List<BoxShadow>? _parseBoxShadow(String value) {
+    if (value.toLowerCase().trim() == 'none') return null;
+
+    final shadows = <BoxShadow>[];
+    // Split by comma for multiple shadows
+    final shadowDefinitions = value.split(',');
+
+    for (final shadowDef in shadowDefinitions) {
+      final parts = shadowDef.trim().split(_Re.whitespace);
+      if (parts.length < 2) continue; // Need at least x y
+
+      double offsetX = 0;
+      double offsetY = 0;
+      double blurRadius = 0;
+      double spreadRadius = 0;
+      Color color = const Color(0x33000000); // Default semi-transparent black
+      bool isInset = false;
+
+      // Parse values
+      int numIndex = 0;
+      for (final part in parts) {
+        if (part.toLowerCase() == 'inset') {
+          isInset = true;
+          continue;
+        }
+
+        // Try to parse as length
+        final length = _parseLength(part);
+        if (length != null) {
+          if (numIndex == 0) {
+            offsetX = length;
+          } else if (numIndex == 1) {
+            offsetY = length;
+          } else if (numIndex == 2) {
+            blurRadius = length;
+          } else if (numIndex == 3) {
+            spreadRadius = length;
+          }
+          numIndex++;
+          continue;
+        }
+
+        // Try to parse as color
+        final parsedColor = _parseColor(part);
+        if (parsedColor != null) {
+          color = parsedColor;
+        }
+      }
+
+      shadows.add(BoxShadow(
+        offset: Offset(offsetX, offsetY),
+        blurRadius: blurRadius,
+        spreadRadius: spreadRadius,
+        color: color,
+        // Flutter doesn't have a direct 'inset' property in BoxShadow,
+        // but BlurStyle.inner can simulate it for some cases.
+        blurStyle: isInset ? BlurStyle.inner : BlurStyle.normal,
+      ));
+    }
+
+    return shadows.isEmpty ? null : shadows;
+  }
+
+  /// Parse CSS gradient
+  Gradient? _parseGradient(String value) {
+    final trimmed = value.trim();
+    if (trimmed.startsWith('linear-gradient(')) {
+      return _parseLinearGradient(trimmed);
+    }
+    return null;
+  }
+
+  /// Basic linear-gradient parser
+  Gradient? _parseLinearGradient(String value) {
+    // Format: linear-gradient([angle | to side]?, color-stop1, color-stop2, ...)
+    final contentMatch = _Re.linearGrad.firstMatch(value);
+    if (contentMatch == null) return null;
+
+    final content = contentMatch.group(1)!;
+    final parts = _splitGradientParts(content);
+    if (parts.length < 2) return null;
+
+    Alignment begin = Alignment.topCenter;
+    Alignment end = Alignment.bottomCenter;
+    int colorStartIndex = 0;
+
+    // Check first part for direction
+    final firstPart = parts[0].toLowerCase();
+    if (firstPart.contains('to ')) {
+      if (firstPart.contains('right')) {
+        begin = Alignment.centerLeft;
+        end = Alignment.centerRight;
+        if (firstPart.contains('top')) {
+          begin = Alignment.bottomLeft;
+          end = Alignment.topRight;
+        }
+        if (firstPart.contains('bottom')) {
+          begin = Alignment.topLeft;
+          end = Alignment.bottomRight;
+        }
+      } else if (firstPart.contains('left')) {
+        begin = Alignment.centerRight;
+        end = Alignment.centerLeft;
+        if (firstPart.contains('top')) {
+          begin = Alignment.bottomRight;
+          end = Alignment.topLeft;
+        }
+        if (firstPart.contains('bottom')) {
+          begin = Alignment.topRight;
+          end = Alignment.bottomLeft;
+        }
+      } else if (firstPart.contains('bottom')) {
+        begin = Alignment.topCenter;
+        end = Alignment.bottomCenter;
+      } else if (firstPart.contains('top')) {
+        begin = Alignment.bottomCenter;
+        end = Alignment.topCenter;
+      }
+      colorStartIndex = 1;
+    } else if (_Re.degAngle.hasMatch(firstPart)) {
+      // Simplified angle handling: 0deg=top, 90deg=right, 180deg=bottom, 270deg=left
+      final angle = double.tryParse(
+          _Re.leadingDigit.firstMatch(firstPart)?.group(0) ?? '180');
+      if (angle != null) {
+        if (angle >= 45 && angle < 135) {
+          begin = Alignment.centerLeft;
+          end = Alignment.centerRight;
+        } else if (angle >= 135 && angle < 225) {
+          begin = Alignment.topCenter;
+          end = Alignment.bottomCenter;
+        } else if (angle >= 225 && angle < 315) {
+          begin = Alignment.centerRight;
+          end = Alignment.centerLeft;
+        } else {
+          begin = Alignment.bottomCenter;
+          end = Alignment.topCenter;
+        }
+      }
+      colorStartIndex = 1;
+    }
+
+    final colors = <Color>[];
+    final stops = <double>[];
+
+    for (int i = colorStartIndex; i < parts.length; i++) {
+      final colorPart = parts[i].trim();
+      final colorMatch = _Re.colorStopPart.firstMatch(colorPart);
+      if (colorMatch == null) continue;
+
+      final colorStr = colorMatch.group(1)!.trim();
+      final stopStr = colorMatch.group(2)!.trim();
+
+      final color = _parseColor(colorStr);
+      if (color != null) {
+        colors.add(color);
+        if (stopStr.isNotEmpty) {
+          final stop = _parsePercent(stopStr);
+          if (stop != null) stops.add(stop);
+        }
+      }
+    }
+
+    if (colors.length < 2) return null;
+
+    return LinearGradient(
+      begin: begin,
+      end: end,
+      colors: colors,
+      stops: stops.length == colors.length ? stops : null,
+    );
+  }
+
+  double? _parsePercent(String value) {
+    final match = _Re.percentage.firstMatch(value);
+    if (match != null) {
+      return double.parse(match.group(1)!) / 100.0;
+    }
+    return null;
+  }
+
+  List<String> _splitGradientParts(String inner) {
+    final parts = <String>[];
+    int depth = 0;
+    int start = 0;
+    for (int i = 0; i < inner.length; i++) {
+      if (inner[i] == '(') {
+        depth++;
+      } else if (inner[i] == ')') {
+        depth--;
+      } else if (inner[i] == ',' && depth == 0) {
+        parts.add(inner.substring(start, i).trim());
+        start = i + 1;
+      }
+    }
+    parts.add(inner.substring(start).trim());
+    return parts;
+  }
+
+  /// Parse CSS filter property: blur(5px) brightness(1.5) contrast(0.8)
+  ui.ImageFilter? _parseFilter(String value) {
+    if (value.toLowerCase().trim() == 'none') return null;
+
+    final filterFuncs = _Re.filterFunc.allMatches(value.toLowerCase());
+    if (filterFuncs.isEmpty) return null;
+
+    final filters = <ui.ImageFilter>[];
+
+    for (final match in filterFuncs) {
+      final name = match.group(1);
+      final args = match.group(2)!;
+
+      switch (name) {
+        case 'blur':
+          final radius = _parseLength(args) ?? 0;
+          if (radius > 0) {
+            filters.add(ui.ImageFilter.blur(sigmaX: radius, sigmaY: radius));
+          }
+          break;
+        case 'brightness':
+          final amount = double.tryParse(args.replaceAll('%', '')) ?? 1.0;
+          final factor = args.contains('%') ? amount / 100.0 : amount;
+          if (factor != 1.0) {
+            final matrix = <double>[
+              factor,
+              0,
+              0,
+              0,
+              0,
+              0,
+              factor,
+              0,
+              0,
+              0,
+              0,
+              0,
+              factor,
+              0,
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+            ];
+            filters.add(ui.ColorFilter.matrix(matrix));
+          }
+          break;
+        case 'contrast':
+          final amount = double.tryParse(args.replaceAll('%', '')) ?? 1.0;
+          final factor = args.contains('%') ? amount / 100.0 : amount;
+          if (factor != 1.0) {
+            final t = (1.0 - factor) / 2.0;
+            final matrix = <double>[
+              factor,
+              0,
+              0,
+              0,
+              t * 255,
+              0,
+              factor,
+              0,
+              0,
+              t * 255,
+              0,
+              0,
+              factor,
+              0,
+              t * 255,
+              0,
+              0,
+              0,
+              1,
+              0,
+            ];
+            filters.add(ui.ColorFilter.matrix(matrix));
+          }
+          break;
+      }
+    }
+
+    if (filters.isEmpty) return null;
+    if (filters.length == 1) return filters.first;
+
+    var composed = filters[0];
+    for (int i = 1; i < filters.length; i++) {
+      composed = ui.ImageFilter.compose(outer: composed, inner: filters[i]);
+    }
+    return composed;
+  }
+
+  /// Parse border-style value
+  HyperBorderStyle? _parseBorderStyle(String value) {
+    switch (value.toLowerCase().trim()) {
+      case 'none':
+        return HyperBorderStyle.none;
+      case 'solid':
+        return HyperBorderStyle.solid;
+      case 'dashed':
+        return HyperBorderStyle.dashed;
+      case 'dotted':
+        return HyperBorderStyle.dotted;
+      case 'double':
+        return HyperBorderStyle.double;
+      case 'groove':
+        return HyperBorderStyle.groove;
+      case 'ridge':
+        return HyperBorderStyle.ridge;
+      case 'inset':
+        return HyperBorderStyle.inset;
+      case 'outset':
+        return HyperBorderStyle.outset;
+      default:
+        return null;
+    }
+  }
+
+  /// Parse direction value
+  HyperTextDirection? _parseDirection(String value) {
+    switch (value.toLowerCase().trim()) {
+      case 'ltr':
+        return HyperTextDirection.ltr;
+      case 'rtl':
+        return HyperTextDirection.rtl;
+      default:
+        return null;
+    }
+  }
+
+  /// Parse inline style attribute.
+  ///
+  /// Uses a paren-aware tokenizer to split on `;` only at depth 0.
+  /// This correctly handles function calls such as `url('data:image/png;...')`,
+  /// `calc(100% - 20px)`, `rgb(255,0,0)`, `var(--x)`, and `linear-gradient(…)`
+  /// that contain semicolons, commas, or colons inside parentheses.
+  ComputedStyle _parseInlineStyle(
+    ComputedStyle style,
+    String inlineStyle, {
+    double? parentFontSize,
+    Map<String, String>? inheritedCustomProps,
+  }) {
+    if (inlineStyle.isEmpty) return style;
+
+    // Split on ';' only when not inside any pair of parentheses.
+    final declarations = _splitDeclarations(inlineStyle);
+
+    // Parse into (property, value) pairs first so `font-size` can be applied
+    // ahead of the rest — see the same hoist in [_applyDeclarations]. Without
+    // it, `style="line-height:30px;font-size:20px"` resolved line-height
+    // against the PARENT's font-size (wrong multiplier), while the reverse
+    // order resolved it correctly: a computed value must not depend on the
+    // order properties happen to be written in.
+    final pairs = <MapEntry<String, String>>[];
+    for (final decl in declarations) {
+      // Split on the FIRST ':' to separate property from value.
+      // (Values like `url(http://…)` contain colons — only the first one matters.)
+      final colonIdx = decl.indexOf(':');
+      if (colonIdx <= 0) continue;
+      final property = decl.substring(0, colonIdx).trim();
+      // An inline declaration already beats normal rules, so `!important` only
+      // needs removing here: left in, value parsers reject the whole value.
+      final value = decl
+          .substring(colonIdx + 1)
+          .replaceFirst(_Re.importantSuffix, '')
+          .trim();
+      if (property.isNotEmpty && value.isNotEmpty) {
+        pairs.add(MapEntry(property, value));
+      }
+    }
+
+    // A later duplicate of the same property wins (CSS cascade within a block),
+    // so hoist the LAST font-size declaration.
+    String? hoistedFontSize;
+    for (final p in pairs) {
+      if (p.key == _kFontSizeProperty) hoistedFontSize = p.value;
+    }
+    if (hoistedFontSize != null) {
+      style = _applySingleDeclaration(
+        style,
+        _kFontSizeProperty,
+        hoistedFontSize,
+        parentFontSize: parentFontSize,
+        inheritedCustomProps: inheritedCustomProps,
+      );
+    }
+
+    for (final p in pairs) {
+      if (p.key == _kFontSizeProperty) continue; // already applied above
+      style = _applySingleDeclaration(
+        style,
+        p.key,
+        p.value,
+        parentFontSize: parentFontSize,
+        inheritedCustomProps: inheritedCustomProps,
+      );
+    }
+    return style;
+  }
+
+  /// Split a CSS declaration block on `;` while respecting parentheses.
+  ///
+  /// A `;` inside `(…)` (e.g. inside `url(…)`, `calc(…)`, `rgb(…)`) is NOT
+  /// treated as a declaration separator.
+  static List<String> _splitDeclarations(String declarations) {
+    final parts = <String>[];
+    int depth = 0;
+    int start = 0;
+    for (int i = 0; i < declarations.length; i++) {
+      final ch = declarations[i];
+      if (ch == '(') {
+        depth++;
+      } else if (ch == ')') {
+        if (depth > 0) depth--;
+      } else if (ch == ';' && depth == 0) {
+        final part = declarations.substring(start, i).trim();
+        if (part.isNotEmpty) parts.add(part);
+        start = i + 1;
+      }
+    }
+    final last = declarations.substring(start).trim();
+    if (last.isNotEmpty) parts.add(last);
+    return parts;
+  }
+
+  /// Apply inheritance from parent
+  ///
+  /// Only inheritable properties are inherited, and only if not explicitly set.
+  /// CSS Inheritable properties: color, font-*, line-height, letter-spacing,
+  /// word-spacing, text-align, white-space, etc.
+  void _applyInheritance(ComputedStyle style, ComputedStyle parentStyle) {
+    // Color - inherit if not explicitly set
+    if (!style.isExplicitlySet('color')) {
+      style.color = parentStyle.color;
+    }
+
+    // Font size - inherit if not explicitly set
+    if (!style.isExplicitlySet('font-size')) {
+      style.fontSize = parentStyle.fontSize;
+    }
+
+    // Font weight - inherit if not explicitly set
+    if (!style.isExplicitlySet('font-weight')) {
+      style.fontWeight = parentStyle.fontWeight;
+    }
+
+    // Font style - inherit if not explicitly set
+    if (!style.isExplicitlySet('font-style')) {
+      style.fontStyle = parentStyle.fontStyle;
+    }
+
+    // Font family - inherit if not explicitly set
+    if (!style.isExplicitlySet('font-family')) {
+      style.fontFamily = parentStyle.fontFamily;
+    }
+
+    // Line height - inherit if not explicitly set
+    if (!style.isExplicitlySet('line-height')) {
+      style.lineHeight = parentStyle.lineHeight;
+    }
+
+    // Letter spacing - inherit if not explicitly set
+    if (!style.isExplicitlySet('letter-spacing')) {
+      style.letterSpacing = parentStyle.letterSpacing;
+    }
+
+    // Word spacing - inherit if not explicitly set
+    if (!style.isExplicitlySet('word-spacing')) {
+      style.wordSpacing = parentStyle.wordSpacing;
+    }
+
+    // Text align - inherit if not explicitly set
+    if (!style.isExplicitlySet('text-align')) {
+      style.textAlign = parentStyle.textAlign;
+    }
+
+    // Text indent - inherit if not explicitly set (CSS text-indent inherits)
+    if (!style.isExplicitlySet('text-indent')) {
+      style.textIndent = parentStyle.textIndent;
+      style.textIndentPercent = parentStyle.textIndentPercent;
+    }
+
+    // White space - inherit if not explicitly set
+    style.whiteSpace ??= parentStyle.whiteSpace;
+
+    // word-break / overflow-wrap inherit in CSS. Line breaking reads them from
+    // the text node's own style, so they must be copied down from the block.
+    style.wordBreak ??= parentStyle.wordBreak;
+    style.overflowWrap ??= parentStyle.overflowWrap;
+
+    // border-collapse / border-spacing inherit in CSS (both apply only to
+    // tables, but a value set on an ancestor cascades to nested tables).
+    if (!style.isExplicitlySet('border-collapse')) {
+      style.borderCollapse = parentStyle.borderCollapse;
+    }
+    if (!style.isExplicitlySet('border-spacing')) {
+      style.borderSpacing ??= parentStyle.borderSpacing;
+    }
+
+    // Direction - inherit if not explicitly set
+    if (!style.isExplicitlySet('direction')) {
+      style.hyperDirection ??= parentStyle.hyperDirection;
+    }
+
+    // CSS custom properties cascade: always inherit parent's props, with child
+    // definitions taking precedence (same as CSS spec for custom properties)
+    if (parentStyle.customProperties.isNotEmpty) {
+      if (style.customProperties.isEmpty) {
+        // Nothing of its own: share the parent's map instead of copying it.
+        // Copying cost O(#properties) per element — Bootstrap-style :root
+        // blocks define hundreds. Safe because the cascade only ever writes
+        // to the fresh map of the element being resolved, before this point.
+        style.customProperties = parentStyle.customProperties;
+        return;
+      }
+      final inherited = Map<String, String>.from(parentStyle.customProperties);
+      inherited.addAll(style.customProperties); // child overrides parent
+      style.customProperties = inherited;
+    }
+  }
+
+  // ============================================
+  // CSS Value Parsers
+  // ============================================
+
+  /// Parse CSS color value
+  Color? _parseColor(String value) => parseCssColor(value);
+
+  /// Parses a CSS color value (`#hex`, `rgb()`, `rgba()`, named colors).
+  ///
+  /// Public and static so adapters (e.g. `@keyframes` parsers) can reuse the
+  /// exact same color grammar as the style resolver.
+  static Color? parseCssColor(String value) {
+    value = value.trim().toLowerCase();
+
+    // Hex color. int.tryParse returns null on invalid hex digits (e.g. an
+    // authored `#zzz`), so malformed values fall through to null rather than
+    // throwing — important now that this parser also runs on @keyframes values.
+    if (value.startsWith('#')) {
+      final hex = value.substring(1);
+      if (hex.length == 3) {
+        // #RGB -> #RRGGBB
+        final r = hex[0] + hex[0];
+        final g = hex[1] + hex[1];
+        final b = hex[2] + hex[2];
+        final argb = int.tryParse('FF$r$g$b', radix: 16);
+        return argb == null ? null : Color(argb);
+      } else if (hex.length == 4) {
+        // CSS Color Level 4: #RGBA → each digit expands to two
+        final r = hex[0] + hex[0];
+        final g = hex[1] + hex[1];
+        final b = hex[2] + hex[2];
+        final a = hex[3] + hex[3];
+        final argb = int.tryParse('$a$r$g$b', radix: 16);
+        return argb == null ? null : Color(argb);
+      } else if (hex.length == 6) {
+        final argb = int.tryParse('FF$hex', radix: 16);
+        return argb == null ? null : Color(argb);
+      } else if (hex.length == 8) {
+        // CSS: #RRGGBBAA → Flutter Color: 0xAARRGGBB
+        final r = hex.substring(0, 2);
+        final g = hex.substring(2, 4);
+        final b = hex.substring(4, 6);
+        final a = hex.substring(6, 8);
+        final argb = int.tryParse('$a$r$g$b', radix: 16);
+        return argb == null ? null : Color(argb);
+      }
+      return null;
+    }
+
+    // rgb(r, g, b) — supports negative values (clamped to 0). tryParse guards
+    // against out-of-int64 channel values that would otherwise throw.
+    final rgbMatch = _Re.rgb.firstMatch(value);
+    if (rgbMatch != null) {
+      final r = int.tryParse(rgbMatch.group(1)!);
+      final g = int.tryParse(rgbMatch.group(2)!);
+      final b = int.tryParse(rgbMatch.group(3)!);
+      if (r == null || g == null || b == null) return null;
+      return Color.fromARGB(
+          255, r.clamp(0, 255), g.clamp(0, 255), b.clamp(0, 255));
+    }
+
+    // rgba(r, g, b, a) — supports negative alpha (clamped to 0)
+    final rgbaMatch = _Re.rgba.firstMatch(value);
+    if (rgbaMatch != null) {
+      final r = int.tryParse(rgbaMatch.group(1)!);
+      final g = int.tryParse(rgbaMatch.group(2)!);
+      final b = int.tryParse(rgbaMatch.group(3)!);
+      if (r == null || g == null || b == null) return null;
+      final alpha =
+          (double.tryParse(rgbaMatch.group(4)!) ?? 1.0).clamp(0.0, 1.0);
+      return Color.fromARGB((alpha * 255).round(), r.clamp(0, 255),
+          g.clamp(0, 255), b.clamp(0, 255));
+    }
+
+    // Named colors
+    return _namedColors[value];
+  }
+
+  /// Root font size for rem calculations (browser default is 16px)
+  static const double rootFontSize = 16.0;
+
+  /// Parse CSS font-size value
+  ///
+  /// [parentFontSize] is used for em calculations
+  double? _parseFontSize(String value, {double? parentFontSize}) {
+    value = value.trim().toLowerCase();
+
+    // px value
+    if (value.endsWith('px')) {
+      return _tryParseFinite(value.replaceAll('px', ''));
+    }
+
+    // pt value (1pt = 1.333px)
+    if (value.endsWith('pt')) {
+      return _scaleFinite(_tryParseFinite(value.replaceAll('pt', '')), 1.333);
+    }
+
+    // rem value (relative to root font size)
+    if (value.endsWith('rem')) {
+      return _scaleFinite(
+          _tryParseFinite(value.replaceAll('rem', '')), rootFontSize);
+    }
+
+    // em value (relative to parent font size)
+    if (value.endsWith('em')) {
+      return _scaleFinite(_tryParseFinite(value.replaceAll('em', '')),
+          parentFontSize ?? rootFontSize);
+    }
+
+    // % value (relative to parent font size)
+    if (value.endsWith('%')) {
+      final percent = _tryParseFinite(value.replaceAll('%', ''));
+      if (percent == null) return null;
+      return _scaleFinite(percent / 100, parentFontSize ?? rootFontSize);
+    }
+
+    // Keyword sizes
+    switch (value) {
+      case 'xx-small':
+        return 9.0;
+      case 'x-small':
+        return 10.0;
+      case 'small':
+        return 13.0;
+      case 'medium':
+        return 16.0;
+      case 'large':
+        return 18.0;
+      case 'x-large':
+        return 24.0;
+      case 'xx-large':
+        return 32.0;
+      case 'smaller':
+        return (parentFontSize ?? rootFontSize) * 0.833;
+      case 'larger':
+        return (parentFontSize ?? rootFontSize) * 1.2;
+    }
+
+    // Plain number
+    return double.tryParse(value);
+  }
+
+  /// Parse CSS length value with relative unit support
+  ///
+  /// [parentFontSize] is used for em calculations
+  /// [rootFontSize] is used for rem calculations
+  double? _parseLengthWithContext(
+    String value, {
+    double? parentFontSize,
+  }) {
+    value = value.trim().toLowerCase();
+
+    if (value.endsWith('px')) {
+      return _tryParseFinite(value.replaceAll('px', ''));
+    }
+    if (value.endsWith('pt')) {
+      return _scaleFinite(_tryParseFinite(value.replaceAll('pt', '')), 1.333);
+    }
+    if (value.endsWith('rem')) {
+      return _scaleFinite(
+          _tryParseFinite(value.replaceAll('rem', '')), rootFontSize);
+    }
+    if (value.endsWith('em')) {
+      return _scaleFinite(_tryParseFinite(value.replaceAll('em', '')),
+          parentFontSize ?? rootFontSize);
+    }
+    if (value == '0') return 0;
+
+    return _tryParseFinite(value);
+  }
+
+  /// Parse CSS font-weight value
+  FontWeight? _parseFontWeight(String value) {
+    value = value.trim().toLowerCase();
+
+    switch (value) {
+      case 'normal':
+      case '400':
+        return FontWeight.normal;
+      case 'bold':
+      case '700':
+        return FontWeight.bold;
+      case '100':
+        return FontWeight.w100;
+      case '200':
+        return FontWeight.w200;
+      case '300':
+        return FontWeight.w300;
+      case '500':
+        return FontWeight.w500;
+      case '600':
+        return FontWeight.w600;
+      case '800':
+        return FontWeight.w800;
+      case '900':
+        return FontWeight.w900;
+      default:
+        return null;
+    }
+  }
+
+  /// Parse CSS font-style value
+  FontStyle? _parseFontStyle(String value) {
+    value = value.trim().toLowerCase();
+    switch (value) {
+      case 'normal':
+        return FontStyle.normal;
+      case 'italic':
+        return FontStyle.italic;
+      default:
+        return null;
+    }
+  }
+
+  /// Parse CSS text-decoration value
+  TextDecoration? _parseTextDecoration(String value) {
+    value = value.trim().toLowerCase();
+    switch (value) {
+      case 'none':
+        return TextDecoration.none;
+      case 'underline':
+        return TextDecoration.underline;
+      case 'overline':
+        return TextDecoration.overline;
+      case 'line-through':
+        return TextDecoration.lineThrough;
+      default:
+        return null;
+    }
+  }
+
+  /// Parse CSS edge insets (margin, padding)
+  EdgeInsets? _parseEdgeInsets(String value, {double? emBase}) {
+    final parts = value.trim().split(_Re.whitespace);
+    final values = parts
+        .map((p) =>
+            (emBase == null
+                ? _parseLength(p)
+                : _parseLengthWithContext(p, parentFontSize: emBase)) ??
+            0.0)
+        .toList();
+
+    switch (values.length) {
+      case 1:
+        return EdgeInsets.all(values[0]);
+      case 2:
+        return EdgeInsets.symmetric(vertical: values[0], horizontal: values[1]);
+      case 3:
+        return EdgeInsets.only(
+          top: values[0],
+          left: values[1],
+          right: values[1],
+          bottom: values[2],
+        );
+      case 4:
+        return EdgeInsets.only(
+          top: values[0],
+          right: values[1],
+          bottom: values[2],
+          left: values[3],
+        );
+      default:
+        return null;
+    }
+  }
+
+  /// Parses a bare CSS number, rejecting values that cannot be laid out.
+  ///
+  /// `double.tryParse` happily returns `Infinity` for an overflowing literal
+  /// such as `1e999`, and `NaN` for `"nan"`. Those propagate into margins,
+  /// font sizes and box constraints and blow up layout with a
+  /// `debugAssertDoesMeetConstraints` failure — i.e. malformed or hostile CSS
+  /// could crash the app. Rejecting them here (a single choke point for every
+  /// length/size parser) keeps non-finite values out of `ComputedStyle`
+  /// entirely, so the declaration is simply ignored as CSS requires.
+  static double? _tryParseFinite(String s) {
+    final v = double.tryParse(s);
+    if (v == null || !v.isFinite) return null;
+    return v;
+  }
+
+  /// Multiplies a parsed value by a unit factor, returning null if the result
+  /// overflows to infinity (e.g. `1e308rem`).
+  static double? _scaleFinite(double? value, double factor) {
+    if (value == null) return null;
+    final scaled = value * factor;
+    return scaled.isFinite ? scaled : null;
+  }
+
+  /// Parse CSS length value (px, pt, em, etc.)
+  /// Applies a `flex-basis` value (`auto`, a percentage, or a length).
+  ///
+  /// Returns false for values that resolve to nothing usable. `auto` clears
+  /// both fields so the layout falls back to the item's max-content width.
+  bool _applyFlexBasis(ComputedStyle style, String value) {
+    final v = value.trim().toLowerCase();
+    if (v == 'auto' || v == 'content') {
+      style.flexBasis = null;
+      style.flexBasisPercent = null;
+      return true;
+    }
+    final pct = _parsePercent(v);
+    if (pct != null) {
+      style.flexBasis = null;
+      style.flexBasisPercent = pct;
+      return true;
+    }
+    final len = _parseLength(v);
+    if (len != null) {
+      style.flexBasis = len;
+      style.flexBasisPercent = null;
+      return true;
+    }
+    return false;
+  }
+
+  bool _isAutoKeyword(String value) => value.trim().toLowerCase() == 'auto';
+
+  /// What `em` means on this element: its own font size. font-size is hoisted
+  /// ahead of other declarations, so it is already final here if the element
+  /// sets it, and otherwise equals the parent's.
+  double? _emBase(ComputedStyle style, double? parentFontSize) =>
+      style.isExplicitlySet('font-size') ? style.fontSize : parentFontSize;
+
+  /// A length whose `em` is this element's font size, unlike [_parseLength].
+  double? _parseEmLength(
+    String value,
+    ComputedStyle style,
+    double? parentFontSize,
+  ) =>
+      _parseLengthWithContext(
+        value,
+        parentFontSize: _emBase(style, parentFontSize),
+      );
+
+  /// A border width: a length or one of CSS's keywords (browsers: 1, 3, 5 px).
+  double? _parseBorderWidth(String value) => switch (value.trim().toLowerCase()) {
+        'thin' => 1,
+        'medium' => 3,
+        'thick' => 5,
+        _ => _parseLength(value),
+      };
+
+  double? _parseLength(String value) {
+    value = value.trim().toLowerCase();
+
+    if (value.endsWith('px')) {
+      return _tryParseFinite(value.replaceAll('px', ''));
+    }
+    if (value.endsWith('pt')) {
+      return _scaleFinite(_tryParseFinite(value.replaceAll('pt', '')), 1.333);
+    }
+    if (value.endsWith('rem')) {
+      return _scaleFinite(
+          _tryParseFinite(value.replaceAll('rem', '')), rootFontSize);
+    }
+    if (value.endsWith('em')) {
+      return _scaleFinite(
+          _tryParseFinite(value.replaceAll('em', '')), rootFontSize);
+    }
+    if (value == '0') return 0;
+
+    return _tryParseFinite(value);
+  }
+
+  /// Parse CSS display value
+  DisplayType? _parseDisplay(String value) {
+    switch (value.trim().toLowerCase()) {
+      case 'block':
+        return DisplayType.block;
+      case 'inline':
+        return DisplayType.inline;
+      case 'inline-block':
+        return DisplayType.inlineBlock;
+      case 'flex':
+        return DisplayType.flex;
+      case 'grid':
+        return DisplayType.grid;
+      case 'none':
+        return DisplayType.none;
+      case 'table':
+        return DisplayType.table;
+      case 'table-row':
+        return DisplayType.tableRow;
+      case 'table-cell':
+        return DisplayType.tableCell;
+      default:
+        return null;
+    }
+  }
+
+  /// Parse CSS flex-direction value
+  FlexDirection? _parseFlexDirection(String value) {
+    switch (value.trim().toLowerCase()) {
+      case 'row':
+        return FlexDirection.row;
+      case 'row-reverse':
+        return FlexDirection.rowReverse;
+      case 'column':
+        return FlexDirection.column;
+      case 'column-reverse':
+        return FlexDirection.columnReverse;
+      default:
+        return null;
+    }
+  }
+
+  /// Parse CSS justify-content value
+  JustifyContent? _parseJustifyContent(String value) {
+    switch (value.trim().toLowerCase()) {
+      case 'flex-start':
+      case 'start':
+        return JustifyContent.flexStart;
+      case 'flex-end':
+      case 'end':
+        return JustifyContent.flexEnd;
+      case 'center':
+        return JustifyContent.center;
+      case 'space-between':
+        return JustifyContent.spaceBetween;
+      case 'space-around':
+        return JustifyContent.spaceAround;
+      case 'space-evenly':
+        return JustifyContent.spaceEvenly;
+      default:
+        return null;
+    }
+  }
+
+  /// Parse CSS align-items value
+  AlignItems? _parseAlignItems(String value) {
+    switch (value.trim().toLowerCase()) {
+      case 'flex-start':
+      case 'start':
+        return AlignItems.flexStart;
+      case 'flex-end':
+      case 'end':
+        return AlignItems.flexEnd;
+      case 'center':
+        return AlignItems.center;
+      case 'baseline':
+        return AlignItems.baseline;
+      case 'stretch':
+        return AlignItems.stretch;
+      default:
+        return null;
+    }
+  }
+
+  /// Parse CSS flex-wrap value
+  FlexWrap? _parseFlexWrap(String value) {
+    switch (value.trim().toLowerCase()) {
+      case 'nowrap':
+        return FlexWrap.nowrap;
+      case 'wrap':
+        return FlexWrap.wrap;
+      case 'wrap-reverse':
+        return FlexWrap.wrapReverse;
+      default:
+        return null;
+    }
+  }
+
+  /// Named CSS colors
+  static const Map<String, Color> _namedColors = {
+    'black': Color(0xFF000000),
+    'white': Color(0xFFFFFFFF),
+    'red': Color(0xFFFF0000),
+    'green': Color(0xFF008000),
+    'blue': Color(0xFF0000FF),
+    'yellow': Color(0xFFFFFF00),
+    'cyan': Color(0xFF00FFFF),
+    'magenta': Color(0xFFFF00FF),
+    'gray': Color(0xFF808080),
+    'grey': Color(0xFF808080),
+    'orange': Color(0xFFFFA500),
+    'purple': Color(0xFF800080),
+    'pink': Color(0xFFFFC0CB),
+    'brown': Color(0xFFA52A2A),
+    'transparent': Color(0x00000000),
+  };
+
+  HyperOverflow? _parseOverflow(String value) {
+    switch (value.trim().toLowerCase()) {
+      case 'visible':
+        return HyperOverflow.visible;
+      case 'hidden':
+        return HyperOverflow.hidden;
+      case 'scroll':
+        return HyperOverflow.scroll;
+      case 'auto':
+        return HyperOverflow.auto;
+      default:
+        return null;
+    }
+  }
+
+  int? _parseDuration(String value) {
+    final v = value.trim().toLowerCase();
+    if (v.endsWith('ms')) {
+      return int.tryParse(v.replaceAll('ms', ''));
+    }
+    if (v.endsWith('s')) {
+      final sec = double.tryParse(v.replaceAll('s', ''));
+      return sec != null ? (sec * 1000).round() : null;
+    }
+    return int.tryParse(v);
+  }
+
+  HyperAnimationDirection? _parseAnimationDirection(String value) {
+    switch (value.trim().toLowerCase()) {
+      case 'normal':
+        return HyperAnimationDirection.normal;
+      case 'reverse':
+        return HyperAnimationDirection.reverse;
+      case 'alternate':
+        return HyperAnimationDirection.alternate;
+      case 'alternate-reverse':
+        return HyperAnimationDirection.alternateReverse;
+      default:
+        return null;
+    }
+  }
+
+  (HyperTimingFunction, HyperTimingParams?)? _parseTimingFunction(
+      String value) {
+    final v = value.trim().toLowerCase();
+    switch (v) {
+      case 'linear':
+        return (HyperTimingFunction.linear, null);
+      case 'ease':
+        return (HyperTimingFunction.ease, null);
+      case 'ease-in':
+        return (HyperTimingFunction.easeIn, null);
+      case 'ease-out':
+        return (HyperTimingFunction.easeOut, null);
+      case 'ease-in-out':
+        return (HyperTimingFunction.easeInOut, null);
+      case 'step-start':
+        return (
+          HyperTimingFunction.steps,
+          const HyperStepsParams(1, jumpStart: true)
+        );
+      case 'step-end':
+        return (HyperTimingFunction.steps, const HyperStepsParams(1));
+    }
+
+    final cb = _Re.cubicBezier.firstMatch(v);
+    if (cb != null) {
+      final x1 = double.tryParse(cb.group(1)!);
+      final y1 = double.tryParse(cb.group(2)!);
+      final x2 = double.tryParse(cb.group(3)!);
+      final y2 = double.tryParse(cb.group(4)!);
+      if (x1 == null || y1 == null || x2 == null || y2 == null) return null;
+      return (
+        HyperTimingFunction.cubicBezier,
+        // Per spec, x control points must lie in [0, 1]; y is unbounded.
+        HyperCubicBezierParams(x1.clamp(0.0, 1.0), y1, x2.clamp(0.0, 1.0), y2),
+      );
+    }
+
+    final st = _Re.stepsFn.firstMatch(v);
+    if (st != null) {
+      final count = int.tryParse(st.group(1)!);
+      if (count == null || count <= 0) return null;
+      return (
+        HyperTimingFunction.steps,
+        HyperStepsParams(count, jumpStart: st.group(2) == 'start'),
+      );
+    }
+
+    return null;
+  }
+
+  /// Splits a shorthand value on whitespace while keeping function tokens
+  /// like `cubic-bezier(0.4, 0, 0.2, 1)` intact (no split inside parens).
+  static List<String> _splitOutsideParens(String value) {
+    final tokens = <String>[];
+    final buf = StringBuffer();
+    int depth = 0;
+    for (final code in value.trim().codeUnits) {
+      final ch = String.fromCharCode(code);
+      if (ch == '(') depth++;
+      if (ch == ')' && depth > 0) depth--;
+      if (depth == 0 && (ch == ' ' || ch == '\t' || ch == '\n')) {
+        if (buf.isNotEmpty) {
+          tokens.add(buf.toString());
+          buf.clear();
+        }
+      } else {
+        buf.write(ch);
+      }
+    }
+    if (buf.isNotEmpty) tokens.add(buf.toString());
+    return tokens;
+  }
+
+  HyperAnimationFillMode? _parseAnimationFillMode(String value) {
+    switch (value.trim().toLowerCase()) {
+      case 'none':
+        return HyperAnimationFillMode.none;
+      case 'forwards':
+        return HyperAnimationFillMode.forwards;
+      case 'backwards':
+        return HyperAnimationFillMode.backwards;
+      case 'both':
+        return HyperAnimationFillMode.both;
+      default:
+        return null;
+    }
+  }
+
+  HyperAnimationPlayState? _parseAnimationPlayState(String value) {
+    switch (value.trim().toLowerCase()) {
+      case 'running':
+        return HyperAnimationPlayState.running;
+      case 'paused':
+        return HyperAnimationPlayState.paused;
+      default:
+        return null;
+    }
+  }
+
+  HyperTransition? _parseTransition(String value) {
+    final parts = _splitOutsideParens(value);
+    if (parts.isEmpty) return null;
+
+    String? property;
+    int duration = 0;
+    HyperTimingFunction timingFunction = HyperTimingFunction.ease;
+    HyperTimingParams? timingParams;
+    int delay = 0;
+
+    for (final part in parts) {
+      final ms = _parseDuration(part);
+      if (ms != null) {
+        if (duration == 0) {
+          duration = ms;
+        } else {
+          delay = ms;
+        }
+        continue;
+      }
+      final tf = _parseTimingFunction(part);
+      if (tf != null) {
+        timingFunction = tf.$1;
+        timingParams = tf.$2;
+        continue;
+      }
+      property ??= part;
+    }
+
+    return HyperTransition(
+      property: property == 'all' ? null : property,
+      duration: duration,
+      timingFunction: timingFunction,
+      timingParams: timingParams,
+      delay: delay,
+    );
+  }
+
+  void _parseAnimationShorthand(String value, ComputedStyle style) {
+    final parts = _splitOutsideParens(value);
+    if (parts.isEmpty) return;
+
+    int durationCount = 0;
+    for (final part in parts) {
+      final ms = _parseDuration(part);
+      if (ms != null) {
+        if (durationCount == 0) {
+          style.animationDuration = ms;
+          style.markExplicitlySet('animation-duration');
+        } else {
+          style.animationDelay = ms;
+          style.markExplicitlySet('animation-delay');
+        }
+        durationCount++;
+        continue;
+      }
+      final tf = _parseTimingFunction(part);
+      if (tf != null) {
+        style.animationTimingFunction = tf.$1;
+        style.animationTimingParams = tf.$2;
+        style.markExplicitlySet('animation-timing-function');
+        continue;
+      }
+      final dir = _parseAnimationDirection(part);
+      if (dir != null) {
+        style.animationDirection = dir;
+        style.markExplicitlySet('animation-direction');
+        continue;
+      }
+      final fm = _parseAnimationFillMode(part);
+      if (fm != null) {
+        style.animationFillMode = fm;
+        style.markExplicitlySet('animation-fill-mode');
+        continue;
+      }
+      final ps = _parseAnimationPlayState(part);
+      if (ps != null) {
+        style.animationPlayState = ps;
+        style.markExplicitlySet('animation-play-state');
+        continue;
+      }
+      if (part == 'infinite') {
+        style.animationIterationCount = null;
+        style.markExplicitlySet('animation-iteration-count');
+        continue;
+      }
+      final count = int.tryParse(part);
+      if (count != null) {
+        style.animationIterationCount = count;
+        style.markExplicitlySet('animation-iteration-count');
+        continue;
+      }
+      style.animationName = part;
+      style.markExplicitlySet('animation-name');
+    }
+  }
+
+  double? _parseAspectRatio(String value) {
+    final v = value.trim().toLowerCase();
+    if (v == 'auto') return null;
+    if (v.contains('/')) {
+      final parts = v.split('/');
+      if (parts.length == 2) {
+        final w = double.tryParse(parts[0].trim());
+        final h = double.tryParse(parts[1].trim());
+        if (w != null && h != null && h > 0) return w / h;
+      }
+      return null;
+    }
+    return double.tryParse(v);
+  }
+}
+
+/// A CSS rule with selector and declarations
+class CssRule {
+  final String selector;
+  final Map<String, String> declarations;
+
+  /// Declarations marked with `!important` — applied after inline styles.
+  final Map<String, String> importantDeclarations;
+  final int specificity;
+
+  /// Source order index — used to make specificity sort stable (later = higher)
+  final int sourceIndex;
+
+  CssRule({
+    required this.selector,
+    required this.declarations,
+    Map<String, String>? importantDeclarations,
+    required this.specificity,
+    this.sourceIndex = 0,
+  }) : importantDeclarations = importantDeclarations ?? const {};
+
+  /// Whether a normal declaration sets a `--custom-property`. Cached:
+  /// the resolver's custom-property pre-pass asks for every candidate rule
+  /// of every element.
+  late final bool declaresCustomProperties =
+      declarations.keys.any((k) => k.startsWith('--'));
+
+  /// Same as [declaresCustomProperties], for `!important` declarations.
+  late final bool declaresImportantCustomProperties =
+      importantDeclarations.keys.any((k) => k.startsWith('--'));
+
+  @override
+  String toString() => 'CssRule($selector, specificity=$specificity, '
+      '${declarations.length} normal + ${importantDeclarations.length} !important)';
+}
