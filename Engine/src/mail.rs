@@ -164,8 +164,8 @@ pub struct Mail {
 }
 
 impl Mail {
-    /// Starts mail.db's writer on the current runtime. `tool_environment` is the AI tagger's
-    /// (`Config::tool_environment`).
+    /// Starts mail.db's writer on the current runtime. `tool_environment` and `apple_tagger` are
+    /// the AI tagger's (`Config::tool_environment`, `Config::apple_tagger`).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         database: PathBuf,
@@ -176,11 +176,13 @@ impl Mail {
         settings: Arc<Settings>,
         events: Arc<Events>,
         tool_environment: Option<HashMap<String, String>>,
+        apple_tagger: PathBuf,
     ) -> Self {
         let cache = Arc::new(MailCache::new(database, cache_root));
         let previews = events.clone();
         let contents = Arc::new(Contents::new(cache.clone(), move || previews.emit_soon("previews")));
-        let tagging = Tagging::new(cache.clone(), contents.clone(), settings.clone(), events.clone(), tool_environment);
+        let tagging =
+            Tagging::new(cache.clone(), contents.clone(), settings.clone(), events.clone(), tool_environment, apple_tagger);
         Self {
             cache,
             contents,

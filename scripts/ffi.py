@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Builds the engine for FFI front ends: the UniFFI crate in FFI/ with the Rust engine in Engine/
 (libmailstream.dylib on macOS, mailstream.dll on Windows), the mailstream command line
-(Engine/target/<config>/mailstream, which the Flutter app bundles on macOS) and, with
+(Engine/target/<config>/mailstream, which the Flutter app bundles on macOS), on macOS the Apple
+Intelligence tagger (Engine/target/<config>/mailstream-apple-tagger, bundled beside it) and, with
 DART_OUT=<dir>, the Dart bindings into <dir>.
 CONFIG=debug|release (default: debug)."""
 import os
@@ -23,6 +24,10 @@ try:
     cargo("FFI", "build", *PROFILE, "-p", "mailstream")
     cargo("Engine", "build", *PROFILE, "--bin", "mailstream")
     print(f"Built FFI/target/{CONFIG}/{LIBRARY} and Engine/target/{CONFIG}/mailstream", flush=True)
+    if sys.platform == "darwin":
+        tagger = ROOT / f"Engine/target/{CONFIG}/mailstream-apple-tagger"
+        subprocess.run([sys.executable, str(ROOT / "scripts/apple-tagger.py"), str(tagger)], check=True)
+        print(f"Built {tagger.relative_to(ROOT)}", flush=True)
     if os.environ.get("DART_OUT"):
         cargo("FFI", "run", "-q", "-p", "mailstream-bindgen", "--", f"target/{CONFIG}/{LIBRARY}",
               "--out-dir", os.environ["DART_OUT"])

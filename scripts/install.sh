@@ -54,6 +54,7 @@ for frontend in "$@"; do
       app="build/$name.app"
       mkdir -p "$app/Contents/MacOS"
       cp GPUI/target/release/mailstream-gpui "$app/Contents/MacOS/"
+      python3 scripts/apple-tagger.py "$app/Contents/MacOS/mailstream-apple-tagger"
       cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

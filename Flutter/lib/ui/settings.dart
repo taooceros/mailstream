@@ -28,6 +28,7 @@ const _sections = [
 /// Short names for the keys; the engine's description sits under each.
 const _titles = {
   'aiTagging.enabled': 'Sort and flag mail with AI',
+  'aiTagging.backend': 'Tagged by',
   'aiTagging.model': 'Model',
   'aiTagging.ompPath': 'omp executable',
   'aiTagging.batchSize': 'Batch size',
@@ -38,6 +39,12 @@ const _titles = {
   'sync.pushPollSeconds': 'Polling while push is connected',
   'chat.pollSeconds': 'Google Chat polling',
   'flutter.showFrameRate': 'Show frame rate',
+};
+
+/// Names for the words a choice setting takes.
+const _choiceTitles = {
+  'omp': 'omp',
+  'apple': 'Apple Intelligence',
 };
 
 class SettingsWindow extends StatelessWidget {
@@ -85,6 +92,9 @@ class SettingsWindow extends StatelessWidget {
                       for (final issue in settings.issues) _Issue(issue),
                       for (final (title, prefixes) in _sections) ...[
                         _Heading(title),
+                        // Why tagging stopped, as the engine reports it: omp or Apple
+                        // Intelligence unavailable, a failed run.
+                        if (prefixes.contains('aiTagging.') && state.taggingProblem != null) _Issue(state.taggingProblem!),
                         _Group(
                           children: [
                             for (final entry in settings.settings)
@@ -695,6 +705,13 @@ class _SettingRowState extends State<_SettingRow> {
               : null,
           onSubmitted: (_) => _commitField(),
         ),
+      ),
+      engine.TextSettingValue(text: final current) when entry.choices.isNotEmpty => MacosPopupButton<String>(
+        value: current,
+        onChanged: (word) {
+          if (word != null && word != current) _write(engine.TextSettingValue(word));
+        },
+        items: [for (final word in entry.choices) MacosPopupMenuItem(value: word, child: Text(_choiceTitles[word] ?? word))],
       ),
       engine.TextSettingValue() => SizedBox(
         width: 220,

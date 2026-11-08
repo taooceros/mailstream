@@ -286,6 +286,7 @@ class MailState extends ChangeNotifier {
     mail.subscribe(listener: _Changes(_changed));
     await reloadAccounts();
     unawaited(reloadSettings());
+    unawaited(reloadTaggingProblem());
     unawaited(chat.reload());
     unawaited(calendar.reload());
     await _fetch(selection);
@@ -309,6 +310,9 @@ class MailState extends ChangeNotifier {
         _listsChanged = true;
       case engine.SettingsEvent():
         unawaited(reloadSettings());
+        return;
+      case engine.ProblemsEvent():
+        unawaited(reloadTaggingProblem());
         return;
       default:
         return;
@@ -930,6 +934,22 @@ class MailState extends ChangeNotifier {
       _report('Could not read settings: ${describe(error)}');
     }
     notifyListeners();
+  }
+
+  /// Why AI tagging stopped (omp or Apple Intelligence unavailable, a failed run); null while
+  /// it works. The engine announces it showing up and going away as a problems event.
+  String? taggingProblem;
+
+  Future<void> reloadTaggingProblem() async {
+    try {
+      final tagging = (await mail.status()).aiTagging;
+      final problem = tagging.failed ? tagging.status : null;
+      if (problem == taggingProblem) return;
+      taggingProblem = problem;
+      notifyListeners();
+    } on engine.MailException {
+      // The next problems event reads it again.
+    }
   }
 
   /// Writes one setting (null resets it to its default) and shows the value at once; throws the

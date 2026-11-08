@@ -1,10 +1,11 @@
 //! AI tags of the inbox conversations, as the Swift engine's `TagStore` keeps them
 //! (`Sources/MailstreamKit/Store/TagStore.swift`, `Model/Tags.swift`, the `mail.tag` and
-//! `mail.retag` commands of `Control/ControlService.swift`): the user's `omp` CLI tags the
-//! default list's untagged conversations, newest first, one pass at a time, a second after the
-//! list last changed, in batches of `aiTagging.batchSize` up to `aiTagging.passLimit` per pass,
-//! waiting `aiTagging.backoffSeconds` after a failure. It runs as the `aiTagging.*` settings say,
-//! following settings.json as it changes.
+//! `mail.retag` commands of `Control/ControlService.swift`): the user's `omp` CLI, or Apple
+//! Intelligence as `aiTagging.backend` says (`omp.rs`), tags the default list's untagged
+//! conversations, newest first, one pass at a time, a second after the list last changed, in
+//! batches of `aiTagging.batchSize` up to `aiTagging.passLimit` per pass, waiting
+//! `aiTagging.backoffSeconds` after a failure, which `status` reports and the `problems` event
+//! announces. It runs as the `aiTagging.*` settings say, following settings.json as it changes.
 //!
 //! Every Mailstream process keeps its own copy of the tags in memory, writes only what it
 //! changed to mail.db's `tags` table and reads them all again when any process says it wrote
@@ -20,7 +21,7 @@ use crate::cache::MailCache;
 use crate::commands::Arguments;
 use crate::content::Contents;
 use crate::model::{Conversation, Date, now};
-use crate::omp::{self, Item, Options, Tagger, Tools};
+use crate::omp::{self, Backend, Item, Options, Tagger, Tools};
 use crate::settings::{Setting, Settings};
 use crate::signal::ProcessSignal;
 use crate::{EngineError, Events};
@@ -84,9 +85,14 @@ impl ConversationTag {
 /// Why tag edits and retagging are refused while tagging is off.
 pub const OFF_MESSAGE: &str = "AI tagging is off (aiTagging.enabled).";
 
-/// Settings whose change deserves another try at once: a fixed omp or model.
-const RETRY_SETTINGS: [Setting; 4] =
-    [Setting::AiTaggingModel, Setting::AiTaggingOmpPath, Setting::AiTaggingPassLimit, Setting::AiTaggingBackoffSeconds];
+/// Settings whose change deserves another try at once: a fixed omp or model, another backend.
+const RETRY_SETTINGS: [Setting; 5] = [
+    Setting::AiTaggingBackend,
+    Setting::AiTaggingModel,
+    Setting::AiTaggingOmpPath,
+    Setting::AiTaggingPassLimit,
+    Setting::AiTaggingBackoffSeconds,
+];
 
 /// A list change waits this long for the next before tagging.
 const DEBOUNCE: Duration = Duration::from_secs(1);
@@ -107,6 +113,8 @@ struct State {
     tags: HashMap<String, ConversationTag>,
     /// Short user-facing progress or failure text; None when idle.
     status: Option<String>,
+    /// `status` is the last run's failure.
+    failed: bool,
     enabled: bool,
     /// The `RETRY_SETTINGS` values last seen.
     retry_values: Vec<Value>,
@@ -145,16 +153,18 @@ pub struct Tagging {
 
 impl Tagging {
     /// Call on the engine's runtime. Follows the `aiTagging.*` settings from now on. omp runs in
-    /// `tool_environment`, else the login shell's (`Config::tool_environment`).
+    /// `tool_environment`, else the login shell's (`Config::tool_environment`); `apple_tagger`
+    /// is the Apple Intelligence helper (`Config::apple_tagger`).
     pub fn new(
         cache: Arc<MailCache>,
         contents: Arc<Contents>,
         settings: Arc<Settings>,
         events: Arc<Events>,
         tool_environment: Option<HashMap<String, String>>,
+        apple_tagger: std::path::PathBuf,
     ) -> Arc<Self> {
         let tools = Arc::new(tool_environment.map_or_else(Tools::new, Tools::fixed));
-        let tagger = Tagger::new(tools.clone(), cache.root.clone());
+        let tagger = Tagger::new(tools.clone(), cache.root.clone(), apple_tagger);
         let state = State {
             enabled: settings.value(Setting::AiTaggingEnabled) == Value::Bool(true),
             retry_values: RETRY_SETTINGS.iter().map(|setting| settings.value(*setting)).collect(),
@@ -250,6 +260,20 @@ impl Tagging {
         self.state().status.clone()
     }
 
+    /// `status` is a failure: the last run failed, and passes wait out the backoff.
+    pub fn failed(&self) -> bool {
+        self.state().failed
+    }
+
+    /// Sets the status line; a failure showing up or going away is a `problems` event.
+    fn set_status(&self, state: &mut State, status: Option<String>, failed: bool) {
+        state.status = status;
+        if state.failed != failed {
+            state.failed = failed;
+            self.events.emit_soon("problems");
+        }
+    }
+
     /// The conversation's tag while tagging is on, with `to_respond` false once the ask lapsed.
     pub fn tag_for(&self, conversation: &Conversation) -> Option<ConversationTag> {
         let state = self.state();
@@ -295,7 +319,7 @@ impl Tagging {
             self.request();
         } else {
             Self::cancel(&mut state);
-            state.status = None;
+            self.set_status(&mut state, None, false);
         }
     }
 
@@ -377,11 +401,16 @@ impl Tagging {
         }
         let text = |setting| self.settings.value(setting).as_str().unwrap_or_default().to_string();
         let number = |setting| self.settings.value(setting).as_u64().unwrap_or(1).max(1) as usize;
-        let options = Options { model: text(Setting::AiTaggingModel), executable: text(Setting::AiTaggingOmpPath) };
+        let options = Options {
+            backend: Backend::named(&text(Setting::AiTaggingBackend)),
+            model: text(Setting::AiTaggingModel),
+            executable: text(Setting::AiTaggingOmpPath),
+        };
         let items = self.untagged_items(number(Setting::AiTaggingPassLimit));
         let mut remaining = items.len();
         for batch in items.chunks(number(Setting::AiTaggingBatchSize)) {
-            self.state().status = Some(format!("Tagging {remaining} conversation{}…", if remaining == 1 { "" } else { "s" }));
+            let progress = format!("Tagging {remaining} conversation{}…", if remaining == 1 { "" } else { "s" });
+            self.set_status(&mut self.state(), Some(progress), false);
             match self.tagger.tag(batch, &options).await {
                 Ok(result) => {
                     let mut state = self.state();
@@ -395,13 +424,13 @@ impl Tagging {
                 Err(message) => {
                     let backoff = self.settings.value(Setting::AiTaggingBackoffSeconds).as_u64().unwrap_or(0);
                     let mut state = self.state();
-                    state.status = Some(format!("AI tagging failed: {message}"));
+                    self.set_status(&mut state, Some(format!("AI tagging failed: {message}")), true);
                     state.backoff_until = Some(Instant::now() + Duration::from_secs(backoff));
                     return;
                 }
             }
         }
-        self.state().status = None;
+        self.set_status(&mut self.state(), None, false);
     }
 
     fn untagged_items(&self, limit: usize) -> Vec<Item> {
@@ -523,7 +552,7 @@ impl Tagging {
             if let Some(pass) = state.pass.take() {
                 pass.abort();
             }
-            state.status = None;
+            self.set_status(&mut state, None, false);
         }
         self.events.emit_soon("tags");
         self.request();

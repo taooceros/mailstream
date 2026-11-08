@@ -6,6 +6,7 @@ import Foundation
 /// an agent or an editor.
 nonisolated enum Setting: String, CaseIterable, Sendable {
     case aiTaggingEnabled = "aiTagging.enabled"
+    case aiTaggingBackend = "aiTagging.backend"
     case aiTaggingModel = "aiTagging.model"
     case aiTaggingOmpPath = "aiTagging.ompPath"
     case aiTaggingBatchSize = "aiTagging.batchSize"
@@ -21,6 +22,8 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         case bool
         case int(ClosedRange<Int>)
         case string
+        /// One of the given words.
+        case choice([String])
         /// Lowercased email addresses, kept sorted and unique.
         case addresses
     }
@@ -31,10 +34,13 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         switch self {
         case .aiTaggingEnabled:
             (.bool, true,
-             "Sort the inbox into People, Notifications, Newsletters and Invitations with omp, and flag mail waiting on your reply or action.")
+             "Sort the inbox into People, Notifications, Newsletters and Invitations with AI, and flag mail waiting on your reply or action.")
+        case .aiTaggingBackend:
+            (.choice(["omp", "apple"]), "omp",
+             "Who tags: omp runs the model aiTagging.model names; apple runs Apple Intelligence's on-device model (macOS 26 or later, Apple Intelligence on).")
         case .aiTaggingModel: (.string, "smol", "omp model role or model id the tagger runs (`omp --model`).")
         case .aiTaggingOmpPath: (.string, "", "Path of the omp executable; empty picks the newest omp on the login shell's PATH.")
-        case .aiTaggingBatchSize: (.int(1...100), 20, "Conversations sent to omp per run.")
+        case .aiTaggingBatchSize: (.int(1...100), 20, "Conversations sent to the model per run.")
         case .aiTaggingPassLimit: (.int(1...2000), 150, "Most conversations one tagging pass looks at, newest first.")
         case .aiTaggingBackoffSeconds: (.int(0...86_400), 300, "Wait after a failed tagging run before tagging automatically again.")
         case .trustedSenders:
@@ -71,6 +77,11 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         case .string:
             guard let string = value.string else { throw ControlError.invalidSetting("\(rawValue) must be a string.") }
             return .string(string.trimmingCharacters(in: .whitespacesAndNewlines))
+        case .choice(let words):
+            guard let word = value.string?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), words.contains(word) else {
+                throw ControlError.invalidSetting("\(rawValue) must be one of \(words.joined(separator: ", ")).")
+            }
+            return .string(word)
         case .addresses:
             guard let items = value.array, let strings = value.strings, strings.count == items.count else {
                 throw ControlError.invalidSetting("\(rawValue) must be an array of email addresses.")
@@ -96,7 +107,7 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         case .int:
             guard let int = Int(trimmed) else { throw ControlError.invalidSetting("\(rawValue) must be an integer, not \"\(text)\".") }
             return try validate(.int(int))
-        case .string:
+        case .string, .choice:
             return try validate(.string(text))
         case .addresses:
             if trimmed.hasPrefix("["), let parsed = try? JSON.decode(Data(trimmed.utf8)) { return try validate(parsed) }
@@ -115,6 +126,9 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
             out["minimum"] = .int(range.lowerBound)
             out["maximum"] = .int(range.upperBound)
         case .string: out["type"] = "string"
+        case .choice(let words):
+            out["type"] = "string"
+            out["enum"] = .strings(words)
         case .addresses:
             out["type"] = "array"
             out["items"] = ["type": "string", "format": "email"]
@@ -270,6 +284,9 @@ nonisolated extension Setting {
             out["minimum"] = .int(range.lowerBound)
             out["maximum"] = .int(range.upperBound)
         case .string: out["type"] = "string"
+        case .choice(let words):
+            out["type"] = "string"
+            out["choices"] = .strings(words)
         case .addresses: out["type"] = "array of email addresses"
         }
         return .object(out)

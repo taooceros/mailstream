@@ -3,6 +3,10 @@
 //! `Tools.swift`, `ProcessRunner.swift`): a one-shot, tool-less run of the model the
 //! `aiTagging.model` setting names, with the same arguments, prompt and lenient reading of the
 //! answer.
+//!
+//! With `aiTagging.backend` set to `apple`, Apple Intelligence's on-device model answers instead,
+//! through `mailstream-apple-tagger` (`Engine/apple/AppleTagger.swift`), a helper the front ends
+//! bundle beside their executable: the same prompt in, the same JSON answer out, read the same way.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -37,14 +41,36 @@ pub struct Item {
     pub latest_from_user: bool,
 }
 
+/// Who answers (`aiTagging.backend`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    Omp,
+    /// Apple Intelligence's on-device model, through `APPLE_TAGGER`.
+    Apple,
+}
+
+impl Backend {
+    /// The backend a valid `aiTagging.backend` value names.
+    pub fn named(name: &str) -> Self {
+        if name == "apple" { Self::Apple } else { Self::Omp }
+    }
+}
+
 /// The `aiTagging.*` settings a run uses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
+    pub backend: Backend,
     /// `--model` value.
     pub model: String,
     /// The omp to run; empty picks the newest on PATH.
     pub executable: String,
 }
+
+/// The Apple Intelligence helper's file name, beside the front end's executable.
+pub const APPLE_TAGGER: &str = "mailstream-apple-tagger";
+/// Its exit status when the model declined a batch (guardrails, a language it lacks). Any other
+/// failure, the model being unavailable included, is its last stderr line.
+const APPLE_DECLINED: i32 = 4;
 
 const MAX_SNIPPET: usize = 200;
 /// Days after which a routine ask no longer waits on the user.
@@ -60,11 +86,13 @@ pub struct Tagger {
     working_directory: PathBuf,
     /// The omp found for an `Options::executable`, so PATH is searched once per choice.
     executables: Mutex<HashMap<String, PathBuf>>,
+    /// `mailstream-apple-tagger` (`Config::apple_tagger`).
+    apple_tagger: PathBuf,
 }
 
 impl Tagger {
-    pub fn new(tools: Arc<Tools>, working_directory: PathBuf) -> Self {
-        Self { tools, working_directory, executables: Mutex::new(HashMap::new()) }
+    pub fn new(tools: Arc<Tools>, working_directory: PathBuf, apple_tagger: PathBuf) -> Self {
+        Self { tools, working_directory, executables: Mutex::new(HashMap::new()), apple_tagger }
     }
 
     /// Tags keyed by `Item::id`. Items the model skipped or answered invalidly are absent.
@@ -72,8 +100,20 @@ impl Tagger {
         if items.is_empty() {
             return Ok(HashMap::new());
         }
-        let executable = self.resolved_executable(&options.executable).await?;
         let now = crate::model::now();
+        match options.backend {
+            Backend::Omp => self.tag_with_omp(items, options, now).await,
+            Backend::Apple => self.tag_with_apple(items, now).await,
+        }
+    }
+
+    async fn tag_with_omp(
+        &self,
+        items: &[Item],
+        options: &Options,
+        now: Date,
+    ) -> Result<HashMap<String, ConversationTag>, String> {
+        let executable = self.resolved_executable(&options.executable).await?;
         let arguments = arguments(&prompt(items, now), &options.model);
         let _ = std::fs::create_dir_all(&self.working_directory);
         let output = run(
@@ -86,14 +126,34 @@ impl Tagger {
         )
         .await?;
         if output.status != 0 {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let line = stderr.lines().rev().map(str::trim).find(|line| !line.is_empty());
-            return Err(match line {
-                Some(line) => line.chars().take(160).collect(),
-                None => format!("omp exited with status {}", output.status),
-            });
+            return Err(failure(&output, "omp"));
         }
-        parse(&output.stdout, items, now)
+        parse(&output.stdout, items, now, "omp")
+    }
+
+    /// One helper run per batch. A batch the model declines is split in halves until the
+    /// conversation it declines stands alone; that one stays untagged rather than holding up the
+    /// rest. Any other failure, the model being unavailable included, fails the batch: tagging
+    /// never falls back to omp.
+    async fn tag_with_apple(&self, items: &[Item], now: Date) -> Result<HashMap<String, ConversationTag>, String> {
+        if !is_executable(&self.apple_tagger) {
+            return Err(format!("Apple Intelligence tagging is not bundled with this app ({} is missing)", APPLE_TAGGER));
+        }
+        let arguments = [SYSTEM_PROMPT.to_string(), prompt(items, now)];
+        let environment: HashMap<String, String> = std::env::vars().collect();
+        let timeout = Duration::from_secs(MAX_TIME + EXIT_MARGIN);
+        let output = run(&self.apple_tagger, &arguments, &environment, None, true, timeout).await?;
+        match output.status {
+            0 => parse(&output.stdout, items, now, "Apple Intelligence"),
+            APPLE_DECLINED if items.len() > 1 => {
+                let (first, second) = items.split_at(items.len() / 2);
+                let mut tags = Box::pin(self.tag_with_apple(first, now)).await?;
+                tags.extend(Box::pin(self.tag_with_apple(second, now)).await?);
+                Ok(tags)
+            }
+            APPLE_DECLINED => Ok(HashMap::new()),
+            _ => Err(failure(&output, APPLE_TAGGER)),
+        }
     }
 
     async fn resolved_executable(&self, configured: &str) -> Result<PathBuf, String> {
@@ -111,6 +171,15 @@ impl Tagger {
         };
         self.executables.lock().expect("executables lock").insert(configured.to_string(), found.clone());
         Ok(found)
+    }
+}
+
+/// A failed run's last stderr line, else its exit status.
+fn failure(output: &Output, name: &str) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    match stderr.lines().rev().map(str::trim).find(|line| !line.is_empty()) {
+        Some(line) => line.chars().take(160).collect(),
+        None => format!("{name} exited with status {}", output.status),
     }
 }
 
@@ -370,7 +439,8 @@ fn day_after(last_day: &str) -> Option<Date> {
     Some(date_from_unix(midnight.timestamp() as f64))
 }
 
-fn parse(data: &[u8], items: &[Item], now: Date) -> Result<HashMap<String, ConversationTag>, String> {
+/// `source` names who answered in failures.
+fn parse(data: &[u8], items: &[Item], now: Date, source: &str) -> Result<HashMap<String, ConversationTag>, String> {
     let text = String::from_utf8_lossy(data);
     let answers = match (text.find('['), text.rfind(']')) {
         (Some(start), Some(end)) if start < end => serde_json::from_str::<Vec<Value>>(&text[start..=end]).ok(),
@@ -378,7 +448,11 @@ fn parse(data: &[u8], items: &[Item], now: Date) -> Result<HashMap<String, Conve
     };
     let Some(answers) = answers else {
         let preview: String = text.trim().chars().take(80).collect();
-        return Err(if preview.is_empty() { "omp returned nothing".into() } else { format!("unexpected omp output: {preview}") });
+        return Err(if preview.is_empty() {
+            format!("{source} returned nothing")
+        } else {
+            format!("unexpected {source} output: {preview}")
+        });
     };
     let mut result = HashMap::new();
     for answer in answers.iter().map(Answer::read) {
@@ -671,7 +745,7 @@ pub(crate) mod tests {
              {{\"id\":4,\"category\":\"spam\"}}, 7, {{\"id\":9,\"category\":\"people\"}},\
              {{\"id\":\"1\",\"category\":\"invitation\",\"toRespond\":true,\"until\":\"2001-01-01\"}}]\n```"
         );
-        let tags = parse(answer.as_bytes(), &items, now).unwrap();
+        let tags = parse(answer.as_bytes(), &items, now, "omp").unwrap();
         // A later answer for the same id wins, as the Swift dictionary does; an until in the
         // past ends the wait.
         let a = &tags["a"];
@@ -683,14 +757,17 @@ pub(crate) mod tests {
         assert!(!tags.contains_key("d"));
 
         let one = format!("[{{\"id\":1,\"category\":\"people\",\"toRespond\":true,\"until\":\"{tomorrow}\",\"labels\":[\"work\",\"travel plans\",\"a very long label here\",\"x\"]}}]");
-        let tag = &parse(one.as_bytes(), &items, now).unwrap()["a"];
+        let tag = &parse(one.as_bytes(), &items, now, "omp").unwrap()["a"];
         assert_eq!(tag.labels, ["Work", "Travel Plans"]);
         assert!(tag.to_respond);
         let until = tag.waiting_until.unwrap();
         assert!(until > now && until - now <= 2.0 * 86_400.0 + 3_600.0);
 
-        assert_eq!(parse(b"  \n", &items, now).err().unwrap(), "omp returned nothing");
-        assert_eq!(parse(b"I can't help with that.", &items, now).err().unwrap(), "unexpected omp output: I can't help with that.");
+        assert_eq!(parse(b"  \n", &items, now, "omp").err().unwrap(), "omp returned nothing");
+        assert_eq!(
+            parse(b"I can't help with that.", &items, now, "omp").err().unwrap(),
+            "unexpected omp output: I can't help with that."
+        );
         assert_eq!(version("omp/12.3.4 darwin-arm64"), Some(vec![12, 3, 4]));
         assert_eq!(title_case("  credit  card "), "Credit Card");
     }
@@ -702,8 +779,9 @@ pub(crate) mod tests {
         let environment: HashMap<String, String> =
             [("PATH".to_string(), format!("{}:/usr/bin:/bin", dir.display()))].into_iter().collect();
         let tools = Arc::new(Tools::fixed(environment));
-        let tagger = Tagger::new(tools.clone(), dir.join("work"));
-        let options = |executable: &str| Options { model: String::new(), executable: executable.into() };
+        let tagger = Tagger::new(tools.clone(), dir.join("work"), dir.join("no-apple-tagger"));
+        let options =
+            |executable: &str| Options { backend: Backend::Omp, model: String::new(), executable: executable.into() };
 
         // Two omps on PATH: the newer one wins. It records its arguments and answers.
         let newer = dir.join("newer");
@@ -721,7 +799,7 @@ pub(crate) mod tests {
         let tools = Arc::new(Tools::fixed(
             [("PATH".to_string(), format!("{}:{}:/usr/bin:/bin", dir.display(), newer.display()))].into_iter().collect(),
         ));
-        let tagger_on_path = Tagger::new(tools, dir.join("work"));
+        let tagger_on_path = Tagger::new(tools, dir.join("work"), dir.join("no-apple-tagger"));
         let tags = tagger_on_path.tag(&[item("k", false)], &options("")).await.unwrap();
         assert_eq!(tags["k"].category, Category::People);
         let args = std::fs::read_to_string(dir.join("args")).unwrap();
@@ -749,6 +827,59 @@ pub(crate) mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         // SAFETY: probing a pid with signal 0.
         assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "the timed-out child is gone");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn runs_apple_intelligence_without_falling_back_to_omp() {
+        let dir = std::env::temp_dir().join(format!("mailstream-apple-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // An omp on PATH that must never run.
+        script(&dir.join("omp"), &format!("touch {}/omp-ran; exit 1", dir.display()));
+        let tools = Arc::new(Tools::fixed(
+            [("PATH".to_string(), format!("{}:/usr/bin:/bin", dir.display()))].into_iter().collect(),
+        ));
+        let helper = dir.join(APPLE_TAGGER);
+        let tagger = Tagger::new(tools, dir.join("work"), helper.clone());
+        let options = Options { backend: Backend::Apple, model: "smol".into(), executable: String::new() };
+        let mut spam = item("b", false);
+        spam.subject = "Spam".into();
+        let items = [item("a", false), spam, item("c", false), item("d", false)];
+
+        let error = tagger.tag(&items, &options).await.err().unwrap();
+        assert_eq!(error, "Apple Intelligence tagging is not bundled with this app (mailstream-apple-tagger is missing)");
+
+        // The fake helper records each run, declines any batch holding the spam and otherwise
+        // calls every conversation people.
+        script(
+            &helper,
+            &format!(
+                "printf '%s\\n' \"$1\" | head -1 >> {dir}/instructions\n\
+                 echo run >> {dir}/runs\n\
+                 case \"$2\" in *Spam*) echo 'Apple Intelligence declined to answer' >&2; exit 4;; esac\n\
+                 n=$(printf '%s\\n' \"$2\" | grep -c '\"id\"')\n\
+                 out='['; i=1\n\
+                 while [ $i -le $n ]; do [ $i -gt 1 ] && out=\"$out,\"; out=\"$out{{\\\"id\\\":\\\"$i\\\",\\\"category\\\":\\\"people\\\",\\\"toRespond\\\":false,\\\"labels\\\":[]}}\"; i=$((i+1)); done\n\
+                 echo \"$out]\"",
+                dir = dir.display()
+            ),
+        );
+        let tags = tagger.tag(&items, &options).await.unwrap();
+        let mut tagged: Vec<&str> = tags.keys().map(String::as_str).collect();
+        tagged.sort();
+        assert_eq!(tagged, ["a", "c", "d"], "the declined conversation alone stays untagged");
+        // All four, then halves [a, spam] and [c, d], then a and the spam alone.
+        assert_eq!(std::fs::read_to_string(dir.join("runs")).unwrap().lines().count(), 5);
+        let instructions = std::fs::read_to_string(dir.join("instructions")).unwrap();
+        assert!(instructions.lines().all(|line| SYSTEM_PROMPT.starts_with(line)), "{instructions}");
+
+        // Unavailable: its message is the failure, and omp does not stand in.
+        script(&helper, "echo 'Apple Intelligence is off; turn it on in System Settings > Apple Intelligence & Siri' >&2; exit 3");
+        let error = tagger.tag(&items, &options).await.err().unwrap();
+        assert_eq!(error, "Apple Intelligence is off; turn it on in System Settings > Apple Intelligence & Siri");
+        script(&helper, "echo 'Hello' ; exit 0");
+        assert_eq!(tagger.tag(&items, &options).await.err().unwrap(), "unexpected Apple Intelligence output: Hello");
+        assert!(!dir.join("omp-ran").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

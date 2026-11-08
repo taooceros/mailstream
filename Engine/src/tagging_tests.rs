@@ -189,26 +189,104 @@ fn tags_the_inbox_with_omp_and_shares_corrections() {
     let error = call(&engine, "mail.retag", json!({})).unwrap_err();
     assert_eq!((error.code.as_str(), error.message.as_str()), ("disabled", "AI tagging is off (aiTagging.enabled)."));
     assert_eq!(tag(json!({ "ids": [id(0)], "category": "people" })).unwrap()["failed"][0]["message"], "AI tagging is off (aiTagging.enabled).");
-    assert_eq!(call(&engine, "status", json!({})).unwrap()["aiTagging"], json!({ "enabled": false, "status": null }));
+    assert_eq!(
+        call(&engine, "status", json!({})).unwrap()["aiTagging"],
+        json!({ "enabled": false, "status": null, "failed": false })
+    );
 
-    // A failing omp: the pass stops with its last error line and waits out the backoff; a
-    // changed omp setting tries again at once.
+    // A failing omp: the pass stops with its last error line, announced as a problem, and waits
+    // out the backoff; a changed omp setting tries again at once.
     let failing = dir.join("failing");
     script(&failing, &format!("echo run >> {}/failures; echo 'Error: quota exceeded' >&2; exit 1", dir.display()));
     call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": failing.display().to_string() })).unwrap();
+    events.lock().unwrap().clear();
     call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "true" })).unwrap();
     let failures = || std::fs::read_to_string(dir.join("failures")).unwrap_or_default().lines().count();
     wait_until("the failure", || {
         call(&engine, "status", json!({})).unwrap()["aiTagging"]
-            == json!({ "enabled": true, "status": "AI tagging failed: Error: quota exceeded" })
+            == json!({ "enabled": true, "status": "AI tagging failed: Error: quota exceeded", "failed": true })
     });
     assert_eq!(failures(), 1);
+    wait_until("the problem", || events.lock().unwrap().contains(&"problems"));
     mail.tagging().schedule();
     std::thread::sleep(Duration::from_millis(1500));
     assert_eq!(failures(), 1);
     call(&engine, "config.set", json!({ "key": "aiTagging.backoffSeconds", "value": "30" })).unwrap();
     wait_until("the retry", || failures() == 2);
 
+    // Apple Intelligence (aiTagging.backend apple): unavailable, the run fails on the helper's
+    // message and omp does not stand in; once it answers, it tags and the problem clears.
+    let helper = &config.apple_tagger;
+    let off = "Apple Intelligence is off; turn it on in System Settings > Apple Intelligence & Siri";
+    script(helper, &format!("echo run >> {}/apple; echo '{off}' >&2; exit 3", dir.display()));
+    call(&engine, "config.set", json!({ "key": "aiTagging.backend", "value": "apple" })).unwrap();
+    wait_until("Apple Intelligence's failure", || {
+        call(&engine, "status", json!({})).unwrap()["aiTagging"]
+            == json!({ "enabled": true, "status": format!("AI tagging failed: {off}"), "failed": true })
+    });
+    assert_eq!(std::fs::read_to_string(dir.join("apple")).unwrap().lines().count(), 1);
+    assert_eq!(failures(), 2);
+    std::fs::remove_file(helper).unwrap();
+    std::fs::copy(&omp, helper).unwrap();
+    events.lock().unwrap().clear();
+    call(&engine, "mail.retag", json!({})).unwrap();
+    wait_until("tagging with Apple Intelligence", || counts(&dir).len() >= 10);
+    assert_eq!(counts(&dir)[7..10], [20, 20, 5]);
+    wait_until("the problem clears", || {
+        call(&engine, "status", json!({})).unwrap()["aiTagging"] == json!({ "enabled": true, "status": null, "failed": false })
+    });
+    wait_until("the problem gone", || events.lock().unwrap().contains(&"problems"));
+    assert_eq!(failures(), 2);
+
+    drop(engine);
+    cleanup(&config);
+}
+
+/// The real model through the engine, on the fake server's synthetic inbox: one pass of 20
+/// conversations in one batch, timed. Not run by default. Apple Intelligence:
+/// `MAILSTREAM_APPLE_TAGGER=<built mailstream-apple-tagger> cargo test on_device -- --ignored --nocapture`;
+/// omp instead: `MAILSTREAM_OMP=<omp path>`.
+#[test]
+#[ignore = "runs a real model: MAILSTREAM_APPLE_TAGGER or MAILSTREAM_OMP"]
+fn tags_synthetic_mail_on_device() {
+    let counters =
+        Arc::new(GmailCounters { tokens: AtomicUsize::new(0), labels: AtomicUsize::new(0), listings: AtomicUsize::new(0) });
+    let server = gmail_server(counters);
+    let (engine, config) = engine_for(&server, &[("me@gmail.com", "google")]);
+    call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
+    let backend = match (std::env::var("MAILSTREAM_APPLE_TAGGER"), std::env::var("MAILSTREAM_OMP")) {
+        (Ok(helper), _) => {
+            std::fs::copy(helper, &config.apple_tagger).unwrap();
+            "apple"
+        }
+        (_, Ok(omp)) => {
+            call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": omp })).unwrap();
+            "omp"
+        }
+        _ => panic!("set MAILSTREAM_APPLE_TAGGER or MAILSTREAM_OMP"),
+    };
+    for (key, value) in [("aiTagging.backend", backend), ("aiTagging.batchSize", "20"), ("aiTagging.passLimit", "20")] {
+        call(&engine, "config.set", json!({ "key": key, "value": value })).unwrap();
+    }
+    wait_until("both pages", || {
+        let listed = call(&engine, "mail.list", json!({ "limit": 100, "cached": true }));
+        listed.is_ok_and(|listed| listed["conversations"].as_array().unwrap().len() == 59)
+    });
+    let started = std::time::Instant::now();
+    call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "true" })).unwrap();
+    let tagged = || list(&engine, json!({})).iter().filter(|conversation| !conversation["category"].is_null()).count();
+    let status = || call(&engine, "status", json!({})).unwrap()["aiTagging"].clone();
+    while started.elapsed() < Duration::from_secs(150) && (tagged() == 0 || !status()["status"].is_null()) {
+        assert_ne!(status()["failed"], json!(true), "{}", status());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    let count = tagged();
+    println!("{backend}: {count} of 20 conversations tagged in {elapsed:.1} s, {:.2} s each", elapsed / 20.0);
+    for conversation in list(&engine, json!({})).iter().take(20) {
+        println!("  {} → {} {} {}", conversation["subject"], conversation["category"], conversation["waiting"], conversation["labels"]);
+    }
+    assert!(count > 0);
     drop(engine);
     cleanup(&config);
 }
@@ -237,7 +315,7 @@ fn reports_status() {
     keys.sort();
     assert_eq!(keys, ["lastError", "lastRefresh", "loading", "pushConnected"]);
     assert_eq!(sync["pushConnected"], json!(false));
-    assert_eq!(status["aiTagging"], json!({ "enabled": false, "status": null }));
+    assert_eq!(status["aiTagging"], json!({ "enabled": false, "status": null, "failed": false }));
     drop(engine);
     cleanup(&config);
 }

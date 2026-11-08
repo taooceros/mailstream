@@ -14,6 +14,7 @@ use crate::files;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Setting {
     AiTaggingEnabled,
+    AiTaggingBackend,
     AiTaggingModel,
     AiTaggingOmpPath,
     AiTaggingBatchSize,
@@ -31,6 +32,8 @@ enum Kind {
     Bool,
     Int(i64, i64),
     Text,
+    /// One of the given words.
+    Choice(&'static [&'static str]),
     /// Lowercased email addresses, kept sorted and unique.
     Addresses,
 }
@@ -39,8 +42,9 @@ enum Kind {
 pub type Values = BTreeMap<Setting, Value>;
 
 impl Setting {
-    pub const ALL: [Setting; 11] = [
+    pub const ALL: [Setting; 12] = [
         Self::AiTaggingEnabled,
+        Self::AiTaggingBackend,
         Self::AiTaggingModel,
         Self::AiTaggingOmpPath,
         Self::AiTaggingBatchSize,
@@ -56,6 +60,7 @@ impl Setting {
     pub fn key(self) -> &'static str {
         match self {
             Self::AiTaggingEnabled => "aiTagging.enabled",
+            Self::AiTaggingBackend => "aiTagging.backend",
             Self::AiTaggingModel => "aiTagging.model",
             Self::AiTaggingOmpPath => "aiTagging.ompPath",
             Self::AiTaggingBatchSize => "aiTagging.batchSize",
@@ -75,7 +80,12 @@ impl Setting {
             Self::AiTaggingEnabled => (
                 Kind::Bool,
                 json!(true),
-                "Sort the inbox into People, Notifications, Newsletters and Invitations with omp, and flag mail waiting on your reply or action.",
+                "Sort the inbox into People, Notifications, Newsletters and Invitations with AI, and flag mail waiting on your reply or action.",
+            ),
+            Self::AiTaggingBackend => (
+                Kind::Choice(&["omp", "apple"]),
+                json!("omp"),
+                "Who tags: omp runs the model aiTagging.model names; apple runs Apple Intelligence's on-device model (macOS 26 or later, Apple Intelligence on).",
             ),
             Self::AiTaggingModel => {
                 (Kind::Text, json!("smol"), "omp model role or model id the tagger runs (`omp --model`).")
@@ -85,7 +95,7 @@ impl Setting {
                 json!(""),
                 "Path of the omp executable; empty picks the newest omp on the login shell's PATH.",
             ),
-            Self::AiTaggingBatchSize => (Kind::Int(1, 100), json!(20), "Conversations sent to omp per run."),
+            Self::AiTaggingBatchSize => (Kind::Int(1, 100), json!(20), "Conversations sent to the model per run."),
             Self::AiTaggingPassLimit => {
                 (Kind::Int(1, 2000), json!(150), "Most conversations one tagging pass looks at, newest first.")
             }
@@ -163,6 +173,12 @@ impl Setting {
                 .as_str()
                 .map(|text| json!(text.trim()))
                 .ok_or_else(|| EngineError::invalid_setting(format!("{key} must be a string."))),
+            Kind::Choice(words) => value
+                .as_str()
+                .map(|text| text.trim().to_lowercase())
+                .filter(|word| words.contains(&word.as_str()))
+                .map(Value::String)
+                .ok_or_else(|| EngineError::invalid_setting(format!("{key} must be one of {}.", words.join(", ")))),
             Kind::Addresses => {
                 let strings: Option<Vec<&str>> =
                     value.as_array().and_then(|items| items.iter().map(Value::as_str).collect());
@@ -197,7 +213,7 @@ impl Setting {
                     .map_err(|_| EngineError::invalid_setting(format!("{key} must be an integer, not \"{text}\".")))?;
                 self.validate(&json!(int))
             }
-            Kind::Text => self.validate(&json!(text)),
+            Kind::Text | Kind::Choice(_) => self.validate(&json!(text)),
             Kind::Addresses => {
                 if trimmed.starts_with('[')
                     && let Ok(parsed) = serde_json::from_str::<Value>(trimmed)
@@ -227,6 +243,10 @@ impl Setting {
             }
             Kind::Text => {
                 out.insert("type".into(), json!("string"));
+            }
+            Kind::Choice(words) => {
+                out.insert("type".into(), json!("string"));
+                out.insert("enum".into(), json!(words));
             }
             Kind::Addresses => {
                 out.insert("type".into(), json!("array"));
@@ -271,6 +291,10 @@ impl Setting {
             }
             Kind::Text => {
                 out.insert("type".into(), json!("string"));
+            }
+            Kind::Choice(words) => {
+                out.insert("type".into(), json!("string"));
+                out.insert("choices".into(), json!(words));
             }
             Kind::Addresses => {
                 out.insert("type".into(), json!("array of email addresses"));
@@ -501,6 +525,11 @@ mod tests {
             "aiTagging.enabled must be true or false, not \"maybe\"."
         );
         assert_eq!(Setting::AiTaggingModel.parse("  big \n").unwrap(), json!("big"));
+        assert_eq!(Setting::AiTaggingBackend.parse(" Apple ").unwrap(), json!("apple"));
+        assert_eq!(
+            Setting::AiTaggingBackend.validate(&json!("gpt")).err().unwrap().message,
+            "aiTagging.backend must be one of omp, apple."
+        );
         let senders = Setting::TrustedSenders;
         assert_eq!(senders.parse("B@x.com, a@x.com,,b@X.com").unwrap(), json!(["a@x.com", "b@x.com"]));
         assert_eq!(senders.parse(r#"["Z@y.org"]"#).unwrap(), json!(["z@y.org"]));
@@ -568,17 +597,25 @@ mod tests {
         let dir = temp();
         let settings = Settings::new(&dir);
         let list = run(&settings, "config.list", json!({})).unwrap();
-        assert_eq!(list["settings"].as_array().unwrap().len(), 11);
+        assert_eq!(list["settings"].as_array().unwrap().len(), 12);
         assert_eq!(
-            list["settings"][3],
+            list["settings"][1],
+            json!({
+                "key": "aiTagging.backend", "value": "omp", "default": "omp", "changed": false,
+                "summary": Setting::AiTaggingBackend.descriptor().2, "type": "string", "choices": ["omp", "apple"],
+            })
+        );
+        assert_eq!(
+            list["settings"][4],
             json!({
                 "key": "aiTagging.batchSize", "value": 20, "default": 20, "changed": false,
-                "summary": "Conversations sent to omp per run.", "type": "integer", "minimum": 1, "maximum": 100,
+                "summary": "Conversations sent to the model per run.", "type": "integer", "minimum": 1, "maximum": 100,
             })
         );
         assert_eq!(run(&settings, "config.path", json!({})).unwrap()["exists"], json!(false));
         let schema = run(&settings, "config.schema", json!({})).unwrap();
         assert_eq!(schema["properties"]["remoteContent.trustedSenders"]["items"]["format"], json!("email"));
+        assert_eq!(schema["properties"]["aiTagging.backend"]["enum"], json!(["omp", "apple"]));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

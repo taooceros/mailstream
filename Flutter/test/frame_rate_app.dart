@@ -29,6 +29,7 @@ class FrameRateMail extends ReaderMail {
     changed: _shown,
     summary:
         'Show the frame rate and the slowest recent frame in a corner of Mailstream Flutter\'s window (also View ▸ Show Frame Rate).',
+    choices: const [],
   );
 
   @override

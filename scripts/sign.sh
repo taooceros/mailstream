@@ -30,5 +30,10 @@ for target in "$@"; do
   if [ -f "$cli" ]; then
     codesign --force --sign "$IDENTITY" --identifier dev.mailstream.cli "$cli" >/dev/null
   fi
+  # The Flutter and GPUI apps carry the Apple Intelligence tagger beside theirs.
+  tagger="$target/Contents/MacOS/mailstream-apple-tagger"
+  if [ -f "$tagger" ]; then
+    codesign --force --sign "$IDENTITY" --identifier dev.mailstream.apple-tagger "$tagger" >/dev/null
+  fi
   codesign --force --sign "$IDENTITY" --identifier "$IDENTIFIER" "$target" >/dev/null
 done

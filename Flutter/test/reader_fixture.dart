@@ -28,6 +28,17 @@ class ReaderMail extends FakeMailstream {
   Future<engine.Settings> settings() async => engine.Settings(file: '', settings: [], issues: []);
 
   @override
+  Future<engine.Status> status() async => engine.Status(
+    version: 'test',
+    pid: 0,
+    settingsFile: '',
+    settingsIssues: [],
+    accounts: [],
+    sync_: engine.SyncStatus(loading: false, lastRefresh: null, lastError: null, pushConnected: false),
+    aiTagging: engine.TaggingStatus(enabled: false, status: null, failed: false),
+  );
+
+  @override
   Future<engine.ChatSpaces> chatSpaces({required String? account}) async =>
       engine.ChatSpaces(accounts: [], spaces: [], loading: false, more: false);
 

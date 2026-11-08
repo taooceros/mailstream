@@ -12,7 +12,8 @@ Cloudflare Worker relay (`Push/`).
   (see First-time setup); their ids and secrets are entered in the app at sign-in
 - For push: a Cloudflare account (`wrangler`) and the Google Cloud CLI (`gcloud`)
 - Optional: the `omp` CLI on `PATH` with a working "smol" model role (or the model set
-  in `aiTagging.model`), for AI tagging
+  in `aiTagging.model`), for AI tagging; or, in Mailstream Flutter and Mailstream GPUI,
+  Apple Intelligence turned on (`aiTagging.backend` `apple`), which tags on the Mac itself
 
 Accounts are added in the app: Mailstream ▸ Settings… (⌘,) ▸ Add Google Account… or
 Add Microsoft Account… first asks for the OAuth client ID and secret, then opens the
@@ -28,7 +29,14 @@ list (address, label, granted scopes) in
 With no account, Settings opens at launch. Labels can be renamed inline there.
 
 Mailstream resolves `PATH` from your login shell to find omp and picks the newest
-version on it, unless `aiTagging.ompPath` names one (see Settings and agents).
+version on it, unless `aiTagging.ompPath` names one (see Settings and agents). With
+`aiTagging.backend` `apple`, the Rust engine runs `mailstream-apple-tagger` instead (beside
+the app's executable; built from `Engine/apple/AppleTagger.swift` by `scripts/apple-tagger.py`,
+which `scripts/ffi.py` runs): Apple's on-device model (Foundation Models) answers the same
+prompt with the same tags, by guided generation. When Apple Intelligence is off, not ready or
+unsupported, tagging stops with that reason (Settings shows it, `mailstream status` reports
+it) and never falls back to omp. Mailstream.app tags only with omp and leaves Apple
+Intelligence tagging to the other two.
 
 ## First-time setup
 
@@ -102,9 +110,10 @@ listed under `settingsIssues` in `mailstream status`.
 | Setting | Default | |
 | --- | --- | --- |
 | `aiTagging.enabled` | `true` | Smart Inbox tagging (also View ▸ Auto-Tag with AI) |
+| `aiTagging.backend` | `"omp"` | who tags: `omp`, or `apple` for Apple Intelligence on the Mac |
 | `aiTagging.model` | `"smol"` | omp model role or id |
 | `aiTagging.ompPath` | `""` | omp to run; empty picks the newest on `PATH` |
-| `aiTagging.batchSize` | `20` | conversations per omp run |
+| `aiTagging.batchSize` | `20` | conversations per model run |
 | `aiTagging.passLimit` | `150` | conversations one pass looks at |
 | `aiTagging.backoffSeconds` | `300` | pause after a failed run |
 | `remoteContent.trustedSenders` | `[]` | senders whose remote content always loads ("Always Load" adds here) |
@@ -214,8 +223,11 @@ DART_OUT=path/to/lib/src python3 scripts/ffi.py   # and the Dart bindings (asset
   dynamic library IDs and dependencies using `install_name_tool` without manual relinking or
   temporary `RUSTFLAGS`.
 - **Tests.** `cd Engine && cargo test` uses a Keychain item of its own, never the apps'
-  sign-ins, fake provider and relay servers, never the real ones, fake `omp` scripts, never
-  the user's omp, and a fake web for sender pictures.
+  sign-ins, fake provider and relay servers, never the real ones, fake `omp` scripts and a
+  fake `mailstream-apple-tagger`, never the user's omp or Apple Intelligence, and a fake web
+  for sender pictures. `tags_synthetic_mail_on_device` (ignored) tags the fake inbox with a
+  real model and times it: `MAILSTREAM_APPLE_TAGGER=<built helper>` or `MAILSTREAM_OMP=<omp>`
+  with `cargo test on_device -- --ignored --nocapture`.
 - **Windows.** The engine and `mailstream.dll` build for Windows x64; the GitHub Actions
   `Windows` workflow runs the engine's tests and `FFI/examples/smoke.rs`, a check of the DLL's
   API without accounts (status, settings and their file watching, saved sign-ins, the cache,

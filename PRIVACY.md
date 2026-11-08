@@ -8,7 +8,7 @@ Mailstream is a personal, open-source mail client for macOS that runs on your Ma
 - **Contacts:** with your permission, Mailstream reads the photos and email addresses of your Google contacts (People API, read-only) and Outlook contacts (Microsoft Graph, read-only) so it can show sender avatars. It does not modify your contacts.
 - **Google Chat:** with your permission, Mailstream reads your Google Chat spaces, their members, messages and your read state, and sends the messages you write and marks spaces read, through the Google Chat API, directly between Google and your Mac. It does not delete or edit messages or change spaces.
 - **Avatars:** to find logos and avatars, Mailstream can look up the sender's domain (BIMI DNS record and the site's icon) and request Gravatar using a hash of the sender's address.
-- **AI tagging (optional):** when enabled, a conversation's sender, subject and preview are sent to the model provider you configured in the `omp` CLI.
+- **AI tagging (optional):** when enabled, a conversation's sender, subject and preview are sent to the model provider you configured in the `omp` CLI; with `aiTagging.backend` set to `apple`, Apple Intelligence's on-device model reads them on your Mac instead.
 - **Storage:** everything Mailstream fetches is cached only on your Mac.
 - **No sharing:** Mailstream has no analytics or tracking, and shares no data with third parties beyond the requests described above.
 

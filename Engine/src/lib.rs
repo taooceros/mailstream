@@ -122,6 +122,10 @@ pub struct Config {
     /// The environment the AI tagger runs `omp` in; None recovers the login shell's PATH as the
     /// Swift engine does. Tests give their own, so no test ever finds the user's omp.
     pub tool_environment: Option<HashMap<String, String>>,
+    /// The Apple Intelligence tagger (`mailstream-apple-tagger`, for `aiTagging.backend`
+    /// `apple`): beside this process's executable, where the front ends bundle it. Tests name a
+    /// fake one.
+    pub apple_tagger: PathBuf,
     /// The public web sender pictures come from (Gravatar, BIMI, site icons); tests answer
     /// from memory.
     pub avatar_web: Arc<dyn avatars::web::Web>,
@@ -146,6 +150,10 @@ impl Config {
             endpoints: backend::Endpoints::default(),
             push: bundle::push_config(),
             tool_environment: None,
+            apple_tagger: std::env::current_exe()
+                .ok()
+                .and_then(|executable| executable.parent().map(|directory| directory.join(omp::APPLE_TAGGER)))
+                .unwrap_or_else(|| PathBuf::from(omp::APPLE_TAGGER)),
             avatar_web: avatars::web::Internet::shared(),
             control_socket: true,
         }
@@ -268,6 +276,7 @@ impl Engine {
             settings.clone(),
             events.clone(),
             config.tool_environment.clone(),
+            config.apple_tagger.clone(),
         ));
         let push = Arc::new(push::Push::new(
             config.push.clone(),
@@ -521,7 +530,7 @@ impl Core {
                 "lastError": self.mail.problem(),
                 "pushConnected": self.push.is_connected(),
             },
-            "aiTagging": { "enabled": tagging.is_enabled(), "status": tagging.status() },
+            "aiTagging": { "enabled": tagging.is_enabled(), "status": tagging.status(), "failed": tagging.failed() },
         })
     }
 
@@ -617,6 +626,8 @@ pub(crate) mod tests {
             // A PATH without omp (the system's tools only): tagging runs only the fake omp a
             // test names.
             tool_environment: Some(HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())])),
+            // No Apple Intelligence: only a fake helper a test writes there runs.
+            apple_tagger: root.join(omp::APPLE_TAGGER),
             avatar_web: Arc::new(avatars::tests::FakeWeb::default()),
             // The test of the socket turns it on.
             control_socket: false,
@@ -648,8 +659,8 @@ pub(crate) mod tests {
         std::fs::write(config.support_directory.join("settings.json"), "{\n  \"chat.pollSeconds\" : 30\n}\n").unwrap();
         assert_eq!(events.recv_timeout(Duration::from_secs(5)), Ok("settings"));
         let list = block_on(engine.call("config.list", json!({}))).unwrap();
-        assert_eq!(list["settings"][9]["value"], json!(30));
-        assert_eq!(list["settings"][7]["changed"], json!(false));
+        assert_eq!(list["settings"][10]["value"], json!(30));
+        assert_eq!(list["settings"][8]["changed"], json!(false));
         drop(engine);
         cleanup(&config);
     }

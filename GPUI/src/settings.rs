@@ -710,8 +710,8 @@ impl Settings {
                     .gap(px(2.))
                     .child(div().font_weight(FontWeight::MEDIUM).child("AI tagging"))
                     .child(div().text_size(px(text::CAPTION)).text_color(p.muted).child(
-                        "Sort the inbox into People, Notifications, Newsletters and Invitations with omp, and flag \
-                         mail waiting on your reply or action.",
+                        "Sort the inbox into People, Notifications, Newsletters and Invitations with AI (omp, or \
+                         Apple Intelligence with aiTagging.backend apple), and flag mail waiting on your reply or action.",
                     )),
             )
             .child(switch(enabled.unwrap_or(false), p));
@@ -727,7 +727,7 @@ impl Settings {
             .child(div().flex_1().min_w_0().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(if self.retag_started {
                 "Re-tagging started."
             } else {
-                "Tag every conversation again, replacing the tags omp gave before."
+                "Tag every conversation again, replacing the tags the model gave before."
             }))
             .child(
                 button("retag", "Re-tag All Conversations", p)

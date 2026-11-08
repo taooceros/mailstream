@@ -98,6 +98,9 @@ pub struct TaggingStatus {
     pub enabled: bool,
     /// A line for people (progress or the last failure); nil while idle.
     pub status: Option<String>,
+    /// `status` is the last run's failure (omp or Apple Intelligence unavailable, a failed run);
+    /// [`Event::Problems`] announces it showing up and going away.
+    pub failed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, uniffi::Record)]
@@ -346,6 +349,8 @@ pub struct SettingEntry {
     /// The range a number setting accepts.
     pub minimum: Option<i64>,
     pub maximum: Option<i64>,
+    /// The words a text setting accepts; empty when it takes any text.
+    pub choices: Vec<String>,
 }
 
 impl<'de> Deserialize<'de> for SettingEntry {
@@ -361,6 +366,8 @@ impl<'de> Deserialize<'de> for SettingEntry {
             summary: String,
             minimum: Option<i64>,
             maximum: Option<i64>,
+            #[serde(default)]
+            choices: Vec<String>,
         }
         let raw = Raw::deserialize(deserializer)?;
         let typed = |value: &Value| {
@@ -375,6 +382,7 @@ impl<'de> Deserialize<'de> for SettingEntry {
             summary: raw.summary,
             minimum: raw.minimum,
             maximum: raw.maximum,
+            choices: raw.choices,
         })
     }
 }

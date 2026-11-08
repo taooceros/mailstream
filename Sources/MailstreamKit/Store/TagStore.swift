@@ -12,9 +12,9 @@ import Observation
 /// Observable: the list follows `tags`, `isEnabled` and `status`.
 @Observable
 final class TagStore {
-    /// Settings whose change deserves another try at once: a fixed omp or model.
-    private static let retrySettings: [Setting] = [.aiTaggingModel, .aiTaggingOmpPath, .aiTaggingPassLimit,
-                                                   .aiTaggingBackoffSeconds]
+    /// Settings whose change deserves another try at once: a fixed omp or model, another backend.
+    private static let retrySettings: [Setting] = [.aiTaggingBackend, .aiTaggingModel, .aiTaggingOmpPath,
+                                                   .aiTaggingPassLimit, .aiTaggingBackoffSeconds]
     /// Why tag edits and retagging are refused while tagging is off.
     static let offMessage = "AI tagging is off (aiTagging.enabled)."
 
@@ -217,11 +217,17 @@ final class TagStore {
         return latest.envelope.messageID ?? "\(latest.ref.account)/\(latest.ref.mailbox)/\(latest.ref.id)"
     }
 
-    /// Tags the newest untagged candidates in batches, one omp process at a time.
+    /// Tags the newest untagged candidates in batches, one omp process at a time. Apple
+    /// Intelligence (`aiTagging.backend` apple) runs only in the Rust engine's front ends; this
+    /// engine then leaves tagging to them rather than tagging with omp instead.
     private func pass() async {
         guard enabled else { return }
         if let until = backoffUntil, until > Date() { return }
         let settings = Settings.shared
+        guard settings.string(.aiTaggingBackend) == "omp" else {
+            status = "Apple Intelligence tags in Mailstream Flutter and Mailstream GPUI; Mailstream.app tags only with omp."
+            return
+        }
         let options = OmpTagger.Options(model: settings.string(.aiTaggingModel),
                                         executable: settings.string(.aiTaggingOmpPath))
         let items = untaggedItems(limit: settings.int(.aiTaggingPassLimit))
