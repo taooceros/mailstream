@@ -598,7 +598,32 @@ class _WebBody extends StatefulWidget {
 }
 
 class _WebBodyState extends State<_WebBody> {
-  MethodChannel? _channel;
+  /// One channel for every WebKit body, its calls carrying the view id: the engine keeps a channel
+  /// it has listened on for good, so a channel per view added one with every body ever shown
+  /// (MS-154).
+  static const _channel = MethodChannel('mailstream/html');
+
+  /// The bodies showing, by view id, for the heights the runner sends.
+  static final _bodies = <int, _WebBodyState>{};
+
+  /// Heights sent before their body listened (its view's creation still on its way back), the
+  /// latest per view. A body takes its own when it starts listening and drops those of older
+  /// views, whose bodies have taken theirs or gone (view ids only grow).
+  static final _early = <int, List<Object?>>{};
+
+  static Future<void> _receive(MethodCall call) async {
+    final arguments = call.arguments;
+    if (call.method != 'height' || arguments is! List || arguments.length != 3) return;
+    final [view, ...height] = arguments;
+    final body = _bodies[view];
+    if (body != null) {
+      body._measured(height);
+    } else if (view is int) {
+      _early[view] = height;
+    }
+  }
+
+  int? _view;
 
   /// Until the page measures itself: about two lines.
   double _height = 40;
@@ -612,17 +637,19 @@ class _WebBodyState extends State<_WebBody> {
 
   void _created(int id) {
     if (!mounted) return;
-    final channel = _channel = MethodChannel('mailstream/html/$id')
-      ..setMethodCallHandler((call) async {
-        if (call.method == 'height') _measured(call.arguments);
-      });
+    _view = id;
+    _bodies[id] = this;
+    _channel.setMethodCallHandler(_receive);
+    final early = _early.remove(id);
+    _early.removeWhere((view, _) => view < id);
+    if (early != null) _measured(early);
     // A page shown before (or measured before this listened) has its height already: ask for it
     // at this width.
     final box = context.findRenderObject();
     final width = box is RenderBox && box.hasSize ? box.size.width : null;
-    channel.invokeMethod<Object?>('height', width).then(_measured, onError: (Object error) {
+    _channel.invokeMethod<Object?>('height', {'view': id, 'width': width}).then(_measured, onError: (Object error) {
       // The view can go before it answers.
-      if (mounted && _channel == channel) throw error;
+      if (mounted && _view == id) throw error;
     });
   }
 
@@ -636,8 +663,7 @@ class _WebBodyState extends State<_WebBody> {
 
   @override
   void dispose() {
-    _channel?.setMethodCallHandler(null);
-    _channel = null;
+    if (_view case final view?) _bodies.remove(view);
     super.dispose();
   }
 

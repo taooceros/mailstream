@@ -221,13 +221,22 @@ void main() {
     expect(Reader.openingHtml(of('people'), messages), ['unread', 'old']);
   });
 
-  /// Platform views made, oldest first; the width each asked its height at; the page's answer.
+  /// Platform views made, oldest first; the width each asked its height at; the page's answer;
+  /// a height each page sends while its view is being made, before Flutter hears of the view.
   final views = <int>[];
   final pulls = <int, Object?>{};
   late Future<Object?> Function(int view) answer;
+  List<Object>? Function(int view) early = (_) => null;
 
   /// The renderer the bodies below draw with; WebKit-only tests leave it on WebKit.
   var renderer = ReaderRenderer.webKit;
+
+  Future<void> send(int view, List<Object> height) => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .handlePlatformMessage(
+        'mailstream/html',
+        const StandardMethodCodec().encodeMethodCall(MethodCall('height', [view, ...height])),
+        (_) {},
+      );
 
   setUp(() {
     renderer = ReaderRenderer.webKit;
@@ -237,16 +246,20 @@ void main() {
     views.clear();
     pulls.clear();
     answer = (_) async => null;
+    early = (_) => null;
     final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    // The runner's pages, which answer the height a view asks for once it listens.
+    messenger.setMockMethodCallHandler(const MethodChannel('mailstream/html'), (call) async {
+      final arguments = call.arguments as Map;
+      final view = arguments['view'] as int;
+      pulls[view] = arguments['width'];
+      return answer(view);
+    });
     messenger.setMockMethodCallHandler(SystemChannels.platform_views, (call) async {
       if (call.method == 'create') {
         final id = (call.arguments as Map)['id'] as int;
         views.add(id);
-        // The runner's page host, which answers the height Flutter asks for once it listens.
-        messenger.setMockMethodCallHandler(MethodChannel('mailstream/html/$id'), (call) async {
-          pulls[id] = call.arguments;
-          return answer(id);
-        });
+        if (early(id) case final height?) await send(id, height);
       }
       return null;
     });
@@ -271,11 +284,7 @@ void main() {
   Finder toggle() => find.byIcon(CupertinoIcons.ellipsis);
   double height(WidgetTester tester, [int index = 0]) => tester.getSize(find.byType(AppKitView).at(index)).height;
   Future<void> measured(WidgetTester tester, int view, List<Object> height) async {
-    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-      'mailstream/html/$view',
-      const StandardMethodCodec().encodeMethodCall(MethodCall('height', height)),
-      (_) {},
-    );
+    await send(view, height);
     await tester.pump();
   }
 
@@ -330,6 +339,29 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(rendered(tester), ['b']);
     expect(height(tester), 40);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('every body shares one channel, each height reaching its own view', (tester) async {
+    final cache = HtmlPartsCache(split: (html) async => ('main', 'quote'));
+    await tester.pumpWidget(host('a', cache));
+    await tester.pumpAndSettle();
+    await tester.tap(toggle());
+    await tester.pumpAndSettle();
+    final [body, quote] = views;
+    expect(pulls.keys, [body, quote]);
+    await measured(tester, quote, [210.0, 1]);
+    await measured(tester, body, [330.0, 1]);
+    expect([height(tester, 0), height(tester, 1)], [330, 210]);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a height sent while its view was being made reaches the body once it listens', (tester) async {
+    final cache = HtmlPartsCache(split: (html) async => (html, null));
+    early = (_) => [260.0, 1];
+    await tester.pumpWidget(host('a', cache));
+    await tester.pumpAndSettle();
+    expect(height(tester), 260);
     await tester.pumpWidget(const SizedBox());
   });
 

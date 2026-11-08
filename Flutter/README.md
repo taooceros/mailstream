@@ -256,15 +256,24 @@ The WebView is `macos/Runner/MailHtmlView.swift`, a platform view (`mailstream/h
 none of the mail's scripts, loads the page without a base URL under a content policy allowing
 HTTPS and data resources only, allows only its own first load (no redirects, frames or meta
 refreshes), loads remote images without cookies, zooms out a body wider than the column, and
-reports its content height so the body scrolls with the conversation.
+reports its content height so the body scrolls with the conversation. Every view talks over the
+one channel `mailstream/html`, its calls carrying the view id (a channel per view stayed
+registered in the engine after the view went, MS-154).
 
 Creating a WebKit page and loading its HTML holds the main thread for 20–35 ms, so each platform
-view is a light host around a page (MS-109). When a reader or fold closes, its page waits idle (at
-most eight) and is shown again only for the same account, conversation, message, part (body or
-quote) and full HTML; a page never loads other HTML and is never taken from a host still showing
-it. Heights carry a per-page number, and the Dart view asks for the latest height at its own
-width once it listens, so a late or stale height cannot resize another showing; a page reused at
-another width measures again.
+view is a light host around a page (MS-109). When a reader or fold closes, its page waits idle and
+is shown again only for the same account, conversation, message, part (body or quote) and full
+HTML; a page never loads other HTML and is never taken from a host still showing it. Heights
+carry a per-page number, and the Dart view asks for the latest height at its own width once it
+listens, so a late or stale height cannot resize another showing; a page reused at another width
+measures again.
+
+An idle page keeps its own WebContent process and the images it decoded, up to hundreds of MB for
+a newsletter, so idle pages close after a minute, past eight, or once their processes together
+use more than 200 MB (oldest first; the most recently closed reader's page stays) (MS-155).
+WebKit ends a closed page's process by leaving it to exit by itself, which a background process
+on a busy machine did not get to do, so every closed page kept its process (MS-153); the pool
+kills the process of each page it lets go, once WebKit has closed the page.
 
 HTML DOM parsing, quote traversal and serialization run in a background Dart isolate before
 creating the WebKit bodies (MS-87). A shared eight-entry LRU reuses unchanged HTML and shares
