@@ -33,7 +33,9 @@ use crate::{EngineError, Events, threader};
 
 mod actions;
 mod contacts;
+mod native;
 mod sending;
+pub use native::{NativeMessage, NativeOutgoing};
 #[cfg(test)]
 mod action_tests;
 #[cfg(test)]
@@ -716,9 +718,10 @@ impl Mail {
         });
     }
 
-    /// First pages of `keys`, and the keys that failed. A key's answer counts only if no later
-    /// request for it was made, so a slow older pass never overwrites a newer one.
-    async fn fetch_first_pages(self: &Arc<Self>, keys: &[MailboxKey]) -> HashMap<MailboxKey, ApiError> {
+    /// First pages of `keys`: the keys that failed, and whether a listing changed. A key's answer
+    /// counts only if no later request for it was made, so a slow older pass never overwrites a
+    /// newer one.
+    async fn fetch_first_pages(self: &Arc<Self>, keys: &[MailboxKey]) -> (HashMap<MailboxKey, ApiError>, bool) {
         let mut tickets = HashMap::new();
         {
             let mut state = self.state();
@@ -737,7 +740,7 @@ impl Mail {
             })
             .collect();
         let mut failures = HashMap::new();
-        let mut shown_changed = false;
+        let (mut shown_changed, mut changed) = (false, false);
         while let Some((key, result)) = jobs.next().await {
             let mut state = self.state();
             if !state.accounts.iter().any(|account| account.name == key.account)
@@ -747,8 +750,9 @@ impl Mail {
             }
             match result {
                 Ok(page) => {
-                    if self.merge_first_page(&mut state, page.envelopes, page.next, &key) && Self::default_keys(&state).contains(&key) {
-                        shown_changed = true;
+                    if self.merge_first_page(&mut state, page.envelopes, page.next, &key) {
+                        changed = true;
+                        shown_changed |= Self::default_keys(&state).contains(&key);
                     }
                 }
                 Err(error) => {
@@ -761,7 +765,7 @@ impl Mail {
         if shown_changed {
             self.conversations_changed();
         }
-        failures
+        (failures, changed)
     }
 
     /// Returns whether anything changed, so an unchanged mailbox costs nothing.
@@ -806,8 +810,8 @@ impl Mail {
     }
 
     /// The next page of each of `keys` that has one, fetched at once and kept in mail.db with
-    /// the cursor after it.
-    async fn fetch_next_pages(self: &Arc<Self>, keys: &[MailboxKey]) {
+    /// the cursor after it; whether a listing grew.
+    async fn fetch_next_pages(self: &Arc<Self>, keys: &[MailboxKey]) -> bool {
         let jobs: Vec<(MailboxKey, String)> = {
             let state = self.state();
             keys.iter()
@@ -858,6 +862,7 @@ impl Mail {
                 self.conversations_changed();
             }
         }
+        grew
     }
 
     fn messages(state: &State, key: &MailboxKey, envelopes: &[Arc<Envelope>]) -> Vec<MailMessage> {
@@ -911,7 +916,7 @@ impl Mail {
         let all: Vec<MailboxKey> = keys.iter().chain(&context).cloned().collect();
         self.load_cached_listings(&all).await;
         if cursor.is_none() && !cached {
-            let failed = self.fetch_first_pages(&all).await;
+            let (failed, _) = self.fetch_first_pages(&all).await;
             let state = self.state();
             for key in keys {
                 if let Some(error) = failed.get(key) {
@@ -960,7 +965,7 @@ impl Mail {
                 }
                 short
             };
-            self.fetch_next_pages(&short).await;
+            let _ = self.fetch_next_pages(&short).await;
             round += 1;
         }
     }

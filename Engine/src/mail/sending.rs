@@ -300,7 +300,7 @@ impl Mail {
     }
 
     /// Sends from `account`, then picks up the sent copy a moment later.
-    async fn deliver(self: &Arc<Self>, message: &OutgoingMessage, account: &str) -> Result<(), EngineError> {
+    pub(super) async fn deliver(self: &Arc<Self>, message: &OutgoingMessage, account: &str) -> Result<(), EngineError> {
         let backend = self.backend(account).ok_or_else(|| EngineError::failed("The account is no longer signed in."))?;
         backend.send(message).await.map_err(|error| EngineError::failed(error.message))?;
         let (mail, account) = (self.clone(), account.to_string());

@@ -372,8 +372,8 @@ impl Engine {
     }
 
     /// Whether remote images and fonts of conversation `id` (from a listing) load on their own,
-    /// and the senders that keep them from it; see [`mail::Mail::remote_content`]. For the
-    /// AppKit reader once it moves to this engine (MS-120); no command carries it.
+    /// and the senders that keep them from it; see [`mail::Mail::remote_content`]. For
+    /// Mailstream.app's reader; no command carries it.
     pub fn remote_content(&self, id: &str) -> Result<(bool, Vec<model::Address>), EngineError> {
         self.core.mail.remote_content(id)
     }
@@ -391,6 +391,118 @@ impl Engine {
                 Err(error) => Err(EngineError::failed(format!("The engine stopped the request: {error}"))),
             }
         }
+    }
+
+    // MARK: - Mailstream.app (AppKit)
+    //
+    // Its list, reader and composer work on messages as the Swift engine's `MailStore` handed
+    // them out (`mail::NativeMessage`); see `mail/native.rs`.
+
+    /// Runs `work` on the engine's runtime; the future may be awaited on any executor.
+    fn spawn<T: Send + 'static>(
+        &self,
+        work: impl Future<Output = Result<T, EngineError>> + Send + 'static,
+    ) -> impl Future<Output = Result<T, EngineError>> + Send + 'static {
+        let task = self.runtime.spawn(work);
+        async move {
+            task.await
+                .unwrap_or_else(|error| Err(EngineError::failed(format!("The engine stopped the request: {error}"))))
+        }
+    }
+
+    /// `primary`'s loaded mail threaded, newest first: `{"conversations": […], "more": bool}`.
+    pub fn native_list(&self, primary: Vec<model::MailboxKey>) -> impl Future<Output = Result<Value, EngineError>> + Send + 'static {
+        let mail = self.core.mail.clone();
+        self.spawn(async move { Ok(mail.native_list(primary).await) })
+    }
+
+    /// The providers' search over `accounts`: `{"conversations": […], "failures": [text]}`.
+    pub fn native_search(&self, accounts: Vec<String>, query: String) -> impl Future<Output = Result<Value, EngineError>> + Send + 'static {
+        let mail = self.core.mail.clone();
+        self.spawn(async move { Ok(mail.native_search(accounts, &query).await) })
+    }
+
+    /// `keys`' first pages fetched afresh: `{"changed": bool, "failures": [{account, mailbox, message}]}`.
+    pub fn native_fetch_first_pages(
+        &self,
+        keys: Vec<model::MailboxKey>,
+    ) -> impl Future<Output = Result<Value, EngineError>> + Send + 'static {
+        let mail = self.core.mail.clone();
+        self.spawn(async move { Ok(mail.native_fetch_first_pages(keys).await) })
+    }
+
+    /// The next page of each of `keys` that has one; whether a listing grew.
+    pub fn native_fetch_next_pages(&self, keys: Vec<model::MailboxKey>) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
+        let mail = self.core.mail.clone();
+        self.spawn(async move { Ok(mail.native_fetch_next_pages(keys).await) })
+    }
+
+    /// One message's content as mail.db keeps it (`MessageContent`).
+    pub fn native_content(
+        &self,
+        message: model::MessageRef,
+        background: bool,
+    ) -> impl Future<Output = Result<Value, EngineError>> + Send + 'static {
+        let mail = self.core.mail.clone();
+        self.spawn(async move { mail.native_content(message, background).await })
+    }
+
+    /// Sets (`add`) or clears the `seen` or `flagged` flag of `messages`.
+    pub fn native_set_flags(
+        &self,
+        messages: Vec<model::MailMessage>,
+        flag: backend::Flag,
+        add: bool,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        let mail = self.core.mail.clone();
+        self.spawn(async move { mail.native_set_flags(messages, flag, add).await })
+    }
+
+    /// Moves `messages` to `destination`.
+    pub fn native_move(
+        &self,
+        messages: Vec<model::MailMessage>,
+        destination: model::MailboxKey,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        let mail = self.core.mail.clone();
+        self.spawn(async move { mail.native_move(messages, destination).await })
+    }
+
+    /// Deletes `messages`, which are in the trash, for good.
+    pub fn native_delete(&self, messages: Vec<model::MailMessage>) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        let mail = self.core.mail.clone();
+        self.spawn(async move { mail.native_delete(messages).await })
+    }
+
+    /// Undoes a move of `messages` to `from`: they go back where they were listed.
+    pub fn native_put_back(
+        &self,
+        messages: Vec<model::MailMessage>,
+        from: model::MailboxKey,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        let mail = self.core.mail.clone();
+        self.spawn(async move { mail.native_put_back(messages, from).await })
+    }
+
+    /// Sends a message the app composed from `account`.
+    pub fn native_deliver(
+        &self,
+        account: String,
+        outgoing: mail::NativeOutgoing,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        let mail = self.core.mail.clone();
+        self.spawn(async move { mail.native_deliver(&account, outgoing).await })
+    }
+
+    /// Everyone compose completes to, best first: `[{"address": {name, email}, "own": bool}]`.
+    pub fn native_contacts(&self) -> impl Future<Output = Result<Value, EngineError>> + Send + 'static {
+        let (mail, avatars) = (self.core.mail.clone(), self.core.avatars.clone());
+        self.spawn(async move {
+            let people = async move {
+                avatars.people().await.into_iter().map(|person| (person.name, person.emails)).collect()
+            };
+            Ok(mail.all_contacts(people).await)
+        })
     }
 }
 

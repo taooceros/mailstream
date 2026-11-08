@@ -201,6 +201,24 @@ impl Mail {
         Value::Array(found)
     }
 
+    /// Everyone compose completes to, best recipient first, with whether each is one of the
+    /// user's own addresses: what Mailstream.app's recipient fields match against as typing goes.
+    pub(crate) async fn all_contacts(
+        self: &Arc<Self>,
+        people: impl Future<Output = Vec<ListedPerson>> + Send + 'static,
+    ) -> Value {
+        let contacts = self.contacts(people).await;
+        let own = Self::own_addresses(&self.state());
+        Value::Array(
+            contacts
+                .iter()
+                .map(|contact| {
+                    json!({ "address": contact.address, "own": own.contains(&contact.address.normalized_email()) })
+                })
+                .collect(),
+        )
+    }
+
     /// Everyone compose completes to, loaded once a minute and shared by searches that arrive
     /// while it loads.
     async fn contacts(self: &Arc<Self>, people: impl Future<Output = Vec<ListedPerson>> + Send + 'static) -> Arc<Vec<Contact>> {

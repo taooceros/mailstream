@@ -58,7 +58,7 @@ fn refs(messages: &[MailMessage]) -> HashSet<MessageRef> {
 }
 
 /// Message ids by the mailbox they list under.
-fn by_mailbox(messages: &[MailMessage]) -> Vec<(MailboxKey, Vec<String>)> {
+pub(super) fn by_mailbox(messages: &[MailMessage]) -> Vec<(MailboxKey, Vec<String>)> {
     let mut groups: Vec<(MailboxKey, Vec<String>)> = Vec::new();
     for message in messages {
         let key = (*message.key).clone();
@@ -71,7 +71,7 @@ fn by_mailbox(messages: &[MailMessage]) -> Vec<(MailboxKey, Vec<String>)> {
 }
 
 /// The first failure of `results`, after all of them finished.
-fn first_failure(results: Vec<Result<(), EngineError>>) -> Result<(), EngineError> {
+pub(super) fn first_failure(results: Vec<Result<(), EngineError>>) -> Result<(), EngineError> {
     results.into_iter().find(Result::is_err).unwrap_or(Ok(()))
 }
 
@@ -182,7 +182,7 @@ impl Mail {
         self.mutate_flags(targets, Flag::Flagged, flagged).await
     }
 
-    async fn mutate_flags(self: &Arc<Self>, targets: Vec<MailMessage>, flag: Flag, add: bool) -> Result<(), EngineError> {
+    pub(super) async fn mutate_flags(self: &Arc<Self>, targets: Vec<MailMessage>, flag: Flag, add: bool) -> Result<(), EngineError> {
         let changed = refs(&targets);
         self.update_envelopes(&changed, |envelope| envelope.set_flag(flag, add));
         let requests = by_mailbox(&targets).into_iter().map(|(key, ids)| {
@@ -199,7 +199,7 @@ impl Mail {
 
     /// One request for a change already shown. A refusal (signing out included) is rolled back,
     /// reported, and with `resync` the lists and counts are fetched afresh.
-    async fn provider_request(
+    pub(super) async fn provider_request(
         self: &Arc<Self>,
         account: String,
         resync: bool,
@@ -294,7 +294,7 @@ impl Mail {
         self.move_messages(targets, &inbox).await
     }
 
-    async fn move_messages(self: &Arc<Self>, targets: Vec<MailMessage>, destination: &Mailbox) -> Result<(), EngineError> {
+    pub(super) async fn move_messages(self: &Arc<Self>, targets: Vec<MailMessage>, destination: &Mailbox) -> Result<(), EngineError> {
         let targets: Vec<MailMessage> = targets.into_iter().filter(|message| message.mailbox() != destination.id).collect();
         if targets.is_empty() {
             return Ok(());
@@ -335,7 +335,7 @@ impl Mail {
     }
 
     /// Drops the messages from their listings and their unread ones from their mailboxes' counts.
-    fn remove_envelopes(&self, targets: &[MailMessage]) {
+    pub(super) fn remove_envelopes(&self, targets: &[MailMessage]) {
         let unseen: Vec<MailMessage> = targets.iter().filter(|message| !message.envelope.is_seen()).cloned().collect();
         self.adjust_unread(&unseen, -1);
         let mut state = self.state();
@@ -348,7 +348,7 @@ impl Mail {
         self.events.emit_soon("conversations");
     }
 
-    fn adjust_unread(&self, targets: &[MailMessage], delta: i64) {
+    pub(super) fn adjust_unread(&self, targets: &[MailMessage], delta: i64) {
         let mut changed = false;
         let mut state = self.state();
         for (key, ids) in by_mailbox(targets) {

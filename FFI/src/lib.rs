@@ -21,10 +21,12 @@ use serde_json::{Value, json};
 
 uniffi::setup_scaffolding!();
 
+mod native;
 mod people;
 #[cfg(feature = "swift-engine")]
 mod swift;
 
+pub use native::{MailboxRef, Outgoing, RemoteContent};
 pub use people::Person;
 
 /// A failed request: the engine's stable `code` (`unknown_account`, `provider`, `confirm`, …)

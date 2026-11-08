@@ -92,6 +92,20 @@ impl Contents {
         }
     }
 
+    /// The message's content, loaded like a preview when it is not in memory: the body only fills
+    /// free room there, so it never pushes out one a reader used.
+    pub async fn load_background(
+        self: &Arc<Self>,
+        message: &MessageRef,
+        backend: Option<Arc<Backend>>,
+    ) -> Result<Arc<MessageContent>, String> {
+        if let Some(body) = self.state().bodies.get(message) {
+            return Ok(body.clone());
+        }
+        let load = self.task(message, Priority::Background, backend);
+        self.finish(message, load).await
+    }
+
     /// Loads the latest message of each conversation listed in the background, for previews.
     pub fn prefetch(self: &Arc<Self>, messages: Vec<(MessageRef, Option<Arc<Backend>>)>) {
         for (message, backend) in messages {
