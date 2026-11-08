@@ -312,6 +312,11 @@ impl Mail {
         self.cache.root.clone()
     }
 
+    /// mail.db and the cache folder, which other stores (chat) keep their data in too.
+    pub fn cache(&self) -> Arc<MailCache> {
+        self.cache.clone()
+    }
+
     /// The account's authorized requests, one per account (their concurrency limits and quota
     /// budget are the account's); nil once it is signed out. Other stores (contacts, avatars,
     /// chat) send through this too.

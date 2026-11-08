@@ -14,11 +14,13 @@ use crate::model::{Address, Envelope, Mailbox, MessageContent};
 pub struct Endpoints {
     pub gmail: GmailEndpoints,
     pub graph: String,
+    /// Google Chat's root (`https://chat.googleapis.com/v1/`).
+    pub chat: String,
 }
 
 impl Default for Endpoints {
     fn default() -> Self {
-        Self { gmail: GmailEndpoints::default(), graph: crate::graph::ROOT.into() }
+        Self { gmail: GmailEndpoints::default(), graph: crate::graph::ROOT.into(), chat: crate::chat_api::ROOT.into() }
     }
 }
 

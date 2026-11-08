@@ -95,6 +95,22 @@ const CASES: &[Case] = &[
     },
     // Starts a refresh and answers at once; with no refresh token the fetch stops at the token.
     Case { name: "refresh", command: "refresh", args: |_| json!({}), write: false },
+    // The three Gmail accounts' chat spaces as the list shows them, from mail.db.
+    Case { name: "chat.spaces", command: "chat.spaces", args: |_| json!({}), write: false },
+    Case {
+        name: "chat.spaces.account",
+        command: "chat.spaces",
+        args: |i| json!({ "account": bench_account(i % CHAT_ACCOUNTS).0 }),
+        write: false,
+    },
+    Case { name: "chat.people", command: "chat.people", args: |i| json!({ "account": bench_account(i % CHAT_ACCOUNTS).0 }), write: false },
+    // An opened space's history (150 messages from mail.db), as the reader re-reads it.
+    Case {
+        name: "chat.messages",
+        command: "chat.messages",
+        args: |i| json!({ "account": bench_account(0).0, "space": chat_space(i % CHAT_RECENT) }),
+        write: false,
+    },
 ];
 
 /// Bench account `n` (0 to 4) and its provider: three Gmail, two Outlook.
@@ -136,6 +152,29 @@ fn page_cursor(i: usize) -> String {
     // Unix milliseconds, then the conversation id.
     let millis = ((inbox_date(0, n) + 978_307_200.0) * 1000.0).round() as i64;
     format!("{millis}|{}|{}", bench_account(0).0, message_id(0, n))
+}
+
+/// The Gmail accounts, which are chat accounts too.
+const CHAT_ACCOUNTS: usize = 3;
+/// Spaces in each chat account's list in mail.db.
+const CHAT_SPACES: usize = 60;
+/// Spaces of bench0 whose messages mail.db keeps, and how many each.
+const CHAT_RECENT: usize = 4;
+const CHAT_MESSAGES: usize = 150;
+
+fn chat_space(n: usize) -> String {
+    format!("spaces/AAAA{n:03}")
+}
+
+/// A Chat user: the account's own `users/0`, else person `n` of 40.
+fn chat_user(n: usize) -> Value {
+    if n == 0 {
+        return json!({ "name": "users/0", "bot": false });
+    }
+    json!({
+        "name": format!("users/{n}"), "displayName": format!("Person {n}"), "email": format!("person{n}@example.com"),
+        "avatarUrl": format!("https://lh3.googleusercontent.com/a/p{n}=s64"), "bot": false,
+    })
 }
 
 /// In-flight calls for the concurrent throughput.
@@ -418,7 +457,65 @@ fn seed_mail(database: &Path, caches: &Path) {
             }
         }
         cache.flush().await;
+        seed_chat(&cache);
+        cache.flush().await;
     });
+}
+
+/// Each Gmail account's chat list in mail.db (`CHAT_SPACES` direct messages, group chats and
+/// spaces, a quarter of them unread), and the messages of bench0's `CHAT_RECENT` most recently
+/// opened spaces.
+fn seed_chat(cache: &mailstream_engine::cache::MailCache) {
+    use mailstream_engine::chat_model::{ChatAccount, ChatMessagePage, ChatSpaceKey, ChatSpaceList};
+    fn parse<T: serde::de::DeserializeOwned>(value: Value) -> T {
+        serde_json::from_value(value).expect("bench data has the engine's shape")
+    }
+    let accounts: Vec<ChatAccount> = (0..CHAT_ACCOUNTS)
+        .map(|a| parse(json!({ "name": bench_account(a).0, "email": bench_account(a).0 })))
+        .collect();
+    cache.save_chat_accounts(&accounts);
+    let message = |space: &str, n: usize, sender: usize, date: f64| {
+        json!({
+            "name": format!("{space}/messages/m{n}"), "sender": chat_user(sender), "created": date,
+            "text": format!("Message {n} with *some* <https://example.com/{n}|markup>"), "thread": format!("{space}/threads/t{}", n / 3),
+            "threadReply": n % 3 != 0, "mine": sender == 0, "card": false,
+            "attachments": if n % 10 == 0 { json!([{ "name": format!("file{n}.png"), "contentType": "image/png", "resource": format!("r/{n}") }]) } else { json!([]) },
+        })
+    };
+    for a in 0..CHAT_ACCOUNTS {
+        let account = bench_account(a).0;
+        let spaces: Vec<Value> = (0..CHAT_SPACES)
+            .map(|n| {
+                let name = chat_space(n);
+                let active = 815_000_000.0 - (n as f64) * 7_200.0 - (a as f64) * 60.0;
+                let (kind, title, members) = match n % 3 {
+                    0 => ("dm", format!("Person {}", n % 40 + 1), vec![chat_user(n % 40 + 1)]),
+                    1 => ("group", format!("Person {}, Person {}", n % 40 + 1, (n + 7) % 40 + 1), vec![chat_user(n % 40 + 1), chat_user((n + 7) % 40 + 1)]),
+                    _ => ("space", format!("Project {n}"), vec![]),
+                };
+                let sender = if n % 5 == 0 { 0 } else { n % 40 + 1 };
+                json!({
+                    "name": name, "kind": kind, "title": title, "members": members, "lastActive": active,
+                    "lastRead": active - if n % 4 == 0 { 600.0 } else { 0.0 }, "unread": if n % 4 == 0 { 2 } else { 0 },
+                    "latest": message(&name, 1000, sender, active),
+                })
+            })
+            .collect();
+        let list: ChatSpaceList = parse(json!({ "me": "users/0", "more": true, "spaces": spaces }));
+        cache.save_chat_spaces(&list, &account);
+    }
+    let account = bench_account(0).0;
+    let recent: Vec<ChatSpaceKey> =
+        (0..CHAT_RECENT).map(|n| ChatSpaceKey { account: account.clone(), space: chat_space(n) }).collect();
+    cache.save_chat_recent(&recent);
+    for key in &recent {
+        let newest = 815_000_000.0;
+        let messages: Vec<Value> = (0..CHAT_MESSAGES)
+            .map(|n| message(&key.space, n, if n % 4 == 0 { 0 } else { n % 40 + 1 }, newest - ((CHAT_MESSAGES - n) as f64) * 300.0))
+            .collect();
+        let page: ChatMessagePage = parse(json!({ "messages": messages, "more": true, "lastRead": newest - 900.0 }));
+        cache.save_chat_messages(&page, key);
+    }
 }
 
 fn load_average() -> f64 {
@@ -603,6 +700,9 @@ fn child(args: &[String]) {
         if cases.iter().any(|case| case.command.starts_with("mail")) {
             mail_ready(&engine);
         }
+        if cases.iter().any(|case| case.command.starts_with("chat")) {
+            chat_ready(&engine);
+        }
         let canonical = std::fs::canonicalize(&home).map(|path| path.to_string_lossy().into_owned()).unwrap_or(home.clone());
         for case in cases {
             let line = measure(case, scale);
@@ -664,6 +764,36 @@ fn mail_ready(engine: &str) {
         fail(&format!("{engine} lists {count} conversations from mail.db"));
     }
     eprintln!("{engine}: mail.db painted in {:.0} ms, {count} conversations", start.elapsed().as_secs_f64() * 1e3);
+}
+
+/// Waits until the engine lists every chat account's spaces from mail.db, then opens bench0's
+/// recent spaces once, as the reader would, so their messages are loaded from mail.db (the
+/// fetch from Google fails: there is no sign-in), and closes the reader again.
+fn chat_ready(engine: &str) {
+    let start = Instant::now();
+    let wait = |what: &str, done: &dyn Fn() -> bool| {
+        while !done() {
+            if start.elapsed() > Duration::from_secs(20) {
+                fail(&format!("{engine} did not load {what} from mail.db"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let answer = |command: &str, args: Value| -> Value {
+        block_on(call(command, args)).unwrap_or_else(|error| fail(&format!("{engine}: {command}: {error}")))
+    };
+    wait("the chat spaces", &|| {
+        answer("chat.spaces", json!({}))["spaces"].as_array().map(Vec::len) == Some(CHAT_ACCOUNTS * CHAT_SPACES)
+    });
+    for n in 0..CHAT_RECENT {
+        let args = json!({ "account": bench_account(0).0, "space": chat_space(n) });
+        answer("chat.open", args.clone());
+        wait("a recent space's messages", &|| {
+            answer("chat.messages", args.clone())["messages"].as_array().map(Vec::len) == Some(CHAT_MESSAGES)
+        });
+    }
+    answer("chat.close", json!({}));
+    eprintln!("{engine}: chat painted in {:.0} ms", start.elapsed().as_secs_f64() * 1e3);
 }
 
 /// Warm-up, then timed calls one at a time, then calls `CONCURRENCY` at a time.

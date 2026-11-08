@@ -111,6 +111,7 @@ fn prepare(server: &FakeServer, relay: &FakeRelay, accounts: &[(&str, &str)]) ->
             batch: format!("{}/batch/gmail/v1", server.base),
         },
         graph: format!("{}/v1.0/", server.base),
+        chat: format!("{}/chat/v1/", server.base),
     };
     config.push = PushConfig {
         url: Some(relay.base.clone()),

@@ -13,6 +13,9 @@ mod assembly;
 pub mod backend;
 mod bundle;
 pub mod cache;
+mod chat;
+mod chat_api;
+pub mod chat_model;
 mod commands;
 mod content;
 mod files;
@@ -36,6 +39,8 @@ mod fake;
 mod mail_tests;
 #[cfg(test)]
 mod push_tests;
+#[cfg(test)]
+mod chat_tests;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -173,6 +178,7 @@ struct Core {
     mail: Arc<mail::Mail>,
     push: Arc<push::Push>,
     polling: Arc<polling::Polling>,
+    chat: Arc<chat::Chat>,
 }
 
 /// One engine; the FFI host keeps one per process.
@@ -185,8 +191,8 @@ pub struct Engine {
 
 impl Engine {
     /// Reads the settings and accounts, starts following settings.json, and starts the mail
-    /// store (it paints from mail.db and loads every account's mailboxes and inboxes), polling
-    /// and push.
+    /// store (it paints from mail.db and loads every account's mailboxes and inboxes), polling,
+    /// push and the chat store (it paints from mail.db and polls every account's chat spaces).
     pub fn start(config: Config) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .thread_name("mailstream-engine")
@@ -225,12 +231,23 @@ impl Engine {
             mail.clone(),
         ));
         let polling = Arc::new(polling::Polling::new(mail.clone(), push.clone(), settings.clone(), events.clone()));
-        let reschedule = Arc::downgrade(&polling);
+        let chat = Arc::new(chat::Chat::new(
+            mail.clone(),
+            config.endpoints.chat.clone(),
+            accounts.clone(),
+            settings.clone(),
+            events.clone(),
+        ));
+        let (reschedule, chat_interval) = (Arc::downgrade(&polling), Arc::downgrade(&chat));
         events.listen(move |event| {
-            if event == "settings"
-                && let Some(polling) = reschedule.upgrade()
-            {
+            if event != "settings" {
+                return;
+            }
+            if let Some(polling) = reschedule.upgrade() {
                 polling.settings_changed();
+            }
+            if let Some(chat) = chat_interval.upgrade() {
+                chat.settings_changed();
             }
         });
         let core = Arc::new(Core {
@@ -242,11 +259,13 @@ impl Engine {
             mail: mail.clone(),
             push: push.clone(),
             polling: polling.clone(),
+            chat: chat.clone(),
         });
         let watcher = Self::follow_settings(&core);
         runtime.spawn(mail.start());
         polling.start();
         push.start();
+        runtime.spawn(chat.start());
         drop(_entered);
         Self { core, _watcher: watcher, runtime }
     }
@@ -296,7 +315,7 @@ impl Engine {
     }
 
     /// Calls `listener` with each change from now on (`accounts`, `settings`, `mailboxes`,
-    /// `conversations`, `previews`, `problems`, `sync`), on an engine thread.
+    /// `conversations`, `previews`, `problems`, `sync`, `chat`, `chatMessages`), on an engine thread.
     pub fn subscribe(&self, listener: impl Fn(&'static str) + Send + Sync + 'static) {
         self.core.events.listen(listener);
     }
@@ -345,6 +364,9 @@ impl Core {
                 return self.mail.run(command, &args).await;
             }
             "refresh" => Ok(self.polling.refresh()),
+            command if chat::COMMANDS.contains(&command) => {
+                return self.chat.run(command, &args).await;
+            }
             "accounts.list" => Ok(json!(self.accounts.list().iter().map(|record| record.json()).collect::<Vec<_>>())),
             "accounts.rename" => {
                 let record = self.record(&args)?;
@@ -384,6 +406,7 @@ impl Core {
                 let api = self.mail.api(&record.id);
                 self.accounts.remove(&record.id).map_err(EngineError::failed)?;
                 self.mail.accounts_changed();
+                self.chat.accounts_changed();
                 self.events.emit("accounts");
                 self.push.sign_out(&record.id, api).await;
                 let _ = std::fs::remove_file(gmail::cache_file(&self.mail.cache_root(), &record.id));
@@ -431,6 +454,7 @@ impl Core {
         self.events.emit("accounts");
         self.mail.accounts_changed();
         self.push.check();
+        self.chat.accounts_changed();
         Ok(record.json())
     }
 }
@@ -474,6 +498,7 @@ pub(crate) mod tests {
                     batch: "http://127.0.0.1:9/batch/gmail/v1".into(),
                 },
                 graph: "http://127.0.0.1:9/v1.0/".into(),
+                chat: "http://127.0.0.1:9/chat/v1/".into(),
             },
             // No relay: no test registers push with a provider unless it sets a fake one.
             push: push::PushConfig::default(),

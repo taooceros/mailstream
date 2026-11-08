@@ -25,6 +25,7 @@ fn engine_for(server: &FakeServer, accounts: &[(&str, &str)]) -> (Engine, Config
             batch: format!("{}/batch/gmail/v1", server.base),
         },
         graph: format!("{}/v1.0/", server.base),
+        chat: format!("{}/chat/v1/", server.base),
     };
     std::fs::create_dir_all(&config.support_directory).unwrap();
     let records: Vec<Value> = accounts

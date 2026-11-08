@@ -76,5 +76,46 @@
       "ref" : { "account" : "me@outlook.com", "id" : "AAMkAGI2-msg=", "mailbox" : "AAMkAD-inbox/+=" },
       "content" : { "attachments" : [ ], "cc" : [ ], "references" : [ ], "replyTo" : [ { "email" : "team@x.com" } ], "snippet" : "", "text" : "Plain only" }
     }
-  ]
+  ],
+  "chat" : {
+    "accounts" : [ { "email" : "me@gmail.com", "name" : "me@gmail.com" } ],
+    "recent" : [ { "account" : "me@gmail.com", "space" : "spaces/AAQA-dm" }, { "account" : "me@gmail.com", "space" : "spaces/Team_1" } ],
+    "spaces" : {
+      "me@gmail.com" : {
+        "me" : "users/111",
+        "more" : true,
+        "spaces" : [
+          {
+            "kind" : "dm", "lastActive" : 815000500.123456, "lastRead" : 815000400, "name" : "spaces/AAQA-dm", "title" : "Ann Ångström", "unread" : 2,
+            "members" : [ { "avatarUrl" : "https://lh3.googleusercontent.com/a/ann=s64", "bot" : false, "displayName" : "Ann Ångström", "email" : "ann@x.com", "name" : "users/222" } ],
+            "latest" : {
+              "attachments" : [ { "contentType" : "image/png", "name" : "plan.png", "resource" : "ClxzcGFjZXMv/abc", "url" : "https://chat.google.com/api/get_attachment_url?x=1" } ],
+              "card" : false, "created" : 815000500.123456, "mine" : false, "name" : "spaces/AAQA-dm/messages/m2",
+              "sender" : { "bot" : false, "displayName" : "Ann Ångström", "email" : "ann@x.com", "name" : "users/222" },
+              "text" : "see *this* <https://x.com|doc> 🍜", "thread" : "spaces/AAQA-dm/threads/t1", "threadReply" : true
+            }
+          },
+          {
+            "kind" : "space", "lastActive" : 814990000, "members" : [ ], "name" : "spaces/Team_1", "title" : "Team \"core\"", "unread" : 0,
+            "latest" : { "attachments" : [ ], "card" : true, "created" : 814990000, "edited" : 814990060.5, "mine" : true, "name" : "spaces/Team_1/messages/x", "sender" : { "bot" : false, "name" : "users/111" }, "text" : "", "threadReply" : false }
+          },
+          { "kind" : "bot", "members" : [ { "bot" : true, "name" : "users/app" } ], "name" : "spaces/Bot", "title" : "App", "unread" : 0 }
+        ]
+      }
+    },
+    "messages" : [
+      {
+        "key" : { "account" : "me@gmail.com", "space" : "spaces/AAQA-dm" },
+        "page" : {
+          "lastRead" : 815000400,
+          "more" : true,
+          "messages" : [
+            { "attachments" : [ ], "card" : false, "created" : 815000000, "mine" : true, "name" : "spaces/AAQA-dm/messages/m1", "sender" : { "bot" : false, "name" : "users/111" }, "text" : "lunch?", "thread" : "spaces/AAQA-dm/threads/t1", "threadReply" : false },
+            { "attachments" : [ { "contentType" : "", "name" : "Attachment", "url" : "https://drive.google.com/open?id=D1" } ], "card" : false, "created" : 815000500.123456, "edited" : 815000600, "mine" : false, "name" : "spaces/AAQA-dm/messages/m2", "sender" : { "bot" : false, "displayName" : "Ann Ångström", "email" : "ann@x.com", "name" : "users/222" }, "text" : "see *this*", "thread" : "spaces/AAQA-dm/threads/t1", "threadReply" : true }
+          ]
+        }
+      },
+      { "key" : { "account" : "me@gmail.com", "space" : "spaces/Team_1" }, "page" : { "messages" : [ ], "more" : false } }
+    ]
+  }
 }

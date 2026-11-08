@@ -1,6 +1,7 @@
 //! What the engine has fetched, kept as the Swift engine's `MailCache` and `MailDatabase` keep
 //! it (`Sources/MailstreamKit/Store/MailCache.swift`, `MailDatabase.swift`): accounts,
-//! mailboxes, every listed envelope with its paging cursor, message content and AI tags in the
+//! mailboxes, every listed envelope with its paging cursor, message content, AI tags and Google
+//! Chat (accounts, space lists, recent spaces' messages) in the
 //! Turso database Application Support/Mailstream/mail.db, with the same tables, keys and JSON
 //! values; attachments and inline parts as files under ~/Library/Caches. Every process with an
 //! engine opens the file through Turso's multi-process WAL, as the Swift engine does.
@@ -18,6 +19,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{OnceCell, mpsc, oneshot};
 use turso::Value as SqlValue;
 
+use crate::chat_model::{ChatAccount, ChatMessagePage, ChatSpaceKey, ChatSpaceList};
 use crate::model::{Account, ConversationTag, Envelope, Mailbox, MailboxKey, MessageContent, MessageRef};
 
 pub const CONTENT_VERSION: u32 = 3;
@@ -43,6 +45,8 @@ enum Table {
     State,
     Mailboxes,
     Contents,
+    ChatSpaces,
+    ChatMessages,
 }
 
 impl Table {
@@ -51,6 +55,8 @@ impl Table {
             Self::State => "state",
             Self::Mailboxes => "mailboxes",
             Self::Contents => "contents",
+            Self::ChatSpaces => "chat_spaces",
+            Self::ChatMessages => "chat_messages",
         }
     }
 }
@@ -72,6 +78,7 @@ pub struct CachedListing {
 
 enum Write {
     Value { table: Table, key: String, value: Vec<u8> },
+    Remove { table: Table, key: String },
     Listing { key: String, listing: CachedListing },
     Flush(oneshot::Sender<()>),
 }
@@ -201,6 +208,10 @@ impl MailCache {
                         ),
                         vec![SqlValue::Text(key), SqlValue::Blob(value)],
                     )
+                    .await
+                    .map(drop),
+                Write::Remove { table, key } => db
+                    .execute(&format!("DELETE FROM {} WHERE key = ?", table.name()), vec![SqlValue::Text(key)])
                     .await
                     .map(drop),
                 Write::Listing { key, listing } => Self::replace_listing(db, key, listing).await,
@@ -391,6 +402,49 @@ impl MailCache {
     pub fn attachment_path(&self, stored_name: &str, message: &MessageRef) -> PathBuf {
         self.message_directory(message).join(stored_name)
     }
+
+    // MARK: Chat
+
+    pub async fn load_chat_accounts(&self) -> Option<Vec<ChatAccount>> {
+        self.read(Table::State, "chatAccounts").await
+    }
+
+    pub fn save_chat_accounts(&self, accounts: &[ChatAccount]) {
+        self.write(accounts, Table::State, "chatAccounts".into());
+    }
+
+    pub async fn load_chat_spaces(&self, account: &str) -> Option<ChatSpaceList> {
+        self.read(Table::ChatSpaces, &hash(&[account])).await
+    }
+
+    pub fn save_chat_spaces(&self, list: &ChatSpaceList, account: &str) {
+        self.write(list, Table::ChatSpaces, hash(&[account]));
+    }
+
+    /// Spaces whose messages are kept, most recently opened first.
+    pub async fn load_chat_recent(&self) -> Option<Vec<ChatSpaceKey>> {
+        self.read(Table::State, "chatRecent").await
+    }
+
+    pub fn save_chat_recent(&self, keys: &[ChatSpaceKey]) {
+        self.write(keys, Table::State, "chatRecent".into());
+    }
+
+    fn chat_messages_key(key: &ChatSpaceKey) -> String {
+        hash(&[&key.account, &key.space])
+    }
+
+    pub async fn load_chat_messages(&self, key: &ChatSpaceKey) -> Option<ChatMessagePage> {
+        self.read(Table::ChatMessages, &Self::chat_messages_key(key)).await
+    }
+
+    pub fn save_chat_messages(&self, page: &ChatMessagePage, key: &ChatSpaceKey) {
+        self.write(page, Table::ChatMessages, Self::chat_messages_key(key));
+    }
+
+    pub fn remove_chat_messages(&self, key: &ChatSpaceKey) {
+        let _ = self.writes.send(Write::Remove { table: Table::ChatMessages, key: Self::chat_messages_key(key) });
+    }
 }
 
 #[cfg(test)]
@@ -480,11 +534,24 @@ pub(crate) mod tests {
             content: MessageContent,
         }
         #[derive(serde::Deserialize)]
+        struct ChatPage {
+            key: ChatSpaceKey,
+            page: ChatMessagePage,
+        }
+        #[derive(serde::Deserialize)]
+        struct Chat {
+            accounts: Vec<ChatAccount>,
+            recent: Vec<ChatSpaceKey>,
+            spaces: HashMap<String, ChatSpaceList>,
+            messages: Vec<ChatPage>,
+        }
+        #[derive(serde::Deserialize)]
         struct Fixture {
             accounts: Vec<Account>,
             mailboxes: HashMap<String, Vec<Mailbox>>,
             listings: Vec<Listing>,
             contents: Vec<Content>,
+            chat: Chat,
         }
         let Ok(mode) = std::env::var("MAILSTREAM_INTEROP") else { return };
         let home = std::env::var("HOME").unwrap();
@@ -511,6 +578,14 @@ pub(crate) mod tests {
             for item in &fixture.contents {
                 cache.save_content(&item.content, &message(item));
             }
+            cache.save_chat_accounts(&fixture.chat.accounts);
+            cache.save_chat_recent(&fixture.chat.recent);
+            for (account, list) in &fixture.chat.spaces {
+                cache.save_chat_spaces(list, account);
+            }
+            for item in &fixture.chat.messages {
+                cache.save_chat_messages(&item.page, &item.key);
+            }
             cache.flush().await;
         }
         assert_eq!(cache.load_accounts().await.as_ref(), Some(&fixture.accounts));
@@ -524,6 +599,14 @@ pub(crate) mod tests {
         }
         for item in &fixture.contents {
             assert_eq!(cache.load_content(&message(item)).await.as_ref(), Some(&item.content), "{}", item.r#ref.id);
+        }
+        assert_eq!(cache.load_chat_accounts().await.as_ref(), Some(&fixture.chat.accounts));
+        assert_eq!(cache.load_chat_recent().await.as_ref(), Some(&fixture.chat.recent));
+        for (account, list) in &fixture.chat.spaces {
+            assert_eq!(cache.load_chat_spaces(account).await.as_ref(), Some(list), "chat spaces of {account}");
+        }
+        for item in &fixture.chat.messages {
+            assert_eq!(cache.load_chat_messages(&item.key).await.as_ref(), Some(&item.page), "chat messages of {}", item.key.space);
         }
     }
 }

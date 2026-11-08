@@ -74,6 +74,26 @@ pub(crate) const PORTED: &[Spec] = &[
     Spec { id: "mail.show", arguments: &[positional("id"), number("max-chars", 20_000), option("html")] },
     Spec { id: "mail.previews", arguments: &[positional("ids")] },
     Spec { id: "refresh", arguments: &[] },
+    Spec { id: "chat.spaces", arguments: &[option("account")] },
+    Spec { id: "chat.more", arguments: &[option("account")] },
+    Spec { id: "chat.refresh", arguments: &[] },
+    Spec { id: "chat.open", arguments: &[positional("account"), positional("space")] },
+    Spec { id: "chat.close", arguments: &[] },
+    Spec { id: "chat.messages", arguments: &[positional("account"), positional("space")] },
+    Spec { id: "chat.earlier", arguments: &[positional("account"), positional("space")] },
+    Spec {
+        id: "chat.send",
+        arguments: &[
+            positional("account"),
+            positional("space"),
+            Argument { name: "text", positional: false, required: true, default: None },
+            option("thread"),
+            option("yes"),
+        ],
+    },
+    Spec { id: "chat.people", arguments: &[positional("account")] },
+    Spec { id: "chat.start", arguments: &[positional("account"), positional("people")] },
+    Spec { id: "chat.attachment", arguments: &[positional("account"), positional("resource"), option("name")] },
 ];
 
 /// The Swift engine's other commands, ported in later phases (MS-114 to MS-118).
@@ -90,17 +110,6 @@ pub(crate) const UNPORTED: &[&str] = &[
     "mail.send",
     "mail.reply",
     "contacts.search",
-    "chat.spaces",
-    "chat.more",
-    "chat.refresh",
-    "chat.open",
-    "chat.close",
-    "chat.messages",
-    "chat.earlier",
-    "chat.send",
-    "chat.people",
-    "chat.start",
-    "chat.attachment",
 ];
 
 /// The spec of a ported `command`, or the error the request answers.

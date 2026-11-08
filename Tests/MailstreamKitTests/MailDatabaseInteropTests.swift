@@ -20,10 +20,23 @@ struct MailDatabaseInteropTests {
             let content: MessageContent
         }
 
+        struct Chat: Decodable {
+            struct Page: Decodable {
+                let key: ChatSpaceKey
+                let page: ChatMessagePage
+            }
+
+            let accounts: [ChatAccount]
+            let recent: [ChatSpaceKey]
+            let spaces: [String: ChatSpaceList]
+            let messages: [Page]
+        }
+
         let accounts: [Account]
         let mailboxes: [String: [Mailbox]]
         let listings: [Listing]
         let contents: [Content]
+        let chat: Chat
     }
 
     nonisolated static let mode = ProcessInfo.processInfo.environment["MAILSTREAM_INTEROP"]
@@ -42,6 +55,10 @@ struct MailDatabaseInteropTests {
                 cache.saveListing(CachedListing(envelopes: listing.envelopes, next: listing.next), for: listing.key)
             }
             for item in fixture.contents { cache.saveContent(item.content, for: item.ref) }
+            cache.saveChatAccounts(fixture.chat.accounts)
+            cache.saveChatRecent(fixture.chat.recent)
+            for (account, list) in fixture.chat.spaces { cache.saveChatSpaces(list, for: account) }
+            for item in fixture.chat.messages { cache.saveChatMessages(item.page, for: item.key) }
             // Writes are queued: wait until every one reads back before the process ends.
             let start = ContinuousClock.now
             while await mismatches(cache, fixture).count > 0, ContinuousClock.now - start < .seconds(10) {
@@ -72,6 +89,20 @@ struct MailDatabaseInteropTests {
                 || loaded?.replyTo != expected.replyTo || loaded?.references != expected.references
                 || loaded?.attachments != expected.attachments || loaded?.snippet != expected.snippet {
                 out.append("content of \(item.ref.id)")
+            }
+        }
+        if await cache.loadChatAccounts() != fixture.chat.accounts { out.append("chat accounts") }
+        if await cache.loadChatRecent() != fixture.chat.recent { out.append("chat recent") }
+        for (account, list) in fixture.chat.spaces {
+            let loaded = await cache.loadChatSpaces(account)
+            if loaded?.me != list.me || loaded?.more != list.more || loaded?.spaces != list.spaces {
+                out.append("chat spaces of \(account)")
+            }
+        }
+        for item in fixture.chat.messages {
+            let loaded = await cache.loadChatMessages(item.key)
+            if loaded?.messages != item.page.messages || loaded?.more != item.page.more || loaded?.lastRead != item.page.lastRead {
+                out.append("chat messages of \(item.key.space)")
             }
         }
         return out

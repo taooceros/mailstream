@@ -3716,6 +3716,7 @@ name = "mailstream-engine"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "core-foundation 0.10.0",
  "core-foundation-sys",
  "dirs 6.0.0",
