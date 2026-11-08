@@ -39,7 +39,7 @@ is reached as the OAuth app `windows-omp`: its client id (line 1) and secret (li
 `https://api.linear.app/graphql` with `Authorization: Bearer <access_token>`. On an
 `AUTHENTICATION_ERROR` (tokens last ~30 days) fetch a new one with
 `curl https://api.linear.app/oauth/token -d grant_type=client_credentials -d client_id=… -d
-client_secret=… -d scope=read,write` into `token.json`; `linear-poll.sh` does this itself. Never
+client_secret=… -d scope=read,write` into `token.json`; `linear-poll.py` does this itself. Never
 print or commit either file. The app can't create labels; ask the user for new ones.
 
 ### Writing
@@ -102,16 +102,16 @@ hashes stay as they are.
 
 ### Polling session
 
-An omp session runs `RUNNING_FILE=~/.local/state/linear-poll/running scripts/linear-poll.sh watch`
+An omp session runs `RUNNING_FILE=~/.local/state/linear-poll/running python3 scripts/linear-poll.py watch`
 as one background bash job with no deadline (`timeout: 0`) and `wait`s on it: the script checks
 Linear every minute and returns only once it has claimed something. The session hands the issues
 it claims, and the user's comments, to subagents, then starts it again. It keeps that file a JSON
 array of its running agent ids, rewritten whenever one starts or finishes; the script re-reads it
 each pass. The script's header says what it claims and how the session picks the agent.
-`scripts/linear-omp.sh MS-12` opens one issue in a new Tern tab instead.
-On Windows it runs in Git Bash (`C:/Program Files/Git/bin/bash.exe`; plain `bash` is WSL) with
-`HOST_LABEL=windows LINEAR_TOKEN_FILE=~/.config/linear/token.json
-LINEAR_CREDENTIALS=~/.config/linear/credentials` and jq on PATH.
+`python3 scripts/linear-omp.py MS-12` opens one issue in a new Tern tab instead. The scripts are
+Python (standard library only) so both machines run the same ones; on Windows the command is
+`python`, and the poller also needs `HOST_LABEL=windows LINEAR_TOKEN_FILE=~/.config/linear/token.json
+LINEAR_CREDENTIALS=~/.config/linear/credentials`.
 
 ## Building
 
@@ -128,11 +128,11 @@ LINEAR_CREDENTIALS=~/.config/linear/credentials` and jq on PATH.
   whole module single-threaded, ~30 s per edit; build it only to check performance or ship.
 - All Swift code is in the `MailstreamKit` target (`Sources/MailstreamKit`); the `Mailstream`
   executable only calls `MailstreamApp.main()`. GPUI and Flutter run the Rust engine (`Engine/`)
-  through the UniFFI crate in `FFI/`, which `scripts/ffi.sh` builds; the Swift engine stays only
+  through the UniFFI crate in `FFI/`, which `scripts/ffi.py` builds; the Swift engine stays only
   for Mailstream.app until MS-120. New commands go in the Rust engine's command table
   (`Engine/src/commands.rs`) and the Swift `CommandSpec`/`ControlService` while both exist, then
   get a typed method in `FFI/src/lib.rs`; GPUI uses that crate directly, Flutter through the
-  Dart binding `ffi.sh` generates (`Flutter/README.md`).
+  Dart binding `ffi.py` generates (`Flutter/README.md`).
 - The engine keeps the state every front end shares (the open chat space and its history, as for
   the native reader); front ends re-read it on the engine's change events.
 - Test only what you changed: build, then exercise the parts your change touches (the view, flow

@@ -165,8 +165,8 @@ and change events (`Mailstream`, `EventListener`). Rust front ends depend on the
 0.31.2) and could generate Kotlin or Python ones.
 
 ```sh
-./scripts/ffi.sh                                  # FFI/target/debug/libmailstream.dylib and Engine/target/debug/mailstream
-DART_OUT=path/to/lib/src ./scripts/ffi.sh         # and the Dart bindings (asset package:mailstream/uniffi:mailstream)
+python3 scripts/ffi.py                            # FFI/target/debug/libmailstream.dylib and Engine/target/debug/mailstream
+DART_OUT=path/to/lib/src python3 scripts/ffi.py   # and the Dart bindings (asset package:mailstream/uniffi:mailstream)
 (cd FFI && cargo run --example inbox)             # lists the inboxes, then prints change events
 ./scripts/sign.sh FFI/target/debug/examples/inbox # sign a host so it reads the saved sign-ins
 ```

@@ -4,7 +4,7 @@ import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
 
 /// Bundles the engine with the app: the UniFFI crate the bindings call, with the Rust engine in it
-/// (asset `package:mailstream/uniffi:mailstream`). `scripts/ffi.sh` at the repository root builds
+/// (asset `package:mailstream/uniffi:mailstream`). `scripts/ffi.py` at the repository root builds
 /// it, and the release build is used: on macOS `libmailstream.dylib` for this Mac's architecture
 /// (arm64) only, on Windows (x64) `mailstream.dll` (`cd FFI && cargo build --release -p mailstream`).
 void main(List<String> args) async {
@@ -21,7 +21,7 @@ void main(List<String> args) async {
       return;
     }
     if (!File.fromUri(library).existsSync()) {
-      throw BuildError(message: 'No ${library.toFilePath()}: run `CONFIG=release ./scripts/ffi.sh` at the repository root first.');
+      throw BuildError(message: 'No ${library.toFilePath()}: run `CONFIG=release python3 scripts/ffi.py` at the repository root first.');
     }
     output.assets.code.add(
       CodeAsset(package: input.packageName, name: 'uniffi:mailstream', linkMode: DynamicLoadingBundled(), file: library),

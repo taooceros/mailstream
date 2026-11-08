@@ -49,7 +49,7 @@ jobs:
             "$UPDATE_PUBLIC_KEY" "$UPDATE_CHANNEL" > Flutter/macos/Runner/Configs/Updates.local.xcconfig
       - name: Build release
         run: |
-          CONFIG=release DART_OUT="$PWD/Flutter/packages/mailstream/lib/src" ./scripts/ffi.sh
+          CONFIG=release DART_OUT="$PWD/Flutter/packages/mailstream/lib/src" python3 scripts/ffi.py
           cd Flutter
           flutter pub get
           flutter build macos --release

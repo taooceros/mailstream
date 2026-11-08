@@ -134,7 +134,7 @@ jobs:
           restore-keys: ffi-cargo-${{ runner.os }}-
 
       - name: Engine, command line and Dart bindings (release)
-        run: CONFIG=release DART_OUT=$PWD/Flutter/packages/mailstream/lib/src ./scripts/ffi.sh
+        run: CONFIG=release DART_OUT=$PWD/Flutter/packages/mailstream/lib/src python3 scripts/ffi.py
 
       - name: Flutter (release)
         run: cd Flutter && flutter build macos --release

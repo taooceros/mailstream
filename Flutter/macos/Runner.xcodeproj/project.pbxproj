@@ -364,7 +364,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "# The mailstream command line (Engine/src/bin/mailstream.rs), which starts this app when no front end runs.\ncli=\"$PROJECT_DIR/../../Engine/target/release/mailstream\"\nif [ ! -x \"$cli\" ]; then\n  echo \"error: no $cli: run CONFIG=release ./scripts/ffi.sh at the repository root first\" >&2\n  exit 1\nfi\nditto \"$cli\" \"$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/mailstream\"\ncodesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY:--}\" --identifier dev.mailstream.cli \"$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/mailstream\"\n";
+			shellScript = "# The mailstream command line (Engine/src/bin/mailstream.rs), which starts this app when no front end runs.\ncli=\"$PROJECT_DIR/../../Engine/target/release/mailstream\"\nif [ ! -x \"$cli\" ]; then\n  echo \"error: no $cli: run CONFIG=release python3 scripts/ffi.py at the repository root first\" >&2\n  exit 1\nfi\nditto \"$cli\" \"$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/mailstream\"\ncodesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY:--}\" --identifier dev.mailstream.cli \"$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/mailstream\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

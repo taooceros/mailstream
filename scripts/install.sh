@@ -43,7 +43,7 @@ for frontend in "$@"; do
     flutter)
       name='Mailstream Flutter'
       executable='Mailstream Flutter'
-      CONFIG=release DART_OUT="$PWD/Flutter/packages/mailstream/lib/src" ./scripts/ffi.sh
+      CONFIG=release DART_OUT="$PWD/Flutter/packages/mailstream/lib/src" python3 scripts/ffi.py
       (cd Flutter && flutter pub get && flutter build macos --release)
       app="Flutter/build/macos/Build/Products/Release/$name.app"
       ;;
