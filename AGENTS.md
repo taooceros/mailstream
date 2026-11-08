@@ -33,6 +33,15 @@ Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` 
 Team `MS`, split into projects by effort; issue IDs look like `MS-12`. Use omp's Linear tools.
 The issue, not the session, is the record other sessions read.
 
+On the Windows machine (issues labelled `windows`) there are no Linear tools or keychain. Linear
+is reached as the OAuth app `windows-omp`: its client id (line 1) and secret (line 2) are in
+`~/.config/linear/credentials`, and the access token in `~/.config/linear/token.json`. Call
+`https://api.linear.app/graphql` with `Authorization: Bearer <access_token>`. On an
+`AUTHENTICATION_ERROR` (tokens last ~30 days) fetch a new one with
+`curl https://api.linear.app/oauth/token -d grant_type=client_credentials -d client_id=… -d
+client_secret=… -d scope=read,write` into `token.json`; `linear-poll.sh` does this itself. Never
+print or commit either file. The app can't create labels; ask the user for new ones.
+
 ### Writing
 
 Everything on Linear is plain Chinese that someone who has not read the code understands at
@@ -100,6 +109,9 @@ it claims, and the user's comments, to subagents, then starts it again. It keeps
 array of its running agent ids, rewritten whenever one starts or finishes; the script re-reads it
 each pass. The script's header says what it claims and how the session picks the agent.
 `scripts/linear-omp.sh MS-12` opens one issue in a new Tern tab instead.
+On Windows it runs in Git Bash (`C:/Program Files/Git/bin/bash.exe`; plain `bash` is WSL) with
+`HOST_LABEL=windows LINEAR_TOKEN_FILE=~/.config/linear/token.json
+LINEAR_CREDENTIALS=~/.config/linear/credentials` and jq on PATH.
 
 ## Building
 
