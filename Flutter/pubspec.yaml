@@ -20,7 +20,9 @@ dependencies:
   # video_player's Windows implementation (Media Foundation); the Mac keeps AVFoundation.
   video_player_win: ^3.3.1
   markdown: ^7.3.1
-  webview_plus: ^0.9.5
+  # HTML mail on Windows (WebView2); the copy carries only the Windows implementation (its pubspec).
+  webview_plus:
+    path: packages/webview_plus
 
 dev_dependencies:
   flutter_test:

@@ -87,6 +87,9 @@ zipped Release folder as artifacts. On Windows:
   the cache would not load), deleted with its view. Links (`target="_blank"` removed first) open
   in the default browser; remote images load in an InPrivate profile. Pages taller than the
   16384 px texture limit stop there and scroll inside. WebView2 Runtime ships with Windows 11.
+  `packages/webview_plus` is upstream 0.9.5 with only its Windows implementation declared, so
+  the Mac build carries none of it (upstream's macOS Swift package does not resolve under
+  Flutter's Swift Package Manager integration).
 
 `flutter test test/windows_platform_test.dart test/compose_paste_test.dart` checks the Windows
 branches on any host (`Host.debugMacOverride`): shortcut labels and bindings, AltGr, the drawn

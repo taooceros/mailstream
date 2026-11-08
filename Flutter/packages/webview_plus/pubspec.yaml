@@ -1,0 +1,35 @@
+# webview_plus 0.9.5 (MIT, https://github.com/Noamcreator/webview_plus) with only its Windows
+# implementation: Mailstream draws HTML mail with it on Windows alone (MS-106); the Mac keeps its
+# own WebKit view, and the upstream macOS Swift package does not resolve under Flutter's Swift
+# Package Manager integration (its product is named `webview_plus`, Flutter asks for
+# `webview-plus`). The Dart and Windows sources are upstream's, unchanged.
+name: webview_plus
+description: A cross-platform Flutter plugin that directly encapsulates native WebViews (Android, iOS/macOS, Windows, Linux andWeb) with no WebView dependencies.
+version: 0.9.5
+publish_to: none
+homepage: https://github.com/Noamcreator/webview_plus
+repository: https://github.com/Noamcreator/webview_plus
+issue_tracker: https://github.com/Noamcreator/webview_plus/issues
+
+environment:
+  sdk: ^3.13.7
+  flutter: '>=3.3.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_web_plugins:
+    sdk: flutter
+  web: ^1.1.2
+  plugin_platform_interface: ^2.1.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  plugin:
+    platforms:
+      windows:
+        pluginClass: WebviewPlusPluginCApi

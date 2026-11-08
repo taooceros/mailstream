@@ -423,10 +423,9 @@ packages:
   webview_plus:
     dependency: "direct main"
     description:
-      name: webview_plus
-      sha256: "51a7daa98433bc796fe31541e3d7cb4b1a7d935734468df9fa5285c923617154"
-      url: "https://pub.dev"
-    source: hosted
+      path: "packages/webview_plus"
+      relative: true
+    source: path
     version: "0.9.5"
   yaml:
     dependency: transitive
