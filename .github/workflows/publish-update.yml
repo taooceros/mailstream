@@ -84,7 +84,13 @@ jobs:
           CONFIG=release DART_OUT="$PWD/Flutter/packages/mailstream/lib/src" python3 scripts/ffi.py
           cd Flutter
           flutter pub get
-          flutter build macos --release --build-number "$BUILD_NUMBER"
+          # Xcode fetches Sparkle from GitHub's release downloads, which sometimes answer 504
+          # for minutes at a time; a failed fetch fails the build quickly, so try again.
+          for attempt in 1 2 3 4 5; do
+            flutter build macos --release --build-number "$BUILD_NUMBER" && break
+            [ "$attempt" -lt 5 ] || exit 1
+            sleep 90
+          done
       - name: Sign and prepare authenticated package
         env:
           CERTIFICATE: ${{ secrets.MAILSTREAM_SIGNING_P12 }}
@@ -109,7 +115,7 @@ jobs:
           app='Flutter/build/macos/Build/Products/Release/Mailstream Flutter.app'
           /usr/libexec/PlistBuddy -c "Add :MSInstalledRevision string $GITHUB_SHA" "$app/Contents/Info.plist"
           ./scripts/sign.sh "$app"
-          curl --fail --location --output "$work/Sparkle.tar.xz" https://github.com/sparkle-project/Sparkle/releases/download/2.10.1/Sparkle-2.10.1.tar.xz
+          curl --fail --location --retry 8 --retry-delay 45 --retry-all-errors --output "$work/Sparkle.tar.xz" https://github.com/sparkle-project/Sparkle/releases/download/2.10.1/Sparkle-2.10.1.tar.xz
           printf '1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27  %s\n' "$work/Sparkle.tar.xz" | shasum -a 256 -c -
           tar -xf "$work/Sparkle.tar.xz" -C "$work"
           python3 scripts/prepare-update.py "$app" build/update --sparkle-bin "$work/bin" --key-file "$work/update-key"
