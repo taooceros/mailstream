@@ -52,10 +52,19 @@
 # re-reading the files the work needs. Forking an agent's session (`omp --fork`) saves nothing: the
 # fork runs with the main system prompt and tools, so its prefix misses the cache. An agent that is
 # running gets more work only on its own issue.
+# Machines: issues labelled with one of HOST_LABELS (comma-separated, default `windows`) belong
+# to the poller started with that HOST_LABEL; every other issue to the poller without one (the
+# Mac). Each poller claims, resumes, reports stale and routes comments only for its own issues.
+# Token: the Mac reads omp's from the keychain and renews it with RENEW. A machine without
+# `security` sets LINEAR_TOKEN_FILE (the OAuth token JSON) and LINEAR_CREDENTIALS (a file with
+# the OAuth app's client id on line 1 and secret on line 2); renewal fetches a client_credentials
+# token into LINEAR_TOKEN_FILE.
 set -euo pipefail
 TEAM_ID=${TEAM_ID:-9f8fe59f-3788-4542-8c18-4e5c5dd5ddc2} # Mailstream; the id survives key renames
 LABEL=${LABEL:-omp}
 CLAIMED=${CLAIMED:-claimed}
+HOST_LABEL=${HOST_LABEL:-}
+HOST_LABELS=${HOST_LABELS:-windows}
 RENEW="$HOME/.pi/agent/extensions/linear/renew-omp-token.sh"
 STATE=${STATE:-$HOME/.local/state/linear-poll}
 LAUNCHED="$STATE/launched"
@@ -66,18 +75,33 @@ mkdir -p "$STATE" && touch "$LAUNCHED" "$HANDLED" "$UNBLOCKED" "$STALE"
 
 log() { echo "$(date '+%F %T') $*" >&2; }
 
+token() {
+  if [ -n "${LINEAR_TOKEN_FILE:-}" ]; then jq -r .access_token "$LINEAR_TOKEN_FILE"
+  else security find-generic-password -s linear-omp -a access_token -w; fi
+}
+
+renew() {
+  [ -n "${LINEAR_TOKEN_FILE:-}" ] || { "$RENEW" >/dev/null; return; }
+  local id secret out
+  id=$(sed -n 1p "$LINEAR_CREDENTIALS" | tr -d '\r') && secret=$(sed -n 2p "$LINEAR_CREDENTIALS" | tr -d '\r')
+  out=$(curl -sS --max-time 60 https://api.linear.app/oauth/token -d grant_type=client_credentials \
+    -d "client_id=$id" --data-urlencode "client_secret=$secret" -d scope=read,write) || return 1
+  jq -e '.access_token' <<<"$out" >/dev/null || return 1
+  echo "$out" >"$LINEAR_TOKEN_FILE"
+}
+
 # gql QUERY VARIABLES_JSON -> .data; renews the omp app token once on an authentication error.
 gql() {
   local body out renewed=
   body=$(jq -nc --arg q "$1" --argjson v "$2" '{query: $q, variables: $v}')
   while :; do
     out=$(curl -sS --max-time 60 https://api.linear.app/graphql \
-      -H "Authorization: Bearer $(security find-generic-password -s linear-omp -a access_token -w)" \
+      -H "Authorization: Bearer $(token)" \
       -H 'Content-Type: application/json' -d "$body") || { log "linear request failed"; return 1; }
     jq -e 'type == "object"' <<<"$out" >/dev/null 2>&1 || { log "linear: unreadable response: ${out:0:200}"; return 1; }
     if [ -z "$renewed" ] && jq -e 'any(.errors[]?; .extensions.code == "AUTHENTICATION_ERROR")' <<<"$out" >/dev/null; then
       log "token rejected; renewing"
-      "$RENEW" >/dev/null || { log "token renewal failed"; return 1; }
+      renew || { log "token renewal failed"; return 1; }
       renewed=1
       continue
     fi
@@ -137,15 +161,18 @@ DATA=$(gql 'query($team: ID!, $label: String!, $claimed: String!) {
       comments(first: 100) { nodes { id createdAt body user { app } } } } }
   comments(first: 100, filter: { createdAt: { gt: "-P7D" }, issue: { team: { id: { eq: $team } } } }) {
     nodes { id createdAt body user { app guest }
-      issue { id identifier state { name } } } }
+      issue { id identifier state { name } labels { nodes { name } } } } }
 }' "$(jq -nc --arg team "$TEAM_ID" --arg label "$LABEL" --arg claimed "$CLAIMED" \
   '{team: $team, label: $label, claimed: $claimed}')")
 
 # Issue lines oldest first, then stale and comment lines oldest first.
 PLAN=$(jq -c --argjson running "$RUNNING" --arg label "$LABEL" --arg claimedLabel "$CLAIMED" \
+  --arg host "$HOST_LABEL" --arg hosts "$HOST_LABELS" \
   --rawfile launched "$LAUNCHED" --rawfile handled "$HANDLED" --rawfile unblocked "$UNBLOCKED" \
   --rawfile stale "$STALE" --arg now "$(date -u +%FT%TZ)" '
   def labelled: [.labels.nodes[] | select(.name == $label) | .id][0];
+  def host: [.labels.nodes[].name] as $names
+    | [$hosts | split(",")[] | select(. as $h | $names | index($h))][0] // "";
   def member: . != null and .app != true and .guest != true;
   def blockers: [.inverseRelations.nodes[] | select(.type == "blocks") | .issue];
   def resolved: .state.type == "completed" or .state.type == "canceled"
@@ -156,7 +183,7 @@ PLAN=$(jq -c --argjson running "$RUNNING" --arg label "$LABEL" --arg claimedLabe
   | ($unblocked | split("\n")) as $freed
   | ($stale | split("\n")) as $reported
   | ($now | fromdateiso8601) as $t
-  | [.queued.nodes[]
+  | [.queued.nodes[] | select(host == $host)
       | (.id as $id | $done | index($id) != null) as $claimed
       | (blockers | all(resolved)) as $free
       | (if (blockers | length) > 0 and $free
@@ -169,7 +196,7 @@ PLAN=$(jq -c --argjson running "$RUNNING" --arg label "$LABEL" --arg claimedLabe
           unblockKey: $key}] as $todo
   | ($todo | sort_by(.number)[]
     | {kind: "issue", id, identifier, resume, unblockedBy, label: labelled, unblockKey}),
-    (if $running == null then empty else .claimed.nodes[]
+    (if $running == null then empty else .claimed.nodes[] | select(host == $host)
       | ([.comments.nodes[] | select(.user.app == true)
           | select(.body | test("^\\[omp @ [^\\]]*\\] start \\("))] | sort_by(.createdAt) | last)
           as $start
@@ -184,7 +211,7 @@ PLAN=$(jq -c --argjson running "$RUNNING" --arg label "$LABEL" --arg claimedLabe
           | {kind: "stale", id, identifier, agent: $agent,
              claimedAt: $start.createdAt, staleKey: $key} end end),
     (.comments.nodes | sort_by(.createdAt)[]
-      | select((.user | member) and (.id as $id | $seen | index($id) | not))
+      | select((.user | member) and (.issue | host == $host) and (.id as $id | $seen | index($id) | not))
       | {kind: "comment", id, issue: .issue.identifier, issueId: .issue.id,
          state: .issue.state.name, createdAt, body})' <<<"$DATA")
 
