@@ -108,7 +108,8 @@ class _MailShellState extends State<MailShell> {
     _shownToast = toast;
     _toastTimer?.cancel();
     setState(() => _toast = toast);
-    _toastTimer = Timer(Duration(seconds: toast.error ? 6 : 3), () {
+    // A toast with a button (Undo) stays long enough to reach it.
+    _toastTimer = Timer(Duration(seconds: toast.error ? 6 : (toast.action != null ? 8 : 3)), () {
       if (mounted) setState(() => _toast = null);
     });
   }
@@ -384,7 +385,16 @@ class _MailShellState extends State<MailShell> {
                   child: Center(
                     child: AnimatedSwitcher(
                       duration: Motion.short,
-                      child: _toast == null ? const SizedBox.shrink() : _ToastView(key: ObjectKey(_toast), toast: _toast!),
+                      child: _toast == null
+                          ? const SizedBox.shrink()
+                          : _ToastView(
+                              key: ObjectKey(_toast),
+                              toast: _toast!,
+                              onAction: () {
+                                _toastTimer?.cancel();
+                                setState(() => _toast = null);
+                              },
+                            ),
                     ),
                   ),
                 ),
@@ -866,19 +876,22 @@ class _SearchField extends StatelessWidget {
 }
 
 /// A notice from the engine, as the Mac floats them: a dark rounded panel (red for an error)
-/// with a soft shadow.
+/// with a soft shadow, and the toast's button (Undo) at its end; [onAction] hides it once pressed.
 class _ToastView extends StatelessWidget {
-  const _ToastView({super.key, required this.toast});
+  const _ToastView({super.key, required this.toast, required this.onAction});
 
   final Toast toast;
+  final VoidCallback onAction;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
     final error = toast.error;
+    final action = toast.action;
+    final foreground = error ? colors.onRedFill : colors.onToast;
     return Container(
-      constraints: const BoxConstraints(maxWidth: 460),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      constraints: const BoxConstraints(maxWidth: 520),
+      padding: EdgeInsets.fromLTRB(16, 10, action == null ? 16 : 8, 10),
       decoration: BoxDecoration(
         color: error ? colors.redFill : colors.toast,
         borderRadius: BorderRadius.circular(12),
@@ -889,7 +902,21 @@ class _ToastView extends StatelessWidget {
           MacosIcon(CupertinoIcons.exclamationmark_triangle_fill, size: 15, color: colors.onRedFill),
           const SizedBox(width: 8),
         ],
-        Flexible(child: Text(toast.text, style: context.text.body.copyWith(color: error ? colors.onRedFill : colors.onToast))),
+        Flexible(child: Text(toast.text, style: context.text.body.copyWith(color: foreground))),
+        if (action != null) ...[
+          const SizedBox(width: 8),
+          Hoverable(
+            radius: 6,
+            onTap: () {
+              onAction();
+              action.onPressed();
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              child: Text(action.label, style: context.text.body.copyWith(color: foreground, fontWeight: FontWeight.w600)),
+            ),
+          ),
+        ],
       ]),
     );
   }

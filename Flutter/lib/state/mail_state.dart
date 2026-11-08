@@ -95,12 +95,13 @@ class ThreadEntry extends ChangeNotifier {
   void completed() => notifyListeners();
 }
 
-/// A message for a snack bar; each one shows once.
+/// A message for a snack bar; each one shows once. [action] adds a button to it, e.g. Undo.
 class Toast {
-  Toast(this.text, {this.error = false});
+  Toast(this.text, {this.error = false, this.action});
 
   final String text;
   final bool error;
+  final ({String label, VoidCallback onPressed})? action;
 }
 
 /// What a compose draft started as.
@@ -187,6 +188,15 @@ class _Changes implements engine.EventListener {
 
 /// What a failed engine call says.
 String describe(Object error) => error is engine.FailedMailException ? error.message : '$error';
+
+/// The toast for one auto-read pass: "Marked 2 notifications and 1 newsletter read as stale".
+String autoReadSummary(List<engine.AutoReadEntry> entries) {
+  final notifications = entries.where((e) => e.category == 'notification').length;
+  final newsletters = entries.length - notifications;
+  String count(int n, String noun) => n == 1 ? '1 $noun' : '$n ${noun}s';
+  final parts = [if (notifications > 0) count(notifications, 'notification'), if (newsletters > 0) count(newsletters, 'newsletter')];
+  return 'Marked ${parts.join(' and ')} read as stale';
+}
 
 /// The UI's single source of truth. Mailstream's engine runs in this process (`package:mailstream`)
 /// and owns accounts, sync, caching, threading and tagging; this keeps what the window shows,
@@ -287,6 +297,7 @@ class MailState extends ChangeNotifier {
     await reloadAccounts();
     unawaited(reloadSettings());
     unawaited(reloadTaggingProblem());
+    unawaited(reloadAutoRead(announce: false));
     unawaited(chat.reload());
     unawaited(calendar.reload());
     await _fetch(selection);
@@ -313,6 +324,9 @@ class MailState extends ChangeNotifier {
         return;
       case engine.ProblemsEvent():
         unawaited(reloadTaggingProblem());
+        return;
+      case engine.AutoReadEvent():
+        unawaited(reloadAutoRead());
         return;
       default:
         return;
@@ -983,6 +997,55 @@ class MailState extends ChangeNotifier {
       await setSetting(frameRateSetting, engine.FlagSettingValue(!showFrameRate));
     } on engine.MailException catch (error) {
       _report('Could not change the frame rate setting: ${describe(error)}');
+    }
+  }
+
+  // MARK: - Auto-read
+
+  /// What the engine's auto-read (`autoRead.*`) marked read and nobody undid, newest first; null
+  /// until first read.
+  engine.AutoReadLog? autoRead;
+
+  /// The latest auto-read pass seen, so each shows its toast once; null until the first read.
+  int? _autoReadBatch;
+
+  /// Reads the log again; a pass newer than any seen gets a toast with Undo, unless
+  /// [announce] is off (the first read, so passes from before the launch stay quiet).
+  Future<void> reloadAutoRead({bool announce = true}) async {
+    final engine.AutoReadLog log;
+    try {
+      log = await mail.autoReadLog();
+    } on engine.MailException catch (error) {
+      if (announce) _report('Could not read auto-read: ${describe(error)}');
+      return;
+    }
+    autoRead = log;
+    final latest = log.entries.fold<int>(0, (latest, e) => e.batch.toInt() > latest ? e.batch.toInt() : latest);
+    final seen = _autoReadBatch;
+    if (latest > (seen ?? 0)) {
+      if (announce && seen != null) {
+        final batch = [for (final e in log.entries) if (e.batch.toInt() == latest) e];
+        toast = Toast(
+          autoReadSummary(batch),
+          action: (label: 'Undo', onPressed: () => unawaited(undoAutoRead([for (final e in batch) e.id]))),
+        );
+      }
+    }
+    if (latest > (seen ?? 0) || seen == null) _autoReadBatch = latest;
+    notifyListeners();
+  }
+
+  /// Marks auto-read conversations unread again: [ids], else the latest pass's.
+  Future<void> undoAutoRead([List<String>? ids]) async {
+    try {
+      final result = await mail.undoAutoRead(ids: ids);
+      if (result.failed.isNotEmpty) {
+        _report('Could not mark ${result.failed.length == 1 ? 'one conversation' : '${result.failed.length} conversations'} unread: ${result.failed.first.message}');
+      } else if (result.done.isNotEmpty) {
+        showToast('Marked ${result.done.length == 1 ? '1 conversation' : '${result.done.length} conversations'} unread again');
+      }
+    } on engine.MailException catch (error) {
+      _report('Could not undo auto-read: ${describe(error)}');
     }
   }
 

@@ -368,6 +368,16 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new("mail.retag", "Forgets every AI tag and tags the current list again.", &[]),
     Spec::new(
+        "mail.autoread",
+        "What auto-read (autoRead.enabled) marked read and has not been undone, newest first: each conversation's id, sender, subject, AI category, why it was stale (age or superseded by a newer newsletter) and the pass (batch) that read it.",
+        &[],
+    ),
+    Spec::new(
+        "mail.autoread.undo",
+        "Marks conversations auto-read marked read unread again; without --ids, those of its latest pass. Auto-read leaves them alone until a new message arrives.",
+        &[Argument::new("ids", Kind::List, "Conversation ids from `mail autoread`.")],
+    ),
+    Spec::new(
         "mail.send",
         "Sends a new plain-text message, with files attached if given.",
         &[

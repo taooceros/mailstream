@@ -253,6 +253,31 @@ pub struct BatchResult {
     pub failed: Vec<BatchFailure>,
 }
 
+/// A conversation auto-read marked read and nobody undid.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct AutoReadEntry {
+    pub id: String,
+    pub account: String,
+    pub sender: String,
+    pub subject: String,
+    /// `notification` or `newsletter`.
+    pub category: String,
+    /// `age` (older than `autoRead.days`) or `superseded` (its sender sent a newer newsletter).
+    pub reason: String,
+    /// ISO 8601.
+    pub at: String,
+    /// The pass that marked it read; [`Mailstream::undo_auto_read`] without ids undoes the latest.
+    pub batch: u64,
+}
+
+/// What auto-read (`autoRead.*` settings) marked read, newest first.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct AutoReadLog {
+    pub enabled: bool,
+    pub days: i64,
+    pub entries: Vec<AutoReadEntry>,
+}
+
 /// A conversation's AI tag after [`Mailstream::tag`] corrected it.
 #[derive(Clone, Debug, Deserialize, uniffi::Record)]
 pub struct Tagged {
@@ -646,6 +671,8 @@ pub enum Event {
     ChatMessages,
     /// Calendar accounts or their events changed.
     Calendar,
+    /// Auto-read marked conversations read, or some were put back ([`Mailstream::auto_read_log`]).
+    AutoRead,
     /// A kind this build does not know yet.
     Other { name: String },
 }
@@ -664,6 +691,7 @@ impl Event {
             "chat" => Self::Chat,
             "chatMessages" => Self::ChatMessages,
             "calendar" => Self::Calendar,
+            "autoRead" => Self::AutoRead,
             _ => Self::Other { name: name.into() },
         }
     }
@@ -840,6 +868,17 @@ impl Mailstream {
     /// Forgets every AI tag and tags the current list again; `disabled` while tagging is off.
     pub async fn retag(&self) -> Result<(), MailError> {
         call::<Value>("mail.retag", json!({})).await.map(drop)
+    }
+
+    /// What auto-read marked read and nobody undid, newest first.
+    pub async fn auto_read_log(&self) -> Result<AutoReadLog, MailError> {
+        call("mail.autoread", json!({})).await
+    }
+
+    /// Marks auto-read conversations unread again: `ids`, else those of its latest pass. Auto-read
+    /// then leaves them alone until a new message arrives.
+    pub async fn undo_auto_read(&self, ids: Option<Vec<String>>) -> Result<BatchResult, MailError> {
+        call("mail.autoread.undo", json!({ "ids": ids })).await
     }
 
     /// Sends `draft` as a new plain-text message with its attachments. Sends at once: `confirm` is the person's

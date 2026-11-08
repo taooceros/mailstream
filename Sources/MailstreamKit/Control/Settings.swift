@@ -17,6 +17,8 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
     case pushPollSeconds = "sync.pushPollSeconds"
     case chatPollSeconds = "chat.pollSeconds"
     case flutterShowFrameRate = "flutter.showFrameRate"
+    case autoReadEnabled = "autoRead.enabled"
+    case autoReadDays = "autoRead.days"
 
     enum Kind: Sendable {
         case bool
@@ -52,6 +54,10 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         case .flutterShowFrameRate:
             (.bool, false,
              "Show the frame rate and the slowest recent frame in a corner of Mailstream Flutter's window (also View ▸ Show Frame Rate).")
+        case .autoReadEnabled:
+            (.bool, false,
+             "Mark stale notifications and newsletters (ads, promotions) read on their own, as AI tagging sorts them: unread ones older than autoRead.days, and a newsletter once its sender sends a newer one. Never mail waiting on you, starred mail, people, invitations or threads you wrote in. Mailstream Flutter offers Undo.")
+        case .autoReadDays: (.int(1...90), 3, "Days an unread notification or newsletter waits before auto-read marks it read.")
         }
     }
 

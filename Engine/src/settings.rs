@@ -25,6 +25,8 @@ pub enum Setting {
     PushPollSeconds,
     ChatPollSeconds,
     FlutterShowFrameRate,
+    AutoReadEnabled,
+    AutoReadDays,
 }
 
 #[derive(Clone, Copy)]
@@ -42,7 +44,7 @@ enum Kind {
 pub type Values = BTreeMap<Setting, Value>;
 
 impl Setting {
-    pub const ALL: [Setting; 12] = [
+    pub const ALL: [Setting; 14] = [
         Self::AiTaggingEnabled,
         Self::AiTaggingBackend,
         Self::AiTaggingModel,
@@ -55,6 +57,8 @@ impl Setting {
         Self::PushPollSeconds,
         Self::ChatPollSeconds,
         Self::FlutterShowFrameRate,
+        Self::AutoReadEnabled,
+        Self::AutoReadDays,
     ];
 
     pub fn key(self) -> &'static str {
@@ -71,6 +75,8 @@ impl Setting {
             Self::PushPollSeconds => "sync.pushPollSeconds",
             Self::ChatPollSeconds => "chat.pollSeconds",
             Self::FlutterShowFrameRate => "flutter.showFrameRate",
+            Self::AutoReadEnabled => "autoRead.enabled",
+            Self::AutoReadDays => "autoRead.days",
         }
     }
 
@@ -118,6 +124,16 @@ impl Setting {
                 Kind::Bool,
                 json!(false),
                 "Show the frame rate and the slowest recent frame in a corner of Mailstream Flutter's window (also View ▸ Show Frame Rate).",
+            ),
+            Self::AutoReadEnabled => (
+                Kind::Bool,
+                json!(false),
+                "Mark stale notifications and newsletters (ads, promotions) read on their own, as AI tagging sorts them: unread ones older than autoRead.days, and a newsletter once its sender sends a newer one. Never mail waiting on you, starred mail, people, invitations or threads you wrote in. Mailstream Flutter offers Undo.",
+            ),
+            Self::AutoReadDays => (
+                Kind::Int(1, 90),
+                json!(3),
+                "Days an unread notification or newsletter waits before auto-read marks it read.",
             ),
         }
     }
@@ -597,7 +613,7 @@ mod tests {
         let dir = temp();
         let settings = Settings::new(&dir);
         let list = run(&settings, "config.list", json!({})).unwrap();
-        assert_eq!(list["settings"].as_array().unwrap().len(), 12);
+        assert_eq!(list["settings"].as_array().unwrap().len(), 14);
         assert_eq!(
             list["settings"][1],
             json!({

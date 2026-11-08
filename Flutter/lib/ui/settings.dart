@@ -9,6 +9,7 @@ import '../backend/models.dart';
 import '../state/mail_state.dart';
 import 'common.dart';
 import 'design.dart';
+import 'format.dart';
 import 'glass.dart';
 
 /// Opens Settings (⌘,): the accounts, as the app's Accounts window has them (add through the
@@ -21,6 +22,7 @@ Future<void> openSettings(BuildContext context, MailState state) => showSheet<vo
 const _sections = [
   ('Sync', ['sync.', 'chat.']),
   ('AI tagging', ['aiTagging.']),
+  ('Auto-read', ['autoRead.']),
   ('Remote content', ['remoteContent.']),
   ('Performance', ['flutter.showFrameRate']),
 ];
@@ -34,6 +36,8 @@ const _titles = {
   'aiTagging.batchSize': 'Batch size',
   'aiTagging.passLimit': 'Conversations per pass',
   'aiTagging.backoffSeconds': 'Wait after a failed run',
+  'autoRead.enabled': 'Mark stale notifications and newsletters read',
+  'autoRead.days': 'Days before marking read',
   'remoteContent.trustedSenders': 'Trusted senders',
   'sync.pollSeconds': 'Mail polling',
   'sync.pushPollSeconds': 'Polling while push is connected',
@@ -101,6 +105,7 @@ class SettingsWindow extends StatelessWidget {
                               if (prefixes.any(entry.key.startsWith)) _SettingRow(state: state, entry: entry),
                           ],
                         ),
+                        if (title == 'Auto-read') _AutoReadLog(state: state),
                       ],
                       _Group(
                         children: [
@@ -233,6 +238,89 @@ class _Issue extends StatelessWidget {
         ]),
       ),
     );
+  }
+}
+
+// MARK: - Auto-read
+
+/// What auto-read marked read and nobody undid, newest first, each with Mark Unread, and Mark
+/// All Unread above them; a line saying nothing was marked while it is on and has done nothing.
+class _AutoReadLog extends StatelessWidget {
+  const _AutoReadLog({required this.state});
+
+  /// Rows shown; the rest stay in the engine's log (`mailstream mail autoread`).
+  static const limit = 50;
+
+  final MailState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final log = state.autoRead;
+    engine.SettingValue? setting(String key) => state.settings?.settings.where((e) => e.key == key).firstOrNull?.value;
+    final enabled = switch (setting('autoRead.enabled')) {
+      engine.FlagSettingValue(:final enabled) => enabled,
+      _ => false,
+    };
+    final days = switch (setting('autoRead.days')) {
+      engine.NumberSettingValue(:final value) => '$value',
+      _ => '${log?.days ?? 3}',
+    };
+    if (log == null || (log.entries.isEmpty && !enabled)) return const SizedBox.shrink();
+    final colors = context.colors;
+    final text = context.text;
+    final entries = log.entries;
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: _Group(
+        children: [
+          _Row(
+            title: const Text('Recently marked read'),
+            subtitle: Text(
+              entries.isEmpty
+                  ? 'Nothing yet. Unread notifications and newsletters older than $days days show here once marked read.'
+                  : '${entries.length} conversation${entries.length == 1 ? '' : 's'}. Marking one unread keeps auto-read away from it until new mail arrives.',
+            ),
+            trailing: entries.isEmpty
+                ? null
+                : PushButton(
+                    controlSize: ControlSize.regular,
+                    secondary: true,
+                    onPressed: () => state.undoAutoRead([for (final e in entries) e.id]),
+                    child: const Text('Mark All Unread'),
+                  ),
+          ),
+          for (final entry in entries.take(limit))
+            _Row(
+              title: Text.rich(
+                TextSpan(children: [
+                  TextSpan(text: entry.sender.isEmpty ? '(Unknown sender)' : entry.sender, style: const TextStyle(fontWeight: FontWeight.w600)),
+                  TextSpan(text: '  ${entry.subject}'),
+                ]),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(
+                [
+                  entry.category == 'newsletter' ? 'Newsletter' : 'Notification',
+                  entry.reason == 'superseded' ? 'a newer one from the same sender arrived' : 'unread too long',
+                  ?_markedAt(entry.at),
+                ].join('  ·  '),
+                style: text.subheadline.copyWith(color: colors.secondaryLabel),
+              ),
+              trailing: ToolButton(
+                tooltip: 'Mark Unread',
+                icon: CupertinoIcons.envelope_badge,
+                onPressed: () => state.undoAutoRead([entry.id]),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  static String? _markedAt(String iso) {
+    final date = DateTime.tryParse(iso)?.toLocal();
+    return date == null ? null : 'marked ${listDate(date, DateTime.now())}';
   }
 }
 

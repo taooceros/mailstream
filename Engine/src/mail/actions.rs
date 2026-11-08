@@ -159,17 +159,41 @@ impl Mail {
 
     /// Marks every unread message read, or the latest message not sent by the user unread.
     async fn set_read(self: &Arc<Self>, conversation: &Conversation, read: bool) -> Result<(), EngineError> {
-        let targets: Vec<MailMessage> = if read {
-            conversation.messages.iter().filter(|message| !message.envelope.is_seen()).cloned().collect()
-        } else {
-            let latest = conversation.messages.iter().rev().find(|message| message.role != MailboxRole::Sent);
-            vec![latest.unwrap_or_else(|| conversation.latest()).clone()]
-        };
+        let targets = Self::read_targets(conversation, read);
         if targets.is_empty() {
             return Ok(());
         }
         self.adjust_unread(&targets, if read { -1 } else { 1 });
         self.mutate_flags(targets, Flag::Seen, read).await
+    }
+
+    /// The messages `set_read` changes.
+    fn read_targets(conversation: &Conversation, read: bool) -> Vec<MailMessage> {
+        if read {
+            conversation.messages.iter().filter(|message| !message.envelope.is_seen()).cloned().collect()
+        } else {
+            let latest = conversation.messages.iter().rev().find(|message| message.role != MailboxRole::Sent);
+            vec![latest.unwrap_or_else(|| conversation.latest()).clone()]
+        }
+    }
+
+    /// `mail.read` over several conversations with one request per mailbox (auto-read and its
+    /// undo); the conversations commands handed out follow, as `act` keeps them.
+    pub(super) async fn set_read_all(self: &Arc<Self>, conversations: &[Conversation], read: bool) -> Result<(), EngineError> {
+        let targets: Vec<MailMessage> =
+            conversations.iter().flat_map(|conversation| Self::read_targets(conversation, read)).collect();
+        if !targets.is_empty() {
+            self.adjust_unread(&targets, if read { -1 } else { 1 });
+            self.mutate_flags(targets, Flag::Seen, read).await?;
+        }
+        let mut state = self.state();
+        for conversation in conversations {
+            if let Some(known) = state.known.get_mut(&conversation.id) {
+                let all = refs(&conversation.messages);
+                known.conversation = updating(conversation, &all, |envelope| envelope.set_flag(Flag::Seen, read));
+            }
+        }
+        Ok(())
     }
 
     /// Stars the latest message, or unstars every starred one.

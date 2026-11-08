@@ -32,10 +32,13 @@ use crate::tagging::{Candidates, Category, ConversationTag, Tagging};
 use crate::{EngineError, Events, threader};
 
 mod actions;
+mod autoread;
 mod contacts;
 mod sending;
 #[cfg(test)]
 mod action_tests;
+#[cfg(test)]
+mod autoread_tests;
 #[cfg(test)]
 mod interop_tests;
 
@@ -161,6 +164,8 @@ pub struct Mail {
     tagging: Arc<Tagging>,
     /// `contacts.search`'s people, loaded again once they are a minute old.
     contacts: contacts::ContactsLoad,
+    /// Marking stale notifications and newsletters read (`autoRead.*`).
+    auto_read: autoread::AutoRead,
 }
 
 impl Mail {
@@ -195,6 +200,7 @@ impl Mail {
             cache_reads: Mutex::new(HashMap::new()),
             tagging,
             contacts: contacts::ContactsLoad::default(),
+            auto_read: autoread::AutoRead::new(),
         }
     }
 
@@ -214,6 +220,7 @@ impl Mail {
     pub async fn start(self: Arc<Self>) {
         let weak = Arc::downgrade(&self);
         self.tagging.start(move || weak.upgrade().map(|mail| mail.tag_candidates()).unwrap_or_default());
+        self.start_auto_read();
         // As each rebuild of the Swift engine's list does (`MailStore.prefetchCount`): the default
         // list's newest conversations get their preview lines loaded, so a list read a moment
         // later carries them instead of leaving them to `mail.previews`.
@@ -1026,6 +1033,7 @@ impl Mail {
             "mail.show" => self.show(args).await,
             "mail.previews" => self.previews(args).await,
             "mail.read" | "mail.star" | "mail.archive" | "mail.trash" | "mail.restore" => self.act(command, args).await,
+            "mail.autoread" | "mail.autoread.undo" => self.auto_read_command(command, args).await,
             "mail.send" => self.send_command(args).await,
             "mail.reply" => self.reply_command(args).await,
             _ => unreachable!("{command} is a mail command"),

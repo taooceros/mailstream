@@ -49,6 +49,27 @@ class ReaderMail extends FakeMailstream {
   @override
   Future<Map<String, String?>> avatars({required List<String> addresses, required List<String> automated}) async => {};
 
+  /// Auto-read's log as the engine answers it; [undoAutoRead] drops what it puts back and, as
+  /// the engine does, sends the autoRead event.
+  engine.AutoReadLog autoRead = engine.AutoReadLog(enabled: false, days: 3, entries: []);
+  final undone = <List<String>?>[];
+
+  @override
+  Future<engine.AutoReadLog> autoReadLog() async => autoRead;
+
+  @override
+  Future<engine.BatchResult> undoAutoRead({required List<String>? ids}) async {
+    undone.add(ids);
+    final back = ids ?? [for (final e in autoRead.entries) e.id];
+    autoRead = engine.AutoReadLog(
+      enabled: autoRead.enabled,
+      days: autoRead.days,
+      entries: [for (final e in autoRead.entries) if (!back.contains(e.id)) e],
+    );
+    changed(engine.AutoReadEvent());
+    return engine.BatchResult(done: back, failed: []);
+  }
+
   @override
   Future<engine.Listing> list({required engine.ListQuery query}) async {
     queries.add(query);

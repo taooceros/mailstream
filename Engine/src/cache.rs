@@ -342,6 +342,18 @@ impl MailCache {
         self.write(accounts, Table::State, "accounts".into());
     }
 
+    // MARK: Auto-read
+
+    /// What auto-read marked read and may still undo, and the messages it is done with
+    /// (`mail::autoread`); one row every process shares.
+    pub async fn load_auto_read<T: DeserializeOwned>(&self) -> Option<T> {
+        self.read(Table::State, "autoRead").await
+    }
+
+    pub fn save_auto_read<T: Serialize>(&self, value: &T) {
+        self.write(value, Table::State, "autoRead".into());
+    }
+
     // MARK: Tags
 
     pub async fn load_tags(&self) -> HashMap<String, ConversationTag> {

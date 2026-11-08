@@ -440,7 +440,8 @@ impl Core {
         }
         match command {
             "mailboxes" | "mail.list" | "mail.search" | "mail.show" | "mail.previews" | "mail.read" | "mail.star"
-            | "mail.archive" | "mail.trash" | "mail.restore" | "mail.send" | "mail.reply" => {
+            | "mail.archive" | "mail.trash" | "mail.restore" | "mail.autoread" | "mail.autoread.undo" | "mail.send"
+            | "mail.reply" => {
                 return self.mail.run(command, &args).await;
             }
             "refresh" => Ok(self.polling.refresh()),

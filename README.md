@@ -121,6 +121,8 @@ listed under `settingsIssues` in `mailstream status`.
 | `sync.pushPollSeconds` | `900` | safety-net polling while push is up |
 | `chat.pollSeconds` | `20` | Google Chat polling |
 | `flutter.showFrameRate` | `false` | frame rate meter in Mailstream Flutter (also its View ▸ Show Frame Rate) |
+| `autoRead.enabled` | `false` | mark stale notifications and newsletters read (Mailstream Flutter and GPUI) |
+| `autoRead.days` | `3` | days an unread notification or newsletter waits before auto-read |
 
 Every other command goes over a Unix socket,
 `~/Library/Application Support/Mailstream/control.sock` (mode 0600 in that directory, which is
@@ -492,6 +494,17 @@ They are cached in `tags-v2.json` in the cache directory. Turn tagging off, or
 re-tag everything, from the View menu or with `mailstream config set
 aiTagging.enabled false` and `mailstream mail retag`; `mailstream mail tag` corrects
 one conversation's tag. Without tags, the list is plain and dated.
+
+**Auto-read** (`autoRead.enabled`, off by default; Settings ▸ Auto-read in Mailstream
+Flutter) marks stale notifications and newsletters read through the same path as
+marking them read by hand, going by their tags alone: unread, tagged Notification or
+Newsletter, not waiting on you (a dated ask counts once it lapsed), not starred, and
+holding nothing you wrote; stale means the latest message is `autoRead.days` old, or a
+newsletter whose sender has since sent a newer one. A pass runs a moment after the
+tags, the list or the settings change, and hourly. Each pass shows a toast with Undo,
+and Settings lists what it marked, each with Mark Unread (`mailstream mail autoread`,
+`mailstream mail autoread undo`). A conversation put back to unread is left alone until
+a new message arrives. Mailstream.app (the Swift engine) does not auto-read.
 
 ## Avatars
 
