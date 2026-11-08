@@ -23,11 +23,12 @@ use crate::cache::{CachedListing, MailCache};
 use crate::commands::Arguments;
 use crate::content::Contents;
 use crate::model::{
-    Account, Address, CATEGORIES, Conversation, ConversationTag, DISTANT_FUTURE, DISTANT_PAST, Date, Envelope, MailMessage,
-    Mailbox, MailboxKey, MailboxRole, date_from_unix, iso8601, now, unix_seconds,
+    Account, Address, Conversation, DISTANT_FUTURE, DISTANT_PAST, Date, Envelope, MailMessage, Mailbox, MailboxKey,
+    MailboxRole, date_from_unix, iso8601, now, unix_seconds,
 };
 use crate::settings::{Setting, Settings};
 use crate::tokens::Tokens;
+use crate::tagging::{Candidates, Category, ConversationTag, Tagging};
 use crate::{EngineError, Events, threader};
 
 pub const PAGE_SIZE: usize = 50;
@@ -67,7 +68,6 @@ struct State {
     /// Conversations handed out by commands, so later ones can address them by id.
     known: HashMap<String, Conversation>,
     known_order: VecDeque<String>,
-    tags: HashMap<String, ConversationTag>,
     /// The latest failure, until a refresh clears it.
     problem: Option<String>,
     /// A refresh of the default list is running (the Swift engine's `isLoading`): the `sync`
@@ -141,10 +141,14 @@ pub struct Mail {
     /// Reads of mailbox listings from mail.db, in flight or done, so each is read at most once
     /// and a later caller awaits the read in flight.
     cache_reads: Mutex<HashMap<MailboxKey, CacheRead>>,
+    /// The AI tags of the default list's conversations.
+    tagging: Arc<Tagging>,
 }
 
 impl Mail {
-    /// Starts mail.db's writer on the current runtime.
+    /// Starts mail.db's writer on the current runtime. `tool_environment` is the AI tagger's
+    /// (`Config::tool_environment`).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         database: PathBuf,
         cache_root: PathBuf,
@@ -153,10 +157,12 @@ impl Mail {
         accounts: Arc<Accounts>,
         settings: Arc<Settings>,
         events: Arc<Events>,
+        tool_environment: Option<HashMap<String, String>>,
     ) -> Self {
         let cache = Arc::new(MailCache::new(database, cache_root));
         let previews = events.clone();
         let contents = Arc::new(Contents::new(cache.clone(), move || previews.emit_soon("previews")));
+        let tagging = Tagging::new(cache.clone(), contents.clone(), settings.clone(), events.clone(), tool_environment);
         Self {
             cache,
             contents,
@@ -167,6 +173,7 @@ impl Mail {
             endpoints,
             state: Mutex::new(State::default()),
             cache_reads: Mutex::new(HashMap::new()),
+            tagging,
         }
     }
 
@@ -184,13 +191,15 @@ impl Mail {
     /// Paints the signed-in accounts from mail.db (identities, mailboxes, tags, listings), then
     /// loads every account's identity and mailboxes and fetches the inboxes' first pages.
     pub async fn start(self: Arc<Self>) {
-        let tags = self.cache.load_tags().await;
+        let weak = Arc::downgrade(&self);
+        self.tagging.start(move || weak.upgrade().map(|mail| mail.tag_candidates()).unwrap_or_default());
+        self.tagging.restore().await;
         let cached = self.cache.load_accounts().await.unwrap_or_default();
         let restored = self.signed_in_accounts(&cached);
         {
             let mut state = self.state();
-            state.tags = tags;
             state.accounts = restored.clone();
+            // Nothing to connect: accounts signed in from now on are the user's as they load.
             state.connected = restored.is_empty();
         }
         if restored.is_empty() {
@@ -212,7 +221,61 @@ impl Mail {
         };
         self.cache.save_accounts(&accounts);
         self.clone().refresh();
+        self.tagging.schedule();
         self.refresh_counts();
+    }
+
+    /// The default list changed: front ends list again, the tagger looks at it a moment later
+    /// (and finds nothing to tag until every account has connected). Callers may hold the lock.
+    fn conversations_changed(&self) {
+        self.events.emit_soon("conversations");
+        self.tagging.schedule();
+    }
+
+    /// What the tagger may tag: the default list's conversations with a message in an inbox,
+    /// once every account has connected (`MailStore.scheduleTagging`).
+    fn tag_candidates(&self) -> Candidates {
+        let state = self.state();
+        if !state.connected {
+            return Candidates::default();
+        }
+        let primary = Self::unified_mailboxes(&state, MailboxRole::Inbox);
+        let context: Vec<MailboxKey> = Self::default_keys(&state).into_iter().filter(|key| !primary.contains(key)).collect();
+        let fetched: Vec<(MailboxKey, Vec<Arc<Envelope>>)> =
+            primary.iter().map(|key| (key.clone(), Self::loaded_envelopes(&state, key))).collect();
+        let listed = Self::threads(&state, &fetched, &context, Vec::new(), true);
+        let conversations = listed
+            .conversations
+            .into_iter()
+            .filter(|conversation| {
+                conversation.messages.iter().any(|message| message.role == MailboxRole::Inbox && primary.contains(&message.key))
+            })
+            .collect();
+        Candidates { conversations, own: Self::own_addresses(&state) }
+    }
+
+    pub(crate) fn tagging(&self) -> &Arc<Tagging> {
+        &self.tagging
+    }
+
+    /// `status`'s accounts: the mail store's, and whether their mailboxes have loaded.
+    pub(crate) fn account_statuses(&self) -> Vec<Value> {
+        let state = self.state();
+        state
+            .accounts
+            .iter()
+            .map(|account| {
+                json!({
+                    "id": account.name, "label": account.label, "provider": account.provider.as_str(),
+                    "mailboxesLoaded": state.mailboxes.get(&account.name).is_some_and(|list| !list.is_empty()),
+                })
+            })
+            .collect()
+    }
+
+    /// The latest failure, until a refresh clears it.
+    pub(crate) fn problem(&self) -> Option<String> {
+        self.state().problem.clone()
     }
 
     /// The signed-in accounts in sidebar order, with the identities `known` has, else the name
@@ -275,7 +338,7 @@ impl Mail {
             self.cache_reads.lock().expect("cache reads").retain(|key, _| !removed.contains(&key.account));
             self.contents.forget(&removed);
             self.events.emit_soon("mailboxes");
-            self.events.emit_soon("conversations");
+            self.conversations_changed();
         }
         if load.is_empty() {
             return;
@@ -376,7 +439,7 @@ impl Mail {
                 drop(state);
                 // Conversations say "me" for the user's own addresses.
                 self.events.emit_soon("accounts");
-                self.events.emit_soon("conversations");
+                self.conversations_changed();
             }
         }
     }
@@ -499,19 +562,8 @@ impl Mail {
     }
 
     /// The AI tag of `conversation` while tagging is on, its waiting flag lapsed by now.
-    fn tag(&self, state: &State, conversation: &Conversation) -> Option<ConversationTag> {
-        if self.settings.value(Setting::AiTaggingEnabled) != Value::Bool(true) {
-            return None;
-        }
-        let latest = conversation.latest();
-        let key = latest
-            .envelope
-            .message_id
-            .clone()
-            .unwrap_or_else(|| format!("{}/{}/{}", latest.account(), latest.mailbox(), latest.id()));
-        let mut tag = state.tags.get(&key)?.clone();
-        tag.to_respond = tag.is_waiting(now());
-        Some(tag)
+    fn tag(&self, conversation: &Conversation) -> Option<ConversationTag> {
+        self.tagging.tag_for(conversation)
     }
 
     // MARK: - Listings
@@ -542,7 +594,7 @@ impl Mail {
                         let shown = Self::default_keys(&state).contains(&key);
                         drop(state);
                         if shown {
-                            mail.events.emit_soon("conversations");
+                            mail.conversations_changed();
                         }
                     })
                     .map(drop)
@@ -653,7 +705,7 @@ impl Mail {
             }
         }
         if shown_changed {
-            self.events.emit_soon("conversations");
+            self.conversations_changed();
         }
         failures
     }
@@ -749,7 +801,7 @@ impl Mail {
         if grew {
             let shown = Self::default_keys(&self.state());
             if keys.iter().any(|key| shown.contains(key)) {
-                self.events.emit_soon("conversations");
+                self.conversations_changed();
             }
         }
     }
@@ -1007,9 +1059,10 @@ impl Mail {
 
     async fn list(self: &Arc<Self>, args: &Arguments, query: Option<String>) -> Result<Value, EngineError> {
         let limit = args.int("limit").unwrap_or(25).clamp(1, 200) as usize;
-        let category = args.string("category").filter(|name| CATEGORIES.contains(&name.as_str()));
+        // Unknown categories filter nothing, as the Swift engine's `MailCategory(rawValue:)` reads them.
+        let category = args.string("category").and_then(|name| Category::named(&name));
         let (unread, starred, waiting) = (args.bool("unread"), args.bool("starred"), args.bool("waiting"));
-        let include = move |state: &State, conversation: &Conversation| {
+        let include = move |_: &State, conversation: &Conversation| {
             if unread && !conversation.is_unread {
                 return false;
             }
@@ -1019,9 +1072,9 @@ impl Mail {
             if category.is_none() && !waiting {
                 return true;
             }
-            let tag = self.tag(state, conversation);
-            if let Some(category) = &category
-                && tag.as_ref().map(|tag| &tag.category) != Some(category)
+            let tag = self.tag(conversation);
+            if let Some(category) = category
+                && tag.as_ref().map(|tag| tag.category) != Some(category)
             {
                 return false;
             }
@@ -1090,7 +1143,7 @@ impl Mail {
         let mut roles: Vec<&str> = conversation.messages.iter().map(|message| message.role.as_str()).collect();
         roles.sort();
         roles.dedup();
-        let tag = self.tag(state, conversation);
+        let tag = self.tag(conversation);
         json!({
             "id": conversation.id,
             "account": conversation.account,
@@ -1104,14 +1157,14 @@ impl Mail {
             "hasAttachment": conversation.has_attachment,
             "mailboxes": roles,
             "snippet": self.contents.snippet(&conversation.latest().message_ref()),
-            "category": tag.as_ref().map(|tag| tag.category.clone()),
+            "category": tag.as_ref().map(|tag| tag.category),
             "waiting": tag.as_ref().is_some_and(|tag| tag.to_respond),
             "labels": tag.map(|tag| tag.labels).unwrap_or_default(),
         })
     }
 
     /// A conversation handed out before, or one of the default list's.
-    fn lookup(&self, id: &str) -> Result<Conversation, EngineError> {
+    pub(crate) fn lookup(&self, id: &str) -> Result<Conversation, EngineError> {
         let state = self.state();
         if let Some(found) = state.known.get(id) {
             return Ok(found.clone());

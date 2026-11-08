@@ -199,10 +199,11 @@ DART_OUT=path/to/lib/src ./scripts/ffi.sh         # and the Dart bindings (asset
   its own threads and reads and writes the same settings.json, accounts.json and Keychain
   item. So far it answers `config.*`, `accounts.*` (sign-in included), `mailboxes`, the
   `mail.*` reads, `refresh` and `chat.*`, polls mail and Chat and follows push like the Swift
-  engine; every other
-  command fails with `unported`. Without the variable nothing changes. `cd Engine && cargo
-  test` uses a Keychain item of its own, never the apps' sign-ins, and fake provider and
-  relay servers, never the real ones.
+  engine, and answers `status`, `mail.tag` and `mail.retag`, tagging the inbox with `omp` as
+  `aiTagging.*` say; every other command fails with `unported`. Without the variable nothing
+  changes. `cd Engine && cargo test` uses a Keychain item of its own, never the apps' sign-ins,
+  fake provider and relay servers, never the real ones, and fake `omp` scripts, never the
+  user's omp.
 - **Engine benchmark.** After `CONFIG=release ./scripts/ffi.sh`, `cd FFI &&
   MAILSTREAM_KIT_CONFIG=release cargo run --release --example bench` runs both engines through
   the same `Mailstream` path, each in its own process with a throwaway home folder and Keychain

@@ -384,7 +384,6 @@ impl Settings {
     }
 
     /// Problems with the file as last read: unknown keys, invalid values, broken JSON.
-    #[cfg(test)]
     pub fn issues(&self) -> Vec<String> {
         self.state.lock().expect("settings lock").1.clone()
     }

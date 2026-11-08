@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import MailstreamKit
 
-/// mail.db as the Swift and the Rust engine (`Engine/`, MS-113) both keep it, checked across
+/// mail.db as the Swift and the Rust engine (`Engine/`, MS-113, MS-116) both keep it, checked across
 /// engines by `scripts/mail-db-interop.sh`: each engine writes `Tests/Fixtures/mail-db-interop.json`
 /// into a throwaway home (`MAILSTREAM_INTEROP=write`), then reads the home the other one wrote
 /// (`MAILSTREAM_INTEROP=read`). Without the variable the test does nothing, so it never touches the
@@ -35,6 +35,7 @@ struct MailDatabaseInteropTests {
         let accounts: [Account]
         let mailboxes: [String: [Mailbox]]
         let listings: [Listing]
+        let tags: [String: ConversationTag]
         let contents: [Content]
         let chat: Chat
     }
@@ -59,6 +60,7 @@ struct MailDatabaseInteropTests {
             cache.saveChatRecent(fixture.chat.recent)
             for (account, list) in fixture.chat.spaces { cache.saveChatSpaces(list, for: account) }
             for item in fixture.chat.messages { cache.saveChatMessages(item.page, for: item.key) }
+            cache.saveTags(fixture.tags)
             // Writes are queued: wait until every one reads back before the process ends.
             let start = ContinuousClock.now
             while await mismatches(cache, fixture).count > 0, ContinuousClock.now - start < .seconds(10) {
@@ -75,6 +77,9 @@ struct MailDatabaseInteropTests {
         if await cache.loadAccounts() != fixture.accounts { out.append("accounts") }
         for (account, mailboxes) in fixture.mailboxes where await cache.loadMailboxes(account) != mailboxes {
             out.append("mailboxes of \(account)")
+        }
+        if await cache.loadTags() != fixture.tags {
+            out.append("tags")
         }
         for listing in fixture.listings {
             let loaded = await cache.loadListing(listing.key)

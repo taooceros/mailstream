@@ -111,6 +111,18 @@ const CASES: &[Case] = &[
         args: |i| json!({ "account": bench_account(0).0, "space": chat_space(i % CHAT_RECENT) }),
         write: false,
     },
+    Case { name: "status", command: "status", args: |_| json!({}), write: false },
+    // Corrections land in mail.db's tags table and signal the other Mailstream processes.
+    Case {
+        name: "mail.tag",
+        command: "mail.tag",
+        args: |i| {
+            json!({ "ids": [conversation_id(i)], "category": (["people", "notification"][i % 2]), "labels": ["Bench", "Work"] })
+        },
+        write: true,
+    },
+    // Forgets every tag and starts a pass, which fails at once on the missing omp.
+    Case { name: "mail.retag", command: "mail.retag", args: |_| json!({}), write: true },
 ];
 
 /// Bench account `n` (0 to 4) and its provider: three Gmail, two Outlook.
@@ -340,8 +352,11 @@ fn seed_home(home: &Path) {
     let support = home.join("Library/Application Support/Mailstream");
     std::fs::create_dir_all(&support).expect("the bench home is writable");
     let senders: Vec<String> = (0..50).map(|n| format!("sender{n:02}@example.com")).collect();
+    // Tagging is on so its commands run, with an omp that does not exist: every pass stops at
+    // once without starting a process, and neither engine looks for the person's omp.
     let settings = json!({
-        "aiTagging.enabled": false,
+        "aiTagging.enabled": true,
+        "aiTagging.ompPath": home.join("no-omp").display().to_string(),
         "remoteContent.trustedSenders": senders,
         "sync.pollSeconds": 120,
     });

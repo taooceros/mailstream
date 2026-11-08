@@ -458,28 +458,6 @@ pub struct MessageContent {
     pub snippet: String,
 }
 
-/// The AI tagger's verdict on a conversation (`Model/Tags.swift`), read here; tagging itself
-/// is a later phase (MS-116).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ConversationTag {
-    pub category: String,
-    #[serde(rename = "toRespond")]
-    pub to_respond: bool,
-    pub labels: Vec<String>,
-    #[serde(rename = "waitingUntil", default, skip_serializing_if = "Option::is_none")]
-    pub waiting_until: Option<Date>,
-}
-
-impl ConversationTag {
-    /// `to_respond`, unless the ask has lapsed by `now`.
-    pub fn is_waiting(&self, now: Date) -> bool {
-        self.to_respond && self.waiting_until.is_none_or(|until| now < until)
-    }
-}
-
-/// The AI categories `mail.list --category` filters by.
-pub const CATEGORIES: [&str; 4] = ["people", "notification", "newsletter", "invitation"];
-
 #[cfg(test)]
 mod tests {
     use super::*;

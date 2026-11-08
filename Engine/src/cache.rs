@@ -20,7 +20,9 @@ use tokio::sync::{OnceCell, mpsc, oneshot};
 use turso::Value as SqlValue;
 
 use crate::chat_model::{ChatAccount, ChatMessagePage, ChatSpaceKey, ChatSpaceList};
-use crate::model::{Account, ConversationTag, Envelope, Mailbox, MailboxKey, MessageContent, MessageRef};
+use crate::model::{Account, Envelope, Mailbox, MailboxKey, MessageContent, MessageRef};
+use crate::signal::ProcessSignal;
+use crate::tagging::ConversationTag;
 
 pub const CONTENT_VERSION: u32 = 3;
 pub const SCHEME: &str = "mscid";
@@ -80,6 +82,9 @@ enum Write {
     Value { table: Table, key: String, value: Vec<u8> },
     Remove { table: Table, key: String },
     Listing { key: String, listing: CachedListing },
+    /// AI tags, encoded, written over the same keys.
+    Tags(Vec<(String, Vec<u8>)>),
+    ClearTags,
     Flush(oneshot::Sender<()>),
 }
 
@@ -195,10 +200,18 @@ impl MailCache {
                 let _ = done.send(());
                 continue;
             }
+            // Tag writes tell every Mailstream process to read the tags again, landed or not,
+            // as the Swift engine's `MailCache.saveTags` does.
+            let signals = matches!(write, Write::Tags(_) | Write::ClearTags);
             if connection.is_none() {
                 connection = database.connection().await;
             }
-            let Some(db) = connection.as_ref() else { continue };
+            let Some(db) = connection.as_ref() else {
+                if signals {
+                    ProcessSignal::TAGS.post();
+                }
+                continue;
+            };
             let result = match write {
                 Write::Value { table, key, value } => db
                     .execute(
@@ -215,12 +228,35 @@ impl MailCache {
                     .await
                     .map(drop),
                 Write::Listing { key, listing } => Self::replace_listing(db, key, listing).await,
+                Write::Tags(tags) => Self::set_tags(db, tags).await,
+                Write::ClearTags => db.execute("DELETE FROM tags", ()).await.map(drop),
                 Write::Flush(_) => unreachable!("answered above"),
             };
             if let Err(error) = result {
                 eprintln!("Mailstream database: {error}");
             }
+            if signals {
+                ProcessSignal::TAGS.post();
+            }
         }
+    }
+
+    /// Writes these tags, leaving the others: each process writes only what it changed, so one
+    /// never overwrites another's changes with its older copy.
+    async fn set_tags(db: &turso::Connection, tags: Vec<(String, Vec<u8>)>) -> turso::Result<()> {
+        db.execute("BEGIN", ()).await?;
+        let result = async {
+            let mut insert = db.prepare("INSERT OR REPLACE INTO tags (key, value) VALUES (?, ?)").await?;
+            for (key, value) in tags {
+                insert.execute(vec![SqlValue::Text(key), SqlValue::Blob(value)]).await?;
+            }
+            db.execute("COMMIT", ()).await.map(drop)
+        }
+        .await;
+        if result.is_err() {
+            let _ = db.execute("ROLLBACK", ()).await;
+        }
+        result
     }
 
     async fn replace_listing(db: &turso::Connection, key: String, listing: CachedListing) -> turso::Result<()> {
@@ -316,6 +352,17 @@ impl MailCache {
             .await
             .unwrap_or_default();
         rows.into_iter().filter_map(|(key, value)| Some((key, serde_json::from_slice(&value).ok()?))).collect()
+    }
+
+    /// Writes the tags that changed, then tells every Mailstream process to read them again.
+    pub fn save_tags(&self, changed: HashMap<String, ConversationTag>) {
+        let rows = changed.into_iter().map(|(key, tag)| (key, encode(&tag))).collect();
+        let _ = self.writes.send(Write::Tags(rows));
+    }
+
+    /// Forgets every tag, then tells every Mailstream process.
+    pub fn clear_tags(&self) {
+        let _ = self.writes.send(Write::ClearTags);
     }
 
     // MARK: Listings
@@ -550,6 +597,7 @@ pub(crate) mod tests {
             accounts: Vec<Account>,
             mailboxes: HashMap<String, Vec<Mailbox>>,
             listings: Vec<Listing>,
+            tags: HashMap<String, ConversationTag>,
             contents: Vec<Content>,
             chat: Chat,
         }
@@ -586,12 +634,14 @@ pub(crate) mod tests {
             for item in &fixture.chat.messages {
                 cache.save_chat_messages(&item.page, &item.key);
             }
+            cache.save_tags(fixture.tags.clone());
             cache.flush().await;
         }
         assert_eq!(cache.load_accounts().await.as_ref(), Some(&fixture.accounts));
         for (account, mailboxes) in &fixture.mailboxes {
             assert_eq!(cache.load_mailboxes(account).await.as_ref(), Some(mailboxes), "mailboxes of {account}");
         }
+        assert_eq!(cache.load_tags().await, fixture.tags);
         for listing in &fixture.listings {
             let loaded = cache.load_listing(&MailboxKey::new(&listing.key.account, &listing.key.mailbox)).await.unwrap();
             let envelopes: Vec<Envelope> = loaded.envelopes.iter().map(|envelope| (**envelope).clone()).collect();

@@ -40,3 +40,8 @@ pub fn push_config() -> PushConfig {
         timing: Default::default(),
     }
 }
+
+/// The main bundle's `CFBundleShortVersionString`; None outside an app bundle (tools, tests).
+pub fn short_version() -> Option<String> {
+    value("CFBundleShortVersionString")
+}

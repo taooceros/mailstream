@@ -56,6 +56,11 @@
       ]
     }
   ],
+  "tags" : {
+    "<lunch@x.com>" : { "category" : "people", "labels" : [ "Food", "Work" ], "toRespond" : true, "waitingUntil" : 815100000.5 },
+    "<plan@outlook.com>" : { "category" : "invitation", "labels" : [ ], "toRespond" : true },
+    "me@gmail.com/INBOX/18f0" : { "category" : "newsletter", "labels" : [ "Shopping" ], "toRespond" : false }
+  },
   "contents" : [
     {
       "ref" : { "account" : "me@gmail.com", "id" : "18f3", "mailbox" : "INBOX" },

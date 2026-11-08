@@ -26,10 +26,12 @@ mod keychain;
 pub mod mail;
 pub mod model;
 mod oauth;
+mod omp;
 mod polling;
 pub mod push;
 mod settings;
 pub mod signal;
+pub mod tagging;
 pub mod text;
 mod threader;
 mod tokens;
@@ -41,6 +43,8 @@ mod mail_tests;
 mod push_tests;
 #[cfg(test)]
 mod chat_tests;
+#[cfg(test)]
+mod tagging_tests;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -107,6 +111,9 @@ pub struct Config {
     pub endpoints: backend::Endpoints,
     /// The push relay; none (tests, builds without it) polls only.
     pub push: push::PushConfig,
+    /// The environment the AI tagger runs `omp` in; None recovers the login shell's PATH as the
+    /// Swift engine does. Tests give their own, so no test ever finds the user's omp.
+    pub tool_environment: Option<HashMap<String, String>>,
 }
 
 impl Config {
@@ -125,6 +132,7 @@ impl Config {
             oauth: OAuthConfig::default(),
             endpoints: backend::Endpoints::default(),
             push: bundle::push_config(),
+            tool_environment: None,
         }
     }
 }
@@ -222,6 +230,7 @@ impl Engine {
             accounts.clone(),
             settings.clone(),
             events.clone(),
+            config.tool_environment.clone(),
         ));
         let push = Arc::new(push::Push::new(
             config.push.clone(),
@@ -315,7 +324,8 @@ impl Engine {
     }
 
     /// Calls `listener` with each change from now on (`accounts`, `settings`, `mailboxes`,
-    /// `conversations`, `previews`, `problems`, `sync`, `chat`, `chatMessages`), on an engine thread.
+    /// `conversations`, `previews`, `tags`, `problems`, `sync`, `chat`, `chatMessages`), on an
+    /// engine thread.
     pub fn subscribe(&self, listener: impl Fn(&'static str) + Send + Sync + 'static) {
         self.core.events.listen(listener);
     }
@@ -367,6 +377,11 @@ impl Core {
             command if chat::COMMANDS.contains(&command) => {
                 return self.chat.run(command, &args).await;
             }
+            "mail.tag" | "mail.retag" => {
+                let mail = &self.mail;
+                mail.tagging().run(command, &args, |id| mail.lookup(id))
+            }
+            "status" => Ok(self.status()),
             "accounts.list" => Ok(json!(self.accounts.list().iter().map(|record| record.json()).collect::<Vec<_>>())),
             "accounts.rename" => {
                 let record = self.record(&args)?;
@@ -415,6 +430,26 @@ impl Core {
             }
             _ => unreachable!("{command} is a ported command"),
         }
+    }
+
+    /// The engine's state: version, accounts, sync, push, AI tagging and settings problems
+    /// (`ControlService.status`).
+    fn status(&self) -> Value {
+        let tagging = self.mail.tagging();
+        json!({
+            "version": bundle::short_version().unwrap_or_else(|| "dev".into()),
+            "pid": std::process::id(),
+            "settingsFile": self.settings.file().path().display().to_string(),
+            "settingsIssues": self.settings.issues(),
+            "accounts": self.mail.account_statuses(),
+            "sync": {
+                "loading": self.mail.is_loading(),
+                "lastRefresh": self.mail.last_refresh().map(model::iso8601),
+                "lastError": self.mail.problem(),
+                "pushConnected": self.push.is_connected(),
+            },
+            "aiTagging": { "enabled": tagging.is_enabled(), "status": tagging.status() },
+        })
     }
 
     /// The signed-in account named by `account`.
@@ -502,6 +537,9 @@ pub(crate) mod tests {
             },
             // No relay: no test registers push with a provider unless it sets a fake one.
             push: push::PushConfig::default(),
+            // A PATH without omp (the system's tools only): tagging runs only the fake omp a
+            // test names.
+            tool_environment: Some(HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())])),
         }
     }
 

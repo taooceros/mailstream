@@ -17,7 +17,7 @@ use crate::{Config, Engine, OAuthClient, OAuthConfig, backend, gmail};
 
 const BASE_MS: i64 = 1_790_000_000_000;
 
-fn engine_for(server: &FakeServer, accounts: &[(&str, &str)]) -> (Engine, Config) {
+pub(crate) fn engine_for(server: &FakeServer, accounts: &[(&str, &str)]) -> (Engine, Config) {
     let mut config = config(OAuthConfig { token_endpoint: Some(format!("{}/token", server.base)), ..OAuthConfig::default() });
     config.endpoints = backend::Endpoints {
         gmail: gmail::GmailEndpoints {
@@ -42,11 +42,11 @@ fn engine_for(server: &FakeServer, accounts: &[(&str, &str)]) -> (Engine, Config
     (Engine::start(config.clone()), config)
 }
 
-fn call(engine: &Engine, command: &str, args: Value) -> Result<Value, crate::EngineError> {
+pub(crate) fn call(engine: &Engine, command: &str, args: Value) -> Result<Value, crate::EngineError> {
     block_on(engine.call(command, args))
 }
 
-fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+pub(crate) fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
     let start = Instant::now();
     while !done() {
         assert!(start.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
@@ -164,13 +164,13 @@ fn gmail_batch(request: &FakeRequest, metadata: &HashMap<String, Value>) -> Repl
     Reply { status: 200, headers: vec![("Content-Type".into(), "multipart/mixed; boundary=resp".into())], body: parts.into_bytes() }
 }
 
-struct GmailCounters {
-    tokens: AtomicUsize,
-    labels: AtomicUsize,
-    listings: AtomicUsize,
+pub(crate) struct GmailCounters {
+    pub tokens: AtomicUsize,
+    pub labels: AtomicUsize,
+    pub listings: AtomicUsize,
 }
 
-fn gmail_server(counters: Arc<GmailCounters>) -> FakeServer {
+pub(crate) fn gmail_server(counters: Arc<GmailCounters>) -> FakeServer {
     let metadata = gmail_metadata();
     FakeServer::start(move |request| {
         let path = request.path.as_str();
