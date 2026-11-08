@@ -113,6 +113,11 @@ Python (standard library only) so both machines run the same ones; on Windows th
 `python`, and the poller also needs `HOST_LABEL=windows LINEAR_TOKEN_FILE=~/.config/linear/token.json
 LINEAR_CREDENTIALS=~/.config/linear/credentials`.
 
+The Mac and the Windows machine talk only through Linear. Work for the other machine is a new
+issue (a sub-issue when it serves one) labelled `omp`, plus `windows` when it is for Windows: its
+poller claims it whoever created it. A comment alone does not reach it, since pollers route only
+workspace members' comments, not the other machine's app.
+
 ## Building
 
 - Rust builds (`Engine/`, `FFI/`, `GPUI/`, Turso) run plain cargo: the repo's
