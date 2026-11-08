@@ -20,6 +20,8 @@ use crate::backend::{EnvelopePage, SearchHit};
 use crate::model::{Address, DISTANT_PAST, Envelope, Mailbox, MailboxRole, MessageContent, date_from_unix};
 use crate::text;
 
+mod changes;
+
 pub const ALL_MAIL: &str = "ALL";
 
 /// Where Gmail's REST API lives: its root, and its batch endpoint (whose sub-requests name

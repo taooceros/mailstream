@@ -723,7 +723,7 @@ final class MailStore {
         return await Self.rankContacts(envelopes, people: people, own: ownAddresses)
     }
 
-    @concurrent private nonisolated static func rankContacts(_ listings: [(account: String, envelopes: [Envelope])],
+    @concurrent nonisolated static func rankContacts(_ listings: [(account: String, envelopes: [Envelope])],
                                                              people: [DirectoryPerson], own: Set<String>) async -> [Contact] {
         var seenMessages = Set<AccountScopedKey>()
         var byEmail: [String: (address: Address, sent: Int, latest: Date, listed: Bool)] = [:]

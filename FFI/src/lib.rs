@@ -11,10 +11,9 @@
 //! Futures here need no particular executor; listeners are called on the main thread.
 //!
 //! With `MAILSTREAM_ENGINE=rust` in the environment the process runs the Rust engine
-//! (`Engine/`, replacing the Swift one phase by phase, MS-110) instead: the Swift engine never
-//! starts, requests go to the Rust engine directly as JSON values, and commands it does not have
-//! yet fail with `unported`. It works on its own threads; listeners are still called on the
-//! main thread.
+//! (`Engine/`, replacing the Swift one, MS-110) instead: the Swift engine never starts and
+//! requests go to the Rust engine directly as JSON values. It works on its own threads;
+//! listeners are still called on the main thread.
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, LazyLock};

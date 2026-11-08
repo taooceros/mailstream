@@ -31,6 +31,14 @@ use crate::tokens::Tokens;
 use crate::tagging::{Candidates, Category, ConversationTag, Tagging};
 use crate::{EngineError, Events, threader};
 
+mod actions;
+mod contacts;
+mod sending;
+#[cfg(test)]
+mod action_tests;
+#[cfg(test)]
+mod interop_tests;
+
 pub const PAGE_SIZE: usize = 50;
 /// Page fetches one listing request may make past the mail already kept, so a rare filter
 /// cannot page through a whole mailbox.
@@ -56,6 +64,14 @@ impl Listing {
     }
 }
 
+/// A conversation a command handed out, with the mailboxes it was listed from (what Archive
+/// moves it out of).
+#[derive(Clone, Debug)]
+struct Known {
+    conversation: Conversation,
+    primary: HashSet<MailboxKey>,
+}
+
 #[derive(Default)]
 struct State {
     accounts: Vec<Account>,
@@ -66,7 +82,7 @@ struct State {
     apis: HashMap<String, Arc<Api>>,
     backends: HashMap<String, Arc<Backend>>,
     /// Conversations handed out by commands, so later ones can address them by id.
-    known: HashMap<String, Conversation>,
+    known: HashMap<String, Known>,
     known_order: VecDeque<String>,
     /// The latest failure, until a refresh clears it.
     problem: Option<String>,
@@ -143,6 +159,8 @@ pub struct Mail {
     cache_reads: Mutex<HashMap<MailboxKey, CacheRead>>,
     /// The AI tags of the default list's conversations.
     tagging: Arc<Tagging>,
+    /// `contacts.search`'s people, loaded again once they are a minute old.
+    contacts: contacts::ContactsLoad,
 }
 
 impl Mail {
@@ -174,6 +192,7 @@ impl Mail {
             state: Mutex::new(State::default()),
             cache_reads: Mutex::new(HashMap::new()),
             tagging,
+            contacts: contacts::ContactsLoad::default(),
         }
     }
 
@@ -327,7 +346,7 @@ impl Mail {
                 }
                 state.listings.retain(|key, _| !removed.contains(&key.account));
                 state.first_page_requests.retain(|key, _| !removed.contains(&key.account));
-                state.known.retain(|_, known| !removed.contains(&known.account));
+                state.known.retain(|_, known| !removed.contains(&known.conversation.account));
                 let known = &state.known;
                 let order: VecDeque<String> = state.known_order.iter().filter(|id| known.contains_key(*id)).cloned().collect();
                 state.known_order = order;
@@ -969,6 +988,9 @@ impl Mail {
             }
             "mail.show" => self.show(args).await,
             "mail.previews" => self.previews(args).await,
+            "mail.read" | "mail.star" | "mail.archive" | "mail.trash" | "mail.restore" => self.act(command, args).await,
+            "mail.send" => self.send_command(args).await,
+            "mail.reply" => self.reply_command(args).await,
             _ => unreachable!("{command} is a mail command"),
         }
     }
@@ -1107,7 +1129,7 @@ impl Mail {
         let summaries: Vec<Value> = {
             let mut state = self.state();
             for conversation in &listing.conversations {
-                remember(&mut state, conversation);
+                remember(&mut state, conversation, &listing.primary);
             }
             listing.conversations.iter().map(|conversation| self.summary(&state, conversation)).collect()
         };
@@ -1165,6 +1187,12 @@ impl Mail {
 
     /// A conversation handed out before, or one of the default list's.
     pub(crate) fn lookup(&self, id: &str) -> Result<Conversation, EngineError> {
+        self.known(id).map(|known| known.conversation)
+    }
+
+    /// `lookup`'s conversation with the mailboxes it was listed from: the default list's for
+    /// one of its conversations.
+    fn known(&self, id: &str) -> Result<Known, EngineError> {
         let state = self.state();
         if let Some(found) = state.known.get(id) {
             return Ok(found.clone());
@@ -1176,7 +1204,7 @@ impl Mail {
             primary.iter().map(|key| (key.clone(), Self::loaded_envelopes(&state, key))).collect();
         let listed = Self::threads(&state, &fetched, &context, Vec::new(), true);
         if let Some(conversation) = listed.conversations.into_iter().find(|conversation| conversation.id == id) {
-            return Ok(conversation);
+            return Ok(Known { conversation, primary: primary.into_iter().collect() });
         }
         Err(EngineError::new(
             "unknown_conversation",
@@ -1342,8 +1370,8 @@ impl Mail {
     }
 }
 
-fn remember(state: &mut State, conversation: &Conversation) {
-    let known = conversation.clone();
+fn remember(state: &mut State, conversation: &Conversation, primary: &HashSet<MailboxKey>) {
+    let known = Known { conversation: conversation.clone(), primary: primary.clone() };
     if state.known.insert(conversation.id.clone(), known).is_none() {
         state.known_order.push_back(conversation.id.clone());
     }

@@ -134,6 +134,27 @@ const CASES: &[Case] = &[
         },
         write: false,
     },
+    // Changes shown at once, then refused by the provider (no sign-in): the change is written
+    // to mail.db and rolled back. Every other pass marks unread / unstars.
+    Case {
+        name: "mail.read",
+        command: "mail.read",
+        args: |i| json!({ "ids": [conversation_id(i)], "unread": i / 295 % 2 == 1 }),
+        write: false,
+    },
+    Case {
+        name: "mail.star",
+        command: "mail.star",
+        args: |i| json!({ "ids": [conversation_id(i)], "off": i / 295 % 2 == 1 }),
+        write: false,
+    },
+    // Completion over every listed address, ranked once a minute.
+    Case {
+        name: "contacts.search",
+        command: "contacts.search",
+        args: |i| json!({ "query": (["sender1", "se", "bench", "alerts"][i % 4]) }),
+        write: false,
+    },
 ];
 
 /// Senders whose pictures are cached; every third has none.
@@ -757,7 +778,7 @@ fn child(args: &[String]) {
         if accounts.as_array().map(Vec::len) != Some(5) {
             fail(&format!("{engine} lists {accounts} instead of the 5 bench accounts"));
         }
-        if cases.iter().any(|case| case.command.starts_with("mail")) {
+        if cases.iter().any(|case| case.command.starts_with("mail") || case.command.starts_with("contacts")) {
             mail_ready(&engine);
         }
         if cases.iter().any(|case| case.command.starts_with("chat")) {

@@ -1,6 +1,6 @@
 //! Mailstream's engine in Rust, replacing the Swift one (`Sources/MailstreamKit`) phase by
 //! phase (MS-110). The `mailstream` crate in `FFI/` runs it instead of the Swift engine when
-//! `MAILSTREAM_ENGINE=rust` is set; commands not ported yet answer `unported`.
+//! `MAILSTREAM_ENGINE=rust` is set.
 //!
 //! The engine runs on its own tokio runtime, so its host needs no main-thread run loop. Requests
 //! are the control socket's commands (`config.set`, `accounts.list`, …) with their arguments as a
@@ -25,6 +25,7 @@ pub mod graph;
 mod json;
 mod keychain;
 pub mod mail;
+mod mime;
 pub mod model;
 mod oauth;
 mod omp;
@@ -64,7 +65,7 @@ use crate::settings::Settings;
 use crate::tokens::Tokens;
 
 /// A failed request: a stable `code` for programs (`usage`, `invalid_setting`,
-/// `unknown_account`, `confirm`, `unported`, `failed`, …) and a `message` for people.
+/// `unknown_account`, `confirm`, `failed`, …) and a `message` for people.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineError {
     pub code: String,
@@ -387,7 +388,8 @@ impl Core {
             return Ok(result);
         }
         match command {
-            "mailboxes" | "mail.list" | "mail.search" | "mail.show" | "mail.previews" => {
+            "mailboxes" | "mail.list" | "mail.search" | "mail.show" | "mail.previews" | "mail.read" | "mail.star"
+            | "mail.archive" | "mail.trash" | "mail.restore" | "mail.send" | "mail.reply" => {
                 return self.mail.run(command, &args).await;
             }
             "refresh" => Ok(self.polling.refresh()),
@@ -400,6 +402,13 @@ impl Core {
             }
             "status" => Ok(self.status()),
             "mail.avatars" => self.avatars.command(&args).await,
+            "contacts.search" => {
+                let avatars = self.avatars.clone();
+                let people = async move {
+                    avatars.people().await.into_iter().map(|person| (person.name, person.emails)).collect()
+                };
+                Ok(self.mail.search_contacts(&args, people).await)
+            }
             "accounts.list" => Ok(json!(self.accounts.list().iter().map(|record| record.json()).collect::<Vec<_>>())),
             "accounts.rename" => {
                 let record = self.record(&args)?;
@@ -446,7 +455,7 @@ impl Core {
                 self.tokens.forget(&record.id);
                 Ok(json!({ "removed": record.id }))
             }
-            _ => unreachable!("{command} is a ported command"),
+            _ => unreachable!("{command} is in the command table"),
         }
     }
 
@@ -590,7 +599,6 @@ pub(crate) mod tests {
         let list = block_on(engine.call("config.list", json!({}))).unwrap();
         assert_eq!(list["settings"][9]["value"], json!(30));
         assert_eq!(list["settings"][7]["changed"], json!(false));
-        assert_eq!(block_on(engine.call("mail.read", json!({ "ids": ["x"] }))).unwrap_err().code, "unported");
         drop(engine);
         cleanup(&config);
     }

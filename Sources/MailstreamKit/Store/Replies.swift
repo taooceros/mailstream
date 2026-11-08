@@ -137,7 +137,7 @@ extension MailStore {
         address.displayName == address.email ? address.email : "\(address.displayName) <\(address.email)>"
     }
 
-    private nonisolated static func quote(_ text: String) -> String {
+    nonisolated static func quote(_ text: String) -> String {
         let body = text.replacingOccurrences(of: "\r\n", with: "\n").trimmingCharacters(in: .newlines)
         guard !body.isEmpty else { return "" }
         return body.split(separator: "\n", omittingEmptySubsequences: false)

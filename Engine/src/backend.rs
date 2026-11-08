@@ -46,6 +46,13 @@ pub struct SearchHit {
     pub envelope: Envelope,
 }
 
+/// The flags a change sets or clears.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flag {
+    Seen,
+    Flagged,
+}
+
 pub enum Backend {
     Gmail(Gmail),
     Graph(Graph),
@@ -102,6 +109,37 @@ impl Backend {
         match self {
             Self::Gmail(gmail) => gmail.content(id, directory, url_base, priority).await,
             Self::Graph(graph) => graph.content(id, directory, url_base, priority).await,
+        }
+    }
+
+    pub async fn set_flag(&self, flag: Flag, on: bool, ids: &[String]) -> Result<(), ApiError> {
+        match self {
+            Self::Gmail(gmail) => gmail.set_flag(flag, on, ids).await,
+            Self::Graph(graph) => graph.set_flag(flag, on, ids).await,
+        }
+    }
+
+    /// Moves to another mailbox of this account; moving to the `All` mailbox archives.
+    pub async fn move_to(&self, ids: &[String], from: &str, to: &str) -> Result<(), ApiError> {
+        match self {
+            Self::Gmail(gmail) => gmail.move_to(ids, from, to).await,
+            Self::Graph(graph) => graph.move_to(ids, to).await,
+        }
+    }
+
+    /// Deletes for good; only called for messages already in the trash.
+    pub async fn delete(&self, ids: &[String]) -> Result<(), ApiError> {
+        match self {
+            Self::Gmail(gmail) => gmail.delete(ids).await,
+            Self::Graph(graph) => graph.delete(ids).await,
+        }
+    }
+
+    /// Sends and files the copy in Sent. Not idempotent: never repeated.
+    pub async fn send(&self, message: &crate::mime::OutgoingMessage) -> Result<(), ApiError> {
+        match self {
+            Self::Gmail(gmail) => gmail.send(message).await,
+            Self::Graph(graph) => graph.send(message).await,
         }
     }
 }

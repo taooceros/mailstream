@@ -15,7 +15,7 @@ use crate::keychain::{Keychain, SignIns};
 use crate::tests::{cleanup, config};
 use crate::{Config, Engine, OAuthClient, OAuthConfig, backend, gmail};
 
-const BASE_MS: i64 = 1_790_000_000_000;
+pub(crate) const BASE_MS: i64 = 1_790_000_000_000;
 
 pub(crate) fn engine_for(server: &FakeServer, accounts: &[(&str, &str)]) -> (Engine, Config) {
     let mut config = config(OAuthConfig { token_endpoint: Some(format!("{}/token", server.base)), ..OAuthConfig::default() });
@@ -55,24 +55,24 @@ pub(crate) fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
-fn token_reply(calls: &AtomicUsize) -> Reply {
+pub(crate) fn token_reply(calls: &AtomicUsize) -> Reply {
     let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
     Reply::json(json!({ "access_token": format!("at{call}"), "expires_in": 3600 }))
 }
 
 // MARK: - Gmail
 
-fn encode(text: &str) -> String {
+pub(crate) fn encode(text: &str) -> String {
     URL_SAFE_NO_PAD.encode(text)
 }
 
-fn header(name: &str, value: &str) -> Value {
+pub(crate) fn header(name: &str, value: &str) -> Value {
     json!({ "name": name, "value": value })
 }
 
 /// The fake mailbox: 60 inbox messages (two of them one sender's repeated alert) and one sent
 /// reply to the newest.
-fn gmail_metadata() -> HashMap<String, Value> {
+pub(crate) fn gmail_metadata() -> HashMap<String, Value> {
     let mut messages = HashMap::new();
     for n in 0..60 {
         let id = format!("i{n:02}");
@@ -113,7 +113,7 @@ fn gmail_metadata() -> HashMap<String, Value> {
     messages
 }
 
-fn gmail_full(id: &str) -> Value {
+pub(crate) fn gmail_full(id: &str) -> Value {
     if id == "i00" {
         return json!({ "id": id, "payload": {
             "mimeType": "multipart/mixed", "headers": [header("Cc", "Cy <cy@x.com>")],
@@ -133,7 +133,7 @@ fn gmail_full(id: &str) -> Value {
 }
 
 /// Gmail's batch answer for the sub-requests in `request`'s body.
-fn gmail_batch(request: &FakeRequest, metadata: &HashMap<String, Value>) -> Reply {
+pub(crate) fn gmail_batch(request: &FakeRequest, metadata: &HashMap<String, Value>) -> Reply {
     let text = request.text();
     let mut parts = String::new();
     let mut number = None;
@@ -227,7 +227,7 @@ pub(crate) fn gmail_server(counters: Arc<GmailCounters>) -> FakeServer {
     })
 }
 
-fn ids(listing: &Value) -> Vec<String> {
+pub(crate) fn ids(listing: &Value) -> Vec<String> {
     listing["conversations"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap().to_string()).collect()
 }
 
@@ -348,7 +348,7 @@ fn lists_shows_and_searches_gmail_and_serves_the_cache_without_asking_again() {
 
 // MARK: - Graph
 
-fn graph_message(id: &str, conversation: &str, from: (&str, &str), subject: &str, minutes: i64) -> Value {
+pub(crate) fn graph_message(id: &str, conversation: &str, from: (&str, &str), subject: &str, minutes: i64) -> Value {
     let date = crate::model::iso8601(crate::model::date_from_unix((BASE_MS / 1000 + minutes * 60) as f64));
     json!({
         "id": id, "conversationId": conversation, "internetMessageId": format!("<{id}@outlook>"), "subject": subject,

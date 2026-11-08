@@ -101,7 +101,7 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Address {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -145,6 +145,30 @@ impl Address {
             Some(name) => format!("{name} <{}>", self.email),
             None => self.email.clone(),
         }
+    }
+
+    /// Parses `Name <a@b>`, the quoted form `rfc5322` writes, or a bare address.
+    pub fn parse(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if let (Some(lt), Some(gt)) = (trimmed.rfind('<'), trimmed.rfind('>'))
+            && lt < gt
+        {
+            let email = trimmed[lt + 1..gt].trim_matches(|c| c == ' ' || c == '\t');
+            let mut name = trimmed[..lt].trim_matches(|c| c == ' ' || c == '\t').to_string();
+            if name.chars().count() >= 2 && name.starts_with('"') && name.ends_with('"') {
+                name = name[1..name.len() - 1].replace("\\\"", "\"").replace("\\\\", "\\");
+            } else {
+                name = name.trim_matches('"').to_string();
+            }
+            if !email.contains('@') {
+                return None;
+            }
+            return Some(Self::new((!name.is_empty()).then_some(name), email));
+        }
+        trimmed.contains('@').then(|| Self::new(None, trimmed))
     }
 }
 

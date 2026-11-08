@@ -1,7 +1,6 @@
 //! The command table and argument checks, as the Swift engine's `CommandSpec` and `Arguments`
-//! (`Sources/MailstreamKit/Control/Commands.swift`, `ControlService.swift`) define them for the
-//! commands ported so far. Commands the Swift engine has and this one does not yet answer
-//! `unported`.
+//! (`Sources/MailstreamKit/Control/Commands.swift`, `ControlService.swift`) define them: every
+//! command the Swift engine has.
 use serde_json::{Map, Value};
 
 use crate::EngineError;
@@ -24,6 +23,11 @@ const fn option(name: &'static str) -> Argument {
     Argument { name, positional: false, required: false, default: None }
 }
 
+/// A `--name` argument the request must carry.
+const fn required(name: &'static str) -> Argument {
+    Argument { name, positional: false, required: true, default: None }
+}
+
 const fn number(name: &'static str, default: i64) -> Argument {
     Argument { name, positional: false, required: false, default: Some(default) }
 }
@@ -40,8 +44,8 @@ impl Spec {
     }
 }
 
-/// The ported commands, with the arguments and defaults of the Swift engine's `CommandSpec`.
-pub(crate) const PORTED: &[Spec] = &[
+/// The commands, with the arguments and defaults of the Swift engine's `CommandSpec`.
+pub(crate) const COMMANDS: &[Spec] = &[
     Spec { id: "config.list", arguments: &[] },
     Spec { id: "config.get", arguments: &[positional("key")] },
     Spec { id: "config.set", arguments: &[positional("key"), positional("value")] },
@@ -101,30 +105,45 @@ pub(crate) const PORTED: &[Spec] = &[
     },
     Spec { id: "mail.retag", arguments: &[] },
     Spec { id: "mail.avatars", arguments: &[positional("addresses"), option("automated")] },
+    Spec { id: "mail.read", arguments: &[positional("ids"), option("unread")] },
+    Spec { id: "mail.star", arguments: &[positional("ids"), option("off")] },
+    Spec { id: "mail.archive", arguments: &[positional("ids")] },
+    Spec { id: "mail.trash", arguments: &[positional("ids"), option("yes")] },
+    Spec { id: "mail.restore", arguments: &[positional("ids")] },
+    Spec {
+        id: "mail.send",
+        arguments: &[
+            required("from"),
+            required("to"),
+            option("cc"),
+            option("bcc"),
+            required("subject"),
+            required("body"),
+            option("attachments"),
+            option("yes"),
+        ],
+    },
+    Spec {
+        id: "mail.reply",
+        arguments: &[
+            positional("id"),
+            required("body"),
+            option("all"),
+            option("to"),
+            option("cc"),
+            option("bcc"),
+            option("subject"),
+            option("attachments"),
+            option("yes"),
+        ],
+    },
+    Spec { id: "contacts.search", arguments: &[positional("query"), number("limit", 10)] },
 ];
 
-/// The Swift engine's other commands, ported in later phases (MS-114 to MS-118).
-pub(crate) const UNPORTED: &[&str] = &[
-    "mail.read",
-    "mail.star",
-    "mail.archive",
-    "mail.trash",
-    "mail.restore",
-    "mail.send",
-    "mail.reply",
-    "contacts.search",
-];
-
-/// The spec of a ported `command`, or the error the request answers.
+/// The spec of `command`, or the error the request answers.
 pub(crate) fn spec(command: &str) -> Result<&'static Spec, EngineError> {
-    if let Some(spec) = PORTED.iter().find(|spec| spec.id == command) {
+    if let Some(spec) = COMMANDS.iter().find(|spec| spec.id == command) {
         return Ok(spec);
-    }
-    if UNPORTED.contains(&command) {
-        return Err(EngineError::new(
-            "unported",
-            format!("{command} is not in the Rust engine yet (MAILSTREAM_ENGINE=rust)."),
-        ));
     }
     Err(EngineError::new(
         "unknown_command",
@@ -223,7 +242,6 @@ mod tests {
         let given = args("accounts.add", json!({ "provider": "google", "client-id": null })).unwrap();
         assert_eq!(given.string("client-id"), None);
         assert!(args("accounts.remove", json!({ "account": "a@b.c", "yes": "true" })).unwrap().bool("yes"));
-        assert_eq!(spec("mail.read").err().unwrap().code, "unported");
         let defaults = args("mail.list", json!({ "mailbox": "inbox, sent" })).unwrap();
         assert_eq!((defaults.int("limit"), defaults.list("mailbox")), (Some(25), Some(vec!["inbox".into(), "sent".into()])));
         assert_eq!(args("mail.show", json!({ "id": "x", "max-chars": "40" })).unwrap().int("max-chars"), Some(40));

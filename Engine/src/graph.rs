@@ -17,6 +17,8 @@ use crate::backend::{EnvelopePage, SearchHit};
 use crate::model::{Address, DISTANT_PAST, Envelope, Mailbox, MailboxRole, MessageContent, parse_iso8601};
 use crate::text;
 
+mod changes;
+
 pub const ROOT: &str = "https://graph.microsoft.com/v1.0/";
 
 const IMMUTABLE_IDS: &str = "IdType=\"ImmutableId\"";

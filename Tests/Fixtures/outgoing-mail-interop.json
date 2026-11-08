@@ -1,0 +1,158 @@
+{
+  "messages": [
+    {
+      "from": { "name": "Ann Example", "email": "ann@example.com" },
+      "to": [{ "email": "bob@example.com" }],
+      "cc": [], "bcc": [],
+      "subject": "Lunch",
+      "text": "Hi Bob,\n\nNoon works.\n"
+    },
+    {
+      "from": { "name": "Ann \"the\" Example", "email": "ann@example.com" },
+      "to": [
+        { "name": "Person, Zero", "email": "person0@example.com" },
+        { "name": "Person One", "email": "person1@example.com" },
+        { "name": "person2@example.com", "email": "person2@example.com" },
+        { "name": "Zoë Ångström", "email": "zoe@example.com" },
+        { "name": "陈小明", "email": "xm@example.cn" },
+        { "name": "O'Brien", "email": "ob@example.com" },
+        { "name": "Line\nBreak\tTab", "email": "lb@example.com" }
+      ],
+      "cc": [{ "name": "=?odd?=", "email": "odd@example.com" }],
+      "bcc": [{ "email": "hidden@example.com" }],
+      "subject": "A subject long enough that it has to fold somewhere past the seventy-eighth column, twice over for good measure",
+      "text": "café = ok \r\nA line far longer than seventy-six characters, which quoted-printable has to break softly somewhere\rTrailing tab\t\n\nend"
+    },
+    {
+      "from": { "email": "me@example.com" },
+      "to": [{ "name": "Grüße", "email": "g@example.de" }],
+      "cc": [], "bcc": [],
+      "subject": "Grüße aus Köln, und noch ein bisschen mehr Text dazu\nzweite Zeile mit 😀 Emoji und 👨‍👩‍👧 Familie",
+      "text": "Hallo 👋",
+      "html": "<!doctype html><html><body><p>Hallo &amp; 👋</p></body></html>\n",
+      "attachments": [
+        { "name": "menu.pdf", "base64": "JVBERi0xLjQKJcfsj6IKMSAwIG9iago8PC9UeXBlL0NhdGFsb2c+PgplbmRvYmoKdHJhaWxlcjw8L1Jvb3QgMSAwIFI+PgolJUVPRgo=" },
+        { "name": "Übersicht März.txt", "base64": "w5xiZXJzaWNodA==" },
+        { "name": "data.unknownext", "base64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5f" }
+      ],
+      "inReplyTo": "<source@example.com>",
+      "references": ["ancestor@example.com", "older@example.com", "another-rather-long-message-id-0123456789@mail.example.com", "source@example.com"],
+      "thread": "thread-1"
+    },
+    {
+      "from": { "name": "Me", "email": "me@example.com" },
+      "to": [{ "email": "a@example.com" }],
+      "cc": [], "bcc": [],
+      "subject": "Re: =?not encoded?= plain",
+      "text": "",
+      "html": "<p>Only HTML</p>"
+    }
+  ],
+  "replies": [
+    {
+      "source": {
+        "ref": { "account": "me@example.com", "mailbox": "INBOX", "id": "m1" },
+        "role": "inbox",
+        "envelope": {
+          "id": "m1", "thread": "t1", "messageID": "m1@example.com", "inReplyTo": [], "flags": ["seen"],
+          "subject": "Lunch?", "size": 10, "date": 783800000,
+          "from": [{ "name": "Ann", "email": "ann@example.com" }],
+          "to": [{ "name": "Me", "email": "ME@example.com" }, { "name": "Bob", "email": "bob@example.com" }]
+        }
+      },
+      "content": {
+        "text": "\r\nHi all,\r\n> earlier quote\r\nlunch at noon?\r\n\r\n",
+        "html": "<html><head><style>p{}</style></head><BODY class=\"x\"><p>Hi <a href=\"https://example.com\">all</a></p><img src=\"mscid://abc/0-logo.png\"><p>lunch?</p></body></html>",
+        "cc": [{ "name": "Cy", "email": "cy@example.com" }, { "email": "bob@example.com" }],
+        "replyTo": [], "references": ["root@example.com"], "attachments": [], "snippet": ""
+      },
+      "own": ["me@example.com"],
+      "all": true,
+      "reply": "Sounds good, see https://example.com/menu?x=1&y=2\n\n<b>not bold</b>"
+    },
+    {
+      "source": {
+        "ref": { "account": "me@example.com", "mailbox": "INBOX", "id": "m2" },
+        "role": "inbox",
+        "envelope": {
+          "id": "m2", "inReplyTo": [], "flags": [], "subject": "AW: [list] Plan", "size": 10, "date": 783830000.75,
+          "from": [{ "email": "list@example.com" }],
+          "to": [{ "email": "list@example.com" }]
+        }
+      },
+      "content": {
+        "text": "Plain only\n-- \nSig",
+        "cc": [], "replyTo": [{ "name": "Poster", "email": "poster@example.com" }], "references": [], "attachments": [], "snippet": ""
+      },
+      "own": ["me@example.com"],
+      "all": false,
+      "reply": "Thanks"
+    },
+    {
+      "source": {
+        "ref": { "account": "me@example.com", "mailbox": "SENT", "id": "m3" },
+        "role": "sent",
+        "envelope": {
+          "id": "m3", "inReplyTo": [], "flags": ["seen"], "subject": "", "size": 10,
+          "from": [{ "name": "Me", "email": "me@example.com" }],
+          "to": []
+        }
+      },
+      "content": {
+        "text": "", "cc": [{ "email": "carl@example.com" }, { "email": "me@example.com" }],
+        "replyTo": [], "references": [], "attachments": [], "snippet": ""
+      },
+      "own": ["me@example.com"],
+      "all": true,
+      "reply": ""
+    },
+    {
+      "source": {
+        "ref": { "account": "me@example.com", "mailbox": "INBOX", "id": "m4" },
+        "role": "inbox",
+        "envelope": {
+          "id": "m4", "inReplyTo": [], "flags": [], "subject": "Notice", "size": 10, "date": 783900000,
+          "from": [],
+          "to": [{ "email": "me@example.com" }]
+        }
+      },
+      "own": ["me@example.com"],
+      "all": false,
+      "reply": "Hello"
+    }
+  ],
+  "contacts": {
+    "own": ["me@example.com"],
+    "listings": [
+      {
+        "account": "me@example.com",
+        "envelopes": [
+          { "id": "1", "inReplyTo": [], "flags": [], "subject": "", "size": 0, "date": 783800010,
+            "from": [{ "name": "Émile Zola", "email": "emile@example.com" }], "to": [{ "name": "Me", "email": "me@example.com" }] },
+          { "id": "2", "inReplyTo": [], "flags": [], "subject": "", "size": 0, "date": 783800005,
+            "from": [{ "name": "Me", "email": "me@example.com" }], "to": [{ "name": "Bea Bauer", "email": "Bea.Bauer@example.com" }] },
+          { "id": "3", "inReplyTo": [], "flags": [], "subject": "", "size": 0, "date": 783800020,
+            "from": [{ "email": "no-reply@shop.example" }], "to": [{ "email": "me@example.com" }] },
+          { "id": "4", "inReplyTo": [], "flags": [], "subject": "", "size": 0, "date": 783800030,
+            "from": [{ "name": "Emma", "email": "emma@example.com" }], "to": [{ "email": "me@example.com" }, { "name": "emile@example.com", "email": "emile@example.com" }] },
+          { "id": "5", "inReplyTo": [], "flags": [], "subject": "", "size": 0, "date": 783800040,
+            "from": [{ "name": "Me", "email": "me@example.com" }], "to": [{ "name": "Bea B.", "email": "bea.bauer@example.com" }, { "email": "notifications@service.example" }] }
+        ]
+      },
+      {
+        "account": "me@example.com",
+        "envelopes": [
+          { "id": "2", "inReplyTo": [], "flags": [], "subject": "", "size": 0, "date": 783800005,
+            "from": [{ "name": "Me", "email": "me@example.com" }], "to": [{ "name": "Bea Bauer", "email": "Bea.Bauer@example.com" }] }
+        ]
+      }
+    ],
+    "people": [
+      { "name": " Dora Directory ", "emails": ["dora@corp.example", "d.directory@corp.example"] },
+      { "emails": ["unnamed@corp.example"] },
+      { "name": "Emma Listed", "emails": ["emma@example.com"] },
+      { "name": "Noreply Team", "emails": ["noreply@corp.example"] }
+    ],
+    "queries": ["em", "EMILE@EXAMPLE.COM", "zol", "bauer", "dir", "d", "corp", "  ", "straße", "notif", "me"]
+  }
+}
