@@ -9,7 +9,7 @@ gpui = "0.2.2"
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 unicode-segmentation = "1"
-mailstream = { path = "../FFI" }
+mailstream = { path = "../FFI", default-features = false }
 futures = "0.3"
 url = "2"
 raw-window-handle = "0.6"

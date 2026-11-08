@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart' show DefaultMaterialLocalizations;
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
@@ -31,8 +33,9 @@ class MailstreamApp extends StatefulWidget {
 }
 
 class _MailstreamAppState extends State<MailstreamApp> {
-  /// The reader's renderer: HyperRender on every launch, switched only by hand.
-  final _renderer = ValueNotifier(ReaderRenderer.hyper);
+  /// The reader's renderer: HyperRender on every launch, switched only by hand
+  /// (`MAILSTREAM_READER_RENDERER` picks another for the bench).
+  final _renderer = ValueNotifier(ReaderRenderer.fromName(Platform.environment['MAILSTREAM_READER_RENDERER']));
 
   @override
   void dispose() {

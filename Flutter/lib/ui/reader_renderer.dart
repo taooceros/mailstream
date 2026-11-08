@@ -7,10 +7,16 @@ import 'design.dart';
 /// What draws an HTML body in the reader.
 enum ReaderRenderer {
   hyper('HyperRender'),
+  blitz('Blitz'),
   webKit('WebView (original)');
 
   const ReaderRenderer(this.title);
   final String title;
+
+  /// The renderer named by `MAILSTREAM_READER_RENDERER` (`hyper`, `blitz` or `webKit`), so the
+  /// bench can open the reader in a given renderer; HyperRender when unset or unknown.
+  static ReaderRenderer fromName(String? name) =>
+      values.firstWhere((r) => r.name.toLowerCase() == name?.toLowerCase(), orElse: () => hyper);
 }
 
 /// The Mac reader's renderer, kept in memory: every launch starts in HyperRender, and a choice
@@ -26,7 +32,7 @@ class ReaderRendererScope extends InheritedNotifier<ValueNotifier<ReaderRenderer
   static ReaderRenderer current(BuildContext context) => maybeOf(context)?.value ?? ReaderRenderer.hyper;
 }
 
-/// The switch in the reader's header, labelled with the renderer in use.
+/// The three-way switch in the reader's header, labelled with the renderer in use.
 class ReaderRendererSwitch extends StatelessWidget {
   const ReaderRendererSwitch({super.key});
 
@@ -34,14 +40,16 @@ class ReaderRendererSwitch extends StatelessWidget {
   Widget build(BuildContext context) {
     final controller = ReaderRendererScope.maybeOf(context);
     if (controller == null || !Host.mac) return const SizedBox.shrink();
-    final renderer = controller.value;
     return Row(mainAxisSize: MainAxisSize.min, children: [
-      MacosSwitch(
-        value: renderer == ReaderRenderer.hyper,
-        onChanged: (hyper) => controller.value = hyper ? ReaderRenderer.hyper : ReaderRenderer.webKit,
+      Text('Renderer:', style: context.text.body),
+      const SizedBox(width: 6),
+      MacosPopupButton<ReaderRenderer>(
+        value: controller.value,
+        onChanged: (renderer) {
+          if (renderer != null) controller.value = renderer;
+        },
+        items: [for (final r in ReaderRenderer.values) MacosPopupMenuItem(value: r, child: Text(r.title))],
       ),
-      const SizedBox(width: 8),
-      Text('Renderer: ${renderer.title}', style: context.text.body),
     ]);
   }
 }

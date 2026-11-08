@@ -16,6 +16,7 @@ import 'glass.dart';
 import 'html_parts.dart';
 import 'mail_html_windows.dart';
 import 'hyper_body.dart';
+import 'blitz_body.dart';
 import 'hyper_resources.dart';
 import 'reader_renderer.dart';
 
@@ -471,9 +472,10 @@ class _Body extends StatelessWidget {
 }
 
 /// An HTML body at the height of its content. On the Mac the reader's switch picks the renderer
-/// ([ReaderRendererScope]): HyperRender ([HyperBody]) by default, or WebKit (`MailHtmlView` in
-/// the runner); both draw the same prepared parts, only the chosen one is mounted, and switching
-/// keeps the parts and the fold. Windows draws with WebView2 ([WindowsMailHtml]).
+/// ([ReaderRendererScope]): HyperRender ([HyperBody]) by default, Blitz ([BlitzBody], laid out
+/// and painted in Rust), or WebKit (`MailHtmlView` in the runner); all draw the same prepared
+/// parts, only the chosen one is mounted, and switching keeps the parts and the fold. Windows
+/// draws with WebView2 ([WindowsMailHtml]).
 /// Quoted history (Gmail, Outlook, Thunderbird, Apple Mail markup) is cut out of the body and
 /// folds behind a toggle, drawn when it opens.
 class MailHtml extends StatefulWidget {
@@ -559,12 +561,14 @@ class _MailHtmlState extends State<MailHtml> {
     final (main, quoted) = parts;
     final owner = widget.owner;
     List<String> part(String name) => [owner.account, owner.conversation, owner.message, name];
-    final hyper = ReaderRendererScope.current(context) == ReaderRenderer.hyper;
+    final renderer = ReaderRendererScope.current(context);
     Widget view(String html, String name) => !Host.mac
         ? WindowsMailHtml(key: ValueKey(html), html: html, onOpenLink: widget.onOpenLink)
-        : hyper
-        ? HyperBody(key: ValueKey(html), html: html)
-        : _WebBody(key: ValueKey(html), owner: part(name), html: html);
+        : switch (renderer) {
+            ReaderRenderer.hyper => HyperBody(key: ValueKey(html), html: html),
+            ReaderRenderer.blitz => BlitzBody(key: ValueKey(html), html: html),
+            ReaderRenderer.webKit => _WebBody(key: ValueKey(html), owner: part(name), html: html),
+          };
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [

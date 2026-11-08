@@ -14,6 +14,7 @@ import 'package:mailstream_ui/ui/html_parts.dart';
 import 'package:mailstream_ui/ui/hyper_body.dart';
 import 'package:mailstream_ui/ui/hyper_resources.dart';
 import 'package:mailstream_ui/ui/hyper_table.dart';
+import 'package:mailstream_ui/ui/blitz_body.dart';
 import 'package:mailstream_ui/ui/reader.dart';
 import 'package:mailstream_ui/ui/reader_renderer.dart';
 
@@ -139,6 +140,12 @@ void main() {
     );
     Iterable<String> webDocuments(WidgetTester tester) => tester.widgetList<AppKitView>(find.byType(AppKitView))
         .map((view) => (view.creationParams! as Map)['html'] as String);
+    Future<void> choose(WidgetTester tester, ReaderRenderer renderer) async {
+      await tester.tap(find.byType(MacosPopupButton<ReaderRenderer>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(renderer.title).last);
+      await tester.pumpAndSettle();
+    }
 
     testWidgets('keeps the message and open quote, prepares once, and mounts one renderer', (tester) async {
       var prepared = 0;
@@ -150,24 +157,30 @@ void main() {
       addTearDown(renderer.dispose);
       await tester.pumpWidget(host(renderer, cache));
       await tester.pumpAndSettle();
-      expect(find.text('Renderer: HyperRender'), findsOneWidget);
+      expect(find.text('HyperRender'), findsOneWidget);
       await tester.tap(find.byIcon(CupertinoIcons.ellipsis));
       await tester.pumpAndSettle();
       expect(find.byType(HyperBody), findsNWidgets(2));
       expect(find.byType(AppKitView), findsNothing);
 
-      await tester.tap(find.byType(MacosSwitch));
-      await tester.pumpAndSettle();
+      await choose(tester, ReaderRenderer.webKit);
       expect(renderer.value, ReaderRenderer.webKit);
-      expect(find.text('Renderer: WebView (original)'), findsOneWidget);
+      expect(find.text('WebView (original)'), findsOneWidget);
       expect(find.byType(HyperBody), findsNothing);
       const meta = '<meta http-equiv="Content-Security-Policy" content="$webKitContentPolicy">';
       // The quote is still open: both parts are on screen, each under the content policy.
       expect(webDocuments(tester), ['<!DOCTYPE html>$meta<p>main</p>', '$meta<p>history</p>']);
 
-      await tester.tap(find.byType(MacosSwitch));
-      await tester.pumpAndSettle();
+      await choose(tester, ReaderRenderer.blitz);
+      expect(renderer.value, ReaderRenderer.blitz);
+      // Blitz draws the same prepared parts, the quote still open, and nothing else is mounted.
+      expect(tester.widgetList<BlitzBody>(find.byType(BlitzBody)).map((b) => b.html), ['<!DOCTYPE html><p>main</p>', '<p>history</p>']);
+      expect(find.byType(HyperBody), findsNothing);
+      expect(find.byType(AppKitView), findsNothing);
+
+      await choose(tester, ReaderRenderer.hyper);
       expect(find.byType(HyperBody), findsNWidgets(2));
+      expect(find.byType(BlitzBody), findsNothing);
       expect(find.byType(AppKitView), findsNothing);
       expect(prepared, 1);
       await tester.pumpWidget(const SizedBox());
@@ -201,7 +214,7 @@ void main() {
         theme: MailTheme.macos(Brightness.light),
         home: ReaderRendererScope(controller: renderer, child: const Center(child: ReaderRendererSwitch())),
       ));
-      expect(find.byType(MacosSwitch), findsNothing);
+      expect(find.byType(MacosPopupButton<ReaderRenderer>), findsNothing);
       expect(find.textContaining('Renderer:'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });

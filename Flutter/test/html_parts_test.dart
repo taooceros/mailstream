@@ -333,8 +333,9 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  // The anti-crosstalk rules (MS-87, MS-79) hold whichever renderer draws the bodies.
-  for (final drawn in ReaderRenderer.values) {
+  // The anti-crosstalk rules (MS-87, MS-79) hold whichever renderer draws the bodies (Blitz draws
+  // the same prepared parts; hyper_render_test checks it gets them).
+  for (final drawn in [ReaderRenderer.hyper, ReaderRenderer.webKit]) {
     group('drawn by ${drawn.title}', () {
       setUp(() => renderer = drawn);
       testWidgets('pending replacement cannot overwrite refreshed content or reopen a fold', (tester) async {

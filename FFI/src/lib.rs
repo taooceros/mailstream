@@ -22,6 +22,8 @@ use serde_json::{Value, json};
 
 uniffi::setup_scaffolding!();
 
+#[cfg(feature = "blitz")]
+mod html_page;
 mod main_thread;
 mod people;
 #[cfg(feature = "swift-engine")]

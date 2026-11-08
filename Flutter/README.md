@@ -226,13 +226,21 @@ pixels/screenshots). Normal text paste still edits the focused field. Attachment
 before sending and remain with their draft when switching tabs or browsing other mail.
 
 HTML mail on the Mac is drawn by HyperRender (`hyper_render` 1.14.1, in Flutter; `lib/ui/hyper_body.dart`)
-unless the reader's switch (beside the header's chips, "Renderer: HyperRender" or "Renderer:
-WebView (original)") picks WebKit (MS-138). Every launch starts in HyperRender; the choice holds
-until the app quits and nothing changes it but the switch: a body HyperRender draws poorly never
-falls back to the WebView by itself. Both draw the same prepared parts, so switching keeps the
-message, its open quote and the parts cache; only the chosen renderer's bodies are mounted.
+unless the reader's three-way switch (beside the header's chips, "Renderer:" HyperRender / Blitz /
+WebView (original)) picks another (MS-138, MS-147). Every launch starts in HyperRender
+(`MAILSTREAM_READER_RENDERER=blitz|webKit` starts in another, for `scripts/bench.sh`); the choice
+holds until the app quits and nothing changes it but the switch: a body a renderer draws poorly
+never falls back to another by itself. All three draw the same prepared parts, so switching keeps
+the message, its open quote and the parts cache; only the chosen renderer's bodies are mounted.
 Known HyperRender gaps: a rule made only of top/bottom borders is not drawn, cell percentage
 widths are ignored, `<center>`/`<font>` are dropped.
+
+Blitz (`blitz-dom`/`blitz-html`/`blitz-paint`, `FFI/src/html_page.rs`; `lib/ui/blitz_body.dart`)
+parses, lays out and paints each body on a thread of its own in the engine's library; Flutter
+only shows the 512-point tiles near the viewport. Iframes, objects and embeds are removed before
+any fetch; stylesheets, web fonts, SVG and `file:`/`http:` resources are never loaded (only
+`data:` and anonymous `https:` raster images). Links go through the same check; a drag selects
+and ⌘C copies. Screen readers get the body's text only (Blitz's AccessKit tree is not bridged).
 
 Preparation (`prepareHyperResources` in `lib/ui/hyper_resources.dart`) is the one resource
 policy for both: inline parts (`file://` copies under Mailstream's `messages-v2` cache, canonical
