@@ -4,7 +4,7 @@
 //! allows.
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -194,13 +194,15 @@ fn open_in_browser(url: &str) {
 }
 
 pub struct OAuth {
-    http: reqwest::Client,
+    /// Made at the first token request: loading the system's root certificates takes ~75 ms,
+    /// which engine start should not wait for.
+    http: LazyLock<reqwest::Client>,
     config: OAuthConfig,
 }
 
 impl OAuth {
     pub fn new(config: OAuthConfig) -> Self {
-        Self { http: reqwest::Client::new(), config }
+        Self { http: LazyLock::new(reqwest::Client::new), config }
     }
 
     fn redirect(&self) -> String {

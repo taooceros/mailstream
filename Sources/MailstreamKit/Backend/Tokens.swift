@@ -183,7 +183,10 @@ nonisolated struct SignIns: Codable, Equatable, Sendable {
 /// once rather than per account. Items from before clients were stored hold a bare object of
 /// refresh token by account id.
 nonisolated enum Keychain {
-    static let service = "dev.mailstream.Mailstream.oauth"
+    /// `MAILSTREAM_KEYCHAIN_SERVICE` names another item, for benchmarks and tests that must not
+    /// read the person's sign-ins (`FFI/examples/bench.rs`).
+    static let service = ProcessInfo.processInfo.environment["MAILSTREAM_KEYCHAIN_SERVICE"]
+        .flatMap { $0.isEmpty ? nil : $0 } ?? "dev.mailstream.Mailstream.oauth"
     private static let account = "refresh-tokens"
 
     struct Failure: LocalizedError, Sendable {

@@ -27,3 +27,7 @@ mailstream-engine = { path = "../Engine" }
 
 [dev-dependencies]
 futures-executor = "0.3"
+# examples/bench.rs: concurrent calls, process memory, its own Keychain item.
+futures = "0.3"
+libc = "0.2"
+security-framework = "3"

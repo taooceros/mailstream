@@ -906,7 +906,10 @@ static USE_RUST_ENGINE: LazyLock<bool> =
 static RUST_ENGINE: LazyLock<mailstream_engine::Engine> =
     LazyLock::new(|| mailstream_engine::Engine::start(mailstream_engine::Config::for_this_app()));
 
-pub(crate) async fn call<T: DeserializeOwned>(command: &str, args: Value) -> Result<T, MailError> {
+/// Any engine command by name (the control socket's: `config.get`, `accounts.list`, …) with its
+/// arguments, answered as `T`. The typed methods use it; Rust tools such as `examples/bench.rs`
+/// call commands that have none.
+pub async fn call<T: DeserializeOwned>(command: &str, args: Value) -> Result<T, MailError> {
     let result = if *USE_RUST_ENGINE {
         RUST_ENGINE
             .call(command, args)

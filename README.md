@@ -200,6 +200,14 @@ DART_OUT=path/to/lib/src ./scripts/ffi.sh         # and the Dart bindings (asset
   item. So far it answers `config.*` and `accounts.*` (sign-in included); every other
   command fails with `unported`. Without the variable nothing changes. `cd Engine && cargo
   test` uses a Keychain item of its own, never the apps' sign-ins.
+- **Engine benchmark.** After `CONFIG=release ./scripts/ffi.sh`, `cd FFI &&
+  MAILSTREAM_KIT_CONFIG=release cargo run --release --example bench` runs both engines through
+  the same `Mailstream` path, each in its own process with a throwaway home folder and Keychain
+  item, and prints each ported command's median and p99 latency, throughput (one at a time and
+  32 in flight), time to the first answer and memory, per round and as Rust/Swift ratios
+  (`--rounds`, `--engines`, `--cases`, `--scale`, `--out` for JSON lines). A command ported
+  later gets a row in its `CASES`. `MAILSTREAM_KEYCHAIN_SERVICE` points both engines at another
+  sign-ins item; it exists for this and for tests.
 
 ## Build and run
 

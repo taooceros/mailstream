@@ -80,11 +80,14 @@ pub struct Config {
 
 impl Config {
     /// The data, sign-ins and OAuth clients this process's app shares with the Swift engine.
+    /// `MAILSTREAM_KEYCHAIN_SERVICE` names another sign-ins item, as it does for the Swift engine
+    /// (benchmarks and tests that must not read the person's sign-ins).
     pub fn for_this_app() -> Self {
         let support = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("Mailstream");
+        let service = std::env::var("MAILSTREAM_KEYCHAIN_SERVICE").ok().filter(|service| !service.is_empty());
         Self {
             support_directory: support,
-            keychain_service: keychain::SERVICE.into(),
+            keychain_service: service.unwrap_or_else(|| keychain::SERVICE.into()),
             built_in_clients: bundle::built_in_clients(),
             oauth: OAuthConfig::default(),
         }
