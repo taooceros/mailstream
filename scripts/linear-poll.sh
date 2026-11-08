@@ -2,26 +2,23 @@
 # One pass over Linear (`watch`: one a minute until one has output): claims what an omp session
 # should act on now and prints it as JSON lines, which that session hands to subagents, each
 # working in its own ovnfs checkout (AGENTS.md, Version control).
-#   {"kind": "issue", "id", "identifier", "resume", "unblockedBy", "blockersInProgress"}: an
-#     issue to start. Claimed when it is
+#   {"kind": "issue", "id", "identifier", "resume", "unblockedBy"}: an issue to
+#     start. Claimed when it is
 #     - in Todo, created by a workspace member or by omp itself (not another app, a guest or a
 #       GitHub import: the repo is public and the subagents run with full access), not claimed
 #       before and not yet commented on by an app (omp); or
-#     - claimed before, in Todo, Backlog or Triage, and free of its blockers. Claimed once per set
-#       of blockers in Todo and once out of it, so blocking it again by another issue resumes it
-#       again, and an issue its agent parked in Backlog resumes once its blockers are resolved; or
+#     - claimed before, out of In Progress and no longer blocked: every issue blocking it (Linear
+#       "blocked by") is In Review, Done, Canceled or a duplicate. Claimed once per set of
+#       blockers, so blocking it again by another issue resumes it again; or
 #     - labelled `omp`, in any state but started, done or canceled; the label is removed on
 #       claim, so adding it again reruns the issue.
-#     Free of its blockers (Linear "blocked by"): in Todo, which the user set to have it worked,
-#     every blocker has started (In Progress or later), so a blocked issue starts without waiting
-#     for the blocker's review and builds on what the blocker has pushed; out of Todo (an agent
-#     parked it in Backlog to wait), every blocker is resolved: In Review, Done, Canceled or a
-#     duplicate. The first two rules skip issues that are not free. resume is true for an issue
+#     The first two skip issues with a blocker still open: a blocked issue waits until its
+#     blockers are delivered (In Review), not for the user's review. resume is true for an issue
 #     claimed before (the subagent carries on from the issue's comments); unblockedBy lists the
-#     identifiers of its resolved blockers, blockersInProgress those still In Progress. Agents
-#     file their own issues in Backlog and move issues to Todo to ask the user something (with an
-#     omp comment), so neither is picked up unless the user moves an uncommented one to Todo or
-#     it was claimed before and gets free.
+#     identifiers of its resolved blockers. Agents file their own issues in Backlog and move
+#     issues to Todo to ask the user something (with an omp comment), so neither is picked up
+#     unless the user moves an uncommented one to Todo or it was claimed before and gets
+#     unblocked.
 #   {"kind": "comment", "id", "issue", "issueId", "state", "createdAt", "body"}: a comment a
 #     workspace member (not an app, a guest or a GitHub sync) posted on any team issue in the last
 #     7 days, each once. The caller routes it to the issue's subagent or starts one.
@@ -34,8 +31,8 @@
 #     each pass; wins when the file exists) or RUNNING; without either nothing is reported stale.
 #     Issues out of In Progress whose owner is not running lose `claimed`.
 # Claims are kept in ~/.local/state/linear-poll/: `launched` (issue ids), `comments` (comment
-# ids), `unblocked` (issue id, the blocker ids it was claimed with, and `todo` when it was in
-# Todo), `stale` (issue id and the start comment reported).
+# ids), `unblocked` (issue id and the blocker ids it was claimed with), `stale` (issue id and the
+# start comment reported).
 # DRY_RUN=1 prints without claiming (unclaim lines included). `linear-poll.sh seen comment|issue
 # <id>` puts omp's 👀 on a comment or issue once the caller has handed it to a subagent, so the
 # user sees it was picked up.
@@ -153,7 +150,6 @@ PLAN=$(jq -c --argjson running "$RUNNING" --arg label "$LABEL" --arg claimedLabe
   def blockers: [.inverseRelations.nodes[] | select(.type == "blocks") | .issue];
   def resolved: .state.type == "completed" or .state.type == "canceled"
     or .state.type == "duplicate" or .state.name == "In Review";
-  def begun: resolved or .state.type == "started";
   .viewer.id as $omp
   | ($launched | split("\n") | map(split(" ")[0])) as $done
   | ($handled | split("\n")) as $seen
@@ -162,21 +158,17 @@ PLAN=$(jq -c --argjson running "$RUNNING" --arg label "$LABEL" --arg claimedLabe
   | ($now | fromdateiso8601) as $t
   | [.queued.nodes[]
       | (.id as $id | $done | index($id) != null) as $claimed
-      | (.state.name == "Todo") as $go
-      | (blockers | all(resolved) or ($go and all(begun))) as $free
+      | (blockers | all(resolved)) as $free
       | (if (blockers | length) > 0 and $free
-          then "\(.id) \([blockers[].id] | sort | join(","))\(if $go then " todo" else "" end)"
-          else null end) as $key
+          then "\(.id) \([blockers[].id] | sort | join(","))" else null end) as $key
       | select(labelled != null or ($free and (
-          ($go and ((.creator | member) or .creator.id == $omp)
+          (.state.name == "Todo" and ((.creator | member) or .creator.id == $omp)
             and ($claimed | not) and ([.comments.nodes[].user.app] | index(true) | not))
           or ($claimed and $key != null and ($key as $k | $freed | index($k) | not)))))
       | . + {resume: $claimed, unblockedBy: [blockers[] | select(resolved) | .identifier],
-          blockersInProgress: [blockers[] | select(resolved | not) | .identifier],
           unblockKey: $key}] as $todo
   | ($todo | sort_by(.number)[]
-    | {kind: "issue", id, identifier, resume, unblockedBy, blockersInProgress, label: labelled,
-       unblockKey}),
+    | {kind: "issue", id, identifier, resume, unblockedBy, label: labelled, unblockKey}),
     (if $running == null then empty else .claimed.nodes[]
       | ([.comments.nodes[] | select(.user.app == true)
           | select(.body | test("^\\[omp @ [^\\]]*\\] start \\("))] | sort_by(.createdAt) | last)

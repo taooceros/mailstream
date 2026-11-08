@@ -73,11 +73,9 @@ hashes stay as they are.
   what is on the issue.
 - Blocked by another issue (it needs that change first, or the user said to wait for it): add a
   "blocked by" relation (file the blocker first if it doesn't exist), comment what it waits for,
-  move it to Backlog and stop. Once every blocker is In Review, Done or Canceled, the poll hands
-  it out again and its agent carries on from the comments. A blocked issue in Todo (the user
-  wants it worked) is handed out as soon as every blocker has started, without waiting for
-  review: build on what the blockers have pushed to `main`; park it as above only for blocker
-  work that is not there yet.
+  move it to Backlog and stop. Once every blocker is delivered (In Review, Done or Canceled; the
+  user's review is not awaited), the poll hands it out again, in Todo or Backlog, and its agent
+  carries on from the comments.
 - Questions only the user can decide: don't guess. Assign the issue to the user (taooceros), move
   it to Todo, start the comment with `**❓ 需要你回答：**` followed by the question(s), each
   answerable on its own, and stop.
