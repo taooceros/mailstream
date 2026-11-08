@@ -128,8 +128,11 @@ name in backticks (`` `@omp` ``), since Linear rejects an app's @-mention of an 
 - Rust builds (`Engine/`, `FFI/`, `GPUI/`, Turso) run plain cargo: the repo's
   `.cargo/config.toml` turns off the rcache wrapper in `~/.cargo/config.toml`, which handed out
   corrupt artifacts in ovnfs checkouts (MS-131). Don't set `RUSTC_WRAPPER` to bring it back. An
-  ovnfs checkout starts from the default checkout's `target/` folders, and cargo's own
-  fingerprints rebuild what changed there.
+  ovnfs checkout reads the default checkout's ignored build folders (`target/`, `.turso/`) live,
+  not as a copy, until it writes a file there; cargo's fingerprints rebuild what differs when the
+  checkout opens. A build or delete in the default checkout afterwards shows up in every open
+  checkout, and cargo there can then keep an artifact built from the default checkout's source
+  (MS-152).
 - The app links the Turso database engine (`.turso/lib/libturso_sqlite3.a`). Run `scripts/turso.sh`
   once before `swift build` (it needs rustup; `bundle.sh` runs it too). It builds the pinned
   version with cargo in a few minutes and returns at once after that.
