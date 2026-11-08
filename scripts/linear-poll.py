@@ -33,8 +33,11 @@ the same script runs on macOS and Windows.
     agent ids running now, as the caller sees them, as a JSON array: in RUNNING_FILE (re-read
     each pass; wins when the file exists) or RUNNING; without either nothing is reported stale.
     Issues out of In Progress whose owner is not running lose `claimed`.
-Machines: issues labelled with one of HOST_LABELS (comma-separated, default `windows`) belong to
-the poller started with that HOST_LABEL; every other issue to the poller without one (the Mac).
+Machines: the poller covers the teams in TEAMS (comma-separated ids, default Mailstream `MS` and
+`WIN`). Issues of a team in HOST_TEAMS (comma-separated `KEY=host`, default `WIN=windows`) belong
+to that host's poller whatever their labels; in other teams, issues labelled with one of
+HOST_LABELS (comma-separated, default `windows`) belong to the poller started with that
+HOST_LABEL; every other issue to the poller without one (the Mac).
 Each poller claims, resumes, reports stale and routes comments only for its own issues, except
 that a comment naming a machine's app (`@windows-omp`) goes to that machine alone, whatever the
 issue: that is how the user and the other machine address it. Another machine's app reaches it
@@ -79,7 +82,11 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-TEAM_ID = os.environ.get("TEAM_ID", "9f8fe59f-3788-4542-8c18-4e5c5dd5ddc2")  # Mailstream; survives key renames
+TEAMS = os.environ.get("TEAMS", ",".join([
+    "9f8fe59f-3788-4542-8c18-4e5c5dd5ddc2",  # MS: Mailstream; ids survive key renames
+    "e94eb87b-32d5-4de3-9e90-11c5c17f336d",  # WIN: the Windows machine's own work
+])).split(",")
+HOST_TEAMS = dict(pair.split("=", 1) for pair in os.environ.get("HOST_TEAMS", "WIN=windows").split(",") if pair)
 LABEL = os.environ.get("LABEL", "omp")
 CLAIMED = os.environ.get("CLAIMED", "claimed")
 HOST_LABEL = os.environ.get("HOST_LABEL", "")
@@ -212,22 +219,22 @@ def watch():
         time.sleep(int(os.environ.get("INTERVAL", "60")))
 
 
-QUERY = """query($team: ID!, $label: String!, $claimed: String!) {
+QUERY = """query($teams: [ID!], $label: String!, $claimed: String!) {
   viewer { id name }
   queued: issues(first: 100, filter: {
-    team: { id: { eq: $team } }, state: { type: { in: ["triage", "backlog", "unstarted"] } },
+    team: { id: { in: $teams } }, state: { type: { in: ["triage", "backlog", "unstarted"] } },
     or: [{ labels: { some: { name: { eq: $label } } } }, { state: { name: { eq: "Todo" } } },
       { hasBlockedByRelations: { eq: true } }] }) {
-    nodes { id identifier number state { name } creator { id app guest }
+    nodes { id identifier number team { key } state { name } creator { id app guest }
       labels { nodes { id name } } comments(first: 100) { nodes { user { app } } }
       inverseRelations(first: 50) { nodes { type issue { id identifier state { name type } } } } } }
   claimed: issues(first: 100, filter: {
-    team: { id: { eq: $team } }, labels: { some: { name: { eq: $claimed } } } }) {
-    nodes { id identifier state { name } labels { nodes { id name } }
+    team: { id: { in: $teams } }, labels: { some: { name: { eq: $claimed } } } }) {
+    nodes { id identifier team { key } state { name } labels { nodes { id name } }
       comments(first: 100) { nodes { id createdAt body user { app } } } } }
-  comments(first: 100, filter: { createdAt: { gt: "-P7D" }, issue: { team: { id: { eq: $team } } } }) {
+  comments(first: 100, filter: { createdAt: { gt: "-P7D" }, issue: { team: { id: { in: $teams } } } }) {
     nodes { id createdAt body user { id name app guest }
-      issue { id identifier state { name } labels { nodes { name } } } } }
+      issue { id identifier team { key } state { name } labels { nodes { name } } } } }
 }"""
 
 
@@ -236,6 +243,9 @@ def labelled(issue):
 
 
 def host(issue):
+    team = HOST_TEAMS.get(issue["team"]["key"])
+    if team is not None:
+        return team
     names = [l["name"] for l in issue["labels"]["nodes"]]
     return next((h for h in HOST_LABELS if h in names), "")
 
@@ -333,7 +343,7 @@ def run_pass():
         if not isinstance(running, list):
             log(f"RUNNING_FILE {running_file} is not a JSON array")
             return 1
-    data = gql(QUERY, {"team": TEAM_ID, "label": LABEL, "claimed": CLAIMED})
+    data = gql(QUERY, {"teams": TEAMS, "label": LABEL, "claimed": CLAIMED})
     out = plan(data, running)
     if os.environ.get("DRY_RUN"):
         for line in out:

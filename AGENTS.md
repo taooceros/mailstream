@@ -30,10 +30,13 @@ Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` 
 
 ## Work tracking: Linear
 
-Team `MS`, split into projects by effort; issue IDs look like `MS-12`. Use omp's Linear tools.
+Team `MS` (the Mailstream app: code in this repo, both machines), split into projects by effort;
+issue IDs look like `MS-12`. Team `WIN` holds the Windows machine's own chores (its setup and
+tools, nothing in this repo); every `WIN` issue goes to the Windows poller. Use omp's Linear tools.
 The issue, not the session, is the record other sessions read.
 
-On the Windows machine (issues labelled `windows`) there are no Linear tools or keychain. Linear
+On the Windows machine (`WIN` issues and `MS` issues labelled `windows`) there are no Linear
+tools or keychain. Linear
 is reached as the OAuth app `windows-omp`: its client id (line 1) and secret (line 2) are in
 `~/.config/linear/credentials`, and the access token in `~/.config/linear/token.json`. Call
 `https://api.linear.app/graphql` with `Authorization: Bearer <access_token>`. On an
@@ -115,7 +118,8 @@ LINEAR_CREDENTIALS=~/.config/linear/credentials`.
 
 The Mac (app `omp`) and the Windows machine (app `windows-omp`) talk only through Linear. New
 work for the other machine is an issue (a sub-issue when it serves one) labelled `omp`, plus
-`windows` for Windows: its poller claims it whoever created it. A comment naming a machine's app
+`windows` for Windows (or in team `WIN` when it is a chore on that machine, not repo work): its
+poller claims it whoever created it. A comment naming a machine's app
 reaches that machine alone on any issue, from the user or the other machine; agents write the
 name in backticks (`` `@omp` ``), since Linear rejects an app's @-mention of an app.
 
