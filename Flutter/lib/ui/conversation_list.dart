@@ -673,7 +673,8 @@ class _TopicLabel extends StatelessWidget {
   }
 }
 
-/// A Smart Inbox bundle: its category, how many unread, who and what's newest.
+/// A Smart Inbox bundle: its category, how many unread, and who sent its unread mail and what the
+/// newest of it is about; with nothing unread, its latest mail.
 class BundleRow extends StatelessWidget {
   const BundleRow({
     super.key,
@@ -700,9 +701,11 @@ class BundleRow extends StatelessWidget {
     final text = context.text;
     final items = bundle.conversations;
     final unread = items.where((c) => c.unread).length;
+    // What is new, as the "N new" beside the title counts; once all is read, what came last.
+    final shown = unread > 0 ? items.where((c) => c.unread) : items;
     final seen = <String>{};
     final senders = [
-      for (final c in items)
+      for (final c in shown)
         if (seen.add(c.from?.displayName ?? '')) c.from?.displayName ?? '',
     ].where((s) => s.isNotEmpty).take(6).join(', ');
     final tone = categoryColors(bundle.category, colors);
@@ -748,7 +751,7 @@ class BundleRow extends StatelessWidget {
                   text: senders,
                   style: TextStyle(color: colors.label, fontWeight: unread > 0 ? FontWeight.w600 : FontWeight.w400),
                 ),
-                TextSpan(text: '  —  ${splitSubject(items.first.subject).title}'),
+                TextSpan(text: '  —  ${splitSubject(shown.first.subject).title}'),
               ],
             ),
             maxLines: 1,
