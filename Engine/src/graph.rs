@@ -139,6 +139,9 @@ fn split(body: Option<&Body>) -> (Option<String>, Option<String>) {
 
 #[derive(Deserialize)]
 struct Full {
+    /// `#microsoft.graph.eventMessageRequest` and the like for meeting messages.
+    #[serde(rename = "@odata.type")]
+    kind: Option<String>,
     body: Option<Body>,
     #[serde(rename = "ccRecipients")]
     cc_recipients: Option<Vec<Recipient>>,
@@ -458,7 +461,19 @@ impl Graph {
                 .find(|header| header.name.eq_ignore_ascii_case("References"))
                 .map(|header| header.value.as_str()),
         );
-        Ok(assembly.finish(html, text, addresses(full.cc_recipients), addresses(full.reply_to), references))
+        let mut content = assembly.finish(html, text, addresses(full.cc_recipients), addresses(full.reply_to), references);
+        // Outlook's meeting requests carry no `.ics`: the event they name, read with the message
+        // (without immutable ids, so the id is the one the calendar lists).
+        let meeting = full.kind.as_deref().is_some_and(|kind| kind.contains("eventMessage") && !kind.contains("Response"));
+        if meeting {
+            let url = self.url(&message_path, &[("$expand", "microsoft.graph.eventMessage/event")]);
+            let request = Request::get(url).header("Prefer", "outlook.timezone=\"UTC\"");
+            let message = self.api.decode::<serde_json::Value>(request, priority, 0).await;
+            if let Some(invitation) = message.ok().as_ref().and_then(crate::calendar_api::graph_invitation) {
+                content.invitation = Some(invitation);
+            }
+        }
+        Ok(content)
     }
 
     /// A file's bytes or an attached message's rendering; nil for kinds not shown (cloud links).

@@ -231,6 +231,10 @@ pub struct Message {
     /// files in the cache.
     pub html: Option<String>,
     pub error: Option<String>,
+    /// The meeting invitation it carries; [`Mailstream::calendar_invitation`] says how the
+    /// account answered.
+    #[serde(default)]
+    pub invitation: Option<MeetingInvitation>,
 }
 
 /// A conversation with its messages and bodies.
@@ -654,6 +658,50 @@ pub struct CalendarAgenda {
     pub events: Vec<CalendarItem>,
 }
 
+/// A meeting invitation (or its cancellation) as a message states it.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingInvitation {
+    /// `request`, or `cancel` for a cancelled meeting.
+    pub method: String,
+    pub uid: Option<String>,
+    pub title: String,
+    /// RFC 3339 in UTC; for all-day events, local midnight of `start_day` and `end_day`.
+    pub start: String,
+    pub end: String,
+    #[serde(default)]
+    pub all_day: bool,
+    pub start_day: Option<String>,
+    pub end_day: Option<String>,
+    pub location: Option<String>,
+    pub organizer: Option<CalendarPerson>,
+    /// A recurring meeting, answered as a whole.
+    #[serde(default)]
+    pub recurring: bool,
+    /// One occurrence of a recurring meeting.
+    #[serde(default)]
+    pub occurrence: bool,
+}
+
+/// A message's invitation and the event it names in its account's calendar.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct InvitationStatus {
+    pub account: String,
+    pub invitation: Option<MeetingInvitation>,
+    /// Whether the account's sign-in grants calendar access.
+    pub granted: bool,
+    /// Whether it may answer (change events); accounts signed in before must sign in again.
+    pub editable: bool,
+    /// The event, with the account's answer (`response`); none when the calendar lacks it.
+    pub event: Option<CalendarItem>,
+    /// What [`Mailstream::calendar_respond`] takes: the event's calendar and the event an
+    /// answer goes to (a recurring meeting's series).
+    pub calendar: Option<String>,
+    pub target: Option<String>,
+    /// Why the calendar could not be asked.
+    pub problem: Option<String>,
+}
+
 /// What changed in the engine; a front end re-reads what it shows of it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Event {
@@ -998,6 +1046,31 @@ impl Mailstream {
     /// Fetches every calendar account's events now.
     pub async fn calendar_refresh(&self) -> Result<(), MailError> {
         call::<Value>("calendar.refresh", json!({})).await.map(drop)
+    }
+
+    /// The invitation `message` of conversation `id` carries and the event it names in the
+    /// account's calendar, with the account's answer; [`Event::Calendar`] follows changes.
+    pub async fn calendar_invitation(&self, id: String, message: String) -> Result<InvitationStatus, MailError> {
+        call("calendar.invitation", json!({ "id": id, "message": message })).await
+    }
+
+    /// Answers an invitation (`accepted`, `tentative` or `declined`) through the calendar, which
+    /// tells the organizer: `event` and `calendar` are [`InvitationStatus::target`] and
+    /// [`InvitationStatus::calendar`]. `confirm` is the person's go-ahead.
+    pub async fn calendar_respond(
+        &self,
+        account: String,
+        calendar: Option<String>,
+        event: String,
+        response: String,
+        confirm: bool,
+    ) -> Result<(), MailError> {
+        call::<Value>(
+            "calendar.respond",
+            json!({ "account": account, "calendar": calendar, "event": event, "response": response, "yes": confirm }),
+        )
+        .await
+        .map(drop)
     }
 
     /// Calls `listener` on the main thread for every change from now on, while the process runs.

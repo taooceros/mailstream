@@ -167,7 +167,11 @@ and prints its path.
 `calendar events` lists every account (and whether it has granted calendar access) with the
 events of its calendars on the days asked for (`--from 2026-11-08 --days 7`; today and the 60
 days after it by default), earliest first, from what the app last fetched. `calendar refresh`
-fetches them now; the app does by itself every five minutes.
+fetches them now; the app does by itself every five minutes. `calendar invitation <id> --message
+<message>` reads the meeting invitation a message carries and the event it names in the
+account's calendar, with the account's answer; `calendar respond <account> --event <target>
+--calendar <calendar> --response accepted|tentative|declined --yes` answers it through the
+calendar, which tells the organizer.
 
 Failures print `{"error": {"code", "message"}}` on stderr and exit 1, 2 for usage
 errors, 3 when the app cannot be reached.
@@ -581,6 +585,18 @@ only for the scopes they granted (Microsoft refuses a refresh asking for more). 
 fetches the events from a week back to 60 days on, recurring events expanded, every five
 minutes, and keeps them in mail.db (`calendars`); a copy younger than that serves without
 fetching, and ⌘R fetches now. A failed fetch keeps the events fetched before and says why.
+
+A meeting invitation in mail shows as a card above the message's body: when and where, the
+organizer, and the account's answer with Accept, Tentative and Decline. The engine reads the
+invitation from the message's iCalendar part (`text/calendar` or an `.ics` file, times placed
+with its own `VTIMEZONE`) or, for an Outlook meeting request, from the event Graph names, and
+finds that event in the account's calendar by the meeting's UID (the fetched copy first, else
+asking the provider once and remembering the answer for five minutes). An answer goes through
+the calendar's API, Google Calendar's guest list (`sendUpdates=all`) or Graph's accept,
+tentativelyAccept and decline (`sendResponse`), so the organizer hears it as from any calendar
+client and no reply is mailed from here; the calendar shows it at once and is fetched again.
+Cancelled meetings show as cancelled, without answers; accounts signed in before calendars were
+asked for are told to sign in again.
 
 ## Shortcuts
 

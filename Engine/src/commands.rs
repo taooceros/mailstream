@@ -484,6 +484,25 @@ pub const COMMANDS: &[Spec] = &[
         ],
     ),
     Spec::new("calendar.refresh", "Fetches every calendar account's events now, or one account's.", &[ACCOUNT]),
+    Spec::new(
+        "calendar.invitation",
+        "The meeting invitation a message carries (an .ics part, an Outlook meeting request), whether its account may read and change its calendar, and the event it names there with the account's answer; `target` and `calendar` are what `calendar respond` takes.",
+        &[
+            CONVERSATION_ID,
+            Argument::new("message", Kind::String, "The message's id from `mail show`.").required(),
+        ],
+    ),
+    Spec::new(
+        "calendar.respond",
+        "Answers a meeting invitation through the account's calendar (Google Calendar, Outlook), which tells the organizer; no reply is mailed.",
+        &[
+            ACCOUNT_ADDRESS,
+            Argument::new("event", Kind::String, "The event (`target` from `calendar invitation`).").required(),
+            Argument::new("calendar", Kind::String, "Its calendar (`calendar` from `calendar invitation`)."),
+            Argument::new("response", Kind::Choice(&["accepted", "tentative", "declined"]), "The answer.").required(),
+            YES,
+        ],
+    ),
 ];
 
 /// What `mailstream help` prints above the command list.

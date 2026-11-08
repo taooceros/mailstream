@@ -229,6 +229,7 @@ class MessageDetail {
     required this.html,
     required this.attachments,
     required this.error,
+    this.invitation,
   });
 
   factory MessageDetail.of(engine.Message m) {
@@ -247,6 +248,7 @@ class MessageDetail {
       html: m.html,
       attachments: m.attachments.map(AttachmentInfo.of).toList(),
       error: m.error,
+      invitation: m.invitation,
     );
   }
 
@@ -263,6 +265,9 @@ class MessageDetail {
   final String? html;
   final List<AttachmentInfo> attachments;
   final String? error;
+
+  /// The meeting invitation it carries.
+  final engine.MeetingInvitation? invitation;
 
   Address get sender => from.isEmpty ? const Address(email: 'unknown') : from.first;
 }

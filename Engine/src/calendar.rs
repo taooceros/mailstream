@@ -3,7 +3,8 @@
 //! recurring events expanded. Each account's calendars and events are kept in mail.db, so the
 //! calendar paints at once; while that copy is younger than [`FRESH`] nothing is fetched. A
 //! timer fetches accounts whose copy got older; `calendar.refresh` fetches now. Front ends
-//! re-read on `calendar`.
+//! re-read on `calendar`. Meeting invitations in mail are matched to their events and answered
+//! in [`invitation`].
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,8 +21,10 @@ use crate::mail::Mail;
 use crate::model::{Date, iso8601, now};
 use crate::{EngineError, Events};
 
+mod invitation;
+
 /// The commands this store answers.
-pub const COMMANDS: &[&str] = &["calendar.events", "calendar.refresh"];
+pub const COMMANDS: &[&str] = &["calendar.events", "calendar.refresh", "calendar.invitation", "calendar.respond"];
 /// How long a fetched copy serves before the timer fetches it again.
 const FRESH: f64 = 5.0 * 60.0;
 /// How often the timer looks for copies that got old.
@@ -44,11 +47,16 @@ struct AccountState {
     fetching: bool,
     /// The last fetch's failure, until one succeeds.
     problem: Option<String>,
+    /// Changes made from here: a fetch that started before one may answer without it.
+    writes: u64,
 }
 
 #[derive(Default)]
 struct State {
     accounts: HashMap<String, AccountState>,
+    /// Events asked of the provider for invitations the fetched window does not hold, by
+    /// account and meeting, with when they were asked.
+    lookups: HashMap<(String, String), (Date, Option<CalendarEvent>)>,
 }
 
 pub struct CalendarStore {
@@ -127,6 +135,7 @@ impl CalendarStore {
                 state.accounts.remove(name);
                 self.cache.remove_calendar(name);
             }
+            state.lookups.retain(|(account, _), _| names.contains(account));
             (gone.len(), names.iter().filter(|name| !state.accounts.contains_key(*name)).cloned().collect())
         };
         if gone == 0 && added.is_empty() {
@@ -174,36 +183,61 @@ impl CalendarStore {
     }
 
     async fn fetch(&self, name: String, provider: crate::Provider, interactive: bool) {
-        let start = local_midnight(&local_day(-PAST_DAYS)).unwrap_or_else(|| now() - PAST_DAYS as f64 * 86_400.0);
-        let end = local_midnight(&local_day(FUTURE_DAYS + 1)).unwrap_or_else(|| now() + (FUTURE_DAYS + 1) as f64 * 86_400.0);
-        let result = match self.mail.api(&name) {
-            Some(api) => {
-                let remote = CalendarRemote {
-                    api: &api,
-                    provider,
-                    google: &self.google,
-                    graph: &self.graph,
-                    priority: if interactive { Priority::Interactive } else { Priority::Background },
-                };
-                remote.fetch(start, end).await.map_err(|error| error.message)
+        loop {
+            let Some(writes) = self.state().accounts.get(&name).map(|account| account.writes) else { return };
+            let start = local_midnight(&local_day(-PAST_DAYS)).unwrap_or_else(|| now() - PAST_DAYS as f64 * 86_400.0);
+            let end = local_midnight(&local_day(FUTURE_DAYS + 1)).unwrap_or_else(|| now() + (FUTURE_DAYS + 1) as f64 * 86_400.0);
+            let result = match self.mail.api(&name) {
+                Some(api) => {
+                    let remote = CalendarRemote {
+                        api: &api,
+                        provider,
+                        google: &self.google,
+                        graph: &self.graph,
+                        priority: if interactive { Priority::Interactive } else { Priority::Background },
+                    };
+                    remote.fetch(start, end).await.map_err(|error| error.message)
+                }
+                None => Err(format!("{name} needs to sign in again (Settings > Accounts).")),
+            };
+            let mut state = self.state();
+            // A fetch that outlived its account's sign-out.
+            let Some(account) = state.accounts.get_mut(&name) else { return };
+            if account.writes != writes {
+                // Changed from here meanwhile: this answer may predate the change.
+                drop(state);
+                continue;
             }
-            None => Err(format!("{name} needs to sign in again (Settings > Accounts).")),
-        };
-        let mut state = self.state();
-        // A fetch that outlived its account's sign-out.
-        let Some(account) = state.accounts.get_mut(&name) else { return };
-        account.fetching = false;
-        match result {
-            Ok(fetched) => {
-                let copy = CalendarCopy { fetched: now(), calendars: fetched.calendars, events: fetched.events };
-                self.cache.save_calendar(&copy, &name);
-                account.copy = Some(copy);
-                account.problem = None;
+            account.fetching = false;
+            match result {
+                Ok(fetched) => {
+                    let copy = CalendarCopy { fetched: now(), calendars: fetched.calendars, events: fetched.events };
+                    self.cache.save_calendar(&copy, &name);
+                    account.copy = Some(copy);
+                    account.problem = None;
+                }
+                Err(message) => account.problem = Some(message),
             }
-            Err(message) => account.problem = Some(message),
+            drop(state);
+            self.events.emit_soon("calendar");
+            return;
         }
-        drop(state);
+    }
+
+    /// An account's events changed from here: `edit` brings its copy up to date at once, and a
+    /// fetch follows (one already under way fetches again).
+    fn changed(self: &Arc<Self>, account: &str, edit: impl FnOnce(&mut CalendarCopy)) {
+        {
+            let mut state = self.state();
+            let Some(entry) = state.accounts.get_mut(account) else { return };
+            entry.writes += 1;
+            if let Some(copy) = &mut entry.copy {
+                edit(copy);
+                self.cache.save_calendar(copy, account);
+            }
+        }
         self.events.emit_soon("calendar");
+        self.fetch_due(|name| name == account);
     }
 
     // MARK: - Commands
@@ -224,6 +258,8 @@ impl CalendarStore {
         };
         match command {
             "calendar.events" => self.list(only.as_deref(), args),
+            "calendar.invitation" => self.invitation(args).await,
+            "calendar.respond" => self.respond(only.as_deref(), args).await,
             "calendar.refresh" => {
                 if let Some(id) = &only
                     && !self.state().accounts.contains_key(id)

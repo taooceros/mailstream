@@ -1347,10 +1347,42 @@ impl Mail {
                     })
                     .collect();
                 item["attachments"] = Value::Array(attachments);
+                if let Some(invitation) = self.invitation_of(&content, &reference) {
+                    item["invitation"] = invitation.json();
+                }
             }
             Err(message) => item["error"] = json!(message),
         }
         item
+    }
+
+    /// The invitation message `message` of conversation `id` carries, and the account it came to.
+    pub(crate) async fn invitation(
+        self: &Arc<Self>,
+        id: &str,
+        message: &str,
+    ) -> Result<(String, Option<crate::ics::Invitation>), EngineError> {
+        let conversation = self.lookup(id)?;
+        let found = conversation.messages.iter().find(|candidate| candidate.id() == message).ok_or_else(|| {
+            EngineError::new("unknown_message", format!("No message {message} in conversation {id}."))
+        })?;
+        let reference = found.message_ref();
+        let content = self
+            .contents
+            .load(&reference, self.backend(&reference.account))
+            .await
+            .map_err(|error| EngineError::new("content_failed", error))?;
+        let invitation = self.invitation_of(&content, &reference);
+        Ok((reference.account, invitation))
+    }
+
+    /// The invitation read when the message was fetched, or from its `.ics` part when it was
+    /// fetched before invitations were read (or by the Swift engine).
+    fn invitation_of(&self, content: &crate::model::MessageContent, reference: &crate::model::MessageRef) -> Option<crate::ics::Invitation> {
+        content.invitation.clone().or_else(|| {
+            let part = content.attachments.iter().find(|part| crate::ics::is_calendar(&part.mime, &part.filename))?;
+            crate::ics::parse(&std::fs::read(self.cache.attachment_path(&part.stored_name, reference)).ok()?)
+        })
     }
 
     // MARK: - Remote content

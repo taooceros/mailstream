@@ -11,6 +11,8 @@ pub struct MessageAssembly {
     directory: PathBuf,
     url_base: String,
     stored: Vec<Attachment>,
+    /// The first iCalendar part that is an invitation.
+    invitation: Option<crate::ics::Invitation>,
 }
 
 /// `URL`'s path-allowed characters: everything else in a stored name is percent-encoded.
@@ -41,7 +43,7 @@ pub fn path_encoded(text: &str) -> String {
 impl MessageAssembly {
     pub fn new(directory: PathBuf, url_base: String) -> std::io::Result<Self> {
         std::fs::create_dir_all(&directory)?;
-        Ok(Self { directory, url_base, stored: Vec::new() })
+        Ok(Self { directory, url_base, stored: Vec::new(), invitation: None })
     }
 
     /// Writes one part. `index` is unique within the message and becomes `Attachment::part`.
@@ -78,6 +80,9 @@ impl MessageAssembly {
             inline,
             stored_name,
         };
+        if self.invitation.is_none() && crate::ics::is_calendar(&attachment.mime, &attachment.filename) {
+            self.invitation = crate::ics::parse(bytes);
+        }
         self.stored.push(attachment.clone());
         attachment
     }
@@ -129,6 +134,7 @@ impl MessageAssembly {
             references,
             attachments,
             snippet: text::snippet(&snippet_source),
+            invitation: self.invitation,
         }
     }
 }

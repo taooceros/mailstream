@@ -18,6 +18,7 @@ import 'mail_html_windows.dart';
 import 'hyper_body.dart';
 import 'blitz_body.dart';
 import 'hyper_resources.dart';
+import 'invitation.dart';
 import 'reader_renderer.dart';
 
 /// One conversation: a reading column with the subject and its chips, then message cards
@@ -398,6 +399,11 @@ class _MessageCard extends StatelessWidget {
               ),
             ),
             if (expanded) ...[
+              if (m.invitation case final invitation?)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                  child: InvitationCard(state: state, conversation: conversation.id, message: m.id, invitation: invitation),
+                ),
               Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), child: _Body(conversation: conversation, message: m, onOpenLink: state.openExternal)),
               if (m.attachments.isNotEmpty)
                 Padding(
@@ -971,6 +977,11 @@ class _ChatMessageState extends State<_ChatMessage> {
                           TextSpan(text: '  ${messageTime(m.date)}', style: text.subheadline.copyWith(color: colors.secondaryLabel)),
                         ])),
                       ),
+                      if (m.invitation case final invitation?)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: InvitationCard(state: widget.state, conversation: widget.conversation.id, message: m.id, invitation: invitation),
+                        ),
                       body,
                       if (m.attachments.isNotEmpty)
                         Padding(

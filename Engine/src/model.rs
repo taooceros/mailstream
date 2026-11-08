@@ -480,6 +480,9 @@ pub struct MessageContent {
     pub references: Vec<String>,
     pub attachments: Vec<Attachment>,
     pub snippet: String,
+    /// The meeting invitation it carries (an `.ics` part, Outlook's meeting request).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitation: Option<crate::ics::Invitation>,
 }
 
 #[cfg(test)]

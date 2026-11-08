@@ -7,9 +7,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::api::{self, Api, ApiError, Priority, Request};
-use crate::model::{Date, date_from_unix, iso8601, parse_iso8601, unix_seconds};
+use crate::ics::{Invitation, normalized_uid};
+use crate::model::{Date, date_from_unix, iso8601, now, parse_iso8601, unix_seconds};
 use crate::oauth::Provider;
 
+/// Google's name for the account's own calendar.
+const PRIMARY: &str = "primary";
 pub const GOOGLE_ROOT: &str = "https://www.googleapis.com/calendar/v3/";
 /// Most pages of events read from one calendar per fetch.
 const PAGES: usize = 20;
@@ -79,6 +82,13 @@ pub struct CalendarEvent {
     /// The event in the provider's web calendar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    /// Its iCalendar UID, as [`crate::ics::normalized_uid`] writes it: what an invitation in
+    /// mail names it by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+    /// For an occurrence of a recurring event, the series' id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series: Option<String>,
 }
 
 impl CalendarEvent {
@@ -303,6 +313,177 @@ impl CalendarRemote<'_> {
             .await?;
         Ok(Fetched { calendars, events })
     }
+
+    // MARK: Invitations
+
+    /// A request with a JSON body.
+    fn json_request(method: reqwest::Method, url: String, body: &Value) -> Request {
+        let mut request = Request::post(url, "application/json", serde_json::to_vec(body).expect("JSON encodes"));
+        request.method = method;
+        request
+    }
+
+    /// The event `invitation` names, asked of the provider (one outside the fetched window, or
+    /// fetched before the invitation came); nil when the account's calendar does not have it.
+    pub async fn find(&self, invitation: &Invitation) -> Result<Option<CalendarEvent>, ApiError> {
+        let found = match self.provider {
+            Provider::Google => self.google_find(invitation).await,
+            Provider::Microsoft => self.graph_find(invitation).await,
+        };
+        match found {
+            Err(error) if matches!(error.status, 404 | 410) => Ok(None),
+            found => found,
+        }
+    }
+
+    async fn google_find(&self, invitation: &Invitation) -> Result<Option<CalendarEvent>, ApiError> {
+        let Some(uid) = &invitation.uid else { return Ok(None) };
+        let url = api::url(self.google, "calendars/primary/events", &[("iCalUID", uid.as_str())]);
+        let list: GoogleList<GoogleEvent> = self.get(Request::get(url)).await?;
+        let events: Vec<CalendarEvent> = list.items.unwrap_or_default().into_iter().filter_map(|item| item.event(PRIMARY)).collect();
+        let found = matching(&events, invitation).cloned();
+        let moved = found.as_ref().is_some_and(|event| (event.start - invitation.start).abs() <= 60.0);
+        if !invitation.occurrence || moved {
+            return Ok(found);
+        }
+        // An occurrence answered alone: among its series' instances.
+        let Some(series) = events.iter().find(|event| event.series.is_none()) else { return Ok(found) };
+        let path = format!("calendars/primary/events/{}/instances", api::percent_encoded(&series.id));
+        let (from, to) = (iso8601(invitation.start - 60.0), iso8601(invitation.start + 60.0));
+        let url = api::url(self.google, &path, &[("timeMin", from.as_str()), ("timeMax", to.as_str())]);
+        let list: GoogleList<GoogleEvent> = self.get(Request::get(url)).await?;
+        Ok(list.items.unwrap_or_default().into_iter().find_map(|item| item.event(PRIMARY)).or(found))
+    }
+
+    async fn graph_find(&self, invitation: &Invitation) -> Result<Option<CalendarEvent>, ApiError> {
+        let utc = |url: String| Request::get(url).header("Prefer", "outlook.timezone=\"UTC\"");
+        if let Some(id) = &invitation.event {
+            let url = api::url(self.graph, &format!("me/events/{}", api::percent_encoded(id)), &[("$select", GRAPH_EVENT_FIELDS)]);
+            return Ok(self.get::<GraphEvent>(utc(url)).await?.event(""));
+        }
+        if invitation.uid.is_none() {
+            return Ok(None);
+        }
+        // Graph cannot be asked by UID: the days around the meeting, by UID.
+        let (from, to) = (iso8601(invitation.start - 86_400.0), iso8601(invitation.end.max(invitation.start) + 86_400.0));
+        let url = api::url(
+            self.graph,
+            "me/calendarView",
+            &[("startDateTime", from.as_str()), ("endDateTime", to.as_str()), ("$top", "250"), ("$select", GRAPH_EVENT_FIELDS)],
+        );
+        let list: GraphList<GraphEvent> = self.get(utc(url)).await?;
+        let events: Vec<CalendarEvent> = list.value.into_iter().filter_map(|event| event.event("")).collect();
+        Ok(matching(&events, invitation).cloned())
+    }
+
+    /// Answers the invitation to `event` in `calendar` (`accepted`, `tentative` or `declined`)
+    /// through the calendar, which tells the organizer.
+    pub async fn respond(&self, calendar: &str, event: &str, response: &str) -> Result<(), ApiError> {
+        let request = match self.provider {
+            Provider::Google => {
+                let calendar = if calendar.is_empty() { PRIMARY } else { calendar };
+                let path = format!("calendars/{}/events/{}", api::percent_encoded(calendar), api::percent_encoded(event));
+                // Google takes the guest list whole: the one read, with this account's answer changed.
+                let current: Value = self.get(Request::get(api::url(self.google, &path, &[]))).await?;
+                let mut attendees = current["attendees"].as_array().cloned().unwrap_or_default();
+                let me = attendees.iter_mut().find(|attendee| {
+                    attendee["self"].as_bool() == Some(true)
+                        || attendee["email"].as_str().is_some_and(|email| email.eq_ignore_ascii_case(&self.api.account))
+                });
+                let Some(me) = me else {
+                    return Err(ApiError::new(400, "This account is not on the meeting's guest list."));
+                };
+                me["responseStatus"] = json!(response);
+                let url = api::url(self.google, &path, &[("sendUpdates", "all")]);
+                Self::json_request(reqwest::Method::PATCH, url, &json!({ "attendees": attendees }))
+            }
+            Provider::Microsoft => {
+                let action = match response {
+                    "accepted" => "accept",
+                    "tentative" => "tentativelyAccept",
+                    _ => "decline",
+                };
+                let url = api::url(self.graph, &format!("me/events/{}/{action}", api::percent_encoded(event)), &[]);
+                Self::json_request(reqwest::Method::POST, url, &json!({ "sendResponse": true }))
+            }
+        };
+        self.api.send(request, self.priority, None, 0).await.map(drop)
+    }
+}
+
+/// The event among `events` that `invitation` names: by Outlook's event id or the meeting's
+/// UID; for one occurrence, the one at its time; for a series, its next occurrence.
+pub fn matching<'a>(events: &'a [CalendarEvent], invitation: &Invitation) -> Option<&'a CalendarEvent> {
+    let uid = invitation.uid.as_deref().map(normalized_uid);
+    let named = |event: &&CalendarEvent| {
+        invitation.event.as_deref().is_some_and(|id| event.id == id || event.series.as_deref() == Some(id))
+            || (uid.is_some() && event.uid == uid)
+    };
+    let found: Vec<&CalendarEvent> = events.iter().filter(named).collect();
+    let at_its_time = found.iter().find(|event| (event.start - invitation.start).abs() <= 60.0);
+    let next = || found.iter().filter(|event| event.end > now()).min_by(|a, b| a.start.total_cmp(&b.start));
+    if invitation.recurring { next().or(at_its_time) } else { at_its_time.or_else(next) }.or(found.first()).copied()
+}
+
+/// The invitation an Outlook meeting message carries (an `eventMessage`, read with its `event`
+/// expanded); nil for other messages and for answers to the user's own meetings.
+pub fn graph_invitation(message: &Value) -> Option<Invitation> {
+    let method = match message["meetingMessageType"].as_str()? {
+        "meetingRequest" => "request",
+        "meetingCancelled" => "cancel",
+        _ => return None,
+    };
+    let event = serde_json::from_value::<GraphEvent>(message["event"].clone()).ok();
+    let kind = event.as_ref().and_then(|event| event.kind.clone()).or_else(|| message["type"].as_str().map(String::from));
+    let (recurring, occurrence) = match kind.as_deref() {
+        Some("seriesMaster") => (true, false),
+        Some("occurrence" | "exception") => (false, true),
+        _ => (false, false),
+    };
+    let id = event.as_ref().map(|event| event.id.clone());
+    if let Some(event) = event.and_then(|event| event.event("")) {
+        return Some(Invitation {
+            method: method.into(),
+            uid: event.uid,
+            title: event.title,
+            start: event.start,
+            end: event.end,
+            all_day: event.all_day,
+            start_day: event.start_day,
+            end_day: event.end_day,
+            location: event.location,
+            organizer: event.organizer,
+            recurring,
+            occurrence,
+            event: id,
+        });
+    }
+    // A cancelled meeting is gone from the calendar: the message's own words.
+    let time = |key: &str| serde_json::from_value::<GraphTime>(message[key].clone()).ok()?.date();
+    let start = time("startDateTime")?;
+    let end = time("endDateTime").unwrap_or(start).max(start);
+    let (start, end, start_day, end_day) = if message["isAllDay"].as_bool() == Some(true) {
+        let (first, after) = (nearest_day(start), nearest_day(end));
+        (local_midnight(&first)?, local_midnight(&after)?, Some(first), Some(after))
+    } else {
+        (start, end, None, None)
+    };
+    let organizer = serde_json::from_value::<GraphRecipient>(message["from"].clone()).ok();
+    Some(Invitation {
+        method: method.into(),
+        uid: None,
+        title: non_empty(message["subject"].as_str().map(String::from)).unwrap_or_else(|| "(No title)".into()),
+        start,
+        end,
+        all_day: start_day.is_some(),
+        start_day,
+        end_day,
+        location: non_empty(message["location"]["displayName"].as_str().map(String::from)),
+        organizer: organizer.map(|organizer| graph_person(organizer.email_address, None)),
+        recurring,
+        occurrence,
+        event: id,
+    })
 }
 
 // MARK: - Google's answers
@@ -382,6 +563,9 @@ struct GoogleEvent {
     end: Option<GoogleTime>,
     organizer: Option<GooglePerson>,
     attendees: Option<Vec<GooglePerson>>,
+    #[serde(rename = "iCalUID")]
+    ical_uid: Option<String>,
+    recurring_event_id: Option<String>,
 }
 
 impl GoogleEvent {
@@ -422,6 +606,8 @@ impl GoogleEvent {
             response,
             notes: notes(self.description, true),
             link: non_empty(self.html_link),
+            uid: non_empty(self.ical_uid).map(|uid| crate::ics::normalized_uid(&uid)),
+            series: non_empty(self.recurring_event_id),
         })
     }
 }
@@ -429,7 +615,7 @@ impl GoogleEvent {
 // MARK: - Graph's answers
 
 const GRAPH_EVENT_FIELDS: &str = "id,subject,start,end,isAllDay,isCancelled,isOrganizer,location,onlineMeeting,\
-onlineMeetingUrl,organizer,attendees,responseStatus,webLink,bodyPreview";
+onlineMeetingUrl,organizer,attendees,responseStatus,webLink,bodyPreview,iCalUId,seriesMasterId,type";
 
 #[derive(Deserialize)]
 struct GraphList<T> {
@@ -518,6 +704,12 @@ struct GraphEvent {
     response_status: Option<GraphStatus>,
     web_link: Option<String>,
     body_preview: Option<String>,
+    #[serde(rename = "iCalUId")]
+    ical_uid: Option<String>,
+    series_master_id: Option<String>,
+    /// `singleInstance`, `occurrence`, `exception` or `seriesMaster`.
+    #[serde(rename = "type")]
+    kind: Option<String>,
 }
 
 /// Graph's answers in Google's words.
@@ -583,6 +775,8 @@ impl GraphEvent {
             response,
             notes: notes(self.body_preview, false),
             link: non_empty(self.web_link),
+            uid: non_empty(self.ical_uid).map(|uid| crate::ics::normalized_uid(&uid)),
+            series: non_empty(self.series_master_id),
         })
     }
 }

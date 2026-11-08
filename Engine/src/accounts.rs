@@ -48,6 +48,14 @@ impl AccountRecord {
             }
         }
     }
+
+    /// Whether its sign-in lets it change events: answer invitations, add and edit events.
+    pub fn can_edit_calendars(&self) -> bool {
+        match self.provider {
+            Provider::Google => has_scope(&self.scopes, "https://www.googleapis.com/auth/calendar.events"),
+            Provider::Microsoft => has_scope(&self.scopes, MICROSOFT_CALENDARS),
+        }
+    }
 }
 
 pub struct Accounts {

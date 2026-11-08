@@ -27,6 +27,9 @@ pub mod control;
 mod files;
 pub mod gmail;
 pub mod graph;
+mod ics;
+#[cfg(test)]
+mod invitation_tests;
 pub mod json;
 mod keychain;
 pub mod mail;
