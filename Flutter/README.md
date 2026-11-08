@@ -32,14 +32,20 @@ the same Rust one, as `mailstream.dll` beside the executable (the build hook bun
 `FFI/target/release/mailstream.dll`; its Windows specifics are in the root README's FFI section).
 The built-in OAuth clients and push settings come from a `config.json` placed beside
 `mailstream_ui.exe` (nothing commits or writes one); without it the app has neither, as an
-unconfigured Mac build. Build on Windows with Rust (MSVC) and Flutter:
+unconfigured Mac build. Build on Windows with Rust (MSVC), Flutter and Visual Studio 2022's
+"Desktop development with C++" workload (MSVC, the Windows SDK, C++ CMake tools):
 
 ```sh
-(cd FFI && cargo build --release -p mailstream && cargo run -q -p mailstream-bindgen -- target/release/mailstream.dll --out-dir ../Flutter/packages/mailstream/lib/src)
+# at the repository root, in Git Bash
+CONFIG=release DART_OUT=$PWD/Flutter/packages/mailstream/lib/src ./scripts/ffi.sh
 cd Flutter && flutter build windows --release   # build/windows/x64/runner/Release/mailstream_ui.exe
 ```
 
-The GitHub Actions `Windows` workflow does this, starts the app and keeps a screenshot and the
+Flutter links plugins with symbolic links, which need Windows' Developer Mode; without it,
+junctions made by hand in `windows/flutter/ephemeral/.plugin_symlinks` (`mklink /J <plugin>
+<its folder in the pub cache>`, as `.flutter-plugins-dependencies` lists them) work too.
+
+The GitHub Actions `Windows` workflow builds it, starts the app and keeps a screenshot and the
 zipped Release folder as artifacts. On Windows:
 
 - Window: the system title bar moves, maximizes and closes the window (`WindowDragArea` does
