@@ -14,6 +14,7 @@ import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
 import 'html_parts.dart';
+import 'mail_html_windows.dart';
 
 /// One conversation: a reading column with the subject and its chips, then message cards
 /// (service mail) or a chat log (people), and reply buttons at the bottom that open an inline
@@ -54,7 +55,6 @@ class Reader extends StatefulWidget {
   /// the bodies at once.
   static void prefetch(MailState state, Conversation c, {HtmlPartsCache? partsCache}) {
     final entry = state.prefetch(c);
-    if (!Host.mac) return;
     entry.future.then((messages) {
       // A newer load replaced this one: it warms its own messages when prefetched.
       if (identical(entry.messages, messages)) (partsCache ?? HtmlPartsCache.shared).warm(openingHtml(c, messages));
@@ -393,7 +393,7 @@ class _MessageCard extends StatelessWidget {
               ),
             ),
             if (expanded) ...[
-              Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), child: _Body(conversation: conversation, message: m)),
+              Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), child: _Body(conversation: conversation, message: m, onOpenLink: state.openExternal)),
               if (m.attachments.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
@@ -434,13 +434,12 @@ class _AttachmentChip extends StatelessWidget {
 }
 
 /// A body: HTML mail on a white sheet, as mail is designed for; plain text in the theme's type.
-/// HTML is drawn by WebKit on the Mac; Windows has no HTML view yet (MS-106) and shows the
-/// message's text under a notice saying so ([HtmlTextFallback]).
 class _Body extends StatelessWidget {
-  const _Body({required this.conversation, required this.message});
+  const _Body({required this.conversation, required this.message, required this.onOpenLink});
 
   final Conversation conversation;
   final MessageDetail message;
+  final ValueChanged<String> onOpenLink;
 
   @override
   Widget build(BuildContext context) {
@@ -448,7 +447,6 @@ class _Body extends StatelessWidget {
     if (message.error != null) return Text(message.error!, style: context.text.body.copyWith(color: colors.red));
     final html = message.html;
     if (html != null && html.trim().isNotEmpty) {
-      if (!Host.mac) return HtmlTextFallback(key: ValueKey(message.id), text: message.text, html: html);
       return Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
@@ -460,6 +458,7 @@ class _Body extends StatelessWidget {
           key: ValueKey(message.id),
           owner: (account: conversation.account, conversation: conversation.id, message: message.id),
           html: html,
+          onOpenLink: onOpenLink,
         ),
       );
     }
@@ -467,92 +466,20 @@ class _Body extends StatelessWidget {
   }
 }
 
-/// An HTML body where the app has no HTML view (Windows, until MS-106): a small notice that the
-/// HTML is not shown, then the message's text drawn as plain text ([FoldedText]). The text is
-/// the engine's (the message's text part, else its HTML read as text); when that is empty, the
-/// HTML's text is read here, in a background isolate ([toText]).
-class HtmlTextFallback extends StatefulWidget {
-  const HtmlTextFallback({super.key, required this.text, required this.html, this.toText = htmlTextInBackground});
-
-  final String? text;
-  final String html;
-  final Future<String> Function(String html) toText;
-
-  static const notice = "This message is shown as plain text: HTML mail isn't drawn on Windows yet (MS-106).";
-
-  @override
-  State<HtmlTextFallback> createState() => _HtmlTextFallbackState();
-}
-
-class _HtmlTextFallbackState extends State<HtmlTextFallback> {
-  String? _derived;
-  int _request = 0;
-
-  String? get _given => (widget.text?.trim().isEmpty ?? true) ? null : widget.text;
-
-  @override
-  void initState() {
-    super.initState();
-    _derive();
-  }
-
-  @override
-  void didUpdateWidget(HtmlTextFallback old) {
-    super.didUpdateWidget(old);
-    if (old.html != widget.html || old.text != widget.text) _derive();
-  }
-
-  void _derive() {
-    final request = ++_request;
-    _derived = null;
-    if (_given != null) return;
-    widget.toText(widget.html).then((text) {
-      if (mounted && request == _request) setState(() => _derived = text);
-    }, onError: (Object error, StackTrace stack) {
-      FlutterError.reportError(FlutterErrorDetails(exception: error, stack: stack, library: 'mail HTML'));
-      if (mounted && request == _request) setState(() => _derived = '');
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.colors;
-    final text = _given ?? _derived;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 1),
-            child: MacosIcon(CupertinoIcons.info_circle, size: 13, color: colors.secondaryLabel),
-          ),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(HtmlTextFallback.notice, style: context.text.subheadline.copyWith(color: colors.secondaryLabel)),
-          ),
-        ]),
-        const SizedBox(height: 10),
-        if (text == null)
-          const SizedBox(height: 40, child: Center(child: Spinner()))
-        else if (text.trim().isEmpty)
-          Text('This message has no text.', style: context.text.body.copyWith(color: colors.secondaryLabel))
-        else
-          FoldedText(text: text),
-      ],
-    );
-  }
-}
-
-/// An HTML body, drawn by WebKit (`MailHtmlView` in the runner) at the height of its content.
+/// An HTML body, drawn by WebKit on the Mac (`MailHtmlView` in the runner) and WebView2 on
+/// Windows ([WindowsMailHtml]), at the height of its content.
 /// Quoted history (Gmail, Outlook, Thunderbird, Apple Mail markup) is cut out of the body and
 /// folds behind a toggle, in a view of its own made when it opens.
 class MailHtml extends StatefulWidget {
-  const MailHtml({super.key, required this.owner, required this.html, this.partsCache});
+  const MailHtml({super.key, required this.owner, required this.html, required this.onOpenLink, this.partsCache});
 
   /// The message the HTML belongs to: a WebKit page closed with its reader is shown again only
   /// for the same message and HTML.
   final HtmlOwner owner;
   final String html;
+
+  /// Opens a clicked link on Windows; the Mac's runner opens links itself.
+  final ValueChanged<String> onOpenLink;
 
   /// Overrides preparation for deterministic tests; rendering stays on the native view path.
   final HtmlPartsCache? partsCache;
@@ -626,11 +553,14 @@ class _MailHtmlState extends State<MailHtml> {
     final (main, quoted) = parts;
     final owner = widget.owner;
     List<String> part(String name) => [owner.account, owner.conversation, owner.message, name];
+    Widget view(String html, String name) => Host.mac
+        ? _WebBody(key: ValueKey(html), owner: part(name), html: html)
+        : WindowsMailHtml(key: ValueKey(html), html: html, onOpenLink: widget.onOpenLink);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _WebBody(key: ValueKey(main), owner: part('body'), html: main),
-        if (quoted != null) _Fold(child: _WebBody(key: ValueKey(quoted), owner: part('quote'), html: quoted)),
+        view(main, 'body'),
+        if (quoted != null) _Fold(child: view(quoted, 'quote')),
       ],
     );
   }
@@ -989,7 +919,7 @@ class _ChatMessageState extends State<_ChatMessage> {
     final m = widget.message;
     final hover = _hover;
     final body = (m.text ?? '').trim().isEmpty && m.html != null
-        ? _Body(conversation: widget.conversation, message: m)
+        ? _Body(conversation: widget.conversation, message: m, onOpenLink: widget.state.openExternal)
         : FoldedText(text: m.text ?? '');
     return MouseRegion(
       onEnter: _enter,

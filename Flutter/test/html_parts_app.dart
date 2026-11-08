@@ -136,6 +136,7 @@ class _HtmlPartsAppState extends State<HtmlPartsApp> {
           child: MailHtml(
             owner: (account: 'synthetic', conversation: 'synthetic', message: 'synthetic'),
             html: sample(3, _revision),
+            onOpenLink: (_) {},
           ),
         ))),
       ]),

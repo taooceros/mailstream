@@ -78,14 +78,19 @@ zipped Release folder as artifacts. On Windows:
   shell's default verb (`ShellExecuteW`), as Explorer's double-click and the browser do.
 - Chat videos play in the log through `video_player_win` (Media Foundation), the Windows
   implementation of `video_player`.
-- HTML mail is not drawn yet (MS-106, which will use `webview_plus` over WebView2): a message
-  with an HTML body shows its text (the engine's text part, else its HTML read as text) under a
-  notice saying so (`HtmlTextFallback` in `lib/ui/reader.dart`). Links and images inside the
-  HTML are therefore not shown; attachments are.
+- HTML mail is drawn by WebView2 through `webview_plus` (`WindowsMailHtml` in
+  `lib/ui/mail_html_windows.dart`), composed into a Flutter texture as tall as the page, so it
+  scrolls with the conversation; quoted history folds as on the Mac. The mail's scripts are off
+  (`javaScriptEnabled: false`, WebView2's `IsScriptEnabled`); the app measures the page through
+  `ExecuteScript`, which that switch does not stop. Each body is a file in
+  `%TEMP%\mailstream-html` (WebView2 gives strings no base URL, so the `file://` inline images in
+  the cache would not load), deleted with its view. Links (`target="_blank"` removed first) open
+  in the default browser; remote images load in an InPrivate profile. Pages taller than the
+  16384 px texture limit stop there and scroll inside. WebView2 Runtime ships with Windows 11.
 
 `flutter test test/windows_platform_test.dart test/compose_paste_test.dart` checks the Windows
 branches on any host (`Host.debugMacOverride`): shortcut labels and bindings, AltGr, the drawn
-capsule, the title bar area, the plain-text body and the Ctrl+V attachment paste.
+capsule, the title bar area, the WebView2 body and the Ctrl+V attachment paste.
 
 ## Application updates (macOS)
 

@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -9,6 +7,7 @@ import 'package:mailstream_ui/ui/common.dart';
 import 'package:mailstream_ui/ui/design.dart';
 import 'package:mailstream_ui/ui/glass.dart';
 import 'package:mailstream_ui/ui/html_parts.dart';
+import 'package:mailstream_ui/ui/mail_html_windows.dart';
 import 'package:mailstream_ui/ui/reader.dart';
 
 /// The Windows branches of the Mac-first UI, taken on any host through [Host.debugMacOverride].
@@ -102,43 +101,34 @@ void main() {
     });
   });
 
-  group('HTML bodies without an HTML view', () {
-    Widget host(Widget child) => MacosApp(theme: MailTheme.macos(Brightness.light), home: SingleChildScrollView(child: child));
-
-    testWidgets('show the message text under the notice', (tester) async {
-      await tester.pumpWidget(host(HtmlTextFallback(
-        text: 'Hello from the text part.',
-        html: '<p>Hello</p>',
-        toText: (_) => fail('the text part is used as it is'),
-      )));
-      expect(find.text(HtmlTextFallback.notice), findsOneWidget);
-      expect(find.text('Hello from the text part.'), findsOneWidget);
-      expect(find.byType(AppKitView), findsNothing);
-    });
-
-    testWidgets('read the HTML as text when the message has none', (tester) async {
-      final derived = Completer<String>();
-      await tester.pumpWidget(host(HtmlTextFallback(text: '', html: '<p>Only HTML</p>', toText: (_) => derived.future)));
-      expect(find.text(HtmlTextFallback.notice), findsOneWidget);
-      expect(find.byType(ProgressCircle), findsOneWidget);
-      derived.complete('Only HTML');
-      await tester.pump();
-      expect(find.text('Only HTML'), findsOneWidget);
-    });
-
-    testWidgets('say so when the HTML has no text either', (tester) async {
-      await tester.pumpWidget(host(HtmlTextFallback(text: null, html: '<img src="x">', toText: (_) async => '  ')));
-      await tester.pump();
-      expect(find.text('This message has no text.'), findsOneWidget);
-    });
-
-    test('HTML reads as its visible text, a line per block', () {
-      final text = mailHtmlText(
-        '<html><head><title>T</title><style>p{}</style></head><body>'
-        '<p>First<br>line two</p><div>Second</div><script>alert(1)</script>'
-        '<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table></body></html>',
+  group('HTML bodies on Windows', () {
+    test('open every link in the page, where the reader sends it to the browser', () {
+      final page = windowsMailPage(
+        '<html><head><base href="https://x.com/" target="_blank"></head><body>'
+        '<a href="https://a.com" target="_blank">a</a><form action="https://f.com" target="_new"></form>'
+        '<img src="file:///C:/cache/0-logo.png"></body></html>',
       );
-      expect(text.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty), ['First', 'line two', 'Second', 'ab', 'c']);
+      expect(page, isNot(contains('target')));
+      expect(page, contains('<base href="https://x.com/">'));
+      expect(page, contains('src="file:///C:/cache/0-logo.png"'));
+    });
+
+    testWidgets('are drawn by WebView2, without the AppKit view', (tester) async {
+      Host.debugMacOverride = false;
+      await tester.pumpWidget(MacosApp(
+        theme: MailTheme.macos(Brightness.light),
+        home: SingleChildScrollView(
+          child: MailHtml(
+            owner: (account: 'a', conversation: 'c', message: 'm'),
+            html: '<p>Hello</p>',
+            onOpenLink: (_) {},
+            partsCache: HtmlPartsCache(split: (html) async => (html, null)),
+          ),
+        ),
+      ));
+      await tester.pump();
+      expect(find.byType(WindowsMailHtml), findsOneWidget);
+      expect(find.byType(AppKitView), findsNothing);
     });
   });
 }

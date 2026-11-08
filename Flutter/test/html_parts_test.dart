@@ -224,6 +224,9 @@ void main() {
   late Future<Object?> Function(int view) answer;
 
   setUp(() {
+    // The WebKit view path is the Mac's (Windows draws WebView2 bodies: windows_platform_test).
+    Host.debugMacOverride = true;
+    addTearDown(() => Host.debugMacOverride = null);
     views.clear();
     pulls.clear();
     answer = (_) async => null;
@@ -245,7 +248,7 @@ void main() {
   const owner = (account: 'account', conversation: 'conversation', message: 'message');
   Widget host(String html, HtmlPartsCache cache, {String message = 'same'}) => MacosApp(
     theme: MailTheme.macos(Brightness.light),
-    home: Center(child: MailHtml(key: ValueKey(message), owner: owner, html: html, partsCache: cache)),
+    home: Center(child: MailHtml(key: ValueKey(message), owner: owner, html: html, onOpenLink: (_) {}, partsCache: cache)),
   );
   List<String> rendered(WidgetTester tester) => tester.widgetList<AppKitView>(find.byType(AppKitView))
       .map((view) => (view.creationParams as Map)['html'] as String).toList();
@@ -408,7 +411,7 @@ void main() {
     theme: MailTheme.macos(Brightness.light),
     home: Column(children: [
       for (final MapEntry(key: message, value: html) in htmlByMessage.entries)
-        MailHtml(key: ValueKey(message), owner: (account: 'account', conversation: 'c', message: message), html: html, partsCache: cache),
+        MailHtml(key: ValueKey(message), owner: (account: 'account', conversation: 'c', message: message), html: html, onOpenLink: (_) {}, partsCache: cache),
     ]),
   );
 
@@ -431,9 +434,6 @@ void main() {
   });
 
   testWidgets('a prefetched conversation draws its bodies in its first frame; pending prefetch waits for the open one', (tester) async {
-    // Prefetch splits bodies only where the reader draws HTML (the Mac's WebKit view; MS-106).
-    Host.debugMacOverride = true;
-    addTearDown(() => Host.debugMacOverride = null);
     final (:calls, :answers, :cache) = held();
     final mail = ReaderMail();
     final state = MailState(mail);
