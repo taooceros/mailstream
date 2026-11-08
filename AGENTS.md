@@ -110,7 +110,9 @@ as one background bash job with no deadline (`timeout: 0`) and `wait`s on it: th
 Linear every minute and returns only once it has claimed something. The session hands the issues
 it claims, and the user's comments, to subagents, then starts it again. It keeps that file a JSON
 array of its running agent ids, rewritten whenever one starts or finishes; the script re-reads it
-each pass. The script's header says what it claims and how the session picks the agent.
+each pass. The script's header says what it claims and how the session picks the agent. Whenever
+`ovnfs ls` shows no checkout open (between agent batches, before starting the script again), the
+session runs `python3 scripts/warm-build.py` in the default checkout ([Building](#building)).
 `python3 scripts/linear-omp.py MS-12` opens one issue in a new Tern tab instead. The scripts are
 Python (standard library only) so both machines run the same ones; on Windows the command is
 `python`, and the poller also needs `HOST_LABEL=windows LINEAR_TOKEN_FILE=~/.config/linear/token.json
@@ -133,6 +135,14 @@ name in backticks (`` `@omp` ``), since Linear rejects an app's @-mention of an 
   checkout opens. A build or delete in the default checkout afterwards shows up in every open
   checkout, and cargo there can then keep an artifact built from the default checkout's source
   (MS-152).
+- The default checkout keeps a warm release build of `main` (`FFI/target`, `Engine/target`,
+  `.turso/`) that every new checkout starts from: its first release FFI build takes ~21 s instead
+  of ~90 s (MS-151). Never delete the default checkout's build folders to free disk; free your
+  own checkout's output instead (delete it there, or `ovnfs rm` the checkout once done). Only
+  `python3 scripts/warm-build.py` builds there: it fetches `main`, moves the default checkout's
+  empty change onto it and builds, and refuses while any checkout of it is open (MS-152). Don't
+  share one `CARGO_TARGET_DIR` between checkouts: cargo locks it for one build at a time and each
+  checkout's source rebuilds the repo's crates over the others'.
 - The app links the Turso database engine (`.turso/lib/libturso_sqlite3.a`). Run `scripts/turso.sh`
   once before `swift build` (it needs rustup; `bundle.sh` runs it too). It builds the pinned
   version with cargo in a few minutes and returns at once after that.
@@ -168,7 +178,8 @@ update without approval, which the installed Mailstream Flutter installs by itse
    in [Version control](#version-control-jj)), never an area workspace or the default checkout.
    The checkout carries the default checkout's build output: delete `.build` in it first (Swift's
    module cache records the folder it was built in and fails anywhere else; this only touches
-   the checkout). Cargo's `target/` folders stay: cargo rebuilds what changed. There run
+   the checkout). Cargo's `target/` folders and `.turso/` stay: they are the warm build
+   ([Building](#building)) and cargo rebuilds what changed. There run
    `./scripts/install.sh <targets>`: it checks source, signing and the deploy lock itself and
    stops only the installed copy. If `main` moves meanwhile, rebuild from its tip. Never delete
    another agent's lock or kill its processes.
