@@ -21,9 +21,10 @@ the same script runs on macOS and Windows.
     issues to Todo to ask the user something (with an omp comment), so neither is picked up
     unless the user moves an uncommented one to Todo or it was claimed before and gets
     unblocked.
-  {"kind": "comment", "id", "issue", "issueId", "state", "createdAt", "body"}: a comment a
-    workspace member (not an app, a guest or a GitHub sync) posted on any team issue in the last
-    7 days, each once. The caller routes it to the issue's subagent or starts one.
+  {"kind": "comment", "id", "issue", "issueId", "state", "createdAt", "author", "body"}: a comment
+    posted on any team issue in the last 7 days, each once, by a workspace member (not an app, a
+    guest or a GitHub sync) or by another machine's omp app (one of PEERS, comma-separated app
+    names, default `omp,windows-omp`). The caller routes it to the issue's subagent or starts one.
   {"kind": "stale", "id", "identifier", "agent", "claimedAt"}: an In Progress issue labelled
     `claimed` whose owner, the agent named in its latest start comment
     (`[omp @ <checkout>] start (<agent id>): …`, posted at claimedAt), is not in RUNNING, and
@@ -34,7 +35,10 @@ the same script runs on macOS and Windows.
     Issues out of In Progress whose owner is not running lose `claimed`.
 Machines: issues labelled with one of HOST_LABELS (comma-separated, default `windows`) belong to
 the poller started with that HOST_LABEL; every other issue to the poller without one (the Mac).
-Each poller claims, resumes, reports stale and routes comments only for its own issues.
+Each poller claims, resumes, reports stale and routes comments only for its own issues, except
+that a comment naming a machine's app (`@windows-omp`) goes to that machine alone, whatever the
+issue: that is how the user and the other machine address it. Another machine's app reaches it
+only that way.
 Token: the Mac reads omp's from the keychain and renews it with RENEW. A machine without
 `security` sets LINEAR_TOKEN_FILE (the OAuth token JSON) and LINEAR_CREDENTIALS (a file with the
 OAuth app's client id on line 1 and secret on line 2); renewal fetches a client_credentials token
@@ -80,6 +84,7 @@ LABEL = os.environ.get("LABEL", "omp")
 CLAIMED = os.environ.get("CLAIMED", "claimed")
 HOST_LABEL = os.environ.get("HOST_LABEL", "")
 HOST_LABELS = os.environ.get("HOST_LABELS", "windows").split(",")
+PEERS = os.environ.get("PEERS", "omp,windows-omp").split(",")
 RENEW = Path.home() / ".pi/agent/extensions/linear/renew-omp-token.sh"
 TOKEN_FILE = os.environ.get("LINEAR_TOKEN_FILE", "")
 CREDENTIALS = os.environ.get("LINEAR_CREDENTIALS", "")
@@ -208,7 +213,7 @@ def watch():
 
 
 QUERY = """query($team: ID!, $label: String!, $claimed: String!) {
-  viewer { id }
+  viewer { id name }
   queued: issues(first: 100, filter: {
     team: { id: { eq: $team } }, state: { type: { in: ["triage", "backlog", "unstarted"] } },
     or: [{ labels: { some: { name: { eq: $label } } } }, { state: { name: { eq: "Todo" } } },
@@ -221,7 +226,7 @@ QUERY = """query($team: ID!, $label: String!, $claimed: String!) {
     nodes { id identifier state { name } labels { nodes { id name } }
       comments(first: 100) { nodes { id createdAt body user { app } } } } }
   comments(first: 100, filter: { createdAt: { gt: "-P7D" }, issue: { team: { id: { eq: $team } } } }) {
-    nodes { id createdAt body user { app guest }
+    nodes { id createdAt body user { id name app guest }
       issue { id identifier state { name } labels { nodes { name } } } } }
 }"""
 
@@ -237,6 +242,21 @@ def host(issue):
 
 def member(user):
     return user is not None and user.get("app") is not True and user.get("guest") is not True
+
+
+def mentions(body, name):
+    return re.search(rf"@{re.escape(name)}(?![\w-])", body) is not None
+
+
+def routed(comment, me):
+    """Whether a comment goes to this poller: see "Machines" above."""
+    user, body = comment["user"], comment["body"]
+    if user is None or user["id"] == me["id"]:
+        return False
+    if member(user):
+        named = [peer for peer in PEERS if mentions(body, peer)]
+        return me["name"] in named if named else host(comment["issue"]) == HOST_LABEL
+    return user.get("app") is True and user["name"] in PEERS and mentions(body, me["name"])
 
 
 def blockers(issue):
@@ -294,10 +314,11 @@ def plan(data, running):
                 out.append({"kind": "stale", "id": issue["id"], "identifier": issue["identifier"], "agent": agent,
                             "claimedAt": start["createdAt"] if start else None, "staleKey": key})
     for comment in sorted(data["comments"]["nodes"], key=lambda c: c["createdAt"]):
-        if member(comment["user"]) and host(comment["issue"]) == HOST_LABEL and comment["id"] not in handled:
+        if routed(comment, data["viewer"]) and comment["id"] not in handled:
             out.append({"kind": "comment", "id": comment["id"], "issue": comment["issue"]["identifier"],
                         "issueId": comment["issue"]["id"], "state": comment["issue"]["state"]["name"],
-                        "createdAt": comment["createdAt"], "body": comment["body"]})
+                        "createdAt": comment["createdAt"], "author": comment["user"]["name"],
+                        "body": comment["body"]})
     return out
 
 
