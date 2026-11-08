@@ -90,10 +90,11 @@ capsule, the title bar area, the plain-text body and the Ctrl+V attachment paste
 ## Application updates (macOS)
 
 The application menu contains **Check for Updates…** and **Automatically Check for
-Updates**. Sparkle 2.10.1 owns its standard consent prompt, daily scheduling, progress,
-errors, authenticated installation and relaunch. Checks do not start mail sync. Automatic
-downloads are off initially, system profiling is disabled, and the automatic-check preference
-is Sparkle's own persisted preference (not reset on launch).
+Updates**. Sparkle 2.10.1 owns scheduling, progress, errors, authenticated installation and
+relaunch. Checks do not start mail sync. The app checks hourly (`SUScheduledCheckInterval`)
+and downloads and verifies a new build in the background without asking; it is installed
+when the app quits (or at once from **Check for Updates…**). System profiling is disabled.
+Both preferences are Sparkle's own, persisted per user (the menu item turns checking off).
 
 The approved production Ed25519 public key and canonical HTTPS feed are configured in
 `macos/Runner/Configs/AppInfo.xcconfig`. The signed feed is published in the repository's
@@ -107,61 +108,56 @@ Both use one monotonically increasing `CFBundleVersion` sequence: neither a prer
 label nor a newer publication date permits a downgrade. There is no `/releases/latest`
 request, so a repository containing only GitHub prereleases is supported.
 
-After configuring the approved signing material:
+Every push to `main` that changes the app (`Flutter/`, `Engine/`, `FFI/` or the update
+scripts) runs `.github/workflows/publish-update.yml`, which builds, signs and publishes the
+update without approval. It runs **only from `main`**, one run at a time, in its `updates`
+environment, which admits `main` only and holds `MAILSTREAM_SIGNING_P12`,
+`MAILSTREAM_SIGNING_P12_PASSWORD` and `MAILSTREAM_UPDATE_PRIVATE_KEY`; the public
+`MAILSTREAM_UPDATE_PUBLIC_KEY` is a repository variable. Its steps:
 
 1. Keep `MAILSTREAM_UPDATE_PUBLIC_KEY` in `macos/Runner/Configs/AppInfo.xcconfig` equal to
-   the `updates` environment's public variable of the same name. The ignored
-   `Updates.local.xcconfig` beside it can override public build settings for CI or isolated
-   tests. Never put a private key there. CI inherits the feed from the tracked configuration;
-   it overrides only the public key and selected channel. The canonical feed is
+   that variable. The ignored `Updates.local.xcconfig` beside it can override public build
+   settings for CI or isolated tests. Never put a private key there. CI inherits the feed from
+   the tracked configuration; it overrides only the public key and selected channel. The
+   canonical feed is
    `https://github.com/taooceros/mailstream/releases/download/updates/appcast.xml`;
    its xcconfig spelling escapes `//` as `/$()/` so it is not parsed as a comment.
-2. Increment `pubspec.yaml`'s build number for **every** update; Sparkle compares
-   `CFBundleVersion`, not a commit SHA. Keep build versions increasing, including locally
-   installed builds, and never replace the bytes of a published version.
-3. Build release and sign with `scripts/sign.sh`, retaining the shared Apple signing team
+2. `python3 scripts/publish-update.py next-version` picks the build number: one past both the
+   newest published build and `pubspec.yaml`'s (what `scripts/install.sh` builds locally).
+   Sparkle compares `CFBundleVersion`, not a commit SHA, so every update gets a larger one
+   and a local install is replaced by the next published build.
+3. The release build is signed with `scripts/sign.sh`, retaining the shared Apple signing team
    `K7HG6KZNNP` and host signing identifier `dev.mailstream.Mailstream`. It signs Sparkle's
    nested helpers inside-out without changing their identifiers.
-4. Prepare artifacts from those exact signed bytes:
-   `python3 scripts/prepare-update.py "/path/Mailstream Flutter.app" /new/output/directory
-   --sparkle-bin /path/to/Sparkle/bin`. The pinned Sparkle distribution is 2.10.1, SHA-256
+4. `python3 scripts/prepare-update.py "/path/Mailstream Flutter.app" /new/output/directory
+   --sparkle-bin /path/to/Sparkle/bin` prepares artifacts from those exact signed bytes. The
+   pinned Sparkle distribution is 2.10.1, SHA-256
    `1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27`.
    Sparkle uses an existing Keychain signing key, or `--key-file /private/path` outside the
    repository. The script never creates keys or publishes anything. It checks the app signature,
    generates and signs the appcast using Sparkle with the bundle's stable/prerelease channel,
    verifies both signatures, verifies the archive against the app's public key, and emits
    the versioned zip, signed `appcast.xml`, and a byte-length/SHA-256/revision/channel manifest.
-5. Publish to this repository's `updates` GitHub Release, whose feed URL is shown above.
-   It is a GitHub **prerelease**; direct asset URLs do not depend on GitHub treating it as
-   the latest stable release. Sparkle's item channel controls client eligibility
-   independently of the GitHub release flag.
-   Only after explicit publication approval, upload the immutable versioned zip first,
-   then the validated appcast (replace only the feed). Keep old packages so a client which
-   already fetched the previous feed can finish its download. Do not delete/recreate this
-   channel the way the unrelated rolling nightly does.
+5. `python3 scripts/publish-update.py publish /that/directory` refuses a build that is not
+   newer than every published one, uploads the immutable versioned zip first, then replaces
+   the appcast, checks the uploaded appcast byte for byte, and deletes all but the newest five
+   archives (a client that already fetched an earlier feed can still finish its download).
+   The `updates` release is a GitHub **prerelease**; direct asset URLs do not depend on GitHub
+   treating it as the latest stable release, and Sparkle's item channel controls client
+   eligibility. Do not delete/recreate it the way the unrelated rolling nightly is.
 
-The initial signed feed and build 4 archive have been published and verified at the canonical
-HTTPS URLs. Apps installed before feed activation need one manual bootstrap install with
-`scripts/install.sh flutter`; the published CI build 4 also already contains the enabled feed.
-Subsequent normal builds inherit the same feed. Installing that initial bootstrap is not a
-version upgrade by itself, and Sparkle never downgrades a newer locally installed build.
-
-`.github/workflows/prepare-update.yml` is manual, runs **only from `main`**, and **only
-prepares artifacts**. Its job references an `updates` environment. The owner must create
-that environment, require reviewers, restrict deployments to `main`, and store
-`MAILSTREAM_SIGNING_P12`, `MAILSTREAM_SIGNING_P12_PASSWORD` and
-`MAILSTREAM_UPDATE_PRIVATE_KEY` there before using it. The YAML reference alone does not
-configure GitHub's approval or branch protections. Set the public
-`MAILSTREAM_UPDATE_PUBLIC_KEY` variable at environment or repository scope.
+The OAuth clients and push relay settings (`scripts/app-config.sh`) must not be in a public
+package, so updates carry none of them: the engine reads them from
+`~/Library/Application Support/Mailstream/config.json`, which `scripts/install.sh flutter`
+writes. Install once with it on a new Mac; Sparkle keeps the app current from then on.
 
 Preflight receives only secret-presence booleans; private material is injected only into
-the final signing step, written to a temporary CI keychain/files and removed on exit.
-Build caches and uploaded artifacts never include that directory. Local credential
-export/upload keeps private values out of process arguments. On the protected disposable
-CI runner, the standard `security` CLI briefly uses certificate/keychain passwords as
-arguments; the signing seed remains a private file, never an argument. Configuring
-credentials or publishing remains a separate owner action, not a side effect of merging.
-Its `channel` input defaults to `prerelease`; `stable` must be selected explicitly and is
+the signing step, written to a temporary CI keychain/files and removed on exit. Build caches
+and uploaded artifacts never include that directory. The release token is given only to the
+steps that read and publish the release, not left in the checkout for the build's tools. On
+the disposable CI runner, the standard `security` CLI briefly uses certificate/keychain
+passwords as arguments; the signing seed remains a private file, never an argument. A manual
+run's `channel` input defaults to `prerelease`; `stable` must be selected explicitly and is
 baked into the bundle before signing. The prepare command derives the signed item channel
 from that bundle, not a later publication label.
 

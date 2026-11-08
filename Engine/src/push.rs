@@ -2,9 +2,9 @@
 //! `PushService` (`Sources/MailstreamKit/Backend/PushService.swift`) gets them: one WebSocket
 //! carrying Gmail Pub/Sub and Graph change notifications, plus the Gmail watches and Graph
 //! subscriptions that make the providers send them. A notification asks the mail store to
-//! refresh the account it names. Without push configuration (the host app's Info.plist items
-//! `MSPushURL`, `MSPushToken`, `MSGraphClientState`, `MSGmailTopic`) it stays idle and the store
-//! keeps polling.
+//! refresh the account it names. Without push configuration (the host's items `MSPushURL`,
+//! `MSPushToken`, `MSGraphClientState`, `MSGmailTopic`, as `bundle` reads them) it stays idle and
+//! the store keeps polling.
 //!
 //! The registrations live in Application Support/Mailstream/push.json in the Swift engine's
 //! format. Every process with an engine shares the file, so a pass reads it afresh before it

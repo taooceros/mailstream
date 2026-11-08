@@ -72,8 +72,12 @@ PLIST
   # An interrupted flutter build can exit 0 and leave a bundle without its executable.
   [ -x "$app/Contents/MacOS/$executable" ] || fail "$app has no executable $executable; build failed"
   # The engine reads OAuth clients and push settings from the host's Info.plist; bundle.sh
-  # already added them to Mailstream.app.
-  [ "$frontend" = native ] || ./scripts/app-config.sh "$app/Contents/Info.plist"
+  # already added them to Mailstream.app. Mailstream Flutter reads them from the support
+  # directory's config.json instead, as the public signed updates it installs from CI must.
+  case "$frontend" in
+    flutter) ./scripts/app-config.sh "$HOME/Library/Application Support/Mailstream/config.json" ;;
+    gpui) ./scripts/app-config.sh "$app/Contents/Info.plist" ;;
+  esac
   /usr/libexec/PlistBuddy -c "Add :MSInstalledRevision string $revision" "$app/Contents/Info.plist"
   ./scripts/sign.sh "$app"
   codesign --verify --deep --strict "$app"

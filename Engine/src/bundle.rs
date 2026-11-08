@@ -1,6 +1,12 @@
 //! Build-time configuration of the host app, never committed: on macOS its Info.plist
-//! (scripts/bundle.sh writes it into Mailstream.app), as the Swift engine's `AppConfig` reads it;
-//! elsewhere `config.json` beside the executable, one object with the same keys and string values.
+//! (scripts/bundle.sh writes it into Mailstream.app), as the Swift engine's `AppConfig` reads it,
+//! else `config.json` in the support directory (scripts/install.sh writes it for Mailstream
+//! Flutter, whose public signed update carries none of these items); elsewhere `config.json`
+//! beside the executable. Each file is one object with the same keys and string values.
+use std::path::PathBuf;
+
+use serde_json::{Map, Value};
+
 use crate::oauth::{BuiltInClients, OAuthClient, Provider};
 use crate::push::PushConfig;
 
@@ -9,6 +15,13 @@ fn value(key: &str) -> Option<String> {
     let text = platform::value(key)?;
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_string())
+}
+
+/// The object in `file`; empty when there is none or it is not an object.
+fn config_file(file: Option<PathBuf>) -> Map<String, Value> {
+    file.and_then(|file| std::fs::read(file).ok())
+        .and_then(|data| serde_json::from_slice::<Map<String, Value>>(&data).ok())
+        .unwrap_or_default()
 }
 
 /// The OAuth clients the host carries (`MSGoogleClientID`/`Secret`,
@@ -46,13 +59,23 @@ pub fn short_version() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 mod platform {
+    use std::sync::LazyLock;
+
     use core_foundation::bundle::CFBundle;
     use core_foundation::string::CFString;
+    use serde_json::{Map, Value};
 
-    /// The main bundle's Info.plist item `key`.
+    /// `config.json` in the support directory.
+    static CONFIG: LazyLock<Map<String, Value>> =
+        LazyLock::new(|| super::config_file(Some(crate::support_directory().join("config.json"))));
+
+    /// The main bundle's Info.plist item `key`, else the support directory's `config.json` item.
     pub fn value(key: &str) -> Option<String> {
         let info = CFBundle::main_bundle().info_dictionary();
-        Some(info.find(CFString::new(key))?.downcast::<CFString>()?.to_string())
+        if let Some(text) = info.find(CFString::new(key)).and_then(|item| item.downcast::<CFString>()) {
+            return Some(text.to_string());
+        }
+        CONFIG.get(key)?.as_str().map(String::from)
     }
 
     pub fn short_version() -> Option<String> {
@@ -66,12 +89,9 @@ mod platform {
 
     use serde_json::{Map, Value};
 
-    /// `config.json` beside the executable; empty when there is none or it is not an object.
+    /// `config.json` beside the executable.
     static CONFIG: LazyLock<Map<String, Value>> = LazyLock::new(|| {
-        let file = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("config.json")));
-        file.and_then(|file| std::fs::read(file).ok())
-            .and_then(|data| serde_json::from_slice::<Map<String, Value>>(&data).ok())
-            .unwrap_or_default()
+        super::config_file(std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("config.json"))))
     });
 
     pub fn value(key: &str) -> Option<String> {

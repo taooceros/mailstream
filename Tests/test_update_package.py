@@ -89,5 +89,25 @@ print(other.publicKey.rawRepresentation.base64EncodedString())''', str(archive)]
             self.assertNotEqual(verify(public_key), 0)
 
 
+publish_spec = importlib.util.spec_from_file_location("publish_update", ROOT / "scripts/publish-update.py")
+publish = importlib.util.module_from_spec(publish_spec)
+publish_spec.loader.exec_module(publish)
+
+
+class PublishTests(unittest.TestCase):
+    FEED = f'''<rss xmlns:sparkle="{package.SPARKLE_NS}"><channel>
+      <item><sparkle:version>7</sparkle:version></item></channel></rss>'''.encode()
+
+    def test_build_numbers_only_grow(self):
+        self.assertEqual(publish.next_version(self.FEED, 4), 8)
+        self.assertEqual(publish.next_version(self.FEED, 12), 13)
+        self.assertEqual(publish.published_versions(self.FEED), ["7"])
+
+    def test_keeps_newest_archives_only(self):
+        names = ["appcast.xml"] + [f"Mailstream-Flutter-{n}.zip" for n in (4, 10, 9, 5, 7, 8, 6)]
+        self.assertEqual(publish.stale_archives(names, 5), ["Mailstream-Flutter-4.zip", "Mailstream-Flutter-5.zip"])
+        self.assertEqual(publish.stale_archives(names[:3], 5), [])
+
+
 if __name__ == "__main__":
     unittest.main()

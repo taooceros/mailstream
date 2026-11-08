@@ -42,7 +42,11 @@
 	<string>$(MAILSTREAM_UPDATE_CHANNEL)</string>
 	<key>SUEnableSystemProfiling</key>
 	<false/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>3600</integer>
 	<key>SUAutomaticallyUpdate</key>
-	<false/>
+	<true/>
 </dict>
 </plist>

@@ -1,11 +1,15 @@
 #!/bin/sh
 # Adds the OAuth clients and the push relay settings from the login keychain (service
-# dev.mailstream.build) to an app's Info.plist, so they are never committed.
-# Usage: scripts/app-config.sh <Info.plist>
+# dev.mailstream.build) to an app's Info.plist, so they are never committed. Given a .json path
+# instead, it writes them as that file (private to the user): Mailstream Flutter's engine reads
+# them from config.json in ~/Library/Application Support/Mailstream, since the signed updates CI
+# publishes are public and carry none of them (Engine/src/bundle.rs).
+# Usage: scripts/app-config.sh <Info.plist | config.json>
 # A missing item leaves its key out (the feature it enables stays off). Values are never printed:
-# they reach PlistBuddy through a private temporary plist, not its command line.
+# they reach PlistBuddy/plutil through a private temporary plist, not their command line.
 set -eu
-plist="$1"
+target="$1"
+case "$target" in *.json) json=1 ;; *) json= ;; esac
 SERVICE="dev.mailstream.build"
 
 umask 077
@@ -24,11 +28,17 @@ trap 'rm -f "$fragment"' EXIT
     if value=$(security find-generic-password -s "$SERVICE" -a "$item" -w 2>/dev/null); then
       value=$(printf '%s' "$value" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
       printf '  <key>%s</key><string>%s</string>\n' "$key" "$value"
-      /usr/libexec/PlistBuddy -c "Delete :$key" "$plist" >/dev/null 2>&1 || true
+      [ -n "$json" ] || /usr/libexec/PlistBuddy -c "Delete :$key" "$target" >/dev/null 2>&1 || true
     else
       echo "warning: no \"$item\" item in Keychain service $SERVICE; $key left out" >&2
     fi
   done
   echo '</dict></plist>'
 } > "$fragment"
-/usr/libexec/PlistBuddy -c "Merge $fragment" "$plist" >/dev/null
+if [ -n "$json" ]; then
+  mkdir -p "$(dirname "$target")"
+  plutil -convert json -o "$target.new" "$fragment"
+  mv -f "$target.new" "$target"
+else
+  /usr/libexec/PlistBuddy -c "Merge $fragment" "$target" >/dev/null
+fi

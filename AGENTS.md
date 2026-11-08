@@ -152,6 +152,9 @@ name in backticks (`` `@omp` ``), since Linear rejects an app's @-mention of an 
 ## Release delivery
 
 Finished fixes go to `/Applications` as part of the work, as signed release builds, never Debug.
+Separately, each push to `main` that touches the Flutter app or its engine publishes a signed
+update without approval, which the installed Mailstream Flutter installs by itself
+(`Flutter/README.md`); the issue's own install below is still required, so it is verified now.
 
 1. Targets: `flutter` (`Mailstream Flutter.app`) by default. Add `native` (`Mailstream.app`) or
    `gpui` (`Mailstream GPUI.app`) only when the user asks or its installed behavior is directly

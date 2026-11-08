@@ -1,8 +1,22 @@
-name: Prepare signed Flutter update
+name: Publish signed Flutter update
 
-# This workflow prepares artifacts only. Publishing a public release is a separate,
-# explicitly approved operation; the ad-hoc rolling nightly is never an update feed.
+# Every push to main that changes the Flutter app or the engine it links builds, signs and
+# publishes a Sparkle update to the `updates` release, which installed copies of Mailstream
+# Flutter check (Flutter/README.md). The `updates` environment holds the signing material and
+# admits main only; it needs no approval. The ad-hoc rolling nightly is never an update feed.
 on:
+  push:
+    branches: [main]
+    paths:
+      - Flutter/**
+      - Engine/**
+      - FFI/**
+      - scripts/ffi.py
+      - scripts/sign.sh
+      - scripts/prepare-update.py
+      - scripts/publish-update.py
+      - scripts/verify-update.swift
+      - .github/workflows/publish-update.yml
   workflow_dispatch:
     inputs:
       channel:
@@ -12,23 +26,33 @@ on:
         default: prerelease
         options: [prerelease, stable]
 
+# One publication at a time, in push order: a newer push waits for the running one, and only
+# the newest waiting push runs after it.
+concurrency:
+  group: publish-update
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
 jobs:
-  prepare:
+  publish:
     if: github.ref == 'refs/heads/main'
-    # Configure reviewers and a main-only deployment policy on this environment
-    # before adding credentials. Naming it here does not create those protections.
     environment: updates
     runs-on: macos-26
     timeout-minutes: 60
+    permissions:
+      contents: write
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
       UPDATE_PUBLIC_KEY: ${{ vars.MAILSTREAM_UPDATE_PUBLIC_KEY }}
-      UPDATE_CHANNEL: ${{ inputs.channel }}
+      UPDATE_CHANNEL: ${{ inputs.channel || 'prerelease' }}
     steps:
+      # The release token is handed only to the steps that publish, never left in .git for
+      # the build's tools.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Require configured trust and signing material
         env:
           HAS_CERTIFICATE: ${{ secrets.MAILSTREAM_SIGNING_P12 != '' }}
@@ -47,12 +71,20 @@ jobs:
         run: |
           printf 'MAILSTREAM_UPDATE_PUBLIC_KEY = %s\nMAILSTREAM_UPDATE_CHANNEL = %s\n' \
             "$UPDATE_PUBLIC_KEY" "$UPDATE_CHANNEL" > Flutter/macos/Runner/Configs/Updates.local.xcconfig
+      - name: Choose build number
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          build=$(python3 scripts/publish-update.py next-version)
+          echo "BUILD_NUMBER=$build" >> "$GITHUB_ENV"
       - name: Build release
         run: |
+          echo "Building update $BUILD_NUMBER"
           CONFIG=release DART_OUT="$PWD/Flutter/packages/mailstream/lib/src" python3 scripts/ffi.py
           cd Flutter
           flutter pub get
-          flutter build macos --release
+          flutter build macos --release --build-number "$BUILD_NUMBER"
       - name: Sign and prepare authenticated package
         env:
           CERTIFICATE: ${{ secrets.MAILSTREAM_SIGNING_P12 }}
@@ -86,3 +118,8 @@ jobs:
           name: Mailstream-authenticated-update-${{ github.sha }}
           path: build/update/
           retention-days: 14
+      - name: Publish to the updates release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 scripts/publish-update.py publish build/update

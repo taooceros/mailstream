@@ -59,7 +59,10 @@ Everything is kept in the login keychain, service `dev.mailstream.build`.
 `MSPushToken`, `MSGraphClientState`, `MSGmailTopic`). A missing item is left out with
 a warning; the OAuth clients are then entered at sign-in, and without the push items
 the app polls instead. `scripts/bundle.sh` runs it for Mailstream.app, `scripts/install.sh`
-for the Flutter and GPUI bundles.
+for the GPUI bundle. For Mailstream Flutter, `scripts/install.sh` writes the same keys to
+`~/Library/Application Support/Mailstream/config.json` (readable by you only) instead: its
+signed updates are built by CI and published, so they carry none of them, and the engine
+reads that file for any key the `Info.plist` lacks.
 
 ## Settings and agents
 
