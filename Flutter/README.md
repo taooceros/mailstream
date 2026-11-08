@@ -9,7 +9,8 @@ The app also carries the `mailstream` command line in `Contents/MacOS` (the Xcod
 The UI lists accounts, mailboxes and conversations, reads previews, sender avatars and
 messages (with their HTML), searches, marks, archives, trashes, tags, replies and sends new mail through it,
 does Google Chat (the spaces of every chat account, their messages, sending and starting new
-chats), manages accounts and settings, and follows the engine's change events instead of polling.
+chats), shows every account's calendar events (an agenda and each event's details), manages
+accounts and settings, and follows the engine's change events instead of polling.
 Mailstream.app need not run.
 
 ```sh

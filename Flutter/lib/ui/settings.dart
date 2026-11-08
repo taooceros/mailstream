@@ -334,11 +334,12 @@ class _AccountsState extends State<_Accounts> {
                 if (account.services.isNotEmpty)
                   account.services
                       .map(
-                        (s) => s == 'mail'
-                            ? 'Mail'
-                            : s == 'chat'
-                            ? 'Chat'
-                            : 'Contacts',
+                        (s) => switch (s) {
+                          'mail' => 'Mail',
+                          'chat' => 'Chat',
+                          'calendar' => 'Calendar',
+                          _ => 'Contacts',
+                        },
                       )
                       .join(', '),
               ].join(' · '),

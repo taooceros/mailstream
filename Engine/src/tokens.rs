@@ -56,8 +56,15 @@ struct Flight {
     refresh: Refresh,
 }
 
+/// A signed-in account as refreshing needs it: whose token endpoint, and what its sign-in granted.
+#[derive(Clone, Debug)]
+pub struct SignedIn {
+    pub provider: Provider,
+    pub scopes: Vec<String>,
+}
+
 struct State {
-    providers: HashMap<String, Provider>,
+    accounts: HashMap<String, SignedIn>,
     access: HashMap<String, Access>,
     flights: HashMap<String, Flight>,
     next_flight: u64,
@@ -76,15 +83,16 @@ pub struct Tokens {
 const MARGIN: Duration = Duration::from_secs(300);
 
 impl Tokens {
-    /// `providers` are the signed-in accounts and whose token endpoint each refreshes against.
+    /// `accounts` are the signed-in accounts: whose token endpoint each refreshes against, and
+    /// the scopes it granted.
     pub fn new(
         keychain: Keychain,
         oauth: Arc<OAuth>,
         built_in: BuiltInClients,
-        providers: HashMap<String, Provider>,
+        accounts: HashMap<String, SignedIn>,
     ) -> Self {
         let state =
-            State { providers, access: HashMap::new(), flights: HashMap::new(), next_flight: 0, sign_ins: None };
+            State { accounts, access: HashMap::new(), flights: HashMap::new(), next_flight: 0, sign_ins: None };
         Self { keychain, oauth, built_in, state: Mutex::new(state) }
     }
 
@@ -101,7 +109,9 @@ impl Tokens {
             {
                 return Ok(cached.token.clone());
             }
-            let Some(&provider) = state.providers.get(account) else { return Err(TokenError::sign_in_again(account)) };
+            let Some(SignedIn { provider, scopes }) = state.accounts.get(account).cloned() else {
+                return Err(TokenError::sign_in_again(account));
+            };
             if let Some(flight) = state.flights.get(account) {
                 (flight.id, flight.refresh.clone())
             } else {
@@ -119,7 +129,7 @@ impl Tokens {
                     state.set_client(&self.keychain, &client, account)?;
                 }
                 let oauth = self.oauth.clone();
-                let task = tokio::spawn(async move { oauth.refresh(&refresh_token, provider, &client).await });
+                let task = tokio::spawn(async move { oauth.refresh(&refresh_token, provider, &client, &scopes).await });
                 let refresh: Refresh =
                     async move { task.await.unwrap_or_else(|error| Err(OAuthError::new("failed", error.to_string()))) }
                         .boxed()
@@ -166,7 +176,7 @@ impl Tokens {
     pub fn install(
         &self,
         account: &str,
-        provider: Provider,
+        signed_in: SignedIn,
         client: &OAuthClient,
         refresh_token: &str,
         access_token: &str,
@@ -176,9 +186,9 @@ impl Tokens {
         let mut sign_ins = state.fresh(&self.keychain)?;
         sign_ins.refresh_tokens.insert(account.into(), refresh_token.into());
         sign_ins.clients.insert(account.into(), client.clone());
-        sign_ins.last_clients.insert(provider.as_str().into(), client.clone());
+        sign_ins.last_clients.insert(signed_in.provider.as_str().into(), client.clone());
         state.save(&self.keychain, sign_ins)?;
-        state.providers.insert(account.into(), provider);
+        state.accounts.insert(account.into(), signed_in);
         state.flights.remove(account);
         let expiry = Instant::now() + Duration::from_secs(expires_in.max(0) as u64);
         state.access.insert(account.into(), Access { token: access_token.into(), expiry });
@@ -208,7 +218,7 @@ impl Tokens {
             sign_ins.clients.remove(account);
             let _ = state.save(&self.keychain, sign_ins);
         }
-        state.providers.remove(account);
+        state.accounts.remove(account);
         state.flights.remove(account);
         state.access.remove(account);
     }
@@ -282,9 +292,16 @@ mod tests {
 
     fn tokens(keychain: &TestKeychain, url: &str, built_in: BuiltInClients) -> Tokens {
         let oauth = OAuth::new(OAuthConfig { token_endpoint: Some(url.into()), ..OAuthConfig::default() });
-        let providers =
-            HashMap::from([("g@x.com".to_string(), Provider::Google), ("m@x.com".to_string(), Provider::Microsoft)]);
-        Tokens::new(keychain.0.clone(), Arc::new(oauth), built_in, providers)
+        let microsoft = |scopes: &[&str]| SignedIn {
+            provider: Provider::Microsoft,
+            scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+        };
+        let accounts = HashMap::from([
+            ("g@x.com".to_string(), SignedIn { provider: Provider::Google, scopes: vec![] }),
+            ("m@x.com".to_string(), microsoft(&["openid", "Mail.ReadWrite", "User.Read"])),
+            ("c@x.com".to_string(), microsoft(&["openid", "Calendars.ReadWrite", "Mail.ReadWrite"])),
+        ]);
+        Tokens::new(keychain.0.clone(), Arc::new(oauth), built_in, accounts)
     }
 
     fn client(id: &str) -> OAuthClient {
@@ -316,10 +333,20 @@ mod tests {
         assert_eq!((form["grant_type"].as_str(), form["refresh_token"].as_str()), ("refresh_token", "old"));
         assert_eq!(form["client_id"], "ms-client");
         assert!(form["scope"].contains("offline_access"));
+        // Signed in before calendars were asked for: Microsoft would refuse a refresh asking for them.
+        assert!(!form["scope"].contains("Calendars"), "{}", form["scope"]);
         // Another process (or the next launch) redeems the rotated token.
         let other = tokens(&keychain, &server.url, BuiltInClients::new());
         assert_eq!(other.token("m@x.com").await.unwrap(), "at2");
         assert_eq!(server.forms.lock().unwrap()[1]["refresh_token"], "new");
+        // An account whose sign-in granted calendars keeps them.
+        let mut sign_ins = keychain.0.load().unwrap();
+        sign_ins.refresh_tokens.insert("c@x.com".into(), "rc".into());
+        sign_ins.clients.insert("c@x.com".into(), client("ms-client"));
+        keychain.0.store(&sign_ins).unwrap();
+        let fresh = tokens(&keychain, &server.url, BuiltInClients::new());
+        fresh.token("c@x.com").await.unwrap();
+        assert!(server.forms.lock().unwrap()[2]["scope"].contains("https://graph.microsoft.com/Calendars.ReadWrite"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -352,7 +379,8 @@ mod tests {
         let tokens = tokens(&keychain, "http://127.0.0.1:9/token", BuiltInClients::new());
         assert!(tokens.suggested_client(Provider::Google).unwrap().is_none());
         let picked = OAuthClient { id: "mine".into(), secret: Some("s".into()) };
-        tokens.install("new@x.com", Provider::Google, &picked, "rt", "at", 3600).unwrap();
+        let signed_in = SignedIn { provider: Provider::Google, scopes: vec![] };
+        tokens.install("new@x.com", signed_in, &picked, "rt", "at", 3600).unwrap();
         assert_eq!(tokens.token("new@x.com").await.unwrap(), "at");
         assert_eq!(tokens.suggested_client(Provider::Google).unwrap(), Some(picked.clone()));
         tokens.forget("new@x.com");

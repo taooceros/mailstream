@@ -38,7 +38,12 @@ const GOOGLE_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/chat.messages.create",
     "https://www.googleapis.com/auth/chat.memberships.readonly",
     "https://www.googleapis.com/auth/chat.users.readstate",
+    // Calendars and their events (the calendar view), and answering invitations and editing
+    // events, asked for together so later calendar features need no second consent.
+    GOOGLE_CALENDARS,
+    "https://www.googleapis.com/auth/calendar.events",
 ];
+pub const GOOGLE_CALENDARS: &str = "https://www.googleapis.com/auth/calendar.readonly";
 const MICROSOFT_SCOPES: &[&str] = &[
     "openid",
     "email",
@@ -48,7 +53,20 @@ const MICROSOFT_SCOPES: &[&str] = &[
     "https://graph.microsoft.com/Mail.ReadWrite",
     "https://graph.microsoft.com/Mail.Send",
     "https://graph.microsoft.com/Contacts.Read",
+    MICROSOFT_CALENDARS,
 ];
+pub const MICROSOFT_CALENDARS: &str = "https://graph.microsoft.com/Calendars.ReadWrite";
+/// Scopes sign-in asks for that accounts signed in before them never granted. Microsoft refuses
+/// a refresh that asks for more than the sign-in granted, so a refresh asks for these only when
+/// the account's grant has them.
+const MICROSOFT_LATER_SCOPES: &[&str] = &[MICROSOFT_CALENDARS];
+
+/// Whether `granted` (an account's scopes as the provider listed them, with or without Graph's
+/// `https://graph.microsoft.com/` prefix) holds `scope`.
+pub fn has_scope(granted: &[String], scope: &str) -> bool {
+    let short = |scope: &str| scope.trim_end_matches('/').rsplit('/').next().unwrap_or(scope).to_lowercase();
+    granted.iter().any(|candidate| candidate == scope || short(candidate) == short(scope))
+}
 
 impl Provider {
     pub fn named(name: &str) -> Option<Self> {
@@ -97,11 +115,22 @@ impl Provider {
         }
     }
 
-    /// Microsoft's token endpoint takes the scopes again; Google's ignores them.
-    fn token_extras(self) -> Vec<(&'static str, String)> {
+    /// Microsoft's token endpoint takes the scopes again; Google's ignores them. A sign-in
+    /// (`granted` None) asks for every scope; a refresh only for those the account's grant has.
+    fn token_extras(self, granted: Option<&[String]>) -> Vec<(&'static str, String)> {
         match self {
             Self::Google => Vec::new(),
-            Self::Microsoft => vec![("scope", self.scopes().join(" "))],
+            Self::Microsoft => {
+                let scopes: Vec<&str> = self
+                    .scopes()
+                    .iter()
+                    .copied()
+                    .filter(|scope| {
+                        granted.is_none_or(|granted| !MICROSOFT_LATER_SCOPES.contains(scope) || has_scope(granted, scope))
+                    })
+                    .collect();
+                vec![("scope", scopes.join(" "))]
+            }
         }
     }
 }
@@ -264,7 +293,7 @@ impl OAuth {
             ("redirect_uri", redirect),
             ("code_verifier", verifier),
         ]);
-        let response = self.exchange(form, provider, client).await?;
+        let response = self.exchange(form, provider, client, None).await?;
         let Some(refresh_token) = response.refresh_token.clone() else {
             return Err(OAuthError::new("response", "The sign-in did not grant offline access; try again."));
         };
@@ -291,31 +320,34 @@ impl OAuth {
         })
     }
 
-    /// A new access token from `refresh_token`, redeemed with the client that issued it.
+    /// A new access token from `refresh_token`, redeemed with the client that issued it, for an
+    /// account whose sign-in granted `granted`.
     pub async fn refresh(
         &self,
         refresh_token: &str,
         provider: Provider,
         client: &OAuthClient,
+        granted: &[String],
     ) -> Result<TokenResponse, OAuthError> {
         let form =
             BTreeMap::from([("grant_type", "refresh_token".to_string()), ("refresh_token", refresh_token.to_string())]);
-        self.exchange(form, provider, client).await
+        self.exchange(form, provider, client, Some(granted)).await
     }
 
     /// POSTs `form` (plus the client credentials) to the token endpoint. Failures answer
-    /// `{"error": …, "error_description": …}`.
+    /// `{"error": …, "error_description": …}`. `granted`: a refresh's scopes, None at sign-in.
     async fn exchange(
         &self,
         mut form: BTreeMap<&'static str, String>,
         provider: Provider,
         client: &OAuthClient,
+        granted: Option<&[String]>,
     ) -> Result<TokenResponse, OAuthError> {
         form.entry("client_id").or_insert_with(|| client.id.clone());
         if let Some(secret) = client.secret.as_ref().filter(|secret| !secret.is_empty()) {
             form.entry("client_secret").or_insert_with(|| secret.clone());
         }
-        for (name, value) in provider.token_extras() {
+        for (name, value) in provider.token_extras(granted) {
             form.entry(name).or_insert(value);
         }
         let url = self.config.token_endpoint.as_deref().unwrap_or(provider.token_url());

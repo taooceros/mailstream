@@ -18,6 +18,9 @@ pub struct Endpoints {
     pub chat: String,
     /// Google People: contacts, other contacts and the domain directory (contact photos).
     pub people: String,
+    /// Google Calendar's root (`https://www.googleapis.com/calendar/v3/`); Outlook calendars are
+    /// under `graph`.
+    pub calendar: String,
 }
 
 impl Default for Endpoints {
@@ -27,6 +30,7 @@ impl Default for Endpoints {
             graph: crate::graph::ROOT.into(),
             chat: crate::chat_api::ROOT.into(),
             people: "https://people.googleapis.com/v1/".into(),
+            calendar: crate::calendar_api::GOOGLE_ROOT.into(),
         }
     }
 }

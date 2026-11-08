@@ -45,7 +45,7 @@ class Account {
   final String label;
   final String provider;
 
-  /// What the sign-in grants: `mail`, `contacts`, `chat`.
+  /// What the sign-in grants: `mail`, `contacts`, `chat`, `calendar`.
   final List<String> services;
 
   String get title => label.isEmpty ? id : label;

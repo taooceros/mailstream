@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{OnceCell, mpsc, oneshot};
 use turso::Value as SqlValue;
 
+use crate::calendar::CalendarCopy;
 use crate::chat_model::{ChatAccount, ChatMessagePage, ChatSpaceKey, ChatSpaceList};
 use crate::model::{Account, Envelope, Mailbox, MailboxKey, MessageContent, MessageRef};
 use crate::signal::ProcessSignal;
@@ -33,6 +34,7 @@ const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS contents (key TEXT PRIMARY KEY, value BLOB NOT NULL);
     CREATE TABLE IF NOT EXISTS chat_spaces (key TEXT PRIMARY KEY, value BLOB NOT NULL);
     CREATE TABLE IF NOT EXISTS chat_messages (key TEXT PRIMARY KEY, value BLOB NOT NULL);
+    CREATE TABLE IF NOT EXISTS calendars (key TEXT PRIMARY KEY, value BLOB NOT NULL);
     CREATE TABLE IF NOT EXISTS tags (key TEXT PRIMARY KEY, value BLOB NOT NULL);
     CREATE TABLE IF NOT EXISTS listings (key TEXT PRIMARY KEY, next TEXT);
     CREATE TABLE IF NOT EXISTS envelopes (
@@ -49,6 +51,7 @@ enum Table {
     Contents,
     ChatSpaces,
     ChatMessages,
+    Calendars,
 }
 
 impl Table {
@@ -59,6 +62,7 @@ impl Table {
             Self::Contents => "contents",
             Self::ChatSpaces => "chat_spaces",
             Self::ChatMessages => "chat_messages",
+            Self::Calendars => "calendars",
         }
     }
 }
@@ -495,6 +499,21 @@ impl MailCache {
 
     pub fn remove_chat_messages(&self, key: &ChatSpaceKey) {
         let _ = self.writes.send(Write::Remove { table: Table::ChatMessages, key: Self::chat_messages_key(key) });
+    }
+
+    // MARK: Calendars
+
+    /// An account's calendars and events as last fetched.
+    pub async fn load_calendar(&self, account: &str) -> Option<CalendarCopy> {
+        self.read(Table::Calendars, &hash(&[account])).await
+    }
+
+    pub fn save_calendar(&self, copy: &CalendarCopy, account: &str) {
+        self.write(copy, Table::Calendars, hash(&[account]));
+    }
+
+    pub fn remove_calendar(&self, account: &str) {
+        let _ = self.writes.send(Write::Remove { table: Table::Calendars, key: hash(&[account]) });
     }
 }
 

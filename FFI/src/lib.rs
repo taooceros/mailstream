@@ -66,7 +66,7 @@ pub struct Account {
     /// `google` or `microsoft`.
     pub provider: String,
     pub name: Option<String>,
-    /// What the sign-in grants: `mail`, `contacts`, `chat`.
+    /// What the sign-in grants: `mail`, `contacts`, `chat`, `calendar`.
     pub services: Vec<String>,
 }
 
@@ -538,6 +538,87 @@ pub struct ChatSpaceRef {
     pub space: String,
 }
 
+/// One of an account's calendars.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct CalendarInfo {
+    pub id: String,
+    pub name: String,
+    /// `#rrggbb`, as the provider shows it.
+    pub color: Option<String>,
+    /// The account's own calendar.
+    pub primary: bool,
+}
+
+/// An account as the calendar shows it.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct CalendarAccount {
+    pub id: String,
+    pub label: String,
+    /// `google` or `microsoft`.
+    pub provider: String,
+    /// Whether its sign-in grants calendar access; accounts signed in before Mailstream asked
+    /// for it must sign in again.
+    pub granted: bool,
+    pub loading: bool,
+    /// Why its last fetch failed; its events are the ones fetched before.
+    pub problem: Option<String>,
+    /// When its events were fetched (RFC 3339).
+    pub fetched: Option<String>,
+    pub calendars: Vec<CalendarInfo>,
+}
+
+/// An organizer or guest.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct CalendarPerson {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    /// `accepted`, `tentative`, `declined` or `needsAction`.
+    pub response: Option<String>,
+}
+
+/// One event, or one occurrence of a recurring event. (Not `CalendarEvent`: Dart names the
+/// [`Event::Calendar`] variant that.)
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarItem {
+    pub account: String,
+    pub calendar: String,
+    pub calendar_name: Option<String>,
+    /// The calendar's color, `#rrggbb`.
+    pub color: Option<String>,
+    pub id: String,
+    pub title: String,
+    /// RFC 3339 in UTC; for all-day events, local midnight of `start_day` and `end_day`.
+    pub start: String,
+    pub end: String,
+    #[serde(default)]
+    pub all_day: bool,
+    /// An all-day event's first day and the day after its last: `2026-11-08`.
+    pub start_day: Option<String>,
+    pub end_day: Option<String>,
+    pub location: Option<String>,
+    /// The video call to join.
+    pub meeting_url: Option<String>,
+    pub organizer: Option<CalendarPerson>,
+    #[serde(default)]
+    pub attendees: Vec<CalendarPerson>,
+    /// The account's answer: `accepted`, `tentative`, `declined`, `needsAction`, or
+    /// `organizer` for its own meeting; none for an event without guests.
+    pub response: Option<String>,
+    /// The description, as plain text.
+    pub notes: Option<String>,
+    /// The event in the provider's web calendar.
+    pub link: Option<String>,
+}
+
+/// Every account and the events of the days asked for, earliest first.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct CalendarAgenda {
+    pub accounts: Vec<CalendarAccount>,
+    pub loading: bool,
+    pub events: Vec<CalendarItem>,
+}
+
 /// What changed in the engine; a front end re-reads what it shows of it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Event {
@@ -555,6 +636,8 @@ pub enum Event {
     Chat,
     /// The open space's messages changed.
     ChatMessages,
+    /// Calendar accounts or their events changed.
+    Calendar,
     /// A kind this build does not know yet.
     Other { name: String },
 }
@@ -572,6 +655,7 @@ impl Event {
             "settings" => Self::Settings,
             "chat" => Self::Chat,
             "chatMessages" => Self::ChatMessages,
+            "calendar" => Self::Calendar,
             _ => Self::Other { name: name.into() },
         }
     }
@@ -853,6 +937,18 @@ impl Mailstream {
         let file: FilePath =
             call("chat.attachment", json!({ "account": account, "resource": resource, "name": name })).await?;
         Ok(file.path)
+    }
+
+    /// Every account and the events of `days` days from `from` (`2026-11-08`; today when
+    /// `None`), from what the engine last fetched (every five minutes); [`Event::Calendar`]
+    /// follows each fetch.
+    pub async fn calendar_events(&self, from: Option<String>, days: u32) -> Result<CalendarAgenda, MailError> {
+        call("calendar.events", json!({ "from": from, "days": days })).await
+    }
+
+    /// Fetches every calendar account's events now.
+    pub async fn calendar_refresh(&self) -> Result<(), MailError> {
+        call::<Value>("calendar.refresh", json!({})).await.map(drop)
     }
 
     /// Calls `listener` on the main thread for every change from now on, while the process runs.

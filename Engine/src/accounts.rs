@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::oauth::{Grant, Provider};
+use crate::oauth::{GOOGLE_CALENDARS, Grant, MICROSOFT_CALENDARS, Provider, has_scope};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountRecord {
@@ -27,12 +27,26 @@ impl AccountRecord {
     /// The account as `accounts.*` commands answer it.
     pub fn json(&self) -> Value {
         let scopes = self.scopes.join(" ").to_lowercase();
-        let services: Vec<&str> =
+        let mut services: Vec<&str> =
             ["mail", "contacts", "chat"].into_iter().filter(|service| scopes.contains(service)).collect();
+        if self.has_calendars() {
+            services.push("calendar");
+        }
         json!({
             "id": self.id, "label": self.label, "provider": self.provider.as_str(), "name": self.display_name,
             "services": services,
         })
+    }
+
+    /// Whether its sign-in lets it read its calendars: those signed in before Mailstream asked
+    /// for them must sign in again.
+    pub fn has_calendars(&self) -> bool {
+        match self.provider {
+            Provider::Google => has_scope(&self.scopes, GOOGLE_CALENDARS),
+            Provider::Microsoft => {
+                has_scope(&self.scopes, MICROSOFT_CALENDARS) || has_scope(&self.scopes, "Calendars.Read")
+            }
+        }
     }
 }
 

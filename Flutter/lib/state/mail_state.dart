@@ -8,6 +8,7 @@ import 'package:mailstream/mailstream.dart' as engine;
 
 import '../backend/models.dart';
 import '../platform.dart';
+import 'calendar_state.dart';
 import 'chat_state.dart';
 
 /// Off the Mac, the runner opens files and links (`windows/runner/window_channels.cpp`: the
@@ -215,6 +216,24 @@ class MailState extends ChangeNotifier {
   /// Google Chat, which the window shows instead of mail while `chat.active`.
   late final ChatState chat = ChatState(mail, report: _report);
 
+  /// The calendar, which the window shows instead of mail while `calendar.active`.
+  late final CalendarState calendar = CalendarState(mail, report: _report);
+
+  /// Chat comes into view, in place of mail or the calendar.
+  void showChat() {
+    calendar.hide();
+    chat.show();
+  }
+
+  /// The calendar comes into view, in place of mail or chat.
+  void showCalendar() {
+    chat.hide();
+    calendar.show();
+  }
+
+  /// Neither chat nor the calendar is in view: the sidebar's mailboxes may show as selected.
+  bool get mailInView => !chat.active && !calendar.active;
+
   /// Set while the Smart Inbox bundle of that category lies over the list.
   MailCategory? openBundle;
 
@@ -268,6 +287,7 @@ class MailState extends ChangeNotifier {
     await reloadAccounts();
     unawaited(reloadSettings());
     unawaited(chat.reload());
+    unawaited(calendar.reload());
     await _fetch(selection);
   }
 
@@ -281,6 +301,7 @@ class MailState extends ChangeNotifier {
 
   void _changed(engine.Event event) {
     chat.changed(event);
+    calendar.changed(event);
     switch (event) {
       case engine.AccountsEvent() || engine.MailboxesEvent():
         _accountsChanged = true;
@@ -386,6 +407,7 @@ class MailState extends ChangeNotifier {
 
   void select(Selection next) {
     chat.hide();
+    calendar.hide();
     _searchDebounce?.cancel();
     searchQuery = null;
     openBundle = null;

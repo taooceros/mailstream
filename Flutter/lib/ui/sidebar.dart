@@ -10,8 +10,8 @@ import 'design.dart';
 import 'glass.dart';
 
 /// Mail's sidebar, on the window's glass panel: unified mailboxes first (Inbox expands into each
-/// account's inbox, each marked with its color), Chat, then every account's folders and Add
-/// Account…, which opens Settings.
+/// account's inbox, each marked with its color), Chat, Calendar, then every account's folders and
+/// Add Account…, which opens Settings.
 class Sidebar extends StatefulWidget {
   const Sidebar({super.key, required this.state, required this.onAddAccount, this.onCollapse});
 
@@ -47,7 +47,7 @@ class _SidebarState extends State<Sidebar> {
       if (boxes.isEmpty) continue;
       final selection = UnifiedSelection(role);
       final expandable = role == MailboxRole.inbox && boxes.length > 1;
-      final selected = !state.chat.active && state.selection == selection;
+      final selected = state.mailInView && state.selection == selection;
       rows.add(_Destination(
         leading: Icon(roleIcon(role)),
         label: role.title,
@@ -64,7 +64,7 @@ class _SidebarState extends State<Sidebar> {
             leading: _AccountDot(color: _accountColor(box.account)),
             label: state.account(box.account)?.title ?? box.account,
             badge: box.unread ?? 0,
-            selected: !state.chat.active && state.selection == MailboxSelection(box),
+            selected: state.mailInView && state.selection == MailboxSelection(box),
             onTap: () => state.select(MailboxSelection(box)),
           ));
         }
@@ -77,7 +77,15 @@ class _SidebarState extends State<Sidebar> {
         label: 'Chat',
         badge: chat.unreadSpaces,
         selected: chat.active,
-        onTap: chat.show,
+        onTap: state.showChat,
+      ));
+    }
+    if (state.accounts.isNotEmpty) {
+      rows.add(_Destination(
+        leading: const Icon(CupertinoIcons.calendar),
+        label: 'Calendar',
+        selected: state.calendar.active,
+        onTap: state.showCalendar,
       ));
     }
     rows.add(const _SectionHeader('Accounts'));
@@ -93,7 +101,7 @@ class _SidebarState extends State<Sidebar> {
       ));
       if (!open) continue;
       for (final box in state.mailboxes[account.id] ?? const <Mailbox>[]) {
-        final selected = !state.chat.active && state.selection == MailboxSelection(box);
+        final selected = state.mailInView && state.selection == MailboxSelection(box);
         rows.add(_Destination(
           indent: true,
           leading: Icon(roleIcon(box.role)),
@@ -187,7 +195,7 @@ class Rail extends StatelessWidget {
                   icon: roleIcon(role),
                   label: role.title,
                   count: badgeRole(role) ? state.unreadCount(UnifiedSelection(role)) : 0,
-                  selected: !chat.active && selection is UnifiedSelection && selection.role == role,
+                  selected: state.mailInView && selection is UnifiedSelection && selection.role == role,
                   onTap: () => state.select(UnifiedSelection(role)),
                 ),
               if (chat.accounts.isNotEmpty)
@@ -196,7 +204,15 @@ class Rail extends StatelessWidget {
                   label: 'Chat',
                   count: chat.unreadSpaces,
                   selected: chat.active,
-                  onTap: chat.show,
+                  onTap: state.showChat,
+                ),
+              if (state.accounts.isNotEmpty)
+                _RailItem(
+                  icon: CupertinoIcons.calendar,
+                  label: 'Calendar',
+                  count: 0,
+                  selected: state.calendar.active,
+                  onTap: state.showCalendar,
                 ),
             ],
           ),

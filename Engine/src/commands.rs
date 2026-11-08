@@ -464,6 +464,16 @@ pub const COMMANDS: &[Spec] = &[
             Argument::new("name", Kind::String, "The file name to keep it under (its kind follows the extension)."),
         ],
     ),
+    Spec::new(
+        "calendar.events",
+        "Calendars: every account with its calendars (or that it must sign in again to grant calendar access), and the events from its calendars on the days asked for, earliest first, as last fetched (every five minutes).",
+        &[
+            ACCOUNT,
+            Argument::new("from", Kind::String, "The first day, as 2026-11-08 (default: today)."),
+            Argument::new("days", Kind::Int, "How many days from it (1-366).").default(60),
+        ],
+    ),
+    Spec::new("calendar.refresh", "Fetches every calendar account's events now, or one account's.", &[ACCOUNT]),
 ];
 
 /// What `mailstream help` prints above the command list.

@@ -153,12 +153,17 @@ chat with several; `chat people` lists who an account already chats with. `chat 
 downloads a file uploaded to a message (its `resource` in `chat messages`) into the cache once
 and prints its path.
 
+`calendar events` lists every account (and whether it has granted calendar access) with the
+events of its calendars on the days asked for (`--from 2026-11-08 --days 7`; today and the 60
+days after it by default), earliest first, from what the app last fetched. `calendar refresh`
+fetches them now; the app does by itself every five minutes.
+
 Failures print `{"error": {"code", "message"}}` on stderr and exit 1, 2 for usage
 errors, 3 when the app cannot be reached.
 
 ## Front ends in other languages (FFI)
 
-The engine (accounts, sync, cache, threading, push, tagging, Google Chat) runs inside each
+The engine (accounts, sync, cache, threading, push, tagging, Google Chat, calendars) runs inside each
 front end's process. For Mailstream Flutter and Mailstream GPUI it is the Rust engine in
 `Engine/`; Mailstream.app still has the Swift one in `Sources/MailstreamKit` until it moves
 over too (MS-120). `FFI/` is a Rust crate over the Rust engine with typed values, async calls
@@ -532,6 +537,25 @@ contacts. One person opens your direct message with them, several the group chat
 with exactly them; when there is none, Google creates it (`spaces.setup`, which
 needs the `chat.spaces.create` scope: accounts signed in before it was asked for
 sign in again in Settings > Accounts). The space opens with the composer focused.
+
+## Calendar
+
+Mailstream Flutter shows every account's calendars (Google Calendar; Outlook through Graph) in
+its Calendar view, below Chat in the sidebar: an agenda of the days from today with events, each
+under its day (all-day ones first, a trip under each of its days), with the calendar's color,
+the time, where it is, and an Invited or Maybe mark for invitations not accepted yet; declined
+ones are struck through. Opening an event shows when and where it is, Join call for its Meet or
+Teams link, the account's answer, the organizer and guests with theirs, its description and a
+link to it in Google Calendar or Outlook.
+
+Sign-in asks for `calendar.readonly` and `calendar.events` (Google) or `Calendars.ReadWrite`
+(Microsoft); the write scopes are for answering invitations and editing events later, so those
+need no second consent. Accounts signed in before calendars were asked for show a Sign In…
+notice in the Calendar view instead; their mail works as before, and their token refreshes ask
+only for the scopes they granted (Microsoft refuses a refresh asking for more). The engine
+fetches the events from a week back to 60 days on, recurring events expanded, every five
+minutes, and keeps them in mail.db (`calendars`); a copy younger than that serves without
+fetching, and ⌘R fetches now. A failed fetch keeps the events fetched before and says why.
 
 ## Shortcuts
 

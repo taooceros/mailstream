@@ -27,6 +27,7 @@ pub(crate) fn engine_for(server: &FakeServer, accounts: &[(&str, &str)]) -> (Eng
         graph: format!("{}/v1.0/", server.base),
         chat: format!("{}/chat/v1/", server.base),
         people: format!("{}/people/v1/", server.base),
+        calendar: format!("{}/calendar/v3/", server.base),
     };
     std::fs::create_dir_all(&config.support_directory).unwrap();
     let records: Vec<Value> = accounts

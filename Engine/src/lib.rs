@@ -14,6 +14,10 @@ pub mod avatars;
 pub mod backend;
 mod bundle;
 pub mod cache;
+mod calendar;
+mod calendar_api;
+#[cfg(test)]
+mod calendar_tests;
 mod chat;
 mod chat_api;
 pub mod chat_model;
@@ -214,6 +218,7 @@ struct Core {
     push: Arc<push::Push>,
     polling: Arc<polling::Polling>,
     chat: Arc<chat::Chat>,
+    calendar: Arc<calendar::CalendarStore>,
     avatars: Arc<avatars::Avatars>,
 }
 
@@ -238,14 +243,18 @@ impl Engine {
         let directory = &config.support_directory;
         let _ = std::fs::create_dir_all(directory);
         let accounts = Arc::new(Accounts::new(directory));
-        let providers: HashMap<_, _> =
-            accounts.list().into_iter().rev().map(|record| (record.id, record.provider)).collect();
+        let signed_in: HashMap<_, _> = accounts
+            .list()
+            .into_iter()
+            .rev()
+            .map(|record| (record.id, tokens::SignedIn { provider: record.provider, scopes: record.scopes }))
+            .collect();
         let oauth = Arc::new(OAuth::new(config.oauth.clone()));
         let tokens = Arc::new(Tokens::new(
             Keychain::new(config.keychain_service.clone()),
             oauth.clone(),
             config.built_in_clients,
-            providers,
+            signed_in,
         ));
         let settings = Arc::new(Settings::new(directory));
         let events = Arc::new(Events::default());
@@ -285,6 +294,13 @@ impl Engine {
             events.clone(),
             avatars.clone(),
         ));
+        let calendar = Arc::new(calendar::CalendarStore::new(
+            mail.clone(),
+            config.endpoints.calendar.clone(),
+            config.endpoints.graph.clone(),
+            accounts.clone(),
+            events.clone(),
+        ));
         let (reschedule, chat_interval) = (Arc::downgrade(&polling), Arc::downgrade(&chat));
         events.listen(move |event| {
             if event != "settings" {
@@ -307,6 +323,7 @@ impl Engine {
             push: push.clone(),
             polling: polling.clone(),
             chat: chat.clone(),
+            calendar: calendar.clone(),
             avatars,
         });
         let watcher = Self::follow_settings(&core);
@@ -314,6 +331,7 @@ impl Engine {
         polling.start();
         push.start();
         runtime.spawn(chat.start());
+        runtime.spawn(calendar.start());
         if config.control_socket {
             control::serve(core.clone(), config.support_directory.clone());
         }
@@ -366,8 +384,8 @@ impl Engine {
     }
 
     /// Calls `listener` with each change from now on (`accounts`, `settings`, `mailboxes`,
-    /// `conversations`, `previews`, `tags`, `problems`, `sync`, `chat`, `chatMessages`), on an
-    /// engine thread.
+    /// `conversations`, `previews`, `tags`, `problems`, `sync`, `chat`, `chatMessages`,
+    /// `calendar`), on an engine thread.
     pub fn subscribe(&self, listener: impl Fn(&'static str) + Send + Sync + 'static) {
         self.core.events.listen(listener);
     }
@@ -419,6 +437,9 @@ impl Core {
             "refresh" => Ok(self.polling.refresh()),
             command if chat::COMMANDS.contains(&command) => {
                 return self.chat.run(command, &args).await;
+            }
+            command if calendar::COMMANDS.contains(&command) => {
+                return self.calendar.run(command, &args).await;
             }
             "mail.tag" | "mail.retag" => {
                 let mail = &self.mail;
@@ -473,6 +494,7 @@ impl Core {
                 self.accounts.remove(&record.id).map_err(EngineError::failed)?;
                 self.mail.accounts_changed();
                 self.chat.accounts_changed();
+                self.calendar.accounts_changed();
                 self.events.emit("accounts");
                 self.push.sign_out(&record.id, api).await;
                 let _ = std::fs::remove_file(gmail::cache_file(&self.mail.cache_root(), &record.id));
@@ -533,14 +555,16 @@ impl Core {
         }
         let client = OAuthClient { id, secret: secret.filter(|secret| !secret.is_empty()) };
         let grant = self.oauth.sign_in(provider, &client).await.map_err(|error| EngineError::failed(error.message))?;
+        let signed_in = tokens::SignedIn { provider, scopes: grant.scopes.clone() };
         self.tokens
-            .install(&grant.id, provider, &client, &grant.refresh_token, &grant.access_token, grant.expires_in)
+            .install(&grant.id, signed_in, &client, &grant.refresh_token, &grant.access_token, grant.expires_in)
             .map_err(|error| EngineError::failed(error.to_string()))?;
         let record = self.accounts.signed_in(provider, &grant).map_err(EngineError::failed)?;
         self.events.emit("accounts");
         self.mail.accounts_changed();
         self.push.check();
         self.chat.accounts_changed();
+        self.calendar.accounts_changed();
         Ok(record.json())
     }
 }
@@ -586,6 +610,7 @@ pub(crate) mod tests {
                 graph: "http://127.0.0.1:9/v1.0/".into(),
                 chat: "http://127.0.0.1:9/chat/v1/".into(),
                 people: "http://127.0.0.1:9/people/v1/".into(),
+                calendar: "http://127.0.0.1:9/calendar/v3/".into(),
             },
             // No relay: no test registers push with a provider unless it sets a fake one.
             push: push::PushConfig::default(),

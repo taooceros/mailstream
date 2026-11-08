@@ -9,8 +9,10 @@ import 'package:macos_ui/macos_ui.dart' hide Sidebar;
 import '../backend/models.dart';
 import '../bench.dart';
 import '../platform.dart';
+import '../state/calendar_state.dart';
 import '../state/chat_state.dart';
 import '../state/mail_state.dart';
+import 'calendar.dart';
 import 'chat.dart';
 import 'common.dart';
 import 'compose.dart';
@@ -178,6 +180,11 @@ class _MailShellState extends State<MailShell> {
       _focus.requestFocus();
       return;
     }
+    if (state.calendar.active) {
+      state.calendar.close();
+      _focus.requestFocus();
+      return;
+    }
     if (state.opened == null && state.openBundle == null && state.searchQuery != null) {
       _search.clear();
       state.search(null);
@@ -255,7 +262,11 @@ class _MailShellState extends State<MailShell> {
         _searchFocus.requestFocus();
         _search.selection = TextSelection(baseOffset: 0, extentOffset: _search.text.length);
       } else if (key == LogicalKeyboardKey.keyR) {
-        state.chat.active ? state.chat.refresh() : state.refresh();
+        state.chat.active
+            ? state.chat.refresh()
+            : state.calendar.active
+            ? state.calendar.refresh()
+            : state.refresh();
       } else if (key == LogicalKeyboardKey.keyN) {
         _compose();
       } else if (key == LogicalKeyboardKey.bracketLeft) {
@@ -263,7 +274,12 @@ class _MailShellState extends State<MailShell> {
       } else if (key == LogicalKeyboardKey.keyW && event is KeyDownEvent) {
         // Closes the open conversation or chat space, as its close button does; the compose
         // column takes ⌘W itself while it has focus.
-        if (state.chat.active ? state.chat.opened == null : state.opened == null) return KeyEventResult.ignored;
+        final detailOpen = state.chat.active
+            ? state.chat.opened != null
+            : state.calendar.active
+            ? state.calendar.opened != null
+            : state.opened != null;
+        if (!detailOpen) return KeyEventResult.ignored;
         _back();
       } else if (key == LogicalKeyboardKey.comma && event is KeyDownEvent && !Host.mac) {
         _settings();
@@ -273,7 +289,7 @@ class _MailShellState extends State<MailShell> {
       return KeyEventResult.handled;
     }
     if (_editing) return KeyEventResult.ignored;
-    if (state.chat.active) {
+    if (state.chat.active || state.calendar.active) {
       if (key != LogicalKeyboardKey.escape) return KeyEventResult.ignored;
       _back();
       return KeyEventResult.handled;
@@ -335,10 +351,11 @@ class _MailShellState extends State<MailShell> {
 
   @override
   Widget build(BuildContext context) {
-    // Chat's spaces and messages rebuild only the parts that show them (`_onChat`); the window
-    // follows chat coming into view and the open space.
+    // Chat's spaces and messages rebuild only the parts that show them (`_onChat`), as do the
+    // calendar's events (`_onCalendar`); the window follows either coming into view and what
+    // opens in it.
     return ListenableBuilder(
-      listenable: Listenable.merge([state, state.chat.layout]),
+      listenable: Listenable.merge([state, state.chat.layout, state.calendar.layout]),
       builder: (context, _) {
         _items = listItems(state.conversations, bundles: state.bundlesEnabled, sections: state.searchQuery == null);
         final bundle = state.openBundle;
@@ -411,27 +428,40 @@ class _MailShellState extends State<MailShell> {
           )
         : Rail(state: state, onMenu: () => setState(() => _drawerOpen = true)));
     final chat = state.chat;
+    final calendar = state.calendar;
     final listPane = Island(
       color: context.colors.tray,
-      child: chat.active ? _onChat(() => ChatListPane(state: state)) : _listPane(context),
+      child: chat.active
+          ? _onChat(() => ChatListPane(state: state))
+          : calendar.active
+          ? _onCalendar(() => CalendarListPane(state: state))
+          : _listPane(context),
     );
-    final opened = chat.active ? null : state.opened;
+    final opened = chat.active || calendar.active ? null : state.opened;
     final space = chat.active ? chat.opened : null;
+    final event = calendar.active ? calendar.opened : null;
     final detail = space != null
         ? Island(child: _chatPane(space))
+        : event != null
+        ? Island(child: _calendarPane(event))
         : opened == null
         ? null
         : Island(child: _detailPane(context, opened));
-    final onDismiss = chat.active ? chat.close : state.close;
+    final onDismiss = chat.active
+        ? chat.close
+        : calendar.active
+        ? calendar.close
+        : state.close;
+    final pageId = space ?? event ?? opened?.id;
     // With the compose column docked the list's width follows the window, not the column, so
     // resizing the column moves only the edge being dragged.
     final listWidth = dockedCompose ? (contentWidth * 0.3).clamp(300.0, 460.0) : (width * 0.36).clamp(400.0, 520.0);
     final Widget mailContent = _twoPane
-        ? SplitDetail(pageId: space ?? opened?.id, list: listPane, listWidth: listWidth, onDismiss: onDismiss, detail: detail)
+        ? SplitDetail(pageId: pageId, list: listPane, listWidth: listWidth, onDismiss: onDismiss, detail: detail)
         : Stack(
             fit: StackFit.expand,
             clipBehavior: Clip.none,
-            children: [listPane, SlideLayer(pageId: space ?? opened?.id, onDismiss: onDismiss, child: detail)],
+            children: [listPane, SlideLayer(pageId: pageId, onDismiss: onDismiss, child: detail)],
           );
 
     final composePane = hasCompose && !stashedCompose
@@ -620,6 +650,23 @@ class _MailShellState extends State<MailShell> {
   /// `build`'s widget, rebuilt as chat's spaces and messages change.
   Widget _onChat(Widget Function() build, {Key? key}) =>
       ListenableBuilder(key: key, listenable: state.chat, builder: (context, _) => build());
+
+  /// The open event, rebuilt as the calendar's events change; one pane per event.
+  Widget _calendarPane(EventKey key) => _onCalendar(() {
+    final event = state.calendar.event(key);
+    if (event == null) return const SizedBox.shrink();
+    return CalendarEventPane(
+      key: ValueKey(key),
+      state: state,
+      event: event,
+      twoPane: _twoPane,
+      onBack: _back,
+    );
+  });
+
+  /// `build`'s widget, rebuilt as the calendar's events change.
+  Widget _onCalendar(Widget Function() build) =>
+      ListenableBuilder(listenable: state.calendar, builder: (context, _) => build());
 
   /// The conversation's island: the message scrolls under its toolbar, glass capsules floating
   /// over the top of it.
