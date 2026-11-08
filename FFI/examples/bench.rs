@@ -111,17 +111,20 @@ const CACHED_CONTENT: usize = 60;
 /// account `i % 5`, the oldest message of its thread.
 fn conversation_id(i: usize) -> String {
     let (account, _) = bench_account(i % ACCOUNTS);
-    format!("{account}|{}", message_id(i % ACCOUNTS, i / ACCOUNTS % CACHED_CONTENT))
+    // Message 49 is a repeated alert, merged into the older alerts' row (another id): skip it.
+    let n = i / ACCOUNTS % (CACHED_CONTENT - 1);
+    format!("{account}|{}", message_id(i % ACCOUNTS, if n >= 49 { n + 1 } else { n }))
 }
 
 fn message_id(account: usize, n: usize) -> String {
     format!("m{n}.a{account}@bench")
 }
 
-/// Seconds since 2001 (as Swift keeps dates) of inbox message `n`: every three hours, back from
-/// late October 2026.
-fn inbox_date(n: usize) -> f64 {
-    815_000_000.0 - (n as f64) * 10_800.0
+/// Seconds since 2001 (as Swift keeps dates) of account `a`'s inbox message `n`: every three
+/// hours, back from late October 2026, a minute apart between accounts so no two conversations
+/// tie (the Swift engine orders ties by dictionary order, which changes from run to run).
+fn inbox_date(a: usize, n: usize) -> f64 {
+    815_000_000.0 - (n as f64) * 10_800.0 - (a as f64) * 60.0
 }
 
 /// A cursor somewhere in the second to fifth page of All Inboxes: after inbox message
@@ -129,7 +132,7 @@ fn inbox_date(n: usize) -> f64 {
 fn page_cursor(i: usize) -> String {
     let n = 50 + i % 4 * 50;
     // Unix milliseconds, then the conversation id.
-    let millis = ((inbox_date(n) + 978_307_200.0) * 1000.0).round() as i64;
+    let millis = ((inbox_date(0, n) + 978_307_200.0) * 1000.0).round() as i64;
     format!("{millis}|{}|{}", bench_account(0).0, message_id(0, n))
 }
 
@@ -375,7 +378,7 @@ fn seed_mail(database: &Path, caches: &Path) {
                     Arc::new(parse(json!({
                         "id": format!("in{n}.a{a}"), "thread": format!("t{n}.a{a}"), "messageID": message_id(a, n),
                         "inReplyTo": [], "flags": flags, "subject": subject(n), "from": [sender(n)], "to": [me],
-                        "date": inbox_date(n), "size": 4000 + n, "hasAttachment": n % 7 == 0,
+                        "date": inbox_date(a, n), "size": 4000 + n, "hasAttachment": n % 7 == 0,
                     })))
                 })
                 .collect();
@@ -387,7 +390,7 @@ fn seed_mail(database: &Path, caches: &Path) {
                     Arc::new(parse(json!({
                         "id": format!("out{n}.a{a}"), "thread": format!("t{parent}.a{a}"), "messageID": format!("r{n}.a{a}@bench"),
                         "inReplyTo": [message_id(a, parent)], "flags": ["seen"], "subject": format!("Re: {}", subject(parent)),
-                        "from": [me], "to": [sender(parent)], "date": inbox_date(parent) + 1800.0, "size": 2000,
+                        "from": [me], "to": [sender(parent)], "date": inbox_date(a, parent) + 1800.0, "size": 2000,
                         "hasAttachment": false,
                     })))
                 })
@@ -644,9 +647,17 @@ fn mail_ready(engine: &str) {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let listing: Value = block_on(call("mail.list", json!({ "limit": ACCOUNTS * INBOX, "cached": true })))
-        .unwrap_or_else(|error| fail(&format!("{engine}: {error}")));
-    let count = listing["conversations"].as_array().map_or(0, Vec::len);
+    // Pages of at most 200, the engines' limit.
+    let (mut count, mut cursor) = (0, Value::Null);
+    loop {
+        let page: Value = block_on(call("mail.list", json!({ "limit": 200, "cached": true, "cursor": cursor })))
+            .unwrap_or_else(|error| fail(&format!("{engine}: {error}")));
+        count += page["conversations"].as_array().map_or(0, Vec::len);
+        cursor = page["next"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
     if count < ACCOUNTS * CACHED_CONTENT {
         fail(&format!("{engine} lists {count} conversations from mail.db"));
     }
