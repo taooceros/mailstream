@@ -23,6 +23,7 @@ pub enum Setting {
     PollSeconds,
     PushPollSeconds,
     ChatPollSeconds,
+    FlutterShowFrameRate,
 }
 
 #[derive(Clone, Copy)]
@@ -38,7 +39,7 @@ enum Kind {
 pub type Values = BTreeMap<Setting, Value>;
 
 impl Setting {
-    pub const ALL: [Setting; 10] = [
+    pub const ALL: [Setting; 11] = [
         Self::AiTaggingEnabled,
         Self::AiTaggingModel,
         Self::AiTaggingOmpPath,
@@ -49,6 +50,7 @@ impl Setting {
         Self::PollSeconds,
         Self::PushPollSeconds,
         Self::ChatPollSeconds,
+        Self::FlutterShowFrameRate,
     ];
 
     pub fn key(self) -> &'static str {
@@ -63,6 +65,7 @@ impl Setting {
             Self::PollSeconds => "sync.pollSeconds",
             Self::PushPollSeconds => "sync.pushPollSeconds",
             Self::ChatPollSeconds => "chat.pollSeconds",
+            Self::FlutterShowFrameRate => "flutter.showFrameRate",
         }
     }
 
@@ -101,6 +104,11 @@ impl Setting {
                 (Kind::Int(60, 86_400), json!(900), "Safety-net polling interval while push is connected.")
             }
             Self::ChatPollSeconds => (Kind::Int(5, 3600), json!(20), "Google Chat polling interval."),
+            Self::FlutterShowFrameRate => (
+                Kind::Bool,
+                json!(false),
+                "Show the frame rate and the slowest recent frame in a corner of Mailstream Flutter's window (also View ▸ Show Frame Rate).",
+            ),
         }
     }
 
@@ -560,7 +568,7 @@ mod tests {
         let dir = temp();
         let settings = Settings::new(&dir);
         let list = run(&settings, "config.list", json!({})).unwrap();
-        assert_eq!(list["settings"].as_array().unwrap().len(), 10);
+        assert_eq!(list["settings"].as_array().unwrap().len(), 11);
         assert_eq!(
             list["settings"][3],
             json!({

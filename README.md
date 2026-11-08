@@ -109,10 +109,15 @@ listed under `settingsIssues` in `mailstream status`.
 | `chat.pollSeconds` | `20` | Google Chat polling |
 | `flutter.showFrameRate` | `false` | frame rate meter in Mailstream Flutter (also its View ▸ Show Frame Rate) |
 
-Every other command goes to the running app over a Unix socket,
-`~/Library/Application Support/Mailstream/control.sock` (mode 0600 in that directory, which the
-app keeps at 0700, so only your own processes reach it), and starts the app in the background if it is not
-running. The protocol is one JSON line each way:
+Every other command goes over a Unix socket,
+`~/Library/Application Support/Mailstream/control.sock` (mode 0600 in that directory, which is
+kept at 0700, so only your own processes reach it), to the running front end that serves it:
+whichever of Mailstream Flutter, Mailstream GPUI and Mailstream.app started first; when it quits,
+a running Flutter or GPUI takes the socket over within seconds. With none running, `mailstream` starts
+Mailstream Flutter in the background and waits for it. The command line itself is Rust
+(`Engine/src/bin/mailstream.rs`, over the engine's command table `Engine/src/commands.rs`), and so
+is the socket's server in the Rust engine (`Engine/src/control.rs`). The protocol is one JSON line
+each way:
 `{"command": "mail.list", "args": {"unread": true}}` →
 `{"ok": true, "result": …}` or `{"ok": false, "error": {"code", "message"}}`.
 

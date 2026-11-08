@@ -17,12 +17,13 @@ pub mod cache;
 mod chat;
 mod chat_api;
 pub mod chat_model;
-mod commands;
+pub mod commands;
 mod content;
+pub mod control;
 mod files;
 pub mod gmail;
 pub mod graph;
-mod json;
+pub mod json;
 mod keychain;
 pub mod mail;
 mod mime;
@@ -119,6 +120,8 @@ pub struct Config {
     /// The public web sender pictures come from (Gravatar, BIMI, site icons); tests answer
     /// from memory.
     pub avatar_web: Arc<dyn avatars::web::Web>,
+    /// Serves the control socket in `support_directory` whenever no other process does.
+    pub control_socket: bool,
 }
 
 impl Config {
@@ -126,7 +129,7 @@ impl Config {
     /// `MAILSTREAM_KEYCHAIN_SERVICE` names another sign-ins item, as it does for the Swift engine
     /// (benchmarks and tests that must not read the person's sign-ins).
     pub fn for_this_app() -> Self {
-        let support = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("Mailstream");
+        let support = support_directory();
         let caches = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("dev.mailstream.Mailstream");
         let service = std::env::var("MAILSTREAM_KEYCHAIN_SERVICE").ok().filter(|service| !service.is_empty());
         Self {
@@ -139,8 +142,25 @@ impl Config {
             push: bundle::push_config(),
             tool_environment: None,
             avatar_web: avatars::web::Internet::shared(),
+            control_socket: true,
         }
     }
+}
+
+/// Where the app's data lives: `~/Library/Application Support/Mailstream` (settings.json,
+/// accounts.json, mail.db, the control socket).
+pub fn support_directory() -> PathBuf {
+    dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("Mailstream")
+}
+
+/// A `config.*` command on the settings.json in `directory`, without an engine: what the
+/// command line runs itself.
+pub fn run_settings_command(
+    directory: &std::path::Path,
+    command: &str,
+    args: &Map<String, Value>,
+) -> Result<Value, EngineError> {
+    Settings::new(directory).run(command, args)
 }
 
 type Listener = Arc<dyn Fn(&'static str) + Send + Sync>;
@@ -293,6 +313,9 @@ impl Engine {
         polling.start();
         push.start();
         runtime.spawn(chat.start());
+        if config.control_socket {
+            control::serve(core.clone(), config.support_directory.clone());
+        }
         drop(_entered);
         Self { core, _watcher: watcher, runtime }
     }
@@ -569,6 +592,8 @@ pub(crate) mod tests {
             // test names.
             tool_environment: Some(HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())])),
             avatar_web: Arc::new(avatars::tests::FakeWeb::default()),
+            // The test of the socket turns it on.
+            control_socket: false,
         }
     }
 
