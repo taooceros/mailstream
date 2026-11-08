@@ -27,9 +27,20 @@ in the Keychain. The build is arm64 only. The app is not sandboxed.
 ## Windows
 
 `windows/` is the Windows x64 runner. The same Dart UI runs there; `lib/platform.dart` (`Host`)
-holds every place the two desktops differ, and the Mac's behavior is unchanged. The engine port,
-the bundled Swift runtime and the build steps are MS-104's (MS91OpusWindows); the Windows CI
-workflow builds and launches it. On Windows:
+holds every place the two desktops differ, and the Mac's behavior is unchanged. The engine is
+the same Rust one, as `mailstream.dll` beside the executable (the build hook bundles
+`FFI/target/release/mailstream.dll`; its Windows specifics are in the root README's FFI section).
+The built-in OAuth clients and push settings come from a `config.json` placed beside
+`mailstream_ui.exe` (nothing commits or writes one); without it the app has neither, as an
+unconfigured Mac build. Build on Windows with Rust (MSVC) and Flutter:
+
+```sh
+(cd FFI && cargo build --release -p mailstream && cargo run -q -p mailstream-bindgen -- target/release/mailstream.dll --out-dir ../Flutter/packages/mailstream/lib/src)
+cd Flutter && flutter build windows --release   # build/windows/x64/runner/Release/mailstream_ui.exe
+```
+
+The GitHub Actions `Windows` workflow does this, starts the app and keeps a screenshot and the
+zipped Release folder as artifacts. On Windows:
 
 - Window: the system title bar moves, maximizes and closes the window (`WindowDragArea` does
   nothing there, and no `macos_window_utils` call is made). The window opens at 1240×800,
@@ -51,10 +62,10 @@ workflow builds and launches it. On Windows:
   shell's default verb (`ShellExecuteW`), as Explorer's double-click and the browser do.
 - Chat videos play in the log through `video_player_win` (Media Foundation), the Windows
   implementation of `video_player`.
-- HTML mail is not drawn yet (MS-106, waiting on MS-103's choice of renderer): a message with an
-  HTML body shows its text (the engine's text part, else its HTML read as text) under a notice
-  saying so (`HtmlTextFallback` in `lib/ui/reader.dart`). Links and images inside the HTML are
-  therefore not shown; attachments are.
+- HTML mail is not drawn yet (MS-106, which will use `webview_plus` over WebView2): a message
+  with an HTML body shows its text (the engine's text part, else its HTML read as text) under a
+  notice saying so (`HtmlTextFallback` in `lib/ui/reader.dart`). Links and images inside the
+  HTML are therefore not shown; attachments are.
 
 `flutter test test/windows_platform_test.dart test/compose_paste_test.dart` checks the Windows
 branches on any host (`Host.debugMacOverride`): shortcut labels and bindings, AltGr, the drawn
