@@ -438,7 +438,9 @@ class _AttachmentChip extends StatelessWidget {
   );
 }
 
-/// A body: HTML mail on a white sheet, as mail is designed for; plain text in the theme's type.
+/// A body: HTML mail flush with the message, as in Mail.app (`.mail-frame` in the native reader);
+/// in dark mode it sits on a white card, since mail is designed for a light page. Plain text in
+/// the theme's type.
 class _Body extends StatelessWidget {
   const _Body({required this.conversation, required this.message, required this.onOpenLink});
 
@@ -452,19 +454,17 @@ class _Body extends StatelessWidget {
     if (message.error != null) return Text(message.error!, style: context.text.body.copyWith(color: colors.red));
     final html = message.html;
     if (html != null && html.trim().isNotEmpty) {
-      return Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: MacosColors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: colors.separator),
-        ),
-        child: MailHtml(
-          key: ValueKey(message.id),
-          owner: (account: conversation.account, conversation: conversation.id, message: message.id),
-          html: html,
-          onOpenLink: onOpenLink,
-        ),
+      final body = MailHtml(
+        key: ValueKey(message.id),
+        owner: (account: conversation.account, conversation: conversation.id, message: message.id),
+        html: html,
+        onOpenLink: onOpenLink,
+      );
+      // One tree in both modes, so switching the theme keeps the body's views.
+      final card = colors.brightness == Brightness.dark;
+      return DecoratedBox(
+        decoration: BoxDecoration(color: card ? MacosColors.white : null, borderRadius: BorderRadius.circular(Panes.corner)),
+        child: Padding(padding: card ? const EdgeInsets.symmetric(horizontal: 16, vertical: 14) : EdgeInsets.zero, child: body),
       );
     }
     return FoldedText(text: message.text ?? '');
