@@ -3,7 +3,7 @@
 //! out their recipients, subject and quote the way mail clients do, threaded under the message
 //! replied to, with an HTML alternative quoting its HTML as Gmail lays it out. Both need `yes`;
 //! without it the error says what would be sent.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -332,7 +332,7 @@ fn files(paths: &[String], argument: &str) -> Result<Vec<PathBuf>, EngineError> 
     paths
         .iter()
         .map(|path| {
-            let readable = path.starts_with('/')
+            let readable = Path::new(path).is_absolute()
                 && std::fs::metadata(path).is_ok_and(|metadata| !metadata.is_dir())
                 && std::fs::File::open(path).is_ok();
             if readable {

@@ -143,8 +143,12 @@ async fn open(path: &Path) -> Result<turso::Database, String> {
         std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
     }
     let path = path.to_str().ok_or("the path is not UTF-8")?;
-    let database = turso::Builder::new_local(path)
-        .experimental_multiprocess_wal(true)
+    let builder = turso::Builder::new_local(path);
+    // Every Mailstream process on a Mac shares mail.db; Turso's Windows file layer has no shared
+    // WAL, and there the front end is the only process that opens it.
+    #[cfg(not(windows))]
+    let builder = builder.experimental_multiprocess_wal(true);
+    let database = builder
         .build()
         .await
         .map_err(|error| error.to_string())?;
@@ -431,7 +435,7 @@ impl MailCache {
     /// writes a directory.
     pub fn message_directory_url(&self, message: &MessageRef) -> String {
         let path = self.message_directory(message);
-        format!("file://{}/", crate::assembly::path_encoded(&path.to_string_lossy()))
+        format!("file://{}/", crate::assembly::path_encoded(&crate::files::url_path(&path)))
     }
 
     fn content_key(message: &MessageRef) -> String {

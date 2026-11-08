@@ -188,9 +188,33 @@ impl Default for OAuthConfig {
 }
 
 /// The default browser, as `open` picks it.
+#[cfg(not(windows))]
 fn open_in_browser(url: &str) {
     let url = url.to_owned();
     std::thread::spawn(move || std::process::Command::new("/usr/bin/open").arg(url).status());
+}
+
+/// The default browser, as the shell's "open" verb picks it.
+#[cfg(windows)]
+fn open_in_browser(url: &str) {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (verb, url) = (wide("open"), wide(url));
+    std::thread::spawn(move || {
+        // SAFETY: both strings are NUL-terminated and outlive the call.
+        unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                url.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+    });
 }
 
 pub struct OAuth {

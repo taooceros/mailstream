@@ -221,7 +221,8 @@ fn lists_opens_reads_sends_and_starts_chats() {
     assert_eq!(thread["members"][0]["email"], json!("ann@x.com"));
     assert_eq!(spaces(&engine)["spaces"][0]["unread"], json!(false));
     wait_until("the read mark", || !requests(&server, "PATCH", "/chat/v1/users/me/spaces/A/spaceReadState").is_empty());
-    assert!(events.lock().unwrap().contains(&"chatMessages"));
+    // Events go out a frame (16 ms, a Windows timer tick or two) after the change.
+    wait_until("the chatMessages event", || events.lock().unwrap().contains(&"chatMessages"));
 
     // Earlier messages join below.
     call(&engine, "chat.earlier", open.clone()).unwrap();
@@ -272,7 +273,8 @@ fn lists_opens_reads_sends_and_starts_chats() {
     // Attachments download once into the cache.
     let fetch = json!({ "account": ME, "resource": "r/1", "name": "a/b.png" });
     let path = call(&engine, "chat.attachment", fetch.clone()).unwrap()["path"].as_str().unwrap().to_string();
-    assert!(path.starts_with(config.cache_directory.join("chat-media").to_str().unwrap()) && path.ends_with("/a-b.png"));
+    let file = std::path::Path::new(&path);
+    assert!(file.starts_with(config.cache_directory.join("chat-media")) && file.file_name() == Some("a-b.png".as_ref()), "{path}");
     assert_eq!(std::fs::read(&path).unwrap(), b"PNG");
     call(&engine, "chat.attachment", fetch).unwrap();
     assert_eq!(requests(&server, "GET", "/chat/v1/media/r/1").len(), 1);

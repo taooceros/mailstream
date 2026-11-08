@@ -683,7 +683,7 @@ fn file_url(path: &Path) -> String {
         .remove(b':')
         .remove(b'@')
         .remove(b'/');
-    format!("file://{}", percent_encoding::utf8_percent_encode(&path.to_string_lossy(), PATH))
+    format!("file://{}", percent_encoding::utf8_percent_encode(&crate::files::url_path(path), PATH))
 }
 
 #[cfg(test)]

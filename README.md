@@ -208,6 +208,20 @@ DART_OUT=path/to/lib/src ./scripts/ffi.sh         # and the Dart bindings (asset
 - **Tests.** `cd Engine && cargo test` uses a Keychain item of its own, never the apps'
   sign-ins, fake provider and relay servers, never the real ones, fake `omp` scripts, never
   the user's omp, and a fake web for sender pictures.
+- **Windows.** The engine and `mailstream.dll` build for Windows x64; the GitHub Actions
+  `Windows` workflow runs the engine's tests and `FFI/examples/smoke.rs`, a check of the DLL's
+  API without accounts (status, settings and their file watching, saved sign-ins, the cache,
+  sender pictures over the network and DNS, the sign-in redirect listener). The macOS-only
+  pieces have Windows counterparts: the OAuth clients and push settings come from `config.json`
+  beside the executable (an object with the `Info.plist` keys; nothing writes it in CI), the
+  sign-ins are one DPAPI-sealed file, `%LOCALAPPDATA%\Mailstream\dev.mailstream.Mailstream.oauth.signins`,
+  settings.json and mail.db are in `%APPDATA%\Mailstream` (mail.db without the multi-process
+  WAL, which Turso's Windows file layer lacks, so one process opens it), the control socket is
+  the named pipe `\\.\pipe\dev.mailstream.control.<hash of the support folder>`, tag
+  notifications stay in the process, and listeners run on the thread that subscribed first
+  (Flutter's platform thread) through a message-only window. The network-change signal does
+  not exist there (push reconnects on its backoff), and the AI tagging tests, which run a
+  shell-script `omp`, are left out.
 - **Engine benchmark.** `FFI/examples/bench.rs` runs both engines through the same
   `Mailstream` path, each in its own process with a throwaway home folder and Keychain item,
   and prints each command's median and p99 latency, throughput (one at a time and 32 in

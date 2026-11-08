@@ -396,6 +396,7 @@ mod tests {
         assert_eq!(percent_encoded("Grüße.pdf"), "Gr%C3%BC%C3%9Fe.pdf");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn knows_mime_types_as_macos_does() {
         assert_eq!(mime_type("pdf").as_deref(), Some("application/pdf"));

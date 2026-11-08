@@ -5,7 +5,8 @@
 //! started by [`Mailstream::new`]. It runs on its own threads, so its host needs no run loop of
 //! its own; requests go to it as the control socket's commands and come back as the typed
 //! values below. Futures here need no particular executor; listeners are called on the main
-//! thread (a command-line host without a run loop calls [`run_main_loop`] on it). Whichever
+//! thread (a command-line host without a run loop calls [`run_main_loop`] on it; on Windows, the
+//! thread that subscribes first, whose message loop runs them). Whichever
 //! process starts its engine first serves the control socket the `mailstream` command line uses.
 //!
 //! With the `swift-engine` feature, a process started with `MAILSTREAM_ENGINE=swift` runs the
@@ -21,6 +22,7 @@ use serde_json::{Value, json};
 
 uniffi::setup_scaffolding!();
 
+mod main_thread;
 mod people;
 #[cfg(feature = "swift-engine")]
 mod swift;
@@ -860,25 +862,23 @@ impl Mailstream {
             swift::subscribe(listener);
             return;
         }
+        main_thread::adopt_current_thread();
         ENGINE.subscribe(move |event| {
             let listener = listener.clone();
-            on_main_thread(move || listener.on_event(Change { event: Event::named(event) }));
+            main_thread::run(move || listener.on_event(Change { event: Event::named(event) }));
         });
     }
 }
 
-/// Runs the main thread's dispatch queue, where listeners are called, for a host without a run
-/// loop (a command-line tool). Call it on the main thread; it never returns.
+/// Runs the main thread's queue, where listeners are called, for a host without a run loop (a
+/// command-line tool). Call it on the main thread; it never returns.
 #[uniffi::export]
 pub fn run_main_loop() {
     #[cfg(feature = "swift-engine")]
     if *swift::USE_SWIFT_ENGINE {
         swift::run_main_loop();
     }
-    unsafe extern "C" {
-        fn dispatch_main() -> !;
-    }
-    unsafe { dispatch_main() }
+    main_thread::run_loop()
 }
 
 /// The process's engine, started on first use.
@@ -905,25 +905,4 @@ pub async fn call<T: DeserializeOwned>(command: &str, args: Value) -> Result<T, 
     let result = ENGINE.call(command, args).await?;
     serde_json::from_value(result)
         .map_err(|error| MailError::new("decode", format!("Unexpected result of {command}: {error}")))
-}
-
-/// Runs `work` on the main thread: uniffi-dart's callbacks only run on the Dart isolate's
-/// thread, which is Flutter's main thread.
-fn on_main_thread(work: impl FnOnce() + Send + 'static) {
-    use std::ffi::c_void;
-    #[repr(C)]
-    struct DispatchQueue {
-        _opaque: [u8; 0],
-    }
-    unsafe extern "C" {
-        /// libdispatch's main queue, which `dispatch_get_main_queue()` returns.
-        static _dispatch_main_q: DispatchQueue;
-        fn dispatch_async_f(queue: *const DispatchQueue, context: *mut c_void, work: extern "C" fn(*mut c_void));
-    }
-    extern "C" fn run(context: *mut c_void) {
-        let work = unsafe { Box::from_raw(context.cast::<Box<dyn FnOnce() + Send>>()) };
-        work();
-    }
-    let work: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(work));
-    unsafe { dispatch_async_f(&raw const _dispatch_main_q, Box::into_raw(work).cast(), run) };
 }

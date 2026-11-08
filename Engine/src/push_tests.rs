@@ -279,7 +279,8 @@ fn connects_registers_follows_notifications_and_stops_on_sign_out() {
     while events.try_recv().is_ok() {}
     assert_eq!(block_on(engine.call("refresh", json!({}))).unwrap(), json!({ "started": true }));
     wait_until("loading ends", || !engine.core.mail.is_loading() && engine.core.mail.last_refresh().is_some());
-    assert!(events.try_iter().any(|event| event == "sync"));
+    // Events go out a frame (16 ms, a Windows timer tick or two) after the change.
+    wait_until("the sync event", || events.try_iter().any(|event| event == "sync"));
 
     // Signing out stops the account's registration with its still-valid token, then drops it.
     let error = block_on(engine.call("refresh", json!({ "nope": 1 }))).unwrap_err();

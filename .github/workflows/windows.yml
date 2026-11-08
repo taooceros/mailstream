@@ -1,0 +1,67 @@
+name: Windows
+
+# The Rust engine and the UniFFI crate's DLL (mailstream.dll) on Windows x64: the engine's tests
+# and an end-to-end smoke test of the DLL's API, without accounts, secrets or private mail.
+on:
+  push:
+    branches: [main, 'ms91/**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Test fixtures compare bytes as committed.
+      - run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            Engine/target
+            FFI/target
+          key: windows-cargo-${{ hashFiles('Engine/Cargo.lock', 'Engine/Cargo.toml', 'FFI/Cargo.lock', 'FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml') }}
+          restore-keys: windows-cargo-
+
+      - name: Toolchain
+        run: rustup default stable && cargo --version
+
+      - name: Engine tests
+        run: cd Engine && cargo test
+
+      # Also after failed tests, so one run shows every step that fails.
+      - name: UniFFI crate (mailstream.dll) and the smoke test
+        if: ${{ !cancelled() }}
+        run: cd FFI && cargo build --release -p mailstream --lib --example smoke
+
+      - name: Smoke test
+        if: ${{ !cancelled() }}
+        run: FFI/target/release/examples/smoke.exe
+
+      - name: Dart bindings
+        if: ${{ !cancelled() }}
+        run: cd FFI && cargo run -q -p mailstream-bindgen -- target/release/mailstream.dll --out-dir ../Flutter/packages/mailstream/lib/src
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: windows-engine
+          path: |
+            FFI/target/release/mailstream.dll
+            Flutter/packages/mailstream/lib/src
+          retention-days: 7

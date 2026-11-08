@@ -4,7 +4,6 @@
 //! `aiTagging.model` setting names, with the same arguments, prompt and lenient reading of the
 //! answer.
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -152,10 +151,22 @@ fn expand_tilde(path: &str) -> PathBuf {
 }
 
 /// `FileManager.isExecutableFile`: the process may execute it.
+#[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
-    let Ok(text) = CString::new(path.as_os_str().as_encoded_bytes()) else { return false };
+    let Ok(text) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else { return false };
     // SAFETY: `text` is a NUL-terminated path that outlives the call.
     unsafe { libc::access(text.as_ptr(), libc::X_OK) == 0 }
+}
+
+/// Windows runs any file with an executable extension; the candidates carry one.
+#[cfg(windows)]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// The file names `name` runs as: itself, or on Windows with the extensions `omp` installs with.
+fn executable_names(name: &str) -> Vec<String> {
+    if cfg!(windows) { ["exe", "cmd", "bat"].map(|extension| format!("{name}.{extension}")).to_vec() } else { vec![name.into()] }
 }
 
 // MARK: - Prompt
@@ -436,10 +447,11 @@ impl Tools {
     /// Executable files called `name` on the recovered PATH, in PATH order, one per resolved target.
     async fn executables(&self, name: &str) -> Vec<PathBuf> {
         let path = self.environment().await.get("PATH").cloned().unwrap_or_default();
+        let names = executable_names(name);
         let mut seen = std::collections::HashSet::new();
-        path.split(':')
-            .filter(|directory| !directory.is_empty())
-            .map(|directory| Path::new(directory).join(name))
+        std::env::split_paths(&path)
+            .filter(|directory| !directory.as_os_str().is_empty())
+            .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
             .filter(|candidate| {
                 is_executable(candidate)
                     && seen.insert(std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.clone()))
@@ -448,6 +460,15 @@ impl Tools {
     }
 }
 
+/// Windows apps get the user's PATH from the system; there is no login shell to ask.
+#[cfg(windows)]
+async fn recover() -> HashMap<String, String> {
+    let mut environment: HashMap<String, String> = std::env::vars().collect();
+    environment.insert("NO_COLOR".into(), "1".into());
+    environment
+}
+
+#[cfg(unix)]
 async fn recover() -> HashMap<String, String> {
     let mut environment: HashMap<String, String> = std::env::vars().collect();
     let home = dirs::home_dir().unwrap_or_default().display().to_string();
@@ -468,6 +489,7 @@ async fn recover() -> HashMap<String, String> {
     environment
 }
 
+#[cfg(unix)]
 async fn login_shell_path(environment: &HashMap<String, String>) -> Option<String> {
     let shell = environment.get("SHELL").cloned().unwrap_or_else(|| "/bin/zsh".into());
     let text = run_quickly(
@@ -498,13 +520,22 @@ pub struct Output {
 }
 
 /// SIGTERM before SIGKILL for a child the run gave up on.
+#[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// A child still running when its run ends early (timeout, or the caller dropping the future):
-/// it gets SIGTERM, then SIGKILL if it outlives `KILL_GRACE`.
+/// it gets SIGTERM, then SIGKILL if it outlives `KILL_GRACE`; on Windows it is terminated.
 struct Running(Option<tokio::process::Child>);
 
 impl Drop for Running {
+    #[cfg(windows)]
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.start_kill();
+        }
+    }
+
+    #[cfg(unix)]
     fn drop(&mut self) {
         let Some(mut child) = self.0.take() else { return };
         if let Some(pid) = child.id() {
@@ -568,12 +599,18 @@ pub async fn run(
         Err(_) => return Err(format!("{name} timed out")),
     };
     running.0 = None;
-    use std::os::unix::process::ExitStatusExt;
-    let status = status.code().or_else(|| status.signal()).unwrap_or(-1);
+    #[cfg(unix)]
+    let status = {
+        use std::os::unix::process::ExitStatusExt;
+        status.code().or_else(|| status.signal()).unwrap_or(-1)
+    };
+    #[cfg(windows)]
+    let status = status.code().unwrap_or(-1);
     Ok(Output { status, stdout, stderr })
 }
 
-#[cfg(test)]
+// The fake omp is a shell script.
+#[cfg(all(test, unix))]
 pub(crate) mod tests {
     use std::os::unix::fs::PermissionsExt;
 

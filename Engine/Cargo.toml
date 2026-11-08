@@ -45,5 +45,10 @@ security-framework-sys = "2.17"
 core-foundation = "0.10"
 core-foundation-sys = "0.8"
 
+# Windows: sign-ins sealed with DPAPI, the browser through the shell, the host executable's
+# version resource.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

@@ -23,6 +23,10 @@ mailstream-engine = { path = "../Engine" }
 # swift-engine only.
 futures-channel = { version = "0.3", optional = true }
 
+# Windows: the message-only window listeners are called through.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
+
 [features]
 # MAILSTREAM_ENGINE=swift runs the Swift engine (libMailstreamKit.dylib, which `swift build
 # --product MailstreamKit` makes) instead, for examples/bench.rs; front ends never build it.
@@ -34,11 +38,14 @@ required-features = ["swift-engine"]
 
 [dev-dependencies]
 futures-executor = "0.3"
-# examples/bench.rs: concurrent calls, process memory, its own Keychain item, and mail.db
-# written through the Rust engine's cache layer (which runs on tokio).
+# examples/bench.rs: concurrent calls, and mail.db written through the Rust engine's cache layer
+# (which runs on tokio).
 futures = "0.3"
-libc = "0.2"
-security-framework = "3"
 # examples/bench.rs: the avatar cache's file names.
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt"] }
+
+# examples/bench.rs (macOS only, with the Swift engine): process memory and its own Keychain item.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+libc = "0.2"
+security-framework = "3"

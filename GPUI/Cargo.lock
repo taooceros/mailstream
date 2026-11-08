@@ -3859,6 +3859,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "uniffi",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3892,6 +3893,7 @@ dependencies = [
  "turso",
  "unicode-normalization",
  "unicode-segmentation",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

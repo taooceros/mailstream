@@ -3,10 +3,8 @@
 //! (`mailstream_engine::control`), starting Mailstream Flutter in the background when none runs.
 //! Commands, arguments, help and output are the command table's (`mailstream_engine::commands`).
 use std::io::{Read, Write};
-use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use mailstream_engine::commands::{self, COMMANDS, Kind, Spec};
@@ -15,6 +13,7 @@ use serde_json::{Map, Value, json};
 
 /// The front end started when none serves the socket: Mailstream Flutter, by bundle id when this
 /// binary is not inside its bundle.
+#[cfg(not(windows))]
 const FRONT_END: &str = "dev.mailstream.MailstreamFlutter";
 /// How long an answer may take: `accounts add` waits up to 5 minutes for the browser sign-in.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(420);
@@ -227,14 +226,16 @@ fn boolean(word: &str) -> Option<bool> {
 fn absolute(raw: &str) -> String {
     let path = Path::new(raw);
     let full = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().unwrap_or_default().join(path) };
-    let mut out = PathBuf::from("/");
+    let mut out = PathBuf::new();
     for component in full.components() {
         match component {
+            // `/`, or on Windows `C:` then `\`.
+            Component::Prefix(_) | Component::RootDir => out.push(component.as_os_str()),
             Component::Normal(part) => out.push(part),
             Component::ParentDir => {
                 out.pop();
             }
-            Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+            Component::CurDir => {}
         }
     }
     out.to_string_lossy().into_owned()
@@ -243,13 +244,12 @@ fn absolute(raw: &str) -> String {
 /// The running front end's answer to one request.
 fn send(spec: &Spec, args: Map<String, Value>) -> Result<Value, EngineError> {
     let mut stream = connect_or_launch()?;
-    let _ = stream.set_read_timeout(Some(ANSWER_TIMEOUT));
     let mut request = json::encode(&json!({ "command": spec.id, "args": args }), false, false);
     request.push(b'\n');
     if stream.write_all(&request).is_err() {
         return Err(EngineError::new("unavailable", "Could not write to Mailstream's control socket."));
     }
-    let _ = stream.shutdown(Shutdown::Write);
+    connection::sent(&stream, ANSWER_TIMEOUT);
     let closed = || EngineError::new("unavailable", "Mailstream closed the connection without answering.");
     let message = receive(&mut stream).filter(|message| !message.is_empty()).ok_or_else(closed)?;
     let answer: Value = serde_json::from_slice(&message).map_err(|_| closed())?;
@@ -265,7 +265,7 @@ fn send(spec: &Spec, args: Map<String, Value>) -> Result<Value, EngineError> {
 }
 
 /// Bytes up to the first newline (or the end), at most `control::MAX_ANSWER`.
-fn receive(stream: &mut UnixStream) -> Option<Vec<u8>> {
+fn receive(stream: &mut impl Read) -> Option<Vec<u8>> {
     let mut message = Vec::new();
     let mut buffer = vec![0; 64 << 10];
     while message.len() <= control::MAX_ANSWER {
@@ -288,11 +288,27 @@ fn receive(stream: &mut UnixStream) -> Option<Vec<u8>> {
 
 /// A connection to the running front end; starts Mailstream Flutter (in the background) when
 /// none serves the socket.
-fn connect_or_launch() -> Result<UnixStream, EngineError> {
+fn connect_or_launch() -> Result<connection::Connection, EngineError> {
     let path = control::socket_path(&mailstream_engine::support_directory());
-    if let Ok(stream) = UnixStream::connect(&path) {
+    if let Some(stream) = connection::open(&path) {
         return Ok(stream);
     }
+    let name = launch()?;
+    let deadline = Instant::now() + LAUNCH_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Some(stream) = connection::open(&path) {
+            return Ok(stream);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Err(EngineError::new("not_running", format!("Started {name}, but it did not open its control socket within 20 s.")))
+}
+
+/// Starts Mailstream Flutter in the background; answers what it started.
+#[cfg(not(windows))]
+fn launch() -> Result<String, EngineError> {
+    use std::process::{Command, Stdio};
+
     let not_running = |message: String| EngineError::new("not_running", message);
     let mut open = Command::new("/usr/bin/open");
     open.arg("-g").stdout(Stdio::null()).stderr(Stdio::null());
@@ -307,22 +323,70 @@ fn connect_or_launch() -> Result<UnixStream, EngineError> {
         }
     };
     match open.status() {
-        Ok(status) if status.success() => {}
-        Ok(_) => return Err(not_running(format!("Mailstream is not running, and {name} could not be started."))),
-        Err(error) => return Err(not_running(format!("Could not start {name}: {error}"))),
+        Ok(status) if status.success() => Ok(name),
+        Ok(_) => Err(not_running(format!("Mailstream is not running, and {name} could not be started."))),
+        Err(error) => Err(not_running(format!("Could not start {name}: {error}"))),
     }
-    let deadline = Instant::now() + LAUNCH_TIMEOUT;
-    while Instant::now() < deadline {
-        if let Ok(stream) = UnixStream::connect(&path) {
-            return Ok(stream);
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    Err(not_running(format!("Started {name}, but it did not open its control socket within 20 s.")))
+}
+
+/// Windows has no app to start by name: the person starts Mailstream.
+#[cfg(windows)]
+fn launch() -> Result<String, EngineError> {
+    Err(EngineError::new("not_running", "Mailstream is not running; start it, then try again."))
 }
 
 /// The .app this executable lives in, following a symlink such as ~/.local/bin/mailstream.
+#[cfg(not(windows))]
 fn app_bundle() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?.canonicalize().ok()?;
     executable.ancestors().skip(1).find(|path| path.extension().is_some_and(|extension| extension == "app")).map(Path::to_path_buf)
+}
+
+/// The control socket's client side.
+#[cfg(unix)]
+mod connection {
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+    use std::path::Path;
+    use std::time::Duration;
+
+    pub type Connection = UnixStream;
+
+    pub fn open(path: &Path) -> Option<Connection> {
+        UnixStream::connect(path).ok()
+    }
+
+    /// The request is written: the answer may take up to `timeout`.
+    pub fn sent(stream: &Connection, timeout: Duration) {
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.shutdown(Shutdown::Write);
+    }
+}
+
+/// The control pipe's client side.
+#[cfg(windows)]
+mod connection {
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    pub type Connection = std::fs::File;
+
+    /// `ERROR_PIPE_BUSY`: the engine is opening the pipe's next instance.
+    const PIPE_BUSY: i32 = 231;
+
+    pub fn open(path: &Path) -> Option<Connection> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+                Ok(pipe) => return Some(pipe),
+                Err(error) if error.raw_os_error() == Some(PIPE_BUSY) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// A pipe has neither a half-close nor a read timeout: the request's newline ends it.
+    pub fn sent(_pipe: &Connection, _timeout: Duration) {}
 }

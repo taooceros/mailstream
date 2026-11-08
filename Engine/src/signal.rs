@@ -6,6 +6,10 @@
 //! names, so a Swift and a Rust engine running at once follow each other.
 //!
 //! Also the system's own notifications of this kind, such as [`ProcessSignal::NETWORK_CHANGE`].
+//!
+//! Elsewhere (Windows) the front end is the only process with an engine (mail.db has no
+//! multi-process WAL there, and the CLI goes through its control pipe), so posts reach this
+//! process's own receivers only and system names never post.
 use std::borrow::Cow;
 use std::ffi::CString;
 
@@ -159,19 +163,38 @@ mod platform {
 
 #[cfg(not(target_os = "macos"))]
 mod platform {
-    use std::ffi::CStr;
+    use std::collections::HashMap;
+    use std::ffi::{CStr, CString};
+    use std::sync::{Arc, LazyLock, Mutex, Weak};
 
-    pub fn post(_name: &CStr) {}
+    use tokio::sync::Notify;
 
-    pub struct Registration;
+    /// The receivers registered for each name.
+    static RECEIVERS: LazyLock<Mutex<HashMap<CString, Vec<Weak<Notify>>>>> = LazyLock::new(Default::default);
 
-    pub fn register(_name: &CStr) -> Option<Registration> {
-        None
+    pub fn post(name: &CStr) {
+        let mut receivers = RECEIVERS.lock().expect("signal receivers");
+        if let Some(list) = receivers.get_mut(name) {
+            // A receiver not waiting keeps one wake: posts since its last call read as one.
+            list.retain(|receiver| receiver.upgrade().inspect(|receiver| receiver.notify_one()).is_some());
+        }
+    }
+
+    pub struct Registration(Arc<Notify>);
+
+    pub fn register(name: &CStr) -> Option<Registration> {
+        let receiver = Arc::new(Notify::new());
+        let mut receivers = RECEIVERS.lock().expect("signal receivers");
+        let list = receivers.entry(name.to_owned()).or_default();
+        list.retain(|receiver| receiver.strong_count() > 0);
+        list.push(Arc::downgrade(&receiver));
+        Some(Registration(receiver))
     }
 
     impl Registration {
         pub async fn next(&mut self) -> bool {
-            false
+            self.0.notified().await;
+            true
         }
     }
 }
@@ -186,12 +209,12 @@ mod tests {
     async fn hears_posts_from_this_process() {
         let signal =
             ProcessSignal::new(format!("dev.mailstream.test.signal.{}.{}", std::process::id(), crate::tests::unique()));
-        let mut posts = signal.posts().expect("notifyd registers the name");
+        let mut posts = signal.posts().expect("the name registers");
         signal.post();
         signal.post();
         signal.post();
         assert!(tokio::time::timeout(Duration::from_secs(5), posts.next()).await.unwrap());
-        // notifyd delivers posts as they reach it; those already waiting are read as one.
+        // Posts are delivered as they reach the receiver; those already waiting are read as one.
         let mut more = 0;
         while tokio::time::timeout(Duration::from_millis(300), posts.next()).await.is_ok() {
             more += 1;
@@ -201,6 +224,7 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_secs(5), posts.next()).await.unwrap());
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn hears_posts_from_another_process() {
         // What the Swift engine's `notify_post` does, from a process of its own.

@@ -88,7 +88,10 @@ fn keys_and_names_match_the_swift_engine() {
     );
     assert_eq!(sized("https://lh3.googleusercontent.com/a/ACg8oc"), "https://lh3.googleusercontent.com/a/ACg8oc=s96-c");
     assert_eq!(sized("https://example.com/a=b"), "https://example.com/a=b");
+    #[cfg(not(windows))]
     assert_eq!(file_url(Path::new("/Users/a b/Caches/p-1.png")), "file:///Users/a%20b/Caches/p-1.png");
+    #[cfg(windows)]
+    assert_eq!(file_url(Path::new(r"C:\Users\a b\Caches\p-1.png")), "file:///C:/Users/a%20b/Caches/p-1.png");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -18,3 +18,10 @@ pub fn replace(directory: &Path, path: &Path, data: &[u8]) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// An absolute `path` as the path of a `file:` URL, before percent-encoding: itself on Unix,
+/// `/C:/Users/…` on Windows.
+pub fn url_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) { format!("/{}", text.replace('\\', "/")) } else { text.into_owned() }
+}

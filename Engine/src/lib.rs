@@ -46,7 +46,8 @@ mod mail_tests;
 mod push_tests;
 #[cfg(test)]
 mod chat_tests;
-#[cfg(test)]
+// Runs a shell-script omp (`omp::tests::fake_omp`).
+#[cfg(all(test, unix))]
 mod tagging_tests;
 
 use std::collections::HashMap;

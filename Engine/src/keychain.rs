@@ -3,22 +3,13 @@
 //! holding [`SignIns`] as key-sorted JSON, so macOS asks about Mailstream's access once rather
 //! than per account. Items from before clients were stored hold a bare object of refresh token
 //! by account id.
-// Security's status constants (`errSecSuccess`) are matched by their C names.
-#![allow(non_upper_case_globals)]
+//!
+//! Windows has no such item: the same JSON is one file, `<service>.signins` in
+//! `%LOCALAPPDATA%\Mailstream`, sealed with DPAPI for the signed-in Windows user (Credential
+//! Manager caps an item at 2.5 KB, less than a few Microsoft refresh tokens).
 use std::collections::BTreeMap;
 use std::fmt;
 
-use core_foundation::base::{CFType, TCFType};
-use core_foundation::boolean::CFBoolean;
-use core_foundation::data::CFData;
-use core_foundation::dictionary::CFDictionary;
-use core_foundation::string::CFString;
-use core_foundation_sys::base::{CFTypeRef, OSStatus};
-use security_framework_sys::base::{SecCopyErrorMessageString, errSecItemNotFound, errSecSuccess};
-use security_framework_sys::item::{
-    kSecAttrAccount, kSecAttrLabel, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecReturnData, kSecValueData,
-};
-use security_framework_sys::keychain_item::{SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate};
 use serde::{Deserialize, Serialize};
 
 use crate::oauth::OAuthClient;
@@ -26,8 +17,6 @@ use crate::oauth::OAuthClient;
 /// The service the apps' sign-ins live under. Tests use another one: an unsigned test binary
 /// reading this item makes macOS ask the person for access.
 pub const SERVICE: &str = "dev.mailstream.Mailstream.oauth";
-const ACCOUNT: &str = "refresh-tokens";
-const LABEL: &str = "Mailstream sign-ins";
 
 /// What the item keeps, by account id and provider.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -68,100 +57,242 @@ impl SignIns {
     }
 }
 
-/// A failed Keychain call.
-#[derive(Clone, Debug)]
-pub struct KeychainError(OSStatus);
-
-impl fmt::Display for KeychainError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let reason = unsafe {
-            let message = SecCopyErrorMessageString(self.0, std::ptr::null_mut());
-            if message.is_null() { None } else { Some(CFString::wrap_under_create_rule(message).to_string()) }
-        };
-        match reason {
-            Some(reason) => write!(formatter, "Keychain: {reason}"),
-            None => write!(formatter, "Keychain: OSStatus {}", self.0),
-        }
-    }
-}
-
 /// The sign-ins item under one service.
 #[derive(Clone, Debug)]
 pub struct Keychain {
     service: String,
 }
 
-impl Keychain {
-    pub fn new(service: impl Into<String>) -> Self {
-        Self { service: service.into() }
-    }
+#[cfg(target_os = "macos")]
+pub use apple::KeychainError;
+#[cfg(windows)]
+pub use sealed::KeychainError;
 
-    /// The stored sign-ins; empty when there are none.
-    pub fn load(&self) -> Result<SignIns, KeychainError> {
-        let mut query = self.base();
-        unsafe {
-            query.push((CFString::wrap_under_get_rule(kSecReturnData), CFBoolean::true_value().into_CFType()));
-        }
-        let query = CFDictionary::from_CFType_pairs(&query);
-        let mut result: CFTypeRef = std::ptr::null();
-        let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut result) };
-        match status {
-            errSecSuccess => {
-                if result.is_null() {
-                    return Ok(SignIns::default());
-                }
-                let value = unsafe { CFType::wrap_under_create_rule(result) };
-                Ok(value.downcast::<CFData>().map(|data| SignIns::decode(data.bytes())).unwrap_or_default())
-            }
-            errSecItemNotFound => Ok(SignIns::default()),
-            status => Err(KeychainError(status)),
-        }
-    }
+#[cfg(target_os = "macos")]
+mod apple {
+    // Security's status constants (`errSecSuccess`) are matched by their C names.
+    #![allow(non_upper_case_globals)]
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::data::CFData;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+    use core_foundation_sys::base::{CFTypeRef, OSStatus};
+    use security_framework_sys::base::{SecCopyErrorMessageString, errSecItemNotFound, errSecSuccess};
+    use security_framework_sys::item::{
+        kSecAttrAccount, kSecAttrLabel, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecReturnData,
+        kSecValueData,
+    };
+    use security_framework_sys::keychain_item::{SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate};
 
-    /// Replaces the stored sign-ins; with no refresh token and no remembered client left the item
-    /// is deleted.
-    pub fn store(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
-        let base = CFDictionary::from_CFType_pairs(&self.base());
-        if sign_ins.refresh_tokens.is_empty() && sign_ins.last_clients.is_empty() {
-            let deleted = unsafe { SecItemDelete(base.as_concrete_TypeRef()) };
-            return match deleted {
-                errSecSuccess | errSecItemNotFound => Ok(()),
-                status => Err(KeychainError(status)),
+    use super::*;
+
+    const ACCOUNT: &str = "refresh-tokens";
+    const LABEL: &str = "Mailstream sign-ins";
+
+    /// A failed Keychain call.
+    #[derive(Clone, Debug)]
+    pub struct KeychainError(OSStatus);
+
+    impl fmt::Display for KeychainError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            let reason = unsafe {
+                let message = SecCopyErrorMessageString(self.0, std::ptr::null_mut());
+                if message.is_null() { None } else { Some(CFString::wrap_under_create_rule(message).to_string()) }
             };
-        }
-        let data = CFData::from_buffer(&sign_ins.encode());
-        let value_key = unsafe { CFString::wrap_under_get_rule(kSecValueData) };
-        let update = CFDictionary::from_CFType_pairs(&[(value_key.clone(), data.clone().into_CFType())]);
-        match unsafe { SecItemUpdate(base.as_concrete_TypeRef(), update.as_concrete_TypeRef()) } {
-            errSecSuccess => Ok(()),
-            errSecItemNotFound => {
-                let mut item = self.base();
-                item.push((value_key, data.into_CFType()));
-                item.push((
-                    unsafe { CFString::wrap_under_get_rule(kSecAttrLabel) },
-                    CFString::new(LABEL).into_CFType(),
-                ));
-                let item = CFDictionary::from_CFType_pairs(&item);
-                match unsafe { SecItemAdd(item.as_concrete_TypeRef(), std::ptr::null_mut()) } {
-                    errSecSuccess => Ok(()),
-                    status => Err(KeychainError(status)),
-                }
+            match reason {
+                Some(reason) => write!(formatter, "Keychain: {reason}"),
+                None => write!(formatter, "Keychain: OSStatus {}", self.0),
             }
-            status => Err(KeychainError(status)),
         }
     }
 
-    fn base(&self) -> Vec<(CFString, CFType)> {
-        unsafe {
-            vec![
-                (
-                    CFString::wrap_under_get_rule(kSecClass),
-                    CFString::wrap_under_get_rule(kSecClassGenericPassword).into_CFType(),
-                ),
-                (CFString::wrap_under_get_rule(kSecAttrService), CFString::new(&self.service).into_CFType()),
-                (CFString::wrap_under_get_rule(kSecAttrAccount), CFString::new(ACCOUNT).into_CFType()),
-            ]
+    impl Keychain {
+        pub fn new(service: impl Into<String>) -> Self {
+            Self { service: service.into() }
         }
+
+        /// The stored sign-ins; empty when there are none.
+        pub fn load(&self) -> Result<SignIns, KeychainError> {
+            let mut query = self.base();
+            unsafe {
+                query.push((CFString::wrap_under_get_rule(kSecReturnData), CFBoolean::true_value().into_CFType()));
+            }
+            let query = CFDictionary::from_CFType_pairs(&query);
+            let mut result: CFTypeRef = std::ptr::null();
+            let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut result) };
+            match status {
+                errSecSuccess => {
+                    if result.is_null() {
+                        return Ok(SignIns::default());
+                    }
+                    let value = unsafe { CFType::wrap_under_create_rule(result) };
+                    Ok(value.downcast::<CFData>().map(|data| SignIns::decode(data.bytes())).unwrap_or_default())
+                }
+                errSecItemNotFound => Ok(SignIns::default()),
+                status => Err(KeychainError(status)),
+            }
+        }
+
+        /// Replaces the stored sign-ins; with no refresh token and no remembered client left the item
+        /// is deleted.
+        pub fn store(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
+            let base = CFDictionary::from_CFType_pairs(&self.base());
+            if sign_ins.refresh_tokens.is_empty() && sign_ins.last_clients.is_empty() {
+                let deleted = unsafe { SecItemDelete(base.as_concrete_TypeRef()) };
+                return match deleted {
+                    errSecSuccess | errSecItemNotFound => Ok(()),
+                    status => Err(KeychainError(status)),
+                };
+            }
+            let data = CFData::from_buffer(&sign_ins.encode());
+            let value_key = unsafe { CFString::wrap_under_get_rule(kSecValueData) };
+            let update = CFDictionary::from_CFType_pairs(&[(value_key.clone(), data.clone().into_CFType())]);
+            match unsafe { SecItemUpdate(base.as_concrete_TypeRef(), update.as_concrete_TypeRef()) } {
+                errSecSuccess => Ok(()),
+                errSecItemNotFound => {
+                    let mut item = self.base();
+                    item.push((value_key, data.into_CFType()));
+                    item.push((
+                        unsafe { CFString::wrap_under_get_rule(kSecAttrLabel) },
+                        CFString::new(LABEL).into_CFType(),
+                    ));
+                    let item = CFDictionary::from_CFType_pairs(&item);
+                    match unsafe { SecItemAdd(item.as_concrete_TypeRef(), std::ptr::null_mut()) } {
+                        errSecSuccess => Ok(()),
+                        status => Err(KeychainError(status)),
+                    }
+                }
+                status => Err(KeychainError(status)),
+            }
+        }
+
+        fn base(&self) -> Vec<(CFString, CFType)> {
+            unsafe {
+                vec![
+                    (
+                        CFString::wrap_under_get_rule(kSecClass),
+                        CFString::wrap_under_get_rule(kSecClassGenericPassword).into_CFType(),
+                    ),
+                    (CFString::wrap_under_get_rule(kSecAttrService), CFString::new(&self.service).into_CFType()),
+                    (CFString::wrap_under_get_rule(kSecAttrAccount), CFString::new(ACCOUNT).into_CFType()),
+                ]
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+mod sealed {
+    use std::io::ErrorKind;
+    use std::path::PathBuf;
+
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
+    };
+
+    use super::*;
+
+    /// A failed read or write of the sealed sign-ins file.
+    #[derive(Clone, Debug)]
+    pub struct KeychainError(String);
+
+    impl fmt::Display for KeychainError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "Saved sign-ins: {}", self.0)
+        }
+    }
+
+    impl Keychain {
+        pub fn new(service: impl Into<String>) -> Self {
+            Self { service: service.into() }
+        }
+
+        /// The stored sign-ins; empty when there are none.
+        pub fn load(&self) -> Result<SignIns, KeychainError> {
+            let sealed = match std::fs::read(self.path()) {
+                Ok(sealed) => sealed,
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(SignIns::default()),
+                Err(error) => return Err(KeychainError(error.to_string())),
+            };
+            Ok(SignIns::decode(&unseal(&sealed)?))
+        }
+
+        /// Replaces the stored sign-ins; with no refresh token and no remembered client left the
+        /// file is deleted.
+        pub fn store(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
+            let path = self.path();
+            if sign_ins.refresh_tokens.is_empty() && sign_ins.last_clients.is_empty() {
+                return match std::fs::remove_file(&path) {
+                    Err(error) if error.kind() != ErrorKind::NotFound => Err(KeychainError(error.to_string())),
+                    _ => Ok(()),
+                };
+            }
+            let sealed = seal(&sign_ins.encode())?;
+            let directory = path.parent().expect("the file is in a directory");
+            crate::files::replace(directory, &path, &sealed).map_err(|error| KeychainError(error.to_string()))
+        }
+
+        fn path(&self) -> PathBuf {
+            let local = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+            local.join("Mailstream").join(format!("{}.signins", self.service))
+        }
+    }
+
+    /// `data` sealed so only the signed-in Windows user reads it back, on this machine.
+    fn seal(data: &[u8]) -> Result<Vec<u8>, KeychainError> {
+        let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+        // SAFETY: the input blob points at `data` for the call; the system fills `out`.
+        let sealed = unsafe {
+            CryptProtectData(
+                &blob(data),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut out,
+            )
+        };
+        if sealed == 0 {
+            return Err(KeychainError(format!("sealing failed: {}", std::io::Error::last_os_error())));
+        }
+        Ok(unsafe { take(out) })
+    }
+
+    fn unseal(data: &[u8]) -> Result<Vec<u8>, KeychainError> {
+        let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+        // SAFETY: as in `seal`.
+        let opened = unsafe {
+            CryptUnprotectData(
+                &blob(data),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut out,
+            )
+        };
+        if opened == 0 {
+            return Err(KeychainError(format!("unsealing failed: {}", std::io::Error::last_os_error())));
+        }
+        Ok(unsafe { take(out) })
+    }
+
+    fn blob(data: &[u8]) -> CRYPT_INTEGER_BLOB {
+        CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr().cast_mut() }
+    }
+
+    /// The bytes of a blob the system allocated, which is then freed.
+    unsafe fn take(blob: CRYPT_INTEGER_BLOB) -> Vec<u8> {
+        if blob.pbData.is_null() {
+            return Vec::new();
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(blob.pbData, blob.cbData as usize) }.to_vec();
+        unsafe { LocalFree(blob.pbData.cast()) };
+        bytes
     }
 }
 
