@@ -69,6 +69,8 @@ for frontend in "$@"; do
 PLIST
       ;;
   esac
+  # An interrupted flutter build can exit 0 and leave a bundle without its executable.
+  [ -x "$app/Contents/MacOS/$executable" ] || fail "$app has no executable $executable; build failed"
   # The engine reads OAuth clients and push settings from the host's Info.plist; bundle.sh
   # already added them to Mailstream.app.
   [ "$frontend" = native ] || ./scripts/app-config.sh "$app/Contents/Info.plist"
