@@ -5,7 +5,6 @@
 # (scripts/turso.sh) for the Swift side.
 set -eu
 cd "$(dirname "$0")/.."
-command -v rcache >/dev/null && export RUSTC_WRAPPER="${RUSTC_WRAPPER:-rcache}"
 # The runs below move HOME to throwaway folders; the toolchain stays where it is.
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 ./scripts/turso.sh

@@ -6,7 +6,6 @@
 # person's is read. Needs the Turso library (scripts/turso.sh) for the Swift side.
 set -eu
 cd "$(dirname "$0")/.."
-command -v rcache >/dev/null && export RUSTC_WRAPPER="${RUSTC_WRAPPER:-rcache}"
 ./scripts/turso.sh
 
 tmp=${TMPDIR:-/tmp}

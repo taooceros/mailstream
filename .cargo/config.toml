@@ -1,0 +1,5 @@
+# Every cargo build in this repo runs plain rustc: an empty wrapper overrides the rcache wrapper
+# set in ~/.cargo/config.toml (rcache handed out corrupt artifacts in ovnfs checkouts, MS-131).
+# An ovnfs checkout already starts from the default checkout's target folders.
+[build]
+rustc-wrapper = ""

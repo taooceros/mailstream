@@ -7,8 +7,6 @@
 # offers through its SDK, so several processes (the app and FFI front ends) can share mail.db.
 set -eu
 cd "$(dirname "$0")/.."
-# Rust builds go through rcache (~/projects/rcache), the rustc cache shared across workspaces.
-command -v rcache >/dev/null && export RUSTC_WRAPPER="${RUSTC_WRAPPER:-rcache}"
 TAG="v0.8.3"
 PATCH="scripts/turso-multiprocess.patch"
 LIB=".turso/lib/libturso_sqlite3.a"
@@ -24,8 +22,9 @@ patch -s -d "$SRC" -p1 < "$PATCH"
 # The header the app compiles against must be this version's.
 cmp -s "$SRC/bindings/c/include/sqlite3.h" Sources/CTurso/sqlite3.h ||
   { echo "Sources/CTurso/sqlite3.h differs from Turso $TAG's; copy it over" >&2; exit 1; }
-# turso_core's build.rs embeds the build time and git commit unless SOURCE_DATE_EPOCH is set; a
-# fixed one makes every workspace's build identical, so rcache hits after the first.
+# turso_core's build.rs embeds the build time and the git commit of the repo it sits in (this
+# one, since the source is unpacked under .turso/) unless SOURCE_DATE_EPOCH is set; a fixed one
+# keeps the library reproducible and cargo from rebuilding it on every commit.
 (cd "$SRC" && MACOSX_DEPLOYMENT_TARGET=26.0 SOURCE_DATE_EPOCH=0 cargo build --release -p turso_sqlite3)
 mkdir -p .turso/lib
 rm -f .turso/lib/v*

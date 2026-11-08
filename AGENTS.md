@@ -103,9 +103,11 @@ each pass. The script's header says what it claims and how the session picks the
 
 ## Building
 
-- Every Rust build (cargo here, in `FFI/`, `GPUI/` and Turso) goes through rcache
-  (`~/projects/rcache`), the rustc cache shared across checkouts. Don't set
-  `RUSTC_WRAPPER`/`RCACHE_DISABLE` to bypass it.
+- Rust builds (`Engine/`, `FFI/`, `GPUI/`, Turso) run plain cargo: the repo's
+  `.cargo/config.toml` turns off the rcache wrapper in `~/.cargo/config.toml`, which handed out
+  corrupt artifacts in ovnfs checkouts (MS-131). Don't set `RUSTC_WRAPPER` to bring it back. An
+  ovnfs checkout starts from the default checkout's `target/` folders, and cargo's own
+  fingerprints rebuild what changed there.
 - The app links the Turso database engine (`.turso/lib/libturso_sqlite3.a`). Run `scripts/turso.sh`
   once before `swift build` (it needs rustup; `bundle.sh` runs it too). It builds the pinned
   version with cargo in a few minutes and returns at once after that.
@@ -136,8 +138,9 @@ Finished fixes go to `/Applications` as part of the work, as signed release buil
 2. Push the issue-referencing commit to live `main` without losing other agents' changes. Build
    in a fresh checkout at `main` (`ovnfs new --rev main --name <unique-build-name>`, jj set up as
    in [Version control](#version-control-jj)), never an area workspace or the default checkout.
-   The checkout carries the default checkout's build output: delete `.build`, `FFI/target` and
-   `GPUI/target` in it first (that only touches the checkout). There run
+   The checkout carries the default checkout's build output: delete `.build` in it first (Swift's
+   module cache records the folder it was built in and fails anywhere else; this only touches
+   the checkout). Cargo's `target/` folders stay: cargo rebuilds what changed. There run
    `./scripts/install.sh <targets>`: it checks source, signing and the deploy lock itself and
    stops only the installed copy. If `main` moves meanwhile, rebuild from its tip. Never delete
    another agent's lock or kill its processes.
