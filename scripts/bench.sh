@@ -8,6 +8,10 @@
 #   BENCH_HZ (120) is the display's refresh rate. Each run first waits up to 2 minutes for the
 #   1-minute load average to fall below BENCH_MAX_LOAD (4): builds in other workspaces skew
 #   frame times. Logs go to BENCH_DIR (/tmp/mailstream-bench).
+#   BENCH_HOME=<dir> runs the front end on the throwaway home in <dir> (HOME and
+#   CFFIXED_USER_HOME, and a sign-ins Keychain item of its own) instead of your data; fill it
+#   with the engine benchmark's mail: (cd FFI && cargo run --release --target-dir target/bench
+#   --features swift-engine --example bench -- --seed <dir>).
 set -eu
 cd "$(dirname "$0")/.."
 FRONTEND=${1:-}
@@ -65,7 +69,12 @@ for run in $(seq "$RUNS"); do
   rm -f "$LOG"
   START_LOAD=$(load)
   echo "run $run/$RUNS (load $START_LOAD)…" >&2
-  MAILSTREAM_BENCH=scroll MAILSTREAM_BENCH_OUT="$LOG" "$BINARY" > "$DIR/$FRONTEND-$run.out" 2>&1 &
+  if [ -n "${BENCH_HOME:-}" ]; then
+    HOME="$BENCH_HOME" CFFIXED_USER_HOME="$BENCH_HOME" MAILSTREAM_KEYCHAIN_SERVICE=dev.mailstream.bench.frames \
+      MAILSTREAM_BENCH=scroll MAILSTREAM_BENCH_OUT="$LOG" "$BINARY" > "$DIR/$FRONTEND-$run.out" 2>&1 &
+  else
+    MAILSTREAM_BENCH=scroll MAILSTREAM_BENCH_OUT="$LOG" "$BINARY" > "$DIR/$FRONTEND-$run.out" 2>&1 &
+  fi
   APP_PID=$!
   # The same window size on the virtual display for every front end.
   parked=

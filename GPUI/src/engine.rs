@@ -1,9 +1,9 @@
-//! Mailstream's Swift engine (accounts, sync, cache, threading, tagging), loaded into this process
-//! from `libMailstreamKit.dylib` through the `mailstream` crate in `FFI/`. This UI asks it for
-//! values and hears about changes from it; it shares the app's mail.db and sign-ins.
+//! Mailstream's engine (accounts, sync, cache, threading, tagging, chat), the Rust one in
+//! `Engine/`, linked into this process through the `mailstream` crate in `FFI/`. This UI asks it
+//! for values and hears about changes from it; it shares the app's mail.db and sign-ins.
 //!
-//! Calls are futures answered on the main thread's run loop; they run on the background
-//! executor, where their answers are decoded, never blocking a thread.
+//! Calls are futures answered on the engine's threads; they run on the background executor,
+//! never blocking a thread.
 
 use std::sync::{Arc, LazyLock};
 

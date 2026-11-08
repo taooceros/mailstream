@@ -1,8 +1,17 @@
-//! Links the Swift engine, `libMailstreamKit.dylib`, which `swift build` puts in the package's
+//! Reserves Mach-O header padding in the macOS `cdylib`, and with the `swift-engine` feature
+//! links the Swift engine, `libMailstreamKit.dylib`, which `swift build` puts in the package's
 //! `.build/<config>` (`MAILSTREAM_KIT_DIR` overrides; `MAILSTREAM_KIT_CONFIG` picks release).
 use std::path::PathBuf;
 
 fn main() {
+    // install_name_tool (run when Flutter bundles or tests native assets) rewrites IDs and rpaths
+    // without relinking.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-headerpad_max_install_names");
+    }
+    if std::env::var_os("CARGO_FEATURE_SWIFT_ENGINE").is_none() {
+        return;
+    }
     println!("cargo:rerun-if-env-changed=MAILSTREAM_KIT_DIR");
     println!("cargo:rerun-if-env-changed=MAILSTREAM_KIT_CONFIG");
     let dir = std::env::var_os("MAILSTREAM_KIT_DIR").map(PathBuf::from).unwrap_or_else(|| {
@@ -14,15 +23,7 @@ fn main() {
     });
     println!("cargo:rustc-link-search=native={}", dir.display());
     println!("cargo:rustc-link-lib=dylib=MailstreamKit");
-    // Development hosts find the dylib where swift build left it; app bundles embed it and add
-    // their own rpath (@executable_path/../Frameworks). The rpath reaches this package's own
-    // binaries; other crates' binaries add it from `DEP_MAILSTREAMKIT_DIR`.
+    // This package's own binaries (the bench) find the dylib where swift build left it.
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dir.display());
-    // On macOS cdylib, reserve Mach-O header padding so `install_name_tool` (run when Flutter
-    // bundles or tests native assets) can rewrite IDs and rpaths without relinking.
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        println!("cargo:rustc-cdylib-link-arg=-Wl,-headerpad_max_install_names");
-    }
-    println!("cargo:dir={}", dir.display());
     println!("cargo:rerun-if-changed={}", dir.join("libMailstreamKit.dylib").display());
 }

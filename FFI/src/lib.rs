@@ -1,24 +1,20 @@
-//! Mailstream's Swift engine (accounts, sync, cache, threading, tagging) as a Rust API, and
+//! Mailstream's engine (accounts, sync, cache, threading, tagging, chat) as a Rust API, and
 //! through UniFFI as a Dart, Kotlin or Python one.
 //!
-//! The engine lives in `libMailstreamKit.dylib`, the Swift package's `MailstreamKit` product,
-//! loaded into this process: one engine per process, started by [`Mailstream::new`]. Requests
-//! cross its C API (`Sources/MailstreamKit/FFI/Exports.swift`) as the control socket's JSON, in
-//! memory rather than over the socket, and come back as the typed values below.
+//! The engine is the Rust one in `Engine/`, linked into this crate: one engine per process,
+//! started by [`Mailstream::new`]. It runs on its own threads, so its host needs no run loop of
+//! its own; requests go to it as the control socket's commands and come back as the typed
+//! values below. Futures here need no particular executor; listeners are called on the main
+//! thread (a command-line host without a run loop calls [`run_main_loop`] on it). Whichever
+//! process starts its engine first serves the control socket the `mailstream` command line uses.
 //!
-//! The engine runs on the main thread's run loop. App hosts (Flutter, GPUI, AppKit) already run
-//! one; a command-line host calls [`run_main_loop`] on its main thread and works elsewhere.
-//! Futures here need no particular executor; listeners are called on the main thread.
-//!
-//! With `MAILSTREAM_ENGINE=rust` in the environment the process runs the Rust engine
-//! (`Engine/`, replacing the Swift one, MS-110) instead: the Swift engine never starts and
-//! requests go to the Rust engine directly as JSON values. It works on its own threads;
-//! listeners are still called on the main thread.
+//! With the `swift-engine` feature, a process started with `MAILSTREAM_ENGINE=swift` runs the
+//! Swift engine Mailstream.app still has (`libMailstreamKit.dylib`, through its C API in
+//! `Sources/MailstreamKit/FFI/Exports.swift`) instead, for `examples/bench.rs` to compare the
+//! two. The front ends never build it (MS-119); it goes with the Swift engine (MS-120).
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::sync::{Arc, LazyLock};
 
-use futures_channel::oneshot;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -26,17 +22,10 @@ use serde_json::{Value, json};
 uniffi::setup_scaffolding!();
 
 mod people;
+#[cfg(feature = "swift-engine")]
+mod swift;
 
 pub use people::Person;
-
-type Callback = extern "C" fn(*mut c_void, *const u8, usize);
-
-unsafe extern "C" {
-    fn mailstream_start();
-    fn mailstream_call(request: *const u8, length: usize, context: *mut c_void, reply: Callback);
-    fn mailstream_subscribe(context: *mut c_void, event: Callback);
-    fn mailstream_run_main_loop();
-}
 
 /// A failed request: the engine's stable `code` (`unknown_account`, `provider`, `confirm`, …)
 /// and a message for people.
@@ -610,11 +599,12 @@ impl Mailstream {
     /// starts syncing every signed-in account.
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
-        if *USE_RUST_ENGINE {
-            LazyLock::force(&RUST_ENGINE);
-        } else {
-            unsafe { mailstream_start() };
+        #[cfg(feature = "swift-engine")]
+        if *swift::USE_SWIFT_ENGINE {
+            swift::start();
+            return Arc::new(Self {});
         }
+        LazyLock::force(&ENGINE);
         Arc::new(Self {})
     }
 
@@ -865,84 +855,62 @@ impl Mailstream {
 
     /// Calls `listener` on the main thread for every change from now on, while the process runs.
     pub fn subscribe(&self, listener: Arc<dyn EventListener>) {
-        if *USE_RUST_ENGINE {
-            RUST_ENGINE.subscribe(move |event| {
-                let listener = listener.clone();
-                on_main_thread(move || listener.on_event(Change { event: Event::named(event) }));
-            });
+        #[cfg(feature = "swift-engine")]
+        if *swift::USE_SWIFT_ENGINE {
+            swift::subscribe(listener);
             return;
         }
-        let context = Box::into_raw(Box::new(listener)).cast::<c_void>();
-        unsafe { mailstream_subscribe(context, deliver_event) };
+        ENGINE.subscribe(move |event| {
+            let listener = listener.clone();
+            on_main_thread(move || listener.on_event(Change { event: Event::named(event) }));
+        });
     }
 }
 
-/// Runs the main thread's run loop, which the engine works on, for a host without one (a
-/// command-line tool). Call it on the main thread; it never returns.
+/// Runs the main thread's dispatch queue, where listeners are called, for a host without a run
+/// loop (a command-line tool). Call it on the main thread; it never returns.
 #[uniffi::export]
 pub fn run_main_loop() {
-    unsafe { mailstream_run_main_loop() };
+    #[cfg(feature = "swift-engine")]
+    if *swift::USE_SWIFT_ENGINE {
+        swift::run_main_loop();
+    }
+    unsafe extern "C" {
+        fn dispatch_main() -> !;
+    }
+    unsafe { dispatch_main() }
 }
 
-#[derive(Deserialize)]
-struct Answer {
-    ok: bool,
-    result: Option<Value>,
-    error: Option<ErrorBody>,
-}
-
-#[derive(Deserialize)]
-struct ErrorBody {
-    code: Option<String>,
-    message: Option<String>,
-}
-
-/// Whether this process runs the Rust engine instead of the Swift one, decided once at start.
-static USE_RUST_ENGINE: LazyLock<bool> =
-    LazyLock::new(|| std::env::var("MAILSTREAM_ENGINE").is_ok_and(|engine| engine == "rust"));
-
-/// The process's Rust engine, started on first use.
-static RUST_ENGINE: LazyLock<mailstream_engine::Engine> =
+/// The process's engine, started on first use.
+static ENGINE: LazyLock<mailstream_engine::Engine> =
     LazyLock::new(|| mailstream_engine::Engine::start(mailstream_engine::Config::for_this_app()));
+
+impl From<mailstream_engine::EngineError> for MailError {
+    fn from(error: mailstream_engine::EngineError) -> Self {
+        Self::Failed { code: error.code, message: error.message }
+    }
+}
 
 /// Any engine command by name (the control socket's: `config.get`, `accounts.list`, …) with its
 /// arguments, answered as `T`. The typed methods use it; Rust tools such as `examples/bench.rs`
 /// call commands that have none.
 pub async fn call<T: DeserializeOwned>(command: &str, args: Value) -> Result<T, MailError> {
-    let result = if *USE_RUST_ENGINE {
-        RUST_ENGINE
-            .call(command, args)
-            .await
-            .map_err(|error| MailError::Failed { code: error.code, message: error.message })?
+    #[cfg(feature = "swift-engine")]
+    let result = if *swift::USE_SWIFT_ENGINE {
+        swift::call(command, args).await?
     } else {
-        swift_call(command, args).await?
+        ENGINE.call(command, args).await?
     };
+    #[cfg(not(feature = "swift-engine"))]
+    let result = ENGINE.call(command, args).await?;
     serde_json::from_value(result)
         .map_err(|error| MailError::new("decode", format!("Unexpected result of {command}: {error}")))
 }
 
-/// The Swift engine's result for one request, through its C API.
-async fn swift_call(command: &str, args: Value) -> Result<Value, MailError> {
-    let request = serde_json::to_vec(&json!({ "command": command, "args": args })).expect("JSON values encode");
-    let (sender, receiver) = oneshot::channel::<Vec<u8>>();
-    let context = Box::into_raw(Box::new(sender)).cast::<c_void>();
-    unsafe { mailstream_call(request.as_ptr(), request.len(), context, deliver_answer) };
-    let bytes = receiver.await.map_err(|_| MailError::new("unreachable", "The engine dropped the request."))?;
-    let answer: Answer = serde_json::from_slice(&bytes)
-        .map_err(|error| MailError::new("decode", format!("Unexpected answer to {command}: {error}")))?;
-    if !answer.ok {
-        let error = answer.error.unwrap_or(ErrorBody { code: None, message: None });
-        return Err(MailError::Failed {
-            code: error.code.unwrap_or_else(|| "failed".into()),
-            message: error.message.unwrap_or_else(|| format!("{command} failed.")),
-        });
-    }
-    Ok(answer.result.unwrap_or(Value::Null))
-}
-
-/// Runs `work` on the main thread, where the Swift engine calls listeners too: uniffi-dart's
-/// callbacks only run on the Dart isolate's thread, which is Flutter's main thread.
+/// Runs `work` on the main thread: uniffi-dart's callbacks only run on the Dart isolate's
+/// thread, which is Flutter's main thread.
 fn on_main_thread(work: impl FnOnce() + Send + 'static) {
+    use std::ffi::c_void;
     #[repr(C)]
     struct DispatchQueue {
         _opaque: [u8; 0],
@@ -958,26 +926,4 @@ fn on_main_thread(work: impl FnOnce() + Send + 'static) {
     }
     let work: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(work));
     unsafe { dispatch_async_f(&raw const _dispatch_main_q, Box::into_raw(work).cast(), run) };
-}
-
-/// The engine's answer to one request: the context is that request's sender, used once.
-extern "C" fn deliver_answer(context: *mut c_void, bytes: *const u8, length: usize) {
-    let sender = unsafe { Box::from_raw(context.cast::<oneshot::Sender<Vec<u8>>>()) };
-    let _ = sender.send(unsafe { bytes_of(bytes, length) }.to_vec());
-}
-
-/// One engine event: the context is a subscriber's listener, kept for the life of the process.
-extern "C" fn deliver_event(context: *mut c_void, bytes: *const u8, length: usize) {
-    let listener = unsafe { &*context.cast::<Arc<dyn EventListener>>() };
-    #[derive(Deserialize)]
-    struct Message {
-        event: String,
-    }
-    if let Ok(message) = serde_json::from_slice::<Message>(unsafe { bytes_of(bytes, length) }) {
-        listener.on_event(Change { event: Event::named(&message.event) });
-    }
-}
-
-unsafe fn bytes_of<'a>(bytes: *const u8, length: usize) -> &'a [u8] {
-    if bytes.is_null() { &[] } else { unsafe { std::slice::from_raw_parts(bytes, length) } }
 }

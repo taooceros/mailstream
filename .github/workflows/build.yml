@@ -70,34 +70,22 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          path: .turso/lib
-          key: turso-${{ runner.os }}-${{ hashFiles('scripts/turso.sh', 'scripts/turso-multiprocess.patch', 'Sources/CTurso/sqlite3.h') }}
-
-      - uses: actions/cache@v4
-        with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             GPUI/target
-          key: gpui-cargo-${{ runner.os }}-${{ hashFiles('GPUI/Cargo.lock', 'FFI/Cargo.toml') }}
+          key: gpui-cargo-${{ runner.os }}-${{ hashFiles('GPUI/Cargo.lock', 'FFI/Cargo.toml', 'Engine/Cargo.toml') }}
           restore-keys: gpui-cargo-${{ runner.os }}-
 
-      - name: Engine (release)
-        run: |
-          ./scripts/turso.sh
-          swift build -c release --product MailstreamKit
-
       - name: GPUI (release)
-        run: cd GPUI && MAILSTREAM_KIT_CONFIG=release cargo build --release
+        run: cd GPUI && cargo build --release
 
-      # An app bundle: the binary in Contents/MacOS finds the engine in Contents/Frameworks
-      # (GPUI/build.rs adds that rpath). Signed ad hoc, like the other two.
+      # An app bundle: the binary links the engine. Signed ad hoc, like the other two.
       - name: App bundle and disk image
         run: |
           APP="build/dmg/Mailstream GPUI.app"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks"
+          mkdir -p "$APP/Contents/MacOS"
           cp GPUI/target/release/mailstream-gpui "$APP/Contents/MacOS/"
-          cp "$(swift build -c release --show-bin-path)/libMailstreamKit.dylib" "$APP/Contents/Frameworks/"
           cat > "$APP/Contents/Info.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -111,7 +99,6 @@ jobs:
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           PLIST
-          codesign --force --sign - "$APP/Contents/Frameworks/libMailstreamKit.dylib"
           codesign --force --sign - --identifier dev.mailstream.Mailstream "$APP"
           ln -s /Applications build/dmg/Applications
           hdiutil create -volname "Mailstream GPUI" -srcfolder build/dmg -fs HFS+ -format UDZO -ov Mailstream-GPUI.dmg
@@ -138,19 +125,15 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          path: .turso/lib
-          key: turso-${{ runner.os }}-${{ hashFiles('scripts/turso.sh', 'scripts/turso-multiprocess.patch', 'Sources/CTurso/sqlite3.h') }}
-
-      - uses: actions/cache@v4
-        with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             FFI/target
-          key: ffi-cargo-${{ runner.os }}-${{ hashFiles('FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml') }}
+            Engine/target
+          key: ffi-cargo-${{ runner.os }}-${{ hashFiles('FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml', 'Engine/Cargo.lock') }}
           restore-keys: ffi-cargo-${{ runner.os }}-
 
-      - name: Engine and Dart bindings (release)
+      - name: Engine, command line and Dart bindings (release)
         run: CONFIG=release DART_OUT=$PWD/Flutter/packages/mailstream/lib/src ./scripts/ffi.sh
 
       - name: Flutter (release)

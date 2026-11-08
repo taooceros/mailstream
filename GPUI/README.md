@@ -2,21 +2,19 @@
 
 A [GPUI](https://gpui.rs) (Zed's GPU UI framework, crate `gpui` 0.2) window for Mailstream. The
 engine (accounts, OAuth, sync, push, the Turso cache, threading, AI tagging, Google Chat) runs in
-this process: the app links `libMailstreamKit.dylib` through the Rust crate in `../FFI` and calls
+this process: the app links the Rust engine (`../Engine`) through the crate in `../FFI` and calls
 its typed async methods (`Mailstream::conversations`, `show`, `tag`, `chat_messages`, `reply`, …).
 The engine's change events (`Accounts`, `Mailboxes`, `Conversations`, `Previews`, `Tags`) drive
 reloads; nothing polls the mail list. The Mailstream app need not be running; when it is, both
 share `mail.db` (see "Front ends in other languages" in the top-level README).
 
 ```sh
-GPUI/run.sh                 # from the repo root: Turso, libMailstreamKit, cargo build, sign, launch
+GPUI/run.sh                 # from the repo root: cargo build, sign, launch
 CONFIG=release GPUI/run.sh  # engine and window optimized: use this to judge smoothness
 (cd GPUI && cargo test)
 ```
 
-The engine's main-actor work (listing a mailbox, encoding answers) runs on the window's main
-thread. In the debug engine a `mail.list` takes 5–18 ms there and drops frames while scrolling;
-the release engine takes under 8 ms. The release Swift build takes about a minute per edit.
+The engine works on its own threads; only its change events reach the window's main thread.
 
 Always start it through `run.sh`. The engine reads the sign-ins from the Keychain item that macOS
 pins to Mailstream's signature (identifier `dev.mailstream.Mailstream`, the Apple Development
@@ -27,8 +25,7 @@ that one build, so the app and every other host get asked again.
 
 | Path | Role |
 | --- | --- |
-| `build.rs` | Adds the rpaths to `libMailstreamKit.dylib`: `.build/<config>` (`DEP_MAILSTREAMKIT_DIR` from the `FFI` crate) for development, `@executable_path/../Frameworks` for an app bundle |
-| `run.sh` | Builds the engine and the app, signs it, checks the signature, starts it |
+| `run.sh` | Builds the app with the engine, signs it, checks the signature, starts it |
 | `src/engine.rs` | The one in-process `Mailstream` engine, started at launch |
 | `src/model.rs` | Accounts, mailboxes, conversations and messages converted from the crate's records; display strings derived once per answer, off the main thread |
 | `src/state.rs` | `MailApp`: selection, lists served from memory for 90 s and reloaded on change events, paging, search, previews, layers over the list, key bindings |

@@ -50,15 +50,10 @@ for frontend in "$@"; do
     gpui)
       name='Mailstream GPUI'
       executable=mailstream-gpui
-      ./scripts/turso.sh
-      swift build -c release --product MailstreamKit
-      (cd GPUI && MAILSTREAM_KIT_CONFIG=release cargo build --release)
+      (cd GPUI && cargo build --release)
       app="build/$name.app"
-      mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks"
+      mkdir -p "$app/Contents/MacOS"
       cp GPUI/target/release/mailstream-gpui "$app/Contents/MacOS/"
-      install_name_tool -delete_rpath "$(swift build -c release --show-bin-path)" \
-        "$app/Contents/MacOS/$executable"
-      cp "$(swift build -c release --show-bin-path)/libMailstreamKit.dylib" "$app/Contents/Frameworks/"
       cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -72,7 +67,6 @@ for frontend in "$@"; do
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
-      ./scripts/sign.sh "$app/Contents/Frameworks/libMailstreamKit.dylib"
       ;;
   esac
   /usr/libexec/PlistBuddy -c "Add :MSInstalledRevision string $revision" "$app/Contents/Info.plist"
@@ -110,6 +104,14 @@ PLIST
   fi
   codesign --verify --deep --strict "$destination"
   echo "Installed $destination at $revision (release, shared signature)."
+  # The mailstream command line ships in Mailstream Flutter; a ~/.local/bin/mailstream link into
+  # an installed Mailstream app moves to it.
+  link="$HOME/.local/bin/mailstream"
+  if [ "$frontend" = flutter ] && [ -L "$link" ] &&
+    case "$(readlink "$link")" in /Applications/Mailstream*.app/*) true ;; *) false ;; esac; then
+    ln -sfn "$destination/Contents/MacOS/mailstream" "$link"
+    echo "$link -> $destination/Contents/MacOS/mailstream"
+  fi
   echo "Launch this /Applications copy with computer helpers and verify its UI/engine."
   echo "Previous bundle retained at $previous until smoke verification succeeds."
 done

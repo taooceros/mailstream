@@ -113,10 +113,12 @@ each pass. The script's header says what it claims and how the session picks the
   (seconds per edit). A release build (`scripts/bundle.sh`, `CONFIG=release`) re-optimizes the
   whole module single-threaded, ~30 s per edit; build it only to check performance or ship.
 - All Swift code is in the `MailstreamKit` target (`Sources/MailstreamKit`); the `Mailstream`
-  executable only calls `MailstreamApp.main()`. `MailstreamKit` is also the dynamic library FFI
-  front ends load: `scripts/ffi.sh` builds it with the UniFFI crate in `FFI/`. New commands go in
-  `CommandSpec`/`ControlService`, then get a typed method in `FFI/src/lib.rs`; GPUI uses that
-  crate directly, Flutter through the Dart binding `ffi.sh` generates (`Flutter/README.md`).
+  executable only calls `MailstreamApp.main()`. GPUI and Flutter run the Rust engine (`Engine/`)
+  through the UniFFI crate in `FFI/`, which `scripts/ffi.sh` builds; the Swift engine stays only
+  for Mailstream.app until MS-120. New commands go in the Rust engine's command table
+  (`Engine/src/commands.rs`) and the Swift `CommandSpec`/`ControlService` while both exist, then
+  get a typed method in `FFI/src/lib.rs`; GPUI uses that crate directly, Flutter through the
+  Dart binding `ffi.sh` generates (`Flutter/README.md`).
 - The engine keeps the state every front end shares (the open chat space and its history, as for
   the native reader); front ends re-read it on the engine's change events.
 - Test only what you changed: build, then exercise the parts your change touches (the view, flow
@@ -142,7 +144,7 @@ Finished fixes go to `/Applications` as part of the work, as signed release buil
 3. Smoke each installed `/Applications/…app` with computer helpers: the running executable, the
    bundle revision, `codesign --verify --deep --strict`, the real window showing loaded data, and
    the affected behavior (no sending mail, nothing destructive). GPUI also: `otool -l` shows no
-   workspace rpath and `vmmap <pid>` loads `libMailstreamKit.dylib` from the bundle. A build, an
+   workspace rpath and `vmmap <pid>` loads no `libMailstreamKit.dylib` (the engine is linked in). A build, an
    `open` or a process name alone proves nothing. Keep personal content out of screenshots and
    logs.
 4. Record the evidence you gathered, or the exact blocker, on the issue; never claim another

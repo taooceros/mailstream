@@ -2,7 +2,7 @@
 name = "mailstream-engine"
 version = "0.1.0"
 edition = "2024"
-description = "Mailstream's engine in Rust, replacing the Swift one (MS-110) phase by phase behind MAILSTREAM_ENGINE=rust"
+description = "Mailstream's engine in Rust (Mailstream Flutter and GPUI), with the control socket and the mailstream command line"
 publish = false
 
 [dependencies]

@@ -212,6 +212,17 @@ impl Mail {
     pub async fn start(self: Arc<Self>) {
         let weak = Arc::downgrade(&self);
         self.tagging.start(move || weak.upgrade().map(|mail| mail.tag_candidates()).unwrap_or_default());
+        // As each rebuild of the Swift engine's list does (`MailStore.prefetchCount`): the default
+        // list's newest conversations get their preview lines loaded, so a list read a moment
+        // later carries them instead of leaving them to `mail.previews`.
+        let weak = Arc::downgrade(&self);
+        self.events.listen(move |event| {
+            if event == "conversations"
+                && let Some(mail) = weak.upgrade()
+            {
+                mail.prefetch_default_snippets();
+            }
+        });
         self.tagging.restore().await;
         let cached = self.cache.load_accounts().await.unwrap_or_default();
         let restored = self.signed_in_accounts(&cached);
@@ -249,6 +260,30 @@ impl Mail {
     fn conversations_changed(&self) {
         self.events.emit_soon("conversations");
         self.tagging.schedule();
+    }
+
+    /// Loads the preview lines of the default list's `PREFETCH_COUNT` newest conversations in the
+    /// background.
+    fn prefetch_default_snippets(&self) {
+        const PREFETCH_COUNT: usize = 40;
+        let latest: Vec<crate::model::MessageRef> = {
+            let state = self.state();
+            let primary = Self::unified_mailboxes(&state, MailboxRole::Inbox);
+            let context: Vec<MailboxKey> =
+                Self::default_keys(&state).into_iter().filter(|key| !primary.contains(key)).collect();
+            let fetched: Vec<(MailboxKey, Vec<Arc<Envelope>>)> =
+                primary.iter().map(|key| (key.clone(), Self::loaded_envelopes(&state, key))).collect();
+            let listed = Self::threads(&state, &fetched, &context, Vec::new(), true);
+            listed.conversations.iter().take(PREFETCH_COUNT).map(|conversation| conversation.latest().message_ref()).collect()
+        };
+        let messages = latest
+            .into_iter()
+            .map(|message| {
+                let backend = self.backend(&message.account);
+                (message, backend)
+            })
+            .collect();
+        self.contents.prefetch(messages);
     }
 
     /// What the tagger may tag: the default list's conversations with a message in an inbox,

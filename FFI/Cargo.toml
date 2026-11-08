@@ -6,10 +6,8 @@ resolver = "3"
 name = "mailstream"
 version = "0.1.0"
 edition = "2024"
-description = "Mailstream's engine (Swift, or Rust with MAILSTREAM_ENGINE=rust) for Rust front ends, and through UniFFI for Dart and others"
+description = "Mailstream's engine for Rust front ends, and through UniFFI for Dart and others"
 publish = false
-# Dependents' build scripts read the engine's directory as DEP_MAILSTREAMKIT_DIR (for their rpath).
-links = "MailstreamKit"
 
 [lib]
 # lib: Rust front ends depend on the crate; cdylib: what UniFFI's Dart (and other) bindings load.
@@ -20,10 +18,19 @@ crate-type = ["lib", "cdylib"]
 uniffi = "=0.31.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-futures-channel = "0.3"
 thiserror = "2"
-# The Rust engine replacing the Swift one, behind MAILSTREAM_ENGINE=rust (MS-110).
 mailstream-engine = { path = "../Engine" }
+# swift-engine only.
+futures-channel = { version = "0.3", optional = true }
+
+[features]
+# MAILSTREAM_ENGINE=swift runs the Swift engine (libMailstreamKit.dylib, which `swift build
+# --product MailstreamKit` makes) instead, for examples/bench.rs; front ends never build it.
+swift-engine = ["dep:futures-channel"]
+
+[[example]]
+name = "bench"
+required-features = ["swift-engine"]
 
 [dev-dependencies]
 futures-executor = "0.3"

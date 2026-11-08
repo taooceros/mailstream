@@ -1,6 +1,6 @@
-//! Mailstream's engine in Rust, replacing the Swift one (`Sources/MailstreamKit`) phase by
-//! phase (MS-110). The `mailstream` crate in `FFI/` runs it instead of the Swift engine when
-//! `MAILSTREAM_ENGINE=rust` is set.
+//! Mailstream's engine in Rust, rewritten from the Swift one (`Sources/MailstreamKit`, which only
+//! Mailstream.app still runs until MS-120). The `mailstream` crate in `FFI/` runs it in Mailstream
+//! Flutter and Mailstream GPUI; `src/bin/mailstream.rs` is the command line.
 //!
 //! The engine runs on its own tokio runtime, so its host needs no main-thread run loop. Requests
 //! are the control socket's commands (`config.set`, `accounts.list`, …) with their arguments as a

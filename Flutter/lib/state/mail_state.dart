@@ -300,8 +300,7 @@ class MailState extends ChangeNotifier {
     });
   }
 
-  /// The accounts, then their mailboxes. The accounts show even when the mailboxes fail (the
-  /// Rust engine behind MAILSTREAM_ENGINE=rust does not list mailboxes yet).
+  /// The accounts, then their mailboxes. The accounts show even when the mailboxes fail.
   Future<void> reloadAccounts() async {
     try {
       accounts = (await mail.accounts()).map(Account.of).toList();

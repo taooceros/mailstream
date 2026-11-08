@@ -66,7 +66,7 @@ Mailstream is meant to be driven by AI agents as well as by hand. Everything the
 can be told goes through one command, `mailstream`, which prints JSON:
 
 ```sh
-ln -s /Applications/Mailstream.app/Contents/MacOS/Mailstream ~/.local/bin/mailstream
+ln -s '/Applications/Mailstream Flutter.app/Contents/MacOS/mailstream' ~/.local/bin/mailstream
 mailstream help                     # overview and every command
 mailstream commands                 # every command and argument, as JSON
 mailstream status                   # accounts, sync, push, AI tagging
@@ -154,17 +154,17 @@ errors, 3 when the app cannot be reached.
 
 ## Front ends in other languages (FFI)
 
-The engine (accounts, sync, cache, threading, push, tagging) also runs inside other
-front ends' processes. The Swift package builds it as `libMailstreamKit.dylib`, whose
-small C API (`Sources/MailstreamKit/FFI/Exports.swift`) takes the control socket's JSON
-requests in memory. `FFI/` is a Rust crate over that API with typed values, async calls
+The engine (accounts, sync, cache, threading, push, tagging, Google Chat) runs inside each
+front end's process. For Mailstream Flutter and Mailstream GPUI it is the Rust engine in
+`Engine/`; Mailstream.app still has the Swift one in `Sources/MailstreamKit` until it moves
+over too (MS-120). `FFI/` is a Rust crate over the Rust engine with typed values, async calls
 and change events (`Mailstream`, `EventListener`). Rust front ends depend on the crate;
 [UniFFI](https://mozilla.github.io/uniffi-rs/) generates the Dart bindings for Flutter
 (through [uniffi-dart](https://github.com/Uniffi-Dart/uniffi-dart), which pins UniFFI
 0.31.2) and could generate Kotlin or Python ones.
 
 ```sh
-./scripts/ffi.sh                                  # libMailstreamKit.dylib + FFI/target/debug/libmailstream.dylib
+./scripts/ffi.sh                                  # FFI/target/debug/libmailstream.dylib and Engine/target/debug/mailstream
 DART_OUT=path/to/lib/src ./scripts/ffi.sh         # and the Dart bindings (asset package:mailstream/uniffi:mailstream)
 (cd FFI && cargo run --example inbox)             # lists the inboxes, then prints change events
 ./scripts/sign.sh FFI/target/debug/examples/inbox # sign a host so it reads the saved sign-ins
@@ -176,20 +176,26 @@ DART_OUT=path/to/lib/src ./scripts/ffi.sh         # and the Dart bindings (asset
   host signed otherwise gets a Keychain prompt, and "Always Allow" there re-pins the item
   to that one binary, so the signed hosts get asked again. `GPUI/run.sh` builds, signs and
   checks the GPUI front end before starting it.
+- **One data format.** Both engines read and write the same settings.json, accounts.json,
+  mail.db, push.json, cache folders and Keychain item, so a front end on either picks up what
+  the other wrote. `scripts/mail-db-interop.sh` checks that both engines read each other's
+  mail.db; `scripts/outgoing-mail-interop.sh` that they render the same MIME messages, reply
+  plans and contact completions.
 - **Shared database.** Every process opens `mail.db` with Turso's experimental
-  multi-process WAL (`mail.db-tshm`). The Turso 0.8.3 C API does not expose it, so
-  `scripts/turso.sh` applies `scripts/turso-multiprocess.patch`. Turso refuses to mix
-  modes, so a build from before this change cannot open the file while a new one has it.
-  Each process runs its own engine (polling, push, tagging). Running several at once is
-  meant for development. AI tags live only in `mail.db`, not with the provider: each
-  process saves just the tags it changed and posts a Darwin notification
-  (`dev.mailstream.Mailstream.tags`), and every process then reads them again, so a tag
-  set in one (the CLI goes through the app) shows in the others.
-- **Main thread.** The engine is main-actor code. App hosts (Flutter, GPUI) run the main
-  run loop already; a command-line host calls `run_main_loop()` on its main thread and
-  works from other threads. Events arrive on the main thread. Each one names what changed
-  (`Accounts`, `Mailboxes`, `Conversations`, `Previews`, `Tags`, `Sync`, `Problems`), and
-  the front end reads it again.
+  multi-process WAL (`mail.db-tshm`): the Rust engine through the `turso` crate, the Swift one
+  through the Turso 0.8.3 C API, which does not expose it, so `scripts/turso.sh` applies
+  `scripts/turso-multiprocess.patch`. Turso refuses to mix modes, so a build from before this
+  change cannot open the file while a new one has it. Each process runs its own engine
+  (polling, push, tagging). Running several at once is meant for development. AI tags live
+  only in `mail.db`, not with the provider: each process saves just the tags it changed and
+  posts a Darwin notification (`dev.mailstream.Mailstream.tags`), and every process then reads
+  them again, so a tag set in one (the CLI goes through the app) shows in the others.
+- **Threads.** The engine runs on its own tokio runtime; the host needs no run loop for it.
+  Events arrive on the main thread (uniffi-dart calls Dart back only there); a command-line
+  host without a run loop calls `run_main_loop()` on its main thread and works from other
+  threads. Each event names what changed (`Accounts`, `Mailboxes`, `Conversations`,
+  `Previews`, `Tags`, `Sync`, `Problems`, `Settings`, `Chat`, `ChatMessages`), and the front
+  end reads it again.
 - **OAuth clients.** A sign-in's OAuth client is stored with its refresh token. Older
   sign-ins relied on the client in the app's `Info.plist`, which other hosts lack. The app
   stores that client the next time it refreshes such a token, and from then on other hosts
@@ -198,30 +204,22 @@ DART_OUT=path/to/lib/src ./scripts/ffi.sh         # and the Dart bindings (asset
   `-headerpad_max_install_names`. Flutter test preparation and native asset hooks can rewrite
   dynamic library IDs and dependencies using `install_name_tool` without manual relinking or
   temporary `RUSTFLAGS`.
-- **Rust engine (in progress, MS-110).** `Engine/` is the engine rewritten in Rust, ported
-  phase by phase. A host started with `MAILSTREAM_ENGINE=rust` runs it instead of the Swift
-  one, through the same `Mailstream` methods and events (still on the main thread); it has
-  its own threads and reads and writes the same settings.json, accounts.json and Keychain
-  item. It answers every command the Swift engine has: `config.*`, `accounts.*` (sign-in
-  included), `mailboxes`, the `mail.*` reads, the mail actions
-  (`mail.read/star/archive/trash/restore`), `mail.send/reply`, `contacts.search`, `refresh`
-  and `chat.*`; it polls mail and Chat and follows push like the Swift engine, answers
-  `status`, `mail.tag` and `mail.retag`, tagging the inbox with `omp` as `aiTagging.*` say,
-  and answers `mail.avatars` from the same avatar cache files as the Swift engine. Without the
-  variable nothing changes. `cd Engine && cargo test` uses a Keychain item of its own, never
-  the apps' sign-ins, fake provider and relay servers, never the real ones, fake `omp`
-  scripts, never the user's omp, and a fake web for sender pictures.
-  `scripts/mail-db-interop.sh` checks that both engines read each other's mail.db;
-  `scripts/outgoing-mail-interop.sh` that they render the same MIME messages, reply plans and
-  contact completions.
-- **Engine benchmark.** After `CONFIG=release ./scripts/ffi.sh`, `cd FFI &&
-  MAILSTREAM_KIT_CONFIG=release cargo run --release --example bench` runs both engines through
-  the same `Mailstream` path, each in its own process with a throwaway home folder and Keychain
-  item, and prints each ported command's median and p99 latency, throughput (one at a time and
-  32 in flight), time to the first answer and memory, per round and as Rust/Swift ratios
-  (`--rounds`, `--engines`, `--cases`, `--scale`, `--out` for JSON lines). A command ported
-  later gets a row in its `CASES`. `MAILSTREAM_KEYCHAIN_SERVICE` points both engines at another
-  sign-ins item; it exists for this and for tests.
+- **Tests.** `cd Engine && cargo test` uses a Keychain item of its own, never the apps'
+  sign-ins, fake provider and relay servers, never the real ones, fake `omp` scripts, never
+  the user's omp, and a fake web for sender pictures.
+- **Engine benchmark.** `FFI/examples/bench.rs` runs both engines through the same
+  `Mailstream` path, each in its own process with a throwaway home folder and Keychain item,
+  and prints each command's median and p99 latency, throughput (one at a time and 32 in
+  flight), time to the first answer and memory, per round and as Rust/Swift ratios
+  (`--rounds`, `--engines`, `--cases`, `--scale`, `--out` for JSON lines). The Swift engine
+  comes with the crate's `swift-engine` feature (a process started with
+  `MAILSTREAM_ENGINE=swift` runs it), which only the benchmark builds:
+  `./scripts/turso.sh && swift build -c release --product MailstreamKit`, then `cd FFI &&
+  MAILSTREAM_KIT_CONFIG=release cargo run --release --target-dir target/bench --features swift-engine
+  --example bench` (its own target folder keeps the feature out of the library Flutter bundles).
+  `--seed DIR` writes its throwaway home into `DIR` for `BENCH_HOME=DIR scripts/bench.sh`.
+  `MAILSTREAM_KEYCHAIN_SERVICE` points both engines at another sign-ins item; it exists for
+  this and for tests.
 
 ## Build and run
 
@@ -263,9 +261,9 @@ for mail and asks for your OAuth client at sign-in. Dragged to Applications, it 
 | Layer | Files | Role |
 | --- | --- | --- |
 | Accounts | `Backend/Accounts.swift`, `OAuth.swift`, `Tokens.swift`, `AppConfig.swift`, `UI/AccountsWindowController.swift` | Signed-in accounts, browser sign-in (authorization code with PKCE, loopback redirect), refresh tokens in the Keychain, build-time defaults from `Info.plist`, the Settings window |
-| Control | `Control/Settings.swift`, `Commands.swift`, `CLI.swift`, `ControlSocket.swift`, `ControlService.swift`, `MailStore+Control.swift` | settings.json with live reload (an observable `Settings`), the `mailstream` command table, the CLI, the control socket (a `NetworkListener` on a Unix-domain path) and the app side of each command |
-| FFI | `FFI/Exports.swift`, `FFI/` (Rust crate) | The engine without windows for other front ends: a C API over `ControlService` in `libMailstreamKit.dylib`, and the UniFFI crate that types it for Rust and Dart |
-| Rust engine | `Engine/` (Rust crate) | The engine's Rust rewrite behind `MAILSTREAM_ENGINE=rust`: its own tokio runtime, the command table, settings.json, accounts.json, the Keychain sign-ins item, token refresh and browser sign-in, receiving mail with mail.db, changing and sending it with its own MIME writer (`mime.rs`, `mail/actions.rs`, `mail/sending.rs`), contact completion (`mail/contacts.rs`), polling (`polling.rs`), push through the relay with push.json shared with the Swift engine (`push.rs`) and the Darwin notifications both engines post (`signal.rs`), Google Chat (`chat.rs`, `chat_api.rs`, `chat_model.rs`), sender pictures (`avatars/`: contact photos, BIMI, Gravatar, site icons) |
+| Control | `Control/Settings.swift`, `Commands.swift`, `CLI.swift`, `ControlSocket.swift`, `ControlService.swift`, `MailStore+Control.swift` | settings.json with live reload (an observable `Settings`), the Swift engine's command table, its CLI (superseded by the Rust one, removed with MS-120), the control socket (a `NetworkListener` on a Unix-domain path) and the app side of each command |
+| FFI | `FFI/` (Rust crate), `FFI/Exports.swift` | The engine without windows for other front ends: the UniFFI crate that types the Rust engine for Rust and Dart; a C API over `ControlService` in `libMailstreamKit.dylib` that only the engine benchmark still uses (feature `swift-engine`) |
+| Rust engine | `Engine/` (Rust crate) | The engine of Mailstream Flutter and Mailstream GPUI, rewritten from the Swift one: its own tokio runtime, the command table (`commands.rs`), the control socket (`control.rs`) and the `mailstream` command line (`src/bin/mailstream.rs`), settings.json, accounts.json, the Keychain sign-ins item, token refresh and browser sign-in, receiving mail with mail.db, changing and sending it with its own MIME writer (`mime.rs`, `mail/actions.rs`, `mail/sending.rs`), contact completion (`mail/contacts.rs`), polling (`polling.rs`), push through the relay with push.json shared with the Swift engine (`push.rs`) and the Darwin notifications both engines post (`signal.rs`), Google Chat (`chat.rs`, `chat_api.rs`, `chat_model.rs`), sender pictures (`avatars/`: contact photos, BIMI, Gravatar, site icons) |
 | Backend | `Backend/API.swift`, `MailBackend.swift`, `GmailBackend.swift`, `MIMEMessage.swift`, `GraphBackend.swift`, `MessageAssembly.swift`, `HTMLText.swift`, `AsyncSemaphore.swift`, `QuotaBudget.swift` | `API` sends authorized requests per account (token refresh on 401, backoff on 429 and 5xx; a rate-limit refusal pauses the whole account's quota budget; Gmail runs 6 interactive / 3 background requests at a time within a 3,000-units-a-minute budget, Graph 3 / 1 for Outlook's limit of four per mailbox). Gmail and Graph implement one `MailBackend` protocol: mailboxes with roles, cursor-paged envelopes, search, message content (bodies, inline `cid:` parts and attachments written to the cache), flags, moves, sending |
 | Chat | `Backend/Chat.swift`, `ChatAPI.swift`, `Store/ChatStore.swift`, `UI/ChatPage.swift`, `UI/ChatReader.swift` | Google Chat REST API for Google accounts granted Chat access; main-actor spaces and message state with a disk cache, rendered into the reader's page |
 | Push | `Backend/PushService.swift`, `Push/` | One WebSocket to the relay; registers Gmail watches and Graph subscriptions for every account and asks the store to refresh the account a notification names |

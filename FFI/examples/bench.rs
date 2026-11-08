@@ -1,14 +1,21 @@
 //! Compares the Swift and the Rust engine through the path front ends use (`Mailstream::new`,
 //! then commands through `mailstream::call`): time from start to the first answer, each
 //! command's latency after warm-up (median, p99) and throughput (one at a time, and 32 in
-//! flight), and memory. `CONFIG=release ./scripts/ffi.sh` first, then
+//! flight), and memory. The front ends run only the Rust engine; the Swift one comes with the
+//! crate's `swift-engine` feature, which this example needs:
 //!
 //! ```sh
-//! cd FFI && MAILSTREAM_KIT_CONFIG=release cargo run --release --example bench -- [options]
+//! ./scripts/turso.sh && swift build -c release --product MailstreamKit
+//! cd FFI && MAILSTREAM_KIT_CONFIG=release cargo run --release --target-dir target/bench --features swift-engine --example bench -- [options]
 //! ```
+//!
+//! Its own target folder keeps the feature out of `target/release/libmailstream.dylib`, which
+//! Mailstream Flutter bundles.
 //!
 //! `--rounds N` (3), `--engines swift,rust`, `--cases config.list,…` (default: every case),
 //! `--scale F` (iterations × F; 1), `--out FILE` (every result as JSON lines).
+//! `--seed DIR` only writes the bench's home (settings, accounts, mail.db, avatars) into `DIR`
+//! and stops: `scripts/bench.sh` runs a front end on it with `BENCH_HOME=DIR`.
 //!
 //! Each engine runs in a process of its own (the engine is chosen once per process), started
 //! from this one with a fresh home folder holding the same settings.json, accounts.json and
@@ -236,6 +243,9 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--child") {
         child(&args[1..]);
+    } else if args.first().map(String::as_str) == Some("--seed") {
+        let Some(home) = args.get(1) else { fail("--seed needs a folder") };
+        seed_home(Path::new(home));
     } else {
         parent(&args);
     }
@@ -326,8 +336,8 @@ fn parent(args: &[String]) {
                 .env_remove("MAILSTREAM_ENGINE")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit());
-            if engine == "rust" {
-                command.env("MAILSTREAM_ENGINE", "rust");
+            if engine == "swift" {
+                command.env("MAILSTREAM_ENGINE", "swift");
             }
             let output = command.output().expect("the engine process starts");
             if !output.status.success() {
@@ -754,7 +764,7 @@ fn child(args: &[String]) {
     if !home.contains("mailstream-bench-")
         || std::env::var("CFFIXED_USER_HOME").ok().as_deref() != Some(home.as_str())
         || !service.starts_with(KEYCHAIN_PREFIX)
-        || (std::env::var("MAILSTREAM_ENGINE").as_deref() == Ok("rust")) != (engine == "rust")
+        || (std::env::var("MAILSTREAM_ENGINE").as_deref() == Ok("swift")) != (engine == "swift")
     {
         fail(&format!("refusing to run outside a bench home ({home}, temp {temp}, service {service})"));
     }

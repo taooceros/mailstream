@@ -43,10 +43,6 @@ jobs:
         with:
           channel: stable
           cache: true
-      - uses: actions/cache@v4
-        with:
-          path: .turso/lib
-          key: turso-${{ runner.os }}-${{ hashFiles('scripts/turso.sh', 'scripts/turso-multiprocess.patch', 'Sources/CTurso/sqlite3.h') }}
       - name: Configure public key and channel
         run: |
           printf 'MAILSTREAM_UPDATE_PUBLIC_KEY = %s\nMAILSTREAM_UPDATE_CHANNEL = %s\n' \
