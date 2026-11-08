@@ -10,6 +10,7 @@
 mod accounts;
 pub mod api;
 mod assembly;
+pub mod avatars;
 pub mod backend;
 mod bundle;
 pub mod cache;
@@ -114,6 +115,9 @@ pub struct Config {
     /// The environment the AI tagger runs `omp` in; None recovers the login shell's PATH as the
     /// Swift engine does. Tests give their own, so no test ever finds the user's omp.
     pub tool_environment: Option<HashMap<String, String>>,
+    /// The public web sender pictures come from (Gravatar, BIMI, site icons); tests answer
+    /// from memory.
+    pub avatar_web: Arc<dyn avatars::web::Web>,
 }
 
 impl Config {
@@ -133,6 +137,7 @@ impl Config {
             endpoints: backend::Endpoints::default(),
             push: bundle::push_config(),
             tool_environment: None,
+            avatar_web: avatars::web::Internet::shared(),
         }
     }
 }
@@ -187,6 +192,7 @@ struct Core {
     push: Arc<push::Push>,
     polling: Arc<polling::Polling>,
     chat: Arc<chat::Chat>,
+    avatars: Arc<avatars::Avatars>,
 }
 
 /// One engine; the FFI host keeps one per process.
@@ -240,12 +246,22 @@ impl Engine {
             mail.clone(),
         ));
         let polling = Arc::new(polling::Polling::new(mail.clone(), push.clone(), settings.clone(), events.clone()));
+        let avatars = {
+            let (accounts, mail) = (accounts.clone(), mail.clone());
+            Arc::new(avatars::Avatars::new(
+                config.cache_directory.join("avatars"),
+                config.avatar_web.clone(),
+                avatars::Roots { people: config.endpoints.people.clone(), graph: config.endpoints.graph.clone() },
+                move || avatars::photo_accounts(&accounts.list(), |account| mail.api(account)),
+            ))
+        };
         let chat = Arc::new(chat::Chat::new(
             mail.clone(),
             config.endpoints.chat.clone(),
             accounts.clone(),
             settings.clone(),
             events.clone(),
+            avatars.clone(),
         ));
         let (reschedule, chat_interval) = (Arc::downgrade(&polling), Arc::downgrade(&chat));
         events.listen(move |event| {
@@ -269,6 +285,7 @@ impl Engine {
             push: push.clone(),
             polling: polling.clone(),
             chat: chat.clone(),
+            avatars,
         });
         let watcher = Self::follow_settings(&core);
         runtime.spawn(mail.start());
@@ -382,6 +399,7 @@ impl Core {
                 mail.tagging().run(command, &args, |id| mail.lookup(id))
             }
             "status" => Ok(self.status()),
+            "mail.avatars" => self.avatars.command(&args).await,
             "accounts.list" => Ok(json!(self.accounts.list().iter().map(|record| record.json()).collect::<Vec<_>>())),
             "accounts.rename" => {
                 let record = self.record(&args)?;
@@ -534,12 +552,14 @@ pub(crate) mod tests {
                 },
                 graph: "http://127.0.0.1:9/v1.0/".into(),
                 chat: "http://127.0.0.1:9/chat/v1/".into(),
+                people: "http://127.0.0.1:9/people/v1/".into(),
             },
             // No relay: no test registers push with a provider unless it sets a fake one.
             push: push::PushConfig::default(),
             // A PATH without omp (the system's tools only): tagging runs only the fake omp a
             // test names.
             tool_environment: Some(HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())])),
+            avatar_web: Arc::new(avatars::tests::FakeWeb::default()),
         }
     }
 

@@ -123,7 +123,25 @@ const CASES: &[Case] = &[
     },
     // Forgets every tag and starts a pass, which fails at once on the missing omp.
     Case { name: "mail.retag", command: "mail.retag", args: |_| json!({}), write: true },
+    // A screenful of senders' pictures, all cached (`seed_avatars`): two thirds found, a third
+    // known to have none.
+    Case {
+        name: "mail.avatars",
+        command: "mail.avatars",
+        args: |i| {
+            let addresses: Vec<String> = (0..30).map(|n| avatar_sender((i * 7 + n) % AVATAR_SENDERS)).collect();
+            json!({ "addresses": addresses, "automated": [avatar_sender(i % AVATAR_SENDERS)] })
+        },
+        write: false,
+    },
 ];
+
+/// Senders whose pictures are cached; every third has none.
+const AVATAR_SENDERS: usize = 60;
+
+fn avatar_sender(n: usize) -> String {
+    format!("Person{n:02}@Example.com")
+}
 
 /// Bench account `n` (0 to 4) and its provider: three Gmail, two Outlook.
 fn bench_account(n: usize) -> (String, &'static str) {
@@ -378,7 +396,34 @@ fn seed_home(home: &Path) {
         })
         .collect();
     std::fs::write(support.join("accounts.json"), serde_json::to_string_pretty(&accounts).unwrap()).unwrap();
-    seed_mail(&support.join("mail.db"), &home.join("Library/Caches/dev.mailstream.Mailstream"));
+    let caches = home.join("Library/Caches/dev.mailstream.Mailstream");
+    seed_mail(&support.join("mail.db"), &caches);
+    seed_avatars(&caches.join("avatars"));
+}
+
+/// The avatar cache as both engines keep it: a contact directory of no accounts (none has
+/// contacts access), each sender's picture (`p-<SHA-256 of the address>.png`), or for every
+/// third a miss made against that directory, so no engine looks anything up.
+fn seed_avatars(root: &Path) {
+    use sha2::{Digest, Sha256};
+    let hex = |data: &[u8]| Sha256::digest(data).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    std::fs::create_dir_all(root).unwrap();
+    let stamp = hex(b"{}");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64() - 978_307_200.0;
+    let directory = json!({ "built": now, "accounts": [], "photos": {}, "people": [], "stamp": stamp });
+    std::fs::write(root.join("directory.json"), directory.to_string()).unwrap();
+    // The size of a typical cached picture (7.5 KB); `mail.avatars` answers with the file and
+    // never decodes it.
+    let mut picture = b"\x89PNG\r\n\x1a\n".to_vec();
+    picture.resize(7_500, 0);
+    for n in 0..AVATAR_SENDERS {
+        let key = format!("p-{}", hex(avatar_sender(n).to_lowercase().as_bytes()));
+        if n % 3 == 2 {
+            std::fs::write(root.join(format!("{key}.none")), &stamp).unwrap();
+        } else {
+            std::fs::write(root.join(format!("{key}.png")), &picture).unwrap();
+        }
+    }
 }
 
 /// mail.db as both engines keep it (`scripts/mail-db-interop.sh` checks they agree), written

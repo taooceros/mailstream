@@ -38,9 +38,14 @@ fn message(space: &str, id: &str, sender: Value, time: &str, text: &str) -> Valu
     })
 }
 
+/// Ann publishes a picture, which reaches the avatar store.
 fn ann() -> Value {
-    user("222", Some("Ann Lee"), Some("ann@x.com"))
+    let mut ann = user("222", Some("Ann Lee"), Some("ann@x.com"));
+    ann["avatarUrl"] = json!(ANN_PHOTO);
+    ann
 }
+
+const ANN_PHOTO: &str = "https://lh3.googleusercontent.com/a/ann=k-no";
 
 fn me() -> Value {
     user("111", Some("Me"), None)
@@ -142,6 +147,7 @@ fn engine_for(server: &FakeServer) -> Config {
         },
         graph: format!("{}/v1.0/", server.base),
         chat: format!("{}/chat/v1/", server.base),
+        people: format!("{}/people/v1/", server.base),
     };
     std::fs::create_dir_all(&config.support_directory).unwrap();
     let scopes = [
@@ -193,6 +199,7 @@ fn lists_opens_reads_sends_and_starts_chats() {
     let (a, b, c) = (&list["spaces"][0], &list["spaces"][1], &list["spaces"][2]);
     assert_eq!((a["kind"].as_str(), a["title"].as_str(), a["preview"].as_str()), (Some("dm"), Some("Ann Lee"), Some("Ann: see the doc")));
     assert_eq!((a["unread"].as_bool(), a["avatarKey"].as_str(), a["avatarName"].as_str()), (Some(true), Some("ann@x.com"), Some("Ann Lee")));
+    assert_eq!(engine.core.avatars.published("ann@x.com").as_deref(), Some(ANN_PHOTO));
     assert_eq!(a["activity"], json!("2026-11-07T12:00:00Z"));
     assert_eq!((b["title"].as_str(), b["preview"].as_str(), b["unread"].as_bool()), (Some("Team"), Some("bob@x.com: hi all"), Some(false)));
     // Google withholds Ann's name in the group, and no message of hers there gives it.

@@ -16,11 +16,18 @@ pub struct Endpoints {
     pub graph: String,
     /// Google Chat's root (`https://chat.googleapis.com/v1/`).
     pub chat: String,
+    /// Google People: contacts, other contacts and the domain directory (contact photos).
+    pub people: String,
 }
 
 impl Default for Endpoints {
     fn default() -> Self {
-        Self { gmail: GmailEndpoints::default(), graph: crate::graph::ROOT.into(), chat: crate::chat_api::ROOT.into() }
+        Self {
+            gmail: GmailEndpoints::default(),
+            graph: crate::graph::ROOT.into(),
+            chat: crate::chat_api::ROOT.into(),
+            people: "https://people.googleapis.com/v1/".into(),
+        }
     }
 }
 

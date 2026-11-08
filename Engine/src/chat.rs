@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 
 use crate::accounts::{AccountRecord, Accounts};
 use crate::api::{Api, ApiError};
+use crate::avatars::Avatars;
 use crate::cache::{MailCache, hash};
 use crate::chat_api::{ChatRemote, chat_error};
 use crate::chat_model::{
@@ -152,6 +153,8 @@ pub struct Chat {
     syncing: tokio::sync::Mutex<()>,
     /// Restarts the poll's wait when `chat.pollSeconds` changes.
     interval_changed: tokio::sync::Notify,
+    /// Takes the pictures Google Chat publishes for the people the rows and threads show.
+    avatars: Arc<Avatars>,
 }
 
 fn is_chat(record: &AccountRecord) -> bool {
@@ -185,6 +188,7 @@ impl Chat {
         accounts: Arc<Accounts>,
         settings: Arc<Settings>,
         events: Arc<Events>,
+        avatars: Arc<Avatars>,
     ) -> Self {
         Self {
             remote: ChatRemote::new(root),
@@ -196,6 +200,7 @@ impl Chat {
             state: Mutex::new(State::default()),
             syncing: tokio::sync::Mutex::new(()),
             interval_changed: tokio::sync::Notify::new(),
+            avatars,
         }
     }
 
@@ -439,6 +444,11 @@ impl Chat {
 
     fn list_changed(&self, state: &mut State) {
         state.rebuild();
+        for row in &state.rows {
+            if let Some(url) = &row.avatar_url {
+                self.avatars.publish(url, &row.avatar_key);
+            }
+        }
         self.events.emit_soon("chat");
     }
 
@@ -1089,11 +1099,17 @@ impl Chat {
         json!({ "accounts": accounts, "loading": state.loading, "more": Self::can_load_more(&state, account), "spaces": spaces })
     }
 
-    /// What the store holds of `key`'s history.
+    /// What the store holds of `key`'s history. Senders' pictures go to the avatar store, so
+    /// `mail.avatars` finds them by address.
     fn thread_json(&self, key: &ChatSpaceKey) -> Value {
         let state = self.state();
         let empty = Thread::default();
         let thread = state.threads.get(key).unwrap_or(&empty);
+        for message in &thread.messages {
+            if let Some(url) = &message.sender.avatar_url {
+                self.avatars.publish(url, &message.sender.avatar_key());
+            }
+        }
         let space = state.space(key);
         let me = state.listings.get(&key.account).and_then(|listing| listing.list.me.clone());
         json!({
