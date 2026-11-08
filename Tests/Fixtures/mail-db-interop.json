@@ -1,0 +1,80 @@
+{
+  "accounts" : [
+    { "identity" : { "email" : "me@gmail.com", "name" : "Me Gmail" }, "label" : "Personal", "name" : "me@gmail.com", "provider" : "google" },
+    { "label" : "me@outlook.com", "name" : "me@outlook.com", "provider" : "microsoft" }
+  ],
+  "mailboxes" : {
+    "me@gmail.com" : [
+      { "account" : "me@gmail.com", "id" : "INBOX", "name" : "Inbox", "role" : "inbox", "total" : 3200, "unread" : 12 },
+      { "account" : "me@gmail.com", "id" : "SENT", "name" : "Sent", "role" : "sent" },
+      { "account" : "me@gmail.com", "id" : "ALL", "name" : "All Mail", "role" : "all" },
+      { "account" : "me@gmail.com", "id" : "Label_7", "name" : "Receipts/2026 \"tax\"", "role" : "other", "total" : 4, "unread" : 0 }
+    ],
+    "me@outlook.com" : [
+      { "account" : "me@outlook.com", "id" : "AAMkAD-inbox/+=", "name" : "Inbox", "role" : "inbox", "unread" : 1 },
+      { "account" : "me@outlook.com", "id" : "AAMkAD-sent", "name" : "Sent", "role" : "sent" }
+    ]
+  },
+  "listings" : [
+    {
+      "key" : { "account" : "me@gmail.com", "mailbox" : "INBOX" },
+      "next" : "13|18f2c0ffee",
+      "envelopes" : [
+        {
+          "date" : 815000123.456, "flags" : [ ], "from" : [ { "email" : "ann@x.com", "name" : "Ann Ångström" } ],
+          "hasAttachment" : true, "id" : "18f3", "inReplyTo" : [ ], "messageID" : "<lunch@x.com>", "size" : 48213,
+          "subject" : "Lunch? 🍜", "thread" : "18f3", "to" : [ { "email" : "me@gmail.com", "name" : "Me" }, { "email" : "cy@x.com" } ]
+        },
+        {
+          "date" : 814990000, "flags" : [ "flagged", "seen" ], "from" : [ { "email" : "alerts@x.com" } ],
+          "id" : "18f2", "inReplyTo" : [ "<a@x>", "<b@x>" ], "size" : 900, "subject" : "Re: [list] Security alert", "thread" : "18f1", "to" : [ ]
+        },
+        {
+          "flags" : [ "draft", "seen" ], "from" : [ ], "id" : "18f0", "inReplyTo" : [ ], "size" : 0, "subject" : "", "to" : [ ]
+        }
+      ]
+    },
+    {
+      "key" : { "account" : "me@gmail.com", "mailbox" : "SENT" },
+      "envelopes" : [
+        {
+          "date" : 815000200, "flags" : [ "seen" ], "from" : [ { "email" : "me@gmail.com" } ], "id" : "18f4",
+          "inReplyTo" : [ "<lunch@x.com>" ], "messageID" : "<reply@gmail.com>", "size" : 1200, "subject" : "Re: Lunch? 🍜",
+          "thread" : "18f3", "to" : [ { "email" : "ann@x.com", "name" : "Ann Ångström" } ]
+        }
+      ]
+    },
+    {
+      "key" : { "account" : "me@outlook.com", "mailbox" : "AAMkAD-inbox/+=" },
+      "next" : "https://graph.microsoft.com/v1.0/me/mailFolders/x/messages?$skip=50",
+      "envelopes" : [
+        {
+          "date" : 815000000, "flags" : [ ], "from" : [ { "email" : "bob@x.com", "name" : "Bob, Jr." } ], "hasAttachment" : false,
+          "id" : "AAMkAGI2-msg=", "inReplyTo" : [ ], "messageID" : "<plan@outlook.com>", "size" : 0, "subject" : "Plan",
+          "thread" : "AAQkAGI2-conv=", "to" : [ { "email" : "me@outlook.com" } ]
+        }
+      ]
+    }
+  ],
+  "contents" : [
+    {
+      "ref" : { "account" : "me@gmail.com", "id" : "18f3", "mailbox" : "INBOX" },
+      "content" : {
+        "attachments" : [
+          { "filename" : "menu.pdf", "inline" : false, "mime" : "application/pdf", "part" : 2, "size" : 40960, "storedName" : "2-menu.pdf" },
+          { "contentID" : "logo@x", "filename" : "logo.png", "inline" : true, "mime" : "image/png", "part" : 1, "size" : 3, "storedName" : "1-logo.png" }
+        ],
+        "cc" : [ { "email" : "cy@x.com", "name" : "Cy" } ],
+        "html" : "<p>Lunch at <b>noon</b>? <img src=\"mscid://abc/1-logo.png\"></p>",
+        "references" : [ "<older@x.com>" ],
+        "replyTo" : [ ],
+        "snippet" : "Lunch at noon?",
+        "text" : "Lunch at noon?\n\n> quoted"
+      }
+    },
+    {
+      "ref" : { "account" : "me@outlook.com", "id" : "AAMkAGI2-msg=", "mailbox" : "AAMkAD-inbox/+=" },
+      "content" : { "attachments" : [ ], "cc" : [ ], "references" : [ ], "replyTo" : [ { "email" : "team@x.com" } ], "snippet" : "", "text" : "Plain only" }
+    }
+  ]
+}

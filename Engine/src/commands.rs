@@ -12,14 +12,20 @@ pub(crate) struct Argument {
     /// Given by position rather than `--name` on the command line; only changes how errors name it.
     pub positional: bool,
     pub required: bool,
+    /// Filled in when the request leaves the argument out.
+    pub default: Option<i64>,
 }
 
 const fn positional(name: &'static str) -> Argument {
-    Argument { name, positional: true, required: true }
+    Argument { name, positional: true, required: true, default: None }
 }
 
 const fn option(name: &'static str) -> Argument {
-    Argument { name, positional: false, required: false }
+    Argument { name, positional: false, required: false, default: None }
+}
+
+const fn number(name: &'static str, default: i64) -> Argument {
+    Argument { name, positional: false, required: false, default: Some(default) }
 }
 
 pub(crate) struct Spec {
@@ -34,8 +40,7 @@ impl Spec {
     }
 }
 
-/// The ported commands. None of them has a default value yet; `Arguments` fills in defaults
-/// once one does.
+/// The ported commands, with the arguments and defaults of the Swift engine's `CommandSpec`.
 pub(crate) const PORTED: &[Spec] = &[
     Spec { id: "config.list", arguments: &[] },
     Spec { id: "config.get", arguments: &[positional("key")] },
@@ -50,16 +55,29 @@ pub(crate) const PORTED: &[Spec] = &[
     Spec { id: "accounts.client", arguments: &[positional("provider")] },
     Spec { id: "accounts.add", arguments: &[positional("provider"), option("client-id"), option("client-secret")] },
     Spec { id: "accounts.remove", arguments: &[positional("account"), option("yes")] },
+    Spec { id: "mailboxes", arguments: &[option("account")] },
+    Spec {
+        id: "mail.list",
+        arguments: &[
+            option("mailbox"),
+            option("account"),
+            option("unread"),
+            option("starred"),
+            option("category"),
+            option("waiting"),
+            number("limit", 25),
+            option("cursor"),
+            option("cached"),
+        ],
+    },
+    Spec { id: "mail.search", arguments: &[positional("query"), option("account"), number("limit", 25)] },
+    Spec { id: "mail.show", arguments: &[positional("id"), number("max-chars", 20_000), option("html")] },
+    Spec { id: "mail.previews", arguments: &[positional("ids")] },
 ];
 
-/// The Swift engine's other commands, ported in later phases (MS-113 to MS-118).
+/// The Swift engine's other commands, ported in later phases (MS-114 to MS-118).
 pub(crate) const UNPORTED: &[&str] = &[
     "status",
-    "mailboxes",
-    "mail.list",
-    "mail.search",
-    "mail.show",
-    "mail.previews",
     "mail.avatars",
     "mail.read",
     "mail.star",
@@ -115,6 +133,9 @@ impl Arguments {
                 Some(value) if !value.is_null() => {
                     out.insert(argument.name.into(), value.clone());
                 }
+                _ if argument.default.is_some() => {
+                    out.insert(argument.name.into(), Value::from(argument.default.unwrap_or_default()));
+                }
                 _ if argument.required => {
                     let label = if argument.positional {
                         format!("<{}>", argument.name)
@@ -149,6 +170,26 @@ impl Arguments {
     pub fn bool(&self, name: &str) -> bool {
         self.values.get(name).and_then(Value::as_bool).unwrap_or_else(|| self.string(name).as_deref() == Some("true"))
     }
+
+    /// A number, or text holding one.
+    pub fn int(&self, name: &str) -> Option<i64> {
+        let value = self.values.get(name)?;
+        value
+            .as_i64()
+            .or_else(|| value.as_f64().filter(|number| number.fract() == 0.0 && number.abs() < 1e15).map(|number| number as i64))
+            .or_else(|| self.string(name).and_then(|text| text.parse().ok()))
+    }
+
+    /// An array's strings, or comma-separated text (trimmed, empty values dropped).
+    pub fn list(&self, name: &str) -> Option<Vec<String>> {
+        match self.values.get(name)? {
+            Value::Array(items) => Some(items.iter().filter_map(|item| item.as_str().map(String::from)).collect()),
+            Value::String(text) => {
+                Some(text.split(',').map(str::trim).filter(|value| !value.is_empty()).map(String::from).collect())
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -170,7 +211,10 @@ mod tests {
         let given = args("accounts.add", json!({ "provider": "google", "client-id": null })).unwrap();
         assert_eq!(given.string("client-id"), None);
         assert!(args("accounts.remove", json!({ "account": "a@b.c", "yes": "true" })).unwrap().bool("yes"));
-        assert_eq!(spec("mail.list").err().unwrap().code, "unported");
+        assert_eq!(spec("mail.read").err().unwrap().code, "unported");
+        let defaults = args("mail.list", json!({ "mailbox": "inbox, sent" })).unwrap();
+        assert_eq!((defaults.int("limit"), defaults.list("mailbox")), (Some(25), Some(vec!["inbox".into(), "sent".into()])));
+        assert_eq!(args("mail.show", json!({ "id": "x", "max-chars": "40" })).unwrap().int("max-chars"), Some(40));
         assert_eq!(spec("mail.nope").err().unwrap().code, "unknown_command");
     }
 }

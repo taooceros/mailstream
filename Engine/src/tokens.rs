@@ -192,6 +192,14 @@ impl Tokens {
         Ok(last.or_else(|| self.built_in(provider)))
     }
 
+    /// Forgets `token` after a provider refused it (401), so the next `token` refreshes.
+    pub fn reject(&self, token: &str, account: &str) {
+        let mut state = self.state.lock().expect("tokens lock");
+        if state.access.get(account).is_some_and(|access| access.token == token) {
+            state.access.remove(account);
+        }
+    }
+
     /// Signs `account` out: deletes its refresh token and forgets its access token.
     pub fn forget(&self, account: &str) {
         let mut state = self.state.lock().expect("tokens lock");

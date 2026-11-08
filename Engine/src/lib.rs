@@ -8,14 +8,29 @@
 //! reads and writes the same files and Keychain item, so either engine picks up what the other
 //! wrote.
 mod accounts;
+pub mod api;
+mod assembly;
+pub mod backend;
 mod bundle;
+pub mod cache;
 mod commands;
+mod content;
 mod files;
+pub mod gmail;
+pub mod graph;
 mod json;
 mod keychain;
+pub mod mail;
+pub mod model;
 mod oauth;
 mod settings;
+pub mod text;
+mod threader;
 mod tokens;
+#[cfg(test)]
+mod fake;
+#[cfg(test)]
+mod mail_tests;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -70,12 +85,16 @@ impl std::error::Error for EngineError {}
 /// Where the engine keeps its data and how it signs in.
 #[derive(Clone)]
 pub struct Config {
-    /// Holds settings.json and accounts.json: `~/Library/Application Support/Mailstream`.
+    /// Holds settings.json, accounts.json and mail.db: `~/Library/Application Support/Mailstream`.
     pub support_directory: PathBuf,
+    /// Attachments, inline parts and Gmail's envelope caches: `~/Library/Caches/dev.mailstream.Mailstream`.
+    pub cache_directory: PathBuf,
     /// The Keychain service of the sign-ins item; tests use their own.
     pub keychain_service: String,
     pub built_in_clients: BuiltInClients,
     pub oauth: OAuthConfig,
+    /// The providers' API roots; tests use a local server.
+    pub endpoints: backend::Endpoints,
 }
 
 impl Config {
@@ -84,40 +103,61 @@ impl Config {
     /// (benchmarks and tests that must not read the person's sign-ins).
     pub fn for_this_app() -> Self {
         let support = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("Mailstream");
+        let caches = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("dev.mailstream.Mailstream");
         let service = std::env::var("MAILSTREAM_KEYCHAIN_SERVICE").ok().filter(|service| !service.is_empty());
         Self {
             support_directory: support,
+            cache_directory: caches,
             keychain_service: service.unwrap_or_else(|| keychain::SERVICE.into()),
             built_in_clients: bundle::built_in_clients(),
             oauth: OAuthConfig::default(),
+            endpoints: backend::Endpoints::default(),
         }
     }
 }
 
 type Listener = Arc<dyn Fn(&'static str) + Send + Sync>;
 
-/// The change events front ends re-read on: `accounts`, `settings`, ….
+/// The change events front ends re-read on: `accounts`, `settings`, `mailboxes`, ….
 #[derive(Default)]
-struct Events {
+pub struct Events {
     listeners: Mutex<Vec<Listener>>,
+    /// Events `emit_soon` has scheduled and not sent yet.
+    pending: Mutex<std::collections::HashSet<&'static str>>,
 }
 
 impl Events {
-    fn emit(&self, event: &'static str) {
+    pub fn emit(&self, event: &'static str) {
         let listeners = self.listeners.lock().expect("events lock").clone();
         for listener in listeners {
             listener(event);
         }
     }
+
+    /// `event` a moment from now, once however often it is asked for meanwhile: a burst of
+    /// changes (previews landing one by one) reaches front ends as one event, as the Swift
+    /// engine's observations coalesce within a run loop turn. Call on the engine's runtime.
+    pub fn emit_soon(self: &Arc<Self>, event: &'static str) {
+        if !self.pending.lock().expect("events lock").insert(event) {
+            return;
+        }
+        let events = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+            events.pending.lock().expect("events lock").remove(event);
+            events.emit(event);
+        });
+    }
 }
 
 /// What the commands work on, shared by the runtime's tasks.
 struct Core {
-    settings: Settings,
-    accounts: Accounts,
-    tokens: Tokens,
+    settings: Arc<Settings>,
+    accounts: Arc<Accounts>,
+    tokens: Arc<Tokens>,
     oauth: Arc<OAuth>,
-    events: Events,
+    events: Arc<Events>,
+    mail: Arc<mail::Mail>,
 }
 
 /// One engine; the FFI host keeps one per process.
@@ -129,7 +169,8 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Reads the settings and accounts and starts following settings.json.
+    /// Reads the settings and accounts, starts following settings.json, and starts the mail
+    /// store: it paints from mail.db and loads every account's mailboxes and inboxes.
     pub fn start(config: Config) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .thread_name("mailstream-engine")
@@ -138,22 +179,32 @@ impl Engine {
             .expect("the engine's runtime starts");
         let directory = &config.support_directory;
         let _ = std::fs::create_dir_all(directory);
-        let accounts = Accounts::new(directory);
+        let accounts = Arc::new(Accounts::new(directory));
         let providers: HashMap<_, _> =
             accounts.list().into_iter().rev().map(|record| (record.id, record.provider)).collect();
         let oauth = Arc::new(OAuth::new(config.oauth.clone()));
-        let tokens = Tokens::new(
+        let tokens = Arc::new(Tokens::new(
             Keychain::new(config.keychain_service.clone()),
             oauth.clone(),
             config.built_in_clients,
             providers,
-        );
-        let core =
-            Arc::new(Core { settings: Settings::new(directory), accounts, tokens, oauth, events: Events::default() });
-        let watcher = {
-            let _entered = runtime.enter();
-            Self::follow_settings(&core)
-        };
+        ));
+        let settings = Arc::new(Settings::new(directory));
+        let events = Arc::new(Events::default());
+        let _entered = runtime.enter();
+        let mail = Arc::new(mail::Mail::new(
+            directory.join("mail.db"),
+            config.cache_directory.clone(),
+            config.endpoints.clone(),
+            tokens.clone(),
+            accounts.clone(),
+            settings.clone(),
+            events.clone(),
+        ));
+        let core = Arc::new(Core { settings, accounts, tokens, oauth, events, mail: mail.clone() });
+        let watcher = Self::follow_settings(&core);
+        runtime.spawn(mail.start());
+        drop(_entered);
         Self { core, _watcher: watcher, runtime }
     }
 
@@ -201,9 +252,17 @@ impl Engine {
         }
     }
 
-    /// Calls `listener` with each change from now on (`accounts`, `settings`), on an engine thread.
+    /// Calls `listener` with each change from now on (`accounts`, `settings`, `mailboxes`,
+    /// `conversations`, `previews`, `problems`), on an engine thread.
     pub fn subscribe(&self, listener: impl Fn(&'static str) + Send + Sync + 'static) {
         self.core.events.listeners.lock().expect("events lock").push(Arc::new(listener));
+    }
+
+    /// Whether remote images and fonts of conversation `id` (from a listing) load on their own,
+    /// and the senders that keep them from it; see [`mail::Mail::remote_content`]. For the
+    /// AppKit reader once it moves to this engine (MS-120); no command carries it.
+    pub fn remote_content(&self, id: &str) -> Result<(bool, Vec<model::Address>), EngineError> {
+        self.core.mail.remote_content(id)
     }
 
     /// A current OAuth access token for `account`, refreshed from its Keychain sign-in when it
@@ -239,6 +298,9 @@ impl Core {
             return Ok(result);
         }
         match command {
+            "mailboxes" | "mail.list" | "mail.search" | "mail.show" | "mail.previews" => {
+                return self.mail.run(command, &args).await;
+            }
             "accounts.list" => Ok(json!(self.accounts.list().iter().map(|record| record.json()).collect::<Vec<_>>())),
             "accounts.rename" => {
                 let record = self.record(&args)?;
@@ -248,6 +310,7 @@ impl Core {
                     .map_err(EngineError::failed)?;
                 if renamed.as_ref() != Some(&record) {
                     self.events.emit("accounts");
+                    self.mail.accounts_changed();
                 }
                 Ok(renamed.map_or(Value::Null, |record| record.json()))
             }
@@ -272,9 +335,10 @@ impl Core {
                         ),
                     ));
                 }
-                // The Swift engine also discards the Gmail envelope cache and stops push first;
-                // those arrive with mail (MS-113) and push (MS-115).
+                // The Swift engine also stops push first; that arrives with push (MS-115).
                 self.accounts.remove(&record.id).map_err(EngineError::failed)?;
+                self.mail.accounts_changed();
+                let _ = std::fs::remove_file(gmail::cache_file(&self.mail.cache_root(), &record.id));
                 self.tokens.forget(&record.id);
                 self.events.emit("accounts");
                 Ok(json!({ "removed": record.id }))
@@ -318,6 +382,7 @@ impl Core {
             .map_err(|error| EngineError::failed(error.to_string()))?;
         let record = self.accounts.signed_in(provider, &grant).map_err(EngineError::failed)?;
         self.events.emit("accounts");
+        self.mail.accounts_changed();
         Ok(record.json())
     }
 }
@@ -345,19 +410,29 @@ pub(crate) mod tests {
         NEXT.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn config(oauth: OAuthConfig) -> Config {
+    pub(crate) fn config(oauth: OAuthConfig) -> Config {
         let name = format!("mailstream-engine-{}-{}", std::process::id(), unique());
+        let root = std::env::temp_dir().join(name.clone());
         Config {
-            support_directory: std::env::temp_dir().join(name.clone()),
+            support_directory: root.join("support"),
+            cache_directory: root.join("caches"),
             keychain_service: format!("dev.mailstream.test.{name}"),
             built_in_clients: BuiltInClients::new(),
             oauth,
+            // Nothing listens there: no test reaches a real provider.
+            endpoints: backend::Endpoints {
+                gmail: gmail::GmailEndpoints {
+                    root: "http://127.0.0.1:9/gmail/v1/users/me/".into(),
+                    batch: "http://127.0.0.1:9/batch/gmail/v1".into(),
+                },
+                graph: "http://127.0.0.1:9/v1.0/".into(),
+            },
         }
     }
 
-    fn cleanup(config: &Config) {
+    pub(crate) fn cleanup(config: &Config) {
         let _ = Keychain::new(config.keychain_service.clone()).store(&SignIns::default());
-        let _ = std::fs::remove_dir_all(&config.support_directory);
+        let _ = std::fs::remove_dir_all(config.support_directory.parent().unwrap());
     }
 
     #[test]
@@ -382,7 +457,7 @@ pub(crate) mod tests {
         let list = block_on(engine.call("config.list", json!({}))).unwrap();
         assert_eq!(list["settings"][9]["value"], json!(30));
         assert_eq!(list["settings"][7]["changed"], json!(false));
-        assert_eq!(block_on(engine.call("mail.list", json!({}))).unwrap_err().code, "unported");
+        assert_eq!(block_on(engine.call("mail.read", json!({ "ids": ["x"] }))).unwrap_err().code, "unported");
         drop(engine);
         cleanup(&config);
     }

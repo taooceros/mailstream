@@ -27,7 +27,9 @@ mailstream-engine = { path = "../Engine" }
 
 [dev-dependencies]
 futures-executor = "0.3"
-# examples/bench.rs: concurrent calls, process memory, its own Keychain item.
+# examples/bench.rs: concurrent calls, process memory, its own Keychain item, and mail.db
+# written through the Rust engine's cache layer (which runs on tokio).
 futures = "0.3"
 libc = "0.2"
 security-framework = "3"
+tokio = { version = "1", features = ["rt"] }

@@ -389,6 +389,11 @@ impl Settings {
         self.state.lock().expect("settings lock").1.clone()
     }
 
+    /// `setting`'s value in effect: the file's, else the default.
+    pub fn value(&self, setting: Setting) -> Value {
+        setting.value(&self.state.lock().expect("settings lock").0)
+    }
+
     /// Reads the file again; true when the values or the issues changed.
     pub fn reload(&self) -> bool {
         let next = self.file.read();

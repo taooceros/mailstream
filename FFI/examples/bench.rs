@@ -11,11 +11,14 @@
 //! `--scale F` (iterations × F; 1), `--out FILE` (every result as JSON lines).
 //!
 //! Each engine runs in a process of its own (the engine is chosen once per process), started
-//! from this one with a fresh home folder holding the same settings.json and accounts.json, and
-//! a Keychain item of the run's own (`MAILSTREAM_KEYCHAIN_SERVICE`), so the person's mail,
-//! settings and sign-ins are never touched. Rounds alternate which engine goes first. Results
-//! are lines `BENCH {json}`, one kind of line for every phase: a command ported later gets a row
-//! in `CASES` (with data in `seed` if it needs some) and is measured the same way.
+//! from this one with a fresh home folder holding the same settings.json, accounts.json and
+//! mail.db, and a Keychain item of the run's own (`MAILSTREAM_KEYCHAIN_SERVICE`), so the
+//! person's mail, settings and sign-ins are never touched. The accounts have no refresh token,
+//! so no engine reaches a provider: the mail cases read what mail.db holds. Rounds alternate
+//! which engine goes first. Results are lines `BENCH {json}`, one kind of line for every phase:
+//! a command ported later gets a row in `CASES` (with data in `seed_home` if it needs some) and
+//! is measured the same way. Each case's answer is compared across the engines too (paths into
+//! the home folder aside), and the report lists the cases whose answers differ.
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -66,7 +69,69 @@ const CASES: &[Case] = &[
         args: |i| json!({ "account": "bench0@gmail.com", "label": (["Bench A", "Bench B"][i % 2]) }),
         write: true,
     },
+    Case { name: "mailboxes", command: "mailboxes", args: |_| json!({}), write: false },
+    // All Inboxes of the five accounts, threaded with their sent mail, from mail.db.
+    Case { name: "mail.list", command: "mail.list", args: |_| json!({ "limit": 50, "cached": true }), write: false },
+    Case {
+        name: "mail.list.page",
+        command: "mail.list",
+        args: |i| json!({ "limit": 50, "cached": true, "cursor": page_cursor(i) }),
+        write: false,
+    },
+    Case {
+        name: "mail.list.filter",
+        command: "mail.list",
+        args: |i| {
+            json!({ "account": bench_account(3 + i % 2).0, "mailbox": "inbox", "unread": true, "limit": 25, "cached": true })
+        },
+        write: false,
+    },
+    Case { name: "mail.show", command: "mail.show", args: |i| json!({ "id": conversation_id(i) }), write: false },
+    Case {
+        name: "mail.previews",
+        command: "mail.previews",
+        args: |i| json!({ "ids": (0..20).map(|n| conversation_id(i + n * 5)).collect::<Vec<_>>() }),
+        write: false,
+    },
 ];
+
+/// Bench account `n` (0 to 4) and its provider: three Gmail, two Outlook.
+fn bench_account(n: usize) -> (String, &'static str) {
+    if n < 3 { (format!("bench{n}@gmail.com"), "google") } else { (format!("bench{n}@outlook.com"), "microsoft") }
+}
+
+const ACCOUNTS: usize = 5;
+/// Envelopes in each account's inbox and sent listings in mail.db.
+const INBOX: usize = 500;
+const SENT: usize = 100;
+/// Inbox messages, newest first, whose content mail.db holds (and every sent one's).
+const CACHED_CONTENT: usize = 60;
+
+/// The id of a conversation whose messages' content is cached: inbox message `i / 5 % 60` of
+/// account `i % 5`, the oldest message of its thread.
+fn conversation_id(i: usize) -> String {
+    let (account, _) = bench_account(i % ACCOUNTS);
+    format!("{account}|{}", message_id(i % ACCOUNTS, i / ACCOUNTS % CACHED_CONTENT))
+}
+
+fn message_id(account: usize, n: usize) -> String {
+    format!("m{n}.a{account}@bench")
+}
+
+/// Seconds since 2001 (as Swift keeps dates) of inbox message `n`: every three hours, back from
+/// late October 2026.
+fn inbox_date(n: usize) -> f64 {
+    815_000_000.0 - (n as f64) * 10_800.0
+}
+
+/// A cursor somewhere in the second to fifth page of All Inboxes: after inbox message
+/// `50 + i % 4 * 50` of bench0.
+fn page_cursor(i: usize) -> String {
+    let n = 50 + i % 4 * 50;
+    // Unix milliseconds, then the conversation id.
+    let millis = ((inbox_date(n) + 978_307_200.0) * 1000.0).round() as i64;
+    format!("{millis}|{}|{}", bench_account(0).0, message_id(0, n))
+}
 
 /// In-flight calls for the concurrent throughput.
 const CONCURRENCY: usize = 32;
@@ -226,7 +291,7 @@ fn seed_keychain(service: &str) {
 }
 
 /// The same files for every engine and round: a few changed settings (AI tagging off, so no
-/// engine runs omp) and five accounts.
+/// engine runs omp), five accounts, and their mail in mail.db.
 fn seed_home(home: &Path) {
     let support = home.join("Library/Application Support/Mailstream");
     std::fs::create_dir_all(&support).expect("the bench home is writable");
@@ -246,15 +311,109 @@ fn seed_home(home: &Path) {
         "https://www.googleapis.com/auth/chat.messages.readonly",
     ];
     let microsoft = ["openid", "email", "profile", "offline_access", "https://graph.microsoft.com/Mail.ReadWrite"];
-    let accounts: Vec<Value> = (0..5)
+    let accounts: Vec<Value> = (0..ACCOUNTS)
         .map(|n| {
-            let (provider, domain, scopes) =
-                if n < 3 { ("google", "gmail.com", &google[..]) } else { ("microsoft", "outlook.com", &microsoft[..]) };
-            let id = format!("bench{n}@{domain}");
+            let (id, provider) = bench_account(n);
+            let scopes = if provider == "google" { &google[..] } else { &microsoft[..] };
             json!({ "id": id, "provider": provider, "label": id, "displayName": format!("Bench {n}"), "scopes": scopes })
         })
         .collect();
     std::fs::write(support.join("accounts.json"), serde_json::to_string_pretty(&accounts).unwrap()).unwrap();
+    seed_mail(&support.join("mail.db"), &home.join("Library/Caches/dev.mailstream.Mailstream"));
+}
+
+/// mail.db as both engines keep it (`scripts/mail-db-interop.sh` checks they agree), written
+/// through the Rust engine's cache layer: each account's mailboxes, an inbox of `INBOX` envelopes
+/// from 80 senders (a few of them a repeated alert, which the inbox shows as one row), a sent box
+/// of `SENT` replies threading into the inbox, and the content of the newest `CACHED_CONTENT`
+/// inbox messages and every sent one.
+fn seed_mail(database: &Path, caches: &Path) {
+    use mailstream_engine::cache::{CachedListing, MailCache};
+    use mailstream_engine::model::{Account, Envelope, Mailbox, MailboxKey, MessageContent, MessageRef};
+    fn parse<T: serde::de::DeserializeOwned>(value: Value) -> T {
+        serde_json::from_value(value).expect("bench data has the engine's shape")
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let cache = MailCache::new(database.to_path_buf(), caches.to_path_buf());
+        let accounts: Vec<Account> = (0..ACCOUNTS)
+            .map(|a| {
+                let (id, provider) = bench_account(a);
+                parse(json!({ "name": id, "label": id, "provider": provider, "identity": { "name": format!("Bench {a}"), "email": id } }))
+            })
+            .collect();
+        cache.save_accounts(&accounts);
+        for a in 0..ACCOUNTS {
+            let (account, provider) = bench_account(a);
+            let (inbox, sent) = if provider == "google" { ("INBOX", "SENT") } else { ("AAMk-inbox", "AAMk-sent") };
+            let mut boxes = vec![
+                json!({ "account": account, "id": inbox, "name": "Inbox", "role": "inbox", "unread": 40, "total": INBOX }),
+                json!({ "account": account, "id": sent, "name": "Sent", "role": "sent" }),
+                json!({ "account": account, "id": "drafts", "name": "Drafts", "role": "drafts" }),
+                json!({ "account": account, "id": "junk", "name": "Spam", "role": "junk" }),
+                json!({ "account": account, "id": "trash", "name": "Trash", "role": "trash" }),
+            ];
+            boxes.extend((0..8).map(|n| json!({ "account": account, "id": format!("label{n}"), "name": format!("Project {n}"), "role": "other" })));
+            let boxes: Vec<Mailbox> = boxes.into_iter().map(parse).collect();
+            cache.save_mailboxes(&boxes, &account);
+            let me = json!({ "name": format!("Bench {a}"), "email": account });
+            let sender = |n: usize| {
+                if n % 50 == 49 {
+                    json!({ "name": "Alerts", "email": "alerts@example.org" })
+                } else {
+                    json!({ "name": format!("Sender {}", n % 80), "email": format!("sender{:02}@example.com", n % 80) })
+                }
+            };
+            let subject = |n: usize| if n % 50 == 49 { "Security alert".to_string() } else { format!("Project update {n}") };
+            let envelopes: Vec<Arc<Envelope>> = (0..INBOX)
+                .map(|n| {
+                    let flags: Vec<&str> = match n % 12 {
+                        0 => vec![],
+                        5 => vec!["seen", "flagged"],
+                        _ => vec!["seen"],
+                    };
+                    Arc::new(parse(json!({
+                        "id": format!("in{n}.a{a}"), "thread": format!("t{n}.a{a}"), "messageID": message_id(a, n),
+                        "inReplyTo": [], "flags": flags, "subject": subject(n), "from": [sender(n)], "to": [me],
+                        "date": inbox_date(n), "size": 4000 + n, "hasAttachment": n % 7 == 0,
+                    })))
+                })
+                .collect();
+            let next = if provider == "google" { "page2".to_string() } else { format!("https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$skip={INBOX}") };
+            cache.save_listing(CachedListing { envelopes, next: Some(next) }, &MailboxKey::new(&account, inbox));
+            let replies: Vec<Arc<Envelope>> = (0..SENT)
+                .map(|n| {
+                    let parent = n * 3;
+                    Arc::new(parse(json!({
+                        "id": format!("out{n}.a{a}"), "thread": format!("t{parent}.a{a}"), "messageID": format!("r{n}.a{a}@bench"),
+                        "inReplyTo": [message_id(a, parent)], "flags": ["seen"], "subject": format!("Re: {}", subject(parent)),
+                        "from": [me], "to": [sender(parent)], "date": inbox_date(parent) + 1800.0, "size": 2000,
+                        "hasAttachment": false,
+                    })))
+                })
+                .collect();
+            cache.save_listing(CachedListing { envelopes: replies, next: None }, &MailboxKey::new(&account, sent));
+            let content = |n: usize, reply: bool| -> MessageContent {
+                let html = format!(
+                    "<p>Hello from message {n}.</p><p><img src=\"https://images.example.com/{n}.png\"> and a <a href=\"https://example.com/{n}\">link</a></p>"
+                );
+                let text = if reply { format!("Thanks!\n\nOn Monday, someone wrote:\n> Hello from message {n}.") } else { format!("Hello from message {n}.\nAnd a link: https://example.com/{n}") };
+                parse(json!({
+                    "html": if reply { Value::Null } else { json!(html) }, "text": text, "cc": [], "replyTo": [], "references": [],
+                    "attachments": [], "snippet": format!("Hello from message {n}."),
+                }))
+            };
+            for n in 0..CACHED_CONTENT {
+                let message = MessageRef { account: account.clone(), mailbox: inbox.into(), id: format!("in{n}.a{a}") };
+                cache.save_content(&content(n, false), &message);
+            }
+            for n in 0..SENT {
+                let message = MessageRef { account: account.clone(), mailbox: sent.into(), id: format!("out{n}.a{a}") };
+                cache.save_content(&content(n * 3, true), &message);
+            }
+        }
+        cache.flush().await;
+    });
 }
 
 fn load_average() -> f64 {
@@ -344,6 +503,42 @@ fn report(lines: &[Value], options: &Options) {
         let (swift, rust) = (median_of("process", "swift", None, field), median_of("process", "rust", None, field));
         println!("{label:<16} {swift:>11.2} {rust:>11.2} {:>8.2}", rust / swift);
     }
+    println!();
+    let mut differing = 0;
+    for name in &options.cases {
+        let answer = |engine: &str| {
+            lines_of(lines, "sample").find(|line| line["engine"] == engine && line["case"] == name.as_str()).map(|line| &line["answer"])
+        };
+        if let (Some(swift), Some(rust)) = (answer("swift"), answer("rust"))
+            && let Some(difference) = difference(swift, rust, "")
+        {
+            differing += 1;
+            println!("answers differ: {name}: {difference}");
+        }
+    }
+    if differing == 0 {
+        println!("answers: the same from both engines for every case");
+    }
+}
+
+/// Where `a` and `b` first differ, as a JSON path with both values; nil when they are equal.
+fn difference(a: &Value, b: &Value, path: &str) -> Option<String> {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            let keys: std::collections::BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+            keys.into_iter().find_map(|key| {
+                difference(x.get(key).unwrap_or(&Value::Null), y.get(key).unwrap_or(&Value::Null), &format!("{path}.{key}"))
+            })
+        }
+        (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
+            x.iter().zip(y).enumerate().find_map(|(index, (x, y))| difference(x, y, &format!("{path}[{index}]")))
+        }
+        _ if a == b => None,
+        _ => {
+            let short = |value: &Value| value.to_string().chars().take(160).collect::<String>();
+            Some(format!("{path}: swift {} / rust {}", short(a), short(b)))
+        }
+    }
 }
 
 fn num(value: &Value) -> f64 {
@@ -400,12 +595,22 @@ fn child(args: &[String]) {
         if accounts.as_array().map(Vec::len) != Some(5) {
             fail(&format!("{engine} lists {accounts} instead of the 5 bench accounts"));
         }
+        if cases.iter().any(|case| case.command.starts_with("mail")) {
+            mail_ready(&engine);
+        }
+        let canonical = std::fs::canonicalize(&home).map(|path| path.to_string_lossy().into_owned()).unwrap_or(home.clone());
         for case in cases {
             let line = measure(case, scale);
-            emit(
-                json!({ "kind": "case", "engine": engine, "round": round, "case": case.name, "command": case.command }),
-                line,
-            );
+            let head = || json!({ "engine": engine, "round": round, "case": case.name, "command": case.command });
+            let mut case_head = head();
+            case_head["kind"] = json!("case");
+            emit(case_head, line);
+            // The answer, with paths into this home made alike, for the report to compare.
+            let answer: Value = block_on(call(case.command, (case.args)(1))).unwrap();
+            let text = answer.to_string().replace(&canonical, "~").replace(&home, "~");
+            let mut sample_head = head();
+            sample_head["kind"] = json!("sample");
+            emit(sample_head, json!({ "answer": serde_json::from_str::<Value>(&text).unwrap() }));
         }
         let end = footprint();
         emit(
@@ -421,6 +626,31 @@ fn child(args: &[String]) {
     });
     // The Swift engine works on the main run loop and both deliver events there, as in an app.
     run_main_loop();
+}
+
+/// Waits until the engine has painted every account's mailboxes from mail.db, then lists All
+/// Inboxes once in full so `mail.show` and `mail.previews` know the conversation ids, as a front
+/// end's list would have.
+fn mail_ready(engine: &str) {
+    let start = Instant::now();
+    loop {
+        let boxes: Value = block_on(call("mailboxes", json!({}))).unwrap_or_else(|error| fail(&format!("{engine}: {error}")));
+        let painted = (0..ACCOUNTS).all(|a| boxes[bench_account(a).0.as_str()].as_array().is_some_and(|list| !list.is_empty()));
+        if painted {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(20) {
+            fail(&format!("{engine} did not load the mailboxes from mail.db: {boxes}"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let listing: Value = block_on(call("mail.list", json!({ "limit": ACCOUNTS * INBOX, "cached": true })))
+        .unwrap_or_else(|error| fail(&format!("{engine}: {error}")));
+    let count = listing["conversations"].as_array().map_or(0, Vec::len);
+    if count < ACCOUNTS * CACHED_CONTENT {
+        fail(&format!("{engine} lists {count} conversations from mail.db"));
+    }
+    eprintln!("{engine}: mail.db painted in {:.0} ms, {count} conversations", start.elapsed().as_secs_f64() * 1e3);
 }
 
 /// Warm-up, then timed calls one at a time, then calls `CONCURRENCY` at a time.
