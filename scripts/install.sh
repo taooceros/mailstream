@@ -69,6 +69,9 @@ for frontend in "$@"; do
 PLIST
       ;;
   esac
+  # The engine reads OAuth clients and push settings from the host's Info.plist; bundle.sh
+  # already added them to Mailstream.app.
+  [ "$frontend" = native ] || ./scripts/app-config.sh "$app/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c "Add :MSInstalledRevision string $revision" "$app/Contents/Info.plist"
   ./scripts/sign.sh "$app"
   codesign --verify --deep --strict "$app"

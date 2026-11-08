@@ -28,24 +28,6 @@ if [ ! -f build/AppIcon.icns ] || [ Resources/AppIcon.png -nt build/AppIcon.icns
 fi
 cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-# OAuth clients and the push relay, read from the login keychain so they are never committed.
-# A missing item leaves its key out (the feature it enables stays off).
-CONFIG_KEYS=""
-for pair in MSGoogleClientID=google-client-id MSGoogleClientSecret=google-client-secret \
-            MSMicrosoftClientID=microsoft-client-id MSMicrosoftClientSecret=microsoft-client-secret \
-            MSPushURL=push-url MSPushToken=push-token MSGraphClientState=graph-client-state \
-            MSGmailTopic=gmail-topic; do
-  key="${pair%%=*}"
-  item="${pair#*=}"
-  if value=$(security find-generic-password -s "$SERVICE" -a "$item" -w 2>/dev/null); then
-    value=$(printf '%s' "$value" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
-    CONFIG_KEYS="$CONFIG_KEYS  <key>$key</key><string>$value</string>
-"
-  else
-    echo "warning: no \"$item\" item in Keychain service $SERVICE; $key left out" >&2
-  fi
-done
-
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -64,9 +46,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticTermination</key><false/>
-$CONFIG_KEYS</dict>
+</dict>
 </plist>
 PLIST
+
+# OAuth clients and the push relay, read from the login keychain so they are never committed.
+./scripts/app-config.sh "$APP/Contents/Info.plist"
 
 # macOS pins the app's Keychain item (OAuth tokens) to its signer; sign.sh signs the app and
 # every FFI front end alike so all of them read it silently.

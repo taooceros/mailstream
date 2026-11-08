@@ -54,11 +54,12 @@ done, so it can be re-run safely, and asks only for what it cannot do itself:
    changing `Push/worker.js`.
 
 Everything is kept in the login keychain, service `dev.mailstream.build`.
-`scripts/bundle.sh` copies the items into the app's `Info.plist` (`MSGoogleClientID`,
+`scripts/app-config.sh` copies the items into the app's `Info.plist` (`MSGoogleClientID`,
 `MSGoogleClientSecret`, `MSMicrosoftClientID`, `MSMicrosoftClientSecret`, `MSPushURL`,
 `MSPushToken`, `MSGraphClientState`, `MSGmailTopic`). A missing item is left out with
 a warning; the OAuth clients are then entered at sign-in, and without the push items
-the app polls instead.
+the app polls instead. `scripts/bundle.sh` runs it for Mailstream.app, `scripts/install.sh`
+for the Flutter and GPUI bundles.
 
 ## Settings and agents
 
