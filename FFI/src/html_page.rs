@@ -47,6 +47,15 @@ const REMOVED: &str = "iframe, frame, frameset, object, embed";
 /// Linked stylesheets: kept (Blitz attaches what they load to them), answered empty.
 const LINKS: &str = "link[href]";
 
+/// Elements whose `background` attribute is an image, which HTML maps to `background-image`; Blitz
+/// maps no `background` attribute (only `bgcolor`), and mail built for Outlook draws its hero and
+/// listing photos this way: Zillow's photos stayed their gray placeholder (MS-162).
+const BACKGROUNDS: &str = "body[background], table[background], thead[background], tbody[background], \
+    tfoot[background], tr[background], td[background], th[background]";
+
+/// Marks each [`BACKGROUNDS`] element for the rule that gives it its image.
+const BACKGROUND_MARK: &str = "data-mailstream-background";
+
 /// What a mail's relative URLs resolve against. Blitz panics on a URL it can't resolve, and its
 /// default base (`data:`) resolves none: a Google security alert's protocol-relative font link
 /// (`//fonts.googleapis.com/…`) brought the page down (MS-161). Nothing is fetched from this
@@ -522,7 +531,7 @@ struct Blocked {
     empty: HashSet<String>,
 }
 
-/// Removes [`REMOVED`] elements and adds [`MAIL_CSS`].
+/// Removes [`REMOVED`] elements, maps [`BACKGROUNDS`] attributes and adds [`MAIL_CSS`].
 fn sanitize(doc: &mut BaseDocument) -> Blocked {
     let urls = |doc: &BaseDocument, selector: &str, names: &[&str]| -> (Vec<NodeId>, HashSet<String>) {
         let ids = doc.query_selector_all(selector).map(|ids| ids.to_vec()).unwrap_or_default();
@@ -538,6 +547,13 @@ fn sanitize(doc: &mut BaseDocument) -> Blocked {
     };
     let (removed, dropped) = urls(doc, REMOVED, &["src", "data"]);
     let (_, empty) = urls(doc, LINKS, &["href"]);
+    let backgrounds: Vec<(NodeId, String)> = doc
+        .query_selector_all(BACKGROUNDS)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|&id| Some((id, doc.get_node(id)?.attr(local_name!("background"))?.trim().to_string())))
+        .filter(|(_, url)| !url.is_empty())
+        .collect();
     let head = doc.query_selector("head").ok().flatten();
     let mut mutator = doc.mutate();
     for id in removed {
@@ -546,13 +562,44 @@ fn sanitize(doc: &mut BaseDocument) -> Blocked {
         }
     }
     if let Some(head) = head {
-        let style = mutator.create_element(QualName::new(None, ns!(html), local_name!("style")), Vec::new());
-        let css = mutator.create_text_node(MAIL_CSS);
-        mutator.append_children(style, &[css]);
-        mutator.append_children(head, &[style]);
+        let style = |mutator: &mut blitz_dom::DocumentMutator, css: &str| {
+            let style = mutator.create_element(QualName::new(None, ns!(html), local_name!("style")), Vec::new());
+            let text = mutator.create_text_node(css);
+            mutator.append_children(style, &[text]);
+            style
+        };
+        if !backgrounds.is_empty() {
+            // A presentational hint yields to every author rule: zero specificity, ahead of the
+            // mail's own styles.
+            let mut css = String::new();
+            for (mark, (id, url)) in backgrounds.iter().enumerate() {
+                mutator.set_attribute(*id, QualName::new(None, ns!(), BACKGROUND_MARK.into()), &mark.to_string());
+                css.push_str(&format!(":where([{BACKGROUND_MARK}=\"{mark}\"]) {{ background-image: url(\"{}\") }}\n", css_string(url)));
+            }
+            let hints = style(&mut mutator, &css);
+            mutator.prepend_nodes(head, &[hints]);
+        }
+        let reader = style(&mut mutator, MAIL_CSS);
+        mutator.append_children(head, &[reader]);
     }
     drop(mutator);
     Blocked { dropped, empty }
+}
+
+/// `value` as the inside of a CSS double-quoted string.
+fn css_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if c.is_control() => out.push_str(&format!("\\{:x} ", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// A page's link to its thread: Blitz calls it when a resource arrives.
@@ -816,6 +863,33 @@ mod tests {
         let based: Vec<_> = asked.iter().filter(|url| !url.starts_with("https://")).collect();
         assert_eq!(based.len(), 4, "{based:?}");
         assert!(based.iter().all(|url| url.starts_with(BASE_URL.trim_end_matches('/'))), "{based:?}");
+    }
+
+    #[test]
+    fn a_cells_background_attribute_draws_its_image() {
+        // Zillow's listing photo is a card cell's `background` attribute over a gray
+        // `background-color`, as mail built for Outlook draws hero images; Blitz maps no
+        // `background` attribute, so the photo stayed gray (MS-162). A 2×2 red PNG stands in for it.
+        const RED: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg==";
+        let mut page = page(&format!(
+            concat!(
+                r#"<table width="200" cellpadding="0" cellspacing="0" border="0" style="width:200px"><tr>"#,
+                r#"<td class="dmBgGray800" align="center" valign="top" background="{red}" "#,
+                r#"style="background-repeat:no-repeat; background-position:center; background-size:cover; background-color:#dddde1">"#,
+                r#"<a href="https://example.com/home"><div style="height:100px"></div></a></td></tr>"#,
+                r#"<tr><td><div style="height:20px"></div></td></tr></table>"#,
+                // An author rule over the attribute wins, as over any presentational hint.
+                r#"<style>.plain {{ background-image: none }}</style>"#,
+                r#"<table width="200" cellpadding="0" cellspacing="0" border="0"><tr>"#,
+                r##"<td class="plain" background="{red}" bgcolor="#0000ff" height="50"></td></tr></table>"##,
+            ),
+            red = RED
+        ));
+        page.lay_out(200.0, 1.0);
+        page.doc.as_mut().resolve(0.0);
+        let tile = page.tile(200.0, 1.0, 0.0, 180.0);
+        assert_eq!(pixel(&tile, 100, 50)[..3], [255, 0, 0]);
+        assert_eq!(pixel(&tile, 100, 150)[..3], [0, 0, 255]);
     }
 
     #[test]
