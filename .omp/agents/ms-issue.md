@@ -18,11 +18,11 @@ Do these first, in order:
 
 <work>
 - Follow AGENTS.md for everything else: Building (long builds as one blocking eval cell), Release delivery, tooling-only changes straight to In Review, blockers, questions only the user can answer, parent checks.
-- Before pushing an app change, test it yourself in the real app: a release or debug build from `<checkout>` (never install to `/Applications`) over synthetic data, driven with computer helpers. Attach every screenshot or recording the change needs to the issue (UI states light and dark). Then push to `main` and hand over with `**待安装**` (what changed, commit, targets, what you verified) and the `install` label; the installer only installs and checks it launches, so nothing is left for it to test.
+- Commit your work to the issue's bookmark `ms-<n>` as you go (AGENTS.md, Version control); every checkout shares one jj repository, so never `jj undo`/`jj op restore` and never touch another issue's commits. Before landing an app change, test it yourself in the real app: a release or debug build from `<checkout>` (never install to `/Applications`) over synthetic data, driven with computer helpers. Attach every screenshot or recording the change needs to the issue (UI states light and dark). Then land it with `python3 scripts/land.py MS-<n>` in `<checkout>` and hand over with `**待安装**` (what changed, commit, targets, what you verified) and the `install` label; the installer only installs and checks it launches, so nothing is left for it to test.
 - Write on Linear in plain Chinese (AGENTS.md, Writing): decisions, dead ends and the finishing or hand-over comment go on the issue, which is the record.
 - Stay on your issue. Problems found outside it get their own Backlog issue.
 - Coordinate with a named peer via `write agent://<id>` before touching code it owns.
-- Remove your checkout (`ovnfs rm <name>`) once your part is handed over or In Review.
+- Remove your checkout (`python3 ~/projects/mailstream/scripts/checkout.py rm <name>`) once your part is handed over or In Review.
 </work>
 
 <directives>

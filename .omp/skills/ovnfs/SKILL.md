@@ -12,25 +12,33 @@ older than those docs: it has no `ovnfs config` verb (edit `.o2/ovnfs.yml` by ha
 
 - Open your checkout with `python3 ~/projects/mailstream/scripts/checkout.py NAME`, from any
   folder. It runs plain `ovnfs new` on the default checkout `~/projects/mailstream`, checks that
-  the repo's rules took effect, sets up jj there (`jj git init --colocate`, `jj bookmark track
-  main@origin`, `jj git fetch`, `jj new main`) and prints the path. Don't open one with `ovnfs
-  new` yourself, and never with `--rev`.
+  the repo's rules took effect, makes the checkout jj workspace NAME of the default checkout's
+  repository, runs `jj git fetch` and `jj new main` there and prints the path. Don't open one
+  with `ovnfs new` yourself, and never with `--rev`.
+- ovnfs knows only git (https://github.com/stencil-hq/ovnfs/issues/37), and jj adds a workspace
+  only in an empty folder, so `checkout.py` adds it in an empty temporary folder and moves its
+  `.jj` into the checkout (MS-179; its header has the details). Every checkout then shares one jj
+  repository: commits, bookmarks, working copies and the operation log show in all of them at
+  once (AGENTS.md, Version control, for the rules that follow). The checkout's `.git` is ovnfs's
+  private git directory as captured; it goes stale, so use jj there, not git.
 - The repo's `.o2/ovnfs.yml` makes the build folders (every `target/`, `.turso/`) `source`: a
   checkout keeps the default checkout's warm build as it was when it opened (APFS clones, no
   extra disk), and later builds or deletes there don't reach it, so cargo can't take artifacts
   built from other source for the checkout's own (MS-152). ovnfs v0.3.0 ignores that in `--rev`
   checkouts: their ignored files stay live, whatever the rules say. The same file hides the
-  default checkout's `.jj`, so jj in a checkout starts a repository of its own.
+  default checkout's `.jj` from the capture; `checkout.py` puts the workspace's own there.
 - The default checkout stays clean on `main` (it is locked; only `scripts/warm-build.py` moves
   it), so a checkout of it starts at `main` as of the last warm build, and `jj new main` takes it
   to `origin`'s tip. The first release `scripts/ffi.py` in a new checkout rebuilds only the repo's
   2 crates (~30 s) on that warm build. `warm-build.py` always moves the default checkout to
   `main`, but builds nothing while a checkout of it that isn't frozen this way is open.
-- Work leaves a checkout through jj (commit, push `main`; AGENTS.md, Version control), not
-  `ovnfs apply`. Don't use `ovnfs diff`, `snap` or `fork` here: they count the build folders as
-  source, so `diff` lists build output and a snapshot hashes gigabytes of it.
-- `ovnfs rm NAME` your checkout once your part is done (pushed and handed over); a woken agent
-  opens a fresh one. Never `rm` a checkout you didn't open, and never `prune`.
+- Work leaves a checkout through jj (commit to `ms-<n>`, `scripts/land.py`; AGENTS.md, Version
+  control), not `ovnfs apply`. Don't use `ovnfs diff`, `snap` or `fork` here: they count the build
+  folders as source, so `diff` lists build output and a snapshot hashes gigabytes of it.
+- Remove your checkout with `python3 ~/projects/mailstream/scripts/checkout.py rm NAME` once your
+  part is done (landed and handed over): it forgets the jj workspace, then runs `ovnfs rm NAME`
+  (plain `ovnfs rm` would leave `NAME@` in every `jj log`). A woken agent opens a fresh one. Never
+  remove a checkout you didn't open, and never `prune`.
 - Free disk by deleting your own checkout's build output or removing the checkout, never the
   default checkout's build folders. Nothing builds Swift in the default checkout, so a checkout's
   `.build` is its own. Don't share one `CARGO_TARGET_DIR` between checkouts: cargo locks it for one

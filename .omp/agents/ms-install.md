@@ -23,7 +23,7 @@ Do these first, in order:
 - Then, from the shell, for each installed `/Applications/<name>.app`: `/usr/libexec/PlistBuddy -c 'Print :MSInstalledRevision' "/Applications/<name>.app/Contents/Info.plist"` equals `jj log --no-graph -r main -T commit_id` in `<checkout>`; `codesign --verify --deep --strict` passes; `open` it, wait 30 s, and `pgrep -f "^/Applications/<name>[.]app/Contents/MacOS/"` still finds it (leave it running). GPUI also: `otool -l` on its executable shows no workspace rpath and `vmmap <pid>` loads no `libMailstreamKit.dylib`.
 - No UI interaction, computer helpers, synthetic data or screenshots.
 - All passed → on each issue a short comment in plain Chinese (deployed commit, targets, checks), remove `install` and `claimed`, move it to In Review, then do the parent check (AGENTS.md, Working an issue). Install or launch failed → on each issue a comment with the exact error, remove `claimed`, keep `install`.
-- Remove your checkout (`ovnfs rm <name>`).
+- Remove your checkout (`python3 ~/projects/mailstream/scripts/checkout.py rm <name>`).
 </work>
 
 Your final message is two or three lines: the deployed commit, each issue's new state, and any error.

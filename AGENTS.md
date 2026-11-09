@@ -11,29 +11,52 @@
 Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` (public).
 
 - Use `jj`, not raw `git`: `jj st`, `jj diff`, `jj describe -m "…"`, `jj new`, `jj log`.
-- Each change is its own described commit (`jj describe -m "<what and why>"`, then `jj new`),
-  made unprompted as soon as it is built and verified, then pushed: `jj git fetch`, rebase onto
-  `main@origin` if it moved, `jj bookmark set main -r @-`, `jj git push`. Never leave finished
-  work uncommitted in `@`.
+- Each issue's work lives on its own bookmark `ms-<n>` (`ms-179`) in the shared repository
+  below. Each change is its own described commit (`jj commit -m "<what and why>"`, then `jj
+  bookmark set ms-<n> -r @-`; `jj bookmark create` the first time), made unprompted as soon as it
+  is built and verified. Never leave finished work uncommitted in `@`; commit it to `ms-<n>`
+  before you stop for any reason (question, blocker, hand-over), so the next agent finds it.
+  `ms-<n>` stays local: every checkout sees it without a push.
+- Landing: once the tests for what you changed pass and you have checked it in the real app,
+  the issue's own agent lands it with `python3 scripts/land.py MS-<n>` in its checkout. Under a
+  lock shared by every lander it fetches, rebases `ms-<n>` onto `main@origin`, moves `main` to
+  it, pushes `main` and deletes `ms-<n>`; it prints the landed commits for the hand-over. When
+  it stops on a conflict, resolve it in `ms-<n>`'s commits, rerun the tests it touches (and look
+  again in the real app when it touches UI), then run it again. Nobody moves or pushes `main`
+  any other way.
 - Every agent works in its own ovnfs checkout, opened with `python3
-  ~/projects/mailstream/scripts/checkout.py <unique>`; how to use one is the `ovnfs` skill
-  (`.omp/skills/ovnfs/SKILL.md`, its first section for this repo). Never the default checkout,
-  never `jj workspace add` (the `../mailstream-*` workspaces take no new work), never omp's
-  `isolated` option for subagents. An agent commits and pushes `main` from its checkout and
-  removes it once its part is done (handed to the install batch or In Review, [Release
-  delivery](#release-delivery)); a woken agent opens a fresh one. Work the user keeps off `main`
-  (a standalone trial) stays in its own existing checkout.
+  ~/projects/mailstream/scripts/checkout.py <unique>` and removed with `python3
+  ~/projects/mailstream/scripts/checkout.py rm <unique>` once its part is done (landed and handed
+  to the install batch or In Review, [Release delivery](#release-delivery)); how to use one is the
+  `ovnfs` skill (`.omp/skills/ovnfs/SKILL.md`, its first section for this repo). Never the default
+  checkout, never `jj workspace add` yourself (the `../mailstream-*` workspaces take no new work),
+  never omp's `isolated` option for subagents. A woken agent opens a fresh one and carries on
+  with `jj new ms-<n>`. Work the user keeps off `main` (a standalone trial) stays on its own
+  bookmark.
+- Shared repository (MS-179): each checkout is a jj workspace of the default checkout's
+  repository, so every commit, bookmark and working copy (`<checkout>@` in `jj log`; `jj diff -r
+  <checkout>@` shows what that agent is changing now) is visible in every checkout at once, and
+  so is the operation log. Hence: never `jj undo` or `jj op restore` (they take back other
+  agents' operations too); to take back one of your own, `jj op log`, then `jj op revert <id>`.
+  Never rewrite, abandon or move commits and bookmarks of another issue or another checkout's
+  working copy. When jj says your working copy is stale (another workspace rewrote a commit under
+  it), run `jj workspace update-stale`; your uncommitted changes stay. Use jj, not git, in a
+  checkout: its `.git` is ovnfs's capture and goes stale. Checkouts opened before MS-179 keep a jj
+  repository of their own until removed; they land with `land.py` too. After upgrading jj, test
+  the graft again (`scripts/checkout.py`'s header says how).
 - The default checkout is locked (MS-156, `scripts/source_lock.py`): every agent's tools start in
   `~/projects/mailstream`, and a relative path or a missing `cwd` put agents' edits and deletes
   there. Its tracked files and folders refuse writes, new files, deletes and renames, whatever
-  the tool; reads, `jj st`, `jj git fetch` and opening checkouts work. `Permission denied` under
+  the tool; reads, `jj st`, `jj git fetch` and opening checkouts work, and its `.jj` (the
+  repository every checkout shares) stays writable. `Permission denied` under
   `~/projects/mailstream` means a path missed your checkout: redo it with the checkout's absolute
   path or `cwd`, and never unlock it. Only `warm-build.py` unlocks it, for its run;
   `linear-poll.py watch` locks it again whenever anything there is writable. A `jj` command that
   rewrites its working copy fails there and leaves it stale; the script's header says how to
   recover.
 - One line: every front end (the AppKit app, `GPUI/`, `Flutter/`) and the engine they share
-  (`Sources/MailstreamKit`, `FFI/`) live on `main`, and every checkout works on it; the
+  (`Sources/MailstreamKit`, `FFI/`) live on `main`, and every checkout starts from it and lands
+  on it; `ms-<n>` bookmarks live only until their issue lands; the
   `gpui-ui` and `flutter-ui` bookmarks are history and take no new commits. An engine change
   updates every front end that calls what it changed, in the same change.
 - The repo is public: never commit secrets, tokens, OAuth client files or personal mail data.
@@ -102,7 +125,8 @@ hashes stay as they are.
   it to Todo, start the comment with `**❓ 需要你回答：**` followed by the question(s), each
   answerable on its own, and stop.
 - Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work)
-  and push it to `main` once the tests for what you changed pass and you have checked it in the
+  and land it on `main` (`scripts/land.py`, [Version control](#version-control-jj)) once the
+  tests for what you changed pass and you have checked it in the
   real app yourself; then hand it to the install batch ([Release delivery](#release-delivery)),
   which only puts `main`'s tip in `/Applications`. A commit or passing tests is not completion:
   the batch install agent moves the issue to In Review once the installed copy passes its
@@ -235,13 +259,14 @@ itself (`Flutter/README.md`); the batch install still runs for each issue.
 
 The code agent:
 
-1. Tests its change in the real app before pushing: a release or debug build from its own
+1. Tests its change in the real app before landing: a release or debug build from its own
    checkout (never an `/Applications` copy; it doesn't install), over synthetic data (no
    accounts or personal mail, like the fixtures `Flutter/README.md` lists), driven with computer
    helpers; no sending mail, nothing destructive. It takes every screenshot or recording the
    change needs, UI states in light and dark (launching the executable with
    `-AppleInterfaceStyle Dark` shows it dark), and attaches them to the issue.
-2. Pushes the issue-referencing commit to live `main` without losing other agents' changes.
+2. Lands its `ms-<n>` bookmark on live `main` with `python3 scripts/land.py MS-<n>` ([Version
+   control](#version-control-jj)), which keeps other agents' changes.
 3. Picks the targets: `flutter` (`Mailstream Flutter.app`) by default; `native`
    (`Mailstream.app`) or `gpui` (`Mailstream GPUI.app`) only when the user asks or its installed
    behavior is directly affected; never an app that isn't installed yet. Tooling-only changes

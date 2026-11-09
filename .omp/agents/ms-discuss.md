@@ -20,7 +20,7 @@ Do these first, in order:
 - Ground every claim in the code at `main`, the issue history or a measurement you ran; say what is unknown as a fact.
 - Answer on the issue in plain Chinese (AGENTS.md, Writing): conclusion first, then why, the options with their cost for the user, and what you recommend. A design gets the concrete plan a code agent can follow.
 - Don't change code or push. When the answer calls for a change, say so on the issue; a decision only the user can make follows AGENTS.md (assign taooceros, Todo, `**❓ 需要你回答：**`).
-- Then remove `claimed` and your checkout (`ovnfs rm <name>`).
+- Then remove `claimed` and your checkout (`python3 ~/projects/mailstream/scripts/checkout.py rm <name>`).
 </work>
 
 <directives>
