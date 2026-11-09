@@ -13,8 +13,9 @@ import 'state/mail_state.dart';
 
 /// The frame measurements `scripts/bench.sh flutter` runs (AGENTS.md, "Performance: 120 fps").
 /// With `MAILSTREAM_BENCH=scroll` the conversation list scrolls by itself, every frame's timing
-/// goes to `MAILSTREAM_BENCH_OUT` and the app quits; `MAILSTREAM_BENCH=reader-swipe` is
-/// [ReaderDismissBench].
+/// goes to `MAILSTREAM_BENCH_OUT` and the app quits; `MAILSTREAM_BENCH=calendar-week` opens the
+/// calendar's week view and scrolls its timeline the same way, from top to bottom and back;
+/// `MAILSTREAM_BENCH=reader-swipe` is [ReaderDismissBench].
 abstract final class ScrollBench {
   /// The scenario every front end runs: after [settle], [legs] legs of [leg] each, down
   /// [distance] and back, the offset set from the time each frame.
@@ -23,24 +24,37 @@ abstract final class ScrollBench {
   static const leg = Duration(seconds: 3);
   static const distance = 4000.0;
 
-  static bool _attached = false;
+  static const scroll = 'scroll';
+  static const calendarWeek = 'calendar-week';
 
-  /// Runs the measurement on the first list attached, if the environment asks for one.
-  static void attach(ScrollController list) {
+  /// The scenario the environment asks for, if any.
+  static String? get scenario => Platform.environment['MAILSTREAM_BENCH'];
+
+  /// The list scrolled: the last one attached, as a list built again (the window's layout
+  /// changing between one and two panes) attaches its new controller.
+  static ScrollController? _list;
+
+  /// Runs the measurement on the list attached for [scenario] (`scroll`, the conversation list;
+  /// `calendar-week`, the week's timeline), if the environment asks for it.
+  static void attach(ScrollController list, {String scenario = scroll}) {
     final out = Platform.environment['MAILSTREAM_BENCH_OUT'];
-    if (_attached || Platform.environment['MAILSTREAM_BENCH'] != 'scroll' || out == null) return;
-    _attached = true;
+    if (ScrollBench.scenario != scenario || out == null) return;
+    final started = _list != null;
+    _list = list;
+    if (started) return;
     Timer(settle, () {
       // Until the list has rows to scroll.
       Timer.periodic(const Duration(milliseconds: 500), (wait) {
+        final list = _list!;
         if (!list.hasClients || list.position.maxScrollExtent <= 0) return;
         wait.cancel();
-        _run(list, out);
+        // The timeline is shorter than the list's distance: it goes from top to bottom.
+        _run(out, scenario, scenario == scroll ? distance : list.position.maxScrollExtent);
       });
     });
   }
 
-  static void _run(ScrollController list, String out) {
+  static void _run(String out, String scenario, double distance) {
     final scheduler = SchedulerBinding.instance;
     final timings = <FrameTiming>[];
     void collect(List<FrameTiming> batch) => timings.addAll(batch);
@@ -55,7 +69,7 @@ abstract final class ScrollBench {
         _finish(() {
           scheduler.removeTimingsCallback(collect);
           final log = StringBuffer(
-            '# frontend=flutter scenario=scroll settle=${settle.inSeconds}s legs=${legs}x${leg.inSeconds}s '
+            '# frontend=flutter scenario=$scenario settle=${settle.inSeconds}s legs=${legs}x${leg.inSeconds}s '
             'distance=${distance.toInt()}px\n',
           );
           _frames(log, timings, first!.inMicroseconds, last.inMicroseconds);
@@ -67,6 +81,7 @@ abstract final class ScrollBench {
       final at = elapsed.inMicroseconds / leg.inMicroseconds;
       final along = at - at.floor();
       final depth = at.floor().isEven ? along : 1 - along;
+      final list = _list!;
       if (list.hasClients) list.jumpTo(min(depth * distance, list.position.maxScrollExtent));
     });
     ticker.start();

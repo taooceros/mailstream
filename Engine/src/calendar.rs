@@ -310,8 +310,9 @@ impl CalendarStore {
 
     /// The accounts (with whether each may read its calendars, and change them) and the events
     /// overlapping `days` days from `from` (today by default), earliest first, each saying
-    /// whether the account may change it (`editable`); and this computer's time zone, which new
-    /// events take.
+    /// whether the account may change it (`editable`); this computer's time zone, which new
+    /// events take; and the days fetched (`synced`, from `from` up to, not including, `until`):
+    /// no others hold events.
     fn list(&self, only: Option<&str>, args: &Arguments) -> Result<Value, EngineError> {
         let from = args.string("from").unwrap_or_else(|| local_day(0));
         let days = args.int("days").unwrap_or(FUTURE_DAYS).clamp(1, 366);
@@ -358,6 +359,7 @@ impl CalendarStore {
         Ok(json!({
             "accounts": accounts,
             "loading": loading,
+            "synced": { "from": local_day(-PAST_DAYS), "until": local_day(FUTURE_DAYS + 1) },
             "events": events.into_iter().map(|(_, _, event)| event).collect::<Vec<_>>(),
             "timeZone": local_zone(),
         }))

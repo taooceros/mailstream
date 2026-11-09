@@ -495,7 +495,7 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new(
         "calendar.events",
-        "Calendars: every account with its calendars (or that it must sign in again to grant calendar access), and the events from its calendars on the days asked for, earliest first, as last fetched (every five minutes).",
+        "Calendars: every account with its calendars (or that it must sign in again to grant calendar access), and the events from its calendars on the days asked for, earliest first, as last fetched (every five minutes), with the days fetched (`synced`: a week back to 60 days on); other days hold no events.",
         &[
             ACCOUNT,
             Argument::new("from", Kind::String, "The first day, as 2026-11-08 (default: today)."),

@@ -76,6 +76,10 @@ class _MailShellState extends State<MailShell> {
     state.addListener(_offerSignIn);
     state.addListener(_checkFrameRateMenu);
     ReaderDismissBench.attach(state);
+    if (ScrollBench.scenario == ScrollBench.calendarWeek) {
+      state.calendar.setView(CalendarView.week);
+      state.showCalendar();
+    }
     _window.setMethodCallHandler((call) async {
       switch (call.method) {
         case 'settings':
@@ -295,7 +299,30 @@ class _MailShellState extends State<MailShell> {
       return KeyEventResult.handled;
     }
     if (_editing) return KeyEventResult.ignored;
-    if (state.chat.active || state.calendar.active) {
+    if (state.calendar.active) {
+      // Google Calendar's keys, as mail takes Gmail's.
+      final calendar = state.calendar;
+      switch (key) {
+        case LogicalKeyboardKey.escape:
+          _back();
+        case LogicalKeyboardKey.keyA:
+          calendar.setView(CalendarView.agenda);
+        case LogicalKeyboardKey.keyD:
+          calendar.setView(CalendarView.day);
+        case LogicalKeyboardKey.keyW:
+          calendar.setView(CalendarView.week);
+        case LogicalKeyboardKey.keyT:
+          calendar.today();
+        case LogicalKeyboardKey.arrowLeft || LogicalKeyboardKey.keyK || LogicalKeyboardKey.keyP when calendar.view != CalendarView.agenda:
+          calendar.page(-1);
+        case LogicalKeyboardKey.arrowRight || LogicalKeyboardKey.keyJ || LogicalKeyboardKey.keyN when calendar.view != CalendarView.agenda:
+          calendar.page(1);
+        default:
+          return KeyEventResult.ignored;
+      }
+      return KeyEventResult.handled;
+    }
+    if (state.chat.active) {
       if (key != LogicalKeyboardKey.escape) return KeyEventResult.ignored;
       _back();
       return KeyEventResult.handled;

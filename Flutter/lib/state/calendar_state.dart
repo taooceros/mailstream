@@ -9,10 +9,21 @@ typedef EventKey = ({String account, String calendar, String id});
 
 EventKey eventKey(engine.CalendarItem event) => (account: event.account, calendar: event.calendar, id: event.id);
 
-/// The calendar in the window: every account's events from today on, and the event open beside
-/// them. The engine fetches Google Calendar and Outlook every five minutes and keeps what it
-/// fetched in mail.db; this keeps what it last answered and reads it again on its `calendar`
-/// event, so the agenda shows at once and nothing waits on the network.
+/// The day `time` falls on, local midnight.
+DateTime dayOf(DateTime time) => DateTime(time.year, time.month, time.day);
+
+/// `day` as the engine names days: `2026-11-08`.
+String dayString(DateTime day) =>
+    '${day.year.toString().padLeft(4, '0')}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
+
+/// How the calendar lays out its events: a list of the days ahead, or one day's or one week's
+/// hours side by side.
+enum CalendarView { agenda, day, week }
+
+/// The calendar in the window: every account's events from a week back on, the view they show
+/// in and the event open beside them. The engine fetches Google Calendar and Outlook every five
+/// minutes and keeps what it fetched in mail.db; this keeps what it last answered and reads it
+/// again on its `calendar` event, so the calendar shows at once and nothing waits on the network.
 class CalendarState extends ChangeNotifier {
   CalendarState(this.mail, {required this.report});
 
@@ -23,6 +34,9 @@ class CalendarState extends ChangeNotifier {
 
   /// Days of events the agenda lists, from today.
   static const days = 60;
+
+  /// Days back the day and week views can show: the engine fetches a week back.
+  static const pastDays = 7;
 
   /// The calendar is in view instead of mail.
   bool active = false;
@@ -39,8 +53,21 @@ class CalendarState extends ChangeNotifier {
   /// Whether `calendar.events` answered once: until then no events is not "nothing planned".
   bool listed = false;
 
-  /// The event beside the agenda.
+  /// The event beside the calendar.
   EventKey? opened;
+
+  CalendarView view = CalendarView.agenda;
+
+  /// The day the day view shows; the week view shows the week it is in.
+  DateTime focus = dayOf(DateTime.now());
+
+  /// The days the engine fetches, from its first up to, not including, `until`; none until it
+  /// answers. Other days show no events because none are fetched, not because none are planned.
+  ({DateTime from, DateTime until})? synced;
+
+  /// Fires when Today is asked for: each view scrolls to now.
+  Listenable get toNow => _toNow;
+  final _toNow = _Signal();
 
   Timer? _change;
 
@@ -81,6 +108,7 @@ class CalendarState extends ChangeNotifier {
   void dispose() {
     _change?.cancel();
     _layout.dispose();
+    _toNow.dispose();
     super.dispose();
   }
 
@@ -93,11 +121,17 @@ class CalendarState extends ChangeNotifier {
 
   Future<void> _read() async {
     try {
-      final answer = await mail.calendarEvents(from: null, days: days);
+      // From a week back (the day and week views show the past days the engine fetched); the
+      // agenda lists only today on.
+      final today = dayOf(DateTime.now());
+      final from = DateTime(today.year, today.month, today.day - pastDays);
+      final answer = await mail.calendarEvents(from: dayString(from), days: pastDays + days + 1);
       accounts = answer.accounts;
       events = answer.events;
       loading = answer.loading;
       timeZone = answer.timeZone;
+      final first = DateTime.tryParse(answer.synced.from), until = DateTime.tryParse(answer.synced.until);
+      synced = first == null || until == null ? null : (from: first, until: until);
       listed = true;
       if (opened != null && event(opened!) == null) {
         opened = null;
@@ -184,6 +218,37 @@ class CalendarState extends ChangeNotifier {
     opened = null;
     notifyListeners();
     _layout.notify();
+  }
+
+  void setView(CalendarView to) {
+    if (view == to) return;
+    view = to;
+    notifyListeners();
+  }
+
+  /// The day view's next day or the week view's next week (`step` 1), or the one before (-1).
+  void page(int step) {
+    if (view == CalendarView.agenda) return;
+    final days = view == CalendarView.week ? 7 * step : step;
+    focus = DateTime(focus.year, focus.month, focus.day + days);
+    notifyListeners();
+  }
+
+  /// Back to today, scrolled to now.
+  void today() {
+    final day = dayOf(DateTime.now());
+    if (focus != day) {
+      focus = day;
+      notifyListeners();
+    }
+    _toNow.notify();
+  }
+
+  /// `day` in the day view.
+  void showDay(DateTime day) {
+    focus = dayOf(day);
+    view = CalendarView.day;
+    notifyListeners();
   }
 
   static String _describe(engine.MailException error) =>

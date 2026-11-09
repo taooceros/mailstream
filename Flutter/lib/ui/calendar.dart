@@ -9,6 +9,7 @@ import '../platform.dart';
 import '../state/calendar_state.dart';
 import '../state/mail_state.dart';
 import 'calendar_editor.dart';
+import 'calendar_grid.dart';
 import 'common.dart';
 import 'conversation_list.dart';
 import 'design.dart';
@@ -17,8 +18,6 @@ import 'glass.dart';
 
 /// An agenda day's events, all-day ones first.
 typedef AgendaDay = ({DateTime day, List<engine.CalendarItem> events});
-
-DateTime _dayOf(DateTime time) => DateTime(time.year, time.month, time.day);
 
 DateTime? _parseDay(String? day) => day == null ? null : DateTime.tryParse(day);
 
@@ -35,10 +34,10 @@ List<AgendaDay> agendaDays(List<engine.CalendarItem> events, DateTime today) {
   final byDay = <DateTime, List<engine.CalendarItem>>{};
   for (final event in events) {
     final span = eventSpan(event);
-    var day = _dayOf(span.start);
+    var day = dayOf(span.start);
     if (day.isBefore(today)) day = today;
     // Ends at midnight: the day before is its last; a moment-long event still shows on its day.
-    final last = span.end.isAfter(span.start) ? _dayOf(span.end.subtract(const Duration(microseconds: 1))) : _dayOf(span.start);
+    final last = span.end.isAfter(span.start) ? dayOf(span.end.subtract(const Duration(microseconds: 1))) : dayOf(span.start);
     for (var d = day; !d.isAfter(last); d = DateTime(d.year, d.month, d.day + 1)) {
       (byDay[d] ??= []).add(event);
     }
@@ -105,8 +104,9 @@ final class _Notice extends _Entry {
   final String? problem;
 }
 
-/// The calendar's list pane: header with refresh, notices for accounts to sign in again or whose
-/// fetch failed, then the agenda from today: each day with events under its header.
+/// The calendar's list pane: header with new event and refresh over the views (agenda, day,
+/// week) and their paging, notices for accounts to sign in again or whose fetch failed, then the
+/// agenda from today (each day with events under its header) or the day's or week's timeline.
 class CalendarListPane extends StatefulWidget {
   const CalendarListPane({super.key, required this.state});
 
@@ -128,9 +128,23 @@ class _CalendarListPaneState extends State<CalendarListPane> {
   CalendarState get calendar => widget.state.calendar;
 
   @override
+  void initState() {
+    super.initState();
+    calendar.toNow.addListener(_toTop);
+  }
+
+  @override
   void dispose() {
+    calendar.toNow.removeListener(_toTop);
     _scroll.dispose();
     super.dispose();
+  }
+
+  /// Today in the agenda: back to its top, where today is.
+  void _toTop() {
+    if (calendar.view == CalendarView.agenda && _scroll.hasClients) {
+      _scroll.animateTo(0, duration: Motion.medium, curve: Motion.curve);
+    }
   }
 
   Future<void> _signIn(engine.CalendarAccount account) async {
@@ -143,14 +157,23 @@ class _CalendarListPaneState extends State<CalendarListPane> {
     if (mounted) setState(() => _signingIn = null);
   }
 
+  List<_Notice> _notices() => [
+    for (final account in calendar.accounts)
+      if (!account.granted)
+        _Notice(account)
+      else if (account.problem != null)
+        _Notice(account, problem: account.problem),
+  ];
+
+  Widget _noticeRow(_Notice notice) => _NoticeRow(
+    account: notice.account,
+    problem: notice.problem,
+    signingIn: _signingIn == notice.account.id,
+    onSignIn: _signingIn == null ? () => _signIn(notice.account) : null,
+  );
+
   List<_Entry> _entries(DateTime today) {
-    final out = <_Entry>[
-      for (final account in calendar.accounts)
-        if (!account.granted)
-          _Notice(account)
-        else if (account.problem != null)
-          _Notice(account, problem: account.problem),
-    ];
+    final out = <_Entry>[..._notices()];
     for (final day in agendaDays(calendar.events, today)) {
       out.add(_Day(agendaTitle(day.day, today)));
       for (final event in day.events) {
@@ -164,13 +187,39 @@ class _CalendarListPaneState extends State<CalendarListPane> {
   Widget build(BuildContext context) {
     final colors = context.colors;
     final now = DateTime.now();
-    final today = _dayOf(now);
-    final entries = _entries(today);
-    final hasEvents = entries.any((e) => e is _Event);
+    final today = dayOf(now);
+    final view = calendar.view;
     final Widget body;
     if (!calendar.listed) {
       body = const Center(child: Spinner());
+    } else if (view != CalendarView.agenda) {
+      final days = view == CalendarView.week ? weekDays(weekOf(calendar.focus)) : [calendar.focus];
+      final notices = _notices();
+      body = Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // One line, leaving the hours their room: the agenda has each account's notice.
+          if (notices.isNotEmpty) _NoticeLine(notices: notices, onTap: () => calendar.setView(CalendarView.agenda)),
+          // Keyed: the notice line comes and goes above it without starting the grid over.
+          Expanded(
+            key: const ValueKey('grid'),
+            child: CalendarGrid(
+              days: days,
+              events: calendar.events,
+              colorOf: (event) => eventColor(widget.state, event),
+              synced: calendar.synced,
+              selected: calendar.opened,
+              onOpen: (event) => calendar.open(eventKey(event)),
+              onDay: view == CalendarView.week ? calendar.showDay : null,
+              onCreate: calendar.writableAccounts.isEmpty ? null : (start) => showEventEditor(context, widget.state, start: start),
+              toNow: calendar.toNow,
+            ),
+          ),
+        ],
+      );
     } else {
+      final entries = _entries(today);
+      final hasEvents = entries.any((e) => e is _Event);
       final empty = hasEvents
           ? null
           : calendar.hasCalendars
@@ -210,12 +259,7 @@ class _CalendarListPaneState extends State<CalendarListPane> {
               selected: calendar.opened == eventKey(event),
               onTap: () => calendar.open(eventKey(event)),
             ),
-            _Notice(:final account, :final problem) => _NoticeRow(
-              account: account,
-              problem: problem,
-              signingIn: _signingIn == account.id,
-              onSignIn: _signingIn == null ? () => _signIn(account) : null,
-            ),
+            final _Notice notice => _noticeRow(notice),
           };
         },
       );
@@ -224,45 +268,51 @@ class _CalendarListPaneState extends State<CalendarListPane> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         WindowDragArea(
-          child: SizedBox(
-            height: 56,
-            child: Row(children: [
-              const SizedBox(width: 18),
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(children: [
-                      Text('Calendar', style: context.text.title3.copyWith(fontWeight: FontWeight.w700)),
-                      if (calendar.loading) const Padding(padding: EdgeInsets.only(left: 8), child: Spinner(radius: 6)),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 0, 12, 0),
+            child: Column(children: [
+              SizedBox(
+                height: 52,
+                child: Row(children: [
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(children: [
+                          Text('Calendar', style: context.text.title3.copyWith(fontWeight: FontWeight.w700)),
+                          if (calendar.loading) const Padding(padding: EdgeInsets.only(left: 8), child: Spinner(radius: 6)),
+                        ]),
+                        Text(
+                          switch (view) {
+                            CalendarView.agenda => DateFormat('EEEE, MMMM d').format(now),
+                            CalendarView.day => dayTitle(calendar.focus),
+                            CalendarView.week => weekTitle(weekOf(calendar.focus)),
+                          },
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: context.text.subheadline.copyWith(color: colors.secondaryLabel),
+                        ),
+                      ],
+                    ),
+                  ),
+                  GlassCapsule(
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      ToolButton(
+                        tooltip: 'New event (${Host.shortcut('N')})',
+                        icon: CupertinoIcons.plus,
+                        onPressed: calendar.writableAccounts.isEmpty ? null : () => showEventEditor(context, widget.state),
+                      ),
+                      ToolButton(
+                        tooltip: 'Refresh (${Host.shortcut('R')})',
+                        icon: CupertinoIcons.arrow_clockwise,
+                        onPressed: calendar.hasCalendars ? calendar.refresh : null,
+                      ),
                     ]),
-                    Text(DateFormat('EEEE, MMMM d').format(now), style: context.text.subheadline.copyWith(color: colors.secondaryLabel)),
-                  ],
-                ),
-              ),
-              GlassCapsule(
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  ToolButton(
-                    tooltip: 'New event (${Host.shortcut('N')})',
-                    icon: CupertinoIcons.plus,
-                    onPressed: calendar.writableAccounts.isEmpty ? null : () => showEventEditor(context, widget.state),
-                  ),
-                  ToolButton(
-                    tooltip: 'Today',
-                    icon: CupertinoIcons.calendar_today,
-                    onPressed: () {
-                      if (_scroll.hasClients) _scroll.animateTo(0, duration: Motion.medium, curve: Motion.curve);
-                    },
-                  ),
-                  ToolButton(
-                    tooltip: 'Refresh (${Host.shortcut('R')})',
-                    icon: CupertinoIcons.arrow_clockwise,
-                    onPressed: calendar.hasCalendars ? calendar.refresh : null,
                   ),
                 ]),
               ),
-              const SizedBox(width: 12),
+              Padding(padding: const EdgeInsets.only(bottom: 8), child: CalendarViewBar(calendar: calendar)),
             ]),
           ),
         ),
@@ -429,6 +479,47 @@ class _NoticeRow extends StatelessWidget {
             PushButton(controlSize: ControlSize.regular, secondary: true, onPressed: onSignIn, child: const Text('Sign In…')),
           ],
         ]),
+      ),
+    );
+  }
+}
+
+/// The day and week views' one line for the accounts whose calendar cannot show (to sign in
+/// again, or whose fetch failed); a click opens the agenda, which has each one's notice.
+class _NoticeLine extends StatelessWidget {
+  const _NoticeLine({required this.notices, required this.onTap});
+
+  final List<_Notice> notices;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final failed = notices.any((n) => n.problem != null);
+    final only = notices.length == 1 ? notices.single.account : null;
+    final text = only != null
+        ? '${only.label.isEmpty ? only.id : only.label}: ${failed ? 'could not update' : 'sign in again to show its calendar'}'
+        : '${notices.length} accounts cannot show their calendars';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      child: Hoverable(
+        onTap: onTap,
+        selected: true,
+        selectedColor: failed ? colors.redFill : colors.waitingFill,
+        child: SizedBox(
+          height: 28,
+          child: Row(children: [
+            const SizedBox(width: 10),
+            Icon(failed ? CupertinoIcons.exclamationmark_triangle : CupertinoIcons.calendar_badge_plus, size: 15,
+                color: failed ? colors.onRedFill : colors.onWaitingFill),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(text, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.footnote.copyWith(fontWeight: FontWeight.w500)),
+            ),
+            Text('Show in Agenda', style: context.text.footnote.copyWith(color: failed ? colors.onRedFill : colors.onWaitingFill)),
+            const SizedBox(width: 10),
+          ]),
+        ),
       ),
     );
   }

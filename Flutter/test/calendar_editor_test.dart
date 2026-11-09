@@ -61,6 +61,7 @@ class EditorMail extends ReaderMail {
     loading: false,
     events: [planning()],
     timeZone: 'Europe/Berlin',
+    synced: engine.CalendarDays(from: '2026-11-01', until: '2027-01-08'),
   );
 
   @override

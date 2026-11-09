@@ -5,7 +5,9 @@
 # Usage: scripts/bench.sh flutter|gpui [RUNS]
 #   BENCH_SCENARIO picks the scenario (MAILSTREAM_BENCH): scroll (default; every front end)
 #   scrolls the conversation list; reader-swipe (Flutter) opens conversations and swipes each
-#   reader away with two fingers.
+#   reader away with two fingers; calendar-week (Flutter) opens the calendar's week view and
+#   scrolls its timeline from top to bottom and back (needs BENCH_HOME, whose seed holds a
+#   week of events, fresh for 5 minutes after seeding).
 #   MAILSTREAM_READER_RENDERER (Flutter, Mac) opens the reader in hyper (default), blitz or
 #   webKit, e.g. BENCH_SCENARIO=reader-swipe MAILSTREAM_READER_RENDERER=blitz.
 #   Build the release first: Flutter/README.md, or CONFIG=release GPUI/run.sh.
@@ -33,7 +35,7 @@ case $FRONTEND in
     ;;
 esac
 case $FRONTEND/$SCENARIO in
-  */scroll | flutter/reader-swipe) ;;
+  */scroll | flutter/reader-swipe | flutter/calendar-week) ;;
   *)
     echo "error: no $SCENARIO scenario in $FRONTEND" >&2
     exit 2

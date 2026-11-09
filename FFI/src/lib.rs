@@ -676,6 +676,15 @@ pub struct CalendarAgenda {
     pub events: Vec<CalendarItem>,
     /// This computer's time zone (`America/Los_Angeles`), which [`CalendarDraft`] times are in.
     pub time_zone: String,
+    /// The days the engine fetches; days outside them show no events because none are fetched.
+    pub synced: CalendarDays,
+}
+
+/// Days from `from` up to, not including, `until`, as `2026-11-08`.
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct CalendarDays {
+    pub from: String,
+    pub until: String,
 }
 
 /// A new event, or what a change sets: a field left `None` stays as it is; an empty location or

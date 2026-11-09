@@ -14,8 +14,9 @@
 //!
 //! `--rounds N` (3), `--engines swift,rust`, `--cases config.list,…` (default: every case),
 //! `--scale F` (iterations × F; 1), `--out FILE` (every result as JSON lines).
-//! `--seed DIR` only writes the bench's home (settings, accounts, mail.db, avatars) into `DIR`
-//! and stops: `scripts/bench.sh` runs a front end on it with `BENCH_HOME=DIR`.
+//! `--seed DIR` only writes the bench's home (settings, accounts, mail.db, avatars, and two
+//! accounts' calendars: `seed_calendar`) into `DIR` and stops: `scripts/bench.sh` runs a front
+//! end on it with `BENCH_HOME=DIR`.
 //!
 //! Each engine runs in a process of its own (the engine is chosen once per process), started
 //! from this one with a fresh home folder holding the same settings.json, accounts.json and
@@ -246,6 +247,7 @@ fn main() {
     } else if args.first().map(String::as_str) == Some("--seed") {
         let Some(home) = args.get(1) else { fail("--seed needs a folder") };
         seed_home(Path::new(home));
+        seed_calendar(Path::new(home));
     } else {
         parent(&args);
     }
@@ -607,6 +609,133 @@ fn seed_chat(cache: &mailstream_engine::cache::MailCache) {
         let page: ChatMessagePage = parse(json!({ "messages": messages, "more": true, "lastRead": newest - 900.0 }));
         cache.save_chat_messages(&page, key);
     }
+}
+
+/// The accounts with a calendar in a `--seed` home (the engine cases never read calendars): a
+/// Gmail and an Outlook account.
+const CALENDAR_ACCOUNTS: [usize; 2] = [0, 3];
+
+/// `--seed` only: [`CALENDAR_ACCOUNTS`] may read and change their calendars, and mail.db holds
+/// each one's copy, fetched now: three weeks around today of meetings (some overlapping), all-day
+/// and multi-day events and one overnight, for the calendar's day and week views
+/// (`BENCH_SCENARIO=calendar-week`). The engine serves a copy for five minutes; then its fetch
+/// fails (the accounts have no refresh token) and the copy stays, under a notice.
+fn seed_calendar(home: &Path) {
+    let support = home.join("Library/Application Support/Mailstream");
+    let accounts_file = support.join("accounts.json");
+    let mut accounts: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(&accounts_file).unwrap()).unwrap();
+    for &n in &CALENDAR_ACCOUNTS {
+        let scopes = if bench_account(n).1 == "google" {
+            vec!["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events"]
+        } else {
+            vec!["https://graph.microsoft.com/Calendars.ReadWrite"]
+        };
+        accounts[n]["scopes"].as_array_mut().unwrap().extend(scopes.into_iter().map(Value::from));
+    }
+    std::fs::write(&accounts_file, serde_json::to_string_pretty(&accounts).unwrap()).unwrap();
+
+    // Seconds since 2001 at `hour:minute` on the day `day` days from today, local time.
+    let at = |day: i32, hour: i32, minute: i32| -> f64 {
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let now = unsafe { libc::time(std::ptr::null_mut()) };
+        unsafe { libc::localtime_r(&now, &mut tm) };
+        (tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, tm.tm_isdst) = (tm.tm_mday + day, hour, minute, 0, -1);
+        (unsafe { libc::mktime(&mut tm) }) as f64 - 978_307_200.0
+    };
+    let day_name = |day: i32| -> String {
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let time = (at(day, 12, 0) + 978_307_200.0) as libc::time_t;
+        unsafe { libc::localtime_r(&time, &mut tm) };
+        format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
+    };
+    let person = |n: usize, response: &str| json!({ "name": format!("Person {n}"), "email": format!("person{n}@example.com"), "response": response });
+    let mut next = 0;
+    let mut timed = |calendar: &str, title: &str, (day, hour, minute): (i32, i32, i32), minutes: i32, response: Option<&str>| {
+        next += 1;
+        let start = at(day, hour, minute);
+        let mut event = json!({
+            "id": format!("e{next}"), "calendar": calendar, "title": title, "start": start, "end": start + minutes as f64 * 60.0,
+            "mine": response.is_none() || response == Some("organizer"),
+        });
+        if let Some(response) = response {
+            event["response"] = json!(response);
+            event["organizer"] = if response == "organizer" { json!({ "name": "Bench", "email": "bench@example.com" }) } else { person(1, "accepted") };
+            event["attendees"] = json!([person(1, "accepted"), person(2, "tentative"), person(3, "needsAction")]);
+            event["meetingUrl"] = json!(format!("https://meet.example.com/{next}"));
+        }
+        if title.contains("Lunch") || title.contains("Dinner") {
+            event["location"] = json!("Cafe Example");
+        }
+        event
+    };
+    let all_day = |id: &str, calendar: &str, title: &str, first: i32, days: i32| {
+        let (start_day, end_day) = (day_name(first), day_name(first + days));
+        json!({
+            "id": id, "calendar": calendar, "title": title, "start": at(first, 0, 0), "end": at(first + days, 0, 0),
+            "allDay": true, "startDay": start_day, "endDay": end_day, "mine": true,
+        })
+    };
+
+    let mut work = Vec::new();
+    for day in -10..=14 {
+        work.push(timed("work", "Standup", (day, 9, 30), 15, Some("accepted")));
+    }
+    work.extend([
+        timed("work", "Design review", (-2, 10, 0), 60, Some("organizer")),
+        timed("work", "1:1 with Person 4", (-2, 14, 0), 30, Some("accepted")),
+        timed("work", "Sprint planning", (-1, 9, 45), 90, Some("organizer")),
+        timed("personal", "Lunch with Person 5", (-1, 12, 0), 60, None),
+        timed("work", "Architecture review", (0, 10, 30), 90, Some("organizer")),
+        timed("personal", "Lunch", (0, 12, 30), 45, None),
+        timed("work", "Interview: frontend", (0, 14, 0), 60, Some("needsAction")),
+        timed("work", "Focus time", (0, 15, 0), 120, None),
+        timed("personal", "Gym", (0, 18, 0), 60, None),
+        timed("work", "Customer call", (1, 11, 0), 30, Some("accepted")),
+        timed("work", "Offsite prep", (1, 13, 0), 60, Some("organizer")),
+        timed("work", "Hiring sync", (1, 13, 0), 30, Some("tentative")),
+        timed("personal", "Dinner with Person 6", (1, 19, 0), 120, None),
+        timed("work", "Release retro", (2, 16, 0), 60, Some("accepted")),
+        timed("work", "Keynote", (3, 9, 0), 60, Some("accepted")),
+        timed("work", "Workshop", (4, 13, 0), 180, Some("accepted")),
+        timed("work", "Quarterly planning", (7, 9, 0), 180, Some("organizer")),
+        timed("personal", "Dentist", (8, 8, 0), 60, Some("declined")),
+        timed("personal", "Flight to NYC", (9, 22, 0), 240, None),
+        timed("work", "Week ahead", (-4, 16, 0), 30, None),
+    ]);
+    work.push(all_day("trip", "personal", "Conference trip", 3, 3));
+    work.push(all_day("hike", "personal", "Weekend hike", -3, 1));
+    work.push(all_day("ooo", "work", "Person 7 out of office", 1, 2));
+    let outlook = vec![
+        timed("calendar", "Product sync", (0, 10, 0), 60, Some("tentative")),
+        timed("calendar", "Vendor demo", (0, 11, 0), 30, Some("accepted")),
+        timed("calendar", "Budget review", (1, 13, 30), 60, Some("organizer")),
+        timed("calendar", "Board prep", (2, 10, 0), 120, Some("organizer")),
+        timed("calendar", "Team lunch", (2, 12, 0), 60, Some("accepted")),
+        timed("calendar", "Planning poker", (-1, 15, 0), 60, Some("accepted")),
+        all_day("holiday", "calendar", "Company holiday", 2, 1),
+    ];
+
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let caches = home.join("Library/Caches/dev.mailstream.Mailstream");
+        let cache = mailstream_engine::cache::MailCache::new(support.join("mail.db"), caches);
+        let fetched = unsafe { libc::time(std::ptr::null_mut()) } as f64 - 978_307_200.0;
+        for (&n, (calendars, events)) in CALENDAR_ACCOUNTS.iter().zip([
+            (
+                json!([
+                    { "id": "work", "name": "Work", "color": "#4285f4", "primary": true, "writable": true },
+                    { "id": "personal", "name": "Personal", "color": "#33b679", "writable": true },
+                ]),
+                work,
+            ),
+            (json!([{ "id": "calendar", "name": "Calendar", "color": "#e67c73", "primary": true, "writable": true }]), outlook),
+        ]) {
+            // Format 1: the engine's copies say which calendars may be written (not fetched again).
+            let copy = json!({ "fetched": fetched, "calendars": calendars, "events": events, "format": 1 });
+            cache.save_calendar(&serde_json::from_value(copy).expect("bench data has the engine's shape"), &bench_account(n).0);
+        }
+        cache.flush().await;
+    });
 }
 
 fn load_average() -> f64 {

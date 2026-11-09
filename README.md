@@ -52,7 +52,7 @@ Designed after macOS Liquid Glass with Dia's floating islands, Mailstream delive
 
 ### 💬 Unified Communication: Chat & Calendar
 - **Google Chat**: Integrated Google Workspace Chat spaces and direct messages directly in your sidebar, complete with real-time updates and threaded replies.
-- **Multi-Account Calendar Agenda**: View upcoming schedules across all connected Google and Outlook accounts, inspect event details, and join Google Meet or Microsoft Teams calls in one click.
+- **Multi-Account Calendar**: View your schedule across all connected Google and Outlook accounts as an agenda or as day and week timelines (all-day row, overlapping meetings side by side, a current-time line), page through days and weeks, inspect event details, and join Google Meet or Microsoft Teams calls in one click.
 - **Event Editing**: Add events (title, time or all day, place, guests, description) to any calendar you can write to, and change or delete the ones you organize; Google Calendar and Outlook tell the guests.
 - **Interactive Meeting Invitations**: RSVP to calendar invitations (Accept, Tentative, Decline) directly from email headers with instant calendar sync.
 
@@ -260,6 +260,9 @@ To install directly to `/Applications`:
 | `⌥⌘N` | Global | New Google Chat space |
 | `⌘F` | Global | Focus search bar |
 | `⌘,` | Global | Preferences / Settings |
+| `a` / `d` / `w` | Calendar | Agenda, day or week view |
+| `t` | Calendar | Today |
+| `←` `→` / `k` `j` / `p` `n` | Calendar (day, week) | Previous / next day or week |
 
 ---
 

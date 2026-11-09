@@ -172,6 +172,7 @@ fn lists_every_accounts_events_from_the_cache_and_fetches_only_when_old_or_asked
     let names: Vec<&str> = accounts[0]["calendars"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["Me", "Team", "Gone"], "the unticked calendar is left out");
     assert_eq!(list["loading"], json!(false));
+    assert_eq!(list["synced"], json!({ "from": local_day(-7), "until": local_day(61) }), "a week back to 60 days on is fetched");
 
     let standup = &list["events"][1];
     assert_eq!((standup["account"].as_str(), standup["calendarName"].as_str(), standup["color"].as_str()), (Some(GOOGLE), Some("Me"), Some("#9fe1e7")));
