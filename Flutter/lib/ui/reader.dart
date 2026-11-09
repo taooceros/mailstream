@@ -478,10 +478,10 @@ class _Body extends StatelessWidget {
 }
 
 /// An HTML body at the height of its content. On the Mac the reader's switch picks the renderer
-/// ([ReaderRendererScope]): Blitz ([BlitzBody], laid out and painted in Rust) by default,
-/// HyperRender ([HyperBody]), or WebKit (`MailHtmlView` in the runner); all draw the same prepared
-/// parts, only the chosen one is mounted, and switching keeps the parts and the fold. Windows
-/// draws with WebView2 ([WindowsMailHtml]).
+/// ([ReaderRendererScope]): Blitz ([BlitzBody], laid out and painted in Rust) by default, WebKit
+/// (`MailHtmlView` in the runner), or the experimental HyperRender ([HyperBody], MS-171); all draw
+/// the same prepared parts, only the chosen one is mounted, and switching keeps the parts and the
+/// fold. Windows draws with WebView2 ([WindowsMailHtml]).
 /// Quoted history (Gmail, Outlook, Thunderbird, Apple Mail markup) is cut out of the body and
 /// folds behind a toggle, drawn when it opens.
 class MailHtml extends StatefulWidget {

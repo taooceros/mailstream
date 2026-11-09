@@ -232,16 +232,17 @@ files from the paperclip picker, file drops on the window, or ⌘V (Finder files
 pixels/screenshots). Normal text paste still edits the focused field. Attachments can be removed
 before sending and remain with their draft when switching tabs or browsing other mail.
 
-HTML mail on the Mac is drawn by Blitz (in Rust, below) unless the reader's three-way switch
-(beside the header's chips, "Renderer:" HyperRender / Blitz / WebView (original)) picks another
-(MS-138, MS-147, MS-166; HyperRender is `hyper_render` 1.14.1, in Flutter, `lib/ui/hyper_body.dart`).
-Every launch starts in Blitz (`MAILSTREAM_READER_RENDERER=hyper|webKit` starts in another, for
-`scripts/bench.sh`); the choice
-holds until the app quits and nothing changes it but the switch: a body a renderer draws poorly
-never falls back to another by itself. All three draw the same prepared parts, so switching keeps
-the message, its open quote and the parts cache; only the chosen renderer's bodies are mounted.
-Known HyperRender gaps: a rule made only of top/bottom borders is not drawn, cell percentage
-widths are ignored, `<center>`/`<font>` are dropped.
+HTML mail on the Mac is drawn by Blitz (in Rust, below) unless the reader's switch (beside the
+header's chips, "Renderer:" Blitz / WebView (original) / HyperRender (experimental)) picks
+another (MS-138, MS-147, MS-166). HyperRender (`hyper_render` 1.14.1, in Flutter,
+`lib/ui/hyper_body.dart`) is experimental and set aside (MS-171): it stays in the switch, last,
+and its code stays, but it gets no further work for now. Every launch starts in Blitz
+(`MAILSTREAM_READER_RENDERER=webKit|hyper` starts in another, for `scripts/bench.sh`); the
+choice holds until the app quits and nothing changes it but the switch: a body a renderer draws
+poorly never falls back to another by itself. All three draw the same prepared parts, so
+switching keeps the message, its open quote and the parts cache; only the chosen renderer's
+bodies are mounted. Known HyperRender gaps: a rule made only of top/bottom borders is not drawn,
+cell percentage widths are ignored, `<center>`/`<font>` are dropped.
 
 Blitz (`blitz-dom`/`blitz-html`/`blitz-paint`, `FFI/src/html_page.rs`; `lib/ui/blitz_body.dart`)
 parses, lays out and paints each body on a thread of its own in the engine's library; Flutter

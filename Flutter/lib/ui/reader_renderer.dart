@@ -4,11 +4,13 @@ import 'package:macos_ui/macos_ui.dart';
 import '../platform.dart';
 import 'design.dart';
 
-/// What draws an HTML body in the reader.
+/// What draws an HTML body in the reader, in the switch's order. HyperRender is experimental and
+/// set aside (MS-171): last in the switch and labelled so, still reachable there and through
+/// `MAILSTREAM_READER_RENDERER=hyper`.
 enum ReaderRenderer {
-  hyper('HyperRender'),
   blitz('Blitz'),
-  webKit('WebView (original)');
+  webKit('WebView (original)'),
+  hyper('HyperRender (experimental)');
 
   const ReaderRenderer(this.title);
   final String title;

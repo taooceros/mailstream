@@ -8,8 +8,9 @@
 #   reader away with two fingers; calendar-week (Flutter) opens the calendar's week view and
 #   scrolls its timeline from top to bottom and back (needs BENCH_HOME, whose seed holds a
 #   week of events, fresh for 5 minutes after seeding).
-#   MAILSTREAM_READER_RENDERER (Flutter, Mac) opens the reader in blitz (default), hyper or
-#   webKit, e.g. BENCH_SCENARIO=reader-swipe MAILSTREAM_READER_RENDERER=hyper.
+#   MAILSTREAM_READER_RENDERER (Flutter, Mac) opens the reader in blitz (default) or webKit,
+#   e.g. BENCH_SCENARIO=reader-swipe MAILSTREAM_READER_RENDERER=webKit; hyper still opens the
+#   experimental HyperRender, which is set aside (MS-171).
 #   Build the release first: Flutter/README.md, or CONFIG=release GPUI/run.sh.
 #   BENCH_HZ (120) is the display's refresh rate. Each run first waits up to 2 minutes for the
 #   1-minute load average to fall below BENCH_MAX_LOAD (4): builds in other workspaces skew

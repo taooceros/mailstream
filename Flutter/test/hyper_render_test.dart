@@ -178,7 +178,7 @@ void main() {
       addTearDown(renderer.dispose);
       await tester.pumpWidget(host(renderer, cache));
       await tester.pumpAndSettle();
-      expect(find.text('HyperRender'), findsOneWidget);
+      expect(find.text('HyperRender (experimental)'), findsOneWidget);
       await tester.tap(find.byIcon(CupertinoIcons.ellipsis));
       await tester.pumpAndSettle();
       expect(find.byType(HyperBody), findsNWidgets(2));
@@ -237,6 +237,25 @@ void main() {
       ));
       expect(find.byType(MacosPopupButton<ReaderRenderer>), findsNothing);
       expect(find.textContaining('Renderer:'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the switch lists Blitz, the WebView, then HyperRender marked experimental (MS-171)', (tester) async {
+      final renderer = ValueNotifier(ReaderRenderer.initial);
+      addTearDown(renderer.dispose);
+      await tester.pumpWidget(MacosApp(
+        theme: MailTheme.macos(Brightness.light),
+        home: ReaderRendererScope(controller: renderer, child: const Center(child: ReaderRendererSwitch())),
+      ));
+      expect(find.text('Blitz'), findsOneWidget);
+      final items = tester.widget<MacosPopupButton<ReaderRenderer>>(find.byType(MacosPopupButton<ReaderRenderer>)).items!;
+      expect(items.map((item) => item.value), [ReaderRenderer.blitz, ReaderRenderer.webKit, ReaderRenderer.hyper]);
+      expect(items.map((item) => (item.child as Text).data), ['Blitz', 'WebView (original)', 'HyperRender (experimental)']);
+      await tester.tap(find.byType(MacosPopupButton<ReaderRenderer>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('HyperRender (experimental)').last);
+      await tester.pumpAndSettle();
+      expect(renderer.value, ReaderRenderer.hyper);
       await tester.pumpWidget(const SizedBox());
     });
 
