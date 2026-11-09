@@ -9,13 +9,14 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'state/calendar_state.dart';
 import 'state/mail_state.dart';
 
 /// The frame measurements `scripts/bench.sh flutter` runs (AGENTS.md, "Performance: 120 fps").
 /// With `MAILSTREAM_BENCH=scroll` the conversation list scrolls by itself, every frame's timing
 /// goes to `MAILSTREAM_BENCH_OUT` and the app quits; `MAILSTREAM_BENCH=calendar-week` opens the
 /// calendar's week view and scrolls its timeline the same way, from top to bottom and back;
-/// `MAILSTREAM_BENCH=reader-swipe` is [ReaderDismissBench].
+/// `MAILSTREAM_BENCH=reader-swipe` is [ReaderDismissBench], `calendar-page` [CalendarPageBench].
 abstract final class ScrollBench {
   /// The scenario every front end runs: after [settle], [legs] legs of [leg] each, down
   /// [distance] and back, the offset set from the time each frame.
@@ -181,6 +182,120 @@ abstract final class ReaderDismissBench {
       scheduler.removeTimingsCallback(collect);
       final log = StringBuffer(
         '# frontend=flutter scenario=reader-swipe rounds=$rounds rest=${rest.inMilliseconds}ms '
+        'swipe=${distance.toInt()}px/${swipe.inMilliseconds}ms\n',
+      );
+      for (final (first, last) in segments) {
+        log.writeln('# segment');
+        _frames(log, timings, first, last + 1);
+      }
+      File(out).writeAsStringSync(log.toString());
+    });
+  }
+}
+
+/// `MAILSTREAM_BENCH=calendar-page`: after [ScrollBench.settle], pages the calendar's week view
+/// (the shell opens it) by [steps], first each with a two-finger swipe across the timeline as
+/// [ReaderDismissBench] makes one (fingers land, rest [rest], move [distance] in [swipe], let go),
+/// then each as ← and → do; the steps go back and forth around this week, where the seed has
+/// events. The log holds the frames from the fingers landing (or the key) until the week has come
+/// to rest, each page a `# segment` of its own (the app rests [pause] between them).
+abstract final class CalendarPageBench {
+  static const scenario = 'calendar-page';
+  static const steps = [1, -1, -1, 1, 1, -1, -1, 1];
+  static const rest = Duration(milliseconds: 100);
+  static const swipe = Duration(milliseconds: 280);
+  static const distance = 360.0;
+  static const pause = Duration(seconds: 1);
+
+  static bool _attached = false;
+  static bool Function()? _paging;
+  static Rect Function()? _area;
+
+  /// Runs the measurement on the window's calendar, if the environment asks for it.
+  static void attach(CalendarState calendar) {
+    final out = Platform.environment['MAILSTREAM_BENCH_OUT'];
+    if (_attached || ScrollBench.scenario != scenario || out == null) return;
+    _attached = true;
+    Timer(ScrollBench.settle, () {
+      // Until the week's grid is up with the events.
+      Timer.periodic(const Duration(milliseconds: 500), (wait) {
+        if (_paging == null || !calendar.listed || calendar.events.isEmpty) return;
+        wait.cancel();
+        _run(calendar, out);
+      });
+    });
+  }
+
+  /// The week's grid in view: whether its pages are still moving, and where it is on screen.
+  static void attachGrid({required bool Function() paging, required Rect Function() area}) {
+    if (ScrollBench.scenario != scenario) return;
+    _paging = paging;
+    _area = area;
+  }
+
+  static Future<void> _run(CalendarState calendar, String out) async {
+    final scheduler = SchedulerBinding.instance;
+    final timings = <FrameTiming>[];
+    void collect(List<FrameTiming> batch) => timings.addAll(batch);
+    scheduler.addTimingsCallback(collect);
+    final segments = <(int, int)>[];
+    Future<void> settle(int start) async {
+      await scheduler.endOfFrame;
+      while (_paging!()) {
+        await scheduler.endOfFrame;
+      }
+      segments.add((start, scheduler.currentSystemFrameTimeStamp.inMicroseconds));
+      await Future<void>.delayed(pause);
+    }
+
+    for (final (round, step) in steps.indexed) {
+      final at = _area!().center;
+      final start = Timeline.now;
+      final pointer = 2000 + round;
+      GestureBinding.instance.handlePointerEvent(PointerPanZoomStartEvent(
+        pointer: pointer,
+        device: pointer,
+        position: at,
+        timeStamp: Duration(microseconds: start),
+      ));
+      await Future<void>.delayed(rest);
+      final released = Completer<void>();
+      var pan = Offset.zero;
+      late final Ticker ticker;
+      ticker = Ticker((elapsed) {
+        final stamp = scheduler.currentSystemFrameTimeStamp;
+        final fraction = min(1.0, elapsed.inMicroseconds / swipe.inMicroseconds);
+        // Fingers to the left bring the next week.
+        final next = Offset(-step * distance * fraction, 0);
+        GestureBinding.instance.handlePointerEvent(PointerPanZoomUpdateEvent(
+          pointer: pointer,
+          device: pointer,
+          position: at,
+          timeStamp: stamp,
+          pan: next,
+          panDelta: next - pan,
+        ));
+        pan = next;
+        if (fraction < 1) return;
+        GestureBinding.instance.handlePointerEvent(
+          PointerPanZoomEndEvent(pointer: pointer, device: pointer, position: at, timeStamp: stamp),
+        );
+        ticker.dispose();
+        released.complete();
+      });
+      ticker.start();
+      await released.future;
+      await settle(start);
+    }
+    for (final step in steps) {
+      final start = Timeline.now;
+      calendar.page(step);
+      await settle(start);
+    }
+    _finish(() {
+      scheduler.removeTimingsCallback(collect);
+      final log = StringBuffer(
+        '# frontend=flutter scenario=$scenario swipes=${steps.length} keys=${steps.length} rest=${rest.inMilliseconds}ms '
         'swipe=${distance.toInt()}px/${swipe.inMilliseconds}ms\n',
       );
       for (final (first, last) in segments) {

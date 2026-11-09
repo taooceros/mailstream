@@ -6,8 +6,10 @@
 #   BENCH_SCENARIO picks the scenario (MAILSTREAM_BENCH): scroll (default; every front end)
 #   scrolls the conversation list; reader-swipe (Flutter) opens conversations and swipes each
 #   reader away with two fingers; calendar-week (Flutter) opens the calendar's week view and
-#   scrolls its timeline from top to bottom and back (needs BENCH_HOME, whose seed holds a
-#   week of events, fresh for 5 minutes after seeding).
+#   scrolls its timeline from top to bottom and back; calendar-page (Flutter) pages that week
+#   view back and forth, eight times with a two-finger swipe, then eight times as ← and → do
+#   (both need BENCH_HOME, whose seed holds events from ten days back to two weeks ahead,
+#   fresh for 5 minutes after seeding).
 #   MAILSTREAM_READER_RENDERER (Flutter, Mac) opens the reader in blitz (default) or webKit,
 #   e.g. BENCH_SCENARIO=reader-swipe MAILSTREAM_READER_RENDERER=webKit; hyper still opens the
 #   experimental HyperRender, which is set aside (MS-171).
@@ -36,7 +38,7 @@ case $FRONTEND in
     ;;
 esac
 case $FRONTEND/$SCENARIO in
-  */scroll | flutter/reader-swipe | flutter/calendar-week) ;;
+  */scroll | flutter/reader-swipe | flutter/calendar-week | flutter/calendar-page) ;;
   *)
     echo "error: no $SCENARIO scenario in $FRONTEND" >&2
     exit 2

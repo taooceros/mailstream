@@ -66,7 +66,7 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
           _presence.forward(from: 0);
         } else {
           // Reopened while still sliding out: it springs back from where it is.
-          _drag.animateWith(_settle(_drag.value, 0, _drag.velocity));
+          _drag.animateWith(settleSwipe(_drag.value, 0, _drag.velocity));
         }
       }
       _shown = child;
@@ -79,7 +79,7 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
         // it moves at once and glides out instead of creeping off first.
         _drag.value += (1 - Motion.curve.transform(_presence.value)) * _width;
         _presence.value = 1;
-        _drag.animateWith(_settle(_drag.value, _width, 0)).whenComplete(() {
+        _drag.animateWith(settleSwipe(_drag.value, _width, 0)).whenComplete(() {
           if (mounted && widget.child == null) setState(() => _shown = null);
           if (mounted) _ready.shown = _shown != null;
         });
@@ -122,9 +122,9 @@ class _SlideLayerState extends State<SlideLayer> with TickerProviderStateMixin {
     final offset = _drag.value;
     if (HorizontalSwipe.dismisses(offset, velocity, width)) {
       _swipedAway = true;
-      _drag.animateWith(_settle(offset, offset.sign * width, velocity)).whenComplete(widget.onDismiss);
+      _drag.animateWith(settleSwipe(offset, offset.sign * width, velocity)).whenComplete(widget.onDismiss);
     } else {
-      _drag.animateWith(_settle(offset, 0, velocity));
+      _drag.animateWith(settleSwipe(offset, 0, velocity));
     }
   }
 
@@ -197,8 +197,8 @@ class HorizontalSwipe {
 
 /// Springs a swiped value from [from] to [to], starting at the fingers' [velocity]; it rests
 /// within half a pixel of [to], so a dismissal hands over with the page off screen. [pixels] is
-/// how many pixels one unit of the value moves the page.
-Simulation _settle(double from, double to, double velocity, {double pixels = 1}) => SpringSimulation(
+/// how many pixels one unit of the value moves the page. The calendar's pages settle on it too.
+Simulation settleSwipe(double from, double to, double velocity, {double pixels = 1}) => SpringSimulation(
   Motion.spring,
   from,
   to,
@@ -354,7 +354,7 @@ class _SplitDetailState extends State<SplitDetail> with TickerProviderStateMixin
         _split.value = 0;
       } else {
         // Closes on the spring a swipe settles on, carrying whatever speed the split has.
-        _split.animateWith(_settle(_split.value, 0, _split.velocity, pixels: _travel)).whenComplete(_hide);
+        _split.animateWith(settleSwipe(_split.value, 0, _split.velocity, pixels: _travel)).whenComplete(_hide);
       }
     }
     _ready.shown = _shown != null;
@@ -424,9 +424,9 @@ class _SplitDetailState extends State<SplitDetail> with TickerProviderStateMixin
     final splitVelocity = -velocity / travel;
     if (offset > 0 && HorizontalSwipe.dismisses(offset, velocity, travel)) {
       _swipedAway = true;
-      _split.animateWith(_settle(_split.value, 0, splitVelocity, pixels: travel)).whenComplete(widget.onDismiss);
+      _split.animateWith(settleSwipe(_split.value, 0, splitVelocity, pixels: travel)).whenComplete(widget.onDismiss);
     } else {
-      _split.animateWith(_settle(_split.value, 1, splitVelocity, pixels: travel));
+      _split.animateWith(settleSwipe(_split.value, 1, splitVelocity, pixels: travel));
     }
   }
 

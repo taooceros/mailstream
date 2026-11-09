@@ -1,13 +1,41 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/intl.dart' hide TextDirection;
 import 'package:macos_ui/macos_ui.dart';
 import 'package:mailstream/mailstream.dart' as engine;
+import 'package:mailstream_ui/state/calendar_state.dart';
+import 'package:mailstream_ui/ui/calendar.dart';
 import 'package:mailstream_ui/ui/calendar_grid.dart';
 import 'package:mailstream_ui/ui/design.dart';
 
 import 'calendar_agenda_test.dart' show item;
+
+/// A week grid that pages as the calendar does: [onPage] moves its days by a week.
+class _PagedWeek extends StatefulWidget {
+  const _PagedWeek({required this.start, required this.events, required this.pages});
+
+  final DateTime start;
+  final List<engine.CalendarItem> events;
+  final List<int> pages;
+
+  @override
+  State<_PagedWeek> createState() => _PagedWeekState();
+}
+
+class _PagedWeekState extends State<_PagedWeek> {
+  late DateTime start = widget.start;
+
+  void page(int step) => setState(() {
+    widget.pages.add(step);
+    start = DateTime(start.year, start.month, start.day + 7 * step);
+  });
+
+  @override
+  Widget build(BuildContext context) =>
+      CalendarGrid(days: weekDays(start), events: widget.events, colorOf: (_) => const Color(0xFF4285F4), onPage: page);
+}
 
 /// A meeting the account was invited to, answered `response`, with `guests` others.
 engine.CalendarItem meeting(String title, DateTime start, int minutes, String? response, {int guests = 0, bool call = false}) =>
@@ -370,5 +398,124 @@ void main() {
     }
     expect(broken, isEmpty);
     await tester.pumpWidget(const SizedBox());
+  });
+
+  group('paging', () {
+    final start = DateTime(2031, 3, 2);
+    final events = [
+      meeting('This week', DateTime(2031, 3, 3, 10), 60, 'accepted'),
+      meeting('Next week', DateTime(2031, 3, 10, 10), 60, 'accepted'),
+    ];
+
+    Future<List<int>> week(WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1000, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final pages = <int>[];
+      await tester.pumpWidget(MacosApp(
+        theme: MailTheme.macos(Brightness.light),
+        home: _PagedWeek(start: start, events: events, pages: pages),
+      ));
+      await tester.pumpAndSettle();
+      return pages;
+    }
+
+    testWidgets('a two-finger swipe drags the week 1:1, springs back when short and on to the next past a third', (tester) async {
+      final pages = await week(tester);
+      // The weeks either side are laid out but not drawn at rest.
+      expect(find.text('This week'), findsOneWidget);
+      expect(find.text('Next week'), findsNothing);
+      final left = tester.getRect(find.text('This week')).left;
+
+      final fingers = await tester.createGesture(kind: PointerDeviceKind.trackpad);
+      await fingers.panZoomStart(const Offset(500, 400));
+      await tester.pump();
+      expect(find.text('Next week'), findsOneWidget);
+      await fingers.panZoomUpdate(const Offset(500, 400), pan: const Offset(-100, 0));
+      await tester.pump();
+      expect(tester.getRect(find.text('This week')).left, closeTo(left - 100, 0.5));
+      // The next week's Monday follows a page width to the right.
+      expect(tester.getRect(find.text('Next week')).left, closeTo(left - 100 + (1000 - CalendarGrid.gutter), 0.5));
+      await fingers.panZoomEnd();
+      await tester.pumpAndSettle();
+      expect(pages, isEmpty);
+      expect(tester.getRect(find.text('This week')).left, closeTo(left, 0.5));
+      expect(find.text('Next week'), findsNothing);
+
+      final again = await tester.createGesture(kind: PointerDeviceKind.trackpad);
+      await again.panZoomStart(const Offset(500, 400));
+      await tester.pump();
+      await again.panZoomUpdate(const Offset(500, 400), pan: const Offset(-400, 0));
+      await tester.pump();
+      await again.panZoomEnd();
+      await tester.pump();
+      expect(pages, [1]);
+      await tester.pumpAndSettle();
+      expect(tester.getRect(find.text('Next week')).left, closeTo(left, 0.5));
+      expect(find.text('This week'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the next week (→) slides in over Motion.page, the last one sliding out beside it', (tester) async {
+      final pages = await week(tester);
+      final left = tester.getRect(find.text('This week')).left;
+      tester.state<_PagedWeekState>(find.byType(_PagedWeek)).page(1);
+      await tester.pump();
+      await tester.pump(Motion.page ~/ 3);
+      final leaving = tester.getRect(find.text('This week')).left, coming = tester.getRect(find.text('Next week')).left;
+      expect(leaving, lessThan(left));
+      expect(coming, greaterThan(left));
+      expect(coming - leaving, closeTo(1000 - CalendarGrid.gutter, 0.5));
+      await tester.pump(Motion.page);
+      expect(tester.getRect(find.text('Next week')).left, closeTo(left, 0.5));
+      await tester.pumpAndSettle();
+      expect(find.text('This week'), findsNothing);
+      expect(pages, [1]);
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  testWidgets('Day and Week open at the hours the other was scrolled to', (tester) async {
+    tester.view.physicalSize = const Size(1000, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final offset = TimelineOffset();
+    Widget grid(List<DateTime> days) => MacosApp(
+      theme: MailTheme.macos(Brightness.light),
+      home: CalendarGrid(key: ValueKey(days.length), days: days, events: const [], colorOf: (_) => const Color(0xFF4285F4), offset: offset),
+    );
+    await tester.pumpWidget(grid(weekDays(DateTime(2031, 3, 2))));
+    await tester.pumpAndSettle();
+    final week = tester.widget<SingleChildScrollView>(find.byType(SingleChildScrollView).last).controller!;
+    week.jumpTo(6.5 * CalendarGrid.hourHeight);
+    await tester.pumpWidget(grid([DateTime(2031, 3, 4)]));
+    await tester.pumpAndSettle();
+    final day = tester.widget<SingleChildScrollView>(find.byType(SingleChildScrollView).last).controller!;
+    expect(day.offset, 6.5 * CalendarGrid.hourHeight);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  test('up and down step through the events in view, day by day, all-day ones first', () {
+    final events = [
+      item('Lunch', start: DateTime(2026, 11, 10, 12), end: DateTime(2026, 11, 10, 13)),
+      item('Standup', start: DateTime(2026, 11, 10, 9), end: DateTime(2026, 11, 10, 9, 15)),
+      item('Trip', startDay: '2026-11-09', endDay: '2026-11-12'),
+      item('Next week', start: DateTime(2026, 11, 16, 9), end: DateTime(2026, 11, 16, 10)),
+      item('Last week', start: DateTime(2026, 11, 5, 9), end: DateTime(2026, 11, 5, 10)),
+    ];
+    List<String> titles(CalendarView view, DateTime focus) =>
+        [for (final event in eventsInView(events, view, focus, DateTime(2026, 11, 10))) event.title];
+    // The trip once, on its first day shown.
+    expect(titles(CalendarView.week, DateTime(2026, 11, 11)), ['Trip', 'Standup', 'Lunch']);
+    expect(titles(CalendarView.day, DateTime(2026, 11, 10)), ['Trip', 'Standup', 'Lunch']);
+    expect(titles(CalendarView.agenda, DateTime(2026, 11, 1)), ['Trip', 'Standup', 'Lunch', 'Next week']);
+
+    final inView = eventsInView(events, CalendarView.week, DateTime(2026, 11, 11), DateTime(2026, 11, 10));
+    expect(steppedEvent(inView, null, 1)!.title, 'Trip');
+    expect(steppedEvent(inView, null, -1)!.title, 'Lunch');
+    expect(steppedEvent(inView, eventKey(inView[1]), 1)!.title, 'Lunch');
+    expect(steppedEvent(inView, eventKey(inView[2]), 1)!.title, 'Lunch');
+    expect(steppedEvent(inView, eventKey(inView[0]), -1)!.title, 'Trip');
+    expect(steppedEvent(const [], null, 1), isNull);
   });
 }

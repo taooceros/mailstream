@@ -3,6 +3,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/foundation.dart' show ValueListenable, listEquals;
+import 'package:flutter/gestures.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 import 'package:intl/intl.dart' hide TextDirection;
 import 'package:macos_ui/macos_ui.dart';
@@ -16,6 +18,7 @@ import 'calendar.dart';
 import 'common.dart';
 import 'design.dart';
 import 'glass.dart';
+import 'slide_layer.dart';
 
 /// Minutes in a day by the clock.
 const _dayMinutes = 24 * 60;
@@ -293,12 +296,15 @@ class CalendarViewBar extends StatelessWidget {
   }
 }
 
-/// Agenda, Day and Week side by side, the one in view raised.
+/// Agenda, Day and Week side by side, equally wide, the one in view raised on a capsule that
+/// slides under the next one picked.
 class _ViewSwitch extends StatelessWidget {
   const _ViewSwitch({required this.view, required this.onChanged});
 
   final CalendarView view;
   final ValueChanged<CalendarView> onChanged;
+
+  static const _views = [(CalendarView.agenda, 'Agenda', 'A'), (CalendarView.day, 'Day', 'D'), (CalendarView.week, 'Week', 'W')];
 
   @override
   Widget build(BuildContext context) {
@@ -311,22 +317,17 @@ class _ViewSwitch extends StatelessWidget {
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: () => onChanged(value),
-          child: AnimatedContainer(
-            duration: Motion.quick,
+          child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: selected ? (light ? MacosColors.white : colors.strongFill) : MacosColors.transparent,
-              borderRadius: BorderRadius.circular(6),
-              boxShadow: selected && light
-                  ? [BoxShadow(color: MacosColors.black.withValues(alpha: 0.12), blurRadius: 2, offset: const Offset(0, 1))]
-                  : null,
-            ),
-            child: Text(
-              label,
-              style: context.text.callout.copyWith(
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                color: selected ? colors.label : colors.secondaryLabel,
+            child: Center(
+              child: AnimatedDefaultTextStyle(
+                duration: Motion.short,
+                curve: Motion.curve,
+                style: context.text.callout.copyWith(
+                  fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                  color: selected ? colors.label : colors.secondaryLabel,
+                ),
+                child: Text(label),
               ),
             ),
           ),
@@ -334,17 +335,45 @@ class _ViewSwitch extends StatelessWidget {
       );
     }
 
+    final index = _views.indexWhere((v) => v.$1 == view);
     return Container(
       height: 28,
       padding: const EdgeInsets.all(2),
       decoration: BoxDecoration(color: colors.strongFill.withValues(alpha: light ? 0.7 : 0.5), borderRadius: BorderRadius.circular(8)),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        segment(CalendarView.agenda, 'Agenda', 'A'),
-        segment(CalendarView.day, 'Day', 'D'),
-        segment(CalendarView.week, 'Week', 'W'),
-      ]),
+      child: IntrinsicWidth(
+        child: Stack(children: [
+          Positioned.fill(
+            child: AnimatedAlign(
+              key: const ValueKey('viewIndicator'),
+              duration: Motion.short,
+              curve: Motion.curve,
+              alignment: Alignment(index * 2 / (_views.length - 1) - 1, 0),
+              child: FractionallySizedBox(
+                widthFactor: 1 / _views.length,
+                heightFactor: 1,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: light ? MacosColors.white : colors.strongFill,
+                    borderRadius: BorderRadius.circular(6),
+                    boxShadow: light
+                        ? [BoxShadow(color: MacosColors.black.withValues(alpha: 0.12), blurRadius: 2, offset: const Offset(0, 1))]
+                        : null,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Row(children: [for (final (value, label, key) in _views) Expanded(child: segment(value, label, key))]),
+        ]),
+      ),
     );
   }
+}
+
+/// Where the timeline is scrolled, kept by the calendar's pane for the grids that show it in turn:
+/// switching between Day and Week keeps the same hours in view.
+class TimelineOffset {
+  double? pixels;
 }
 
 /// Days side by side on a 24-hour timeline, after MS-163: each day's date (today's raised on a
@@ -354,6 +383,12 @@ class _ViewSwitch extends StatelessWidget {
 /// dates. The layout is worked out only when the events or days change; scrolling moves the
 /// timeline's layer and the time line repaints alone, once a minute (the cards again only when
 /// one of them ends).
+///
+/// The days page as one (MS-170): a two-finger swipe on the trackpad drags them 1:1, the gutter's
+/// hours staying put, and past a third of the width or flicked they spring on to the next page
+/// ([Motion.spring], as the reader does), else back; a new [days] one page on (← and →) slides in
+/// over [Motion.page]. The pages either side are laid out at rest, each in its own layers, so
+/// paging only moves layers.
 class CalendarGrid extends StatefulWidget {
   const CalendarGrid({
     super.key,
@@ -365,10 +400,12 @@ class CalendarGrid extends StatefulWidget {
     this.onOpen,
     this.onDay,
     this.onCreate,
+    this.onPage,
     this.toNow,
+    this.offset,
   });
 
-  /// Consecutive days, from the left.
+  /// Consecutive days, from the left: one page.
   final List<DateTime> days;
   final List<engine.CalendarItem> events;
   final Color Function(engine.CalendarItem event) colorOf;
@@ -382,8 +419,14 @@ class CalendarGrid extends StatefulWidget {
   /// An empty stretch of time was clicked: a new event from there (to the quarter hour).
   final ValueChanged<DateTime>? onCreate;
 
+  /// A swipe went on to the next page (1) or the one before (-1); the owner moves [days] by it.
+  final ValueChanged<int>? onPage;
+
   /// Scrolls the timeline to now when it fires.
   final Listenable? toNow;
+
+  /// Where the timeline opens and what it keeps as it scrolls; none: around now.
+  final TimelineOffset? offset;
 
   static const hourHeight = 48.0;
   static const gutter = 52.0;
@@ -400,33 +443,131 @@ class CalendarGrid extends StatefulWidget {
   State<CalendarGrid> createState() => _CalendarGridState();
 }
 
-class _CalendarGridState extends State<CalendarGrid> {
+/// One page of the grid: its days laid out ([layoutDay], [layoutAllDay]) and, once built, its
+/// widgets, which stay the same objects until what they show changes so paging rebuilds none.
+class _Page {
+  _Page(List<engine.CalendarItem> events, this.days) {
+    layout(events);
+  }
+
+  final List<DateTime> days;
+  late List<List<DayPlacement>> timed;
+  late List<List<bool>> conflicts;
+  late List<double> booked;
+  late ({List<AllDayPlacement> placements, int rows}) allDay;
+  Widget? header, allDayRow, timeline;
+
+  void layout(List<engine.CalendarItem> events) {
+    timed = [for (final day in days) layoutDay(events, day)];
+    conflicts = [for (final placements in timed) dayConflicts(placements)];
+    booked = [for (final placements in timed) bookedHours(placements)];
+    allDay = layoutAllDay(events, days);
+    forget();
+  }
+
+  void forget() => header = allDayRow = timeline = null;
+
+  /// Rows the all-day row shows, the rest scrolling.
+  int get shownRows => math.min(allDay.rows, CalendarGrid.allDayRows);
+}
+
+class _CalendarGridState extends State<CalendarGrid> with TickerProviderStateMixin {
   ScrollController? _scroll;
   final _clock = ValueNotifier<DateTime>(DateTime.now());
   Timer? _tick;
-  late List<List<DayPlacement>> _timed;
-  late List<List<bool>> _conflicts;
-  late List<double> _booked;
-  late ({List<AllDayPlacement> placements, int rows}) _allDay;
+
+  /// The pages built, by first day: the one shown and, at rest, one either side; while paging,
+  /// also the ones it left.
+  final _pages = <DateTime, _Page>{};
+
+  /// Where the pages are, in page widths: 0 the shown one in place, -0.5 halfway to the next.
+  late final _pan = AnimationController.unbounded(vsync: this);
+  final _swipe = HorizontalSwipe();
+  late final _ready = SwipeReadiness(this);
+
+  /// [_pan] when the swipe turned horizontal; none until then.
+  double? _origin;
+
+  /// The release velocity, in pages a second, a swipe paging on hands to the page's spring.
+  double? _fling;
+
+  /// Fingers are on the trackpad or the pages are moving: the pages either side are drawn.
+  bool _moving = false;
+  bool _fingers = false;
+  bool _neighborsQueued = false;
+  double _pageWidth = 1;
+
+  int get _length => widget.days.length;
+  DateTime get _first => widget.days.first;
+
+  /// The first day of the page `index` pages from the one shown.
+  DateTime _pageStart(int index) => DateTime(_first.year, _first.month, _first.day + index * _length);
+
+  _Page _page(DateTime start) =>
+      _pages[start] ??= _Page(widget.events, [for (var i = 0; i < _length; i++) DateTime(start.year, start.month, start.day + i)]);
 
   @override
   void initState() {
     super.initState();
-    _layout();
+    _page(_first);
+    _ready.shown = true;
     _scheduleTick();
+    _queueNeighbors();
     widget.toNow?.addListener(_onToNow);
+    CalendarPageBench.attachGrid(paging: () => mounted && (_moving || _pan.isAnimating), area: _area);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // The theme may have changed: the cards' colors.
+    _forget();
   }
 
   @override
   void didUpdateWidget(CalendarGrid old) {
     super.didUpdateWidget(old);
-    if (!identical(old.events, widget.events) || old.days.first != widget.days.first || old.days.length != widget.days.length) {
-      _layout();
+    if (!identical(old.events, widget.events)) {
+      for (final page in _pages.values) {
+        page.layout(widget.events);
+      }
+    } else if (old.selected != widget.selected ||
+        old.synced != widget.synced ||
+        (old.onOpen == null) != (widget.onOpen == null) ||
+        (old.onDay == null) != (widget.onDay == null) ||
+        (old.onCreate == null) != (widget.onCreate == null)) {
+      _forget();
+    }
+    final moved = old.days.length == _length ? _daysBetween(old.days.first, _first) : null;
+    final pages = moved != null && moved % _length == 0 ? moved ~/ _length : null;
+    if (pages == null || pages.abs() > 1) {
+      // Another view's days, or a jump (Today): the new page shows at once.
+      _pan
+        ..stop()
+        ..value = 0;
+      _fling = null;
+      _pages.clear();
+      _page(_first);
+      _moving = _fingers;
+      _queueNeighbors();
+    } else if (pages != 0) {
+      // One page on: the old one stays where it was and both move on together.
+      _page(_first);
+      _moving = true;
+      _pan.value += pages;
+      final fling = _fling;
+      _fling = null;
+      (fling != null
+              ? _pan.animateWith(settleSwipe(_pan.value, 0, fling, pixels: _pageWidth))
+              : _pan.animateTo(0, duration: Motion.page, curve: Motion.curve))
+          .whenComplete(_settled);
     }
     if (old.toNow != widget.toNow) {
       old.toNow?.removeListener(_onToNow);
       widget.toNow?.addListener(_onToNow);
     }
+    final selected = widget.selected;
+    if (selected != null && selected != old.selected) WidgetsBinding.instance.addPostFrameCallback((_) => _reveal(selected));
   }
 
   @override
@@ -435,14 +576,114 @@ class _CalendarGridState extends State<CalendarGrid> {
     _tick?.cancel();
     _clock.dispose();
     _scroll?.dispose();
+    _ready.dispose();
+    _pan.dispose();
     super.dispose();
   }
 
-  void _layout() {
-    _timed = [for (final day in widget.days) layoutDay(widget.events, day)];
-    _conflicts = [for (final placements in _timed) dayConflicts(placements)];
-    _booked = [for (final placements in _timed) bookedHours(placements)];
-    _allDay = layoutAllDay(widget.events, widget.days);
+  /// The pages' widgets show something else now (the open event, the time, the theme).
+  void _forget() {
+    for (final page in _pages.values) {
+      page.forget();
+    }
+  }
+
+  /// Lays out the pages either side of the one shown after the first frame in which nothing
+  /// animates (no page sliding, no view fading in), and lets go of the others: a page's first
+  /// layout never lands in the middle of a slide.
+  void _queueNeighbors() {
+    if (_neighborsQueued) return;
+    _neighborsQueued = true;
+    final scheduler = SchedulerBinding.instance;
+    void check(Duration _) {
+      if (!mounted) return;
+      if (_moving || scheduler.transientCallbackCount > 0) {
+        scheduler.addPostFrameCallback(check);
+        return;
+      }
+      _neighborsQueued = false;
+      setState(() {
+        final keep = {for (var i = -1; i <= 1; i++) _pageStart(i)};
+        _pages.removeWhere((start, _) => !keep.contains(start));
+        keep.forEach(_page);
+      });
+    }
+
+    scheduler
+      ..addPostFrameCallback(check)
+      ..ensureVisualUpdate();
+  }
+
+  /// The pages came to rest.
+  void _settled() {
+    if (!mounted || _fingers) return;
+    if (!_pan.isAnimating) _pan.value = 0;
+    if (_moving) setState(() => _moving = false);
+    _queueNeighbors();
+  }
+
+  void _start(PointerPanZoomStartEvent event) {
+    _swipe.start(event);
+    _origin = null;
+    _fingers = true;
+    _ready.fingersDown();
+    // Normally laid out already, at rest; else now, while the fingers have yet to move.
+    if (!_moving || !_pages.containsKey(_pageStart(-1)) || !_pages.containsKey(_pageStart(1))) {
+      setState(() {
+        _moving = true;
+        _page(_pageStart(-1));
+        _page(_pageStart(1));
+      });
+    }
+  }
+
+  void _update(PointerPanZoomUpdateEvent event) {
+    if (!_swipe.update(event)) return;
+    if (_origin == null) {
+      _ready.swipeTookOver();
+      _pan.stop();
+      _fling = null;
+      _origin = _pan.value;
+    }
+    // One page either way: the next one's neighbor is laid out once it rests.
+    _pan.value = (_origin! + event.pan.dx / _pageWidth).clamp(-1.0, 1.0);
+  }
+
+  void _end() {
+    _ready.swipeTookOver();
+    _fingers = false;
+    final velocity = _swipe.end();
+    final dragged = _origin != null;
+    _origin = null;
+    if (velocity == null || !dragged) {
+      if (!_pan.isAnimating) _settled();
+      return;
+    }
+    final width = _pageWidth, offset = _pan.value * width, onPage = widget.onPage;
+    if (onPage != null && offset != 0 && HorizontalSwipe.dismisses(offset, velocity, width)) {
+      // The owner moves the days on; the page's spring starts from here with this velocity.
+      _fling = velocity / width;
+      onPage(offset < 0 ? 1 : -1);
+      SchedulerBinding.instance
+        ..ensureVisualUpdate()
+        ..addPostFrameCallback((_) {
+          // The days did not move on: back to the page shown.
+          if (mounted && _fling != null) _springBack(_fling!);
+        });
+    } else {
+      _springBack(velocity / width);
+    }
+  }
+
+  void _springBack(double velocity) {
+    _fling = null;
+    _pan.animateWith(settleSwipe(_pan.value, 0, velocity, pixels: _pageWidth)).whenComplete(_settled);
+  }
+
+  /// The grid on screen, for the paging benchmark.
+  Rect _area() {
+    final box = context.findRenderObject()! as RenderBox;
+    return box.localToGlobal(Offset.zero) & box.size;
   }
 
   /// Whether an event ended in `(from, to]`: its card flattens into the tray.
@@ -450,13 +691,6 @@ class _CalendarGridState extends State<CalendarGrid> {
     final end = eventSpan(event).end;
     return end.isAfter(from) && !end.isAfter(to);
   });
-
-  /// Whether an all-day row event goes on past the last day shown.
-  bool _continuesAfter(engine.CalendarItem event) {
-    final span = eventSpan(event);
-    final last = span.end.isAfter(span.start) ? dayOf(span.end.subtract(const Duration(microseconds: 1))) : dayOf(span.start);
-    return last.isAfter(widget.days.last);
-  }
 
   /// Moves the time line on each minute; a new day rebuilds for today's date, an event ending
   /// for its card.
@@ -466,7 +700,7 @@ class _CalendarGridState extends State<CalendarGrid> {
       final before = _clock.value, after = DateTime.now();
       _clock.value = after;
       if (!mounted) return;
-      if (!sameDayOf(before, after) || _endedBetween(before, after)) setState(() {});
+      if (!sameDayOf(before, after) || _endedBetween(before, after)) setState(_forget);
       _scheduleTick();
     });
   }
@@ -489,6 +723,31 @@ class _CalendarGridState extends State<CalendarGrid> {
     });
   }
 
+  void _keepOffset() => widget.offset?.pixels = _scroll!.offset;
+
+  /// Brings the open event's card into view when it is off the timeline's visible hours (↑ and ↓
+  /// open the next one): at once, as the event beside the grid changes at once.
+  void _reveal(EventKey key) {
+    final scroll = _scroll;
+    final page = _pages[_first];
+    if (!mounted || scroll == null || !scroll.hasClients || page == null) return;
+    const perMinute = CalendarGrid.hourHeight / 60;
+    for (final placements in page.timed) {
+      for (final placed in placements) {
+        if (eventKey(placed.event) != key) continue;
+        final top = CalendarGrid.inset + placed.top * perMinute, bottom = CalendarGrid.inset + placed.bottom * perMinute;
+        final position = scroll.position;
+        final margin = CalendarGrid.hourHeight / 2;
+        if (top < position.pixels) {
+          scroll.jumpTo(math.max(position.minScrollExtent, top - margin));
+        } else if (bottom > position.pixels + position.viewportDimension) {
+          scroll.jumpTo(math.min(position.maxScrollExtent, math.max(top - margin, bottom + margin - position.viewportDimension)));
+        }
+        return;
+      }
+    }
+  }
+
   bool _fetched(DateTime day) {
     final synced = widget.synced;
     return synced == null || (!day.isBefore(synced.from) && day.isBefore(synced.until));
@@ -499,86 +758,83 @@ class _CalendarGridState extends State<CalendarGrid> {
     final colors = context.colors;
     final days = widget.days;
     final today = dayOf(_clock.value);
-    final todayIndex = days.indexWhere((day) => sameDayOf(day, today));
-    final unfetched = [for (final day in days) !_fetched(day)];
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (unfetched.contains(true))
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
-            child: Text(syncedNote(widget.synced!), style: context.text.footnote.copyWith(color: colors.secondaryLabel)),
+    final current = _page(_first);
+    final showsToday = days.any((day) => sameDayOf(day, today));
+    // The pages built, each with how many pages from the one shown it is.
+    final pages = [for (final page in _pages.values) (index: _daysBetween(_first, page.days.first) ~/ _length, page: page)];
+    final rows = current.shownRows;
+    return Listener(
+      onPointerPanZoomStart: _start,
+      onPointerPanZoomUpdate: _update,
+      onPointerPanZoomEnd: (_) => _end(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (days.any((day) => !_fetched(day)))
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
+              child: Text(syncedNote(widget.synced!), style: context.text.footnote.copyWith(color: colors.secondaryLabel)),
+            ),
+          SizedBox(
+            height: CalendarGrid.headerHeight,
+            child: Row(children: [
+              const SizedBox(width: CalendarGrid.gutter),
+              Expanded(child: _strip(pages, (page) => page.header ??= _header(page, today))),
+            ]),
           ),
-        SizedBox(
-          height: CalendarGrid.headerHeight,
-          child: Row(children: [
-            const SizedBox(width: CalendarGrid.gutter),
-            for (var i = 0; i < days.length; i++)
-              Expanded(
-                child: CalendarDayHeader(day: days[i], today: i == todayIndex, booked: _booked[i], onTap: widget.onDay),
-              ),
-          ]),
-        ),
-        if (_allDay.rows > 0) _allDayRow(context, today),
-        const Hairline(),
-        // Keyed: the synced note and the all-day row come and go above it without starting the
-        // timeline over (its scroll position, the benchmark's controller).
-        Expanded(
-          key: const ValueKey('timeline'),
-          child: LayoutBuilder(builder: (context, constraints) {
-            final scroll = _scroll ??= ScrollController(initialScrollOffset: _nowOffset(constraints.maxHeight));
-            ScrollBench.attach(scroll, scenario: ScrollBench.calendarWeek);
-            return SingleChildScrollView(
-              controller: scroll,
-              child: SizedBox(
-                height: CalendarGrid.timelineHeight,
-                child: RepaintBoundary(
+          // Grows and shrinks with the page shown; each page keeps its own height inside.
+          AnimatedContainer(
+            duration: Motion.page,
+            curve: Motion.curve,
+            height: rows > 0 ? rows * CalendarGrid.allDayHeight + 4 : 0,
+            child: ClipRect(
+              child: Stack(children: [
+                if (rows > 0)
+                  Positioned(
+                    left: 0,
+                    width: CalendarGrid.gutter - 6,
+                    top: 4,
+                    child: Text('all-day', textAlign: TextAlign.right, style: context.text.caption1.copyWith(color: colors.secondaryLabel)),
+                  ),
+                Positioned.fill(
+                  left: CalendarGrid.gutter,
+                  child: _strip(pages, (page) => page.allDayRow ??= _allDayRow(page), heightOf: (page) => page.shownRows * CalendarGrid.allDayHeight + 4),
+                ),
+              ]),
+            ),
+          ),
+          const Hairline(),
+          // Keyed: the synced note and the all-day row come and go above it without starting the
+          // timeline over (its scroll position, the benchmark's controller).
+          Expanded(
+            key: const ValueKey('timeline'),
+            child: LayoutBuilder(builder: (context, constraints) {
+              _pageWidth = math.max(1, constraints.maxWidth - CalendarGrid.gutter);
+              final scroll = _scroll ??= ScrollController(
+                initialScrollOffset: widget.offset?.pixels ?? _nowOffset(constraints.maxHeight),
+              )..addListener(_keepOffset);
+              ScrollBench.attach(scroll, scenario: ScrollBench.calendarWeek);
+              return SingleChildScrollView(
+                controller: scroll,
+                child: SizedBox(
+                  height: CalendarGrid.timelineHeight,
                   child: Stack(children: [
-                    Positioned.fill(
-                      child: CustomPaint(
-                        painter: _HoursPainter(
-                          unfetched: unfetched,
-                          today: todayIndex,
-                          spotlight: colors.spotlight,
-                          line: colors.separator,
-                          label: context.text.caption1.copyWith(color: colors.secondaryLabel),
-                          shade: colors.label.withValues(alpha: colors.brightness == Brightness.light ? 0.035 : 0.05),
-                        ),
-                      ),
-                    ),
+                    // The hours stay put as the days page.
                     Positioned(
-                      left: CalendarGrid.gutter,
-                      right: 0,
-                      top: CalendarGrid.inset,
-                      height: 24 * CalendarGrid.hourHeight,
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          for (var i = 0; i < days.length; i++)
-                            Expanded(
-                              child: _DayColumn(
-                                day: days[i],
-                                placements: _timed[i],
-                                conflicts: _conflicts[i],
-                                colorOf: widget.colorOf,
-                                selected: widget.selected,
-                                now: _clock.value,
-                                onOpen: widget.onOpen,
-                                onCreate: widget.onCreate,
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                    Positioned.fill(
-                      child: IgnorePointer(
+                      left: 0,
+                      width: CalendarGrid.gutter,
+                      top: 0,
+                      bottom: 0,
+                      child: RepaintBoundary(
                         child: CustomPaint(
-                          painter: _NowPainter(
+                          painter: _GutterPainter(
                             clock: _clock,
-                            days: days,
+                            now: showsToday,
+                            line: colors.separator,
+                            label: context.text.caption1.copyWith(color: colors.secondaryLabel),
                             color: colors.red,
                             mask: colors.tray,
-                            label: context.text.caption1.copyWith(
+                            nowLabel: context.text.caption1.copyWith(
                               color: MacosColors.white,
                               fontWeight: FontWeight.w600,
                               fontFeatures: const [FontFeature.tabularFigures()],
@@ -587,28 +843,122 @@ class _CalendarGridState extends State<CalendarGrid> {
                         ),
                       ),
                     ),
+                    Positioned(
+                      left: CalendarGrid.gutter,
+                      right: 0,
+                      top: 0,
+                      bottom: 0,
+                      child: _strip(pages, (page) => page.timeline ??= _timeline(page, today), clipper: const _NowDotClip()),
+                    ),
                   ]),
                 ),
-              ),
-            );
-          }),
-        ),
-      ],
+              );
+            }),
+          ),
+        ],
+      ),
     );
   }
 
-  Widget _allDayRow(BuildContext context, DateTime today) {
+  /// The pages side by side in one band (the dates, the all-day row or the timeline), each
+  /// [heightOf] tall from the top (else the band's height), the ones beside the shown page drawn
+  /// only while paging.
+  Widget _strip(
+    List<({int index, _Page page})> pages,
+    Widget Function(_Page page) content, {
+    double Function(_Page page)? heightOf,
+    CustomClipper<Rect>? clipper,
+  }) => ClipRect(
+    clipper: clipper,
+    child: Stack(
+      fit: StackFit.expand,
+      children: [
+        for (final (:index, :page) in pages)
+          Positioned(
+            key: ValueKey(page.days.first),
+            left: 0,
+            right: 0,
+            top: 0,
+            height: heightOf?.call(page),
+            bottom: heightOf == null ? 0 : null,
+            child: _PageSlide(
+              pan: _pan,
+              index: index,
+              child: Offstage(offstage: index != 0 && !_moving, child: content(page)),
+            ),
+          ),
+      ],
+    ),
+  );
+
+  Widget _header(_Page page, DateTime today) => RepaintBoundary(
+    child: Row(children: [
+      for (var i = 0; i < page.days.length; i++)
+        Expanded(
+          child: CalendarDayHeader(day: page.days[i], today: sameDayOf(page.days[i], today), booked: page.booked[i], onTap: widget.onDay),
+        ),
+    ]),
+  );
+
+  Widget _timeline(_Page page, DateTime today) {
     final colors = context.colors;
-    final rows = _allDay.rows;
-    final shown = math.min(rows, CalendarGrid.allDayRows);
+    final days = page.days;
+    return RepaintBoundary(
+      child: Stack(children: [
+        Positioned.fill(
+          child: CustomPaint(
+            painter: _DaysPainter(
+              unfetched: [for (final day in days) !_fetched(day)],
+              today: days.indexWhere((day) => sameDayOf(day, today)),
+              spotlight: colors.spotlight,
+              line: colors.separator,
+              shade: colors.label.withValues(alpha: colors.brightness == Brightness.light ? 0.035 : 0.05),
+            ),
+          ),
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          top: CalendarGrid.inset,
+          height: 24 * CalendarGrid.hourHeight,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (var i = 0; i < days.length; i++)
+                Expanded(
+                  child: _DayColumn(
+                    day: days[i],
+                    placements: page.timed[i],
+                    conflicts: page.conflicts[i],
+                    colorOf: widget.colorOf,
+                    selected: widget.selected,
+                    now: _clock.value,
+                    onOpen: widget.onOpen,
+                    onCreate: widget.onCreate,
+                  ),
+                ),
+            ],
+          ),
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: RepaintBoundary(child: CustomPaint(painter: _NowLinePainter(clock: _clock, days: days, color: colors.red))),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _allDayRow(_Page page) {
+    final rows = page.allDay.rows;
     final content = SizedBox(
       height: rows * CalendarGrid.allDayHeight + 4,
       child: LayoutBuilder(builder: (context, constraints) {
-        final column = (constraints.maxWidth - CalendarGrid.gutter) / widget.days.length;
+        final column = constraints.maxWidth / page.days.length;
         return Stack(children: [
-          for (final placed in _allDay.placements)
+          for (final placed in page.allDay.placements)
             Positioned(
-              left: CalendarGrid.gutter + placed.first * column + 1,
+              left: placed.first * column + 1,
               width: (placed.last - placed.first + 1) * column - 2,
               top: placed.row * CalendarGrid.allDayHeight + 2,
               height: CalendarGrid.allDayHeight - 2,
@@ -617,27 +967,48 @@ class _CalendarGridState extends State<CalendarGrid> {
                 color: widget.colorOf(placed.event),
                 selected: widget.selected == eventKey(placed.event),
                 past: !eventSpan(placed.event).end.isAfter(_clock.value),
-                before: _daysBetween(widget.days.first, dayOf(eventSpan(placed.event).start)) < 0,
-                after: placed.last == widget.days.length - 1 && _continuesAfter(placed.event),
+                before: _daysBetween(page.days.first, dayOf(eventSpan(placed.event).start)) < 0,
+                after: placed.last == page.days.length - 1 && _continuesAfter(placed.event, page.days.last),
                 onTap: widget.onOpen == null ? null : () => widget.onOpen!(placed.event),
               ),
             ),
         ]);
       }),
     );
-    return SizedBox(
-      height: shown * CalendarGrid.allDayHeight + 4,
-      child: Stack(children: [
-        Positioned(
-          left: 0,
-          width: CalendarGrid.gutter - 6,
-          top: 4,
-          child: Text('all-day', textAlign: TextAlign.right, style: context.text.caption1.copyWith(color: colors.secondaryLabel)),
-        ),
-        Positioned.fill(child: rows > shown ? SingleChildScrollView(child: content) : content),
-      ]),
-    );
+    return RepaintBoundary(child: rows > page.shownRows ? SingleChildScrollView(child: content) : content);
   }
+
+  /// Whether an all-day row event goes on past `last`, the page's last day.
+  static bool _continuesAfter(engine.CalendarItem event, DateTime last) {
+    final span = eventSpan(event);
+    final end = span.end.isAfter(span.start) ? dayOf(span.end.subtract(const Duration(microseconds: 1))) : dayOf(span.start);
+    return end.isAfter(last);
+  }
+}
+
+/// A page of the grid [index] pages from the one shown, moved by [pan] (page widths): a
+/// translation of its layers alone, never a new layout.
+class _PageSlide extends AnimatedWidget {
+  const _PageSlide({required Animation<double> pan, required this.index, required this.child}) : super(listenable: pan);
+
+  final int index;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) =>
+      FractionalTranslation(translation: Offset(index + (listenable as Animation<double>).value, 0), child: child);
+}
+
+/// The timeline's pages, clipped at the gutter but for the current time's dot on the first day's
+/// line.
+class _NowDotClip extends CustomClipper<Rect> {
+  const _NowDotClip();
+
+  @override
+  Rect getClip(Size size) => Rect.fromLTRB(-CalendarMetrics.dot / 2, 0, size.width, size.height);
+
+  @override
+  bool shouldReclip(_NowDotClip old) => false;
 }
 
 /// A day's weekday and date. Today's lifts off the tray as a small card in the accent color; the
@@ -1208,43 +1579,85 @@ class GuestAvatars extends StatelessWidget {
   }
 }
 
-/// The timeline's hour lines and their labels, the lines between days, the light over [today]'s
-/// column and the shade over days the engine does not fetch.
-class _HoursPainter extends CustomPainter {
-  _HoursPainter({
-    required this.unfetched,
-    required this.today,
-    required this.spotlight,
-    required this.line,
-    required this.label,
-    required this.shade,
-  });
+/// A page's days on the timeline: the hour lines, the lines between days (the first day's left
+/// edge too), the light over [today]'s column and the shade over days the engine does not fetch.
+class _DaysPainter extends CustomPainter {
+  _DaysPainter({required this.unfetched, required this.today, required this.spotlight, required this.line, required this.shade});
 
   final List<bool> unfetched;
 
-  /// Today's column, or -1 when today isn't shown.
+  /// Today's column, or -1 when today isn't on the page.
   final int today;
   final Color spotlight;
   final Color line;
-  final TextStyle label;
   final Color shade;
 
   @override
   void paint(Canvas canvas, Size size) {
-    const gutter = CalendarGrid.gutter, inset = CalendarGrid.inset, hour = CalendarGrid.hourHeight;
-    final column = (size.width - gutter) / unfetched.length;
-    if (today >= 0) canvas.drawRect(Rect.fromLTWH(gutter + today * column, 0, column, size.height), Paint()..color = spotlight);
+    const inset = CalendarGrid.inset, hour = CalendarGrid.hourHeight;
+    final column = size.width / unfetched.length;
+    if (today >= 0) canvas.drawRect(Rect.fromLTWH(today * column, 0, column, size.height), Paint()..color = spotlight);
     final shadePaint = Paint()..color = shade;
     for (var i = 0; i < unfetched.length; i++) {
-      if (unfetched[i]) canvas.drawRect(Rect.fromLTWH(gutter + i * column, 0, column, size.height), shadePaint);
+      if (unfetched[i]) canvas.drawRect(Rect.fromLTWH(i * column, 0, column, size.height), shadePaint);
     }
+    final paint = Paint()
+      ..color = line
+      ..strokeWidth = 1;
+    for (var h = 0; h <= 24; h++) {
+      final y = inset + h * hour;
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
+    }
+    for (var i = 0; i < unfetched.length; i++) {
+      final x = i * column;
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DaysPainter old) =>
+      !listEquals(old.unfetched, unfetched) || old.today != today || old.spotlight != spotlight || old.line != line || old.shade != shade;
+}
+
+/// The current time in the timeline's gutter: 10:08, or 22:08 where the clock runs to 24 hours.
+String gutterTime(DateTime now) => DateFormat(DateFormat.jm().pattern!.contains('a') ? 'h:mm' : 'H:mm').format(now);
+
+const _nowPillHeight = 16.0;
+
+/// The gutter, which stays put as the days page: the hours' labels and the ends of their lines,
+/// and, when the page shown has today ([now]), the current time as a pill (over the hour label
+/// it would collide with). Repaints on its own as [clock] moves.
+class _GutterPainter extends CustomPainter {
+  _GutterPainter({
+    required this.clock,
+    required this.now,
+    required this.line,
+    required this.label,
+    required this.color,
+    required this.mask,
+    required this.nowLabel,
+  }) : super(repaint: clock);
+
+  final ValueListenable<DateTime> clock;
+  final bool now;
+  final Color line;
+  final TextStyle label;
+  final Color color;
+
+  /// The gutter's background, which covers the hour label under the pill.
+  final Color mask;
+  final TextStyle nowLabel;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const gutter = CalendarGrid.gutter, inset = CalendarGrid.inset, hour = CalendarGrid.hourHeight;
     final paint = Paint()
       ..color = line
       ..strokeWidth = 1;
     final format = DateFormat.j();
     for (var h = 0; h <= 24; h++) {
       final y = inset + h * hour;
-      canvas.drawLine(Offset(gutter - 4, y), Offset(size.width, y), paint);
+      canvas.drawLine(Offset(gutter - 4, y), Offset(gutter, y), paint);
       if (h == 0 || h == 24) continue;
       final text = TextPainter(
         text: TextSpan(text: format.format(DateTime(2000, 1, 1, h)), style: label),
@@ -1253,57 +1666,62 @@ class _HoursPainter extends CustomPainter {
       text.paint(canvas, Offset(gutter - 8 - text.width, y - text.height / 2));
       text.dispose();
     }
-    for (var i = 0; i < unfetched.length; i++) {
-      final x = gutter + i * column;
-      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+    if (!now) return;
+    final time = clock.value;
+    final minutes = _clockMinutes(time);
+    final y = inset + minutes / 60 * hour;
+    final hourY = inset + (minutes / 60).round() * hour;
+    if ((hourY - y).abs() < _nowPillHeight) {
+      canvas.drawRect(Rect.fromLTRB(0, hourY - _nowPillHeight / 2, gutter - 4, hourY + _nowPillHeight / 2), Paint()..color = mask);
     }
+    final text = TextPainter(text: TextSpan(text: gutterTime(time), style: nowLabel), textDirection: TextDirection.ltr)..layout();
+    const padding = 5.0;
+    final pill = RRect.fromLTRBR(
+      gutter - 3 - text.width - 2 * padding,
+      y - _nowPillHeight / 2,
+      gutter - 3,
+      y + _nowPillHeight / 2,
+      const Radius.circular(_nowPillHeight / 2),
+    );
+    canvas.drawRRect(pill, Paint()..color = color);
+    text.paint(canvas, Offset(pill.left + padding, y - text.height / 2));
+    text.dispose();
   }
 
   @override
-  bool shouldRepaint(_HoursPainter old) =>
-      !listEquals(old.unfetched, unfetched) ||
-      old.today != today ||
-      old.spotlight != spotlight ||
+  bool shouldRepaint(_GutterPainter old) =>
+      old.clock != clock ||
+      old.now != now ||
       old.line != line ||
       old.label != label ||
-      old.shade != shade;
+      old.color != color ||
+      old.mask != mask ||
+      old.nowLabel != nowLabel;
 }
 
-/// The current time in the timeline's gutter: 10:08, or 22:08 where the clock runs to 24 hours.
-String gutterTime(DateTime now) => DateFormat(DateFormat.jm().pattern!.contains('a') ? 'h:mm' : 'H:mm').format(now);
-
-/// The current time: a pill with the time in the gutter (over the hour label it would collide
-/// with), a line with a dot across today's column and a dashed one across the other days;
-/// repaints on its own as [clock] moves.
-class _NowPainter extends CustomPainter {
-  _NowPainter({required this.clock, required this.days, required this.color, required this.mask, required this.label})
-    : super(repaint: clock);
+/// The current time across a page with today: a line with a dot across today's column and a
+/// dashed one across the page's other days; repaints on its own as [clock] moves.
+class _NowLinePainter extends CustomPainter {
+  _NowLinePainter({required this.clock, required this.days, required this.color}) : super(repaint: clock);
 
   final ValueListenable<DateTime> clock;
   final List<DateTime> days;
   final Color color;
-
-  /// The gutter's background, which covers the hour label under the pill.
-  final Color mask;
-  final TextStyle label;
-
-  static const _pillHeight = 16.0;
 
   @override
   void paint(Canvas canvas, Size size) {
     final now = clock.value;
     final index = days.indexWhere((day) => day.year == now.year && day.month == now.month && day.day == now.day);
     if (index < 0) return;
-    const gutter = CalendarGrid.gutter, inset = CalendarGrid.inset, hour = CalendarGrid.hourHeight;
-    final column = (size.width - gutter) / days.length;
-    final minutes = _clockMinutes(now);
-    final y = inset + minutes / 60 * hour;
-    final left = gutter + index * column;
+    const inset = CalendarGrid.inset, hour = CalendarGrid.hourHeight;
+    final column = size.width / days.length;
+    final y = inset + _clockMinutes(now) / 60 * hour;
+    final left = index * column;
 
     final trail = Paint()
       ..color = color.withValues(alpha: CalendarMetrics.nowTrailOpacity)
       ..strokeWidth = 1;
-    for (var x = gutter; x < size.width; x += 2 * CalendarMetrics.dash) {
+    for (var x = 0.0; x < size.width; x += 2 * CalendarMetrics.dash) {
       if (x + CalendarMetrics.dash > left && x < left + column) continue;
       canvas.drawLine(Offset(x, y), Offset(math.min(x + CalendarMetrics.dash, size.width), y), trail);
     }
@@ -1312,26 +1730,8 @@ class _NowPainter extends CustomPainter {
       ..strokeWidth = 1.5;
     canvas.drawLine(Offset(left, y), Offset(left + column, y), solid);
     canvas.drawCircle(Offset(left, y), CalendarMetrics.dot / 2, solid);
-
-    final hourY = inset + (minutes / 60).round() * hour;
-    if ((hourY - y).abs() < _pillHeight) {
-      canvas.drawRect(Rect.fromLTRB(0, hourY - _pillHeight / 2, gutter - 4, hourY + _pillHeight / 2), Paint()..color = mask);
-    }
-    final text = TextPainter(text: TextSpan(text: gutterTime(now), style: label), textDirection: TextDirection.ltr)..layout();
-    const padding = 5.0;
-    final pill = RRect.fromLTRBR(
-      gutter - 3 - text.width - 2 * padding,
-      y - _pillHeight / 2,
-      gutter - 3,
-      y + _pillHeight / 2,
-      const Radius.circular(_pillHeight / 2),
-    );
-    canvas.drawRRect(pill, Paint()..color = color);
-    text.paint(canvas, Offset(pill.left + padding, y - text.height / 2));
-    text.dispose();
   }
 
   @override
-  bool shouldRepaint(_NowPainter old) =>
-      old.clock != clock || old.color != color || old.mask != mask || old.label != label || !listEquals(old.days, days);
+  bool shouldRepaint(_NowLinePainter old) => old.clock != clock || old.color != color || !listEquals(old.days, days);
 }

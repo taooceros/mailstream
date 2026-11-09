@@ -327,13 +327,22 @@ final class TextRoles {
   TextStyle get tag => _role(10, FontWeight.w600);
 }
 
-/// Motion for the pages that slide over the list.
+/// Motion for the pages that slide over the list, the calendar's pages and views.
 abstract final class Motion {
   static const quick = Duration(milliseconds: 150);
+
+  /// A day or week sliding in after ← or →.
+  static const page = Duration(milliseconds: 180);
   static const short = Duration(milliseconds: 200);
+
+  /// One open item giving way to the next beside the list (an event after ↑ or ↓).
+  static const swap = Duration(milliseconds: 240);
   static const medium = Duration(milliseconds: 300);
   static const enter = Duration(milliseconds: 400);
   static const exit = medium;
+
+  /// Where a view or pane coming in starts its scale, growing to full size as it fades in.
+  static const enterScale = 0.985;
 
   /// A strong deceleration: quick off the mark, a long settle.
   static const curve = Cubic(0.05, 0.7, 0.1, 1.0);

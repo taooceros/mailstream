@@ -77,10 +77,11 @@ class _MailShellState extends State<MailShell> {
     state.addListener(_offerSignIn);
     state.addListener(_checkFrameRateMenu);
     ReaderDismissBench.attach(state);
-    if (ScrollBench.scenario == ScrollBench.calendarWeek) {
+    if (ScrollBench.scenario == ScrollBench.calendarWeek || ScrollBench.scenario == CalendarPageBench.scenario) {
       state.calendar.setView(CalendarView.week);
       state.showCalendar();
     }
+    CalendarPageBench.attach(state.calendar);
     _window.setMethodCallHandler((call) async {
       switch (call.method) {
         case 'settings':
@@ -318,6 +319,12 @@ class _MailShellState extends State<MailShell> {
           calendar.page(-1);
         case LogicalKeyboardKey.arrowRight || LogicalKeyboardKey.keyJ || LogicalKeyboardKey.keyN when calendar.view != CalendarView.agenda:
           calendar.page(1);
+        // The next or previous event opens at once beside the calendar; j and k in the agenda,
+        // where they don't page.
+        case LogicalKeyboardKey.arrowDown || LogicalKeyboardKey.keyJ:
+          _stepEvent(1);
+        case LogicalKeyboardKey.arrowUp || LogicalKeyboardKey.keyK:
+          _stepEvent(-1);
         default:
           return KeyEventResult.ignored;
       }
@@ -705,22 +712,35 @@ class _MailShellState extends State<MailShell> {
   Widget _onChat(Widget Function() build, {Key? key}) =>
       ListenableBuilder(key: key, listenable: state.chat, builder: (context, _) => build());
 
-  /// The open event, rebuilt as the calendar's events change; one pane per event.
-  Widget _calendarPane(EventKey key) => _onCalendar(() {
-    final event = state.calendar.event(key);
-    if (event == null) return const SizedBox.shrink();
-    return CalendarEventPane(
-      key: ValueKey(key),
-      state: state,
-      event: event,
-      twoPane: _twoPane,
-      onBack: _back,
-    );
-  });
+  /// The open event, rebuilt as the calendar's events change; one pane per event, the next one
+  /// (↑, ↓) fading and growing in over the last.
+  Widget _calendarPane(EventKey key) => AnimatedSwitcher(
+    duration: Motion.swap,
+    switchInCurve: Motion.curve,
+    switchOutCurve: Motion.curve,
+    layoutBuilder: (current, previous) => Stack(fit: StackFit.expand, children: [...previous, ?current]),
+    transitionBuilder: (child, animation) => FadeTransition(
+      opacity: animation,
+      child: ScaleTransition(scale: Tween(begin: Motion.enterScale, end: 1.0).animate(animation), child: child),
+    ),
+    child: _onCalendar(key: ValueKey(key), () {
+      final event = state.calendar.event(key);
+      if (event == null) return const SizedBox.shrink();
+      return CalendarEventPane(state: state, event: event, twoPane: _twoPane, onBack: _back);
+    }),
+  );
+
+  /// Opens the event `step` after (1) or before (-1) the open one in the calendar's view.
+  void _stepEvent(int step) {
+    final calendar = state.calendar;
+    final inView = eventsInView(calendar.events, calendar.view, calendar.focus, dayOf(DateTime.now()));
+    final next = steppedEvent(inView, calendar.opened, step);
+    if (next != null) calendar.open(eventKey(next));
+  }
 
   /// `build`'s widget, rebuilt as the calendar's events change.
-  Widget _onCalendar(Widget Function() build) =>
-      ListenableBuilder(listenable: state.calendar, builder: (context, _) => build());
+  Widget _onCalendar(Widget Function() build, {Key? key}) =>
+      ListenableBuilder(key: key, listenable: state.calendar, builder: (context, _) => build());
 
   /// The conversation's island: the message scrolls under its toolbar, glass capsules floating
   /// over the top of it.

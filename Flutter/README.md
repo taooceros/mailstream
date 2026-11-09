@@ -470,6 +470,18 @@ runs the real shell over a synthetic calendar (a meeting seven minutes away, inv
 answer, answers kept in memory), for screenshots without accounts. Launching any build's
 executable with `-AppleInterfaceStyle Dark` shows it dark without changing the system's setting.
 
+The calendar moves like the reader (`lib/ui/calendar_grid.dart`, MS-170). Two fingers on the
+trackpad drag the day or week view's days 1:1, the hours in the gutter staying put; past a third
+of the width or flicked they spring on to the next day or week on `Motion.spring`, else back. ←
+and → (and the arrows in the bar) slide the next one in over `Motion.page`. The days either side
+are laid out at rest, after the first frame in which nothing animates, each in layers of its own,
+so paging only moves layers. Agenda, Day and Week fade and grow into each other over
+`Motion.short` under a capsule that slides to the view picked, and Day and Week keep the hours
+the other was scrolled to. ↑ and ↓ (J and K in the agenda) open the next or previous event in
+view at once, the list or timeline scrolling it into view and the event's pane fading through
+over `Motion.swap`. `flutter test test/calendar_grid_test.dart` covers the swipe, the slide, the
+kept hours and the order ↑ and ↓ follow.
+
 | Path | Role |
 | --- | --- |
 | `packages/mailstream` | The engine's Dart binding and the build hook that bundles its libraries |
@@ -491,7 +503,7 @@ executable with `-AppleInterfaceStyle Dark` shows it dark without changing the s
 | `lib/ui/settings.dart` | Settings (⌘,, the sidebar's Add Account…, or by itself at launch with no account): accounts (browser sign-in with an OAuth client, filled in with the one used last through `accounts.client`, whose secret stays in the engine; rename, remove) and every key of the settings.json Mailstream.app and `mailstream config` share (`config.*` over FFI), following edits made elsewhere |
 | `lib/ui/slide_layer.dart` | Bundles (and, in one pane, the reader) slide over the list, which stays mounted; trackpad swipe back |
 | `lib/ui/frame_rate.dart` | The frame rate meter (`FrameRateLayer` over the app in `main.dart`, `FrameRateMeter`, `FrameRateCounter`) |
-| `lib/bench.dart` | The frame measurements `scripts/bench.sh flutter` runs: `MAILSTREAM_BENCH=scroll` (the list scrolls itself) and `reader-swipe` (conversations open and are swiped away after a rest); every frame's `FrameTiming` is logged |
+| `lib/bench.dart` | The frame measurements `scripts/bench.sh flutter` runs: `MAILSTREAM_BENCH=scroll` (the list scrolls itself), `reader-swipe` (conversations open and are swiped away after a rest), `calendar-week` (the week's timeline scrolls itself) and `calendar-page` (the week view pages back and forth, with two-finger swipes, then as ← and → do); every frame's `FrameTiming` is logged |
 
 Keys: ↑/↓ or J/K move (beside an open conversation they open the next one), Return or Space
 opens, Esc or ⌘[ goes back, ⌘W closes the open conversation or chat space, E archives, ⌫ trashes, S stars, U toggles read, D resolves "Waiting on you" (or puts it back), R replies (⇧R or

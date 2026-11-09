@@ -56,6 +56,33 @@ List<AgendaDay> agendaDays(List<engine.CalendarItem> events, DateTime today) {
   ];
 }
 
+/// The events `view` shows, in the order ↑ and ↓ step through them: the agenda's from `today`
+/// on, else the day's or week's around `focus`; day by day, all-day ones first, then by start.
+/// An event over several days counts once, on its first day shown.
+List<engine.CalendarItem> eventsInView(List<engine.CalendarItem> events, CalendarView view, DateTime focus, DateTime today) {
+  final week = weekOf(focus);
+  final (from, until) = switch (view) {
+    CalendarView.agenda => (today, null),
+    CalendarView.day => (focus, DateTime(focus.year, focus.month, focus.day + 1)),
+    CalendarView.week => (week, DateTime(week.year, week.month, week.day + 7)),
+  };
+  final seen = <EventKey>{};
+  return [
+    for (final day in agendaDays(events, from))
+      if (until == null || day.day.isBefore(until))
+        for (final event in day.events)
+          if (seen.add(eventKey(event))) event,
+  ];
+}
+
+/// The event `step` after (1) or before (-1) `opened` in `inView` ([eventsInView]), staying at
+/// the ends; with none open, or the open one out of view, the first (or the last).
+engine.CalendarItem? steppedEvent(List<engine.CalendarItem> inView, EventKey? opened, int step) {
+  if (inView.isEmpty) return null;
+  final index = opened == null ? -1 : inView.indexWhere((event) => eventKey(event) == opened);
+  return inView[index < 0 ? (step > 0 ? 0 : inView.length - 1) : (index + step).clamp(0, inView.length - 1)];
+}
+
 /// An agenda day's header: Today, Tomorrow, else the weekday and date.
 String agendaTitle(DateTime day, DateTime today) {
   if (sameDay(day, today)) return 'Today · ${DateFormat('EEEE, MMMM d').format(day)}';
@@ -223,6 +250,12 @@ class _CalendarListPaneState extends State<CalendarListPane> {
 
   final _scroll = ScrollController();
 
+  /// The timeline's scroll, kept as Day and Week take turns.
+  final _hours = TimelineOffset();
+
+  /// The open event the agenda last brought into view.
+  EventKey? _revealed;
+
   /// The account being signed in to again, while the browser is open.
   String? _signingIn;
 
@@ -306,6 +339,29 @@ class _CalendarListPaneState extends State<CalendarListPane> {
     calendar.showDay(day);
   }
 
+  /// Brings the open event's row into view when it is off the agenda's visible rows (↑ and ↓,
+  /// j and k open the next one): at once, as the event beside it changes at once.
+  void _reveal(List<_Entry> entries, EventKey key) {
+    if (_scroll.positions.length != 1) return;
+    final position = _scroll.position;
+    var offset = _listTop;
+    for (var i = 0; i < entries.length; i++) {
+      final entry = entries[i];
+      if (entry is _Event && eventKey(entry.event) == key) {
+        // A day's first event brings its header along.
+        final top = offset - (i > 0 && entries[i - 1] is _Day ? ListMetrics.sectionHeight : 0);
+        final bottom = offset + CalendarListPane.rowHeight;
+        if (top < position.pixels) {
+          _scroll.jumpTo(top.clamp(position.minScrollExtent, position.maxScrollExtent));
+        } else if (bottom > position.pixels + position.viewportDimension) {
+          _scroll.jumpTo((bottom - position.viewportDimension).clamp(position.minScrollExtent, position.maxScrollExtent));
+        }
+        return;
+      }
+      offset += _extent(entry);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
@@ -339,13 +395,20 @@ class _CalendarListPaneState extends State<CalendarListPane> {
               onOpen: open,
               onDay: view == CalendarView.week ? calendar.showDay : null,
               onCreate: calendar.writableAccounts.isEmpty ? null : (start) => showEventEditor(context, widget.state, start: start),
+              onPage: calendar.page,
               toNow: calendar.toNow,
+              offset: _hours,
             ),
           ),
         ],
       );
     } else {
       final entries = _entries(today);
+      final opened = calendar.opened;
+      if (opened != _revealed) {
+        _revealed = opened;
+        if (opened != null) WidgetsBinding.instance.addPostFrameCallback((_) => _reveal(entries, opened));
+      }
       final hasEvents = entries.any((e) => e is _Event);
       final empty = hasEvents
           ? null
@@ -447,7 +510,22 @@ class _CalendarListPaneState extends State<CalendarListPane> {
             ]),
           ),
         ),
-        Expanded(child: ClipRect(child: body)),
+        Expanded(
+          child: ClipRect(
+            // Agenda, Day and Week fade and grow into each other.
+            child: AnimatedSwitcher(
+              duration: Motion.short,
+              switchInCurve: Motion.curve,
+              switchOutCurve: Motion.curve,
+              layoutBuilder: (current, previous) => Stack(fit: StackFit.expand, children: [...previous, ?current]),
+              transitionBuilder: (child, animation) => FadeTransition(
+                opacity: animation,
+                child: ScaleTransition(scale: Tween(begin: Motion.enterScale, end: 1.0).animate(animation), child: child),
+              ),
+              child: KeyedSubtree(key: ValueKey(calendar.listed ? view : null), child: body),
+            ),
+          ),
+        ),
       ],
     );
   }
