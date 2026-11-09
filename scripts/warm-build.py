@@ -14,7 +14,8 @@ of it is open: a checkout reads these folders live, so a build under an open one
 artifacts built from other source (MS-152). --allow names an open checkout that builds nothing
 and may stay. It fetches `main` and moves the default checkout's empty working-copy change onto
 it, then builds; tracked files end as `main` has them and nothing else in the tree changes (the
-Dart bindings go to a temporary folder)."""
+Dart bindings go to a temporary folder). It unlocks the default checkout's source for its run and
+locks it again when it ends, failed or not (scripts/source_lock.py, MS-156)."""
 import argparse
 import json
 import os
@@ -29,6 +30,7 @@ OUTPUT = ["FFI/target", "Engine/target", ".turso"]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.dont_write_bytecode = True
 from ffi import DRIFTING  # noqa: E402
+import source_lock  # noqa: E402
 ENV = {k: v for k, v in os.environ.items() if k not in DRIFTING}
 
 
@@ -74,6 +76,14 @@ def main():
     if jj("diff", "--name-only").strip() or jj("log", "--no-graph", "-r", "@", "-T", "description").strip():
         fail("the default checkout has changes or a described working-copy change; see `jj st`")
 
+    source_lock.unlock()
+    try:
+        build(allowed)
+    finally:
+        source_lock.lock()
+
+
+def build(allowed):
     jj("git", "fetch")
     if not jj("log", "--no-graph", "-r", "@- & ::main", "-T", "commit_id").strip():
         fail("the default checkout's working copy is not on a revision of main")

@@ -24,6 +24,15 @@ Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` 
   install batch or In Review, [Release delivery](#release-delivery)); a woken agent opens a fresh
   one. Subagents are spawned without omp's `isolated` option. Work the user keeps off `main` (a
   standalone trial) stays in its own existing checkout.
+- The default checkout is locked (MS-156, `scripts/source_lock.py`): every agent's tools start in
+  `~/projects/mailstream`, and a relative path or a missing `cwd` put agents' edits and deletes
+  there. Its tracked files and folders refuse writes, new files, deletes and renames, whatever
+  the tool; reads, `jj st`, `jj git fetch` and `ovnfs new` work. `Permission denied` under
+  `~/projects/mailstream` means a path missed your checkout: redo it with the checkout's absolute
+  path or `cwd`, and never unlock it. Only `warm-build.py` unlocks it, for its run;
+  `linear-poll.py watch` locks it again whenever anything there is writable. A `jj` command that
+  rewrites its working copy fails there and leaves it stale; the script's header says how to
+  recover.
 - One line: every front end (the AppKit app, `GPUI/`, `Flutter/`) and the engine they share
   (`Sources/MailstreamKit`, `FFI/`) live on `main`, and every checkout works on it; the
   `gpui-ui` and `flutter-ui` bookmarks are history and take no new commits. An engine change
@@ -113,7 +122,13 @@ hashes stay as they are.
 An omp session runs `RUNNING_FILE=~/.local/state/linear-poll/running python3 scripts/linear-poll.py watch`
 as one background bash job with no deadline (`timeout: 0`) and `wait`s on it: the script checks
 Linear every minute and returns only once it has claimed something. The session hands the issues
-it claims, and the user's comments, to subagents, then starts it again. It keeps that file a JSON
+it claims, and the user's comments, to subagents, then starts it again. A subagent starts in the
+session's folder, the default checkout (omp can't start it elsewhere), so every task opens with
+this, `<slug>` filled in: "Work in your own checkout `~/checkouts/<slug>` (`ovnfs new --rev main
+--name <slug>`, then the setup in AGENTS.md, Version control). Your tools start in the locked
+default checkout `~/projects/mailstream`: give every `read`, `edit`, `write`, `grep`, `glob`,
+`find` and `ast_edit` an absolute path under `~/checkouts/<slug>`, every `bash` call `cwd:
+~/checkouts/<slug>`, and every eval subprocess `cwd=`." It keeps that file a JSON
 array of its running agent ids, rewritten whenever one starts or finishes; the script re-reads it
 each pass. The script's header says what it claims and how the session picks the agent. On an
 `install` line it starts one `sonic` agent with an id starting `Install` (`Install3`) for the
@@ -169,11 +184,11 @@ name in backticks (`` `@omp` ``), since Linear rejects an app's @-mention of an 
   `Engine/` (that compiles the engine and its dependencies again). Never delete the default
   checkout's build folders to free disk; free your own checkout's output instead (delete it
   there, or `ovnfs rm` the checkout once done). Only `python3 scripts/warm-build.py` builds
-  there: it fetches `main`, moves the default checkout's empty change onto it and builds, and
-  refuses while any checkout of it is open (MS-152). Nothing builds Swift there, so a checkout's
-  `.build` is always its own. Don't share one `CARGO_TARGET_DIR` between checkouts: cargo locks
-  it for one build at a time and each checkout's source rebuilds the repo's crates over the
-  others'.
+  there: it fetches `main`, moves the default checkout's empty change onto it (unlocking its
+  source for the run) and builds, and refuses while any checkout of it is open (MS-152). Nothing
+  builds Swift there, so a checkout's `.build` is always its own. Don't share one
+  `CARGO_TARGET_DIR` between checkouts: cargo locks it for one build at a time and each
+  checkout's source rebuilds the repo's crates over the others'.
 - Run anything that may take over a minute (a cold cargo build, `ffi.py`, `install.sh`, `flutter
   build`, a Swift release build, `bench.sh`) as one blocking eval cell, not `bash`: Python
   `subprocess.run(…, capture_output=True, text=True)` with the cell's `timeout` set (up to 3600),

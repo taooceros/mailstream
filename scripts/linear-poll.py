@@ -66,6 +66,8 @@ retried next interval; after MAX_FAILURES (default 10) failures in a row it exit
 starts it once as a background job with no deadline, waits for its result, handles the lines and
 starts it again, and rewrites RUNNING_FILE whenever its agents start or finish. With DRY_RUN=1 it
 exits after the first plan holding a line other than unclaim.
+On macOS, run in the default checkout, `watch` locks that checkout's source again before each
+pass when anything there is writable (scripts/source_lock.py, MS-156), logging it to stderr.
 The caller keeps context while it is still in the prompt cache (1 h on a Claude subscription,
 5 min on an API key). A user comment or rework on an issue goes to the agent that worked it,
 woken with `write agent://<id>` even after it finished (it reads its transcript from cache, even
@@ -87,6 +89,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+import source_lock
 
 TEAMS = os.environ.get("TEAMS", ",".join([
     "9f8fe59f-3788-4542-8c18-4e5c5dd5ddc2",  # MS: Mailstream; ids survive key renames
@@ -208,9 +212,23 @@ def seen(kind, id):
     return 0
 
 
+def relock():
+    """Locks the default checkout again when its source is writable (source_lock.py, MS-156)."""
+    if sys.platform != "darwin":
+        return
+    try:
+        if source_lock.default_checkout() and (open_paths := source_lock.writable()):
+            source_lock.lock()
+            log(f"locked the default checkout again: {len(open_paths)} tracked files or folders were writable")
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        detail = (getattr(error, "stderr", None) or "").strip()
+        log(f"could not check the default checkout's lock: {error}" + (f": {detail}" if detail else ""))
+
+
 def watch():
     failures = 0
     while True:
+        relock()
         result = subprocess.run([sys.executable, __file__], stdout=subprocess.PIPE, text=True, encoding="utf-8")
         out = result.stdout.rstrip("\n")
         # Real passes print only what the caller handles; a dry run also shows unclaim lines.
