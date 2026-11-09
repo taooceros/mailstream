@@ -11,6 +11,7 @@
 //! would join the font collection every page shares. SVG is off, as its renderer would read files an
 //! SVG's `<image>` names.
 use std::collections::{HashMap, HashSet};
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -45,6 +46,12 @@ const REMOVED: &str = "iframe, frame, frameset, object, embed";
 
 /// Linked stylesheets: kept (Blitz attaches what they load to them), answered empty.
 const LINKS: &str = "link[href]";
+
+/// What a mail's relative URLs resolve against. Blitz panics on a URL it can't resolve, and its
+/// default base (`data:`) resolves none: a Google security alert's protocol-relative font link
+/// (`//fonts.googleapis.com/…`) brought the page down (MS-161). Nothing is fetched from this
+/// scheme, so `//host/…` and `logo.png` load nothing, as in WebKit's view, which has no base.
+const BASE_URL: &str = "mailstream-body:///";
 
 /// The viewport's height in points; only `vh` units read it, since pages are as tall as their content.
 const VIEWPORT_HEIGHT: f64 = 800.0;
@@ -178,6 +185,25 @@ enum Job {
     Arrived { id: u64 },
 }
 
+impl Job {
+    /// The page the job is for.
+    fn page(&self) -> u64 {
+        match *self {
+            Job::Open { id, .. }
+            | Job::Close { id }
+            | Job::Layout { id, .. }
+            | Job::Tile { id, .. }
+            | Job::LinkAt { id, .. }
+            | Job::Select { id, .. }
+            | Job::ClearSelection { id, .. }
+            | Job::SelectedText { id, .. }
+            | Job::Text { id, .. }
+            | Job::Changed { id, .. }
+            | Job::Arrived { id } => id,
+        }
+    }
+}
+
 static PAGES: LazyLock<Sender<Job>> = LazyLock::new(|| {
     let (jobs, queue) = mpsc::channel();
     std::thread::Builder::new()
@@ -249,7 +275,17 @@ impl Pages {
                 }
                 Err(TryRecvError::Disconnected) => return,
             };
-            self.handle(job);
+            self.guard(job.page(), |pages| pages.handle(job));
+        }
+    }
+
+    /// Runs `work` for page `id`. Blitz panics on some mail; the page it panicked on is dropped,
+    /// so its calls answer `None`, and the thread carries on with every other page instead of
+    /// dying and leaving every later one blank (MS-161).
+    fn guard(&mut self, id: u64, work: impl FnOnce(&mut Self)) {
+        if panic::catch_unwind(AssertUnwindSafe(|| work(self))).is_err() {
+            self.pages.remove(&id);
+            self.arrived.remove(&id);
         }
     }
 
@@ -315,16 +351,20 @@ impl Pages {
     /// one whose height changed tells its waiters.
     fn relayout_arrived(&mut self) {
         for id in std::mem::take(&mut self.arrived) {
-            let Some(page) = self.pages.get_mut(&id) else { continue };
-            page.doc.as_mut().resolve(0.0);
-            if page.scale > 0.0 {
-                page.fit();
-            }
-            page.version += 1;
-            let version = page.version;
-            for reply in page.waiting.drain(..) {
-                let _ = reply.send(version);
-            }
+            self.guard(id, |pages| pages.relayout(id));
+        }
+    }
+
+    fn relayout(&mut self, id: u64) {
+        let Some(page) = self.pages.get_mut(&id) else { return };
+        page.doc.as_mut().resolve(0.0);
+        if page.scale > 0.0 {
+            page.fit();
+        }
+        page.version += 1;
+        let version = page.version;
+        for reply in page.waiting.drain(..) {
+            let _ = reply.send(version);
         }
     }
 }
@@ -339,6 +379,7 @@ impl Page {
                 net_provider: Some(gate.clone() as _),
                 shell_provider: Some(shell.clone() as _),
                 font_ctx: Some(fonts.clone()),
+                base_url: Some(BASE_URL.into()),
                 viewport: Some(Viewport::new(1, 1, 1.0, ColorScheme::Light)),
                 ..Default::default()
             },
@@ -484,7 +525,8 @@ fn sanitize(doc: &mut BaseDocument) -> Blocked {
             .iter()
             .filter_map(|&id| doc.get_node(id))
             .flat_map(|node| names.iter().filter_map(|&name| node.attr(blitz_dom::LocalName::from(name))))
-            .filter_map(|raw| Url::parse(raw.trim()).ok())
+            // As Blitz resolves them for its requests.
+            .filter_map(|raw| doc.base_url().join(raw).ok())
             .map(|url| url.to_string())
             .collect();
         (ids, urls)
@@ -683,10 +725,12 @@ mod tests {
             format!("file://{}", file.display()),
             "http://example.com/a.png".into(),
             "javascript:alert(1)".into(),
+            // A protocol-relative image, as the page resolves it.
+            Url::parse(BASE_URL).unwrap().join("//example.com/a.png").unwrap().to_string(),
         ] {
             fetch(Url::parse(&url).unwrap(), Box::new(Probe(got.clone())));
         }
-        assert_eq!(*got.lock().unwrap(), [6, 0, 0, 0, 0, 0]);
+        assert_eq!(*got.lock().unwrap(), [6, 0, 0, 0, 0, 0, 0]);
         assert!(is_raster_image(b"\x89PNG\r\n") && !is_raster_image(b"body { color: red }"));
     }
 
@@ -709,6 +753,32 @@ mod tests {
         assert!(page.select((2.0, 8.0), (390.0, 8.0)));
         assert!(page.doc.get_selected_text().unwrap().starts_with("Alpha"));
         assert!(!page.select((10.0, 300.0), (20.0, 300.0)));
+    }
+
+    #[test]
+    fn relative_urls_resolve_and_load_nothing() {
+        // A Google security alert links its font protocol-relative; the default base made Blitz
+        // panic on that (MS-161).
+        let mut page = page(concat!(
+            r#"<html><head><link href="//fonts.example.com/css?family=Sans" rel="stylesheet" type="text/css"></head>"#,
+            r#"<body><img src="//images.example.com/logo.png" width="74" height="24"><img src="logo.png"><p>Kept</p></body></html>"#,
+        ));
+        page.lay_out(400.0, 1.0);
+        page.doc.as_mut().resolve(0.0);
+        assert!(!page.doc.as_ref().has_pending_critical_resources());
+        assert_eq!(page.text(), "Kept");
+    }
+
+    #[test]
+    fn a_page_blitz_panics_on_leaves_the_others_drawing() {
+        use futures_executor::block_on;
+        // Blitz panics on an image URL it can't resolve; the pages' thread used to die with it,
+        // leaving every later page blank (MS-161).
+        let broken = HtmlPage::new(r#"<img src="http://"><p>Broken</p>"#.into());
+        assert!(block_on(broken.layout(400.0, 1.0)).is_none());
+        let page = HtmlPage::new("<p>Next</p>".into());
+        assert!(block_on(page.layout(400.0, 1.0)).is_some_and(|size| size.height > 0.0));
+        assert!(block_on(page.tile(400.0, 1.0, 0.0, 20.0)).is_some());
     }
 }
 

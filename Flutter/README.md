@@ -243,8 +243,10 @@ Blitz (`blitz-dom`/`blitz-html`/`blitz-paint`, `FFI/src/html_page.rs`; `lib/ui/b
 parses, lays out and paints each body on a thread of its own in the engine's library; Flutter
 only shows the 512-point tiles near the viewport. Iframes, objects and embeds are removed before
 any fetch; stylesheets, web fonts, SVG and `file:`/`http:` resources are never loaded (only
-`data:` and anonymous `https:` raster images). Links go through the same check; a drag selects
+`data:` and anonymous `https:` raster images), nor are relative and protocol-relative URLs
+(`logo.png`, `//host/…`), as in WebKit's view. Links go through the same check; a drag selects
 and ⌘C copies. Screen readers get the body's text only (Blitz's AccessKit tree is not bridged).
+A body Blitz panics on stays blank by itself; every other body keeps drawing (MS-161).
 
 Preparation (`prepareHyperResources` in `lib/ui/hyper_resources.dart`) is the one resource
 policy for both: inline parts (`file://` copies under Mailstream's `messages-v2` cache, canonical
