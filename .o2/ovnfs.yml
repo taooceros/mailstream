@@ -1,0 +1,7 @@
+# ovnfs rules for checkouts of this repository (frozen into each checkout when it opens; see
+# .omp/skills/ovnfs/SKILL.md). The warm build's folders are source, so a checkout keeps the build
+# it opened with instead of reading the default checkout's live (MS-152); jj's store stays out, so
+# each checkout's jj starts its own.
+rules: |
+  hidden  .jj
+  source  ignored & (**/target | **/target/** | .turso | .turso/**)

@@ -11,12 +11,13 @@ Usage: python3 scripts/warm-build.py [--allow CHECKOUT ...]
 
 Runs only in the default checkout, with no source changes there, and only while every open ovnfs
 checkout of it froze these folders when it opened (scripts/checkout.py; those keep the build they
-opened with): one opened with plain `ovnfs new` reads them live, so a build under it can hand it
-artifacts built from other source (MS-152). --allow names such a checkout that builds nothing and
-may stay. It fetches `main` and moves the default checkout's empty working-copy change onto
-it, then builds; tracked files end as `main` has them and nothing else in the tree changes (the
-Dart bindings go to a temporary folder). It unlocks the default checkout's source for its run and
-locks it again when it ends, failed or not (scripts/source_lock.py, MS-156)."""
+opened with): any other (opened with `ovnfs new` by hand, `--rev` or before MS-152) reads them
+live, so a build under it can hand it artifacts built from other source (MS-152). --allow names
+such a checkout that builds nothing and may stay. It fetches `main` and moves the default
+checkout's empty working-copy change onto it, then builds; tracked files end as `main` has them
+and nothing else in the tree changes (the Dart bindings go to a temporary folder). It unlocks the
+default checkout's source for its run and locks it again when it ends, failed or not
+(scripts/source_lock.py, MS-156)."""
 import argparse
 import json
 import os
@@ -31,6 +32,7 @@ OUTPUT = ["FFI/target", "Engine/target", ".turso"]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.dont_write_bytecode = True
 from ffi import DRIFTING  # noqa: E402
+from checkout import frozen  # noqa: E402
 import source_lock  # noqa: E402
 ENV = {k: v for k, v in os.environ.items() if k not in DRIFTING}
 
@@ -48,15 +50,9 @@ def fail(message):
 
 
 def checkouts():
-    """Names of the open ovnfs checkouts of this folder."""
+    """The open ovnfs checkouts of this folder (`ovnfs --json ls` entries)."""
     listing = json.loads(run("ovnfs", "--json", "ls"))
-    return [c["name"] for c in listing.get("checkouts") or [] if Path(c["source"]).resolve() == ROOT]
-
-
-def reads_live(checkout):
-    """Whether a checkout reads the build folders live (opened by plain `ovnfs new`)."""
-    return any(json.loads(run("ovnfs", "--json", "explain", checkout, path))["class"] != "source"
-               for folder in OUTPUT for path in (folder, f"{folder}/release"))
+    return [c for c in listing.get("checkouts") or [] if Path(c["source"]).resolve() == ROOT]
 
 
 def size(path):
@@ -77,8 +73,9 @@ def main():
     mount = json.loads(run("ovnfs", "--json", "status"))["mount"]
     if ROOT.is_relative_to(Path(mount).resolve()) or not (ROOT / ".jj").is_dir():
         fail(f"run it in the default checkout, not {ROOT}")
-    open_before = checkouts()
-    if blocking := [name for name in open_before if name not in allowed and reads_live(name)]:
+    open_now = checkouts()
+    open_before = [c["name"] for c in open_now]
+    if blocking := [c["name"] for c in open_now if c["name"] not in allowed and not frozen(c)]:
         fail("checkouts that read the build folders live are open: " + ", ".join(blocking) +
              " (run it once they are removed, or --allow one that builds nothing; open checkouts"
              " with scripts/checkout.py)")
@@ -117,7 +114,7 @@ def build(open_before):
 
     if changed := jj("diff", "--name-only").strip():
         fail("the build changed tracked files:\n" + changed)
-    if opened := [name for name in checkouts() if name not in open_before]:
+    if opened := [c["name"] for c in checkouts() if c["name"] not in open_before]:
         print("warm-build: checkouts opened during the build and may hold half-built output: " +
               ", ".join(opened), file=sys.stderr)
 

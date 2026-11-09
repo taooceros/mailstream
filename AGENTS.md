@@ -15,20 +15,18 @@ Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` 
   made unprompted as soon as it is built and verified, then pushed: `jj git fetch`, rebase onto
   `main@origin` if it moved, `jj bookmark set main -r @-`, `jj git push`. Never leave finished
   work uncommitted in `@`.
-- Every agent works in its own ovnfs checkout, never the default checkout and never
-  `jj workspace add` (the `../mailstream-*` workspaces take no new work): `python3
-  ~/projects/mailstream/scripts/checkout.py <unique>` opens it under `~/checkouts/` at `main`,
-  with the build folders frozen ([Building](#building)) and jj set up (a checkout gets a private
-  `.git` and no `.jj`, and starts at the default checkout's `main`, which can lag `origin`; the
-  script fetches and moves onto `main@origin`). Don't open one with plain `ovnfs new`. It commits
-  and pushes `main` from there and runs `ovnfs rm <name>` once its part is done (handed to the
-  install batch or In Review, [Release delivery](#release-delivery)); a woken agent opens a fresh
-  one. Subagents are spawned without omp's `isolated` option. Work the user keeps off `main` (a
-  standalone trial) stays in its own existing checkout.
+- Every agent works in its own ovnfs checkout, opened with `python3
+  ~/projects/mailstream/scripts/checkout.py <unique>`; how to use one is the `ovnfs` skill
+  (`.omp/skills/ovnfs/SKILL.md`, its first section for this repo). Never the default checkout,
+  never `jj workspace add` (the `../mailstream-*` workspaces take no new work), never omp's
+  `isolated` option for subagents. An agent commits and pushes `main` from its checkout and
+  removes it once its part is done (handed to the install batch or In Review, [Release
+  delivery](#release-delivery)); a woken agent opens a fresh one. Work the user keeps off `main`
+  (a standalone trial) stays in its own existing checkout.
 - The default checkout is locked (MS-156, `scripts/source_lock.py`): every agent's tools start in
   `~/projects/mailstream`, and a relative path or a missing `cwd` put agents' edits and deletes
   there. Its tracked files and folders refuse writes, new files, deletes and renames, whatever
-  the tool; reads, `jj st`, `jj git fetch` and `ovnfs new` work. `Permission denied` under
+  the tool; reads, `jj st`, `jj git fetch` and opening checkouts work. `Permission denied` under
   `~/projects/mailstream` means a path missed your checkout: redo it with the checkout's absolute
   path or `cwd`, and never unlock it. Only `warm-build.py` unlocks it, for its run;
   `linear-poll.py watch` locks it again whenever anything there is writable. A `jj` command that
@@ -125,8 +123,8 @@ as one background bash job with no deadline (`timeout: 0`) and `wait`s on it: th
 Linear every minute and returns only once it has claimed something. The session hands the issues
 it claims, and the user's comments, to subagents, then starts it again. A subagent starts in the
 session's folder, the default checkout (omp can't start it elsewhere), so every task opens with
-this, `<slug>` filled in: "Work in your own checkout `~/checkouts/<slug>` (open it with `python3
-~/projects/mailstream/scripts/checkout.py <slug>`, AGENTS.md, Version control). Your tools start
+this, `<slug>` filled in: "Work in your own checkout `~/checkouts/<slug>`: open it with `python3
+~/projects/mailstream/scripts/checkout.py <slug>` and read the `ovnfs` skill. Your tools start
 in the locked default checkout `~/projects/mailstream`: give every `read`, `edit`, `write`,
 `grep`, `glob`, `find` and `ast_edit` an absolute path under `~/checkouts/<slug>`, every `bash`
 call `cwd: ~/checkouts/<slug>`, and every eval subprocess `cwd=`." It keeps that file a JSON
@@ -135,8 +133,7 @@ each pass. The script's header says what it claims and how the session picks the
 `install` line it starts one `sonic` agent with an id starting `Install` (`Install3`) for the
 listed issues, which follows [Release delivery](#release-delivery); it doesn't count against the
 heavy agents below. Each time before it starts the script again, the session runs `python3
-scripts/warm-build.py` in the default checkout ([Building](#building)), so new checkouts start
-from `main`'s latest build; open checkouts keep theirs.
+scripts/warm-build.py` in the default checkout ([Building](#building)).
 `python3 scripts/linear-omp.py MS-12` opens one issue in a new Tern tab instead. The scripts are
 Python (standard library only) so both machines run the same ones; on Windows the command is
 `python`, and the poller also needs `HOST_LABEL=windows LINEAR_TOKEN_FILE=~/.config/linear/token.json
@@ -170,29 +167,17 @@ name in backticks (`` `@omp` ``), since Linear rejects an app's @-mention of an 
 
 - Rust builds (`Engine/`, `FFI/`, `GPUI/`, Turso) run plain cargo: the repo's
   `.cargo/config.toml` turns off the rcache wrapper in `~/.cargo/config.toml`, which handed out
-  corrupt artifacts in ovnfs checkouts (MS-131). Don't set `RUSTC_WRAPPER` to bring it back. A
-  checkout opened by `scripts/checkout.py` freezes the default checkout's ignored build folders
-  (every `target/`, `.turso/`) as they are when it opens: ovnfs keeps an APFS clone of each file
-  (~3 s for the 6 GB, no extra disk until the default checkout replaces the file), and cargo's
-  fingerprints rebuild what differs from the checkout's source. A plain `ovnfs new` reads them
-  live instead: a later build or delete in the default checkout shows up in it, and cargo there
-  can keep an artifact built from the default checkout's source over the checkout's own edits
-  (MS-152).
+  corrupt artifacts in ovnfs checkouts (MS-131). Don't set `RUSTC_WRAPPER` to bring it back.
 - The default checkout keeps a warm build of `main` (`FFI/target` release, `Engine/target`
-  debug for the engine's tests, `.turso/`) that every new checkout starts from: its first release
-  `ffi.py` rebuilds only the repo's 2 crates (~25 s) instead of 460 (~3–4 min) (MS-151, MS-159).
-  `ffi.py` builds the library and the command line in one cargo run into `FFI/target` and drops
-  `SDKROOT`/`CPATH`-style variables: C build scripts rebuild everything above them when those
-  differ from the warm build's. Run release engine builds through `ffi.py`, not a second cargo in
-  `Engine/` (that compiles the engine and its dependencies again). Never delete the default
-  checkout's build folders to free disk; free your own checkout's output instead (delete it
-  there, or `ovnfs rm` the checkout once done). Only `python3 scripts/warm-build.py` builds
-  there: it fetches `main`, moves the default checkout's empty change onto it (unlocking its
-  source for the run) and builds; checkouts opened by `checkout.py` keep the build they opened
-  with, and it refuses while one opened with plain `ovnfs new` is open (MS-152). Nothing
-  builds Swift there, so a checkout's `.build` is always its own. Don't share one
-  `CARGO_TARGET_DIR` between checkouts: cargo locks it for one build at a time and each
-  checkout's source rebuilds the repo's crates over the others'.
+  debug for the engine's tests, `.turso/`) that every new checkout starts from and keeps (MS-151,
+  MS-152, MS-159): a checkout's first release `ffi.py` rebuilds only the repo's 2 crates (~30 s)
+  instead of 460 (~3–4 min). `ffi.py` builds the library and the command line in one cargo run
+  into `FFI/target` and drops `SDKROOT`/`CPATH`-style variables: C build scripts rebuild
+  everything above them when those differ from the warm build's. Run release engine builds
+  through `ffi.py`, not a second cargo in `Engine/` (that compiles the engine and its
+  dependencies again). Never delete the default checkout's build folders. Only `python3
+  scripts/warm-build.py` builds there: it fetches `main`, moves the default checkout's empty
+  change onto it (unlocking its source for the run) and builds.
 - Run anything that may take over a minute (a cold cargo build, `ffi.py`, `install.sh`, `flutter
   build`, a Swift release build, `bench.sh`) as one blocking eval cell, not `bash`: Python
   `subprocess.run(…, capture_output=True, text=True)` with the cell's `timeout` set (up to 3600),
@@ -240,7 +225,7 @@ The code agent:
 3. Hands over: a comment starting `**待安装**` with what changed, the commit, the targets, what
    to check in the installed app and how to reach it, and for UI changes each state to
    screenshot. Then it adds the `install` label, removes `claimed`, leaves the issue In Progress
-   and runs `ovnfs rm` on its checkout.
+   and removes its checkout.
 
 The batch install agent (one per `install` line of the poller, [Polling session](#polling-session)):
 
@@ -264,7 +249,7 @@ The batch install agent (one per `install` line of the poller, [Polling session]
    exact blocker on each issue and removes `claimed` but keeps `install`, so the next batch
    retries; an issue whose commit broke the build goes back as failed. Never claim another
    issue's pending checks passed.
-5. Runs `ovnfs rm` on its checkout; leaves every other checkout and workspace alone.
+5. Removes its checkout; leaves every other checkout and workspace alone.
 
 ## Performance: 120 fps
 
