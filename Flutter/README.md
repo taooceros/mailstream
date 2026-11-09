@@ -252,9 +252,12 @@ Preparation (`prepareHyperResources` in `lib/ui/hyper_resources.dart`) is the on
 policy for both: inline parts (`file://` copies under Mailstream's `messages-v2` cache, canonical
 paths only, raster bytes checked) become data URLs, images that are not HTTPS or raster data are
 removed, and `align`/`valign`/`bgcolor`/`border`/`cellpadding` get `data-ms-*` copies that
-HyperRender's sanitizer keeps. `lib/ui/hyper_table.dart` lays mail tables out as mail clients
-do: no grid unless `border="1"`, widths fit the reading column. HyperRender's core is vendored in
-`third_party/hyper_render_core` with one change: the image widget builder reaches table cells.
+HyperRender's sanitizer keeps. Prepared and split HTML is written back with the doctype the mail
+wrote (`documentHtml`): package:html drops a doctype's PUBLIC/SYSTEM keyword, which put XHTML and
+HTML 4 newsletters into quirks mode in the WebView (MS-160). `lib/ui/hyper_table.dart` lays mail
+tables out as mail clients do: no grid unless `border="1"`, widths fit the reading column.
+HyperRender's core is vendored in `third_party/hyper_render_core` with one change: the image
+widget builder reaches table cells.
 Links open through the runner's `MailLink` (HTTP(S) with a host, or mailto), in either renderer.
 
 The WebView is `macos/Runner/MailHtmlView.swift`, a platform view (`mailstream/html`) that runs
@@ -263,7 +266,13 @@ HTTPS and data resources only, allows only its own first load (no redirects, fra
 refreshes), loads remote images without cookies, zooms out a body wider than the column, and
 reports its content height so the body scrolls with the conversation. Every view talks over the
 one channel `mailstream/html`, its calls carrying the view id (a channel per view stayed
-registered in the engine after the view went, MS-154).
+registered in the engine after the view went, MS-154). Its `html` and `body` are as tall as
+their content (`height: fit-content`): in quirks mode an `auto` height stretched them to the
+view, so a zoomed-out page grew by a point with each height it reported, or kept a gap under the
+mail after the window was resized (MS-78, MS-160). For checks without private mail, run
+`MAILSTREAM_READER_RENDERER=webKit flutter run -d macos -t test/html_zoom_app.dart`: open each
+of its three synthetic mails, 900 px wide, and resize the window back and forth; each body stays
+fully visible and as tall as its content.
 
 Creating a WebKit page and loading its HTML holds the main thread for 20–35 ms, so each platform
 view is a light host around a page (MS-109). When a reader or fold closes, its page waits idle and

@@ -50,7 +50,7 @@ HtmlParts splitMailHtml(String html) {
   final kept = body.text.trim().isNotEmpty || body.querySelector('img') != null;
   if (!kept) return (html, null);
   final head = document.head?.outerHtml ?? '';
-  return (document.outerHtml, '<html>$head<body>$quoted</body></html>');
+  return (documentHtml(document), '<html>$head<body>$quoted</body></html>');
 }
 
 /// [html] as the page a WebView2 body loads on Windows (`WindowsMailHtml`): links open in the
@@ -61,7 +61,7 @@ String windowsMailPage(String html) {
   for (final element in document.querySelectorAll('[target]')) {
     element.attributes.remove('target');
   }
-  return document.outerHtml;
+  return documentHtml(document);
 }
 
 /// Reopening/rebuilding unchanged mail reuses its parts, including in-flight work.

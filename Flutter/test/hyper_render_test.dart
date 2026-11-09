@@ -77,6 +77,27 @@ void main() {
     expect(prepared, contains('align="Center"'));
   });
 
+  test('prepared mail keeps its doctype, so WebKit lays it out in the mode it was written for (MS-160)', () async {
+    const xhtml = '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" '
+        '"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">';
+    const html4 = '<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">';
+    final doctypes = {
+      xhtml: xhtml,
+      '<!doctype HTML public "-//W3C//DTD HTML 4.01 Transitional//EN">': html4,
+      '<!DOCTYPE html SYSTEM "about:legacy-compat">': '<!DOCTYPE html SYSTEM "about:legacy-compat">',
+      '''<!DOCTYPE html PUBLIC 'a "quoted" id'>''': '''<!DOCTYPE html PUBLIC 'a "quoted" id'>''',
+      '<!DOCTYPE html>': '<!DOCTYPE html>',
+    };
+    for (final MapEntry(key: written, value: expected) in doctypes.entries) {
+      final mail = '$written<html><head></head><body><table bgcolor="#EEEEEE"><tr><td>x'
+          '<img src="https://example.test/a.png"></td></tr></table><div class="gmail_quote">history</div></body></html>';
+      final prepared = await prepareHyperResources(mail);
+      expect(prepared, startsWith(expected));
+      expect(splitMailHtml(prepared).$1, startsWith(expected));
+      expect(windowsMailPage(mail), startsWith(expected));
+    }
+  });
+
   testWidgets('the image builder reaches nested table cells without a WebView', (tester) async {
     final seen = <String>[];
     await tester.pumpWidget(MaterialApp(home: SingleChildScrollView(child: HyperViewer(

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 
 const maxInlineImageBytes = 20 * 1024 * 1024;
@@ -75,6 +76,32 @@ String webKitDocument(String html) {
   return '${html.substring(0, at)}$meta${html.substring(at)}';
 }
 
+/// [document] as HTML, its doctype keeping the PUBLIC or SYSTEM keyword before its identifiers.
+/// package:html writes them without it (`<!DOCTYPE html "-//W3C//DTD XHTML 1.0 Transitional//EN"
+/// "…">`), which browsers read as a broken doctype: the mail then lays out in quirks mode instead
+/// of the mode it was written for (MS-160).
+String documentHtml(dom.Document document) {
+  final doctype = document.nodes.whereType<dom.DocumentType>().firstOrNull;
+  if (doctype != null && doctype is! _Doctype) doctype.replaceWith(_Doctype(doctype));
+  return document.outerHtml;
+}
+
+class _Doctype extends dom.DocumentType {
+  _Doctype(dom.DocumentType doctype) : super(doctype.name, doctype.publicId, doctype.systemId);
+
+  @override
+  String toString() {
+    String quoted(String id) => id.contains('"') ? "'$id'" : '"$id"';
+    final name = this.name ?? '';
+    return switch ((publicId, systemId)) {
+      (null, null) => '<!DOCTYPE $name>',
+      (final public?, null) => '<!DOCTYPE $name PUBLIC ${quoted(public)}>',
+      (null, final system?) => '<!DOCTYPE $name SYSTEM ${quoted(system)}>',
+      (final public?, final system?) => '<!DOCTYPE $name PUBLIC ${quoted(public)} ${quoted(system)}>',
+    };
+  }
+}
+
 /// Mail's presentational attributes that HyperRender's sanitizer drops (it keeps `width` and
 /// `height`). Preparation copies them, lower-cased, to inert `data-ms-*` attributes, which the
 /// sanitizer keeps when data attributes are allowed and the WebView ignores.
@@ -113,5 +140,5 @@ Future<String> prepareHyperResources(String html) async {
       image.attributes['src'] = safe;
     }
   }
-  return document.outerHtml;
+  return documentHtml(document);
 }
