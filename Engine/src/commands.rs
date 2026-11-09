@@ -188,6 +188,25 @@ const CHAT_SPACE: Argument = Argument::new("space", Kind::String, "Space name fr
 /// The AI categories (`tagging::Category`).
 const CATEGORIES: Kind = Kind::Choice(&["people", "notification", "newsletter", "invitation"]);
 const ATTACHMENTS: Argument = Argument::new("attachments", Kind::List, "A file to attach; repeat for several.");
+const EVENT_CALENDAR: Argument = Argument::new("calendar", Kind::String, "The event's `calendar` from `calendar events`.").required();
+const EVENT_ID: Argument = Argument::new("id", Kind::String, "The event's `id` from `calendar events`.").required();
+const EVENT_START: Argument = Argument::new(
+    "start",
+    Kind::String,
+    "When it starts: a time in --time-zone, 2026-11-08T10:00; for an all-day event its first day, 2026-11-08.",
+);
+const EVENT_END: Argument = Argument::new(
+    "end",
+    Kind::String,
+    "When it ends, as --start (default: an hour on); for an all-day event its last day (default: the first).",
+);
+const EVENT_ALL_DAY: Argument = Argument::new("all-day", Kind::Bool, "Whole days rather than times.");
+const EVENT_TIME_ZONE: Argument =
+    Argument::new("time-zone", Kind::String, "The zone of --start and --end, e.g. Europe/Berlin (default: this computer's).");
+const EVENT_LOCATION: Argument = Argument::new("location", Kind::String, "Where; empty clears it.");
+const EVENT_ATTENDEES: Argument =
+    Argument::new("attendees", Kind::List, "Guests' email addresses, the whole list; an empty list removes every guest.");
+const EVENT_NOTES: Argument = Argument::new("notes", Kind::String, "Description, as plain text; empty clears it.");
 
 /// Every command, in the order help lists them.
 pub const COMMANDS: &[Spec] = &[
@@ -502,6 +521,44 @@ pub const COMMANDS: &[Spec] = &[
             Argument::new("response", Kind::Choice(&["accepted", "tentative", "declined"]), "The answer.").required(),
             YES,
         ],
+    ),
+    Spec::new(
+        "calendar.create",
+        "Adds an event to one of an account's calendars and invites its guests; answers the event as `calendar events` lists it.",
+        &[
+            ACCOUNT_ADDRESS,
+            Argument::new("calendar", Kind::String, "Calendar id from `calendar events` (default: the account's own calendar)."),
+            Argument::new("title", Kind::String, "Title.").required(),
+            EVENT_START,
+            EVENT_END,
+            EVENT_ALL_DAY,
+            EVENT_TIME_ZONE,
+            EVENT_LOCATION,
+            EVENT_ATTENDEES,
+            EVENT_NOTES,
+        ],
+    ),
+    Spec::new(
+        "calendar.update",
+        "Changes an event the account organizes: only the fields given change, and its guests are told. One occurrence of a recurring event changes alone.",
+        &[
+            ACCOUNT_ADDRESS,
+            EVENT_CALENDAR,
+            EVENT_ID,
+            Argument::new("title", Kind::String, "New title."),
+            EVENT_START,
+            EVENT_END,
+            EVENT_ALL_DAY,
+            EVENT_TIME_ZONE,
+            EVENT_LOCATION,
+            EVENT_ATTENDEES,
+            EVENT_NOTES,
+        ],
+    ),
+    Spec::new(
+        "calendar.delete",
+        "Deletes an event the account organizes (one occurrence of a recurring one); its guests are told it is cancelled.",
+        &[ACCOUNT_ADDRESS, EVENT_CALENDAR, EVENT_ID, YES],
     ),
 ];
 

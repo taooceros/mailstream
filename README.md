@@ -53,6 +53,7 @@ Designed after macOS Liquid Glass with Dia's floating islands, Mailstream delive
 ### 💬 Unified Communication: Chat & Calendar
 - **Google Chat**: Integrated Google Workspace Chat spaces and direct messages directly in your sidebar, complete with real-time updates and threaded replies.
 - **Multi-Account Calendar Agenda**: View upcoming schedules across all connected Google and Outlook accounts, inspect event details, and join Google Meet or Microsoft Teams calls in one click.
+- **Event Editing**: Add events (title, time or all day, place, guests, description) to any calendar you can write to, and change or delete the ones you organize; Google Calendar and Outlook tell the guests.
 - **Interactive Meeting Invitations**: RSVP to calendar invitations (Accept, Tentative, Decline) directly from email headers with instant calendar sync.
 
 ### 🤖 Agent-First & Fully Programmable
@@ -131,8 +132,11 @@ mailstream chat spaces
 mailstream chat messages you@gmail.com spaces/AAAA
 mailstream chat send you@gmail.com spaces/AAAA --text "On my way" --yes
 
-# Calendar agenda
+# Calendar agenda, and adding, changing and deleting your own events
 mailstream calendar events --days 7
+mailstream calendar create you@gmail.com --title "Lunch" --start 2026-11-10T12:00 --location "Cafe"
+mailstream calendar update you@gmail.com --calendar you@gmail.com --id <event id> --title "Team lunch"
+mailstream calendar delete you@gmail.com --calendar you@gmail.com --id <event id> --yes
 ```
 
 ### Protocol Details

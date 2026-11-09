@@ -44,7 +44,7 @@ class ReaderMail extends FakeMailstream {
 
   @override
   Future<engine.CalendarAgenda> calendarEvents({required String? from, required int days}) async =>
-      engine.CalendarAgenda(accounts: [], loading: false, events: []);
+      engine.CalendarAgenda(accounts: [], loading: false, events: [], timeZone: 'UTC');
 
   @override
   Future<Map<String, String?>> avatars({required List<String> addresses, required List<String> automated}) async => {};

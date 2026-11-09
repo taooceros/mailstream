@@ -8,6 +8,7 @@ import 'package:mailstream/mailstream.dart' as engine;
 import '../platform.dart';
 import '../state/calendar_state.dart';
 import '../state/mail_state.dart';
+import 'calendar_editor.dart';
 import 'common.dart';
 import 'conversation_list.dart';
 import 'design.dart';
@@ -242,6 +243,11 @@ class _CalendarListPaneState extends State<CalendarListPane> {
               ),
               GlassCapsule(
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  ToolButton(
+                    tooltip: 'New event (${Host.shortcut('N')})',
+                    icon: CupertinoIcons.plus,
+                    onPressed: calendar.writableAccounts.isEmpty ? null : () => showEventEditor(context, widget.state),
+                  ),
                   ToolButton(
                     tooltip: 'Today',
                     icon: CupertinoIcons.calendar_today,
@@ -481,7 +487,23 @@ class CalendarEventPane extends StatelessWidget {
                   ),
                 ),
                 const Spacer(),
-                if (event.link != null)
+                if (event.editable)
+                  GlassCapsule(
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      ToolButton(
+                        tooltip: 'Edit',
+                        icon: CupertinoIcons.pencil,
+                        onPressed: () => showEventEditor(context, state, event: event),
+                      ),
+                      ToolButton(
+                        tooltip: 'Delete',
+                        icon: CupertinoIcons.trash,
+                        onPressed: () => confirmDeleteEvent(context, state, event),
+                      ),
+                    ]),
+                  ),
+                if (event.link != null) ...[
+                  if (event.editable) const SizedBox(width: 8),
                   GlassCapsule(
                     child: ToolButton(
                       tooltip: provider == 'microsoft' ? 'Open in Outlook' : 'Open in Google Calendar',
@@ -489,6 +511,7 @@ class CalendarEventPane extends StatelessWidget {
                       onPressed: () => state.openExternal(event.link!),
                     ),
                   ),
+                ],
               ]),
             ),
           ),

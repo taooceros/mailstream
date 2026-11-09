@@ -9,8 +9,7 @@ use serde_json::{Value, json};
 
 use super::{CalendarStore, FRESH};
 use crate::accounts::AccountRecord;
-use crate::api::Priority;
-use crate::calendar_api::{CalendarEvent, CalendarRemote, matching};
+use crate::calendar_api::{CalendarEvent, matching};
 use crate::commands::Arguments;
 use crate::ics::{Invitation, normalized_uid};
 use crate::model::now;
@@ -27,10 +26,6 @@ fn lookup_key(invitation: &Invitation) -> Option<String> {
 }
 
 impl CalendarStore {
-    fn remote<'a>(&'a self, api: &'a crate::api::Api, provider: crate::Provider) -> CalendarRemote<'a> {
-        CalendarRemote { api, provider, google: &self.google, graph: &self.graph, priority: Priority::Interactive }
-    }
-
     /// `calendar.invitation`: the invitation message `message` of conversation `id` carries,
     /// whether its account may read and change its calendar, and the event it names there with
     /// the account's answer (`event.response`); `target` is the event an answer goes to (the

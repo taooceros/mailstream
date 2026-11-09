@@ -43,12 +43,22 @@ class CalendarState extends ChangeNotifier {
   EventKey? opened;
 
   Timer? _change;
-  bool _running = false, _again = false;
+
+  /// The read under way, and the one asked for meanwhile, which runs after it.
+  Future<void>? _reading;
+  Completer<void>? _queued;
 
   /// Accounts whose sign-in predates calendar access.
   List<engine.CalendarAccount> get needsSignIn => accounts.where((a) => !a.granted).toList();
 
   bool get hasCalendars => accounts.any((a) => a.granted);
+
+  /// The accounts that may add events, with a calendar to add them to.
+  List<engine.CalendarAccount> get writableAccounts =>
+      accounts.where((a) => a.granted && a.writable && a.calendars.any((c) => c.writable)).toList();
+
+  /// This computer's time zone, as the engine names it (`America/Los_Angeles`).
+  String timeZone = '';
 
   engine.CalendarItem? event(EventKey key) => events.where((e) => eventKey(e) == key).firstOrNull;
 
@@ -74,18 +84,20 @@ class CalendarState extends ChangeNotifier {
     super.dispose();
   }
 
-  /// Reads the events the engine holds; a request made meanwhile runs once after it.
-  Future<void> reload() async {
-    if (_running) {
-      _again = true;
-      return;
-    }
-    _running = true;
+  /// Reads the events the engine holds; a request made meanwhile runs once after it, and its
+  /// future completes after that read.
+  Future<void> reload() {
+    if (_reading == null) return _reading = _read();
+    return (_queued ??= Completer<void>()).future;
+  }
+
+  Future<void> _read() async {
     try {
       final answer = await mail.calendarEvents(from: null, days: days);
       accounts = answer.accounts;
       events = answer.events;
       loading = answer.loading;
+      timeZone = answer.timeZone;
       listed = true;
       if (opened != null && event(opened!) == null) {
         opened = null;
@@ -94,12 +106,14 @@ class CalendarState extends ChangeNotifier {
       notifyListeners();
     } on engine.MailException catch (error) {
       report('Could not read the calendar: ${_describe(error)}');
-    } finally {
-      _running = false;
     }
-    if (_again) {
-      _again = false;
-      await reload();
+    final queued = _queued;
+    _queued = null;
+    if (queued == null) {
+      _reading = null;
+    } else {
+      _reading = _read();
+      queued.complete(_reading);
     }
   }
 
@@ -128,6 +142,33 @@ class CalendarState extends ChangeNotifier {
       await mail.calendarRefresh();
     } on engine.MailException catch (error) {
       report('Could not refresh the calendar: ${_describe(error)}');
+    }
+  }
+
+  /// Adds an event to `calendar` of `account`, then opens it. Fails with the engine's error,
+  /// for the editor to show.
+  Future<engine.CalendarItem> create(String account, String calendar, engine.CalendarDraft draft) async {
+    final saved = await mail.calendarCreate(account: account, calendar: calendar, draft: draft);
+    await reload();
+    open(eventKey(saved));
+    return saved;
+  }
+
+  /// Changes what `draft` gives of `event`. Fails with the engine's error, for the editor.
+  Future<engine.CalendarItem> update(engine.CalendarItem event, engine.CalendarDraft draft) async {
+    final saved = await mail.calendarUpdate(account: event.account, calendar: event.calendar, id: event.id, draft: draft);
+    await reload();
+    return saved;
+  }
+
+  /// Deletes `event`, which the person confirmed, telling its guests; closes it.
+  Future<void> delete(engine.CalendarItem event) async {
+    try {
+      await mail.calendarDelete(account: event.account, calendar: event.calendar, id: event.id, confirm: true);
+      if (opened == eventKey(event)) close();
+      await reload();
+    } on engine.MailException catch (error) {
+      report('Could not delete "${event.title}": ${_describe(error)}');
     }
   }
 

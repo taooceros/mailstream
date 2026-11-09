@@ -11,8 +11,9 @@ the engine runs to tag with Apple Intelligence when `aiTagging.backend` is `appl
 The UI lists accounts, mailboxes and conversations, reads previews, sender avatars and
 messages (with their HTML), searches, marks, archives, trashes, tags, replies and sends new mail through it,
 does Google Chat (the spaces of every chat account, their messages, sending and starting new
-chats), shows every account's calendar events (an agenda and each event's details) and answers
-meeting invitations in mail (a card in the reader with Accept, Tentative and Decline), manages
+chats), shows every account's calendar events (an agenda and each event's details), adds events
+and changes or deletes the ones the account organizes (New event, ⌘N; Edit and Delete on an
+event), answers meeting invitations in mail (a card in the reader with Accept, Tentative and Decline), manages
 accounts and settings, and follows the engine's change events instead of polling.
 Mailstream.app need not run.
 

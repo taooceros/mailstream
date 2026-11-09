@@ -586,6 +586,9 @@ pub struct CalendarInfo {
     pub color: Option<String>,
     /// The account's own calendar.
     pub primary: bool,
+    /// The account may add and change events on it.
+    #[serde(default)]
+    pub writable: bool,
 }
 
 /// An account as the calendar shows it.
@@ -598,6 +601,9 @@ pub struct CalendarAccount {
     /// Whether its sign-in grants calendar access; accounts signed in before Mailstream asked
     /// for it must sign in again.
     pub granted: bool,
+    /// Whether its sign-in lets it add, change and delete events.
+    #[serde(default)]
+    pub writable: bool,
     pub loading: bool,
     /// Why its last fetch failed; its events are the ones fetched before.
     pub problem: Option<String>,
@@ -646,16 +652,45 @@ pub struct CalendarItem {
     pub response: Option<String>,
     /// The description, as plain text.
     pub notes: Option<String>,
+    /// `notes` is shorter than the provider's description, so editing them here would lose the
+    /// rest.
+    #[serde(default)]
+    pub notes_cut: bool,
     /// The event in the provider's web calendar.
     pub link: Option<String>,
+    /// For an occurrence of a recurring event, the series' id: a change or deletion touches
+    /// that occurrence alone.
+    pub series: Option<String>,
+    /// The account organizes it on a calendar it may write to: [`Mailstream::calendar_update`]
+    /// and [`Mailstream::calendar_delete`] take it.
+    #[serde(default)]
+    pub editable: bool,
 }
 
 /// Every account and the events of the days asked for, earliest first.
 #[derive(Clone, Debug, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
 pub struct CalendarAgenda {
     pub accounts: Vec<CalendarAccount>,
     pub loading: bool,
     pub events: Vec<CalendarItem>,
+    /// This computer's time zone (`America/Los_Angeles`), which [`CalendarDraft`] times are in.
+    pub time_zone: String,
+}
+
+/// A new event, or what a change sets: a field left `None` stays as it is; an empty location or
+/// notes clears it. A time is `start` with `end`, both local wall-clock times
+/// (`2026-11-08T10:00`) or, with `all_day`, the first and last days (`2026-11-08`).
+#[derive(Clone, Debug, Default, uniffi::Record)]
+pub struct CalendarDraft {
+    pub title: Option<String>,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub all_day: bool,
+    pub location: Option<String>,
+    pub notes: Option<String>,
+    /// The guests' addresses, the whole list.
+    pub attendees: Option<Vec<String>>,
 }
 
 /// A meeting invitation (or its cancellation) as a message states it.
@@ -1073,6 +1108,44 @@ impl Mailstream {
         .map(drop)
     }
 
+    /// Adds an event to `calendar` of `account` (its own calendar when `None`) and invites the
+    /// draft's guests; answers the event as the calendar lists it, which [`Event::Calendar`]
+    /// also shows at once. The draft needs a title and a start.
+    pub async fn calendar_create(
+        &self,
+        account: String,
+        calendar: Option<String>,
+        draft: CalendarDraft,
+    ) -> Result<CalendarItem, MailError> {
+        let mut args = draft_arguments(draft);
+        args["account"] = json!(account);
+        args["calendar"] = json!(calendar);
+        call("calendar.create", args).await
+    }
+
+    /// Changes what `draft` gives of an [`CalendarItem::editable`] event, telling its guests.
+    pub async fn calendar_update(
+        &self,
+        account: String,
+        calendar: String,
+        id: String,
+        draft: CalendarDraft,
+    ) -> Result<CalendarItem, MailError> {
+        let mut args = draft_arguments(draft);
+        args["account"] = json!(account);
+        args["calendar"] = json!(calendar);
+        args["id"] = json!(id);
+        call("calendar.update", args).await
+    }
+
+    /// Deletes an [`CalendarItem::editable`] event, telling its guests it is cancelled.
+    /// `confirm` is the person's go-ahead.
+    pub async fn calendar_delete(&self, account: String, calendar: String, id: String, confirm: bool) -> Result<(), MailError> {
+        call::<Value>("calendar.delete", json!({ "account": account, "calendar": calendar, "id": id, "yes": confirm }))
+            .await
+            .map(drop)
+    }
+
     /// Calls `listener` on the main thread for every change from now on, while the process runs.
     pub fn subscribe(&self, listener: Arc<dyn EventListener>) {
         #[cfg(feature = "swift-engine")]
@@ -1123,4 +1196,12 @@ pub async fn call<T: DeserializeOwned>(command: &str, args: Value) -> Result<T, 
     let result = ENGINE.call(command, args).await?;
     serde_json::from_value(result)
         .map_err(|error| MailError::new("decode", format!("Unexpected result of {command}: {error}")))
+}
+
+/// `calendar.create` and `calendar.update`'s arguments for `draft`; `null` ones are left out.
+fn draft_arguments(draft: CalendarDraft) -> Value {
+    json!({
+        "title": draft.title, "start": draft.start, "end": draft.end, "all-day": draft.all_day.then_some(true),
+        "location": draft.location, "notes": draft.notes, "attendees": draft.attendees,
+    })
 }

@@ -21,7 +21,10 @@ engine.CalendarItem item(String id, {DateTime? start, DateTime? end, String? sta
   attendees: const [],
   response: null,
   notes: null,
+  notesCut: false,
   link: null,
+  series: null,
+  editable: false,
 );
 
 void main() {

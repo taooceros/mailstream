@@ -13,6 +13,7 @@ import '../state/calendar_state.dart';
 import '../state/chat_state.dart';
 import '../state/mail_state.dart';
 import 'calendar.dart';
+import 'calendar_editor.dart';
 import 'chat.dart';
 import 'common.dart';
 import 'compose.dart';
@@ -269,7 +270,11 @@ class _MailShellState extends State<MailShell> {
             ? state.calendar.refresh()
             : state.refresh();
       } else if (key == LogicalKeyboardKey.keyN) {
-        _compose();
+        if (!state.calendar.active) {
+          _compose();
+        } else if (state.calendar.writableAccounts.isNotEmpty) {
+          showEventEditor(context, state);
+        }
       } else if (key == LogicalKeyboardKey.bracketLeft) {
         _back();
       } else if (key == LogicalKeyboardKey.keyW && event is KeyDownEvent) {

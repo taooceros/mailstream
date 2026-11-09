@@ -4,7 +4,7 @@
 //! calendar paints at once; while that copy is younger than [`FRESH`] nothing is fetched. A
 //! timer fetches accounts whose copy got older; `calendar.refresh` fetches now. Front ends
 //! re-read on `calendar`. Meeting invitations in mail are matched to their events and answered
-//! in [`invitation`].
+//! in [`invitation`]; events the account organizes are added, changed and deleted in [`edit`].
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,17 +14,26 @@ use serde_json::{Value, json};
 
 use crate::accounts::{AccountRecord, Accounts};
 use crate::api::Priority;
-use crate::calendar_api::{Calendar, CalendarEvent, CalendarRemote, local_day, local_midnight};
+use crate::calendar_api::{Calendar, CalendarEvent, CalendarRemote, local_day, local_midnight, local_zone};
 use crate::cache::MailCache;
 use crate::commands::Arguments;
 use crate::mail::Mail;
 use crate::model::{Date, iso8601, now};
 use crate::{EngineError, Events};
 
+mod edit;
 mod invitation;
 
 /// The commands this store answers.
-pub const COMMANDS: &[&str] = &["calendar.events", "calendar.refresh", "calendar.invitation", "calendar.respond"];
+pub const COMMANDS: &[&str] = &[
+    "calendar.events",
+    "calendar.refresh",
+    "calendar.invitation",
+    "calendar.respond",
+    "calendar.create",
+    "calendar.update",
+    "calendar.delete",
+];
 /// How long a fetched copy serves before the timer fetches it again.
 const FRESH: f64 = 5.0 * 60.0;
 /// How often the timer looks for copies that got old.
@@ -39,7 +48,14 @@ pub struct CalendarCopy {
     pub fetched: Date,
     pub calendars: Vec<Calendar>,
     pub events: Vec<CalendarEvent>,
+    /// [`COPY_FORMAT`] when it was fetched: a copy from an older one paints, then is fetched.
+    #[serde(default)]
+    pub format: u32,
 }
+
+/// Bumped when fetches start keeping something copies made before lack (1: which calendars
+/// may be written and which events the account organizes).
+const COPY_FORMAT: u32 = 1;
 
 #[derive(Default)]
 struct AccountState {
@@ -162,7 +178,9 @@ impl CalendarStore {
             let mut due = Vec::new();
             for (name, account) in state.accounts.iter_mut() {
                 let Some(&provider) = records.get(name) else { continue };
-                let old = account.copy.as_ref().is_none_or(|copy| time - copy.fetched >= FRESH || copy.fetched > time);
+                let old = account.copy.as_ref().is_none_or(|copy| {
+                    time - copy.fetched >= FRESH || copy.fetched > time || copy.format < COPY_FORMAT
+                });
                 let forced = force(name);
                 if account.fetching || !(forced || old) {
                     continue;
@@ -211,7 +229,12 @@ impl CalendarStore {
             account.fetching = false;
             match result {
                 Ok(fetched) => {
-                    let copy = CalendarCopy { fetched: now(), calendars: fetched.calendars, events: fetched.events };
+                    let copy = CalendarCopy {
+                        fetched: now(),
+                        calendars: fetched.calendars,
+                        events: fetched.events,
+                        format: COPY_FORMAT,
+                    };
                     self.cache.save_calendar(&copy, &name);
                     account.copy = Some(copy);
                     account.problem = None;
@@ -222,6 +245,11 @@ impl CalendarStore {
             self.events.emit_soon("calendar");
             return;
         }
+    }
+
+    /// The calls for `api`'s account, asked for by someone waiting on them.
+    fn remote<'a>(&'a self, api: &'a crate::api::Api, provider: crate::Provider) -> CalendarRemote<'a> {
+        CalendarRemote { api, provider, google: &self.google, graph: &self.graph, priority: Priority::Interactive }
     }
 
     /// An account's events changed from here: `edit` brings its copy up to date at once, and a
@@ -260,6 +288,10 @@ impl CalendarStore {
             "calendar.events" => self.list(only.as_deref(), args),
             "calendar.invitation" => self.invitation(args).await,
             "calendar.respond" => self.respond(only.as_deref(), args).await,
+            "calendar.create" | "calendar.update" | "calendar.delete" => {
+                let account = only.ok_or_else(|| EngineError::usage("account is required."))?;
+                self.edit(command, &account, args).await
+            }
             "calendar.refresh" => {
                 if let Some(id) = &only
                     && !self.state().accounts.contains_key(id)
@@ -276,8 +308,10 @@ impl CalendarStore {
         }
     }
 
-    /// The accounts (with whether each may read its calendars) and the events overlapping
-    /// `days` days from `from` (today by default), earliest first.
+    /// The accounts (with whether each may read its calendars, and change them) and the events
+    /// overlapping `days` days from `from` (today by default), earliest first, each saying
+    /// whether the account may change it (`editable`); and this computer's time zone, which new
+    /// events take.
     fn list(&self, only: Option<&str>, args: &Arguments) -> Result<Value, EngineError> {
         let from = args.string("from").unwrap_or_else(|| local_day(0));
         let days = args.int("days").unwrap_or(FUTURE_DAYS).clamp(1, 366);
@@ -298,6 +332,7 @@ impl CalendarStore {
             accounts.push(json!({
                 "id": record.id, "label": record.label, "provider": record.provider.as_str(),
                 "granted": account.is_some(),
+                "writable": account.is_some() && record.can_edit_calendars(),
                 "loading": account.is_some_and(|account| account.fetching),
                 "problem": account.and_then(|account| account.problem.as_deref()),
                 "fetched": copy.map(|copy| iso8601(copy.fetched)),
@@ -310,7 +345,10 @@ impl CalendarStore {
                 let overlaps =
                     if event.end > event.start { event.end > start && event.start < end } else { event.start >= start && event.start < end };
                 if overlaps {
-                    events.push((event.start, event.all_day, event.json(&record.id, calendars.get(event.calendar.as_str()).copied())));
+                    let calendar = calendars.get(event.calendar.as_str()).copied();
+                    let mut value = event.json(&record.id, calendar);
+                    value["editable"] = json!(editable(&record, calendar, event));
+                    events.push((event.start, event.all_day, value));
                 }
             }
         }
@@ -321,6 +359,13 @@ impl CalendarStore {
             "accounts": accounts,
             "loading": loading,
             "events": events.into_iter().map(|(_, _, event)| event).collect::<Vec<_>>(),
+            "timeZone": local_zone(),
         }))
     }
+}
+
+/// Whether `record` may change or delete `event`: it organizes it, on a calendar it may write
+/// to, and its sign-in lets it change events.
+fn editable(record: &AccountRecord, calendar: Option<&Calendar>, event: &CalendarEvent) -> bool {
+    event.mine && calendar.is_some_and(|calendar| calendar.writable) && record.can_edit_calendars()
 }

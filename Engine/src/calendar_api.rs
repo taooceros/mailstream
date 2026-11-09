@@ -1,7 +1,8 @@
 //! Google Calendar and Outlook calendars (Microsoft Graph) as the calendar store reads them: an
 //! account's calendars, and their events within a window with recurring ones expanded into
 //! occurrences (Google's `singleEvents`, Graph's `calendarView`). Both answer the same
-//! [`CalendarEvent`]s, which mail.db keeps as they are.
+//! [`CalendarEvent`]s, which mail.db keeps as they are. Adding, changing and deleting events is
+//! in [`write`].
 use chrono::{Local, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -10,6 +11,10 @@ use crate::api::{self, Api, ApiError, Priority, Request};
 use crate::ics::{Invitation, normalized_uid};
 use crate::model::{Date, date_from_unix, iso8601, now, parse_iso8601, unix_seconds};
 use crate::oauth::Provider;
+
+mod write;
+
+pub use write::{EventFields, local_zone};
 
 /// Google's name for the account's own calendar.
 const PRIMARY: &str = "primary";
@@ -31,6 +36,10 @@ pub struct Calendar {
     /// The account's own calendar.
     #[serde(default)]
     pub primary: bool,
+    /// The account may add and change events on it (Google's owner or writer access, Graph's
+    /// `canEdit`).
+    #[serde(default)]
+    pub writable: bool,
 }
 
 /// An organizer or attendee.
@@ -79,6 +88,10 @@ pub struct CalendarEvent {
     /// The description, as plain text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// `notes` is cut short of the provider's description (Graph keeps a preview of it only), so
+    /// it cannot be edited from here without losing the rest.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notes_cut: bool,
     /// The event in the provider's web calendar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
@@ -89,6 +102,10 @@ pub struct CalendarEvent {
     /// For an occurrence of a recurring event, the series' id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub series: Option<String>,
+    /// The account organizes it (Google's organizer `self` on an ordinary event, Graph's
+    /// `isOrganizer`): only these may be changed or deleted, on a writable calendar.
+    #[serde(default)]
+    pub mine: bool,
 }
 
 impl CalendarEvent {
@@ -134,17 +151,20 @@ fn non_empty(text: Option<String>) -> Option<String> {
     text.map(|text| text.trim().to_string()).filter(|text| !text.is_empty())
 }
 
-fn notes(text: Option<String>, html: bool) -> Option<String> {
-    let text = text?;
+/// The description as plain text, and whether writing that text back would lose part of it: cut
+/// at [`NOTES_LIMIT`], or links whose addresses the text drops.
+fn notes(text: Option<String>, html: bool) -> (Option<String>, bool) {
+    let Some(text) = text else { return (None, false) };
+    let links = html && text.to_ascii_lowercase().contains("<a ");
     let plain = if html && text.contains('<') { crate::text::strip_html(&text) } else { text };
     let lines: Vec<&str> = plain.lines().map(str::trim_end).collect();
     let joined = lines.join("\n");
     let trimmed = joined.trim();
     if trimmed.is_empty() {
-        return None;
+        return (None, false);
     }
     let (kept, cut) = crate::text::prefix_characters(trimmed, NOTES_LIMIT);
-    Some(if cut { format!("{kept}…") } else { kept.to_string() })
+    (Some(if cut { format!("{kept}…") } else { kept.to_string() }), cut || links)
 }
 
 /// The calls for one account, by its provider.
@@ -221,6 +241,7 @@ impl CalendarRemote<'_> {
                 id: entry.id,
                 color: non_empty(entry.background_color),
                 primary: entry.primary == Some(true),
+                writable: matches!(entry.access_role.as_deref(), Some("owner" | "writer")),
             })
             .collect();
         let (time_min, time_max) = (iso8601(start), iso8601(end));
@@ -261,7 +282,8 @@ impl CalendarRemote<'_> {
     // MARK: Graph
 
     async fn graph(&self, start: Date, end: Date) -> Result<Fetched, ApiError> {
-        let first = api::url(self.graph, "me/calendars", &[("$top", "100"), ("$select", "id,name,hexColor,isDefaultCalendar")]);
+        let first =
+            api::url(self.graph, "me/calendars", &[("$top", "100"), ("$select", "id,name,hexColor,isDefaultCalendar,canEdit")]);
         let found = api::pages(
             first,
             PAGES,
@@ -278,6 +300,7 @@ impl CalendarRemote<'_> {
                 id: calendar.id,
                 color: non_empty(calendar.hex_color),
                 primary: calendar.is_default_calendar == Some(true),
+                writable: calendar.can_edit == Some(true),
             })
             .collect();
         let (from, to) = (iso8601(start), iso8601(end));
@@ -505,6 +528,8 @@ struct GoogleCalendar {
     primary: Option<bool>,
     selected: Option<bool>,
     hidden: Option<bool>,
+    /// `owner`, `writer`, `reader` or `freeBusyReader`.
+    access_role: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -553,6 +578,8 @@ struct GoogleConference {
 struct GoogleEvent {
     id: String,
     status: Option<String>,
+    /// `default`; `birthday`, `fromGmail`, `outOfOffice` and the like.
+    event_type: Option<String>,
     summary: Option<String>,
     location: Option<String>,
     description: Option<String>,
@@ -582,6 +609,8 @@ impl GoogleEvent {
         let attendees: Vec<&GooglePerson> =
             self.attendees.iter().flatten().filter(|person| person.resource != Some(true)).collect();
         let organizer_is_me = self.organizer.as_ref().and_then(|organizer| organizer.me) == Some(true);
+        // Birthdays, events from Gmail and the like are Google's to change.
+        let mine = organizer_is_me && self.event_type.as_deref().is_none_or(|kind| kind == "default");
         let response = match attendees.iter().find(|person| person.me == Some(true)) {
             _ if organizer_is_me && !attendees.is_empty() => Some("organizer".to_string()),
             Some(me) => non_empty(me.response_status.clone()),
@@ -590,6 +619,7 @@ impl GoogleEvent {
         let video = self.conference_data.and_then(|conference| {
             conference.entry_points?.into_iter().find(|point| point.entry_point_type.as_deref() == Some("video"))?.uri
         });
+        let (notes, notes_cut) = notes(self.description, true);
         Some(CalendarEvent {
             id: self.id,
             calendar: calendar.to_string(),
@@ -604,10 +634,12 @@ impl GoogleEvent {
             organizer: self.organizer.as_ref().map(GooglePerson::person),
             attendees: attendees.iter().map(|person| person.person()).collect(),
             response,
-            notes: notes(self.description, true),
+            notes,
+            notes_cut,
             link: non_empty(self.html_link),
             uid: non_empty(self.ical_uid).map(|uid| crate::ics::normalized_uid(&uid)),
             series: non_empty(self.recurring_event_id),
+            mine,
         })
     }
 }
@@ -616,6 +648,8 @@ impl GoogleEvent {
 
 const GRAPH_EVENT_FIELDS: &str = "id,subject,start,end,isAllDay,isCancelled,isOrganizer,location,onlineMeeting,\
 onlineMeetingUrl,organizer,attendees,responseStatus,webLink,bodyPreview,iCalUId,seriesMasterId,type";
+/// The most characters of the description Graph's `bodyPreview` holds.
+const GRAPH_PREVIEW: usize = 255;
 
 #[derive(Deserialize)]
 struct GraphList<T> {
@@ -631,6 +665,7 @@ struct GraphCalendar {
     name: Option<String>,
     hex_color: Option<String>,
     is_default_calendar: Option<bool>,
+    can_edit: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -754,11 +789,15 @@ impl GraphEvent {
                 graph_person(attendee.email_address, graph_response(attendee.status.and_then(|status| status.response).as_deref()))
             })
             .collect();
-        let response = if self.is_organizer == Some(true) {
+        let mine = self.is_organizer == Some(true);
+        let response = if mine {
             (!attendees.is_empty()).then(|| "organizer".to_string())
         } else {
             graph_response(self.response_status.and_then(|status| status.response).as_deref())
         };
+        // Graph previews the description in its first 255 characters.
+        let preview = self.body_preview.as_deref().map_or(0, |preview| preview.chars().count());
+        let (notes, notes_cut) = notes(self.body_preview, false);
         Some(CalendarEvent {
             id: self.id,
             calendar: calendar.to_string(),
@@ -773,10 +812,12 @@ impl GraphEvent {
             organizer: self.organizer.map(|organizer| graph_person(organizer.email_address, None)),
             attendees,
             response,
-            notes: notes(self.body_preview, false),
+            notes,
+            notes_cut: notes_cut || preview >= GRAPH_PREVIEW,
             link: non_empty(self.web_link),
             uid: non_empty(self.ical_uid).map(|uid| crate::ics::normalized_uid(&uid)),
             series: non_empty(self.series_master_id),
+            mine,
         })
     }
 }
