@@ -584,6 +584,7 @@ class _DayColumn extends StatelessWidget {
               selected: selected == eventKey(placed.event),
               past: !eventSpan(placed.event).end.isAfter(now),
               compact: (placed.bottom - placed.top) < 40,
+              narrow: width * placed.span / placed.columns < 64,
               onTap: onOpen == null ? null : () => onOpen!(placed.event),
             ),
           ),
@@ -601,6 +602,7 @@ class _EventBlock extends StatelessWidget {
     required this.selected,
     required this.past,
     required this.compact,
+    this.narrow = false,
     required this.onTap,
   });
 
@@ -611,6 +613,9 @@ class _EventBlock extends StatelessWidget {
 
   /// One line: the title, and the start after it on the timeline.
   final bool compact;
+
+  /// Too narrow for a word: lines are cut at the edge rather than broken inside words.
+  final bool narrow;
   final VoidCallback? onTap;
 
   @override
@@ -644,7 +649,15 @@ class _EventBlock extends StatelessWidget {
       label = Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Flexible(child: Text(event.title, maxLines: 3, overflow: TextOverflow.ellipsis, style: title)),
+          Flexible(
+            child: Text(
+              event.title,
+              maxLines: narrow ? 1 : 3,
+              softWrap: !narrow,
+              overflow: narrow ? TextOverflow.clip : TextOverflow.ellipsis,
+              style: title,
+            ),
+          ),
           if (start != null) Text(start, maxLines: 1, overflow: TextOverflow.clip, softWrap: false, style: title.copyWith(fontWeight: FontWeight.w400)),
           if (event.location != null)
             Flexible(
