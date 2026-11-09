@@ -51,6 +51,8 @@ class Island extends StatelessWidget {
 /// what scrolls under it blurs behind a translucent [MailColors.capsule] face inside a hairline
 /// rim. Flutter draws it on every platform, in the app's light or dark (MS-177: the system's
 /// glass followed the system's appearance, not the app's, and went pale under dark controls).
+/// The capsules share the app's [BackdropGroup] (`main.dart`): the engine reads and blurs the
+/// window once for all of them rather than once per capsule.
 class GlassCapsule extends StatelessWidget {
   const GlassCapsule({super.key, required this.child});
 
@@ -69,7 +71,7 @@ class GlassCapsule extends StatelessWidget {
       height: height,
       child: ClipRRect(
         borderRadius: const BorderRadius.all(Radius.circular(height / 2)),
-        child: BackdropFilter(
+        child: BackdropFilter.grouped(
           filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
           child: DecoratedBox(
             decoration: ShapeDecoration(
