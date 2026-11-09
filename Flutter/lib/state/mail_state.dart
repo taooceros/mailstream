@@ -1038,6 +1038,33 @@ class MailState extends ChangeNotifier {
     }
   }
 
+  /// The list column's width beside an open page, in thousandths of the window's width beside
+  /// the sidebar: `flutter.listWidth` for mail and chat, `flutter.calendarWidth` for the calendar.
+  static const listWidthSetting = 'flutter.listWidth';
+  static const calendarWidthSetting = 'flutter.calendarWidth';
+
+  /// The engine's defaults, for the first frames before settings.json is read.
+  static const _columnDefaults = {listWidthSetting: 400, calendarWidthSetting: 500};
+
+  /// The share (0–1) the column of [key] takes of the width beside the sidebar.
+  double columnShare(String key) {
+    for (final entry in settings?.settings ?? const <engine.SettingEntry>[]) {
+      if (entry.key == key && entry.value is engine.NumberSettingValue) {
+        return (entry.value as engine.NumberSettingValue).value / 1000;
+      }
+    }
+    return _columnDefaults[key]! / 1000;
+  }
+
+  /// Keeps the share a drag of the column's gap left; null goes back to the default.
+  Future<void> setColumnShare(String key, double? share) async {
+    try {
+      await setSetting(key, share == null ? null : engine.NumberSettingValue((share * 1000).round().clamp(100, 900)));
+    } on engine.MailException catch (error) {
+      _report('Could not keep the column width: ${describe(error)}');
+    }
+  }
+
   // MARK: - Auto-read
 
   /// What the engine's auto-read (`autoRead.*`) marked read and nobody undid, newest first; null

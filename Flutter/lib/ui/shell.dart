@@ -496,11 +496,21 @@ class _MailShellState extends State<MailShell> {
         ? calendar.close
         : state.close;
     final pageId = space ?? event ?? opened?.id;
-    // With the compose column docked the list's width follows the window, not the column, so
-    // resizing the column moves only the edge being dragged.
-    final listWidth = dockedCompose ? (contentWidth * 0.3).clamp(300.0, 460.0) : (width * 0.36).clamp(400.0, 520.0);
+    // A share of the width beside the navigation, not of the mail area: with the compose column
+    // docked, resizing that column moves only the edge being dragged. The split fits it to its
+    // room, and a drag of the split's gap keeps the new share.
+    final widthSetting = calendar.active ? MailState.calendarWidthSetting : MailState.listWidthSetting;
+    final listWidth = state.columnShare(widthSetting) * contentWidth;
     final Widget mailContent = _twoPane
-        ? SplitDetail(pageId: pageId, list: listPane, listWidth: listWidth, onDismiss: onDismiss, detail: detail)
+        ? SplitDetail(
+            pageId: pageId,
+            list: listPane,
+            listWidth: listWidth,
+            onDismiss: onDismiss,
+            onResize: (width) => state.setColumnShare(widthSetting, width / contentWidth),
+            onResetWidth: () => state.setColumnShare(widthSetting, null),
+            detail: detail,
+          )
         : Stack(
             fit: StackFit.expand,
             clipBehavior: Clip.none,
@@ -535,14 +545,15 @@ class _MailShellState extends State<MailShell> {
     } else if (state.composeSwapped && _twoPane && detail != null) {
       // Between the list and the conversation, it widens only as far as keeps the conversation
       // beside the list: past that the layout would fold into one pane under the pointer.
-      final widest = math.min(contentWidth - Panes.gap - 700.0, contentWidth - listWidth - 2 * Panes.gap - 360.0);
+      final swappedList = SplitDetail.fit(listWidth, mailWidth);
+      final widest = math.min(contentWidth - Panes.gap - 700.0, contentWidth - swappedList - 2 * Panes.gap - 360.0);
       content = Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          SizedBox(width: listWidth, child: listPane),
+          SizedBox(width: swappedList, child: listPane),
           const SizedBox(width: Panes.gap),
           SizedBox(width: composeWidth, child: composePane),
-          _ResizeGap(onDrag: (dx) => resize(dx, trailing: true, widest: math.max(math.min(widest, maxCompose), composeWidth))),
+          ResizeGap(onDrag: (dx) => resize(dx, trailing: true, widest: math.max(math.min(widest, maxCompose), composeWidth))),
           Expanded(child: detail),
         ],
       );
@@ -551,7 +562,7 @@ class _MailShellState extends State<MailShell> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           SizedBox(width: composeWidth, child: composePane),
-          _ResizeGap(onDrag: (dx) => resize(dx, trailing: true)),
+          ResizeGap(onDrag: (dx) => resize(dx, trailing: true)),
           Expanded(child: mailContent),
         ],
       );
@@ -560,7 +571,7 @@ class _MailShellState extends State<MailShell> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(child: mailContent),
-          _ResizeGap(onDrag: (dx) => resize(dx, trailing: false)),
+          ResizeGap(onDrag: (dx) => resize(dx, trailing: false)),
           SizedBox(width: composeWidth, child: composePane),
         ],
       );
@@ -951,56 +962,6 @@ class _ToastView extends StatelessWidget {
           ),
         ],
       ]),
-    );
-  }
-}
-
-/// The gap between a docked compose island and its neighbor: drags horizontally to resize the
-/// compose column and shows a pill handle on hover.
-class _ResizeGap extends StatefulWidget {
-  const _ResizeGap({required this.onDrag});
-
-  final ValueChanged<double> onDrag;
-
-  @override
-  State<_ResizeGap> createState() => _ResizeGapState();
-}
-
-class _ResizeGapState extends State<_ResizeGap> {
-  bool _hovered = false;
-  bool _dragging = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final active = _hovered || _dragging;
-    return MouseRegion(
-      cursor: SystemMouseCursors.resizeLeftRight,
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onHorizontalDragStart: (_) => setState(() => _dragging = true),
-        onHorizontalDragUpdate: (details) => widget.onDrag(details.delta.dx),
-        onHorizontalDragEnd: (_) => setState(() => _dragging = false),
-        onHorizontalDragCancel: () => setState(() => _dragging = false),
-        child: SizedBox(
-          width: Panes.gap,
-          child: Center(
-            child: AnimatedOpacity(
-              duration: Motion.quick,
-              opacity: active ? 1 : 0,
-              child: Container(
-                width: 3,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: context.colors.border,
-                  borderRadius: BorderRadius.circular(1.5),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
     );
   }
 }

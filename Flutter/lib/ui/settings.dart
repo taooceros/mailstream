@@ -24,6 +24,7 @@ const _sections = [
   ('AI tagging', ['aiTagging.']),
   ('Auto-read', ['autoRead.']),
   ('Remote content', ['remoteContent.']),
+  ('Layout', ['flutter.listWidth', 'flutter.calendarWidth']),
   ('Performance', ['flutter.showFrameRate']),
 ];
 
@@ -44,6 +45,8 @@ const _titles = {
   'sync.pushPollSeconds': 'Polling while push is connected',
   'chat.pollSeconds': 'Google Chat polling',
   'flutter.showFrameRate': 'Show frame rate',
+  'flutter.listWidth': 'List width (‰ of the window)',
+  'flutter.calendarWidth': 'Calendar width (‰ of the window)',
 };
 
 /// Names for the words a choice setting takes.

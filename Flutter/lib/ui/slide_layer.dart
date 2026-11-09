@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/physics.dart';
@@ -257,6 +258,8 @@ class SwipeReadiness {
 /// The list-detail split of wide windows: the list beside the opened page, which slides in from
 /// the trailing edge as the list narrows. A two-finger swipe to the right on the page drags it
 /// out, the list widening behind it, and closes it once past a third of its width or flicked.
+/// With [onResize], the gap between them drags the list's width and a double-click on it calls
+/// [onResetWidth].
 class SplitDetail extends StatefulWidget {
   const SplitDetail({
     super.key,
@@ -265,7 +268,17 @@ class SplitDetail extends StatefulWidget {
     required this.pageId,
     required this.listWidth,
     required this.onDismiss,
+    this.onResize,
+    this.onResetWidth,
   });
+
+  /// The narrowest list, and the narrowest page a list may squeeze beside it.
+  static const minList = 300.0;
+  static const minDetail = 420.0;
+
+  /// [width] of a list within a split [room] wide: at least [minList], and no wider than leaves
+  /// the page [minDetail].
+  static double fit(double width, double room) => width.clamp(minList, math.max(minList, room - Panes.gap - minDetail));
 
   final Widget list;
 
@@ -274,8 +287,15 @@ class SplitDetail extends StatefulWidget {
 
   /// Stable identity lets a new page interrupt an old page's pending dismissal.
   final Object? pageId;
+
+  /// The width the list asks for, fitted to the room the split has.
   final double listWidth;
   final VoidCallback onDismiss;
+
+  /// Called with the list's width once a drag of the gap ends; the owner keeps it and passes it
+  /// back as [listWidth]. Until then the split keeps showing the dragged width.
+  final ValueChanged<double>? onResize;
+  final VoidCallback? onResetWidth;
 
   @override
   State<SplitDetail> createState() => _SplitDetailState();
@@ -296,6 +316,17 @@ class _SplitDetailState extends State<SplitDetail> with TickerProviderStateMixin
   /// How far the page travels between open and closed, at the last layout.
   double _travel = 1;
 
+  /// The list's width from a drag of the gap, until the owner passes back a new [listWidth]. Only
+  /// the split's own layout follows it, so a drag rebuilds nothing above or inside the panes.
+  final _dragged = ValueNotifier<double?>(null);
+  bool _dragging = false;
+  double _dragFrom = 0;
+  double _dragBy = 0;
+
+  /// The split's width and the list's width, at the last layout.
+  double _room = 0;
+  double _listWidth = 0;
+
   @override
   void initState() {
     super.initState();
@@ -307,6 +338,8 @@ class _SplitDetailState extends State<SplitDetail> with TickerProviderStateMixin
   @override
   void didUpdateWidget(SplitDetail old) {
     super.didUpdateWidget(old);
+    // The owner kept the dragged width (or its window changed size): its width rules again.
+    if (!_dragging && widget.listWidth != old.listWidth) _dragged.value = null;
     final detail = widget.detail;
     if (detail != null) {
       _shown = detail;
@@ -336,7 +369,31 @@ class _SplitDetailState extends State<SplitDetail> with TickerProviderStateMixin
   void dispose() {
     _ready.dispose();
     _split.dispose();
+    _dragged.dispose();
     super.dispose();
+  }
+
+  void _resizeStart() {
+    _dragging = true;
+    _dragFrom = _listWidth;
+    _dragBy = 0;
+  }
+
+  // Follows the pointer from where the drag began, so a drag past a limit and back resumes under it.
+  void _resize(double dx) {
+    _dragBy += dx;
+    _dragged.value = SplitDetail.fit(_dragFrom + _dragBy, _room);
+  }
+
+  void _resizeEnd() {
+    _dragging = false;
+    final width = _dragged.value;
+    if (width != null) widget.onResize?.call(width);
+  }
+
+  void _resetWidth() {
+    _dragged.value = null;
+    widget.onResetWidth?.call();
   }
 
   void _start(PointerPanZoomStartEvent event) {
@@ -375,16 +432,21 @@ class _SplitDetailState extends State<SplitDetail> with TickerProviderStateMixin
 
   @override
   Widget build(BuildContext context) {
+    final resizable = widget.onResize != null;
     return LayoutBuilder(
       builder: (context, constraints) {
-        final full = constraints.maxWidth;
-        final detailWidth = full - widget.listWidth - Panes.gap;
-        final travel = _travel = full - widget.listWidth;
+        final full = _room = constraints.maxWidth;
+        final gap = resizable
+            ? ResizeGap(onDragStart: _resizeStart, onDrag: _resize, onDragEnd: _resizeEnd, onDoubleTap: _resetWidth)
+            : null;
         return AnimatedBuilder(
-          animation: _split,
+          animation: Listenable.merge([_split, _dragged]),
           builder: (context, _) {
+            final listWidth = _listWidth = SplitDetail.fit(_dragged.value ?? widget.listWidth, full);
+            final detailWidth = full - listWidth - Panes.gap;
+            _travel = full - listWidth;
             final split = _split.value.clamp(0.0, 1.0);
-            final list = full + (widget.listWidth - full) * split;
+            final list = full + (listWidth - full) * split;
             final shown = _shown;
             // Unclipped: the islands' shadows reach into the gaps around them, and the page slides
             // in from the window's edge.
@@ -401,16 +463,83 @@ class _SplitDetailState extends State<SplitDetail> with TickerProviderStateMixin
                     width: detailWidth,
                     child: Listener(
                       onPointerPanZoomStart: _start,
-                      onPointerPanZoomUpdate: (event) => _update(event, travel),
-                      onPointerPanZoomEnd: (_) => _end(travel),
+                      onPointerPanZoomUpdate: (event) => _update(event, _travel),
+                      onPointerPanZoomEnd: (_) => _end(_travel),
                       child: shown,
                     ),
                   ),
+                // Only once the page is in: a spring settles within a hair of fully open.
+                if (gap != null && split > 0.99 && shown != null && widget.detail != null)
+                  Positioned(left: list, top: 0, bottom: 0, width: Panes.gap, child: gap),
               ],
             );
           },
         );
       },
+    );
+  }
+}
+
+/// The gap between two islands that drags horizontally to resize one of them: a resize cursor,
+/// and a pill handle on hover and while dragging.
+class ResizeGap extends StatefulWidget {
+  const ResizeGap({super.key, required this.onDrag, this.onDragStart, this.onDragEnd, this.onDoubleTap});
+
+  final ValueChanged<double> onDrag;
+  final VoidCallback? onDragStart;
+  final VoidCallback? onDragEnd;
+  final VoidCallback? onDoubleTap;
+
+  @override
+  State<ResizeGap> createState() => _ResizeGapState();
+}
+
+class _ResizeGapState extends State<ResizeGap> {
+  bool _hovered = false;
+  bool _dragging = false;
+
+  void _end() {
+    setState(() => _dragging = false);
+    widget.onDragEnd?.call();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final active = _hovered || _dragging;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeLeftRight,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        // From the press, so the edge stays under the pointer instead of trailing it by the slop.
+        dragStartBehavior: DragStartBehavior.down,
+        onHorizontalDragStart: (_) {
+          setState(() => _dragging = true);
+          widget.onDragStart?.call();
+        },
+        onHorizontalDragUpdate: (details) => widget.onDrag(details.delta.dx),
+        onHorizontalDragEnd: (_) => _end(),
+        onHorizontalDragCancel: _end,
+        onDoubleTap: widget.onDoubleTap,
+        child: SizedBox(
+          width: Panes.gap,
+          child: Center(
+            child: AnimatedOpacity(
+              duration: Motion.quick,
+              opacity: active ? 1 : 0,
+              child: Container(
+                width: 3,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: context.colors.border,
+                  borderRadius: BorderRadius.circular(1.5),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
