@@ -1,4 +1,5 @@
 import 'package:flutter/widgets.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/intl.dart' hide TextDirection;
 import 'package:macos_ui/macos_ui.dart';
@@ -323,6 +324,51 @@ void main() {
     // Every card has its dot; the overflow checks of the layout ran without a report.
     expect(find.byKey(const ValueKey('dot')), findsNWidgets(6));
     expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a title never breaks inside a word, whatever the column width (Install7: "Dinne / r with")', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final week = weekDays(DateTime(2031, 3, 2));
+    DateTime at(int day, int hour, [int minute = 0]) => DateTime(week[day].year, week[day].month, week[day].day, hour, minute);
+    final events = [
+      // Install7's card: two hours, no guests.
+      meeting('Dinner with Person 6', at(2, 19), 120, null),
+      meeting('Architecture review', at(1, 10), 90, 'accepted', guests: 4, call: true),
+      meeting('Interview: frontend', at(1, 14), 60, 'needsAction'),
+      meeting('Workshop', at(5, 13), 180, 'accepted', guests: 2, call: true),
+      meeting('Offsite prep', at(3, 13), 60, 'organizer'),
+      meeting('Budget review', at(3, 13, 30), 60, 'accepted'),
+    ];
+    final titles = {for (final event in events) event.title};
+    final broken = <String>[];
+    // Each day from 40 to 140 points wide, a point at a time, in the test font (13 points a
+    // letter at the cards' title size, so `Dinner` needs 78).
+    for (var day = 40; day <= 140; day++) {
+      tester.view.physicalSize = Size(CalendarGrid.gutter + 7.0 * day, 900);
+      await tester.pumpWidget(MacosApp(
+        theme: MailTheme.macos(Brightness.light),
+        home: CalendarGrid(days: week, events: events, colorOf: (_) => const Color(0xFF4285F4)),
+      ));
+      for (final paragraph in tester.renderObjectList<RenderParagraph>(find.byType(RichText))) {
+        final text = paragraph.text.toPlainText();
+        if (!titles.contains(text)) continue;
+        // Two letters of one word on different lines: the word was broken. Letters an ellipsis
+        // cut off have no box.
+        for (var i = 1; i < text.length; i++) {
+          if (text[i - 1] == ' ' || text[i] == ' ') continue;
+          final first = paragraph.getBoxesForSelection(TextSelection(baseOffset: i - 1, extentOffset: i));
+          final second = paragraph.getBoxesForSelection(TextSelection(baseOffset: i, extentOffset: i + 1));
+          if (first.isEmpty || second.isEmpty) continue;
+          if (second.first.top > first.first.top) {
+            broken.add('$text at $i, ${paragraph.size.width} wide (day $day)');
+            break;
+          }
+        }
+      }
+    }
+    expect(broken, isEmpty);
     await tester.pumpWidget(const SizedBox());
   });
 }

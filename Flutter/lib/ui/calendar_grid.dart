@@ -197,6 +197,24 @@ enum CardFit { line, standard, full }
 
 CardFit cardFit(int minutes) => minutes < 45 ? CardFit.line : (minutes < 75 ? CardFit.standard : CardFit.full);
 
+/// Whether every word of `text` fits on a line `width` wide in `style`, so wrapping it never
+/// breaks inside a word.
+bool wordsFit(String text, TextStyle style, TextScaler scaler, double width) {
+  final painter = TextPainter(textDirection: TextDirection.ltr, textScaler: scaler, maxLines: 1);
+  try {
+    for (final word in text.split(RegExp(r'\s+'))) {
+      if (word.isEmpty) continue;
+      painter
+        ..text = TextSpan(text: word, style: style)
+        ..layout();
+      if (painter.width > width) return false;
+    }
+    return true;
+  } finally {
+    painter.dispose();
+  }
+}
+
 /// From `start` to `end`, the period once when both share it: 10:15 – 11:30 AM.
 String timeRange(DateTime start, DateTime end) {
   final format = DateFormat.jm();
@@ -851,7 +869,7 @@ class _EventCard extends StatelessWidget {
                 TextSpan(text: '  ${DateFormat.jm().format(span.start)} · ${shortDuration(span.end.difference(span.start))}', style: detail),
               ]),
               maxLines: 1,
-              overflow: TextOverflow.clip,
+              overflow: TextOverflow.ellipsis,
               softWrap: false,
             ),
           ),
@@ -863,16 +881,14 @@ class _EventCard extends StatelessWidget {
       final location = event.location;
       final guests = flat ? const <engine.CalendarPerson>[] : GuestAvatars.guestsOf(event);
       final foot = fit == CardFit.full && width >= 50 && (meeting != null || guests.isNotEmpty);
-      // As many title lines as fit over the time (and the foot), each word whole: a word wider
-      // than the card keeps the title to one line, cut with an ellipsis, rather than broken.
-      final longest = event.title.split(' ').fold('', (a, b) => b.length > a.length ? b : a);
-      final measure = TextPainter(text: TextSpan(text: longest, style: title), textDirection: TextDirection.ltr, maxLines: 1)
-        ..layout();
-      final wordTooWide = measure.width > width - 22 - (trailing.isEmpty ? 0 : 10);
-      final lineHeight = measure.preferredLineHeight;
-      measure.dispose();
+      // As many title lines as fit over the time (and the foot).
+      final scaler = MediaQuery.textScalerOf(context);
+      final shown = DefaultTextStyle.of(context).style.merge(title);
+      final template = TextPainter(text: TextSpan(style: shown), textDirection: TextDirection.ltr, textScaler: scaler);
+      final lineHeight = template.preferredLineHeight;
+      template.dispose();
       final room = height - 7 - lineHeight * (detail.fontSize! / title.fontSize!) - (foot ? CalendarMetrics.avatar + 2 : 0);
-      final titleLines = wordTooWide ? 1 : (room / lineHeight).floor().clamp(1, 3);
+      final titleLines = (room / lineHeight).floor().clamp(1, 3);
       final text = Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -881,13 +897,19 @@ class _EventCard extends StatelessWidget {
               Padding(padding: EdgeInsets.only(top: (title.fontSize! * 1.2 - CalendarMetrics.dot) / 2), child: dot),
               const SizedBox(width: 5),
               Expanded(
-                child: Text(
-                  event.title,
-                  maxLines: titleLines,
-                  softWrap: !wordTooWide,
-                  overflow: TextOverflow.ellipsis,
-                  style: title,
-                ),
+                // Each word whole: measured against the width the title really gets (after the
+                // card's border and what trails it), a word wider than that keeps the title to
+                // one line cut with an ellipsis, rather than broken inside the word (MS-168).
+                child: LayoutBuilder(builder: (context, constraints) {
+                  final whole = wordsFit(event.title, shown, scaler, constraints.maxWidth);
+                  return Text(
+                    event.title,
+                    maxLines: whole ? titleLines : 1,
+                    softWrap: whole,
+                    overflow: TextOverflow.ellipsis,
+                    style: title,
+                  );
+                }),
               ),
               ...trailingRow,
             ]),
@@ -917,7 +939,7 @@ class _EventCard extends StatelessWidget {
                   // Too narrow for both: the guests alone.
                   child: Row(children: [
                     if (meeting != null && (guests.isEmpty || width >= 70))
-                      _QuietChip(label: width >= 110 ? meetingLabel(meeting) : null, icon: CupertinoIcons.video_camera),
+                      Flexible(child: _QuietChip(label: width >= 110 ? meetingLabel(meeting) : null, icon: CupertinoIcons.video_camera)),
                     const Spacer(),
                     if (guests.isNotEmpty)
                       GuestAvatars(
@@ -989,12 +1011,18 @@ class _QuietChip extends StatelessWidget {
       height: CalendarMetrics.avatar,
       padding: const EdgeInsets.symmetric(horizontal: 5),
       decoration: ShapeDecoration(color: colors.fill, shape: const StadiumBorder()),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        if (icon != null) MacosIcon(icon, size: 11, color: colors.secondaryLabel),
-        if (icon != null && label != null) const SizedBox(width: 3),
-        if (label != null)
-          Text(label!, maxLines: 1, style: context.text.caption1.copyWith(color: colors.secondaryLabel, fontWeight: FontWeight.w500)),
-      ]),
+      // Squeezed by the guests beside it: cut at the chip's edge.
+      child: UnconstrainedBox(
+        constrainedAxis: Axis.vertical,
+        alignment: Alignment.centerLeft,
+        clipBehavior: Clip.hardEdge,
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (icon != null) MacosIcon(icon, size: 11, color: colors.secondaryLabel),
+          if (icon != null && label != null) const SizedBox(width: 3),
+          if (label != null)
+            Text(label!, maxLines: 1, style: context.text.caption1.copyWith(color: colors.secondaryLabel, fontWeight: FontWeight.w500)),
+        ]),
+      ),
     );
   }
 }
