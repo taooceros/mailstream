@@ -74,12 +74,23 @@ void main() {
   group('window chrome off the Mac', () {
     Widget host(Widget child) => MacosApp(theme: MailTheme.macos(Brightness.light), home: Center(child: child));
 
-    testWidgets('glass capsules are drawn by Flutter, without the AppKit view', (tester) async {
-      Host.debugMacOverride = false;
-      await tester.pumpWidget(host(const GlassCapsule(child: SizedBox(width: 30, height: 30))));
-      expect(find.byType(AppKitView), findsNothing);
-      expect(find.byType(BackdropFilter), findsOneWidget);
-      expect(tester.getSize(find.byType(GlassCapsule)).height, GlassCapsule.height);
+    testWidgets('glass capsules are drawn by Flutter on both platforms, in the app\'s light or dark', (tester) async {
+      for (final mac in [true, false]) {
+        for (final brightness in Brightness.values) {
+          Host.debugMacOverride = mac;
+          await tester.pumpWidget(MacosApp(
+            key: ValueKey((mac, brightness)),
+            theme: MailTheme.macos(brightness),
+            home: const Center(child: GlassCapsule(child: SizedBox(width: 30, height: 30))),
+          ));
+          expect(find.byType(AppKitView), findsNothing);
+          expect(find.byType(BackdropFilter), findsOneWidget);
+          expect(tester.getSize(find.byType(GlassCapsule)).height, GlassCapsule.height);
+          final face = tester.widget<DecoratedBox>(find.descendant(of: find.byType(GlassCapsule), matching: find.byType(DecoratedBox)));
+          final expected = brightness == Brightness.light ? MailColors.light.capsule : MailColors.dark.capsule;
+          expect((face.decoration as ShapeDecoration).color, expected);
+        }
+      }
     });
     testWidgets('the title bar area leaves dragging to the system title bar', (tester) async {
       final calls = <String>[];

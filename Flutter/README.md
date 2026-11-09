@@ -71,9 +71,8 @@ zipped Release folder as artifacts. On Windows:
 - Window: the system title bar moves, maximizes and closes the window (`WindowDragArea` does
   nothing there, and no `macos_window_utils` call is made). The window opens at 1240×800,
   centered, titled Mailstream, no smaller than 820×520. There is no system glass under the
-  Flutter view: the window is painted `MailColors.window`, and toolbar `GlassCapsule`s are
-  frosted by Flutter (a backdrop blur, a translucent fill and a hairline rim) instead of the
-  AppKit `mailstream/glass` view.
+  Flutter view: the window is painted `MailColors.window`. Everything drawn on the window
+  (islands, toolbar `GlassCapsule`s, controls) is the same as on the Mac.
 - Keys: every ⌘ shortcut is Ctrl (Ctrl+N, Ctrl+F, Ctrl+R, Ctrl+W, Ctrl+[, Ctrl+Enter sends,
   Ctrl+Shift+O), and Ctrl+, opens Settings, as the Mac's app menu does. Ctrl with Alt (AltGr) is
   never a command. Tooltips name the keys of the desktop they run on (`Host.shortcut`).
@@ -203,11 +202,15 @@ is the system's glass (`NSGlassEffectView`, which `macos/Runner/MainFlutterWindo
 under the transparent Flutter view, through `macos_window_utils`), the sidebar sits on it, and the
 list and the conversation are rounded islands floating on it with a gap between them: the
 conversation's white, the lists' a shade grayer, a tray their highlighted row lifts off as a white
-card (the row under the pointer half as far, lifted rows 4 pt apart). The toolbars' controls float on capsules of real system glass (`mailstream/glass` platform views
-under them), the controls over a row on a raised capsule. Buttons, icon buttons, the search and
-text fields and spinners are `macos_ui`'s; Material's remaining widgets are themed to match
-(system font sizes, accent blue, gray fills, SF Symbols-style icons from `CupertinoIcons`). It
-needs macOS 26.
+card (the row under the pointer half as far, lifted rows 4 pt apart). The toolbars' controls
+float on frosted capsules Flutter draws (a backdrop blur, a translucent `MailColors.capsule`
+face, a hairline rim), the controls over a row on a raised capsule. Only the window's glass is
+the system's: everything on it is the app's own and looks the same on Windows (MS-182). Colors,
+radii, spacing, elevations, icon sizes and text roles are tokens in `lib/ui/design.dart`; use
+them rather than literals. Buttons, icon buttons, the search and text fields and spinners are
+still `macos_ui`'s until the app's own control set replaces them (MS-193); Material's remaining
+widgets are themed to match (system font sizes, accent blue, gray fills, SF Symbols-style icons
+from `CupertinoIcons`). It needs macOS 26.
 
 The sidebar shows from 1200 dp wide (a rail below, whose menu button opens it). The list's
 island fills the window; from 1000 dp opening a conversation splits it, the conversation's

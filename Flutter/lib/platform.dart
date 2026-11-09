@@ -4,10 +4,10 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart' show SingleActivator;
 
-/// The desktop whose conventions the app follows. On the Mac: ⌘ shortcuts, the runner's AppKit
-/// glass, window chrome and WebKit bodies (`macos/Runner`). Elsewhere (Windows): Ctrl shortcuts,
-/// capsules Flutter draws, the system title bar and the Windows runner's channels
-/// (`windows/runner`).
+/// The desktop whose conventions the app follows. On the Mac: ⌘ shortcuts, the runner's window
+/// glass and chrome and WebKit bodies (`macos/Runner`). Elsewhere (Windows): Ctrl shortcuts, the
+/// system title bar and the Windows runner's channels (`windows/runner`). Everything the app
+/// draws looks the same on both (`ui/design.dart`).
 abstract final class Host {
   /// Set by tests to take the other desktop's branch on any host; `null` follows the host.
   @visibleForTesting

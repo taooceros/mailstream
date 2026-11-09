@@ -1,10 +1,10 @@
-/// The window's surfaces, after Dia's islands on macOS 26's Liquid Glass. The window itself is
-/// glass (`NSGlassEffectView`, under the transparent Flutter view: `macos/Runner/MainFlutterWindow.swift`),
-/// the sidebar sits on it, and the list and the conversation are [Island]s. Toolbar groups float
-/// on [GlassCapsule]s, real system glass over the content scrolling under them; the controls
-/// that float over a row are [RaisedCapsule]s, a little skeuomorphic. Off the Mac there is no
-/// system glass under the Flutter view: the window is a color (`MailColors.window`) and the
-/// capsules are frosted by Flutter.
+/// The window's surfaces, after Dia's islands. On the Mac the window itself is glass
+/// (`NSGlassEffectView`, under the transparent Flutter view: `macos/Runner/MainFlutterWindow.swift`)
+/// and the sidebar sits on it; on Windows the window is a color (`MailColors.window`). That is
+/// window chrome, the one place the platforms differ: everything drawn on it is the app's own and
+/// the same on both (MS-182). The list and the conversation are [Island]s; toolbar groups float
+/// on frosted [GlassCapsule]s over the content scrolling under them; the controls that float
+/// over a row are [RaisedCapsule]s, a little skeuomorphic.
 library;
 
 import 'dart:ui' show ImageFilter;
@@ -40,74 +40,44 @@ class Island extends StatelessWidget {
           width: 0.5,
           strokeAlign: BorderSide.strokeAlignOutside,
         ),
-        boxShadow: [
-          BoxShadow(color: MacosColors.black.withValues(alpha: light ? 0.05 : 0.3), blurRadius: 1, offset: const Offset(0, 0.5)),
-          BoxShadow(color: MacosColors.black.withValues(alpha: light ? 0.07 : 0.35), blurRadius: 18, offset: const Offset(0, 4)),
-        ],
+        boxShadow: colors.islandShadow,
       ),
       child: ClipRRect(borderRadius: radius, child: child),
     );
   }
 }
 
-/// Controls grouped on a capsule of the system's glass, as macOS 26 groups toolbar items. The
-/// glass is an AppKit view under the controls (the `mailstream/glass` platform view), so it
-/// refracts whatever Flutter draws beneath it. Off the Mac, Flutter frosts the capsule itself:
-/// what scrolls under it blurs behind a translucent fill with a hairline rim.
+/// Controls grouped on a capsule floating over the content, as macOS 26 groups toolbar items:
+/// what scrolls under it blurs behind a translucent [MailColors.capsule] face inside a hairline
+/// rim. Flutter draws it on every platform, in the app's light or dark (MS-177: the system's
+/// glass followed the system's appearance, not the app's, and went pale under dark controls).
 class GlassCapsule extends StatelessWidget {
   const GlassCapsule({super.key, required this.child});
 
   /// The capsule's height: a 30 pt control and its padding.
   static const height = 36.0;
 
+  /// How far what lies beneath blurs.
+  static const blur = 12.0;
+
   final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    final controls = Padding(padding: const EdgeInsets.all(3), child: child);
-    if (!Host.mac) return SizedBox(height: height, child: _FrostedCapsule(child: controls));
+    final colors = context.colors;
     return SizedBox(
       height: height,
-      child: Stack(
-        children: [
-          const Positioned.fill(
-            child: IgnorePointer(
-              child: AppKitView(
-                viewType: 'mailstream/glass',
-                creationParams: {'radius': height / 2},
-                creationParamsCodec: StandardMessageCodec(),
-              ),
+      child: ClipRRect(
+        borderRadius: const BorderRadius.all(Radius.circular(height / 2)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
+          child: DecoratedBox(
+            decoration: ShapeDecoration(
+              color: colors.capsule,
+              shape: StadiumBorder(side: BorderSide(color: colors.capsuleRim, width: Strokes.hairline)),
             ),
+            child: Padding(padding: const EdgeInsets.all(3), child: child),
           ),
-          controls,
-        ],
-      ),
-    );
-  }
-}
-
-/// [GlassCapsule] without system glass: a blur of what lies beneath, a translucent fill and a
-/// hairline rim, in a capsule.
-class _FrostedCapsule extends StatelessWidget {
-  const _FrostedCapsule({required this.child});
-
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    final light = context.colors.brightness == Brightness.light;
-    return ClipRRect(
-      borderRadius: const BorderRadius.all(Radius.circular(GlassCapsule.height / 2)),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-        child: DecoratedBox(
-          decoration: ShapeDecoration(
-            color: light ? MacosColors.white.withValues(alpha: 0.72) : const Color(0xFF3A3A3C).withValues(alpha: 0.72),
-            shape: StadiumBorder(
-              side: BorderSide(color: light ? MacosColors.black.withValues(alpha: 0.08) : MacosColors.white.withValues(alpha: 0.12), width: 0.5),
-            ),
-          ),
-          child: child,
         ),
       ),
     );
@@ -132,10 +102,7 @@ class RaisedCapsule extends StatelessWidget {
           colors: light ? const [MacosColors.white, Color(0xFFF4F4F6)] : const [Color(0xFF424245), Color(0xFF35353A)],
         ),
         shape: StadiumBorder(side: BorderSide(color: light ? MacosColors.black.withValues(alpha: 0.1) : MacosColors.white.withValues(alpha: 0.12), width: 0.5)),
-        shadows: [
-          BoxShadow(color: MacosColors.black.withValues(alpha: light ? 0.08 : 0.4), blurRadius: 2, offset: const Offset(0, 1)),
-          BoxShadow(color: MacosColors.black.withValues(alpha: light ? 0.08 : 0.3), blurRadius: 10, offset: const Offset(0, 4)),
-        ],
+        shadows: context.colors.raisedShadow,
       ),
       child: Padding(padding: const EdgeInsets.all(3), child: child),
     );
@@ -158,13 +125,13 @@ class ToolButton extends StatelessWidget {
     return MacosTooltip(
       message: tooltip,
       child: MacosIconButton(
-        icon: MacosIcon(icon, size: 17, color: onPressed == null ? tint.withValues(alpha: 0.35) : tint),
+        icon: MacosIcon(icon, size: IconSizes.toolbar, color: onPressed == null ? tint.withValues(alpha: 0.35) : tint),
         onPressed: onPressed,
         semanticLabel: tooltip,
         backgroundColor: MacosColors.transparent,
         disabledColor: MacosColors.transparent,
         hoverColor: colors.label.withValues(alpha: 0.07),
-        borderRadius: BorderRadius.circular(15),
+        borderRadius: BorderRadius.circular(GlassCapsule.height / 2),
         padding: EdgeInsets.zero,
         boxConstraints: const BoxConstraints.tightFor(width: 30, height: 30),
       ),
@@ -275,12 +242,10 @@ class _SheetState extends State<Sheet> {
               decoration: ShapeDecoration(
                 color: colors.background,
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(Panes.sheetCorner),
-                  side: BorderSide(color: colors.separator, width: 0.5),
+                  borderRadius: BorderRadius.circular(Radii.sheet),
+                  side: BorderSide(color: colors.separator, width: Strokes.hairline),
                 ),
-                shadows: [
-                  BoxShadow(color: MacosColors.black.withValues(alpha: 0.28), blurRadius: 40, offset: const Offset(0, 16)),
-                ],
+                shadows: colors.sheetShadow,
               ),
               child: content,
             ),

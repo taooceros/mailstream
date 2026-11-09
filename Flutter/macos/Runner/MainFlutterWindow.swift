@@ -108,8 +108,6 @@ class MainFlutterWindow: NSWindow {
 
     let html = flutterViewController.registrar(forPlugin: "MailHtmlView")
     html.register(MailHtmlFactory(messenger: html.messenger), withId: "mailstream/html")
-    let glass = flutterViewController.registrar(forPlugin: "Glass")
-    glass.register(GlassFactory(), withId: "mailstream/glass")
 
     super.awakeFromNib()
     // AppKit consumes the system Edit > Paste shortcut before Flutter's key shortcuts.
@@ -217,41 +215,7 @@ private final class ComposeFileDropView: NSView {
   }
 }
 
-/// Glass over Flutter's own content, as Flutter `AppKitView`s of type `mailstream/glass` (a
-/// `radius` creation argument rounds them): the toolbars' capsules. AppKit composites the Flutter
-/// layers under a platform view below it, so this glass refracts the list and the message that
-/// scroll under it.
-final class GlassFactory: NSObject, FlutterPlatformViewFactory {
-  func create(withViewIdentifier viewId: Int64, arguments args: Any?) -> NSView {
-    let radius = (args as? [String: Any])?["radius"] as? Double ?? 0
-    let glass = BackdropGlass()
-    glass.cornerRadius = radius
-    glass.autoresizingMask = [.width, .height]
-    // The glass paints a tinted rect past its rounded shape; the clip leaves only the capsule.
-    let clip = BackdropView()
-    clip.wantsLayer = true
-    clip.layer?.cornerRadius = radius
-    clip.layer?.cornerCurve = .continuous
-    clip.layer?.masksToBounds = true
-    clip.addSubview(glass)
-    return clip
-  }
-
-  func createArgsCodec() -> (any FlutterMessageCodec & NSObjectProtocol)? {
-    FlutterStandardMessageCodec.sharedInstance()
-  }
-}
-
-/// Glass that is only a backdrop: clicks go to the Flutter view, which draws the controls on it.
+/// The window's glass, only a backdrop: clicks go to the Flutter view above it.
 private final class BackdropGlass: NSGlassEffectView {
   override func hitTest(_ point: NSPoint) -> NSView? { nil }
-}
-
-private final class BackdropView: NSView {
-  override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-  override func layout() {
-    super.layout()
-    subviews.forEach { $0.frame = bounds }
-  }
 }
