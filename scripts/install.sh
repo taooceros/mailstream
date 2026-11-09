@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install affected, already-installed front ends from a clean private checkout at main.
 # Usage: scripts/install.sh native|flutter|gpui [native|flutter|gpui ...]
-# Launch and inspect each installed app with computer helpers before completing the issue.
+# Then check each installed app: revision, signature, launch (AGENTS.md, Release delivery).
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -122,6 +122,6 @@ PLIST
     ln -sfn "$destination/Contents/MacOS/mailstream" "$link"
     echo "$link -> $destination/Contents/MacOS/mailstream"
   fi
-  echo "Launch this /Applications copy with computer helpers and verify its UI/engine."
-  echo "Previous bundle retained at $previous until smoke verification succeeds."
+  echo "Check this /Applications copy: MSInstalledRevision, codesign, launch (AGENTS.md)."
+  echo "Previous bundle retained at $previous until those checks pass."
 done

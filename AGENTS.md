@@ -101,17 +101,18 @@ hashes stay as they are.
 - Questions only the user can decide: don't guess. Assign the issue to the user (taooceros), move
   it to Todo, start the comment with `**❓ 需要你回答：**` followed by the question(s), each
   answerable on its own, and stop.
-- Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work),
-  push it to `main` with the tests for what you changed passing, and hand it to the install batch
-  ([Release delivery](#release-delivery)): code agents don't build release apps or install. A
-  commit or passing tests is not completion: the batch install agent moves the issue to In Review
-  once the installed copy passes its smoke check, and comments what changed, the deployed commit,
-  the exact `/Applications` targets, the checks run and what remains; the user moves it to Done.
-  Tooling-only changes install nothing: their agent moves them to In Review itself, with that
-  comment.
-- UI changes (a new or changed view, flow or interaction, in any front end): the finishing comment
-  carries screenshots of the installed app showing the change, every state it adds included. The
-  hand-over names each state and how to reach it; without them the work is not ready for review.
+- Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work)
+  and push it to `main` once the tests for what you changed pass and you have checked it in the
+  real app yourself; then hand it to the install batch ([Release delivery](#release-delivery)),
+  which only puts `main`'s tip in `/Applications`. A commit or passing tests is not completion:
+  the batch install agent moves the issue to In Review once the installed copy passes its
+  mechanical checks, with a short note (deployed commit, `/Applications` targets, checks); the
+  user moves it to Done. Tooling-only changes install nothing: their agent moves them to In
+  Review itself, commenting what changed, the checks run and what remains.
+- UI changes (a new or changed view, flow or interaction, in any front end): before handing
+  over, the code agent attaches to the issue screenshots of its own build of the real app (a
+  recording for motion) showing every state the change adds or alters, light and dark; without
+  them the work is not ready to install.
 - Parents: whoever moves a sub-issue to In Review checks its siblings. Once none is left in
   Backlog, Todo or In Progress, it finishes the parent too: a summary comment listing each
   sub-issue and what remains, then In Review. Nobody else picks up a parent an agent filed.
@@ -143,8 +144,9 @@ issue, report on it, yield two or three lines. The session picks one per task it
 - `ms-issue`: an issue to work (code or tooling), named `MS<number><Topic>` (`MS173BlitzLinear`).
 - `ms-discuss`: a question, design or discussion to answer on the issue without changing code.
 - `ms-install`: the `install` line, named `Install<n>` (`Install7`), its task the listed
-  identifiers; it follows [Release delivery](#release-delivery) and doesn't count against the
-  heavy agents below. Its model is in its frontmatter (sonic or quick-task: MS-176).
+  identifiers; it only installs and runs mechanical checks ([Release delivery](#release-delivery)),
+  on the cheap `sonic` setup in its frontmatter (MS-176), and doesn't count against the heavy
+  agents below.
 
 The task text is the issue identifier plus at most a line or two the issue doesn't say (a peer
 changing the same code, a narrower scope); the agent reads the issue, labels and places it and
@@ -159,10 +161,11 @@ Cost rules (MS-157): at most three heavy agents (ones that write code) run at on
 claimed issues wait in the queue of `~/.local/state/linear-poll/session.md`, stay in Todo with a
 comment saying they are queued (Backlog holds only what nobody plans to do yet, MS-175), and start
 in order as slots free; the poller doesn't hand out a Todo issue again once omp has commented on
-it or claimed it. Code is written by the default model; release builds, installs, smoke checks
-and screenshots go to the batch install agent, one run for every issue waiting, at most once an
-hour (`INSTALL_EVERY`). Agents write their full report on the issue and yield only two or three
-lines (result, commit, issue state, anything the user must do).
+it or claimed it. Code is written by the default model, and its agent tests it in the real app
+itself; release installs and their mechanical checks go to the batch install agent, one run for
+every issue waiting, at most once an hour (`INSTALL_EVERY`). Agents write their full report on
+the issue and yield only two or three lines (result, commit, issue state, anything the user
+must do).
 
 The session hands over to a fresh one once its own context passes about 150K tokens: every wake
 re-reads the whole conversation. It waits until no agent of its own is running (their results
@@ -223,49 +226,50 @@ name in backticks (`` `@omp` ``), since Linear rejects an app's @-mention of an 
 
 ## Release delivery
 
-Finished fixes reach `/Applications` as signed release builds, never Debug, in batches (MS-159):
-code agents stop once their change is on `main`, and one cheap agent installs `main`'s tip for
-every issue waiting, then checks each. Separately, each push to `main` that touches the Flutter
-app or its engine publishes a signed update without approval, which the installed Mailstream
-Flutter installs by itself (`Flutter/README.md`); the batch install is still required, so each
-issue is verified in the installed app.
+Finished fixes reach `/Applications` as signed release builds, never Debug, in batches (MS-159).
+All testing happens before that (MS-176): each code agent checks its own change in the real app,
+and one cheap agent then installs `main`'s tip for every issue waiting and checks only that the
+install worked. Separately, each push to `main` that touches the Flutter app or its engine
+publishes a signed update without approval, which the installed Mailstream Flutter installs by
+itself (`Flutter/README.md`); the batch install still runs for each issue.
 
 The code agent:
 
-1. Pushes the issue-referencing commit to live `main` without losing other agents' changes.
-2. Picks the targets: `flutter` (`Mailstream Flutter.app`) by default; `native`
+1. Tests its change in the real app before pushing: a release or debug build from its own
+   checkout (never an `/Applications` copy; it doesn't install), over synthetic data (no
+   accounts or personal mail, like the fixtures `Flutter/README.md` lists), driven with computer
+   helpers; no sending mail, nothing destructive. It takes every screenshot or recording the
+   change needs, UI states in light and dark (launching the executable with
+   `-AppleInterfaceStyle Dark` shows it dark), and attaches them to the issue.
+2. Pushes the issue-referencing commit to live `main` without losing other agents' changes.
+3. Picks the targets: `flutter` (`Mailstream Flutter.app`) by default; `native`
    (`Mailstream.app`) or `gpui` (`Mailstream GPUI.app`) only when the user asks or its installed
    behavior is directly affected; never an app that isn't installed yet. Tooling-only changes
    install nothing (In Review directly, [Finish](#working-an-issue)). Changes to deployment
    itself (`install.sh`, signing, updates) exercise the real path: their own agent installs them
    as below.
-3. Hands over: a comment starting `**待安装**` with what changed, the commit, the targets, what
-   to check in the installed app and how to reach it, and for UI changes each state to
-   screenshot. Then it adds the `install` label, removes `claimed`, leaves the issue In Progress
-   and removes its checkout.
+4. Hands over: a comment starting `**待安装**` with what changed, the commit, the targets and
+   what it verified, with its screenshots; nothing is left for the installer to test. Then it
+   adds the `install` label, removes `claimed`, leaves the issue In Progress and removes its
+   checkout.
 
 The batch install agent (one per `install` line of the poller, [Polling session](#polling-session)):
 
-1. Reads each listed issue's latest `**待安装**` comment and claims it (start comment,
-   `claimed`).
+1. Claims each listed issue (start comment, `claimed`) and takes the targets from its latest
+   `**待安装**` comment.
 2. Opens one fresh checkout at `main`'s tip ([Version control](#version-control-jj)) and runs
-   `./scripts/install.sh <every target the issues name>` there, as one blocking eval cell
+   `./scripts/install.sh <every target the issues name>` there once, as one blocking eval cell
    ([Building](#building)): it refuses a checkout that differs from `main`, checks signing and
    the deploy lock itself and stops only the installed copy. Never an area workspace or the
    default checkout; never delete another agent's lock or kill its processes.
-3. Smokes each installed `/Applications/…app` once with computer helpers: the running
-   executable, the bundle revision, `codesign --verify --deep --strict`, the real window showing
-   loaded data. GPUI also: `otool -l` shows no workspace rpath and `vmmap <pid>` loads no
-   `libMailstreamKit.dylib` (the engine is linked in). A build, an `open` or a process name alone
-   proves nothing. Then, per issue, the behavior its hand-over names and its screenshots (no
-   sending mail, nothing destructive; personal content kept out of screenshots and logs).
-4. Per issue: passed → the finishing comment ([Finish](#working-an-issue)), `install` and
-   `claimed` removed, In Review, then the parent check. Failed → a comment with what failed and
-   the evidence, `install` and `claimed` removed, moved to Todo with the `omp` label so a code
-   agent takes it up again. When the install itself fails (build, signing), it comments the
-   exact blocker on each issue and removes `claimed` but keeps `install`, so the next batch
-   retries; an issue whose commit broke the build goes back as failed. Never claim another
-   issue's pending checks passed.
+3. Checks each installed `/Applications/…app` from the shell, nothing more: its Info.plist
+   `MSInstalledRevision` is the commit it built; `codesign --verify --deep --strict` passes;
+   `open` launches it and its `/Applications/…app/Contents/MacOS/` executable is still running
+   30 s later (left running). GPUI also: `otool -l` shows no workspace rpath and `vmmap <pid>`
+   loads no `libMailstreamKit.dylib`. No UI interaction, synthetic data or screenshots.
+4. Passed → per issue a short comment (deployed commit, targets, checks), `install` and
+   `claimed` removed, In Review, then the parent check. Install or launch failed → a comment
+   with the exact error on each issue, `claimed` removed and `install` kept.
 5. Removes its checkout; leaves every other checkout and workspace alone.
 
 ## Performance: 120 fps

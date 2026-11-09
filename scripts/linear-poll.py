@@ -28,10 +28,11 @@ only, so the same script runs on macOS and Windows.
     again unless the user moves an uncommented one to Todo, adds `omp`, or it was claimed before
     and gets unblocked.
   {"kind": "install", "issues"}: the identifiers of every open issue labelled `install` (INSTALL),
-    which code agents add once their change is on `main` (AGENTS.md, Release delivery). Printed
-    when at least one waits, no agent whose id starts with `Install` is in RUNNING, and the
-    previous install line is INSTALL_EVERY seconds old (default 3600). The caller starts one
-    `ms-install` agent (.omp/agents) that installs `main`'s tip once and checks every listed issue.
+    which code agents add once their change is tested and on `main` (AGENTS.md, Release
+    delivery). Printed when at least one waits, no agent whose id starts with `Install` is in
+    RUNNING, and the previous install line is INSTALL_EVERY seconds old (default 3600). The
+    caller starts one `ms-install` agent (.omp/agents) that installs `main`'s tip once for every
+    listed issue and checks only that the install worked (revision, signature, launch).
   {"kind": "comment", "id", "issue", "issueId", "title", "state", "createdAt", "author", "body"}: a
     comment posted on any team issue in the last 7 days, each once, by a workspace member (not an
     app, a guest or a GitHub sync) or by another machine's omp app (one of PEERS, comma-separated
