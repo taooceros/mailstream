@@ -39,6 +39,10 @@ final class MailColors {
     required this.onRedFill,
     required this.toast,
     required this.onToast,
+    required this.card,
+    required this.cardBorder,
+    required this.raisedCard,
+    required this.spotlight,
   });
 
   static const light = MailColors._(
@@ -64,6 +68,10 @@ final class MailColors {
     onRedFill: Color(0xFFB3261E),
     toast: Color(0xFF2C2C2E),
     onToast: Color(0xFFF5F5F7),
+    card: MacosColors.white,
+    cardBorder: Color(0x14000000),
+    raisedCard: MacosColors.white,
+    spotlight: Color(0xA6FFFFFF),
   );
 
   static const dark = MailColors._(
@@ -89,6 +97,10 @@ final class MailColors {
     onRedFill: Color(0xFFFFB4AB),
     toast: Color(0xFFE5E5EA),
     onToast: Color(0xFF1D1D1F),
+    card: Color(0xFF232327),
+    cardBorder: Color(0x1AFFFFFF),
+    raisedCard: Color(0xFF2C2C32),
+    spotlight: Color(0x06FFFFFF),
   );
 
   final Brightness brightness;
@@ -131,9 +143,38 @@ final class MailColors {
   final Color toast;
   final Color onToast;
 
+  /// Cards resting on a [tray] (the calendar's events): white, dark gray in dark mode, with a
+  /// [cardBorder] hairline; [raisedCard] is one raised a step further (today's date).
+  final Color card;
+  final Color cardBorder;
+  final Color raisedCard;
+
+  /// The wash over today's column of the timeline, lighter than the tray.
+  final Color spotlight;
+
   /// Hover and press washes over a surface.
   Color get hover => label.withValues(alpha: brightness == Brightness.light ? 0.05 : 0.08);
   Color get pressed => label.withValues(alpha: brightness == Brightness.light ? 0.1 : 0.14);
+
+  /// A resting [card]'s shadow, one soft layer.
+  List<BoxShadow> get cardShadow => brightness == Brightness.light
+      ? const [BoxShadow(color: Color(0x0F0F172A), blurRadius: 3, offset: Offset(0, 1))]
+      : const [BoxShadow(color: Color(0x33000000), blurRadius: 3, offset: Offset(0, 1))];
+
+  /// An open card, lifted: a white face lit from above (the dark mode's grays), a 1pt accent
+  /// rim, two soft shadows.
+  List<Color> get liftedCard => brightness == Brightness.light
+      ? const [MacosColors.white, Color(0xFFFAFCFF)]
+      : const [Color(0xFF2E323C), Color(0xFF252830)];
+  List<BoxShadow> get liftedShadow => brightness == Brightness.light
+      ? const [
+          BoxShadow(color: Color(0x0F0F172A), blurRadius: 2, offset: Offset(0, 1)),
+          BoxShadow(color: Color(0x170055FF), blurRadius: 14, offset: Offset(0, 4)),
+        ]
+      : const [
+          BoxShadow(color: Color(0x0F000000), blurRadius: 2, offset: Offset(0, 1)),
+          BoxShadow(color: Color(0x45000000), blurRadius: 14, offset: Offset(0, 4)),
+        ];
 }
 
 /// Motion for the pages that slide over the list.
@@ -171,6 +212,36 @@ abstract final class Panes {
   static const corner = 12.0;
   static const sheetCorner = 16.0;
 }
+
+/// The calendar's events as cards on the tray (MS-163, variant A): [cardRadius] corners and a
+/// [cardBorder] hairline, a [dot] of the calendar's color before the title, guests as [avatar]
+/// monograms ringed [avatarRing] in the card's color. Overlapping events stand [conflictGap]
+/// apart; past ones fade to [pastOpacity], declined ones to [declinedOpacity]; an unanswered
+/// invitation is hatched at [hatchOpacity] inside a dashed border. A day's header carries a
+/// [loadBar] tall bar as long as its booked hours.
+abstract final class CalendarMetrics {
+  static const dot = 6.0;
+  static const cardRadius = 8.0;
+  static const cardBorder = 0.5;
+  static const conflictGap = 2.0;
+  static const avatar = 16.0;
+  static const avatarRing = 1.5;
+  static const loadBar = 2.5;
+  static const pastOpacity = 0.48;
+  static const declinedOpacity = 0.40;
+  static const hatchOpacity = 0.07;
+}
+
+/// A calendar's color softened for its dot, so a screen of events stays quiet.
+Color calendarDot(Color calendar, MailColors colors) => Color.lerp(calendar, colors.card, 0.2)!;
+
+/// Guests' monograms on calendar cards: muted indigo, pine, apricot, lavender and slate.
+const guestPalette = [
+  Color(0xFF6B78B4), Color(0xFF4F8A7B), Color(0xFFC0916A), Color(0xFF9784BE), Color(0xFF7A8290),
+];
+
+/// A guest's monogram color, the same for them on every card.
+Color guestColor(String key) => guestPalette[stableIndex(key.toLowerCase(), guestPalette.length)];
 
 /// Stable per-account colors, in sidebar order: the system blue, orange, purple, green, red, teal.
 const accountPalette = [
