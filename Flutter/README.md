@@ -249,7 +249,10 @@ and ⌘C copies. Screen readers get the body's text only (Blitz's AccessKit tree
 A body Blitz panics on stays blank by itself; every other body keeps drawing (MS-161). Blitz maps
 no legacy `background` attribute, which Outlook-style mail (Zillow's listing photos) puts its
 pictures in, so the page turns each one on `body`/`table`/`tr`/`td`/`th` into a zero-specificity
-`background-image` rule ahead of the mail's own styles, which still win over it (MS-162).
+`background-image` rule ahead of the mail's own styles, which still win over it (MS-162). To check
+it without private mail, run `MAILSTREAM_READER_RENDERER=blitz flutter run -d macos -t
+test/html_background_app.dart` and open its one conversation: the listing card shows a sky-over-grass
+picture, not a gray box.
 
 Preparation (`prepareHyperResources` in `lib/ui/hyper_resources.dart`) is the one resource
 policy for both: inline parts (`file://` copies under Mailstream's `messages-v2` cache, canonical
