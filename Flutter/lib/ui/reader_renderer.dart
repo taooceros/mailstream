@@ -13,13 +13,16 @@ enum ReaderRenderer {
   const ReaderRenderer(this.title);
   final String title;
 
+  /// What every launch starts in (MS-166): Blitz, at the user's request.
+  static const initial = blitz;
+
   /// The renderer named by `MAILSTREAM_READER_RENDERER` (`hyper`, `blitz` or `webKit`), so the
-  /// bench can open the reader in a given renderer; HyperRender when unset or unknown.
+  /// bench can open the reader in a given renderer; [initial] when unset or unknown.
   static ReaderRenderer fromName(String? name) =>
-      values.firstWhere((r) => r.name.toLowerCase() == name?.toLowerCase(), orElse: () => hyper);
+      values.firstWhere((r) => r.name.toLowerCase() == name?.toLowerCase(), orElse: () => initial);
 }
 
-/// The Mac reader's renderer, kept in memory: every launch starts in HyperRender, and a choice
+/// The Mac reader's renderer, kept in memory: every launch starts in Blitz, and a choice
 /// made in the reader holds until the app quits. Nothing switches it but the user (no automatic
 /// fallback), and it touches no MailState, cache or setting. Windows always draws with WebView2.
 class ReaderRendererScope extends InheritedNotifier<ValueNotifier<ReaderRenderer>> {
@@ -29,7 +32,7 @@ class ReaderRendererScope extends InheritedNotifier<ValueNotifier<ReaderRenderer
   static ValueNotifier<ReaderRenderer>? maybeOf(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<ReaderRendererScope>()?.notifier;
 
-  static ReaderRenderer current(BuildContext context) => maybeOf(context)?.value ?? ReaderRenderer.hyper;
+  static ReaderRenderer current(BuildContext context) => maybeOf(context)?.value ?? ReaderRenderer.initial;
 }
 
 /// The three-way switch in the reader's header, labelled with the renderer in use.

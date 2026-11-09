@@ -229,10 +229,11 @@ files from the paperclip picker, file drops on the window, or ⌘V (Finder files
 pixels/screenshots). Normal text paste still edits the focused field. Attachments can be removed
 before sending and remain with their draft when switching tabs or browsing other mail.
 
-HTML mail on the Mac is drawn by HyperRender (`hyper_render` 1.14.1, in Flutter; `lib/ui/hyper_body.dart`)
-unless the reader's three-way switch (beside the header's chips, "Renderer:" HyperRender / Blitz /
-WebView (original)) picks another (MS-138, MS-147). Every launch starts in HyperRender
-(`MAILSTREAM_READER_RENDERER=blitz|webKit` starts in another, for `scripts/bench.sh`); the choice
+HTML mail on the Mac is drawn by Blitz (in Rust, below) unless the reader's three-way switch
+(beside the header's chips, "Renderer:" HyperRender / Blitz / WebView (original)) picks another
+(MS-138, MS-147, MS-166; HyperRender is `hyper_render` 1.14.1, in Flutter, `lib/ui/hyper_body.dart`).
+Every launch starts in Blitz (`MAILSTREAM_READER_RENDERER=hyper|webKit` starts in another, for
+`scripts/bench.sh`); the choice
 holds until the app quits and nothing changes it but the switch: a body a renderer draws poorly
 never falls back to another by itself. All three draw the same prepared parts, so switching keeps
 the message, its open quote and the parts cache; only the chosen renderer's bodies are mounted.
@@ -250,9 +251,11 @@ A body Blitz panics on stays blank by itself; every other body keeps drawing (MS
 no legacy `background` attribute, which Outlook-style mail (Zillow's listing photos) puts its
 pictures in, so the page turns each one on `body`/`table`/`tr`/`td`/`th` into a zero-specificity
 `background-image` rule ahead of the mail's own styles, which still win over it (MS-162). To check
-it without private mail, run `MAILSTREAM_READER_RENDERER=blitz flutter run -d macos -t
-test/html_background_app.dart` and open its one conversation: the listing card shows a sky-over-grass
-picture, not a gray box.
+it without private mail, run `flutter run -d macos -t test/html_background_app.dart` and open its
+one conversation: the listing card shows a sky-over-grass picture, not a gray box. Known Blitz
+gaps: at 600 points or narrower, mail whose mobile styles make table cells `display: block`
+(Zillow's "Other rentals") loses those cells (MS-165); stylesheets and web fonts are not loaded
+(MS-164); an image URL Blitz can't resolve (`<img src="http://">`) leaves that body blank.
 
 Preparation (`prepareHyperResources` in `lib/ui/hyper_resources.dart`) is the one resource
 policy for both: inline parts (`file://` copies under Mailstream's `messages-v2` cache, canonical

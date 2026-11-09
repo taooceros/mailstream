@@ -8,7 +8,7 @@ import 'reader_fixture.dart';
 
 // A listing card whose photo is its cell's `background` attribute, as Zillow's are (MS-162).
 // Synthetic mail only: no real backend, accounts, or private mail.
-// MAILSTREAM_READER_RENDERER=blitz flutter run -d macos -t test/html_background_app.dart
+// flutter run -d macos -t test/html_background_app.dart
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await WindowManipulator.initialize(enableWindowDelegate: true);

@@ -239,5 +239,12 @@ void main() {
       expect(find.textContaining('Renderer:'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
+
+    test('every launch starts in Blitz unless MAILSTREAM_READER_RENDERER names another (MS-166)', () {
+      expect(ReaderRenderer.fromName(null), ReaderRenderer.blitz);
+      expect(ReaderRenderer.fromName('unknown'), ReaderRenderer.blitz);
+      expect(ReaderRenderer.fromName('hyper'), ReaderRenderer.hyper);
+      expect(ReaderRenderer.fromName('webkit'), ReaderRenderer.webKit);
+    });
   });
 }

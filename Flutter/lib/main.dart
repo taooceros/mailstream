@@ -33,7 +33,7 @@ class MailstreamApp extends StatefulWidget {
 }
 
 class _MailstreamAppState extends State<MailstreamApp> {
-  /// The reader's renderer: HyperRender on every launch, switched only by hand
+  /// The reader's renderer: Blitz on every launch, switched only by hand
   /// (`MAILSTREAM_READER_RENDERER` picks another for the bench).
   final _renderer = ValueNotifier(ReaderRenderer.fromName(Platform.environment['MAILSTREAM_READER_RENDERER']));
 
