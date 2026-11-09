@@ -16,10 +16,11 @@ Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` 
   `main@origin` if it moved, `jj bookmark set main -r @-`, `jj git push`. Never leave finished
   work uncommitted in `@`.
 - Every agent works in its own ovnfs checkout, never the default checkout and never
-  `jj workspace add` (the `../mailstream-*` workspaces take no new work): `ovnfs new --rev main
-  --name <unique>` (it prints the path, under `~/checkouts/`), then `jj git init --colocate &&
-  jj bookmark track main@origin && jj git fetch && jj new main` (a checkout has a private `.git`
-  and no `.jj`, and starts at the default checkout's `main`, which can lag `origin`). It commits
+  `jj workspace add` (the `../mailstream-*` workspaces take no new work): `python3
+  ~/projects/mailstream/scripts/checkout.py <unique>` opens it under `~/checkouts/` at `main`,
+  with the build folders frozen ([Building](#building)) and jj set up (a checkout gets a private
+  `.git` and no `.jj`, and starts at the default checkout's `main`, which can lag `origin`; the
+  script fetches and moves onto `main@origin`). Don't open one with plain `ovnfs new`. It commits
   and pushes `main` from there and runs `ovnfs rm <name>` once its part is done (handed to the
   install batch or In Review, [Release delivery](#release-delivery)); a woken agent opens a fresh
   one. Subagents are spawned without omp's `isolated` option. Work the user keeps off `main` (a
@@ -124,18 +125,18 @@ as one background bash job with no deadline (`timeout: 0`) and `wait`s on it: th
 Linear every minute and returns only once it has claimed something. The session hands the issues
 it claims, and the user's comments, to subagents, then starts it again. A subagent starts in the
 session's folder, the default checkout (omp can't start it elsewhere), so every task opens with
-this, `<slug>` filled in: "Work in your own checkout `~/checkouts/<slug>` (`ovnfs new --rev main
---name <slug>`, then the setup in AGENTS.md, Version control). Your tools start in the locked
-default checkout `~/projects/mailstream`: give every `read`, `edit`, `write`, `grep`, `glob`,
-`find` and `ast_edit` an absolute path under `~/checkouts/<slug>`, every `bash` call `cwd:
-~/checkouts/<slug>`, and every eval subprocess `cwd=`." It keeps that file a JSON
+this, `<slug>` filled in: "Work in your own checkout `~/checkouts/<slug>` (open it with `python3
+~/projects/mailstream/scripts/checkout.py <slug>`, AGENTS.md, Version control). Your tools start
+in the locked default checkout `~/projects/mailstream`: give every `read`, `edit`, `write`,
+`grep`, `glob`, `find` and `ast_edit` an absolute path under `~/checkouts/<slug>`, every `bash`
+call `cwd: ~/checkouts/<slug>`, and every eval subprocess `cwd=`." It keeps that file a JSON
 array of its running agent ids, rewritten whenever one starts or finishes; the script re-reads it
 each pass. The script's header says what it claims and how the session picks the agent. On an
 `install` line it starts one `sonic` agent with an id starting `Install` (`Install3`) for the
 listed issues, which follows [Release delivery](#release-delivery); it doesn't count against the
-heavy agents below. Whenever `ovnfs ls` shows no checkout open (between agent batches, before
-starting the script again), the session runs `python3 scripts/warm-build.py` in the default
-checkout ([Building](#building)).
+heavy agents below. Each time before it starts the script again, the session runs `python3
+scripts/warm-build.py` in the default checkout ([Building](#building)), so new checkouts start
+from `main`'s latest build; open checkouts keep theirs.
 `python3 scripts/linear-omp.py MS-12` opens one issue in a new Tern tab instead. The scripts are
 Python (standard library only) so both machines run the same ones; on Windows the command is
 `python`, and the poller also needs `HOST_LABEL=windows LINEAR_TOKEN_FILE=~/.config/linear/token.json
@@ -169,11 +170,13 @@ name in backticks (`` `@omp` ``), since Linear rejects an app's @-mention of an 
 
 - Rust builds (`Engine/`, `FFI/`, `GPUI/`, Turso) run plain cargo: the repo's
   `.cargo/config.toml` turns off the rcache wrapper in `~/.cargo/config.toml`, which handed out
-  corrupt artifacts in ovnfs checkouts (MS-131). Don't set `RUSTC_WRAPPER` to bring it back. An
-  ovnfs checkout reads the default checkout's ignored build folders (`target/`, `.turso/`) live,
-  not as a copy, until it writes a file there; cargo's fingerprints rebuild what differs when the
-  checkout opens. A build or delete in the default checkout afterwards shows up in every open
-  checkout, and cargo there can then keep an artifact built from the default checkout's source
+  corrupt artifacts in ovnfs checkouts (MS-131). Don't set `RUSTC_WRAPPER` to bring it back. A
+  checkout opened by `scripts/checkout.py` freezes the default checkout's ignored build folders
+  (every `target/`, `.turso/`) as they are when it opens: ovnfs keeps an APFS clone of each file
+  (~3 s for the 6 GB, no extra disk until the default checkout replaces the file), and cargo's
+  fingerprints rebuild what differs from the checkout's source. A plain `ovnfs new` reads them
+  live instead: a later build or delete in the default checkout shows up in it, and cargo there
+  can keep an artifact built from the default checkout's source over the checkout's own edits
   (MS-152).
 - The default checkout keeps a warm build of `main` (`FFI/target` release, `Engine/target`
   debug for the engine's tests, `.turso/`) that every new checkout starts from: its first release
@@ -185,7 +188,8 @@ name in backticks (`` `@omp` ``), since Linear rejects an app's @-mention of an 
   checkout's build folders to free disk; free your own checkout's output instead (delete it
   there, or `ovnfs rm` the checkout once done). Only `python3 scripts/warm-build.py` builds
   there: it fetches `main`, moves the default checkout's empty change onto it (unlocking its
-  source for the run) and builds, and refuses while any checkout of it is open (MS-152). Nothing
+  source for the run) and builds; checkouts opened by `checkout.py` keep the build they opened
+  with, and it refuses while one opened with plain `ovnfs new` is open (MS-152). Nothing
   builds Swift there, so a checkout's `.build` is always its own. Don't share one
   `CARGO_TARGET_DIR` between checkouts: cargo locks it for one build at a time and each
   checkout's source rebuilds the repo's crates over the others'.

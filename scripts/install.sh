@@ -20,7 +20,7 @@ for frontend in "$@"; do
 done
 revision=$(jj log --no-graph -r main -T commit_id)
 [ -n "$(jj log --no-graph -r 'main & (@ | @-)' -T commit_id)" ] ||
-  fail "create a clean private checkout at current main (ovnfs new --rev main); do not deploy an area workspace"
+  fail "create a clean private checkout at current main (scripts/checkout.py NAME); do not deploy an area workspace"
 [ -z "$(jj diff --from main --to @ --name-only)" ] || fail "checkout differs from main"
 # sign.sh may fall back to ad hoc for development/CI, but installed releases must not.
 security find-identity -v -p codesigning | /usr/bin/grep -q '"Apple Development: ' ||
