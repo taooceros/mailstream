@@ -28,6 +28,9 @@ blitz-dom = { optional = true, version = "=0.3.0-beta.4", default-features = fal
 blitz-html = { optional = true, version = "=0.3.0-beta.4", default-features = false }
 blitz-paint = { optional = true, version = "=0.3.0-beta.4", default-features = false }
 blitz-traits = { optional = true, version = "=0.3.0-beta.4", default-features = false }
+# html_page.rs: mail always parsed as HTML through blitz-html's tree builder, with the html5ever it
+# uses; blitz-html's own entry point parses mail that looks like XHTML as XML (MS-173).
+html5ever = { version = "=0.40.1", optional = true }
 anyrender = { version = "0.14", optional = true }
 anyrender_vello_cpu = { version = "0.18", optional = true }
 peniko = { version = "0.6", optional = true }
@@ -51,7 +54,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 # ffi.py builds); GPUI leaves it off: it doesn't draw with Blitz, and stylo fails to compile in
 # GPUI's dependency graph.
 default = ["blitz"]
-blitz = ["dep:blitz-dom", "dep:blitz-html", "dep:blitz-paint", "dep:blitz-traits", "dep:anyrender", "dep:anyrender_vello_cpu", "dep:peniko", "dep:parley", "dep:style", "dep:sha2", "dep:data-url", "dep:tokio"]
+blitz = ["dep:blitz-dom", "dep:blitz-html", "dep:blitz-paint", "dep:blitz-traits", "dep:html5ever", "dep:anyrender", "dep:anyrender_vello_cpu", "dep:peniko", "dep:parley", "dep:style", "dep:sha2", "dep:data-url", "dep:tokio"]
 # MAILSTREAM_ENGINE=swift runs the Swift engine (libMailstreamKit.dylib, which `swift build
 # --product MailstreamKit` makes) instead, for examples/bench.rs; front ends never build it.
 swift-engine = []

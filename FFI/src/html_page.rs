@@ -31,7 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyrender::{PaintScene as _, render_to_buffer};
 use anyrender_vello_cpu::VelloCpuImageRenderer;
 use blitz_dom::{BaseDocument, DocumentConfig, FontContext, NodeId, QualName, local_name, ns};
-use blitz_html::HtmlDocument;
+use blitz_html::DocumentHtmlParser;
 use blitz_paint::paint_scene;
 use blitz_traits::net::{Bytes, NetHandler, NetProvider, Request, Url};
 use blitz_traits::shell::{ColorScheme, ShellProvider, Viewport};
@@ -298,7 +298,7 @@ struct Pages {
 }
 
 struct Page {
-    doc: HtmlDocument,
+    doc: BaseDocument,
     shell: Arc<PageShell>,
     gate: Arc<Gate>,
     /// What the page was last laid out for: width and scale (0 before the first layout), the zoom
@@ -437,18 +437,36 @@ impl Pages {
 }
 
 /// `html` parsed, its requests going to `net`, its fonts a copy of `fonts`.
-fn document(html: &str, net: Arc<dyn NetProvider>, shell: Arc<PageShell>, fonts: &FontContext) -> HtmlDocument {
-    HtmlDocument::from_html(
-        html,
-        DocumentConfig {
-            net_provider: Some(net),
-            shell_provider: Some(shell),
-            font_ctx: Some(fonts.clone()),
-            base_url: Some(BASE_URL.into()),
-            viewport: Some(Viewport::new(1, 1, 1.0, ColorScheme::Light)),
+///
+/// Always as HTML, as WebKit's view reads it: Blitz's own entry point (`HtmlDocument::from_html`)
+/// parses mail that starts with an XHTML doctype, an `<?xml` line or an `<html
+/// xmlns="http://www.w3.org/1999/xhtml">` root as XML, where HTML that isn't well-formed XML (a
+/// `<link>` without its `/>`) swallows the rest of the page: Linear's notifications, re-serialized
+/// by the reader's preparation with their XHTML doctype first, came out blank (MS-173).
+fn document(html: &str, net: Arc<dyn NetProvider>, shell: Arc<PageShell>, fonts: &FontContext) -> BaseDocument {
+    use html5ever::tendril::TendrilSink as _;
+    use html5ever::tree_builder::TreeBuilderOpts;
+    let mut doc = BaseDocument::new(DocumentConfig {
+        net_provider: Some(net),
+        shell_provider: Some(shell),
+        font_ctx: Some(fonts.clone()),
+        base_url: Some(BASE_URL.into()),
+        viewport: Some(Viewport::new(1, 1, 1.0, ColorScheme::Light)),
+        ..Default::default()
+    });
+    let mut mutator = doc.mutate();
+    // The options Blitz parses HTML with.
+    let options = html5ever::ParseOpts {
+        tree_builder: TreeBuilderOpts {
+            scripting_enabled: false,
+            drop_doctype: true,
             ..Default::default()
         },
-    )
+        ..Default::default()
+    };
+    html5ever::parse_document(DocumentHtmlParser::new(&mut mutator), options).one(html);
+    drop(mutator);
+    doc
 }
 
 impl Page {
@@ -1243,6 +1261,39 @@ mod tests {
         let mut table = page(r#"<table height="100%" style="height:100%"><tr><td>Cell</td></tr></table>"#);
         table.lay_out(400.0, 2.0);
         assert!(table.height < 60.0, "{}", table.height);
+    }
+
+    #[test]
+    fn mail_that_looks_like_xhtml_is_read_as_html() {
+        // A Linear notification, as the reader's preparation writes it back: its XHTML doctype
+        // first, then HTML that isn't well-formed XML (a `<link>` without its `/>`). Blitz's own
+        // entry point read that as XML, where the `<link>` swallowed the page: a few points tall,
+        // blank (MS-173). The same goes for an `<html xmlns=…>` root or an `<?xml` line.
+        let body = concat!(
+            r##"<body bgcolor="#F9F8F9" style="margin:0;padding:0">"##,
+            r##"<table width="100%" bgcolor="#F9F8F9"><tbody><tr><td align="center">"##,
+            r#"<link rel="preload" as="image" href="https://example.com/logo.png">"#,
+            r#"<table id="main" width="502" style="width:502px;margin:24px;max-width:90vw" border="0" cellspacing="0" cellpadding="0">"#,
+            r#"<tbody><tr><td><h1 style="font-size:24px;margin:0 0 24px">You have an unread notification</h1>"#,
+            r#"<p>Someone&nbsp;commented on an issue:<br>First line</p><hr style="margin:12px 0">"#,
+            r#"<div style="height:200px">Comment</div></td></tr></tbody></table>"#,
+            "</td></tr></tbody></table></body></html>",
+        );
+        let head = r#"<head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"><title>Notification</title></head>"#;
+        let root = r#"<html dir="ltr" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml">"#;
+        let doctype = r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">"#;
+        for html in [
+            format!("{doctype}{root}{head}{body}"),
+            format!("{root}{head}{body}"),
+            format!(r#"<?xml version="1.0" encoding="utf-8"?>{doctype}{root}{head}{body}"#),
+        ] {
+            let mut page = page(&html);
+            page.lay_out(600.0, 1.0);
+            assert!(page.height > 300.0, "{} for {}", page.height, &html[..40]);
+            // Every element after the `<link>` is there, `&nbsp;` and `<br>` read as HTML.
+            let text = page.text();
+            assert_eq!(text, "You have an unread notificationSomeone commented on an issue:First lineComment");
+        }
     }
 
     #[test]
