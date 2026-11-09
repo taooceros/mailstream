@@ -547,6 +547,7 @@ pub(crate) mod tests {
             date: Some(date),
             size: 0,
             has_attachment: Some(false),
+            tags: Default::default(),
         }
     }
 

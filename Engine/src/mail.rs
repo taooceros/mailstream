@@ -35,6 +35,7 @@ mod actions;
 mod autoread;
 mod contacts;
 mod sending;
+mod tagsync;
 #[cfg(test)]
 mod action_tests;
 #[cfg(test)]
@@ -219,7 +220,20 @@ impl Mail {
     /// loads every account's identity and mailboxes and fetches the inboxes' first pages.
     pub async fn start(self: Arc<Self>) {
         let weak = Arc::downgrade(&self);
-        self.tagging.start(move || weak.upgrade().map(|mail| mail.tag_candidates()).unwrap_or_default());
+        let pushing = Arc::downgrade(&self);
+        self.tagging.start(
+            move || weak.upgrade().map(|mail| mail.tag_candidates()).unwrap_or_default(),
+            move |pushes| {
+                let mail = pushing.upgrade();
+                async move {
+                    match mail {
+                        Some(mail) => mail.push_tags(pushes).await,
+                        None => HashSet::new(),
+                    }
+                }
+                .boxed()
+            },
+        );
         self.start_auto_read();
         // As each rebuild of the Swift engine's list does (`MailStore.prefetchCount`): the default
         // list's newest conversations get their preview lines loaded, so a list read a moment

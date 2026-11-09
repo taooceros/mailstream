@@ -1,13 +1,14 @@
 //! Changing and sending Gmail mail, as the Swift engine's `GmailBackend` does: flags and moves are
 //! label changes (`batchModify`, `trash`/`untrash`), deletion is `batchDelete`, and sending goes
 //! through the media upload endpoint, which takes messages up to 35 MB with their thread. Each
-//! change is applied to the envelope cache ahead of the history reporting it.
+//! change is applied to the envelope cache ahead of the history reporting it. AI tags synced
+//! (`tagsync`) are user labels found by name in any case, made when missing, never deleted.
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use serde::Serialize;
 
-use super::{ALL_MAIL, EnvelopeCache, Gmail, GmailEndpoints};
+use super::{ALL_MAIL, EnvelopeCache, Gmail, GmailEndpoints, Label};
 use crate::api::{self, ApiError, Priority, Request};
 use crate::backend::Flag;
 use crate::mime::{self, OutgoingMessage};
@@ -93,6 +94,56 @@ impl Gmail {
         let request = Request::post(url, &format!("multipart/related; boundary={boundary}"), body);
         self.api.send(request, Priority::Interactive, Some(false), 100).await?;
         Ok(())
+    }
+
+    /// Puts the user labels named `add` on the messages and takes those named `remove` off,
+    /// matching names in any case. A label `add` names that the mailbox lacks is made, shown in
+    /// Gmail's label list and on its messages; no label is ever deleted.
+    pub async fn set_tags(&self, ids: &[String], add: &[String], remove: &[String]) -> Result<(), ApiError> {
+        fn find(labels: &[Label], name: &str) -> Option<String> {
+            let name = name.to_lowercase();
+            labels
+                .iter()
+                .find(|label| label.kind.as_deref() == Some("user") && label.name.to_lowercase() == name)
+                .map(|label| label.id.clone())
+        }
+        let mut labels = self.cache.labels(Priority::Interactive).await?;
+        let mut made = false;
+        let mut add_ids: Vec<String> = Vec::new();
+        for name in add {
+            if find(&labels, name).is_none() {
+                self.create_label(name).await?;
+                labels = self.cache.labels(Priority::Interactive).await?;
+                made = true;
+            }
+            let id = find(&labels, name)
+                .ok_or_else(|| ApiError::new(0, format!("Gmail did not make the label \"{name}\"")))?;
+            add_ids.push(id);
+        }
+        let remove_ids: Vec<String> =
+            remove.iter().filter_map(|name| find(&labels, name)).filter(|id| !add_ids.contains(id)).collect();
+        let add: Vec<&str> = add_ids.iter().map(String::as_str).collect();
+        let remove: Vec<&str> = remove_ids.iter().map(String::as_str).collect();
+        self.modify(ids, &add, &remove).await?;
+        if made {
+            // The new labels' names, for the envelopes that now carry them.
+            self.cache.labels(Priority::Interactive).await?;
+        }
+        Ok(())
+    }
+
+    /// Makes a user label; one another client made meanwhile (409) is fine.
+    async fn create_label(&self, name: &str) -> Result<(), ApiError> {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "name": name, "labelListVisibility": "labelShow", "messageListVisibility": "show",
+        }))
+        .expect("label encodes");
+        let request = Request::post(self.endpoints.url("labels", &[]), "application/json", body);
+        match self.api.send(request, Priority::Interactive, Some(true), 5).await {
+            Ok(_) => Ok(()),
+            Err(error) if error.status == 409 => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     async fn modify(&self, ids: &[String], add: &[&str], remove: &[&str]) -> Result<(), ApiError> {

@@ -123,6 +123,16 @@ impl Backend {
         }
     }
 
+    /// Puts the provider tags (Gmail user labels, Outlook categories) named `add` on the
+    /// messages and takes those named `remove` off, names matching in any case. Never deletes a
+    /// label or category itself.
+    pub async fn set_tags(&self, ids: &[String], add: &[String], remove: &[String]) -> Result<(), ApiError> {
+        match self {
+            Self::Gmail(gmail) => gmail.set_tags(ids, add, remove).await,
+            Self::Graph(graph) => graph.set_tags(ids, add, remove).await,
+        }
+    }
+
     /// Moves to another mailbox of this account; moving to the `All` mailbox archives.
     pub async fn move_to(&self, ids: &[String], from: &str, to: &str) -> Result<(), ApiError> {
         match self {

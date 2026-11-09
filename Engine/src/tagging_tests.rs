@@ -19,7 +19,7 @@ use crate::tests::cleanup;
 /// A fake omp answering every batch: its first conversation is people waiting on the user, the
 /// second people whose ask lapsed long ago, the third it skips, the rest are notifications.
 /// Each run appends how many conversations it was asked about to `<dir>/counts`.
-fn fake_omp(dir: &Path) -> PathBuf {
+pub(crate) fn fake_omp(dir: &Path) -> PathBuf {
     let path = dir.join("omp");
     script(
         &path,
@@ -44,7 +44,7 @@ fn fake_omp(dir: &Path) -> PathBuf {
     path
 }
 
-fn counts(dir: &Path) -> Vec<usize> {
+pub(crate) fn counts(dir: &Path) -> Vec<usize> {
     std::fs::read_to_string(dir.join("counts"))
         .unwrap_or_default()
         .lines()
@@ -158,8 +158,8 @@ fn tags_the_inbox_with_omp_and_shares_corrections() {
     assert_eq!(saved.len(), 56);
     let lapsed = Some(crate::model::now() - 60.0);
     let written = HashMap::from([
-        (key(46), ConversationTag { category: Category::People, to_respond: true, labels: vec![], waiting_until: None }),
-        (key(47), ConversationTag { category: Category::People, to_respond: true, labels: vec![], waiting_until: lapsed }),
+        (key(46), ConversationTag { category: Category::People, to_respond: true, labels: vec![], waiting_until: None, synced: false }),
+        (key(47), ConversationTag { category: Category::People, to_respond: true, labels: vec![], waiting_until: lapsed, synced: false }),
     ]);
     block_on(engine.runtime.spawn(async move {
         let other = MailCache::new(database, files);

@@ -433,6 +433,12 @@ for timings. `flutter test test/frame_rate_test.dart` covers the counting and th
 `flutter build macos --release -t test/frame_rate_app.dart` runs the real shell over synthetic
 mail with the setting kept in memory, for screenshots.
 
+Settings ▸ AI tagging ▸ Sync tags with the server (`aiTagging.syncAccounts`, MS-172) is a switch
+per mail account, plus one per listed account no longer signed in; the engine does the syncing
+(`Engine/src/tagsync.rs`). `flutter test test/tag_sync_test.dart` covers the switches;
+`flutter build macos --release -t test/tag_sync_app.dart` runs the real shell over synthetic
+mail and two made-up accounts with the setting kept in memory, for screenshots.
+
 The agenda (`lib/ui/calendar.dart`, MS-169) lists each day's events as rows: a time column in
 tabular figures, the calendar's 6 pt dot, title and place, the guests' monograms, or Going, Maybe
 and Decline while the account has not answered. Above it, this week's days (today raised, a

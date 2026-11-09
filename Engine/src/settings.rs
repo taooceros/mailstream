@@ -20,6 +20,7 @@ pub enum Setting {
     AiTaggingBatchSize,
     AiTaggingPassLimit,
     AiTaggingBackoffSeconds,
+    AiTaggingSyncAccounts,
     TrustedSenders,
     PollSeconds,
     PushPollSeconds,
@@ -44,7 +45,7 @@ enum Kind {
 pub type Values = BTreeMap<Setting, Value>;
 
 impl Setting {
-    pub const ALL: [Setting; 14] = [
+    pub const ALL: [Setting; 15] = [
         Self::AiTaggingEnabled,
         Self::AiTaggingBackend,
         Self::AiTaggingModel,
@@ -52,6 +53,7 @@ impl Setting {
         Self::AiTaggingBatchSize,
         Self::AiTaggingPassLimit,
         Self::AiTaggingBackoffSeconds,
+        Self::AiTaggingSyncAccounts,
         Self::TrustedSenders,
         Self::PollSeconds,
         Self::PushPollSeconds,
@@ -70,6 +72,7 @@ impl Setting {
             Self::AiTaggingBatchSize => "aiTagging.batchSize",
             Self::AiTaggingPassLimit => "aiTagging.passLimit",
             Self::AiTaggingBackoffSeconds => "aiTagging.backoffSeconds",
+            Self::AiTaggingSyncAccounts => "aiTagging.syncAccounts",
             Self::TrustedSenders => "remoteContent.trustedSenders",
             Self::PollSeconds => "sync.pollSeconds",
             Self::PushPollSeconds => "sync.pushPollSeconds",
@@ -109,6 +112,11 @@ impl Setting {
                 Kind::Int(0, 86_400),
                 json!(300),
                 "Wait after a failed tagging run before tagging automatically again.",
+            ),
+            Self::AiTaggingSyncAccounts => (
+                Kind::Addresses,
+                json!([]),
+                "Accounts whose AI tags sync with the server, both ways, as Gmail labels or Outlook categories named People, Notifications, Newsletters, Invitations and Waiting on you (an existing label of that name is used, in any case). Mail another device or the server already tagged is not tagged again here. Labels are never deleted.",
             ),
             Self::TrustedSenders => (
                 Kind::Addresses,
@@ -613,7 +621,7 @@ mod tests {
         let dir = temp();
         let settings = Settings::new(&dir);
         let list = run(&settings, "config.list", json!({})).unwrap();
-        assert_eq!(list["settings"].as_array().unwrap().len(), 14);
+        assert_eq!(list["settings"].as_array().unwrap().len(), 15);
         assert_eq!(
             list["settings"][1],
             json!({

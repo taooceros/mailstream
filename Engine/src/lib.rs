@@ -42,6 +42,7 @@ pub mod push;
 mod settings;
 pub mod signal;
 pub mod tagging;
+pub mod tagsync;
 pub mod text;
 mod threader;
 mod tokens;
@@ -56,6 +57,8 @@ mod chat_tests;
 // Runs a shell-script omp (`omp::tests::fake_omp`).
 #[cfg(all(test, unix))]
 mod tagging_tests;
+#[cfg(all(test, unix))]
+mod tagsync_tests;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -669,8 +672,8 @@ pub(crate) mod tests {
         std::fs::write(config.support_directory.join("settings.json"), "{\n  \"chat.pollSeconds\" : 30\n}\n").unwrap();
         assert_eq!(events.recv_timeout(Duration::from_secs(5)), Ok("settings"));
         let list = block_on(engine.call("config.list", json!({}))).unwrap();
-        assert_eq!(list["settings"][10]["value"], json!(30));
-        assert_eq!(list["settings"][8]["changed"], json!(false));
+        assert_eq!(list["settings"][11]["value"], json!(30));
+        assert_eq!(list["settings"][9]["changed"], json!(false));
         drop(engine);
         cleanup(&config);
     }

@@ -243,6 +243,7 @@ mod tests {
             date: Some(date),
             size: 0,
             has_attachment: None,
+            tags: Default::default(),
         })
     }
 

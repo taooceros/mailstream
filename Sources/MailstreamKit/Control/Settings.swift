@@ -12,6 +12,7 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
     case aiTaggingBatchSize = "aiTagging.batchSize"
     case aiTaggingPassLimit = "aiTagging.passLimit"
     case aiTaggingBackoffSeconds = "aiTagging.backoffSeconds"
+    case aiTaggingSyncAccounts = "aiTagging.syncAccounts"
     case trustedSenders = "remoteContent.trustedSenders"
     case pollSeconds = "sync.pollSeconds"
     case pushPollSeconds = "sync.pushPollSeconds"
@@ -45,6 +46,9 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         case .aiTaggingBatchSize: (.int(1...100), 20, "Conversations sent to the model per run.")
         case .aiTaggingPassLimit: (.int(1...2000), 150, "Most conversations one tagging pass looks at, newest first.")
         case .aiTaggingBackoffSeconds: (.int(0...86_400), 300, "Wait after a failed tagging run before tagging automatically again.")
+        case .aiTaggingSyncAccounts:
+            (.addresses, [],
+             "Accounts whose AI tags sync with the server, both ways, as Gmail labels or Outlook categories named People, Notifications, Newsletters, Invitations and Waiting on you (an existing label of that name is used, in any case). Mail another device or the server already tagged is not tagged again here. Labels are never deleted.")
         case .trustedSenders:
             (.addresses, [],
              "Senders whose remote images and fonts always load, besides your own addresses and people you wrote to.")

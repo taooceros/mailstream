@@ -209,6 +209,7 @@ mod tests {
             date: Some(date),
             size: 0,
             has_attachment: None,
+            tags: Default::default(),
         };
         extra(&mut envelope);
         let role = if mailbox == "SENT" { MailboxRole::Sent } else { MailboxRole::Inbox };

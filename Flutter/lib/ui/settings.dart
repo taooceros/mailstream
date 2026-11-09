@@ -36,6 +36,7 @@ const _titles = {
   'aiTagging.batchSize': 'Batch size',
   'aiTagging.passLimit': 'Conversations per pass',
   'aiTagging.backoffSeconds': 'Wait after a failed run',
+  'aiTagging.syncAccounts': 'Sync tags with the server',
   'autoRead.enabled': 'Mark stale notifications and newsletters read',
   'autoRead.days': 'Days before marking read',
   'remoteContent.trustedSenders': 'Trusted senders',
@@ -102,7 +103,10 @@ class SettingsWindow extends StatelessWidget {
                         _Group(
                           children: [
                             for (final entry in settings.settings)
-                              if (prefixes.any(entry.key.startsWith)) _SettingRow(state: state, entry: entry),
+                              if (prefixes.any(entry.key.startsWith))
+                                entry.key == _syncAccounts
+                                    ? _SyncAccountsRow(state: state, entry: entry)
+                                    : _SettingRow(state: state, entry: entry),
                           ],
                         ),
                         if (title == 'Auto-read') _AutoReadLog(state: state),
@@ -236,6 +240,101 @@ class _Issue extends StatelessWidget {
           const SizedBox(width: 10),
           Expanded(child: Text(message, style: context.text.body.copyWith(color: colors.onRedFill))),
         ]),
+      ),
+    );
+  }
+}
+
+// MARK: - Tag sync
+
+const _syncAccounts = 'aiTagging.syncAccounts';
+
+/// `aiTagging.syncAccounts` as a switch per mail account: on, that account's AI tags sync both
+/// ways with its Gmail labels or Outlook categories. Accounts listed but no longer signed in show
+/// too, so they can be switched off.
+class _SyncAccountsRow extends StatefulWidget {
+  const _SyncAccountsRow({required this.state, required this.entry});
+
+  final MailState state;
+  final engine.SettingEntry entry;
+
+  @override
+  State<_SyncAccountsRow> createState() => _SyncAccountsRowState();
+}
+
+class _SyncAccountsRowState extends State<_SyncAccountsRow> {
+  String? _error;
+
+  List<String> get _listed => switch (widget.entry.value) {
+    engine.AddressesSettingValue(:final addresses) => addresses,
+    _ => const [],
+  };
+
+  Future<void> _set(String address, bool on) async {
+    final listed = _listed;
+    final next = on ? [...listed, address] : [for (final a in listed) if (a != address) a];
+    try {
+      await widget.state.setSetting(_syncAccounts, engine.AddressesSettingValue(next));
+      if (mounted) setState(() => _error = null);
+    } on engine.MailException catch (error) {
+      if (mounted) setState(() => _error = describe(error));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final text = context.text;
+    final listed = _listed;
+    final accounts = [
+      for (final account in widget.state.accounts)
+        if (account.services.contains('mail')) (address: account.id.toLowerCase(), title: account.title, provider: account.provider),
+    ];
+    final rows = [
+      ...accounts,
+      for (final address in listed)
+        if (!accounts.any((a) => a.address == address)) (address: address, title: address, provider: ''),
+    ];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(_titles[_syncAccounts]!, style: text.body),
+          const SizedBox(height: 2),
+          Text(widget.entry.summary, style: text.subheadline.copyWith(color: colors.secondaryLabel)),
+          Text(_syncAccounts, style: text.subheadline.copyWith(color: colors.border)),
+          if (rows.isEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text('Sign in to a Gmail or Outlook account to sync its tags.', style: text.subheadline.copyWith(color: colors.secondaryLabel)),
+            ),
+          for (final row in rows)
+            Padding(
+              padding: const EdgeInsets.only(top: 8, right: 32),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      [
+                        row.title,
+                        if (row.provider.isNotEmpty) row.provider == 'google' ? 'Gmail labels' : 'Outlook categories',
+                        if (row.provider.isEmpty) 'not signed in',
+                      ].join('  ·  '),
+                      style: text.body,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  MacosSwitch(value: listed.contains(row.address), onChanged: (on) => _set(row.address, on)),
+                ],
+              ),
+            ),
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(_error!, style: text.subheadline.copyWith(color: colors.red)),
+            ),
+        ],
       ),
     );
   }

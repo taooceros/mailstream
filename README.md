@@ -49,6 +49,7 @@ Designed after macOS Liquid Glass with Dia's floating islands, Mailstream delive
 - **"Waiting on you" Detection**: Automatically highlights messages requiring your reply, action, approval, or RSVP under a dedicated triage header.
 - **100% On-Device AI**: Powered by Apple Intelligence on macOS (`aiTagging.backend apple`) or local LLMs via `omp`. Your message bodies never leave your machine for categorization.
 - **Auto-Read for Stale Alerts**: Optionally auto-marks outdated marketing newsletters and resolved notification badges as read.
+- **Tags Synced as Labels**: Optionally, per account (`aiTagging.syncAccounts`), tags sync both ways with Gmail labels or Outlook categories of the same name (People, Notifications, Newsletters, Invitations, Waiting on you), so they show in Gmail and Outlook and mail one device tagged isn't tagged again on another. Labels are never deleted.
 
 ### 💬 Unified Communication: Chat & Calendar
 - **Google Chat**: Integrated Google Workspace Chat spaces and direct messages directly in your sidebar, complete with real-time updates and threaded replies.

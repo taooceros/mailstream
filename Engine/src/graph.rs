@@ -24,7 +24,7 @@ pub const ROOT: &str = "https://graph.microsoft.com/v1.0/";
 const IMMUTABLE_IDS: &str = "IdType=\"ImmutableId\"";
 const HTML_BODY: &str = "outlook.body-content-type=\"html\"";
 const ENVELOPE_FIELDS: &str =
-    "id,conversationId,internetMessageId,subject,from,toRecipients,receivedDateTime,isRead,flag,isDraft,hasAttachments";
+    "id,conversationId,internetMessageId,subject,from,toRecipients,receivedDateTime,isRead,flag,isDraft,hasAttachments,categories";
 const FOLDER_FIELDS: &str = "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount";
 const ROLE_FOLDERS: [(&str, MailboxRole); 6] = [
     ("inbox", MailboxRole::Inbox),
@@ -109,6 +109,7 @@ struct Message {
     is_draft: Option<bool>,
     #[serde(rename = "hasAttachments")]
     has_attachments: Option<bool>,
+    categories: Option<Vec<String>>,
     /// Only selected by search.
     #[serde(rename = "parentFolderId")]
     parent_folder_id: Option<String>,
@@ -210,6 +211,7 @@ fn envelope(message: Message) -> Envelope {
         date: message.received_date_time.as_deref().and_then(parse_iso8601),
         size: 0,
         has_attachment: message.has_attachments,
+        tags: message.categories.unwrap_or_default().into_iter().collect(),
     }
 }
 

@@ -10,10 +10,15 @@
 //! Every Mailstream process keeps its own copy of the tags in memory, writes only what it
 //! changed to mail.db's `tags` table and reads them all again when any process says it wrote
 //! (`ProcessSignal::TAGS`), so a tag set in one engine shows in the others, Swift or Rust.
+//!
+//! For the accounts `aiTagging.syncAccounts` lists, each pass first syncs the tags with the
+//! server as Gmail labels or Outlook categories (`tagsync`): a conversation the server already
+//! tags takes that tag and is not sent to the model, and tags made here go there.
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -24,6 +29,7 @@ use crate::model::{Conversation, Date, now};
 use crate::omp::{self, Backend, Item, Options, Tagger, Tools};
 use crate::settings::{Setting, Settings};
 use crate::signal::ProcessSignal;
+use crate::tagsync::{self, Push, Step};
 use crate::{EngineError, Events};
 
 /// Smart Inbox bucket assigned by the AI tagger.
@@ -73,6 +79,10 @@ pub struct ConversationTag {
     /// stale. None keeps it waiting until resolved or answered.
     #[serde(rename = "waitingUntil", default, skip_serializing_if = "Option::is_none")]
     pub waiting_until: Option<Date>,
+    /// The server has this tag as it is here (`tagsync`); false for a tag made or corrected
+    /// here and not yet on the server, and for every tag of an account that doesn't sync.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub synced: bool,
 }
 
 impl ConversationTag {
@@ -96,6 +106,11 @@ const RETRY_SETTINGS: [Setting; 5] = [
 
 /// A list change waits this long for the next before tagging.
 const DEBOUNCE: Duration = Duration::from_secs(1);
+/// After a push, the server's tags of that conversation are not taken back for this long: a
+/// listing fetched before the push may still land and show them as they were.
+const PUSH_GRACE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 60 });
+/// A push the server refused is tried again after this long, or once the tag changes.
+const PUSH_RETRY: Duration = Duration::from_secs(600);
 
 /// What a pass may tag: the default list's conversations with a message in a listed inbox,
 /// newest first, and the user's lowercased addresses.
@@ -106,6 +121,8 @@ pub struct Candidates {
 }
 
 type Source = Box<dyn Fn() -> Candidates + Send + Sync>;
+/// Puts tags on the server (`Mail::push_tags`); answers the keys that landed.
+type Pusher = Box<dyn Fn(Vec<Push>) -> BoxFuture<'static, HashSet<String>> + Send + Sync>;
 
 #[derive(Default)]
 struct State {
@@ -133,6 +150,15 @@ struct State {
     /// `candidates` reflects the list's last change; false until first read, and after a
     /// change while tagging was off.
     fresh: bool,
+    /// The `aiTagging.syncAccounts` value last seen.
+    sync_value: Value,
+    /// Keys pushed lately (`PUSH_GRACE`).
+    pushed: HashMap<String, Instant>,
+    /// Pushes the server refused: the tag, and when (`PUSH_RETRY`).
+    refused: HashMap<String, (ConversationTag, Instant)>,
+    /// `retag_all` cleared the tags and the tagger has not caught up: the server's tags are
+    /// not taken meanwhile, so the new ones replace them.
+    retagging: bool,
 }
 
 pub struct Tagging {
@@ -146,6 +172,7 @@ pub struct Tagging {
     state: Mutex<State>,
     /// The conversations to offer, set once mail starts.
     source: OnceLock<Source>,
+    pusher: OnceLock<Pusher>,
     /// Held by the pass running. A pass aborted between awaits finishes that stretch before it
     /// stops; the next one waits for it, so passes never overlap (`CoalescedTask`).
     running: tokio::sync::Mutex<()>,
@@ -168,6 +195,7 @@ impl Tagging {
         let state = State {
             enabled: settings.value(Setting::AiTaggingEnabled) == Value::Bool(true),
             retry_values: RETRY_SETTINGS.iter().map(|setting| settings.value(*setting)).collect(),
+            sync_value: settings.value(Setting::AiTaggingSyncAccounts),
             ..State::default()
         };
         let tagging = Arc::new(Self {
@@ -180,6 +208,7 @@ impl Tagging {
             runtime: tokio::runtime::Handle::current(),
             state: Mutex::new(state),
             source: OnceLock::new(),
+            pusher: OnceLock::new(),
             running: tokio::sync::Mutex::new(()),
         });
         let weak: Weak<Self> = Arc::downgrade(&tagging);
@@ -197,11 +226,17 @@ impl Tagging {
         self.state.lock().expect("tagging lock")
     }
 
-    /// Starts offering `source`'s conversations and reading the tags other processes write.
-    pub fn start(self: &Arc<Self>, source: impl Fn() -> Candidates + Send + Sync + 'static) {
+    /// Starts offering `source`'s conversations, putting the sync accounts' tags on the server
+    /// through `pusher`, and reading the tags other processes write.
+    pub fn start(
+        self: &Arc<Self>,
+        source: impl Fn() -> Candidates + Send + Sync + 'static,
+        pusher: impl Fn(Vec<Push>) -> BoxFuture<'static, HashSet<String>> + Send + Sync + 'static,
+    ) {
         if self.source.set(Box::new(source)).is_err() {
             return;
         }
+        let _ = self.pusher.set(Box::new(pusher));
         if self.state().enabled {
             self.tools.start();
         }
@@ -290,16 +325,27 @@ impl Tagging {
     fn settings_changed(self: &Arc<Self>) {
         let enabled = self.settings.value(Setting::AiTaggingEnabled) == Value::Bool(true);
         let values: Vec<Value> = RETRY_SETTINGS.iter().map(|setting| self.settings.value(*setting)).collect();
-        let retry = {
+        let sync_value = self.settings.value(Setting::AiTaggingSyncAccounts);
+        let (retry, sync) = {
             let mut state = self.state();
             let changed = state.retry_values != values;
             state.retry_values = values;
-            changed
+            let sync = state.sync_value != sync_value;
+            state.sync_value = sync_value;
+            (changed, sync)
         };
         self.apply(enabled);
         if retry {
             self.retry();
+        } else if sync && self.is_enabled() {
+            self.request();
         }
+    }
+
+    /// The lowercased addresses of the accounts whose tags sync with the server.
+    fn sync_accounts(&self) -> HashSet<String> {
+        let value = self.settings.value(Setting::AiTaggingSyncAccounts);
+        value.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_lowercase).collect()
     }
 
     fn apply(self: &Arc<Self>, enabled: bool) {
@@ -390,13 +436,18 @@ impl Tagging {
         }
     }
 
-    /// Tags the newest untagged candidates in batches, one omp process at a time.
+    /// Syncs the tags with the server, then tags the newest untagged candidates in batches, one
+    /// omp process at a time, and puts the new tags on the server.
     async fn pass(&self) {
         let (enabled, backoff) = {
             let state = self.state();
             (state.enabled, state.backoff_until)
         };
-        if !enabled || backoff.is_some_and(|until| until > Instant::now()) {
+        if !enabled {
+            return;
+        }
+        self.sync_server().await;
+        if backoff.is_some_and(|until| until > Instant::now()) {
             return;
         }
         let text = |setting| self.settings.value(setting).as_str().unwrap_or_default().to_string();
@@ -407,6 +458,9 @@ impl Tagging {
             executable: text(Setting::AiTaggingOmpPath),
         };
         let items = self.untagged_items(number(Setting::AiTaggingPassLimit));
+        if items.is_empty() {
+            self.state().retagging = false;
+        }
         let mut remaining = items.len();
         for batch in items.chunks(number(Setting::AiTaggingBatchSize)) {
             let progress = format!("Tagging {remaining} conversation{}…", if remaining == 1 { "" } else { "s" });
@@ -423,31 +477,43 @@ impl Tagging {
                 }
                 Err(message) => {
                     let backoff = self.settings.value(Setting::AiTaggingBackoffSeconds).as_u64().unwrap_or(0);
-                    let mut state = self.state();
-                    self.set_status(&mut state, Some(format!("AI tagging failed: {message}")), true);
-                    state.backoff_until = Some(Instant::now() + Duration::from_secs(backoff));
+                    {
+                        let mut state = self.state();
+                        self.set_status(&mut state, Some(format!("AI tagging failed: {message}")), true);
+                        state.backoff_until = Some(Instant::now() + Duration::from_secs(backoff));
+                    }
+                    self.sync_server().await;
                     return;
                 }
             }
         }
         self.set_status(&mut self.state(), None, false);
+        if !items.is_empty() {
+            self.sync_server().await;
+        }
     }
 
-    fn untagged_items(&self, limit: usize) -> Vec<Item> {
-        let Some(source) = self.source.get() else { return Vec::new() };
+    /// What passes offer, read again after the list changed.
+    fn candidates(&self) -> Arc<Candidates> {
+        let Some(source) = self.source.get() else { return Arc::default() };
         if !self.state().fresh {
             let candidates = Arc::new(source());
             let mut state = self.state();
             state.candidates = candidates;
             state.fresh = true;
         }
+        self.state().candidates.clone()
+    }
+
+    fn untagged_items(&self, limit: usize) -> Vec<Item> {
+        let candidates = self.candidates();
         // Picks under the lock, builds the items (snippets, addresses) after it, so commands
         // that take the lock meanwhile (a burst of retags) don't wait on that work.
-        let (candidates, picked) = {
+        let picked = {
             let state = self.state();
             let mut keys = HashSet::new();
             let mut picked = Vec::new();
-            for (index, conversation) in state.candidates.conversations.iter().enumerate() {
+            for (index, conversation) in candidates.conversations.iter().enumerate() {
                 if picked.len() >= limit {
                     break;
                 }
@@ -457,12 +523,94 @@ impl Tagging {
                 }
                 picked.push((index, key));
             }
-            (state.candidates.clone(), picked)
+            picked
         };
         picked
             .into_iter()
             .map(|(index, key)| self.item(&candidates.conversations[index], key, &candidates.own))
             .collect()
+    }
+
+    /// Brings the sync accounts' tags and the server's together (`tagsync`): takes the tags the
+    /// server has and this engine lacks or has older, then puts this engine's new ones there.
+    async fn sync_server(&self) {
+        let accounts = self.sync_accounts();
+        if accounts.is_empty() {
+            return;
+        }
+        let candidates = self.candidates();
+        let at = now();
+        let pushes = {
+            let mut guard = self.state();
+            let state = &mut *guard;
+            state.pushed.retain(|_, pushed| pushed.elapsed() < PUSH_GRACE);
+            state.refused.retain(|_, (_, refused)| refused.elapsed() < PUSH_RETRY);
+            let mut adopted = HashMap::new();
+            let mut pushes = Vec::new();
+            let mut keys = HashSet::new();
+            for conversation in &candidates.conversations {
+                if !accounts.contains(&conversation.account.to_lowercase()) {
+                    continue;
+                }
+                let key = key(conversation);
+                if !keys.insert(key.clone()) {
+                    continue;
+                }
+                let local = state.tags.get(&key).cloned();
+                if local.as_ref().is_some_and(|tag| tag.synced) && state.pushed.contains_key(&key) {
+                    continue;
+                }
+                match tagsync::reconcile(local.as_ref(), &conversation.latest().envelope.tags, at, !state.retagging) {
+                    Step::Keep => {}
+                    Step::Adopt(tag) => {
+                        state.tags.insert(key.clone(), tag.clone());
+                        adopted.insert(key, tag);
+                    }
+                    Step::Push => {
+                        let Some(tag) = local else { continue };
+                        if state.refused.get(&key).is_some_and(|(refused, _)| *refused == tag) {
+                            continue;
+                        }
+                        let names = tagsync::names(&tag, at);
+                        pushes.push(Push { key, tag, conversation: conversation.clone(), names });
+                    }
+                }
+            }
+            if !adopted.is_empty() {
+                self.save(state, adopted);
+                self.events.emit_soon("tags");
+            }
+            pushes
+        };
+        let Some(pusher) = self.pusher.get() else { return };
+        if pushes.is_empty() {
+            return;
+        }
+        let sent: Vec<(String, ConversationTag)> = pushes.iter().map(|push| (push.key.clone(), push.tag.clone())).collect();
+        let landed = pusher(pushes).await;
+        let mut state = self.state();
+        let mut synced = HashMap::new();
+        for (key, tag) in sent {
+            if !landed.contains(&key) {
+                state.refused.insert(key, (tag, Instant::now()));
+                continue;
+            }
+            state.refused.remove(&key);
+            state.pushed.insert(key.clone(), Instant::now());
+            // A correction made meanwhile is still to go.
+            if let Some(current) = state.tags.get_mut(&key)
+                && *current == tag
+                && !current.synced
+            {
+                current.synced = true;
+                synced.insert(key, current.clone());
+            }
+        }
+        // The listed envelopes now carry the pushed tags.
+        state.fresh = false;
+        if !synced.is_empty() {
+            self.save(&mut state, synced);
+        }
     }
 
     fn item(&self, conversation: &Conversation, key: String, own: &HashSet<String>) -> Item {
@@ -487,9 +635,10 @@ impl Tagging {
     // MARK: - Corrections
 
     /// Corrects the conversation's tag; None leaves a part as it is. A conversation the tagger
-    /// has not judged needs a category, and newsletters never wait on the user.
+    /// has not judged needs a category, and newsletters never wait on the user. For an account
+    /// that syncs, the correction goes to the server in a pass that follows.
     pub fn edit(
-        &self,
+        self: &Arc<Self>,
         conversation: &Conversation,
         category: Option<Category>,
         waiting: Option<bool>,
@@ -501,8 +650,14 @@ impl Tagging {
         }
         let key = key(conversation);
         let existing = state.tags.get(&key).cloned();
-        let Some(mut tag) = existing.or_else(|| {
-            category.map(|category| ConversationTag { category, to_respond: false, labels: Vec::new(), waiting_until: None })
+        let Some(mut tag) = existing.clone().or_else(|| {
+            category.map(|category| ConversationTag {
+                category,
+                to_respond: false,
+                labels: Vec::new(),
+                waiting_until: None,
+                synced: false,
+            })
         }) else {
             return Err(format!("{} has no AI tag yet; give a category.", conversation.id));
         };
@@ -527,11 +682,17 @@ impl Tagging {
                 .take(2)
                 .collect();
         }
+        if existing.as_ref() != Some(&tag) {
+            tag.synced = false;
+        }
         state.tags.insert(key.clone(), tag.clone());
         state.attempted.insert(key.clone());
         self.save(&mut state, HashMap::from([(key, tag.clone())]));
         drop(state);
         self.events.emit_soon("tags");
+        if !tag.synced && self.sync_accounts().contains(&conversation.account.to_lowercase()) {
+            self.request();
+        }
         tag.to_respond = tag.is_waiting(now());
         Ok(tag)
     }
@@ -544,6 +705,7 @@ impl Tagging {
             state.attempted.clear();
             state.backoff_until = None;
             state.edits += 1;
+            state.retagging = true;
             self.cache.clear_tags();
             if let Some(debounce) = state.debounce.take() {
                 debounce.abort();

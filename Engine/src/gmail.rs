@@ -140,6 +140,19 @@ impl Part {
     }
 }
 
+#[derive(Deserialize)]
+struct LabelList {
+    labels: Option<Vec<Label>>,
+}
+
+#[derive(Clone, Deserialize)]
+struct Label {
+    id: String,
+    name: String,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
 impl Gmail {
     pub fn new(api: Arc<Api>, endpoints: Arc<GmailEndpoints>, cache_root: &std::path::Path) -> Self {
         let cache = Arc::new(EnvelopeCache::new(api.clone(), endpoints.clone(), cache_file(cache_root, &api.account)));
@@ -184,17 +197,6 @@ impl Gmail {
 
     pub async fn mailboxes(&self, counts: bool) -> Result<Vec<Mailbox>, ApiError> {
         #[derive(Deserialize)]
-        struct LabelList {
-            labels: Option<Vec<Label>>,
-        }
-        #[derive(Deserialize)]
-        struct Label {
-            id: String,
-            name: String,
-            #[serde(rename = "type")]
-            kind: Option<String>,
-        }
-        #[derive(Deserialize)]
         struct Tally {
             #[serde(rename = "messagesTotal")]
             messages_total: Option<i64>,
@@ -202,8 +204,7 @@ impl Gmail {
             messages_unread: Option<i64>,
         }
         let account = &self.api.account;
-        let url = self.endpoints.url("labels", &[("fields", "labels(id,name,type)")]);
-        let labels = self.api.get::<LabelList>(&url, Priority::Interactive, 1).await?.labels.unwrap_or_default();
+        let labels = self.cache.labels(Priority::Interactive).await?;
         let mut boxes: Vec<Mailbox> = labels
             .into_iter()
             .filter_map(|label| {
@@ -456,16 +457,29 @@ struct Entry {
 }
 
 impl Entry {
-    fn current(&self) -> Envelope {
+    /// The envelope as its labels have it: the flags, and the user labels' names as its tags.
+    fn current(&self, names: &HashMap<String, String>) -> Envelope {
         let mut envelope = self.envelope.clone();
         envelope.flags = Envelope::flags(
             !self.labels.contains("UNREAD"),
             self.labels.contains("STARRED"),
             self.labels.contains("DRAFT"),
         );
+        envelope.tags = self.labels.iter().filter_map(|id| names.get(id).cloned()).collect();
         envelope
     }
+
+    /// Carries a user label (`Label_…`) `names` lacks: one made since they were read.
+    fn has_unknown_label(&self, names: &HashMap<String, String>) -> bool {
+        self.labels.iter().any(|id| id.starts_with("Label_") && !names.contains_key(id))
+    }
 }
+
+/// The user labels' names by id, and when they were read.
+type LabelNames = Option<(Arc<HashMap<String, String>>, std::time::Instant)>;
+
+/// Labels unknown to the names read this recently wait for a later read.
+const NAMES_REFRESH: Duration = Duration::from_secs(60);
 
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
@@ -536,11 +550,38 @@ struct EnvelopeCache {
     endpoints: Arc<GmailEndpoints>,
     file: PathBuf,
     state: Mutex<CacheState>,
+    names: std::sync::Mutex<LabelNames>,
 }
 
 impl EnvelopeCache {
     fn new(api: Arc<Api>, endpoints: Arc<GmailEndpoints>, file: PathBuf) -> Self {
-        Self { api, endpoints, file, state: Mutex::new(CacheState::default()) }
+        Self { api, endpoints, file, state: Mutex::new(CacheState::default()), names: std::sync::Mutex::new(None) }
+    }
+
+    /// Every label of the mailbox, system ones included; the user labels' names are kept for
+    /// the envelopes' tags.
+    async fn labels(&self, priority: Priority) -> Result<Vec<Label>, ApiError> {
+        let url = self.endpoints.url("labels", &[("fields", "labels(id,name,type)")]);
+        let labels = self.api.get::<LabelList>(&url, priority, 1).await?.labels.unwrap_or_default();
+        let names = labels
+            .iter()
+            .filter(|label| label.kind.as_deref() == Some("user"))
+            .map(|label| (label.id.clone(), label.name.clone()))
+            .collect();
+        *self.names.lock().expect("label names") = Some((Arc::new(names), std::time::Instant::now()));
+        Ok(labels)
+    }
+
+    /// The user labels' names, read once and again when `entries` carry a label they lack.
+    async fn names(&self, entries: &[Entry], priority: Priority) -> Result<Arc<HashMap<String, String>>, ApiError> {
+        let known = self.names.lock().expect("label names").clone();
+        if let Some((names, read)) = known
+            && (read.elapsed() < NAMES_REFRESH || !entries.iter().any(|entry| entry.has_unknown_label(&names)))
+        {
+            return Ok(names);
+        }
+        self.labels(priority).await?;
+        Ok(self.names.lock().expect("label names").as_ref().map(|(names, _)| names.clone()).unwrap_or_default())
     }
 
     /// Reads the disk snapshot once, before anything else touches the entries.
@@ -734,19 +775,21 @@ impl EnvelopeCache {
     }
 
     async fn envelopes(self: &Arc<Self>, ids: &[String], priority: Priority) -> Result<Vec<Envelope>, ApiError> {
-        Ok(self.lookup(ids, priority).await?.iter().map(Entry::current).collect())
+        let entries = self.lookup(ids, priority).await?;
+        let names = self.names(&entries, priority).await?;
+        Ok(entries.iter().map(|entry| entry.current(&names)).collect())
     }
 
     /// The envelopes placed in the mailbox their labels list them under: Inbox, Sent or Drafts
     /// when they carry that label, else All Mail.
     async fn hits(self: &Arc<Self>, ids: &[String], priority: Priority) -> Result<Vec<SearchHit>, ApiError> {
-        Ok(self
-            .lookup(ids, priority)
-            .await?
+        let entries = self.lookup(ids, priority).await?;
+        let names = self.names(&entries, priority).await?;
+        Ok(entries
             .iter()
             .map(|entry| {
                 let mailbox = ["INBOX", "SENT", "DRAFT"].into_iter().find(|label| entry.labels.contains(*label));
-                SearchHit { mailbox: mailbox.unwrap_or(ALL_MAIL).to_string(), envelope: entry.current() }
+                SearchHit { mailbox: mailbox.unwrap_or(ALL_MAIL).to_string(), envelope: entry.current(&names) }
             })
             .collect())
     }
@@ -902,6 +945,8 @@ fn entry(message: &GmailMessage, has_attachment: bool) -> Entry {
         date: message.internal_date.as_deref().and_then(|ms| ms.parse::<f64>().ok()).map(|ms| date_from_unix(ms / 1000.0)),
         size: message.size_estimate.unwrap_or(0),
         has_attachment: Some(has_attachment),
+        // Named from the labels as the envelope is read (`Entry::current`).
+        tags: BTreeSet::new(),
     };
     Entry { envelope, labels: message.label_ids.iter().flatten().cloned().collect() }
 }

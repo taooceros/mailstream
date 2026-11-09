@@ -311,6 +311,10 @@ pub struct Envelope {
     pub size: i64,
     #[serde(rename = "hasAttachment", default, skip_serializing_if = "Option::is_none")]
     pub has_attachment: Option<bool>,
+    /// The provider's own tags on the message: Gmail's user label names, Outlook's categories.
+    /// AI tags sync through them (`tagsync`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tags: BTreeSet<String>,
 }
 
 impl Envelope {
@@ -513,6 +517,7 @@ mod tests {
             date: Some(752_000_000.5),
             size: 0,
             has_attachment: Some(false),
+            tags: Default::default(),
         };
         let text = String::from_utf8(crate::json::encode(&envelope, false, true)).unwrap();
         assert_eq!(

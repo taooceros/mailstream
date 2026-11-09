@@ -379,6 +379,7 @@ mod tests {
             date: Some(NOW - days_ago * DAY),
             size: 0,
             has_attachment: Some(false),
+            tags: Default::default(),
             message_id: Some(format!("{id}@x")),
         };
         let mailbox = if role == MailboxRole::Sent { "SENT" } else { "INBOX" };
@@ -395,7 +396,7 @@ mod tests {
     }
 
     fn tag(category: Category, to_respond: bool) -> ConversationTag {
-        ConversationTag { category, to_respond, labels: Vec::new(), waiting_until: None }
+        ConversationTag { category, to_respond, labels: Vec::new(), waiting_until: None, synced: false }
     }
 
     #[test]

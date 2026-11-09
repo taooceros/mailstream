@@ -474,6 +474,7 @@ fn parse(data: &[u8], items: &[Item], now: Date, source: &str) -> Result<HashMap
             to_respond: answer.to_respond && category != Category::Newsletter && !item.latest_from_user,
             labels,
             waiting_until: answer.until.as_deref().and_then(day_after),
+            synced: false,
         };
         if !tag.is_waiting(now) {
             tag.to_respond = false;

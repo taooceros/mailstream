@@ -223,7 +223,7 @@ impl Mail {
 
     /// One request for a change already shown. A refusal (signing out included) is rolled back,
     /// reported, and with `resync` the lists and counts are fetched afresh.
-    async fn provider_request(
+    pub(super) async fn provider_request(
         self: &Arc<Self>,
         account: String,
         resync: bool,
@@ -338,8 +338,8 @@ impl Mail {
 
     // MARK: - Listings
 
-    /// Flags never change threading: the listed envelopes change in place.
-    fn update_envelopes(&self, refs: &HashSet<MessageRef>, change: impl Fn(&mut Envelope)) {
+    /// Flags and tags never change threading: the listed envelopes change in place.
+    pub(super) fn update_envelopes(&self, refs: &HashSet<MessageRef>, change: impl Fn(&mut Envelope)) {
         let mut ids: HashMap<MailboxKey, HashSet<&str>> = HashMap::new();
         for reference in refs {
             ids.entry(reference.key()).or_default().insert(reference.id.as_str());
