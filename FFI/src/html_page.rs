@@ -504,7 +504,12 @@ impl Page {
             self.apply_viewport();
             self.doc.as_mut().resolve(0.0);
             if wrap_loose_table_parts(self.doc.as_mut()) {
-                self.doc.as_mut().resolve(0.0);
+                // Blitz skipped building the dropped children's boxes (their text included) and
+                // marks no moved subtree for building again, so this pass builds every box anew.
+                let doc = self.doc.as_mut();
+                doc.set_incremental_layout(false);
+                doc.resolve(0.0);
+                doc.set_incremental_layout(true);
             }
             let doc = self.doc.as_ref();
             let Some(root) = doc.try_root_element() else { break };
@@ -605,7 +610,7 @@ impl Page {
 /// parent is one, as CSS does with anonymous boxes and WebKit shows them: Blitz makes no
 /// anonymous table boxes and drops such children (MS-165). Which children are loose changes with
 /// the width, so the wrappers of the last pass are undone when they differ, their children keeping
-/// the styles they had. Returns whether the tree changed; it is then resolved again.
+/// the styles they had. Returns whether the tree changed; it is then laid out again from scratch.
 fn wrap_loose_table_parts(doc: &mut BaseDocument) -> bool {
     let Some(root) = doc.try_root_element().map(|root| root.id) else { return false };
     let mut runs = Vec::new();
@@ -1600,30 +1605,42 @@ mod tests {
     fn cells_a_media_query_makes_blocks_stack_in_their_row() {
         // Zillow's "Other rentals" cards put the photo and the text in two `<th>`s of one row,
         // which its phone styles turn into blocks; WebKit stacks them in one anonymous cell, Blitz
-        // dropped them, leaving the cards empty below 600px (MS-165).
+        // dropped them, leaving the cards empty below 600px (MS-165). Wrapped, the text cell must
+        // draw its text too, not only its box, after every change of width.
         let mut page = page(concat!(
             "<style>@media only screen and (max-width: 600px) {",
             " .displayBlock { display: block !important; width: 100% !important }",
             " .wrap { width: 100% !important } }</style>",
             r#"<table class="wrap" width="501" cellpadding="0" cellspacing="0" border="0" style="width:501px"><tr>"#,
             r#"<th class="displayBlock" width="243" style="width:243px;height:100px;background-color:#ff0000"></th>"#,
-            r#"<th class="displayBlock" style="height:50px;background-color:#0000ff"></th>"#,
+            r#"<th class="displayBlock" style="font:400 40px Helvetica,Arial,sans-serif;color:#000000;"#,
+            r#"background-color:#0000ff;text-align:left">WWW</th>"#,
             "</tr></table>",
         ));
-        page.lay_out(400.0, 1.0);
-        assert_eq!(page.zoom, 1.0);
-        assert!(page.height >= 150.0, "{}", page.height);
-        let tile = page.tile(400.0, 1.0, 0.0, 160.0);
-        assert_eq!(pixel(&tile, 200, 50)[..3], [255, 0, 0]);
-        assert_eq!(pixel(&tile, 200, 125)[..3], [0, 0, 255]);
+        // Whether any pixel of the tile's rows `rows` is the text's black.
+        let text_in = |tile: &HtmlTile, rows: std::ops::Range<u32>| {
+            rows.flat_map(|y| (0..tile.width).map(move |x| (x, y))).any(|(x, y)| pixel(tile, x, y)[..3].iter().all(|&c| c < 60))
+        };
+        let stacked = |page: &mut Page| {
+            page.lay_out(400.0, 1.0);
+            assert_eq!(page.zoom, 1.0);
+            // The text cell is as tall as its line, under the photo.
+            assert!(page.height >= 150.0, "{}", page.height);
+            let tile = page.tile(400.0, 1.0, 0.0, page.height);
+            assert_eq!(pixel(&tile, 200, 50)[..3], [255, 0, 0]);
+            assert_eq!(pixel(&tile, 390, 115)[..3], [0, 0, 255]);
+            assert!(!text_in(&tile, 0..100));
+            assert!(text_in(&tile, 100..tile.height));
+        };
+        stacked(&mut page);
         // Wider than 600, the cells sit side by side again.
         page.lay_out(800.0, 1.0);
         assert!(page.height < 150.0, "{}", page.height);
         let tile = page.tile(800.0, 1.0, 0.0, 100.0);
         assert_eq!(pixel(&tile, 100, 50)[..3], [255, 0, 0]);
-        assert_eq!(pixel(&tile, 400, 25)[..3], [0, 0, 255]);
-        page.lay_out(400.0, 1.0);
-        assert!(page.height >= 150.0, "{}", page.height);
+        assert_eq!(pixel(&tile, 490, 90)[..3], [0, 0, 255]);
+        assert!(text_in(&tile, 0..100));
+        stacked(&mut page);
     }
 
     #[test]
