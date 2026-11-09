@@ -9,15 +9,15 @@ with them rebuilt 15 crates in every checkout (MS-159).
 
 Usage: python3 scripts/warm-build.py [--allow CHECKOUT ...]
 
-Runs only in the default checkout, with no source changes there, and only while every open ovnfs
-checkout of it froze these folders when it opened (scripts/checkout.py; those keep the build they
-opened with): any other (opened with `ovnfs new` by hand, `--rev` or before MS-152) reads them
-live, so a build under it can hand it artifacts built from other source (MS-152). --allow names
-such a checkout that builds nothing and may stay. It fetches `main` and moves the default
-checkout's empty working-copy change onto it, then builds; tracked files end as `main` has them
-and nothing else in the tree changes (the Dart bindings go to a temporary folder). It unlocks the
-default checkout's source for its run and locks it again when it ends, failed or not
-(scripts/source_lock.py, MS-156)."""
+Runs only in the default checkout, with no source changes there. It fetches `main` and moves the
+default checkout's empty working-copy change onto it, always; then it builds only while every
+open ovnfs checkout of it froze these folders when it opened (scripts/checkout.py; those keep the
+build they opened with): any other (opened with `ovnfs new` by hand, `--rev` or before MS-152)
+reads them live, so a build under it can hand it artifacts built from other source (MS-152), and
+it exits 1 instead. --allow names such a checkout that builds nothing and may stay. Tracked files
+end as `main` has them and nothing else in the tree changes (the Dart bindings go to a temporary
+folder). It unlocks the default checkout's source for its run and locks it again when it ends,
+failed or not (scripts/source_lock.py, MS-156)."""
 import argparse
 import json
 import os
@@ -73,28 +73,37 @@ def main():
     mount = json.loads(run("ovnfs", "--json", "status"))["mount"]
     if ROOT.is_relative_to(Path(mount).resolve()) or not (ROOT / ".jj").is_dir():
         fail(f"run it in the default checkout, not {ROOT}")
-    open_now = checkouts()
-    open_before = [c["name"] for c in open_now]
-    if blocking := [c["name"] for c in open_now if c["name"] not in allowed and not frozen(c)]:
-        fail("checkouts that read the build folders live are open: " + ", ".join(blocking) +
-             " (run it once they are removed, or --allow one that builds nothing; open checkouts"
-             " with scripts/checkout.py)")
     if jj("diff", "--name-only").strip() or jj("log", "--no-graph", "-r", "@", "-T", "description").strip():
         fail("the default checkout has changes or a described working-copy change; see `jj st`")
+    open_now = checkouts()
+    blocking = [c["name"] for c in open_now if c["name"] not in allowed and not frozen(c)]
 
     source_lock.unlock()
     try:
-        build(open_before)
+        update_source()
+        if blocking:
+            fail("moved the source to main but built nothing: checkouts that read the build "
+                 "folders live are open: " + ", ".join(blocking) + " (run it again once they are "
+                 "removed, or --allow one that builds nothing)")
+        build([c["name"] for c in open_now])
     finally:
         source_lock.lock()
 
 
-def build(open_before):
+def update_source():
+    """Moves the default checkout's empty working-copy change onto `main`. Safe under any open
+    checkout: none reads the tracked files live (`--rev` ones read git, the others their capture),
+    and new checkouts get main's checkout.py and .o2/ovnfs.yml, so they freeze the build folders.
+    Without this a stale checkout.py there kept opening live checkouts that blocked every build
+    (MS-152)."""
     jj("git", "fetch")
     if not jj("log", "--no-graph", "-r", "@- & ::main", "-T", "commit_id").strip():
         fail("the default checkout's working copy is not on a revision of main")
     if jj("log", "--no-graph", "-r", "@-", "-T", "commit_id") != jj("log", "--no-graph", "-r", "main", "-T", "commit_id"):
         jj("new", "main")
+
+
+def build(open_before):
     revision = jj("log", "--no-graph", "-r", "main", "-T", 'commit_id.short() ++ " " ++ description.first_line()')
     print(f"Building main at {revision}", flush=True)
 

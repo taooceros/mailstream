@@ -24,8 +24,8 @@ older than those docs: it has no `ovnfs config` verb (edit `.o2/ovnfs.yml` by ha
 - The default checkout stays clean on `main` (it is locked; only `scripts/warm-build.py` moves
   it), so a checkout of it starts at `main` as of the last warm build, and `jj new main` takes it
   to `origin`'s tip. The first release `scripts/ffi.py` in a new checkout rebuilds only the repo's
-  2 crates (~30 s) on that warm build. `warm-build.py` refuses while any checkout of the default
-  checkout that isn't frozen this way is open.
+  2 crates (~30 s) on that warm build. `warm-build.py` always moves the default checkout to
+  `main`, but builds nothing while a checkout of it that isn't frozen this way is open.
 - Work leaves a checkout through jj (commit, push `main`; AGENTS.md, Version control), not
   `ovnfs apply`. Don't use `ovnfs diff`, `snap` or `fork` here: they count the build folders as
   source, so `diff` lists build output and a snapshot hashes gigabytes of it.
