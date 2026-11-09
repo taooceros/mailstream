@@ -497,7 +497,7 @@ class _CalendarGridState extends State<CalendarGrid> {
             const SizedBox(width: CalendarGrid.gutter),
             for (var i = 0; i < days.length; i++)
               Expanded(
-                child: _DayHeader(day: days[i], today: i == todayIndex, booked: _booked[i], onTap: widget.onDay),
+                child: CalendarDayHeader(day: days[i], today: i == todayIndex, booked: _booked[i], onTap: widget.onDay),
               ),
           ]),
         ),
@@ -624,8 +624,8 @@ class _CalendarGridState extends State<CalendarGrid> {
 
 /// A day's weekday and date. Today's lifts off the tray as a small card in the accent color; the
 /// other days lie flat over a bar as long as their booked hours ([fullDayHours] fill it).
-class _DayHeader extends StatelessWidget {
-  const _DayHeader({required this.day, required this.today, required this.booked, required this.onTap});
+class CalendarDayHeader extends StatelessWidget {
+  const CalendarDayHeader({super.key, required this.day, required this.today, required this.booked, required this.onTap});
 
   final DateTime day;
   final bool today;

@@ -11,11 +11,14 @@ the engine runs to tag with Apple Intelligence when `aiTagging.backend` is `appl
 The UI lists accounts, mailboxes and conversations, reads previews, sender avatars and
 messages (with their HTML), searches, marks, archives, trashes, tags, replies and sends new mail through it,
 does Google Chat (the spaces of every chat account, their messages, sending and starting new
-chats), shows every account's calendar events (an agenda, day and week timelines with paging and
+chats), shows every account's calendar events (an agenda under the week's strip, with the meeting
+about to start and its Join on top, day and week timelines with paging and
 Today, and each event's details; keys `a`/`d`/`w`, `t`, `←`/`→`), adds events (also by clicking
 an empty time in the day or week view)
 and changes or deletes the ones the account organizes (New event, ⌘N; Edit and Delete on an
-event), answers meeting invitations in mail (a card in the reader with Accept, Tentative and Decline), manages
+event), answers meeting invitations in mail (a card in the reader with Accept, Tentative and Decline)
+and in the calendar (Going, Maybe and Decline on an unanswered invitation's agenda row and in every
+invitation's details), manages
 accounts and settings, and follows the engine's change events instead of polling.
 Mailstream.app need not run.
 
@@ -390,6 +393,19 @@ once a second, so it updates at that pace (at most every 500 ms otherwise). Off,
 for timings. `flutter test test/frame_rate_test.dart` covers the counting and the switch;
 `flutter build macos --release -t test/frame_rate_app.dart` runs the real shell over synthetic
 mail with the setting kept in memory, for screenshots.
+
+The agenda (`lib/ui/calendar.dart`, MS-169) lists each day's events as rows: a time column in
+tabular figures, the calendar's 6 pt dot, title and place, the guests' monograms, or Going, Maybe
+and Decline while the account has not answered. Above it, this week's days (today raised, a
+bar for the time each day books; a day scrolls the agenda to it or opens it in the day view) and,
+from 30 minutes before a meeting (one with a call or guests) until it ends, an Up Next card with
+Join; the day view shows that card too. The event's pane answers inline beside Join and lists the
+guests two to a row. Answers go through `calendar.respond` for that occurrence alone.
+`flutter test test/calendar_agenda_test.dart test/calendar_reply_test.dart` covers the Up Next
+window, the answers' states and sending them; `flutter run -d macos -t test/calendar_app.dart`
+runs the real shell over a synthetic calendar (a meeting seven minutes away, invitations to
+answer, answers kept in memory), for screenshots without accounts. Launching any build's
+executable with `-AppleInterfaceStyle Dark` shows it dark without changing the system's setting.
 
 | Path | Role |
 | --- | --- |

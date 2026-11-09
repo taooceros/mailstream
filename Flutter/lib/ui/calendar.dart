@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/widgets.dart';
 import 'package:intl/intl.dart';
@@ -11,7 +13,6 @@ import '../state/mail_state.dart';
 import 'calendar_editor.dart';
 import 'calendar_grid.dart';
 import 'common.dart';
-import 'conversation_list.dart';
 import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
@@ -63,6 +64,94 @@ String agendaTitle(DateTime day, DateTime today) {
   return DateFormat('EEEE, MMMM d, y').format(day);
 }
 
+/// An agenda day's header summary: its events, and the hours its timed ones book (overlaps once,
+/// declined ones left out): 4 events · 3h 30m.
+String daySummary(List<engine.CalendarItem> events, DateTime day) {
+  final booked = (bookedHours(layoutDay(events, day)) * 60).round();
+  return [events.length == 1 ? '1 event' : '${events.length} events', if (booked > 0) shortDuration(Duration(minutes: booked))].join(' · ');
+}
+
+/// How long before a meeting the agenda and the day view offer to join it.
+const upNextLead = Duration(minutes: 30);
+
+/// The meeting the Up Next bar offers at `now`: the soonest one starting within [upNextLead],
+/// else the one under way that started last. Meetings have a call or guests; all-day and
+/// declined events never count.
+engine.CalendarItem? upNext(List<engine.CalendarItem> events, DateTime now) {
+  engine.CalendarItem? soonest, current;
+  DateTime? soonestStart, currentStart;
+  for (final event in events) {
+    if (event.allDay || event.response == 'declined') continue;
+    if (event.meetingUrl == null && event.attendees.isEmpty) continue;
+    final span = eventSpan(event);
+    if (!span.end.isAfter(now)) continue;
+    if (span.start.isAfter(now)) {
+      if (span.start.difference(now) > upNextLead) continue;
+      if (soonestStart == null || span.start.isBefore(soonestStart)) (soonest, soonestStart) = (event, span.start);
+    } else if (currentStart == null || span.start.isAfter(currentStart)) {
+      (current, currentStart) = (event, span.start);
+    }
+  }
+  return soonest ?? current;
+}
+
+/// When the Up Next meeting starts, from `now`: In 7m (a started minute counts whole), or Now.
+String upNextLabel(engine.CalendarItem event, DateTime now) {
+  final start = eventSpan(event).start;
+  if (!start.isAfter(now)) return 'Now';
+  return 'In ${(start.difference(now).inSeconds / 60).ceil()}m';
+}
+
+/// The answers an invitation takes, as the engine names them, with their labels.
+const replies = [('accepted', 'Going'), ('tentative', 'Maybe'), ('declined', 'Decline')];
+
+/// What the account can do about an event's invitation. [answerable]: it is a guest (not the
+/// organizer) and its sign-in may change its calendar; [chosen]: the answer to show picked, the
+/// one being sent ([sending]) else the calendar's; [invited]: it has not answered yet, so the
+/// agenda's row offers the answers.
+typedef ReplyState = ({bool answerable, String? chosen, String? sending, bool invited});
+
+/// `event`'s [ReplyState] for its `account`, with the answer being sent, if any.
+ReplyState replyState(engine.CalendarItem event, engine.CalendarAccount? account, String? sending) {
+  final response = event.response;
+  final guest = response == 'needsAction' || replies.any((r) => r.$1 == response);
+  final answerable = guest && account != null && account.granted && account.writable;
+  return (
+    answerable: answerable,
+    chosen: sending ?? (response == 'needsAction' || !guest ? null : response),
+    sending: answerable ? sending : null,
+    invited: answerable && response == 'needsAction',
+  );
+}
+
+/// `event`'s answers: the guests, and its organizer first when the guests leave them out.
+List<({engine.CalendarPerson person, bool organizer})> eventGuests(engine.CalendarItem event) {
+  final organizer = event.organizer;
+  final key = organizer?.email?.toLowerCase();
+  bool isOrganizer(engine.CalendarPerson person) => key != null && person.email?.toLowerCase() == key;
+  return [
+    if (organizer != null && !event.attendees.any(isOrganizer)) (person: organizer, organizer: true),
+    for (final person in event.attendees) (person: person, organizer: isOrganizer(person)),
+  ];
+}
+
+/// The guests' answers counted, in the order Going, Maybe, Declined, Invited: 4 Going · 1 Maybe.
+String guestSummary(List<engine.CalendarPerson> guests) {
+  final counts = <String, int>{};
+  for (final person in guests) {
+    // No answer yet, or none given: still invited.
+    final label = switch (person.response) {
+      'accepted' || 'tentative' || 'declined' => _responseLabel(person.response),
+      _ => 'Invited',
+    };
+    counts[label] = (counts[label] ?? 0) + 1;
+  }
+  return [
+    for (final label in const ['Going', 'Maybe', 'Declined', 'Invited'])
+      if (counts[label] case final count?) '$count $label',
+  ].join(' · ');
+}
+
 /// `#rrggbb` as a color.
 Color? hexColor(String? hex) {
   if (hex == null || !hex.startsWith('#') || hex.length != 7) return null;
@@ -83,11 +172,20 @@ String _responseLabel(String? response) => switch (response) {
   _ => '',
 };
 
+/// The account `event` belongs to, as the calendar lists it.
+engine.CalendarAccount? _accountOf(CalendarState calendar, engine.CalendarItem event) =>
+    calendar.accounts.where((a) => a.id == event.account).firstOrNull;
+
+ReplyState _reply(CalendarState calendar, engine.CalendarItem event) =>
+    replyState(event, _accountOf(calendar, event), calendar.answering[eventKey(event)]);
+
 sealed class _Entry {}
 
 final class _Day extends _Entry {
-  _Day(this.title);
+  _Day(this.day, this.title, this.summary);
+  final DateTime day;
   final String title;
+  final String summary;
 }
 
 final class _Event extends _Entry {
@@ -106,7 +204,8 @@ final class _Notice extends _Entry {
 
 /// The calendar's list pane: header with new event and refresh over the views (agenda, day,
 /// week) and their paging, notices for accounts to sign in again or whose fetch failed, then the
-/// agenda from today (each day with events under its header) or the day's or week's timeline.
+/// agenda from today (the week's days on a strip, the meeting about to start, then each day with
+/// events under its header) or the day's or week's timeline.
 class CalendarListPane extends StatefulWidget {
   const CalendarListPane({super.key, required this.state});
 
@@ -120,6 +219,8 @@ class CalendarListPane extends StatefulWidget {
 }
 
 class _CalendarListPaneState extends State<CalendarListPane> {
+  static const _listTop = 4.0;
+
   final _scroll = ScrollController();
 
   /// The account being signed in to again, while the browser is open.
@@ -175,12 +276,34 @@ class _CalendarListPaneState extends State<CalendarListPane> {
   List<_Entry> _entries(DateTime today) {
     final out = <_Entry>[..._notices()];
     for (final day in agendaDays(calendar.events, today)) {
-      out.add(_Day(agendaTitle(day.day, today)));
+      out.add(_Day(day.day, agendaTitle(day.day, today), daySummary(day.events, day.day)));
       for (final event in day.events) {
         out.add(_Event(event, day.day));
       }
     }
     return out;
+  }
+
+  static double _extent(_Entry entry) => switch (entry) {
+    _Day() => ListMetrics.sectionHeight,
+    _Event() => CalendarListPane.rowHeight,
+    _Notice() => CalendarListPane.noticeHeight,
+  };
+
+  /// A day on the week strip: the agenda scrolls to it when it lists it, else the day view
+  /// shows it (days gone by, days with nothing planned).
+  void _showDay(List<_Entry> entries, DateTime day) {
+    var offset = _listTop;
+    for (final entry in entries) {
+      if (entry is _Day && entry.day == day) {
+        if (_scroll.hasClients) {
+          _scroll.animateTo(offset.clamp(0, _scroll.position.maxScrollExtent), duration: Motion.medium, curve: Motion.curve);
+        }
+        return;
+      }
+      offset += _extent(entry);
+    }
+    calendar.showDay(day);
   }
 
   @override
@@ -190,6 +313,8 @@ class _CalendarListPaneState extends State<CalendarListPane> {
     final today = dayOf(now);
     final view = calendar.view;
     final Widget body;
+    void open(engine.CalendarItem event) => calendar.open(eventKey(event));
+    final upNextBar = _UpNextBar(key: const ValueKey('upNext'), state: widget.state, onOpen: open);
     if (!calendar.listed) {
       body = const Center(child: Spinner());
     } else if (view != CalendarView.agenda) {
@@ -200,7 +325,9 @@ class _CalendarListPaneState extends State<CalendarListPane> {
         children: [
           // One line, leaving the hours their room: the agenda has each account's notice.
           if (notices.isNotEmpty) _NoticeLine(notices: notices, onTap: () => calendar.setView(CalendarView.agenda)),
-          // Keyed: the notice line comes and goes above it without starting the grid over.
+          if (view == CalendarView.day) upNextBar,
+          // Keyed: the notice line and the Up Next bar come and go above it without starting the
+          // grid over.
           Expanded(
             key: const ValueKey('grid'),
             child: CalendarGrid(
@@ -209,7 +336,7 @@ class _CalendarListPaneState extends State<CalendarListPane> {
               colorOf: (event) => eventColor(widget.state, event),
               synced: calendar.synced,
               selected: calendar.opened,
-              onOpen: (event) => calendar.open(eventKey(event)),
+              onOpen: open,
               onDay: view == CalendarView.week ? calendar.showDay : null,
               onCreate: calendar.writableAccounts.isEmpty ? null : (start) => showEventEditor(context, widget.state, start: start),
               toNow: calendar.toNow,
@@ -225,43 +352,47 @@ class _CalendarListPaneState extends State<CalendarListPane> {
           : calendar.hasCalendars
           ? (calendar.loading ? null : 'Nothing on your calendars in the next ${CalendarState.days} days')
           : 'No account has calendar access yet. Sign in again to show its calendar here.';
-      // MacosApp's scroll behavior puts the Mac's overlay scrollbar on it.
-      body = ListView.builder(
-        controller: _scroll,
-        padding: const EdgeInsets.only(top: 4, bottom: 24),
-        itemCount: entries.length + 1,
-        itemExtentBuilder: (index, _) => index == entries.length
-            ? (empty == null && hasEvents ? 0 : 120)
-            : switch (entries[index]) {
-                _Day() => ListMetrics.sectionHeight,
-                _Event() => CalendarListPane.rowHeight,
-                _Notice() => CalendarListPane.noticeHeight,
+      body = Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _WeekStrip(events: calendar.events, today: today, onDay: (day) => _showDay(entries, day)),
+          upNextBar,
+          Expanded(
+            // MacosApp's scroll behavior puts the Mac's overlay scrollbar on it.
+            child: ListView.builder(
+              controller: _scroll,
+              padding: const EdgeInsets.only(top: _listTop, bottom: 24),
+              itemCount: entries.length + 1,
+              itemExtentBuilder: (index, _) =>
+                  index == entries.length ? (empty == null && hasEvents ? 0 : 120) : _extent(entries[index]),
+              itemBuilder: (context, index) {
+                if (index == entries.length) {
+                  if (hasEvents) return const SizedBox.shrink();
+                  if (empty == null) return const Center(child: Spinner());
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(empty, textAlign: TextAlign.center, style: context.text.body.copyWith(color: colors.secondaryLabel)),
+                    ),
+                  );
+                }
+                return switch (entries[index]) {
+                  _Day(:final title, :final summary) => _DayHeader(title: title, summary: summary),
+                  _Event(:final event, :final day) => _EventRow(
+                    key: ValueKey('${event.account}|${event.calendar}|${event.id}|${day.millisecondsSinceEpoch}'),
+                    state: widget.state,
+                    event: event,
+                    day: day,
+                    now: now,
+                    selected: calendar.opened == eventKey(event),
+                    onTap: () => open(event),
+                  ),
+                  final _Notice notice => _noticeRow(notice),
+                };
               },
-        itemBuilder: (context, index) {
-          if (index == entries.length) {
-            if (hasEvents) return const SizedBox.shrink();
-            if (empty == null) return const Center(child: Spinner());
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text(empty, textAlign: TextAlign.center, style: context.text.body.copyWith(color: colors.secondaryLabel)),
-              ),
-            );
-          }
-          return switch (entries[index]) {
-            _Day(:final title) => SectionHeader(title),
-            _Event(:final event, :final day) => _EventRow(
-              key: ValueKey('${event.account}|${event.calendar}|${event.id}|${day.millisecondsSinceEpoch}'),
-              state: widget.state,
-              event: event,
-              day: day,
-              now: now,
-              selected: calendar.opened == eventKey(event),
-              onTap: () => calendar.open(eventKey(event)),
             ),
-            final _Notice notice => _noticeRow(notice),
-          };
-        },
+          ),
+        ],
       );
     }
     return Column(
@@ -322,8 +453,163 @@ class _CalendarListPaneState extends State<CalendarListPane> {
   }
 }
 
-/// One event in the agenda: its calendar's color bar, the time (or All day), the title and where
-/// it is, and the account's answer when it is an invitation.
+/// Tabular figures, so times line up down the agenda's time column.
+const _tabular = [FontFeature.tabularFigures()];
+
+/// The agenda's week strip: this week's seven days as the week view heads them (today raised on
+/// a card, the others over a bar of the hours they book). A day scrolls the agenda to it, or
+/// opens it in the day view when the agenda does not list it.
+class _WeekStrip extends StatelessWidget {
+  const _WeekStrip({required this.events, required this.today, required this.onDay});
+
+  final List<engine.CalendarItem> events;
+  final DateTime today;
+  final ValueChanged<DateTime> onDay;
+
+  static const _height = 44.0;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+    child: SizedBox(
+      height: _height,
+      child: Row(children: [
+        for (final day in weekDays(weekOf(today)))
+          Expanded(
+            child: CalendarDayHeader(day: day, today: day == today, booked: bookedHours(layoutDay(events, day)), onTap: onDay),
+          ),
+      ]),
+    ),
+  );
+}
+
+/// The meeting about to start (within [upNextLead]) or under way, on one compact card: how soon,
+/// its title, and Join when it has a call; a click opens it. It follows the clock by itself.
+class _UpNextBar extends StatefulWidget {
+  const _UpNextBar({super.key, required this.state, required this.onOpen});
+
+  final MailState state;
+  final ValueChanged<engine.CalendarItem> onOpen;
+
+  @override
+  State<_UpNextBar> createState() => _UpNextBarState();
+}
+
+class _UpNextBarState extends State<_UpNextBar> {
+  Timer? _clock;
+
+  /// What the bar last showed: its event and label; the clock rebuilds it when they change.
+  (EventKey, String)? _shown;
+
+  @override
+  void initState() {
+    super.initState();
+    _clock = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (_current(DateTime.now()) != _shown) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _clock?.cancel();
+    super.dispose();
+  }
+
+  (EventKey, String)? _current(DateTime now) {
+    final event = upNext(widget.state.calendar.events, now);
+    return event == null ? null : (eventKey(event), upNextLabel(event, now));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final event = upNext(widget.state.calendar.events, now);
+    _shown = event == null ? null : (eventKey(event), upNextLabel(event, now));
+    if (event == null) return const SizedBox.shrink();
+    final colors = context.colors;
+    final url = event.meetingUrl;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: colors.card,
+          borderRadius: BorderRadius.circular(CalendarMetrics.cardRadius),
+          border: Border.all(color: colors.cardBorder, width: CalendarMetrics.cardBorder),
+          boxShadow: colors.cardShadow,
+        ),
+        child: Hoverable(
+          onTap: () => widget.onOpen(event),
+          radius: CalendarMetrics.cardRadius,
+          child: SizedBox(
+            height: 36,
+            child: Row(children: [
+              const SizedBox(width: 12),
+              Container(
+                width: CalendarMetrics.dot,
+                height: CalendarMetrics.dot,
+                decoration: BoxDecoration(color: colors.accent, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                _shown!.$2,
+                style: context.text.callout.copyWith(color: colors.accent, fontWeight: FontWeight.w600, fontFeatures: _tabular),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  event.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.text.callout.copyWith(color: colors.label, fontWeight: FontWeight.w600),
+                ),
+              ),
+              if (url != null) ...[
+                const SizedBox(width: 8),
+                PushButton(
+                  controlSize: ControlSize.small,
+                  onPressed: () => widget.state.openExternal(url),
+                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(CupertinoIcons.videocam_fill, size: 13, color: MacosColors.white),
+                    SizedBox(width: 4),
+                    Text('Join'),
+                  ]),
+                ),
+              ],
+              const SizedBox(width: 8),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// An agenda day's header: its title, and how many events it has and the time they book.
+class _DayHeader extends StatelessWidget {
+  const _DayHeader({required this.title, required this.summary});
+
+  final String title;
+  final String summary;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = context.text.callout.copyWith(color: context.colors.secondaryLabel, fontWeight: FontWeight.w600);
+    return Container(
+      alignment: Alignment.bottomLeft,
+      padding: const EdgeInsets.fromLTRB(22, 0, 18, 5),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+        Expanded(child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: style)),
+        const SizedBox(width: 8),
+        Text(summary, style: context.text.footnote.copyWith(color: context.colors.secondaryLabel, fontFeatures: _tabular)),
+      ]),
+    );
+  }
+}
+
+/// One event in the agenda: a time column (when it starts and how long it runs, or All day),
+/// its calendar's dot, the title and where it is, then its guests' monograms, or the answers
+/// when the account is invited and has not answered. Past events fade; declined ones fade
+/// further, struck through. Selected, the row lifts as a card with a blue mark at its edge.
 class _EventRow extends StatelessWidget {
   const _EventRow({
     super.key,
@@ -342,94 +628,163 @@ class _EventRow extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
 
+  static const _timeWidth = 64.0;
+
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
+    final calendar = state.calendar;
     final span = eventSpan(event);
     final past = !span.end.isAfter(now);
     final declined = event.response == 'declined';
-    final dim = past || declined;
     // A timed event shows its times on the day it starts; days it runs through show All day, and
     // the day it ends, when it ends.
     final startsToday = !event.allDay && sameDay(span.start, day);
     final endsToday = !event.allDay && (sameDay(span.end, day) || span.end == DateTime(day.year, day.month, day.day + 1));
     final time = startsToday ? DateFormat.jm().format(span.start) : 'All day';
-    final until = startsToday && endsToday
-        ? DateFormat.jm().format(span.end)
+    final under = startsToday && endsToday
+        ? shortDuration(span.end.difference(span.start))
         : endsToday && !startsToday
         ? 'until ${DateFormat.jm().format(span.end)}'
         : null;
     final detail = [
       if (event.location != null) event.location!,
-      if (event.location == null && event.meetingUrl != null) 'Video call',
-      if (state.calendar.accounts.where((a) => a.granted).length > 1 || (event.calendarName != null && event.calendarName != event.account))
+      if (event.meetingUrl != null) meetingLabel(event.meetingUrl!),
+      if (calendar.accounts.where((a) => a.granted).length > 1 || (event.calendarName != null && event.calendarName != event.account))
         event.calendarName ?? event.account,
     ].join(' · ');
-    final response = event.response == 'needsAction' || event.response == 'tentative' ? _responseLabel(event.response) : '';
-    final secondary = dim ? colors.secondaryLabel.withValues(alpha: 0.6) : colors.secondaryLabel;
+    final reply = _reply(calendar, event);
+    final tag = switch (event.response) {
+      'needsAction' => 'Invited',
+      'tentative' => 'Maybe',
+      _ => null,
+    };
+    final secondary = colors.secondaryLabel;
+    final timeStyle = context.text.callout.copyWith(color: colors.label, fontWeight: FontWeight.w600, fontFeatures: _tabular);
+    final guests = eventGuests(event);
+    final Widget? trailing = reply.invited
+        ? _ReplySwitch(reply: reply, compact: true, onReply: (response) => calendar.respond(event, response))
+        : guests.isNotEmpty
+        ? GuestAvatars(event: event, max: 3)
+        : null;
+    Widget row = Row(children: [
+      SizedBox(
+        width: _timeWidth,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Text(time, maxLines: 1, style: timeStyle),
+            if (under != null)
+              Text(under, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.footnote.copyWith(color: secondary, fontFeatures: _tabular)),
+          ],
+        ),
+      ),
+      const SizedBox(width: 12),
+      Container(
+        width: CalendarMetrics.dot,
+        height: CalendarMetrics.dot,
+        decoration: BoxDecoration(color: calendarDot(eventColor(state, event), colors), shape: BoxShape.circle),
+      ),
+      const SizedBox(width: 8),
+      Expanded(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              event.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: context.text.body.copyWith(
+                fontWeight: FontWeight.w600,
+                color: colors.label,
+                decoration: declined ? TextDecoration.lineThrough : null,
+              ),
+            ),
+            if (detail.isNotEmpty || tag != null)
+              Row(children: [
+                if (tag != null) ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5),
+                    decoration: BoxDecoration(color: colors.waitingFill, borderRadius: BorderRadius.circular(4)),
+                    child: Text(tag, style: context.text.footnote.copyWith(color: colors.onWaitingFill, fontWeight: FontWeight.w600)),
+                  ),
+                  if (detail.isNotEmpty) const SizedBox(width: 6),
+                ],
+                if (event.location != null || event.meetingUrl != null) ...[
+                  Icon(event.location != null ? CupertinoIcons.location : CupertinoIcons.videocam, size: 12, color: secondary),
+                  const SizedBox(width: 3),
+                ],
+                Expanded(child: Text(detail, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.callout.copyWith(color: secondary))),
+              ]),
+          ],
+        ),
+      ),
+      if (trailing != null) ...[const SizedBox(width: 8), trailing],
+    ]);
+    if (past || declined) row = Opacity(opacity: declined ? CalendarMetrics.declinedOpacity : CalendarMetrics.pastOpacity, child: row);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: ListMetrics.inset),
       child: LiftedRow(
         selected: selected,
         onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Row(children: [
-            Container(
-              width: 4,
-              height: 34,
-              decoration: BoxDecoration(
-                color: eventColor(state, event).withValues(alpha: dim ? 0.4 : 1),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            const SizedBox(width: 10),
-            SizedBox(
-              width: 76,
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(time, maxLines: 1, style: context.text.callout.copyWith(color: dim ? secondary : colors.label, fontWeight: FontWeight.w500)),
-                  if (until != null) Text(until, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.footnote.copyWith(color: secondary)),
-                ],
-              ),
-            ),
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    event.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: context.text.body.copyWith(
-                      fontWeight: FontWeight.w600,
-                      color: dim ? secondary : colors.label,
-                      decoration: declined ? TextDecoration.lineThrough : null,
-                    ),
-                  ),
-                  if (detail.isNotEmpty)
-                    Text(detail, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.callout.copyWith(color: secondary)),
-                ],
-              ),
-            ),
-            if (event.meetingUrl != null) ...[
-              const SizedBox(width: 6),
-              Icon(CupertinoIcons.videocam, size: 16, color: secondary),
-            ],
-            if (response.isNotEmpty) ...[
-              const SizedBox(width: 6),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                decoration: BoxDecoration(color: colors.accentFill, borderRadius: BorderRadius.circular(9)),
-                child: Text(response, style: context.text.footnote.copyWith(color: colors.onAccentFill, fontWeight: FontWeight.w600)),
-              ),
-            ],
+        child: Padding(padding: const EdgeInsets.only(left: 4, right: 12), child: row),
+      ),
+    );
+  }
+}
+
+/// Going, Maybe and Decline side by side, the account's answer raised and checked; the answer
+/// being sent spins. [compact] for the agenda's rows.
+class _ReplySwitch extends StatelessWidget {
+  const _ReplySwitch({required this.reply, required this.onReply, this.compact = false});
+
+  final ReplyState reply;
+  final ValueChanged<String> onReply;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final light = colors.brightness == Brightness.light;
+    final style = compact ? context.text.footnote : context.text.callout;
+    Widget segment(String value, String label) {
+      final chosen = reply.chosen == value;
+      final sending = reply.sending == value;
+      final tint = !chosen ? colors.secondaryLabel : value == 'declined' ? colors.red : colors.accent;
+      return Hoverable(
+        onTap: reply.answerable && reply.sending == null && !chosen ? () => onReply(value) : null,
+        radius: CalendarMetrics.cardRadius - 2,
+        child: Container(
+          height: compact ? 20 : 26,
+          padding: EdgeInsets.symmetric(horizontal: compact ? 8 : 12),
+          decoration: chosen
+              ? BoxDecoration(
+                  color: colors.raisedCard,
+                  borderRadius: BorderRadius.circular(CalendarMetrics.cardRadius - 2),
+                  border: Border.all(color: colors.cardBorder, width: CalendarMetrics.cardBorder),
+                  boxShadow: colors.cardShadow,
+                )
+              : null,
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            if (sending) ...[const Spinner(radius: 5), const SizedBox(width: 5)],
+            if (chosen && !sending) ...[Icon(CupertinoIcons.checkmark, size: compact ? 10 : 12, color: tint), const SizedBox(width: 4)],
+            Text(label, style: style.copyWith(color: chosen ? tint : colors.label, fontWeight: chosen ? FontWeight.w600 : FontWeight.w500)),
           ]),
         ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(2),
+      decoration: BoxDecoration(
+        color: colors.strongFill.withValues(alpha: light ? 0.7 : 0.5),
+        borderRadius: BorderRadius.circular(CalendarMetrics.cardRadius),
       ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        for (final (value, label) in replies) segment(value, label),
+      ]),
     );
   }
 }
@@ -525,8 +880,9 @@ class _NoticeLine extends StatelessWidget {
   }
 }
 
-/// The open event: when and where, joining its call, the account's answer, who organizes and who
-/// is invited, its description, and the provider's page for it.
+/// The open event: its calendar, title and when; a bar answering the invitation inline (Going,
+/// Maybe, Decline) beside Join for its call; where; the guests two to a row with their answers;
+/// its description, and the provider's page for it.
 class CalendarEventPane extends StatelessWidget {
   const CalendarEventPane({super.key, required this.state, required this.event, required this.twoPane, required this.onBack});
 
@@ -534,6 +890,9 @@ class CalendarEventPane extends StatelessWidget {
   final engine.CalendarItem event;
   final bool twoPane;
   final VoidCallback onBack;
+
+  /// Guest cards go two to a row from this width.
+  static const _twoColumns = 320.0;
 
   String _when(DateTime now) {
     final span = eventSpan(event);
@@ -547,11 +906,49 @@ class CalendarEventPane extends StatelessWidget {
     return '${day(span.start)}, ${time.format(span.start)} – ${day(span.end)}, ${time.format(span.end)}';
   }
 
+  /// The bar under the title: the answers (or the account's part, when it cannot answer from
+  /// here) and Join; none when there is neither.
+  Widget? _actionBar(BuildContext context) {
+    final colors = context.colors;
+    final calendar = state.calendar;
+    final reply = _reply(calendar, event);
+    final url = event.meetingUrl;
+    final part = switch (event.response) {
+      'organizer' => 'You organize this',
+      final response? when !reply.answerable => _responseLabel(response),
+      _ => '',
+    };
+    if (!reply.answerable && part.isEmpty && url == null) return null;
+    return Container(
+      padding: const EdgeInsets.all(6),
+      decoration: BoxDecoration(color: colors.fill, borderRadius: BorderRadius.circular(CalendarMetrics.cardRadius + 2)),
+      child: Row(children: [
+        if (reply.answerable)
+          _ReplySwitch(reply: reply, onReply: (response) => calendar.respond(event, response))
+        else if (part.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            child: Text(part, style: context.text.body.copyWith(color: colors.secondaryLabel, fontWeight: FontWeight.w500)),
+          ),
+        const Spacer(),
+        if (url != null)
+          PushButton(
+            controlSize: ControlSize.regular,
+            onPressed: () => state.openExternal(url),
+            child: const Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(CupertinoIcons.videocam_fill, size: 15, color: MacosColors.white),
+              SizedBox(width: 6),
+              Text('Join'),
+            ]),
+          ),
+      ]),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    final provider = state.calendar.accounts.where((a) => a.id == event.account).firstOrNull?.provider;
-    final response = _responseLabel(event.response);
+    final provider = _accountOf(state.calendar, event)?.provider;
     Widget line(IconData icon, Widget child) => Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -561,6 +958,8 @@ class CalendarEventPane extends StatelessWidget {
       ]),
     );
     final text = context.text.body;
+    final actions = _actionBar(context);
+    final guests = eventGuests(event);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -611,75 +1010,55 @@ class CalendarEventPane extends StatelessWidget {
         Expanded(
           child: Selectable(
             child: ListView(
-              padding: const EdgeInsets.fromLTRB(24, 18, 24, 24),
+              padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
               children: [
-                Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Container(
-                    margin: const EdgeInsets.only(top: 6, right: 10),
-                    width: 12,
-                    height: 12,
-                    decoration: BoxDecoration(color: eventColor(state, event), borderRadius: BorderRadius.circular(3)),
-                  ),
-                  Expanded(
-                    child: Text(
-                      event.title,
-                      style: context.text.title2.copyWith(
-                        fontWeight: FontWeight.w700,
-                        decoration: event.response == 'declined' ? TextDecoration.lineThrough : null,
-                      ),
+                Wrap(spacing: 6, runSpacing: 6, children: [
+                  Pill(
+                    label: [event.calendarName ?? event.calendar, if (event.calendarName != event.account) event.account].join(' · '),
+                    leading: Container(
+                      width: CalendarMetrics.dot,
+                      height: CalendarMetrics.dot,
+                      decoration: BoxDecoration(color: calendarDot(eventColor(state, event), colors), shape: BoxShape.circle),
                     ),
                   ),
+                  if (event.series != null) const Pill(label: 'Repeats'),
                 ]),
-                const SizedBox(height: 6),
-                Text(_when(DateTime.now()), style: text.copyWith(color: colors.secondaryLabel)),
-                const SizedBox(height: 16),
-                if (event.meetingUrl != null)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 14),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: PushButton(
-                        controlSize: ControlSize.large,
-                        onPressed: () => state.openExternal(event.meetingUrl!),
-                        child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                          Icon(CupertinoIcons.videocam_fill, size: 16, color: MacosColors.white),
-                          SizedBox(width: 6),
-                          Text('Join call'),
-                        ]),
-                      ),
-                    ),
+                const SizedBox(height: 10),
+                Text(
+                  event.title,
+                  style: context.text.title2.copyWith(
+                    fontWeight: FontWeight.w700,
+                    decoration: event.response == 'declined' ? TextDecoration.lineThrough : null,
                   ),
-                if (event.location != null) line(CupertinoIcons.location, Text(event.location!, style: text)),
-                line(
-                  CupertinoIcons.calendar,
-                  Text([event.calendarName ?? event.calendar, if (event.calendarName != event.account) event.account].join(' · '), style: text),
                 ),
-                if (response.isNotEmpty) line(CupertinoIcons.checkmark_circle, Text(response, style: text)),
-                if (event.organizer != null && event.response != 'organizer')
-                  line(CupertinoIcons.person, Text('Organized by ${_person(event.organizer!)}', style: text)),
-                if (event.attendees.isNotEmpty)
-                  line(
-                    CupertinoIcons.person_2,
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('${event.attendees.length} guests', style: text.copyWith(fontWeight: FontWeight.w600)),
-                        const SizedBox(height: 4),
-                        for (final person in event.attendees)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 3),
-                            child: Row(children: [
-                              Expanded(child: Text(_person(person), maxLines: 1, overflow: TextOverflow.ellipsis, style: text)),
-                              Text(_responseLabel(person.response), style: context.text.footnote.copyWith(color: colors.secondaryLabel)),
-                            ]),
-                          ),
-                      ],
-                    ),
-                  ),
+                const SizedBox(height: 6),
+                line(CupertinoIcons.clock, Text(_when(DateTime.now()), style: text.copyWith(color: colors.secondaryLabel))),
+                if (actions != null) Padding(padding: const EdgeInsets.only(top: 4, bottom: 14), child: actions),
+                if (event.location != null) line(CupertinoIcons.location, Text(event.location!, style: text)),
+                if (guests.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Row(children: [
+                    Text(guests.length == 1 ? '1 guest' : '${guests.length} guests', style: text.copyWith(fontWeight: FontWeight.w600)),
+                    const Spacer(),
+                    Text(guestSummary(event.attendees), style: context.text.footnote.copyWith(color: colors.secondaryLabel)),
+                  ]),
+                  const SizedBox(height: 8),
+                  LayoutBuilder(builder: (context, constraints) {
+                    const gap = 8.0;
+                    final columns = constraints.maxWidth >= _twoColumns ? 2 : 1;
+                    final width = (constraints.maxWidth - gap * (columns - 1)) / columns;
+                    return Wrap(spacing: gap, runSpacing: gap, children: [
+                      for (final guest in guests)
+                        SizedBox(width: width, child: _GuestCard(person: guest.person, organizer: guest.organizer)),
+                    ]);
+                  }),
+                  const SizedBox(height: 14),
+                ],
                 if (event.notes != null) ...[
-                  const SizedBox(height: 6),
                   const Hairline(),
                   const SizedBox(height: 14),
+                  Text('Notes', style: text.copyWith(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 6),
                   Text(event.notes!, style: text),
                 ],
               ],
@@ -689,10 +1068,43 @@ class CalendarEventPane extends StatelessWidget {
       ],
     );
   }
+}
 
-  static String _person(engine.CalendarPerson person) {
-    final name = person.name, email = person.email;
-    if (name != null && email != null && name != email) return '$name <$email>';
-    return name ?? email ?? '';
+/// A guest on the open event: their monogram, name, and part (Organizer) and answer; the
+/// answers still owed (Maybe, Invited) in the waiting color.
+class _GuestCard extends StatelessWidget {
+  const _GuestCard({required this.person, required this.organizer});
+
+  final engine.CalendarPerson person;
+  final bool organizer;
+
+  static const _monogram = 26.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final name = person.name ?? person.email ?? 'Someone';
+    final answer = _responseLabel(person.response);
+    final status = [if (organizer) 'Organizer', if (answer.isNotEmpty && answer != 'Organizer') answer].join(' · ');
+    final owed = person.response == 'tentative' || person.response == 'needsAction';
+    final card = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(color: colors.fill, borderRadius: BorderRadius.circular(CalendarMetrics.cardRadius)),
+      child: Row(children: [
+        GuestMonogram(person: person, size: _monogram),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.callout.copyWith(color: colors.label, fontWeight: FontWeight.w600)),
+            if (status.isNotEmpty)
+              Text(status, maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: context.text.footnote.copyWith(color: owed ? colors.waiting : colors.secondaryLabel)),
+          ]),
+        ),
+      ]),
+    );
+    final email = person.email;
+    return email == null || email == name ? card : MacosTooltip(message: email, child: card);
   }
 }
+

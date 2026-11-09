@@ -56,6 +56,9 @@ class CalendarState extends ChangeNotifier {
   /// The event beside the calendar.
   EventKey? opened;
 
+  /// Answers on their way to the calendar, by event, until it takes them.
+  final Map<EventKey, String> answering = {};
+
   CalendarView view = CalendarView.agenda;
 
   /// The day the day view shows; the week view shows the week it is in.
@@ -203,6 +206,25 @@ class CalendarState extends ChangeNotifier {
       await reload();
     } on engine.MailException catch (error) {
       report('Could not delete "${event.title}": ${_describe(error)}');
+    }
+  }
+
+  /// Answers the invitation to `event` (`accepted`, `tentative` or `declined`) through its
+  /// account's calendar (Google Calendar, Outlook), which tells the organizer; that occurrence
+  /// alone when it repeats. The answer shows chosen while it is sent.
+  Future<void> respond(engine.CalendarItem event, String response) async {
+    final key = eventKey(event);
+    if (answering.containsKey(key)) return;
+    answering[key] = response;
+    notifyListeners();
+    try {
+      await mail.calendarRespond(account: event.account, calendar: event.calendar, event: event.id, response: response, confirm: true);
+      await reload();
+    } on engine.MailException catch (error) {
+      report('Could not answer "${event.title}": ${_describe(error)}');
+    } finally {
+      answering.remove(key);
+      notifyListeners();
     }
   }
 

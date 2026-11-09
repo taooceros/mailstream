@@ -616,8 +616,9 @@ fn seed_chat(cache: &mailstream_engine::cache::MailCache) {
 const CALENDAR_ACCOUNTS: [usize; 2] = [0, 3];
 
 /// `--seed` only: [`CALENDAR_ACCOUNTS`] may read and change their calendars, and mail.db holds
-/// each one's copy, fetched now: three weeks around today of meetings (some overlapping), all-day
-/// and multi-day events and one overnight, for the calendar's day and week views
+/// each one's copy, fetched now: three weeks around today of meetings (some overlapping, some
+/// unanswered, tentative or declined, one starting ten minutes after the seed), all-day and
+/// multi-day events and one overnight, for the calendar's agenda, day and week views
 /// (`BENCH_SCENARIO=calendar-week`). The engine serves a copy for five minutes; then its fetch
 /// fails (the accounts have no refresh token) and the copy stays, under a notice.
 fn seed_calendar(home: &Path) {
@@ -702,6 +703,14 @@ fn seed_calendar(home: &Path) {
         timed("personal", "Flight to NYC", (9, 22, 0), 240, None),
         timed("work", "Week ahead", (-4, 16, 0), 30, None),
     ]);
+    // Ten minutes after the seed, so the calendar's Up Next bar shows for the next half hour.
+    let (hour, minute) = {
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let now = unsafe { libc::time(std::ptr::null_mut()) };
+        unsafe { libc::localtime_r(&now, &mut tm) };
+        (tm.tm_hour, tm.tm_min)
+    };
+    work.push(timed("work", "Design crit", (0, hour, minute + 10), 30, Some("accepted")));
     work.push(all_day("trip", "personal", "Conference trip", 3, 3));
     work.push(all_day("hike", "personal", "Weekend hike", -3, 1));
     work.push(all_day("ooo", "work", "Person 7 out of office", 1, 2));
