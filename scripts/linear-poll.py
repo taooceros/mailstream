@@ -10,17 +10,23 @@ the same script runs on macOS and Windows.
       GitHub import: the repo is public and the subagents run with full access), not claimed
       before and not yet commented on by an app (omp); or
     - claimed before, out of In Progress and no longer blocked: every issue blocking it (Linear
-      "blocked by") is In Review, Done, Canceled or a duplicate. Claimed once per set of
-      blockers, so blocking it again by another issue resumes it again; or
+      "blocked by") is In Review, Done, Canceled, a duplicate or labelled `install` (pushed to
+      `main`, waiting only for the batch install). Claimed once per set of blockers, so
+      blocking it again by another issue resumes it again; or
     - labelled `omp`, in any state but started, done or canceled; the label is removed on
       claim, so adding it again reruns the issue.
     The first two skip issues with a blocker still open: a blocked issue waits until its
-    blockers are delivered (In Review), not for the user's review. resume is true for an issue
-    claimed before (the subagent carries on from the issue's comments); unblockedBy lists the
-    identifiers of its resolved blockers. Agents file their own issues in Backlog and move
+    blockers are on `main` (`install` or In Review), not for the user's review. resume is true
+    for an issue claimed before (the subagent carries on from the issue's comments); unblockedBy
+    lists the identifiers of its resolved blockers. Agents file their own issues in Backlog and move
     issues to Todo to ask the user something (with an omp comment), so neither is picked up
     unless the user moves an uncommented one to Todo or it was claimed before and gets
     unblocked.
+  {"kind": "install", "issues"}: the identifiers of every open issue labelled `install` (INSTALL),
+    which code agents add once their change is on `main` (AGENTS.md, Release delivery). Printed
+    when at least one waits, no agent whose id starts with `Install` is in RUNNING, and the
+    previous install line is INSTALL_EVERY seconds old (default 3600). The caller starts one
+    cheap agent that installs `main`'s tip once and checks every listed issue.
   {"kind": "comment", "id", "issue", "issueId", "state", "createdAt", "author", "body"}: a comment
     posted on any team issue in the last 7 days, each once, by a workspace member (not an app, a
     guest or a GitHub sync) or by another machine's omp app (one of PEERS, comma-separated app
@@ -48,7 +54,7 @@ OAuth app's client id on line 1 and secret on line 2); renewal fetches a client_
 into LINEAR_TOKEN_FILE.
 Claims are kept in ~/.local/state/linear-poll/ (STATE): `launched` (issue ids), `comments`
 (comment ids), `unblocked` (issue id and the blocker ids it was claimed with), `stale` (issue id
-and the start comment reported).
+and the start comment reported), `install` (when the last install line was printed).
 DRY_RUN=1 prints without claiming (unclaim lines included). `linear-poll.py seen comment|issue
 <id>` puts omp's 👀 on a comment or issue once the caller has handed it to a subagent, so the
 user sees it was picked up.
@@ -100,6 +106,9 @@ LAUNCHED = STATE / "launched"
 HANDLED = STATE / "comments"
 UNBLOCKED = STATE / "unblocked"
 STALE = STATE / "stale"
+INSTALL = os.environ.get("INSTALL", "install")
+INSTALLED = STATE / "install"
+INSTALL_EVERY = int(os.environ.get("INSTALL_EVERY", "3600"))
 START = re.compile(r"^\[omp @ [^\]]*\] start \((?P<a>[^)]+)\)")
 
 
@@ -219,7 +228,7 @@ def watch():
         time.sleep(int(os.environ.get("INTERVAL", "60")))
 
 
-QUERY = """query($teams: [ID!], $label: String!, $claimed: String!) {
+QUERY = """query($teams: [ID!], $label: String!, $claimed: String!, $install: String!) {
   viewer { id name }
   queued: issues(first: 100, filter: {
     team: { id: { in: $teams } }, state: { type: { in: ["triage", "backlog", "unstarted"] } },
@@ -227,7 +236,12 @@ QUERY = """query($teams: [ID!], $label: String!, $claimed: String!) {
       { hasBlockedByRelations: { eq: true } }] }) {
     nodes { id identifier number team { key } state { name } creator { id app guest }
       labels { nodes { id name } } comments(first: 100) { nodes { user { app } } }
-      inverseRelations(first: 50) { nodes { type issue { id identifier state { name type } } } } } }
+      inverseRelations(first: 50) { nodes { type issue { id identifier state { name type }
+        labels { nodes { name } } } } } } }
+  installs: issues(first: 100, filter: {
+    team: { id: { in: $teams } }, labels: { some: { name: { eq: $install } } },
+    state: { type: { nin: ["completed", "canceled", "duplicate"] } } }) {
+    nodes { identifier number team { key } labels { nodes { name } } } }
   claimed: issues(first: 100, filter: {
     team: { id: { in: $teams } }, labels: { some: { name: { eq: $claimed } } } }) {
     nodes { id identifier team { key } state { name } labels { nodes { id name } }
@@ -274,7 +288,8 @@ def blockers(issue):
 
 
 def resolved(issue):
-    return issue["state"]["type"] in ("completed", "canceled", "duplicate") or issue["state"]["name"] == "In Review"
+    return (issue["state"]["type"] in ("completed", "canceled", "duplicate") or issue["state"]["name"] == "In Review"
+            or any(l["name"] == INSTALL for l in issue["labels"]["nodes"]))
 
 
 def timestamp(text):
@@ -306,6 +321,11 @@ def plan(data, running):
     out = sorted(todo, key=lambda line: line["number"])
     for line in out:
         del line["number"]
+    waiting = sorted((i for i in data["installs"]["nodes"] if host(i) == HOST_LABEL), key=lambda i: i["number"])
+    last = INSTALLED.read_text(encoding="utf-8").strip()
+    if (waiting and not any(agent.startswith("Install") for agent in running or [])
+            and (not last or (now - timestamp(last)).total_seconds() >= INSTALL_EVERY)):
+        out.append({"kind": "install", "issues": [i["identifier"] for i in waiting]})
     if running is not None:
         for issue in data["claimed"]["nodes"]:
             if host(issue) != HOST_LABEL:
@@ -334,7 +354,7 @@ def plan(data, running):
 
 def run_pass():
     STATE.mkdir(parents=True, exist_ok=True)
-    for path in (LAUNCHED, HANDLED, UNBLOCKED, STALE):
+    for path in (LAUNCHED, HANDLED, UNBLOCKED, STALE, INSTALLED):
         path.touch()
     running = json.loads(os.environ.get("RUNNING", "null"))
     running_file = os.environ.get("RUNNING_FILE")
@@ -343,7 +363,7 @@ def run_pass():
         if not isinstance(running, list):
             log(f"RUNNING_FILE {running_file} is not a JSON array")
             return 1
-    data = gql(QUERY, {"teams": TEAMS, "label": LABEL, "claimed": CLAIMED})
+    data = gql(QUERY, {"teams": TEAMS, "label": LABEL, "claimed": CLAIMED, "install": INSTALL})
     out = plan(data, running)
     if os.environ.get("DRY_RUN"):
         for line in out:
@@ -356,6 +376,9 @@ def run_pass():
             emit(line)
         elif kind == "stale":
             append(STALE, line.pop("staleKey"))
+            emit(line)
+        elif kind == "install":
+            INSTALLED.write_text(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n", encoding="utf-8")
             emit(line)
         elif kind == "unclaim":
             remove_label(line["id"], line["label"])

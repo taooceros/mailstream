@@ -18,11 +18,12 @@ Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` 
 - Every agent works in its own ovnfs checkout, never the default checkout and never
   `jj workspace add` (the `../mailstream-*` workspaces take no new work): `ovnfs new --rev main
   --name <unique>` (it prints the path, under `~/checkouts/`), then `jj git init --colocate &&
-  jj bookmark track main@origin` (a checkout has a private `.git` and no `.jj`). It commits,
-  pushes `main` and delivers from there ([Release delivery](#release-delivery)), and runs
-  `ovnfs rm <name>` once the issue is delivered; a woken agent opens a fresh one. Subagents are
-  spawned without omp's `isolated` option. Work the user keeps off `main` (a standalone trial)
-  stays in its own existing checkout.
+  jj bookmark track main@origin && jj git fetch && jj new main` (a checkout has a private `.git`
+  and no `.jj`, and starts at the default checkout's `main`, which can lag `origin`). It commits
+  and pushes `main` from there and runs `ovnfs rm <name>` once its part is done (handed to the
+  install batch or In Review, [Release delivery](#release-delivery)); a woken agent opens a fresh
+  one. Subagents are spawned without omp's `isolated` option. Work the user keeps off `main` (a
+  standalone trial) stays in its own existing checkout.
 - One line: every front end (the AppKit app, `GPUI/`, `Flutter/`) and the engine they share
   (`Sources/MailstreamKit`, `FFI/`) live on `main`, and every checkout works on it; the
   `gpui-ui` and `flutter-ui` bookmarks are history and take no new commits. An engine change
@@ -80,29 +81,32 @@ hashes stay as they are.
   polling session hands one over. Move it to In Progress, comment
   `[omp @ <checkout>] start (<agent id>): <plan>` (the subagent/roster id, so the issue shows
   who owns it), then add the `claimed` label. Taking over or resuming counts as starting: post a
-  new start comment with your own id. Remove `claimed` when you stop (In Review, Todo with a
-  question, Backlog when blocked).
+  new start comment with your own id. Remove `claimed` when you stop (In Review, handed to the
+  install batch, Todo with a question, Backlog when blocked).
 - Progress: record decisions, blockers and dead ends as comments; the next session only sees
   what is on the issue.
 - Blocked by another issue (it needs that change first, or the user said to wait for it): add a
   "blocked by" relation (file the blocker first if it doesn't exist), comment what it waits for,
-  move it to Backlog and stop. Once every blocker is delivered (In Review, Done or Canceled; the
-  user's review is not awaited), the poll hands it out again, in Todo or Backlog, and its agent
-  carries on from the comments.
+  move it to Backlog and stop. Once every blocker is on `main` (labelled `install`, In Review,
+  Done or Canceled; the user's review is not awaited), the poll hands it out again, in Todo or
+  Backlog, and its agent carries on from the comments.
 - Questions only the user can decide: don't guess. Assign the issue to the user (taooceros), move
   it to Todo, start the comment with `**❓ 需要你回答：**` followed by the question(s), each
   answerable on its own, and stop.
 - Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work),
-  integrate it into `main` and deliver it ([Release delivery](#release-delivery)). A commit,
-  passing tests or a Debug/test app is not completion. Only after the installed copy passes its
-  smoke check, move the issue to In Review and comment what changed, the deployed commit, the
-  exact `/Applications` targets, the checks run and what remains; the user moves it to Done.
-- UI changes (a new or changed view, flow or interaction, in any front end): attach screenshots
-  of the running app showing the change, every state it adds included, to the finishing comment.
-  Without them the work is not ready for review.
-- Parents: when finishing a sub-issue, check its siblings. Once none is left in Backlog, Todo or
-  In Progress, finish the parent too: a summary comment listing each sub-issue and what remains,
-  then In Review. Nobody else picks up a parent an agent filed.
+  push it to `main` with the tests for what you changed passing, and hand it to the install batch
+  ([Release delivery](#release-delivery)): code agents don't build release apps or install. A
+  commit or passing tests is not completion: the batch install agent moves the issue to In Review
+  once the installed copy passes its smoke check, and comments what changed, the deployed commit,
+  the exact `/Applications` targets, the checks run and what remains; the user moves it to Done.
+  Tooling-only changes install nothing: their agent moves them to In Review itself, with that
+  comment.
+- UI changes (a new or changed view, flow or interaction, in any front end): the finishing comment
+  carries screenshots of the installed app showing the change, every state it adds included. The
+  hand-over names each state and how to reach it; without them the work is not ready for review.
+- Parents: whoever moves a sub-issue to In Review checks its siblings. Once none is left in
+  Backlog, Todo or In Progress, it finishes the parent too: a summary comment listing each
+  sub-issue and what remains, then In Review. Nobody else picks up a parent an agent filed.
 
 ### Polling session
 
@@ -111,9 +115,12 @@ as one background bash job with no deadline (`timeout: 0`) and `wait`s on it: th
 Linear every minute and returns only once it has claimed something. The session hands the issues
 it claims, and the user's comments, to subagents, then starts it again. It keeps that file a JSON
 array of its running agent ids, rewritten whenever one starts or finishes; the script re-reads it
-each pass. The script's header says what it claims and how the session picks the agent. Whenever
-`ovnfs ls` shows no checkout open (between agent batches, before starting the script again), the
-session runs `python3 scripts/warm-build.py` in the default checkout ([Building](#building)).
+each pass. The script's header says what it claims and how the session picks the agent. On an
+`install` line it starts one `sonic` agent with an id starting `Install` (`Install3`) for the
+listed issues, which follows [Release delivery](#release-delivery); it doesn't count against the
+heavy agents below. Whenever `ovnfs ls` shows no checkout open (between agent batches, before
+starting the script again), the session runs `python3 scripts/warm-build.py` in the default
+checkout ([Building](#building)).
 `python3 scripts/linear-omp.py MS-12` opens one issue in a new Tern tab instead. The scripts are
 Python (standard library only) so both machines run the same ones; on Windows the command is
 `python`, and the poller also needs `HOST_LABEL=windows LINEAR_TOKEN_FILE=~/.config/linear/token.json
@@ -122,11 +129,10 @@ LINEAR_CREDENTIALS=~/.config/linear/credentials`.
 Cost rules (MS-157): at most three heavy agents (ones that write code) run at once; other
 claimed issues wait in the queue of `~/.local/state/linear-poll/session.md`, moved to Backlog
 with a comment saying they are queued, and start in order as slots free. Code is written by the
-default model; build, install, smoke checks and screenshots that need no code go to a cheaper
-agent. A code agent handing delivery over leaves its checkout open and names it; the delivery
-agent installs from that checkout (one of them, for several issues at once) and removes it, since
-a fresh checkout builds Flutter and Swift from nothing. Agents write their full report on the
-issue and yield only two or three lines (result, commit, issue state, anything the user must do).
+default model; release builds, installs, smoke checks and screenshots go to the batch install
+agent, one run for every issue waiting, at most once an hour (`INSTALL_EVERY`). Agents write
+their full report on the issue and yield only two or three lines (result, commit, issue state,
+anything the user must do).
 
 The session hands over to a fresh one once its own context passes about 150K tokens: every wake
 re-reads the whole conversation. It waits until no agent of its own is running (their results
@@ -196,35 +202,50 @@ name in backticks (`` `@omp` ``), since Linear rejects an app's @-mention of an 
 
 ## Release delivery
 
-Finished fixes go to `/Applications` as part of the work, as signed release builds, never Debug.
-Separately, each push to `main` that touches the Flutter app or its engine publishes a signed
-update without approval, which the installed Mailstream Flutter installs by itself
-(`Flutter/README.md`); the issue's own install below is still required, so it is verified now.
+Finished fixes reach `/Applications` as signed release builds, never Debug, in batches (MS-159):
+code agents stop once their change is on `main`, and one cheap agent installs `main`'s tip for
+every issue waiting, then checks each. Separately, each push to `main` that touches the Flutter
+app or its engine publishes a signed update without approval, which the installed Mailstream
+Flutter installs by itself (`Flutter/README.md`); the batch install is still required, so each
+issue is verified in the installed app.
 
-1. Targets: `flutter` (`Mailstream Flutter.app`) by default. Add `native` (`Mailstream.app`) or
-   `gpui` (`Mailstream GPUI.app`) only when the user asks or its installed behavior is directly
-   affected; never install an app that isn't installed yet. Tooling-only changes install
-   nothing; changes to deployment itself exercise the real path.
-2. Push the issue-referencing commit to live `main` without losing other agents' changes, then
-   build from your own checkout at that `main`: `jj git fetch && jj new main` there (never an
-   area workspace or the default checkout). It already holds your incremental builds (cargo,
-   Flutter, Swift); a fresh checkout would rebuild Flutter and Swift from nothing. Open a fresh
-   one (`ovnfs new --rev main --name <unique-build-name>`, jj set up as in
-   [Version control](#version-control-jj)) only when you have no checkout with the work, and
-   take over a code agent's when it hands one to you. There run
-   `./scripts/install.sh <targets>`: it refuses a checkout that differs from `main`, checks
-   signing and the deploy lock itself and stops only the installed copy. If `main` moves
-   meanwhile, `jj new main` again and rebuild from its tip. Never delete another agent's lock or
-   kill its processes.
-3. Smoke each installed `/Applications/…app` with computer helpers: the running executable, the
-   bundle revision, `codesign --verify --deep --strict`, the real window showing loaded data, and
-   the affected behavior (no sending mail, nothing destructive). GPUI also: `otool -l` shows no
-   workspace rpath and `vmmap <pid>` loads no `libMailstreamKit.dylib` (the engine is linked in). A build, an
-   `open` or a process name alone proves nothing. Keep personal content out of screenshots and
-   logs.
-4. Record the evidence you gathered, or the exact blocker, on the issue; never claim another
-   issue's pending checks passed. Then `ovnfs rm` your checkout; leave every other checkout and
-   workspace alone.
+The code agent:
+
+1. Pushes the issue-referencing commit to live `main` without losing other agents' changes.
+2. Picks the targets: `flutter` (`Mailstream Flutter.app`) by default; `native`
+   (`Mailstream.app`) or `gpui` (`Mailstream GPUI.app`) only when the user asks or its installed
+   behavior is directly affected; never an app that isn't installed yet. Tooling-only changes
+   install nothing (In Review directly, [Finish](#working-an-issue)). Changes to deployment
+   itself (`install.sh`, signing, updates) exercise the real path: their own agent installs them
+   as below.
+3. Hands over: a comment starting `**待安装**` with what changed, the commit, the targets, what
+   to check in the installed app and how to reach it, and for UI changes each state to
+   screenshot. Then it adds the `install` label, removes `claimed`, leaves the issue In Progress
+   and runs `ovnfs rm` on its checkout.
+
+The batch install agent (one per `install` line of the poller, [Polling session](#polling-session)):
+
+1. Reads each listed issue's latest `**待安装**` comment and claims it (start comment,
+   `claimed`).
+2. Opens one fresh checkout at `main`'s tip ([Version control](#version-control-jj)) and runs
+   `./scripts/install.sh <every target the issues name>` there, as one blocking eval cell
+   ([Building](#building)): it refuses a checkout that differs from `main`, checks signing and
+   the deploy lock itself and stops only the installed copy. Never an area workspace or the
+   default checkout; never delete another agent's lock or kill its processes.
+3. Smokes each installed `/Applications/…app` once with computer helpers: the running
+   executable, the bundle revision, `codesign --verify --deep --strict`, the real window showing
+   loaded data. GPUI also: `otool -l` shows no workspace rpath and `vmmap <pid>` loads no
+   `libMailstreamKit.dylib` (the engine is linked in). A build, an `open` or a process name alone
+   proves nothing. Then, per issue, the behavior its hand-over names and its screenshots (no
+   sending mail, nothing destructive; personal content kept out of screenshots and logs).
+4. Per issue: passed → the finishing comment ([Finish](#working-an-issue)), `install` and
+   `claimed` removed, In Review, then the parent check. Failed → a comment with what failed and
+   the evidence, `install` and `claimed` removed, moved to Todo with the `omp` label so a code
+   agent takes it up again. When the install itself fails (build, signing), it comments the
+   exact blocker on each issue and removes `claimed` but keeps `install`, so the next batch
+   retries; an issue whose commit broke the build goes back as failed. Never claim another
+   issue's pending checks passed.
+5. Runs `ovnfs rm` on its checkout; leaves every other checkout and workspace alone.
 
 ## Performance: 120 fps
 
