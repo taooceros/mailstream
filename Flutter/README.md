@@ -260,6 +260,10 @@ as their answers allow (a day when they don't say) in
 `~/Library/Caches/dev.mailstream.Mailstream/reader-resources` (50 MB, least recently used out
 first) and in memory, so a body opened again reads nothing from the network. Requests carry
 Safari's user agent: Google Fonts splits its fonts by `unicode-range` only for browsers it knows.
+To check it without private mail, run `flutter run -d macos -t test/html_web_font_app.dart` (it
+reads Google Fonts; launch with another `HOME` for an empty cache): its first mail's title shows
+in the system font, then turns to Lobster, and the second mail, which names Lobster without
+linking it, stays in the system font.
 Clicked links go through the same check as in the other renderers; a drag selects and ⌘C copies.
 Screen readers get the body's text only (Blitz's AccessKit tree is not bridged).
 A body Blitz panics on stays blank by itself; every other body keeps drawing (MS-161). Blitz maps
