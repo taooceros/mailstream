@@ -312,10 +312,20 @@ the page, which opens the quotes in place (`fold`), with a rule at their left. D
 white card the reader draws around every HTML body, as before. Its `html` and `body` are as
 tall as their content (`height: fit-content`): in quirks mode an `auto` height stretched them to
 the view, so a zoomed-out page grew by a point with each height it reported, or kept a gap under
-the mail after the window was resized (MS-78, MS-160). For checks without private mail, run
+the mail after the window was resized (MS-78, MS-160). Only content of a width of its own (a 600
+or 900 px newsletter) zooms out: content as wide as the view plus a share of it (a web editor's
+`width: 100.775%` table) widens with the view, so it overflowed after every step and the page
+shrank to the 30% floor, unreadable (MS-183). A step that leaves the page overflowing almost as
+much as before is undone, and the page keeps the last zoom that helped until its width or fold
+changes (a few points of such content stay cut off). `RunnerTests`' `MailHtmlZoomTests` check
+both in a real page (`xcodebuild test -workspace macos/Runner.xcworkspace -scheme Runner
+-only-testing:RunnerTests/MailHtmlZoomTests FLUTTER_TARGET=test/html_zoom_app.dart`, after a
+`flutter build macos --debug -t test/html_zoom_app.dart`, so the test host runs synthetic mail).
+For checks without private mail, run
 `MAILSTREAM_READER_RENDERER=webKit flutter run -d macos -t test/html_zoom_app.dart`: open each
-of its three synthetic mails, 900 px wide, and resize the window back and forth; each body stays
-fully visible and as tall as its content. `MAILSTREAM_READER_RENDERER=webKit flutter run -d
+of its four synthetic mails, resize the window back and forth; the three 900 px ones stay fully
+visible and as tall as their content, and the one with a 100.775% table stays at full size.
+`MAILSTREAM_READER_RENDERER=webKit flutter run -d
 macos -t test/html_webkit_app.dart` shows quotes that fold, an inline image (a synthetic PNG it
 writes to the inline cache's folder `f167…`), a `srcset` image and a forward that is all quote.
 

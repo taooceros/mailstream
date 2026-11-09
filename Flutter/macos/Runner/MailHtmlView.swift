@@ -216,6 +216,11 @@ final class MailHtmlView: WKWebView {
   private var quoted = false
   private var open = false
 
+  /// Zooming out to fit, since the width last changed: the zoom before the last step out and how
+  /// much wider than the view the page was there; `settled` once a step out stopped helping.
+  private var fitting: (zoom: CGFloat, overflow: Double)?
+  private var settled = false
+
   /// WebKit ended the page's process; an idle page that lost it is not shown again.
   fileprivate(set) var terminated = false
 
@@ -305,11 +310,15 @@ final class MailHtmlView: WKWebView {
     return [Double(height), version, quoted]
   }
 
-  /// Opens or closes the page's quoted history, which lays the page out and measures it again.
-  /// Before the page has found its quotes (still loading) the first measurement applies it.
+  /// Opens or closes the page's quoted history, which lays the page out and measures it again
+  /// (and may zoom it out anew). Before the page has found its quotes (still loading) the first
+  /// measurement applies it.
   fileprivate func fold(open: Bool) {
     self.open = open
-    if quoted { evaluateJavaScript("mailstreamFold(\(open))", in: nil, in: .defaultClient) }
+    guard quoted else { return }
+    fitting = nil
+    settled = false
+    evaluateJavaScript("mailstreamFold(\(open))", in: nil, in: .defaultClient)
   }
 
   /// The conversation scrolls as a whole: wheel events go on to Flutter.
@@ -323,21 +332,48 @@ final class MailHtmlView: WKWebView {
     let widthChanged = newSize.width != frame.width
     let reflowed = abs(newSize.width - frame.width) >= 0.5
     super.setFrameSize(newSize)
-    if widthChanged, pageZoom != 1 { pageZoom = 1 }
+    if widthChanged {
+      fitting = nil
+      settled = false
+      if pageZoom != 1 { pageZoom = 1 }
+    }
     if reflowed, owed, height >= 0 { evaluateJavaScript("mailstreamMeasure()", in: nil, in: .defaultClient) }
   }
 
   /// Content wider than the view zooms out until it fits; the height goes to Flutter in points.
   /// A page whose quotes show otherwise than the reader wants folds first, which measures again.
+  ///
+  /// Only content of a width of its own (a 600 or 900 px newsletter) fits by zooming out. Content
+  /// as wide as the view plus a share of it (a `width: 100.775%` table) or plus a fixed margin
+  /// widens with the view as the zoom shrinks, so it overflowed again after every step, and the
+  /// page shrank to the 30% floor, its text unreadable (MS-183). So a step that leaves the page
+  /// overflowing almost as much as before is undone, and the page keeps the last zoom that helped
+  /// (a few points of such content stay cut off at the right) until its width or fold changes.
+  /// A measurement taken before the last zoom applied (its CSS width is not the view's at this
+  /// zoom) is dropped: the zoom lays the page out again, which measures again.
   fileprivate func measured(height: Double, width: Double, room: Double, quoted: Bool, open: Bool) {
     self.quoted = quoted
     if quoted, open != self.open {
       fold(open: self.open)
       return
     }
-    if room > 0, width > room + 2 {
-      pageZoom = max(pageZoom * room / width, 0.3)
-      return  // The zoom lays the page out again, which measures again.
+    if room > 0, width > room + 2, !settled {
+      guard abs(frame.width / room - pageZoom) <= pageZoom * 0.01 else { return }
+      let overflow = width / room
+      if let last = fitting, overflow - 1 > (last.overflow - 1) * 0.9 {
+        settled = true
+        if pageZoom != last.zoom {
+          pageZoom = last.zoom
+          return
+        }
+      } else {
+        fitting = (pageZoom, overflow)
+        let zoom = max(pageZoom / overflow, 0.3)
+        if zoom != pageZoom {
+          pageZoom = zoom
+          return
+        }
+      }
     }
     let points = (height * pageZoom).rounded(.up)
     measuredWidth = frame.width
