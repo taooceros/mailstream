@@ -238,21 +238,39 @@ struct Held {
     graph: Vec<Value>,
 }
 
-/// Puts `body`'s fields into `event`, as a PATCH does: `null` clears.
+/// A time sent as wall clock in this computer's zone, as the providers keep it: in UTC.
+fn in_utc(time: &mut Value) {
+    let Some(zone) = time["timeZone"].as_str().filter(|zone| *zone != "UTC") else { return };
+    assert_eq!(zone, local_zone());
+    let wall = chrono::NaiveDateTime::parse_from_str(time["dateTime"].as_str().unwrap(), "%Y-%m-%dT%H:%M:%S").unwrap();
+    let utc = chrono::TimeZone::from_local_datetime(&chrono::Local, &wall).earliest().unwrap().with_timezone(&chrono::Utc);
+    *time = json!({ "dateTime": utc.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "timeZone": "UTC" });
+}
+
+/// Puts `body`'s fields into `event`, as a PATCH does: `null` clears; times are kept in UTC.
 fn merge(event: &mut Value, body: &Value) {
     for (key, value) in body.as_object().unwrap() {
         let mut value = value.clone();
         if let Some(fields) = value.as_object_mut() {
             fields.retain(|_, field| !field.is_null());
-            // Google answers wall-clock times with their offset: here, as if in UTC.
-            if let Some(Value::String(time)) = fields.get_mut("dateTime")
-                && !time.ends_with('Z')
-            {
-                time.push('Z');
-            }
+        }
+        if key == "start" || key == "end" {
+            in_utc(&mut value);
         }
         event[key] = value;
     }
+}
+
+/// What Graph answers a write with: the event, its times in the zone the request named (not
+/// in UTC, whatever `Prefer` asks).
+fn as_written(event: &Value, body: &Value) -> Value {
+    let mut written = event.clone();
+    for key in ["start", "end"] {
+        if !body[key].is_null() {
+            written[key] = body[key].clone();
+        }
+    }
+    written
 }
 
 /// Where in `events` the event the path's last part names is.
@@ -307,22 +325,28 @@ fn graph_write_reply(request: &FakeRequest, held_events: &std::sync::Mutex<Held>
         }
         ("GET", "/v1.0/me/calendars/cal-1/calendarView") => Reply::json(json!({ "value": events })),
         ("POST", "/v1.0/me/calendars/cal-1/events") => {
-            assert_eq!(request.header("Prefer"), Some("outlook.timezone=\"UTC\""));
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             let mut event = json!({ "id": "review", "isOrganizer": true, "bodyPreview": body["body"]["content"] });
             merge(&mut event, &body);
             events.push(event.clone());
-            Reply::json(event)
+            Reply::json(as_written(&event, &body))
         }
         (method, path) if path.starts_with("/v1.0/me/events/") => {
             let Some(index) = held(events, path) else { return Reply::status(404, json!({ "error": { "message": "Not found" } })) };
             match method {
-                "PATCH" => merge(&mut events[index], &serde_json::from_slice(&request.body).unwrap()),
+                "PATCH" => {
+                    let body: Value = serde_json::from_slice(&request.body).unwrap();
+                    merge(&mut events[index], &body);
+                    return Reply::json(as_written(&events[index], &body));
+                }
                 "DELETE" => {
                     events.remove(index);
                     return Reply::status(204, Value::Null);
                 }
                 _ => {}
+            }
+            if request.param("$select") != Some("attendees") {
+                assert_eq!(request.header("Prefer"), Some("outlook.timezone=\"UTC\""), "an event is read back in UTC");
             }
             Reply::json(events[index].clone())
         }
@@ -408,6 +432,7 @@ fn adds_changes_and_deletes_the_accounts_own_events_and_keeps_the_copy_up_to_dat
     )
     .unwrap();
     assert_eq!((&lunch["title"], &lunch["editable"], &lunch["calendar"], &lunch["location"]), (&json!("Lunch"), &json!(true), &json!(GOOGLE), &json!("Cafe")));
+    assert_eq!((&lunch["start"], &lunch["end"]), (&json!(at(2, 12.0)), &json!(at(2, 13.0))));
     let (request, body) = sent(&server, "POST", "calendars/me@gmail.com/events");
     assert_eq!(request.param("sendUpdates"), Some("all"));
     assert_eq!(body["start"], json!({ "dateTime": format!("{day}T12:00:00"), "timeZone": local_zone() }));
@@ -469,10 +494,18 @@ fn adds_changes_and_deletes_the_accounts_own_events_and_keeps_the_copy_up_to_dat
     )
     .unwrap();
     assert_eq!((&review["title"], &review["editable"], &review["notes"]), (&json!("Review"), &json!(true), &json!("Agenda")));
+    // Graph answers the write in the zone sent; the event is read back in UTC.
+    assert_eq!((&review["start"], &review["end"]), (&json!(at(2, 15.0)), &json!(at(2, 15.5))));
     let (_, body) = sent(&server, "POST", "/v1.0/me/calendars/cal-1/events");
     assert_eq!(body["start"], json!({ "dateTime": format!("{day}T15:00:00"), "timeZone": local_zone() }));
     assert_eq!((&body["isAllDay"], &body["body"]), (&json!(false), &json!({ "contentType": "text", "content": "Agenda" })));
-    call(&engine, "calendar.update", json!({ "account": OUTLOOK, "calendar": "cal-1", "id": "own", "attendees": ["cy@x.com"], "location": "Room 2" })).unwrap();
+    let own = call(
+        &engine,
+        "calendar.update",
+        json!({ "account": OUTLOOK, "calendar": "cal-1", "id": "own", "attendees": ["cy@x.com"], "location": "Room 2", "start": format!("{day}T16:00") }),
+    )
+    .unwrap();
+    assert_eq!((&own["start"], &own["end"]), (&json!(at(2, 16.0)), &json!(at(2, 17.0))));
     let (_, body) = sent(&server, "PATCH", "/v1.0/me/events/own");
     assert_eq!(body["attendees"], json!([{ "emailAddress": { "address": "cy@x.com" }, "type": "required" }]));
     assert_eq!(body["location"], json!({ "displayName": "Room 2" }));

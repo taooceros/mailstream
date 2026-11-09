@@ -246,9 +246,13 @@ impl CalendarRemote<'_> {
         event.event(calendar).ok_or_else(|| ApiError::malformed("Google Calendar answered an event without a time."))
     }
 
-    /// Graph answers in UTC, as the fetch reads it.
+    /// Sends a Graph write and reads the event back in UTC, as the fetch reads it: Graph answers
+    /// a write in the zone the request named, whatever `Prefer` asks.
     async fn graph_event(&self, request: Request, calendar: &str) -> Result<CalendarEvent, ApiError> {
-        let event: GraphEvent = self.get(request.header("Prefer", "outlook.timezone=\"UTC\"")).await?;
+        let written: Value = self.get(request).await?;
+        let id = written["id"].as_str().ok_or_else(|| ApiError::malformed("Outlook answered an event without an id."))?;
+        let url = self.graph_event_url(id, &[("$select", super::GRAPH_EVENT_FIELDS)]);
+        let event: GraphEvent = self.get(Request::get(url).header("Prefer", "outlook.timezone=\"UTC\"")).await?;
         event.event(calendar).ok_or_else(|| ApiError::malformed("Outlook answered an event without a time."))
     }
 
