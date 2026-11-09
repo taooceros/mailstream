@@ -41,7 +41,7 @@ impl FakeWeb {
 impl Web for FakeWeb {
     fn get(&self, url: String, cap: usize) -> BoxFuture<'static, Option<Page>> {
         self.asked.lock().unwrap().push(url.clone());
-        let page = self.pages.lock().unwrap().get(&url).map(|body| Page { body: body[..body.len().min(cap + 1)].to_vec(), url });
+        let page = self.pages.lock().unwrap().get(&url).map(|body| Page { body: body[..body.len().min(cap + 1)].to_vec(), url, max_age: None });
         Box::pin(async move { page })
     }
 

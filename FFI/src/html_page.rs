@@ -5,16 +5,28 @@
 //!
 //! Mail safety: Blitz runs no scripts, follows no `<meta refresh>` and opens nothing on a click
 //! (the front end asks [`HtmlPage::link_at`] and opens the link itself). Frames and plug-ins are
-//! removed before anything is fetched, and linked stylesheets get nothing. A page reads raster
-//! images only: `data:` ones and `https:` ones, fetched anonymously; nothing else is read, `file:`
-//! included (the front end inlines the cached parts it allows as `data:`), and no web font, which
-//! would join the font collection every page shares. SVG is off, as its renderer would read files an
-//! SVG's `<image>` names.
-use std::collections::{HashMap, HashSet};
+//! removed before anything is fetched. A page reads what WebKit's view does, anonymously: `data:`
+//! and `https:` raster images, `https:` stylesheets (linked, and what those and the mail's own
+//! styles `@import`, one level deep) and the `https:` and `data:` web fonts they name; nothing
+//! else, `file:` included (the front end inlines the cached parts it allows as `data:`). SVG is
+//! off, as its renderer would read files an SVG's `<image>` names.
+//!
+//! Web fonts (MS-164) never hold a page back: it lays out and draws in system fonts at once, and a
+//! font arriving later lays it out again, unless it comes [`LATE`] after the page was first shown,
+//! when it only goes to the cache for the next open. A page reads only the font files whose
+//! `unicode-range` covers some of its text (Blitz would read every one a stylesheet names: 54 for
+//! two weights of Google Sans), at most [`MAX_FONTS`]. Stylesheets and fonts are kept in a cache on
+//! disk for as long as their answers allow ([`ResourceCache`]), and each page registers its fonts
+//! in a copy of its own of the system font collection, so one mail's font never changes another's.
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::{self, File};
 use std::panic::{self, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyrender::{PaintScene as _, render_to_buffer};
 use anyrender_vello_cpu::VelloCpuImageRenderer;
@@ -24,9 +36,10 @@ use blitz_paint::paint_scene;
 use blitz_traits::net::{Bytes, NetHandler, NetProvider, Request, Url};
 use blitz_traits::shell::{ColorScheme, ShellProvider, Viewport};
 use futures_channel::oneshot;
-use mailstream_engine::avatars::web::{Internet, Web};
+use mailstream_engine::avatars::web::{Browser, Web};
 use peniko::kurbo::Rect;
 use peniko::{Color, Fill};
+use sha2::{Digest, Sha256};
 
 /// The reader's look over the mail's own styles, the one WebKit's view applies
 /// (`MailHtmlView.swift`): the document is as tall as its content, so nothing sizes from the
@@ -44,7 +57,7 @@ pre { white-space: pre-wrap; }
 /// dropped unanswered.
 const REMOVED: &str = "iframe, frame, frameset, object, embed";
 
-/// Linked stylesheets: kept (Blitz attaches what they load to them), answered empty.
+/// Linked stylesheets: kept (Blitz attaches what they load to them); `https:` ones are read.
 const LINKS: &str = "link[href]";
 
 /// Elements whose `background` attribute is an image, which HTML maps to `background-image`; Blitz
@@ -70,6 +83,25 @@ const MIN_ZOOM: f32 = 0.3;
 
 /// The most of a remote image read; a larger one is not shown.
 const IMAGE_CAP: usize = 16 << 20;
+
+/// The most of a stylesheet read, and of a font file; a larger one is not applied.
+const SHEET_CAP: usize = 512 << 10;
+const FONT_CAP: usize = 2 << 20;
+
+/// The most stylesheets (linked and imported) and remote font files one page reads.
+const MAX_SHEETS: usize = 8;
+const MAX_FONTS: usize = 8;
+
+/// A font arriving this long after its page was first laid out only goes to the cache: swapping
+/// it in would move text the reader has started on.
+const LATE: Duration = Duration::from_secs(3);
+
+/// How long a stylesheet or font is kept when its answer doesn't say.
+const DEFAULT_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The most the stylesheet and font cache keeps on disk, and in memory.
+const CACHE_CAP: u64 = 50 << 20;
+const MEMORY_CAP: usize = 16 << 20;
 
 /// A page's size at the width it was laid out for, in points, and its version, which grows each
 /// time late content (an image) changes it.
@@ -99,10 +131,7 @@ impl HtmlPage {
     /// Starts parsing `html` on the pages' thread; returns at once.
     #[uniffi::constructor]
     pub fn new(html: String) -> Arc<Self> {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        send(Job::Open { id, html });
-        Arc::new(Self { id })
+        Self::open(html, RESOURCES.clone())
     }
 
     /// Lays the page out `width` points wide for `scale` pixels per point (unless it already
@@ -179,8 +208,18 @@ impl Drop for HtmlPage {
     }
 }
 
+impl HtmlPage {
+    /// A page reading its remote resources from `resources`.
+    fn open(html: String, resources: Arc<Resources>) -> Arc<Self> {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        send(Job::Open { id, html, resources });
+        Arc::new(Self { id })
+    }
+}
+
 enum Job {
-    Open { id: u64, html: String },
+    Open { id: u64, html: String, resources: Arc<Resources> },
     Close { id: u64 },
     Layout { id: u64, width: f64, scale: f64, reply: oneshot::Sender<Option<HtmlSize>> },
     Tile { id: u64, width: f64, scale: f64, top: f64, height: f64, reply: oneshot::Sender<Option<HtmlTile>> },
@@ -227,7 +266,8 @@ fn send(job: Job) {
     let _ = PAGES.send(job);
 }
 
-/// Remote images: fetched on a runtime of their own, so a slow server never holds the pages' thread.
+/// Remote images, stylesheets and fonts: fetched on a runtime of their own, so a slow server never
+/// holds the pages' thread.
 static NET: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -237,10 +277,21 @@ static NET: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         .expect("the mail HTML network runtime starts")
 });
 
+/// Where pages read their remote resources: the web as a browser asks it, and the stylesheets and
+/// fonts already read, under the engine's cache folder.
+static RESOURCES: LazyLock<Arc<Resources>> = LazyLock::new(|| {
+    Arc::new(Resources {
+        web: Arc::new(Browser),
+        cache: ResourceCache::new(mailstream_engine::cache_directory().join("reader-resources"), CACHE_CAP),
+        late: LATE,
+    })
+});
+
 /// Every page on the pages' thread.
 struct Pages {
     pages: HashMap<u64, Page>,
-    /// System fonts, scanned once: a font collection per page costs 30–40 ms.
+    /// System fonts, scanned once (a scan per page costs 30–40 ms); each page lays out with a copy
+    /// of its own, which the web fonts it reads join.
     fonts: FontContext,
     /// Pages a resource arrived for, laid out again once no job waits.
     arrived: HashSet<u64>,
@@ -249,6 +300,7 @@ struct Pages {
 struct Page {
     doc: HtmlDocument,
     shell: Arc<PageShell>,
+    gate: Arc<Gate>,
     /// What the page was last laid out for: width and scale (0 before the first layout), the zoom
     /// that fit its content and the height that gave.
     width: f64,
@@ -261,13 +313,19 @@ struct Page {
 
 impl Pages {
     fn new() -> Self {
-        use parley::fontique::{Collection, CollectionOptions, SourceCache};
+        use parley::fontique::{Collection, CollectionOptions, FallbackKey, Script, SourceCache};
         let mut fonts = FontContext {
             source_cache: SourceCache::new_shared(),
-            collection: Collection::new(CollectionOptions { shared: true, system_fonts: true }),
+            collection: Collection::new(CollectionOptions { shared: false, system_fonts: true }),
         };
         // List bullets draw with Blitz's own font.
         fonts.collection.register_fonts(peniko::Blob::new(Arc::new(blitz_dom::BULLET_FONT) as _), None);
+        // The fonts the system falls back to for the scripts mail is mostly written in, looked up
+        // once: every page's copy would ask the system again (Han for every page, as parley adds
+        // it to each fallback list).
+        for script in [b"Latn", b"Hani", b"Cyrl", b"Grek", b"Arab", b"Hebr", b"Thai", b"Hira", b"Kana", b"Hang", b"Deva"] {
+            fonts.collection.fallback_families(FallbackKey::new(Script::from_bytes(*script), None)).for_each(drop);
+        }
         Self { pages: HashMap::new(), fonts, arrived: HashSet::new() }
     }
 
@@ -300,8 +358,8 @@ impl Pages {
 
     fn handle(&mut self, job: Job) {
         match job {
-            Job::Open { id, html } => {
-                let page = Page::open(id, &html, &self.fonts);
+            Job::Open { id, html, resources } => {
+                let page = Page::open(id, &html, &self.fonts, resources);
                 self.pages.insert(id, page);
             }
             Job::Close { id } => {
@@ -378,7 +436,7 @@ impl Pages {
     }
 }
 
-/// `html` parsed, its requests going to `net`.
+/// `html` parsed, its requests going to `net`, its fonts a copy of `fonts`.
 fn document(html: &str, net: Arc<dyn NetProvider>, shell: Arc<PageShell>, fonts: &FontContext) -> HtmlDocument {
     HtmlDocument::from_html(
         html,
@@ -394,16 +452,18 @@ fn document(html: &str, net: Arc<dyn NetProvider>, shell: Arc<PageShell>, fonts:
 }
 
 impl Page {
-    fn open(id: u64, html: &str, fonts: &FontContext) -> Self {
+    fn open(id: u64, html: &str, fonts: &FontContext, resources: Arc<Resources>) -> Self {
         let shell = Arc::new(PageShell { id, quiet: AtomicBool::new(false) });
-        let gate = Arc::new(Gate::default());
+        let gate = Arc::new(Gate::new(resources));
         let mut doc = document(html, gate.clone(), shell.clone(), fonts);
-        let blocked = sanitize(doc.as_mut());
-        gate.open(blocked);
-        Self { doc, shell, width: 0.0, scale: 0.0, zoom: 1.0, height: 0.0, version: 0, waiting: Vec::new() }
+        let allowed = sanitize(doc.as_mut());
+        gate.open(allowed);
+        Self { doc, shell, gate, width: 0.0, scale: 0.0, zoom: 1.0, height: 0.0, version: 0, waiting: Vec::new() }
     }
 
     fn lay_out(&mut self, width: f64, scale: f64) {
+        // From now on, a font arriving late only goes to the cache.
+        self.gate.shared.shown.get_or_init(Instant::now);
         if width == self.width && scale == self.scale {
             return;
         }
@@ -523,16 +583,21 @@ fn content_width(doc: &BaseDocument) -> f32 {
         .fold(0.0, f32::max)
 }
 
-/// The URLs a page's requests may not have: those of the elements [`sanitize`] removes get no
-/// answer, linked stylesheets an empty one.
+/// What a page's requests may get, as [`sanitize`] finds it: the removed elements' URLs no
+/// answer, the rest as [`Gate`] decides.
 #[derive(Default)]
-struct Blocked {
+struct Allowed {
     dropped: HashSet<String>,
-    empty: HashSet<String>,
+    /// The linked stylesheets.
+    links: HashSet<String>,
+    /// What the mail's own `<style>`s ask for.
+    asks: Asks,
+    /// The characters of the body's text, sorted, which a font file's `unicode-range` must cover.
+    text: Vec<u32>,
 }
 
 /// Removes [`REMOVED`] elements, maps [`BACKGROUNDS`] attributes and adds [`MAIL_CSS`].
-fn sanitize(doc: &mut BaseDocument) -> Blocked {
+fn sanitize(doc: &mut BaseDocument) -> Allowed {
     let urls = |doc: &BaseDocument, selector: &str, names: &[&str]| -> (Vec<NodeId>, HashSet<String>) {
         let ids = doc.query_selector_all(selector).map(|ids| ids.to_vec()).unwrap_or_default();
         let urls = ids
@@ -546,7 +611,19 @@ fn sanitize(doc: &mut BaseDocument) -> Blocked {
         (ids, urls)
     };
     let (removed, dropped) = urls(doc, REMOVED, &["src", "data"]);
-    let (_, empty) = urls(doc, LINKS, &["href"]);
+    let (_, links) = urls(doc, LINKS, &["href"]);
+    let body = doc.query_selector("body").ok().flatten().and_then(|id| doc.get_node(id));
+    let mut text: Vec<u32> = body.map(|body| body.text_content()).unwrap_or_default().chars().map(u32::from).collect();
+    text.sort_unstable();
+    text.dedup();
+    let mut asks = Asks::default();
+    for id in doc.query_selector_all("style").unwrap_or_default().iter() {
+        let Some(css) = doc.get_node(*id).map(|node| node.text_content()) else { continue };
+        let lower = css.to_ascii_lowercase();
+        if lower.contains("@font-face") || lower.contains("@import") {
+            asks.extend(scan(&css, doc.base_url(), &text));
+        }
+    }
     let backgrounds: Vec<(NodeId, String)> = doc
         .query_selector_all(BACKGROUNDS)
         .unwrap_or_default()
@@ -583,7 +660,7 @@ fn sanitize(doc: &mut BaseDocument) -> Blocked {
         mutator.append_children(head, &[reader]);
     }
     drop(mutator);
-    Blocked { dropped, empty }
+    Allowed { dropped, links, asks, text }
 }
 
 /// `value` as the inside of a CSS double-quoted string.
@@ -617,26 +694,103 @@ impl ShellProvider for PageShell {
     }
 }
 
-/// A page's resources: held until parsing ends and the removed elements' requests are known, then
-/// answered by [`fetch`] unless [`Blocked`].
-#[derive(Default)]
+/// A page's resources: held until parsing ends and what the page may read is known, then
+/// answered.
 struct Gate {
+    shared: Arc<GateShared>,
+}
+
+/// What a page's requests share with the fetches answering them.
+struct GateShared {
     state: Mutex<GateState>,
+    resources: Arc<Resources>,
+    /// When the page was first laid out.
+    shown: OnceLock<Instant>,
 }
 
 #[derive(Default)]
 struct GateState {
     open: bool,
     held: Vec<(Request, Box<dyn NetHandler>)>,
-    blocked: Blocked,
+    /// The removed elements' URLs: never answered.
+    dropped: HashSet<String>,
+    /// The stylesheets the page may read, each with whether its own `@import`s may be read: a
+    /// linked one's may, an imported one's may not.
+    sheets: HashMap<String, bool>,
+    /// The font files of `@font-face` rules covering some of the page's text.
+    fonts: HashSet<String>,
+    /// What the page's stylesheets name that it never reads: fonts covering none of its text,
+    /// imports more than one level deep.
+    skipped: HashSet<String>,
+    text: Arc<Vec<u32>>,
+    sheets_read: usize,
+    fonts_read: usize,
+}
+
+impl GateState {
+    /// Takes in what a stylesheet asks for; its imports may be read when `imports` says so.
+    fn learn(&mut self, asks: Asks, imports: bool) {
+        for url in asks.fonts {
+            self.skipped.remove(&url);
+            self.fonts.insert(url);
+        }
+        for url in asks.skipped {
+            if !self.fonts.contains(&url) {
+                self.skipped.insert(url);
+            }
+        }
+        for url in asks.imports {
+            if imports {
+                self.skipped.remove(&url);
+                self.sheets.entry(url).or_insert(false);
+            } else if !self.sheets.contains_key(&url) {
+                self.skipped.insert(url);
+            }
+        }
+    }
+}
+
+impl GateShared {
+    /// Whether what arrives now comes [`Resources::late`] after the page was first shown.
+    fn late(&self) -> bool {
+        self.shown.get().is_some_and(|shown| shown.elapsed() >= self.resources.late)
+    }
+
+    /// A stylesheet: what it asks for is learned before Blitz reads it and asks.
+    async fn read_sheet(self: Arc<Self>, url: Url, imports: bool, handler: Box<dyn NetHandler>) {
+        let Some(css) = self.resources.read(&url, SHEET_CAP, |body| std::str::from_utf8(body).is_ok()).await else {
+            return refuse(url, handler);
+        };
+        let text = self.state.lock().unwrap().text.clone();
+        let asks = scan(std::str::from_utf8(&css).unwrap_or_default(), &url, &text);
+        self.state.lock().unwrap().learn(asks, imports);
+        handler.bytes(url.to_string(), css);
+    }
+
+    /// A font file; one arriving late is only cached.
+    async fn read_font(self: Arc<Self>, url: Url, handler: Box<dyn NetHandler>) {
+        if let Some(font) = self.resources.read(&url, FONT_CAP, is_font).await
+            && !self.late()
+        {
+            handler.bytes(url.to_string(), font);
+        }
+    }
 }
 
 impl Gate {
-    fn open(&self, blocked: Blocked) {
+    fn new(resources: Arc<Resources>) -> Self {
+        let state = Mutex::new(GateState::default());
+        Self { shared: Arc::new(GateShared { state, resources, shown: OnceLock::new() }) }
+    }
+
+    fn open(&self, allowed: Allowed) {
         let held = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.shared.state.lock().unwrap();
             state.open = true;
-            state.blocked = blocked;
+            state.dropped = allowed.dropped;
+            state.text = Arc::new(allowed.text);
+            state.sheets = allowed.links.into_iter().map(|url| (url, true)).collect();
+            state.learn(allowed.asks, true);
             std::mem::take(&mut state.held)
         };
         for (request, handler) in held {
@@ -647,24 +801,71 @@ impl Gate {
 
 impl NetProvider for Gate {
     fn fetch(&self, _doc_id: usize, request: Request, handler: Box<dyn NetHandler>) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.shared.state.lock().unwrap();
         if !state.open {
             state.held.push((request, handler));
             return;
         }
-        let url = request.url.as_str();
-        let (dropped, empty) = (state.blocked.dropped.contains(url), state.blocked.empty.contains(url));
-        drop(state);
-        if empty {
-            refuse(request.url, handler);
-        } else if !dropped {
-            fetch(request.url, handler);
+        enum Read {
+            Nothing,
+            Empty,
+            Sheet { imports: bool },
+            Font,
+            InlineFont,
+            Image,
         }
+        let url = request.url;
+        let (key, https) = (url.as_str(), url.scheme() == "https");
+        let read = if state.dropped.contains(key) || state.skipped.contains(key) {
+            Read::Nothing
+        } else if let Some(&imports) = state.sheets.get(key) {
+            if https && state.sheets_read < MAX_SHEETS {
+                state.sheets_read += 1;
+                Read::Sheet { imports }
+            } else {
+                Read::Empty
+            }
+        } else if state.fonts.contains(key) {
+            if https && state.fonts_read < MAX_FONTS {
+                state.fonts_read += 1;
+                Read::Font
+            } else if url.scheme() == "data" {
+                Read::InlineFont
+            } else {
+                Read::Nothing
+            }
+        } else {
+            Read::Image
+        };
+        drop(state);
+        match read {
+            Read::Nothing => {}
+            Read::Empty => refuse(url, handler),
+            Read::Sheet { imports } => {
+                NET.spawn(self.shared.clone().read_sheet(url, imports, handler));
+            }
+            Read::Font => {
+                NET.spawn(self.shared.clone().read_font(url, handler));
+            }
+            Read::InlineFont => {
+                let font = data_url::DataUrl::process(url.as_str()).ok().and_then(|data| data.decode_to_vec().ok());
+                if let Some((font, _)) = font.filter(|(font, _)| font.len() <= FONT_CAP && is_font(font)) {
+                    handler.bytes(url.to_string(), Bytes::from(font));
+                }
+            }
+            Read::Image => fetch_image(url, handler, self.shared.resources.web.clone()),
+        }
+    }
+
+    /// A linked stylesheet never holds the page back from laying out: Blitz waits for those in
+    /// the `<head>` unless its provider says it never answers (MS-164).
+    fn is_noop(&self) -> bool {
+        true
     }
 }
 
 /// A raster image from `data:` (at once) or `https:`; anything else gets an empty answer.
-fn fetch(url: Url, handler: Box<dyn NetHandler>) {
+fn fetch_image(url: Url, handler: Box<dyn NetHandler>, web: Arc<dyn Web>) {
     match url.scheme() {
         "data" => match data_url::DataUrl::process(url.as_str()).ok().and_then(|data| data.decode_to_vec().ok()) {
             Some((bytes, _)) if is_raster_image(&bytes) => handler.bytes(url.to_string(), Bytes::from(bytes)),
@@ -672,7 +873,7 @@ fn fetch(url: Url, handler: Box<dyn NetHandler>) {
         },
         "https" => {
             NET.spawn(async move {
-                let page = Internet.get(url.to_string(), IMAGE_CAP).await;
+                let page = web.get(url.to_string(), IMAGE_CAP).await;
                 match page.filter(|page| page.body.len() <= IMAGE_CAP && is_raster_image(&page.body)) {
                     Some(page) => handler.bytes(page.url, Bytes::from(page.body)),
                     None => refuse(url, handler),
@@ -688,6 +889,240 @@ fn refuse(url: Url, handler: Box<dyn NetHandler>) {
     handler.bytes(url.to_string(), Bytes::new());
 }
 
+/// What a stylesheet asks for: the files of its `@font-face` rules, split by whether their
+/// `unicode-range` covers any of the page's text, and its `@import`s.
+#[derive(Default)]
+struct Asks {
+    fonts: Vec<String>,
+    skipped: Vec<String>,
+    imports: Vec<String>,
+}
+
+impl Asks {
+    fn extend(&mut self, other: Asks) {
+        self.fonts.extend(other.fonts);
+        self.skipped.extend(other.skipped);
+        self.imports.extend(other.imports);
+    }
+}
+
+/// What `css`, read from `base`, asks for, with `text` the page's characters (sorted). Read with
+/// Blitz's own parser, so the URLs are the ones it asks for.
+fn scan(css: &str, base: &Url, text: &[u32]) -> Asks {
+    use style::context::QuirksMode;
+    use style::font_face::Source;
+    use style::media_queries::MediaList;
+    use style::servo_arc::Arc as ServoArc;
+    use style::shared_lock::SharedRwLock;
+    use style::stylesheets::{AllowImportRules, CssRule, Origin, Stylesheet, StylesheetInDocument, UrlExtraData};
+
+    let lock = SharedRwLock::new();
+    let imports = Imports::default();
+    let sheet = Stylesheet::from_str(
+        css,
+        UrlExtraData::from(base.clone()),
+        Origin::Author,
+        ServoArc::new(lock.wrap(MediaList::empty())),
+        lock.clone(),
+        Some(&imports),
+        None,
+        QuirksMode::NoQuirks,
+        AllowImportRules::Yes,
+    );
+    let guard = lock.read();
+    let mut asks = Asks { imports: imports.0.into_inner(), ..Asks::default() };
+    // Blitz reads only top-level `@font-face` rules.
+    for rule in sheet.contents(&guard).rules(&guard).iter() {
+        let CssRule::FontFace(face) = rule else { continue };
+        let face = &face.read_with(&guard).descriptors;
+        let Some(sources) = &face.src else { continue };
+        let urls = sources.0.iter().filter_map(|source| match source {
+            Source::Url(source) => source.url.url().map(|url| url.as_str().to_string()),
+            Source::Local(_) => None,
+        });
+        let covered = face.unicode_range.as_ref().is_none_or(|ranges| {
+            ranges.iter().any(|range| {
+                let first = text.partition_point(|&c| c < range.start);
+                text.get(first).is_some_and(|&c| c <= range.end)
+            })
+        });
+        if covered { asks.fonts.extend(urls) } else { asks.skipped.extend(urls) }
+    }
+    asks
+}
+
+/// Records a stylesheet's `@import`s and loads none of them.
+#[derive(Default)]
+struct Imports(RefCell<Vec<String>>);
+
+impl style::stylesheets::StylesheetLoader for Imports {
+    fn request_stylesheet(
+        &self,
+        url: style::values::CssUrl,
+        location: style::values::SourceLocation,
+        lock: &style::shared_lock::SharedRwLock,
+        _media: style::servo_arc::Arc<style::shared_lock::Locked<style::media_queries::MediaList>>,
+        supports: Option<style::stylesheets::import_rule::ImportSupportsCondition>,
+        layer: style::stylesheets::import_rule::ImportLayer,
+    ) -> style::servo_arc::Arc<style::shared_lock::Locked<style::stylesheets::ImportRule>> {
+        if let Some(resolved) = url.url() {
+            self.0.borrow_mut().push(resolved.as_str().to_string());
+        }
+        let stylesheet = style::stylesheets::import_rule::ImportSheet::new_refused();
+        style::servo_arc::Arc::new(lock.wrap(style::stylesheets::ImportRule { url, stylesheet, supports, layer, source_location: location }))
+    }
+}
+
+/// Where a page's remote resources come from.
+struct Resources {
+    web: Arc<dyn Web>,
+    cache: ResourceCache,
+    /// See [`LATE`].
+    late: Duration,
+}
+
+impl Resources {
+    /// `url`'s body when `valid` takes it: from the cache while it is fresh, else from the web,
+    /// then kept for as long as the answer allows.
+    async fn read(&self, url: &Url, cap: usize, valid: fn(&[u8]) -> bool) -> Option<Bytes> {
+        if let Some(body) = self.cache.get(url.as_str()) {
+            return Some(body);
+        }
+        let page = self.web.get(url.to_string(), cap).await?;
+        if page.body.len() > cap || !valid(&page.body) {
+            return None;
+        }
+        let body = Bytes::from(page.body);
+        let lifetime = page.max_age.unwrap_or(DEFAULT_LIFETIME);
+        if !lifetime.is_zero() {
+            self.cache.put(url.as_str(), &body, lifetime);
+        }
+        Some(body)
+    }
+}
+
+/// Stylesheets and fonts kept between opens: a file each in `folder`, named by its URL's hash and
+/// holding when it expires, the URL and the body, at most `cap` bytes in all (the least recently
+/// used go first); those read this run are also kept in memory.
+struct ResourceCache {
+    folder: PathBuf,
+    cap: u64,
+    memory: Mutex<Memory>,
+}
+
+#[derive(Default)]
+struct Memory {
+    entries: HashMap<String, (Bytes, SystemTime)>,
+    /// The entries' URLs, oldest first.
+    order: VecDeque<String>,
+    size: usize,
+}
+
+impl ResourceCache {
+    fn new(folder: PathBuf, cap: u64) -> Self {
+        Self { folder, cap, memory: Mutex::default() }
+    }
+
+    /// `url`'s body while it has not expired.
+    fn get(&self, url: &str) -> Option<Bytes> {
+        let now = SystemTime::now();
+        if let Some((body, expires)) = self.memory.lock().unwrap().entries.get(url)
+            && *expires > now
+        {
+            return Some(body.clone());
+        }
+        let path = self.file(url);
+        let data = Bytes::from(fs::read(&path).ok()?);
+        let expires = UNIX_EPOCH + Duration::from_secs(u64::from_le_bytes(data.get(..8)?.try_into().ok()?));
+        let length = u32::from_le_bytes(data.get(8..12)?.try_into().ok()?) as usize;
+        if data.get(12..12 + length)? != url.as_bytes() {
+            return None;
+        }
+        if expires <= now {
+            let _ = fs::remove_file(&path);
+            return None;
+        }
+        // Used now: the size cap removes it last.
+        let _ = File::options().write(true).open(&path).and_then(|file| file.set_modified(now));
+        let body = data.slice(12 + length..);
+        self.remember(url, &body, expires);
+        Some(body)
+    }
+
+    /// Keeps `body` as `url`'s for `lifetime`.
+    fn put(&self, url: &str, body: &Bytes, lifetime: Duration) {
+        let expires = SystemTime::now().checked_add(lifetime).unwrap_or(SystemTime::now());
+        self.remember(url, body, expires);
+        if self.write(url, body, expires).is_ok() {
+            self.trim();
+        }
+    }
+
+    fn file(&self, url: &str) -> PathBuf {
+        let hash = Sha256::digest(url.as_bytes());
+        self.folder.join(hash.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+    }
+
+    fn remember(&self, url: &str, body: &Bytes, expires: SystemTime) {
+        if body.len() > MEMORY_CAP {
+            return;
+        }
+        let mut memory = self.memory.lock().unwrap();
+        match memory.entries.insert(url.to_string(), (body.clone(), expires)) {
+            Some((old, _)) => memory.size -= old.len(),
+            None => memory.order.push_back(url.to_string()),
+        }
+        memory.size += body.len();
+        while memory.size > MEMORY_CAP {
+            let Some(oldest) = memory.order.pop_front() else { break };
+            if let Some((old, _)) = memory.entries.remove(&oldest) {
+                memory.size -= old.len();
+            }
+        }
+    }
+
+    /// Written whole under another name, then moved in place, so a reader never sees half of it.
+    fn write(&self, url: &str, body: &[u8], expires: SystemTime) -> std::io::Result<()> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        fs::create_dir_all(&self.folder)?;
+        let seconds = expires.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
+        let mut data = Vec::with_capacity(12 + url.len() + body.len());
+        data.extend_from_slice(&seconds.to_le_bytes());
+        data.extend_from_slice(&(url.len() as u32).to_le_bytes());
+        data.extend_from_slice(url.as_bytes());
+        data.extend_from_slice(body);
+        let path = self.file(url);
+        let partial = path.with_extension(format!("{}-{}.part", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        fs::write(&partial, &data)?;
+        fs::rename(&partial, &path)
+    }
+
+    /// Removes the least recently used files until the folder holds at most `cap` bytes.
+    fn trim(&self) {
+        let Ok(entries) = fs::read_dir(&self.folder) else { return };
+        let mut files: Vec<(SystemTime, u64, PathBuf)> = entries
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let metadata = entry.metadata().ok()?;
+                metadata.is_file().then(|| (metadata.modified().unwrap_or(UNIX_EPOCH), metadata.len(), entry.path()))
+            })
+            .collect();
+        let mut total: u64 = files.iter().map(|(_, length, _)| length).sum();
+        if total <= self.cap {
+            return;
+        }
+        files.sort_by_key(|(used, _, _)| *used);
+        for (_, length, path) in files {
+            if total <= self.cap {
+                break;
+            }
+            if fs::remove_file(&path).is_ok() {
+                total -= length;
+            }
+        }
+    }
+}
+
 /// PNG, JPEG, GIF, WebP, BMP or ICO, by their first bytes.
 fn is_raster_image(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x89PNG")
@@ -698,12 +1133,100 @@ fn is_raster_image(bytes: &[u8]) -> bool {
         || bytes.starts_with(b"\0\0\x01\0")
 }
 
+/// WOFF, WOFF2, OpenType or TrueType, by their first bytes, as Blitz tells them apart.
+fn is_font(bytes: &[u8]) -> bool {
+    [b"wOFF", b"wOF2", b"OTTO", b"true", b"\0\x01\0\0"].iter().any(|magic| bytes.starts_with(*magic))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn page(html: &str) -> Page {
-        Page::open(0, html, &Pages::new().fonts)
+        Page::open(0, html, &Pages::new().fonts, offline())
+    }
+
+    /// A web of the files a test gives, recording what is asked; a file can be held back until
+    /// the test lets it go.
+    #[derive(Default)]
+    struct FakeWeb {
+        files: Mutex<HashMap<String, Vec<u8>>>,
+        held: Mutex<HashMap<String, oneshot::Receiver<()>>>,
+        asked: Mutex<Vec<String>>,
+    }
+
+    impl FakeWeb {
+        fn file(&self, url: &str, body: impl Into<Vec<u8>>) {
+            self.files.lock().unwrap().insert(url.into(), body.into());
+        }
+
+        /// Holds `url` back until the sender returned sends or drops.
+        fn hold(&self, url: &str) -> oneshot::Sender<()> {
+            let (release, held) = oneshot::channel();
+            self.held.lock().unwrap().insert(url.into(), held);
+            release
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    impl Web for FakeWeb {
+        fn get(&self, url: String, cap: usize) -> futures::future::BoxFuture<'static, Option<mailstream_engine::avatars::web::Page>> {
+            self.asked.lock().unwrap().push(url.clone());
+            let body = self.files.lock().unwrap().get(&url).cloned();
+            let held = self.held.lock().unwrap().remove(&url);
+            Box::pin(async move {
+                if let Some(held) = held {
+                    let _ = held.await;
+                }
+                let body = body?;
+                Some(mailstream_engine::avatars::web::Page { body: body[..body.len().min(cap + 1)].to_vec(), url, max_age: None })
+            })
+        }
+
+        fn txt(&self, _name: String) -> futures::future::BoxFuture<'static, Vec<String>> {
+            Box::pin(async { Vec::new() })
+        }
+    }
+
+    /// A cache folder of its own, empty.
+    fn cache_folder() -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let folder = std::env::temp_dir().join(format!("ms164-cache-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let _ = fs::remove_dir_all(&folder);
+        folder
+    }
+
+    /// Resources from `web`, with a cache of their own.
+    fn resources(web: Arc<FakeWeb>, late: Duration) -> Arc<Resources> {
+        Arc::new(Resources { web, cache: ResourceCache::new(cache_folder(), CACHE_CAP), late })
+    }
+
+    /// Resources from a web that answers nothing.
+    fn offline() -> Arc<Resources> {
+        resources(Arc::default(), LATE)
+    }
+
+    /// Runs `work` on a thread of its own; the test fails when it takes over 10 s.
+    fn in_time<T: Send + 'static>(work: impl Future<Output = T> + Send + 'static) -> T {
+        let (done, result) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(futures_executor::block_on(work));
+        });
+        result.recv_timeout(Duration::from_secs(10)).expect("in time")
+    }
+
+    /// The page's height, laid out 400 points wide, once `settled` takes it.
+    async fn height_when(page: &HtmlPage, settled: impl Fn(f64) -> bool) -> f64 {
+        loop {
+            let size = page.layout(400.0, 1.0).await.expect("open");
+            if settled(size.height) {
+                return size.height;
+            }
+            page.changed(size.version).await.expect("open");
+        }
     }
 
     fn pixel(tile: &HtmlTile, x: u32, y: u32) -> [u8; 4] {
@@ -744,19 +1267,27 @@ mod tests {
     }
 
     #[test]
-    fn frames_and_plugins_are_removed_and_linked_stylesheets_get_nothing() {
-        let mut page = page(concat!(
-            r#"<html><head><link rel="stylesheet" href="https://example.com/a.css"></head><body>"#,
-            r#"<iframe src="https://example.com/frame"></iframe><iframe srcdoc="<p>inner</p>"></iframe>"#,
-            r#"<object data="https://example.com/o"></object><p>Kept</p></body></html>"#,
-        ));
+    fn frames_and_plugins_are_removed_and_a_stylesheet_never_holds_the_page() {
+        let web = Arc::new(FakeWeb::default());
+        web.file("https://example.com/a.css", "p { margin: 40px }");
+        let _held = web.hold("https://example.com/a.css");
+        let mut page = Page::open(
+            0,
+            concat!(
+                r#"<html><head><link rel="stylesheet" href="https://example.com/a.css"></head><body>"#,
+                r#"<iframe src="https://example.com/frame"></iframe><iframe srcdoc="<p>inner</p>"></iframe>"#,
+                r#"<object data="https://example.com/o"></object><p>Kept</p></body></html>"#,
+            ),
+            &Pages::new().fonts,
+            resources(web.clone(), LATE),
+        );
+        // The stylesheet is still on its way, and the page lays out without it (MS-164).
         page.lay_out(400.0, 1.0);
+        assert!(!page.doc.as_ref().has_pending_critical_resources());
+        assert!(page.height > 10.0, "{}", page.height);
         let doc = page.doc.as_ref();
         assert_eq!(doc.query_selector_all("iframe, object").unwrap().len(), 0);
         assert_eq!(doc.query_selector_all("p").unwrap().len(), 1);
-        // The stylesheet's empty answer arrived, so nothing holds the page back from painting.
-        page.doc.as_mut().resolve(0.0);
-        assert!(!page.doc.as_ref().has_pending_critical_resources());
     }
 
     #[test]
@@ -780,10 +1311,11 @@ mod tests {
             // A protocol-relative image, as the page resolves it.
             Url::parse(BASE_URL).unwrap().join("//example.com/a.png").unwrap().to_string(),
         ] {
-            fetch(Url::parse(&url).unwrap(), Box::new(Probe(got.clone())));
+            fetch_image(Url::parse(&url).unwrap(), Box::new(Probe(got.clone())), Arc::new(FakeWeb::default()));
         }
         assert_eq!(*got.lock().unwrap(), [6, 0, 0, 0, 0, 0, 0]);
         assert!(is_raster_image(b"\x89PNG\r\n") && !is_raster_image(b"body { color: red }"));
+        assert!(is_font(b"wOF2\0\x01\0\0") && is_font(b"\0\x01\0\0\0\x10") && !is_font(b"body { color: red }"));
     }
 
     #[test]
@@ -824,9 +1356,8 @@ mod tests {
     #[test]
     fn absolute_https_urls_are_still_asked_for_and_relative_ones_go_nowhere() {
         // The base only gives relative URLs somewhere to resolve: `https:` ones are asked for as
-        // before (images load, stylesheets and fonts get nothing either way), while `//host/…`
-        // and `logo.png` resolve to a scheme `fetch` never reads, as WebKit's view, whose base
-        // is `about:blank`, resolves them to nothing (MS-161).
+        // before, while `//host/…` and `logo.png` resolve to a scheme nothing reads, as WebKit's
+        // view, whose base is `about:blank`, resolves them to nothing (MS-161).
         struct Record(Mutex<HashSet<String>>);
         impl NetProvider for Record {
             fn fetch(&self, _doc_id: usize, request: Request, handler: Box<dyn NetHandler>) {
@@ -902,6 +1433,267 @@ mod tests {
         let page = HtmlPage::new("<p>Next</p>".into());
         assert!(block_on(page.layout(400.0, 1.0)).is_some_and(|size| size.height > 0.0));
         assert!(block_on(page.tile(400.0, 1.0, 0.0, 20.0)).is_some());
+    }
+
+    const SHEET: &str = "https://fonts.test/css";
+    const MONO: &str = "https://fonts.test/mono.ttf";
+
+    /// A stylesheet giving 'Mail Mono' its Latin file, [`MONO`], and a Cyrillic one.
+    fn mono_sheet() -> String {
+        format!(concat!(
+            "@font-face {{ font-family: 'Mail Mono'; src: url({mono}) format('truetype'); unicode-range: U+0000-00FF; }}\n",
+            "@font-face {{ font-family: 'Mail Mono'; src: url(https://fonts.test/cyrillic.woff2) format('woff2'); unicode-range: U+0400-045F; }}\n",
+        ), mono = MONO)
+    }
+
+    /// A paragraph in 'Mail Mono', which wraps onto many more lines in a monospaced font than in
+    /// the system one, with `head`.
+    fn mono_mail(head: &str) -> String {
+        format!(
+            r#"<html><head>{head}</head><body><p style="font-family:'Mail Mono',sans-serif;font-size:20px;width:200px;margin:0">{}</p></body></html>"#,
+            "iiiii ".repeat(40)
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn monaco() -> Vec<u8> {
+        fs::read("/System/Library/Fonts/Monaco.ttf").expect("macOS has Monaco")
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn web_fonts_arrive_after_the_first_layout_and_only_the_text_needs_are_read() {
+        let web = Arc::new(FakeWeb::default());
+        web.file(SHEET, format!("@import url(https://fonts.test/more.css);\n{}", mono_sheet()));
+        web.file("https://fonts.test/more.css", "@import url(https://fonts.test/nested.css); p { color: #333 }");
+        web.file(MONO, monaco());
+        let release = web.hold(MONO);
+        let resources = resources(web.clone(), LATE);
+        let head = format!(
+            r#"<link rel="stylesheet" href="{SHEET}"><link rel="stylesheet" href="http://fonts.test/plain.css"><link rel="stylesheet" href="//fonts.test/relative.css">"#
+        );
+        let page = HtmlPage::open(mono_mail(&head), resources.clone());
+        let (system, mono) = in_time(async move {
+            // The font is held back: the page lays out in the system font meanwhile.
+            let system = page.layout(400.0, 1.0).await.unwrap().height;
+            release.send(()).unwrap();
+            let mono = height_when(&page, |height| height > system * 1.5).await;
+            (system, mono)
+        });
+        assert!(system > 20.0, "{system}");
+        let asked = web.asked();
+        assert_eq!(
+            HashSet::<&str>::from_iter(asked.iter().map(String::as_str)),
+            HashSet::from([SHEET, "https://fonts.test/more.css", MONO]),
+            "no Cyrillic file for Latin text, no second-level import, no `http:` or `//` sheet"
+        );
+        // Open again: everything from the cache, nothing asked.
+        let page = HtmlPage::open(mono_mail(&head), resources);
+        let again = in_time(async move { height_when(&page, |height| height > system * 1.5).await });
+        assert_eq!(again, mono);
+        assert_eq!(web.asked().len(), asked.len());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_font_arriving_late_is_only_cached_for_the_next_open() {
+        let web = Arc::new(FakeWeb::default());
+        web.file(SHEET, mono_sheet());
+        web.file(MONO, monaco());
+        let release = web.hold(MONO);
+        // Every font is late once the page has been laid out.
+        let first = resources(web.clone(), Duration::ZERO);
+        let head = format!(r#"<link rel="stylesheet" href="{SHEET}">"#);
+        let page = HtmlPage::open(mono_mail(&head), first.clone());
+        let (page, system) = in_time(async move {
+            let system = page.layout(400.0, 1.0).await.unwrap().height;
+            release.send(()).unwrap();
+            (page, system)
+        });
+        assert!((0..200).any(|_| {
+            std::thread::sleep(Duration::from_millis(25));
+            first.cache.get(MONO).is_some()
+        }));
+        std::thread::sleep(Duration::from_millis(300));
+        let shown = in_time(async move { page.layout(400.0, 1.0).await.unwrap().height });
+        assert_eq!(shown, system, "the late font is not swapped in");
+        // The next run of the app reads the sheet and the font from the disk cache in time.
+        let offline = Arc::new(FakeWeb::default());
+        let next = Arc::new(Resources { web: offline.clone(), cache: ResourceCache::new(first.cache.folder.clone(), CACHE_CAP), late: LATE });
+        let page = HtmlPage::open(mono_mail(&head), next);
+        in_time(async move { height_when(&page, |height| height > system * 1.5).await });
+        assert!(offline.asked().is_empty(), "{:?}", offline.asked());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_web_font_changes_only_the_page_that_read_it() {
+        let web = Arc::new(FakeWeb::default());
+        web.file(SHEET, mono_sheet());
+        web.file(MONO, monaco());
+        let release = web.hold(MONO);
+        let reader = HtmlPage::open(mono_mail(&format!(r#"<link rel="stylesheet" href="{SHEET}">"#)), resources(web, LATE));
+        let (system, mono, other) = in_time(async move {
+            let system = reader.layout(400.0, 1.0).await.unwrap().height;
+            release.send(()).unwrap();
+            let mono = height_when(&reader, |height| height > system * 1.5).await;
+            // A mail naming the same family, opened after the font arrived for the first one:
+            // all pages used to share one collection, so it got the font too.
+            let other = HtmlPage::open(mono_mail(""), offline());
+            let other = other.layout(400.0, 1.0).await.unwrap().height;
+            (system, mono, other)
+        });
+        assert!(system * 1.5 < mono, "{system} {mono}");
+        assert_eq!(other, system);
+    }
+
+    #[test]
+    fn font_files_covering_none_of_the_text_are_skipped() {
+        let css = concat!(
+            "@import 'more.css';\n",
+            "@font-face { font-family: A; src: local(A), url(a-latin.woff2) format('woff2'), url(a.ttf); unicode-range: U+0000-00FF, U+2000-206F; }\n",
+            "@font-face { font-family: A; src: url(https://cdn.test/a-cyrillic.woff2); unicode-range: U+0400-045F; }\n",
+            "@font-face { font-family: B; src: url(data:font/woff2;base64,d09GMg); }\n",
+            "@media screen { @font-face { font-family: C; src: url(c.woff2); } }\n",
+        );
+        let base = Url::parse("https://fonts.test/css/sheet.css").unwrap();
+        let text = |text: &str| {
+            let mut chars: Vec<u32> = text.chars().map(u32::from).collect();
+            chars.sort_unstable();
+            chars
+        };
+        let latin = scan(css, &base, &text("Hello"));
+        assert_eq!(
+            latin.fonts,
+            ["https://fonts.test/css/a-latin.woff2", "https://fonts.test/css/a.ttf", "data:font/woff2;base64,d09GMg"]
+        );
+        assert_eq!(latin.skipped, ["https://cdn.test/a-cyrillic.woff2"]);
+        assert_eq!(latin.imports, ["https://fonts.test/css/more.css"]);
+        let cyrillic = scan(css, &base, &text("Привет"));
+        assert_eq!(cyrillic.fonts, ["https://cdn.test/a-cyrillic.woff2", "data:font/woff2;base64,d09GMg"]);
+    }
+
+    #[test]
+    fn the_cache_keeps_files_for_their_lifetime_within_its_size() {
+        let folder = cache_folder();
+        let url = |name: &str| format!("https://fonts.test/{name}.woff2");
+        let body = |byte: u8| Bytes::from(vec![byte; 100]);
+        // Each file is 100 bytes, its URL (26) and 12 bytes of header: 138.
+        let cache = ResourceCache::new(folder.clone(), 300);
+        cache.put(&url("a"), &body(1), Duration::from_secs(60));
+        cache.put(&url("b"), &body(2), Duration::ZERO);
+        // The next run reads them from disk: `a` while it lives, `b` no more.
+        let next = ResourceCache::new(folder.clone(), 300);
+        assert_eq!(next.get(&url("a")), Some(body(1)));
+        assert_eq!(next.get(&url("b")), None);
+        assert!(!next.file(&url("b")).exists());
+        let pause = || std::thread::sleep(Duration::from_millis(20));
+        pause();
+        next.put(&url("c"), &body(3), Duration::from_secs(60));
+        pause();
+        assert!(ResourceCache::new(folder.clone(), 300).get(&url("a")).is_some());
+        pause();
+        // Three files are over the cap: the least recently used, `c`, goes.
+        next.put(&url("d"), &body(4), Duration::from_secs(60));
+        let last = ResourceCache::new(folder.clone(), 300);
+        assert_eq!((last.get(&url("a")), last.get(&url("c")), last.get(&url("d"))), (Some(body(1)), None, Some(body(4))));
+        let _ = fs::remove_dir_all(folder);
+    }
+
+    /// What a Google Fonts stylesheet costs a mail on the real network (MS-164): `cargo test
+    /// --release -p mailstream --lib google_fonts_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "reads fonts.googleapis.com"]
+    fn google_fonts_timing() {
+        /// The browser's web, logging each URL read and its size.
+        struct Counted(Arc<Mutex<Vec<(String, usize)>>>);
+        impl Web for Counted {
+            fn get(&self, url: String, cap: usize) -> futures::future::BoxFuture<'static, Option<mailstream_engine::avatars::web::Page>> {
+                let (read, log) = (Browser.get(url.clone(), cap), self.0.clone());
+                Box::pin(async move {
+                    let page = read.await;
+                    log.lock().unwrap().push((url, page.as_ref().map_or(0, |page| page.body.len())));
+                    page
+                })
+            }
+            fn txt(&self, _name: String) -> futures::future::BoxFuture<'static, Vec<String>> {
+                Box::pin(async { Vec::new() })
+            }
+        }
+        let mail = format!(
+            concat!(
+                r#"<html><head><link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&family=Google+Sans:wght@400;500&display=swap" rel="stylesheet"></head>"#,
+                r#"<body><div style="font-family:'Google Sans',Roboto,Arial,sans-serif;font-size:24px">MS164 synthetic newsletter</div>{}</body></html>"#
+            ),
+            "<p style=\"font-family:Roboto,Arial,sans-serif\">We noticed a new sign-in to your account on a Mac device. <b>Check activity</b> if this wasn't you.</p>".repeat(20)
+        );
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let web: Arc<dyn Web> = Arc::new(Counted(log.clone()));
+        let open = |resources: Arc<Resources>| {
+            let start = Instant::now();
+            let page = HtmlPage::open(mail.clone(), resources);
+            let (page, painted) = in_time(async move {
+                let size = page.layout(600.0, 2.0).await.unwrap();
+                page.tile(600.0, 2.0, 0.0, 512.0).await.unwrap();
+                (page, (start.elapsed(), size.version))
+            });
+            // Then until nothing more arrives for 1.5 s.
+            let page = Arc::new(page);
+            let (mut version, mut settled) = (painted.1, painted.0);
+            loop {
+                let (done, changed) = mpsc::channel();
+                let watched = page.clone();
+                std::thread::spawn(move || {
+                    let _ = done.send(futures_executor::block_on(watched.changed(version)));
+                });
+                match changed.recv_timeout(Duration::from_millis(1500)) {
+                    Ok(Some(next)) => (version, settled) = (next, start.elapsed()),
+                    _ => break,
+                }
+            }
+            (painted.0, settled)
+        };
+        let measure = |name: &str, resources: Arc<Resources>| {
+            let from = log.lock().unwrap().len();
+            let (painted, settled) = open(resources);
+            let asked = log.lock().unwrap();
+            let bytes: usize = asked[from..].iter().map(|(_, length)| length).sum();
+            println!("{name}: first paint {painted:.1?}, last arrival laid out {settled:.1?}, {} requests, {bytes} bytes", asked.len() - from);
+        };
+        let resources = |folder: &PathBuf, web: Arc<dyn Web>| Arc::new(Resources { web, cache: ResourceCache::new(folder.clone(), CACHE_CAP), late: LATE });
+        let offline = || resources(&cache_folder(), Arc::new(FakeWeb::default()));
+        // The pages' thread starts and scans the system fonts once per process.
+        open(offline());
+        for run in 1..=3 {
+            measure(&format!("{run}. without web fonts (as before MS-164)"), offline());
+            let folder = cache_folder();
+            let warm = resources(&folder, web.clone());
+            measure(&format!("{run}. first open, empty cache"), warm.clone());
+            measure(&format!("{run}. open again, same run"), warm);
+            measure(&format!("{run}. after a restart, disk cache"), resources(&folder, web.clone()));
+            let _ = fs::remove_dir_all(folder);
+        }
+        let mut paints: Vec<Duration> = (0..20)
+            .map(|_| {
+                let start = Instant::now();
+                let page = HtmlPage::open(mail.clone(), offline());
+                in_time(async move {
+                    page.layout(600.0, 2.0).await.unwrap();
+                    page.tile(600.0, 2.0, 0.0, 512.0).await.unwrap();
+                });
+                start.elapsed()
+            })
+            .collect();
+        paints.sort();
+        println!("first paint without web fonts, 20 opens: median {:.1?}, slowest {:.1?}", paints[10], paints[19]);
+        let start = Instant::now();
+        let fonts = Pages::new().fonts;
+        println!("the pages' system fonts, scanned and their fallbacks looked up: {:.1?}", start.elapsed());
+        let start = Instant::now();
+        for _ in 0..100 {
+            std::hint::black_box(fonts.clone());
+        }
+        println!("a page's copy of the font collection: {:.1?}", start.elapsed() / 100);
     }
 }
 

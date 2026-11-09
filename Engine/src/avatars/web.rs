@@ -7,11 +7,13 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use regex::Regex;
 
-/// A successful (200) answer: the body, at most the `cap` asked for plus one byte, and the URL
-/// it came from after redirects.
+/// A successful (200) answer: the body, at most the `cap` asked for plus one byte, the URL it
+/// came from after redirects, and how long it may be reused (`Cache-Control`: `max-age`, zero for
+/// `no-store`/`no-cache`; none when the answer doesn't say).
 pub struct Page {
     pub body: Vec<u8>,
     pub url: String,
+    pub max_age: Option<Duration>,
 }
 
 pub trait Web: Send + Sync {
@@ -33,36 +35,77 @@ impl Internet {
     }
 }
 
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
+/// The web as a mail's images, stylesheets and fonts are asked for by a browser: as [`Internet`],
+/// with Safari's user agent. Google Fonts serves split `woff2` files with a `unicode-range` each only
+/// to browsers it knows, so a reader that downloads just the parts a mail's text needs can; to
+/// `Mailstream` it gives one whole TrueType file per weight (MS-164).
+pub struct Browser;
+
+const SAFARI: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+
+fn client(user_agent: &str) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
-        .user_agent("Mailstream")
+        .user_agent(user_agent)
         .build()
         .expect("the HTTP client builds")
-});
+}
+
+static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| client("Mailstream"));
+static BROWSER: LazyLock<reqwest::Client> = LazyLock::new(|| client(SAFARI));
 
 /// Built from the system's resolver configuration once; nil when it cannot be read.
 static RESOLVER: LazyLock<Option<hickory_resolver::TokioResolver>> =
     LazyLock::new(|| hickory_resolver::Resolver::builder_tokio().ok()?.build().ok());
 
+fn get(client: &'static reqwest::Client, url: String, cap: usize) -> BoxFuture<'static, Option<Page>> {
+    Box::pin(async move {
+        let mut response = client.get(&url).send().await.ok()?;
+        if response.status().as_u16() != 200 {
+            return None;
+        }
+        let url = response.url().to_string();
+        let max_age = response.headers().get(reqwest::header::CACHE_CONTROL).and_then(|value| max_age(value.to_str().ok()?));
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.ok()? {
+            body.extend_from_slice(&chunk);
+            if body.len() > cap {
+                body.truncate(cap + 1);
+                break;
+            }
+        }
+        Some(Page { body, url, max_age })
+    })
+}
+
+/// How long a `Cache-Control` header lets an answer be reused: zero for `no-store` or `no-cache`,
+/// else its `max-age`.
+fn max_age(cache_control: &str) -> Option<Duration> {
+    let mut age = None;
+    for directive in cache_control.split(',').map(str::trim) {
+        let (name, value) = directive.split_once('=').unwrap_or((directive, ""));
+        match name.trim().to_ascii_lowercase().as_str() {
+            "no-store" | "no-cache" => return Some(Duration::ZERO),
+            "max-age" => age = value.trim().trim_matches('"').parse().ok().map(Duration::from_secs),
+            _ => {}
+        }
+    }
+    age
+}
+
+impl Web for Browser {
+    fn get(&self, url: String, cap: usize) -> BoxFuture<'static, Option<Page>> {
+        get(&BROWSER, url, cap)
+    }
+
+    fn txt(&self, name: String) -> BoxFuture<'static, Vec<String>> {
+        Internet.txt(name)
+    }
+}
+
 impl Web for Internet {
     fn get(&self, url: String, cap: usize) -> BoxFuture<'static, Option<Page>> {
-        Box::pin(async move {
-            let mut response = HTTP.get(&url).send().await.ok()?;
-            if response.status().as_u16() != 200 {
-                return None;
-            }
-            let url = response.url().to_string();
-            let mut body = Vec::new();
-            while let Some(chunk) = response.chunk().await.ok()? {
-                body.extend_from_slice(&chunk);
-                if body.len() > cap {
-                    body.truncate(cap + 1);
-                    break;
-                }
-            }
-            Some(Page { body, url })
-        })
+        get(&HTTP, url, cap)
     }
 
     fn txt(&self, name: String) -> BoxFuture<'static, Vec<String>> {
@@ -140,5 +183,14 @@ mod tests {
                 "https://www.example.com/mask.svg",
             ]
         );
+    }
+
+    #[test]
+    fn reads_how_long_an_answer_may_be_reused() {
+        assert_eq!(max_age("public, max-age=31536000"), Some(Duration::from_secs(31_536_000)));
+        assert_eq!(max_age("private, max-age=86400"), Some(Duration::from_secs(86_400)));
+        assert_eq!(max_age("max-age=600, no-store"), Some(Duration::ZERO));
+        assert_eq!(max_age("no-cache"), Some(Duration::ZERO));
+        assert_eq!(max_age("public"), None);
     }
 }

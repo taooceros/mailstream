@@ -31,10 +31,15 @@ blitz-traits = { optional = true, version = "=0.3.0-beta.4", default-features = 
 anyrender = { version = "0.14", optional = true }
 anyrender_vello_cpu = { version = "0.18", optional = true }
 peniko = { version = "0.6", optional = true }
-# The system font collection every page shares.
+# Per page, a copy of the system font collection scanned once.
 parley = { version = "0.12", optional = true, default-features = false, features = ["std", "system"] }
+# html_page.rs: the `@font-face` rules and `@import`s of a mail's stylesheets, read with Blitz's own
+# CSS parser so their URLs are the ones it asks for (MS-164).
+style = { package = "stylo", version = "=0.22.0", optional = true, default-features = false }
+# html_page.rs: the file names of its stylesheet and font cache.
+sha2 = { version = "0.10", optional = true }
 data-url = { version = "0.3", optional = true }
-# Remote images fetch on a runtime of their own (the engine's is private).
+# Remote images, stylesheets and fonts fetch on a runtime of their own (the engine's is private).
 tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 
 # Windows: the message-only window listeners are called through.
@@ -46,7 +51,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 # ffi.py builds); GPUI leaves it off: it doesn't draw with Blitz, and stylo fails to compile in
 # GPUI's dependency graph.
 default = ["blitz"]
-blitz = ["dep:blitz-dom", "dep:blitz-html", "dep:blitz-paint", "dep:blitz-traits", "dep:anyrender", "dep:anyrender_vello_cpu", "dep:peniko", "dep:parley", "dep:data-url", "dep:tokio"]
+blitz = ["dep:blitz-dom", "dep:blitz-html", "dep:blitz-paint", "dep:blitz-traits", "dep:anyrender", "dep:anyrender_vello_cpu", "dep:peniko", "dep:parley", "dep:style", "dep:sha2", "dep:data-url", "dep:tokio"]
 # MAILSTREAM_ENGINE=swift runs the Swift engine (libMailstreamKit.dylib, which `swift build
 # --product MailstreamKit` makes) instead, for examples/bench.rs; front ends never build it.
 swift-engine = []

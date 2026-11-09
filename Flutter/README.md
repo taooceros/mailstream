@@ -246,10 +246,21 @@ widths are ignored, `<center>`/`<font>` are dropped.
 Blitz (`blitz-dom`/`blitz-html`/`blitz-paint`, `FFI/src/html_page.rs`; `lib/ui/blitz_body.dart`)
 parses, lays out and paints each body on a thread of its own in the engine's library; Flutter
 only shows the 512-point tiles near the viewport. Iframes, objects and embeds are removed before
-any fetch; stylesheets, web fonts, SVG and `file:`/`http:` resources are never loaded (only
-`data:` and anonymous `https:` raster images), nor are relative and protocol-relative URLs
-(`logo.png`, `//host/…`), as in WebKit's view. Links go through the same check; a drag selects
-and ⌘C copies. Screen readers get the body's text only (Blitz's AccessKit tree is not bridged).
+any fetch. A body reads what WebKit's view does, anonymously: `data:` and `https:` raster images,
+`https:` stylesheets (linked, plus one level of `@import`) and the `https:`/`data:` web fonts they
+name; SVG and `file:`/`http:` resources are never loaded, nor are relative and protocol-relative
+URLs (`logo.png`, `//host/…`), as in WebKit's view. Web fonts never hold a body back (MS-164): it
+draws in system fonts at once and lays out again as each font arrives, unless the font comes over
+3 s after the body was shown, when it is only cached for the next open. Only font files whose
+`unicode-range` covers some of the body's text are read, at most 8 per body (2 MB each, 512 KB per
+stylesheet), and each body registers its fonts in a copy of its own of the system font
+collection, so one mail's font never changes another's. Stylesheets and fonts are kept for as long
+as their answers allow (a day when they don't say) in
+`~/Library/Caches/dev.mailstream.Mailstream/reader-resources` (50 MB, least recently used out
+first) and in memory, so a body opened again reads nothing from the network. Requests carry
+Safari's user agent: Google Fonts splits its fonts by `unicode-range` only for browsers it knows.
+Clicked links go through the same check as in the other renderers; a drag selects and ⌘C copies.
+Screen readers get the body's text only (Blitz's AccessKit tree is not bridged).
 A body Blitz panics on stays blank by itself; every other body keeps drawing (MS-161). Blitz maps
 no legacy `background` attribute, which Outlook-style mail (Zillow's listing photos) puts its
 pictures in, so the page turns each one on `body`/`table`/`tr`/`td`/`th` into a zero-specificity
@@ -257,8 +268,8 @@ pictures in, so the page turns each one on `body`/`table`/`tr`/`td`/`th` into a 
 it without private mail, run `flutter run -d macos -t test/html_background_app.dart` and open its
 one conversation: the listing card shows a sky-over-grass picture, not a gray box. Known Blitz
 gaps: at 600 points or narrower, mail whose mobile styles make table cells `display: block`
-(Zillow's "Other rentals") loses those cells (MS-165); stylesheets and web fonts are not loaded
-(MS-164); an image URL Blitz can't resolve (`<img src="http://">`) leaves that body blank.
+(Zillow's "Other rentals") loses those cells (MS-165); an image URL Blitz can't resolve
+(`<img src="http://">`) leaves that body blank.
 
 Preparation (`prepareHyperResources` in `lib/ui/hyper_resources.dart`) is the one resource
 policy for both: inline parts (`file://` copies under Mailstream's `messages-v2` cache, canonical

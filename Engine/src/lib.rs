@@ -142,7 +142,7 @@ impl Config {
     /// (benchmarks and tests that must not read the person's sign-ins).
     pub fn for_this_app() -> Self {
         let support = support_directory();
-        let caches = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("dev.mailstream.Mailstream");
+        let caches = cache_directory();
         let service = std::env::var("MAILSTREAM_KEYCHAIN_SERVICE").ok().filter(|service| !service.is_empty());
         Self {
             support_directory: support,
@@ -167,6 +167,12 @@ impl Config {
 /// accounts.json, mail.db, the control socket).
 pub fn support_directory() -> PathBuf {
     dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("Mailstream")
+}
+
+/// The folder of files the engine can fetch again (attachments, avatars, the reader's web fonts):
+/// `~/Library/Caches/dev.mailstream.Mailstream`.
+pub fn cache_directory() -> PathBuf {
+    dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("dev.mailstream.Mailstream")
 }
 
 /// A `config.*` command on the settings.json in `directory`, without an engine: what the
