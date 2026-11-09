@@ -7,7 +7,7 @@ import 'package:mailstream_ui/state/mail_state.dart';
 import 'reader_fixture.dart';
 
 // WebKit bodies wider than the reader, zoomed out to fit, keep their height (MS-78, MS-160); a
-// body that is wider than the view by a share of it keeps its size (MS-183).
+// body that is wider than the view by a share of it zooms out by that share only (MS-183).
 // Synthetic mail only: no real backend, accounts, or private mail.
 // MAILSTREAM_READER_RENDERER=webKit flutter run -d macos -t test/html_zoom_app.dart
 void main() async {
@@ -63,7 +63,7 @@ final _mails = {
   'share': (
     'Web-editor newsletter with a 100.775% table',
     // Fragments without a doctype or styles, and a schedule table its editor sized at 100.775%:
-    // it widens with the view, so each zoom step out left it overflowing, down to 30% (MS-183).
+    // it widened with the view, so each zoom step out left it overflowing, down to 30% (MS-183).
     '<div>Hello! Synthetic update from a recreation center.</div><div>&nbsp;</div>'
         '<div>${'Plain paragraphs of synthetic text that wrap at the reading column, as the editor wrote them. ' * 3}</div>'
         '<div>&nbsp;</div><div><strong>Holiday hours</strong></div>'

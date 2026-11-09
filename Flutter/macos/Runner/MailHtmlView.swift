@@ -216,11 +216,6 @@ final class MailHtmlView: WKWebView {
   private var quoted = false
   private var open = false
 
-  /// Zooming out to fit, since the width last changed: the zoom before the last step out and how
-  /// much wider than the view the page was there; `settled` once a step out stopped helping.
-  private var fitting: (zoom: CGFloat, overflow: Double)?
-  private var settled = false
-
   /// WebKit ended the page's process; an idle page that lost it is not shown again.
   fileprivate(set) var terminated = false
 
@@ -301,7 +296,7 @@ final class MailHtmlView: WKWebView {
 
   /// The last height, its number and whether the page has quoted history, if it was measured at
   /// this width; otherwise the next measurement goes to the host.
-  fileprivate func height(forWidth width: Double?) -> [Any]? {
+  func height(forWidth width: Double?) -> [Any]? {
     guard let width, height >= 0, abs(measuredWidth - width) < 0.5 else {
       owed = true
       return nil
@@ -310,15 +305,11 @@ final class MailHtmlView: WKWebView {
     return [Double(height), version, quoted]
   }
 
-  /// Opens or closes the page's quoted history, which lays the page out and measures it again
-  /// (and may zoom it out anew). Before the page has found its quotes (still loading) the first
-  /// measurement applies it.
+  /// Opens or closes the page's quoted history, which lays the page out and measures it again.
+  /// Before the page has found its quotes (still loading) the first measurement applies it.
   fileprivate func fold(open: Bool) {
     self.open = open
-    guard quoted else { return }
-    fitting = nil
-    settled = false
-    evaluateJavaScript("mailstreamFold(\(open))", in: nil, in: .defaultClient)
+    if quoted { evaluateJavaScript("mailstreamFold(\(open))", in: nil, in: .defaultClient) }
   }
 
   /// The conversation scrolls as a whole: wheel events go on to Flutter.
@@ -326,56 +317,23 @@ final class MailHtmlView: WKWebView {
     nextResponder?.scrollWheel(with: event)
   }
 
-  /// A new width measures again from full size. A reused page whose new host is another width
-  /// measures even when its body keeps its size, since that host has not heard a height yet.
+  /// A reused page whose new host is another width measures even when its body keeps its size,
+  /// since that host has not heard a height yet (a new width lays the page out again by itself).
   override func setFrameSize(_ newSize: NSSize) {
-    let widthChanged = newSize.width != frame.width
     let reflowed = abs(newSize.width - frame.width) >= 0.5
     super.setFrameSize(newSize)
-    if widthChanged {
-      fitting = nil
-      settled = false
-      if pageZoom != 1 { pageZoom = 1 }
-    }
     if reflowed, owed, height >= 0 { evaluateJavaScript("mailstreamMeasure()", in: nil, in: .defaultClient) }
   }
 
-  /// Content wider than the view zooms out until it fits; the height goes to Flutter in points.
-  /// A page whose quotes show otherwise than the reader wants folds first, which measures again.
-  ///
-  /// Only content of a width of its own (a 600 or 900 px newsletter) fits by zooming out. Content
-  /// as wide as the view plus a share of it (a `width: 100.775%` table) or plus a fixed margin
-  /// widens with the view as the zoom shrinks, so it overflowed again after every step, and the
-  /// page shrank to the 30% floor, its text unreadable (MS-183). So a step that leaves the page
-  /// overflowing almost as much as before is undone, and the page keeps the last zoom that helped
-  /// (a few points of such content stay cut off at the right) until its width or fold changes.
-  /// A measurement taken before the last zoom applied (its CSS width is not the view's at this
-  /// zoom) is dropped: the zoom lays the page out again, which measures again.
-  fileprivate func measured(height: Double, width: Double, room: Double, quoted: Bool, open: Bool) {
+  /// The page's height in points goes to Flutter. A page whose quotes show otherwise than the
+  /// reader wants folds first, which measures again.
+  fileprivate func measured(height: Double, quoted: Bool, open: Bool) {
     self.quoted = quoted
     if quoted, open != self.open {
       fold(open: self.open)
       return
     }
-    if room > 0, width > room + 2, !settled {
-      guard abs(frame.width / room - pageZoom) <= pageZoom * 0.01 else { return }
-      let overflow = width / room
-      if let last = fitting, overflow - 1 > (last.overflow - 1) * 0.9 {
-        settled = true
-        if pageZoom != last.zoom {
-          pageZoom = last.zoom
-          return
-        }
-      } else {
-        fitting = (pageZoom, overflow)
-        let zoom = max(pageZoom / overflow, 0.3)
-        if zoom != pageZoom {
-          pageZoom = zoom
-          return
-        }
-      }
-    }
-    let points = (height * pageZoom).rounded(.up)
+    let points = height.rounded(.up)
     measuredWidth = frame.width
     if abs(points - self.height) >= 1 {
       self.height = points
@@ -389,14 +347,21 @@ final class MailHtmlView: WKWebView {
   }
 
   /// Applied over the mail's own styles, as the native reader's frames are: the document sizes to
-  /// its content, which the script reports on every change (layout, late images, zoom, the fold).
-  /// The view's height is the viewport's, so nothing may size from the viewport. In quirks mode
-  /// (mail without a doctype, as Outlook writes it) an `auto` height stretches `html` and `body` to
-  /// the viewport, and a `height: 100%` (mail layout tables) passes over auto-height blocks up to
-  /// it: the reported height then grows the view, which grows the page. Zoomed out, each pass came
-  /// back a fraction of a point taller and was rounded up, so the body grew a point a frame without
-  /// end (MS-78, MS-160). A `fit-content` height is not `auto`: neither stretches, and percentages
-  /// inside them resolve as auto, so the body ends where its content does in either mode.
+  /// its content, which the script reports on every change (layout, late images, the fold, a new
+  /// width). The view's height is the viewport's, so nothing may size from the viewport. In quirks
+  /// mode (mail without a doctype, as Outlook writes it) an `auto` height stretches `html` and
+  /// `body` to the viewport, and a `height: 100%` (mail layout tables) passes over auto-height
+  /// blocks up to it: the reported height then grows the view, which grows the page (MS-78,
+  /// MS-160). A `fit-content` height is not `auto`: neither stretches, and percentages inside them
+  /// resolve as auto, so the body ends where its content does in either mode.
+  ///
+  /// Mail wider than the view zooms out to fit, once per measurement, as the native reader's
+  /// frames do: `html` is pinned to a width in pixels, the view's or, for content that needs more
+  /// (a 600 or 900 px newsletter), its own minimum (`min-content`); the page is measured there and
+  /// `html` zoomed by the view's width over the content's. The zoom never changes the width the
+  /// page lays out at, so content as wide as the view plus a share of it (a `width: 100.775%`
+  /// table) zooms out by that share once, instead of widening with every step out down to the 30%
+  /// floor (MS-183). The height is measured zoomed.
   ///
   /// Quoted history (Gmail, Outlook, Thunderbird and Apple Mail markup: the outermost element
   /// matching, as `splitMailHtml` cuts it out for the other renderers) is hidden until the reader's
@@ -437,13 +402,27 @@ final class MailHtmlView: WKWebView {
     if (quoted) root.setAttribute('data-mailstream-folded', '');
     else quotes.forEach((quote) => quote.removeAttribute('data-mailstream-quote'));
     let pending = false;
+    const pin = (width) => root.style.setProperty('width', width, 'important');
+    const contentWidth = () => Math.max(root.scrollWidth, body ? body.scrollWidth : 0);
     const measure = () => {
       pending = false;
-      const width = Math.max(root.scrollWidth, body ? body.scrollWidth : 0);
+      const view = window.innerWidth;
+      root.style.zoom = '';
+      pin(view + 'px');
+      let width = contentWidth();
+      if (width > view + 1) {
+        pin('min-content');
+        pin(Math.max(view, root.offsetWidth) + 'px');
+        width = contentWidth();
+      }
+      const zoom = width > view + 1 ? Math.max(view / width, 0.3) : 1;
+      if (zoom !== 1) root.style.zoom = String(zoom);
+      // Zoomed text keeps WebKit's minimum font size, so a zoomed page is taller than its unzoomed
+      // height times the zoom: measure it zoomed (in the view's pixels).
       const box = (body || root).getBoundingClientRect();
       const margin = body ? parseFloat(getComputedStyle(body).marginBottom) || 0 : 0;
       window.webkit.messageHandlers.size.postMessage({
-        height: box.bottom + window.scrollY + margin, width, room: root.clientWidth,
+        height: box.bottom + window.scrollY + margin * zoom,
         quoted, open: !root.hasAttribute('data-mailstream-folded'),
       });
     };
@@ -453,6 +432,7 @@ final class MailHtmlView: WKWebView {
       requestAnimationFrame(measure);
     };
     new ResizeObserver(schedule).observe(body || root);
+    window.addEventListener('resize', schedule);
     window.mailstreamMeasure = schedule;
     window.mailstreamFold = (open) => {
       if (open) root.removeAttribute('data-mailstream-folded');
@@ -472,13 +452,9 @@ private final class Bridge: NSObject, WKNavigationDelegate, WKScriptMessageHandl
   private var loaded = false
 
   func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-    guard let size = message.body as? [String: Any],
-      let height = (size["height"] as? NSNumber)?.doubleValue,
-      let width = (size["width"] as? NSNumber)?.doubleValue,
-      let room = (size["room"] as? NSNumber)?.doubleValue
+    guard let size = message.body as? [String: Any], let height = (size["height"] as? NSNumber)?.doubleValue
     else { return }
-    view?.measured(
-      height: height, width: width, room: room, quoted: size["quoted"] as? Bool ?? false, open: size["open"] as? Bool ?? true)
+    view?.measured(height: height, quoted: size["quoted"] as? Bool ?? false, open: size["open"] as? Bool ?? true)
   }
 
   func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {

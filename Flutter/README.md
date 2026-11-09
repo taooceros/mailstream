@@ -311,20 +311,25 @@ and reports whether it found any with each height; the reader then shows the "â€
 the page, which opens the quotes in place (`fold`), with a rule at their left. Dark mode is the
 white card the reader draws around every HTML body, as before. Its `html` and `body` are as
 tall as their content (`height: fit-content`): in quirks mode an `auto` height stretched them to
-the view, so a zoomed-out page grew by a point with each height it reported, or kept a gap under
-the mail after the window was resized (MS-78, MS-160). Only content of a width of its own (a 600
-or 900 px newsletter) zooms out: content as wide as the view plus a share of it (a web editor's
-`width: 100.775%` table) widens with the view, so it overflowed after every step and the page
-shrank to the 30% floor, unreadable (MS-183). A step that leaves the page overflowing almost as
-much as before is undone, and the page keeps the last zoom that helped until its width or fold
-changes (a few points of such content stay cut off). `RunnerTests`' `MailHtmlZoomTests` check
-both in a real page (`xcodebuild test -workspace macos/Runner.xcworkspace -scheme Runner
+the view, so the page grew by a point with each height it reported, or kept a gap under the mail
+after the window was resized (MS-78, MS-160). A body wider than the column zooms out once per
+measurement, in the page's script, as the native reader's frames do: `html` is pinned to a width
+in pixels (the view's, or for content that needs more, such as a 600 or 900 px newsletter, its
+own minimum, `min-content`), measured there, and given a CSS `zoom` of the view's width over the
+content's (down to 30%); the height is measured zoomed (zoomed text keeps WebKit's minimum font
+size, so it is more than the unzoomed height times the zoom). The zoom never changes the
+width the page lays out at. It used to: the view's `pageZoom` widened the page, so content as
+wide as the view plus a share of it (a web editor's `width: 100.775%` table) overflowed again
+after every step out and the page shrank to the 30% floor, unreadable (MS-183); now such a page
+zooms out by that share once. `RunnerTests`' `MailHtmlZoomTests` check it in real pages
+(`xcodebuild test -workspace macos/Runner.xcworkspace -scheme Runner
 -only-testing:RunnerTests/MailHtmlZoomTests FLUTTER_TARGET=test/html_zoom_app.dart`, after a
 `flutter build macos --debug -t test/html_zoom_app.dart`, so the test host runs synthetic mail).
 For checks without private mail, run
 `MAILSTREAM_READER_RENDERER=webKit flutter run -d macos -t test/html_zoom_app.dart`: open each
 of its four synthetic mails, resize the window back and forth; the three 900 px ones stay fully
-visible and as tall as their content, and the one with a 100.775% table stays at full size.
+visible and as tall as their content, and the one with a 100.775% table stays readable at about
+full size, its whole table in view.
 `MAILSTREAM_READER_RENDERER=webKit flutter run -d
 macos -t test/html_webkit_app.dart` shows quotes that fold, an inline image (a synthetic PNG it
 writes to the inline cache's folder `f167â€¦`), a `srcset` image and a forward that is all quote.
