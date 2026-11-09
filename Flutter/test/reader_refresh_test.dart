@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:macos_ui/macos_ui.dart';
 import 'package:mailstream/mailstream.dart' as engine;
+import 'package:mailstream_ui/backend/models.dart';
 import 'package:mailstream_ui/state/mail_state.dart';
 import 'package:mailstream_ui/ui/design.dart';
 import 'package:mailstream_ui/ui/reader.dart';
@@ -12,10 +13,27 @@ void main() {
   late ReaderMail mail;
   late MailState state;
 
-  Future<void> start() async {
+  Future<void> start({List<engine.Conversation>? rows}) async {
     mail = ReaderMail();
+    if (rows != null) mail.rows = rows;
     state = MailState(mail);
     await state.start();
+  }
+
+  /// `a`, `b` and enough others to push loaded conversations out of the state's cache.
+  List<engine.Conversation> many() => [
+    conversation('a'),
+    conversation('b'),
+    for (var i = 0; i < 2 * MailState.keptThreads + 8; i++) conversation('c$i'),
+  ];
+
+  /// Prefetches [c] and answers its body request, as resting on its row does.
+  Future<ThreadEntry> prefetched(WidgetTester tester, Conversation c) async {
+    final entry = state.prefetch(c);
+    final index = mail.requests.lastIndexWhere((r) => r.id == c.id);
+    if (!mail.requests[index].answer.isCompleted) mail.answer(index, mail.rows.firstWhere((r) => r.id == c.id));
+    await tester.pump();
+    return entry;
   }
 
   Future<void> update(WidgetTester tester, List<engine.Conversation> rows) async {
@@ -167,5 +185,98 @@ void main() {
     mail.answer(2, revised);
     await tester.pump();
     expect(state.thread(state.opened!).error, isNull);
+  });
+
+  testWidgets('bodies past keptThreads drop out least recently used first; the open one stays', (tester) async {
+    await start(rows: many());
+    await openA(tester);
+    final a = state.thread(state.opened!);
+    final others = state.conversations.where((c) => c.id != 'a').toList();
+    final first = await prefetched(tester, others[0]);
+    final second = await prefetched(tester, others[1]);
+    for (final c in others.skip(2).take(MailState.keptThreads - 3)) {
+      await prefetched(tester, c);
+    }
+    // Opening or prefetching again counts as use: the second, not the first, is now the oldest
+    // after the open conversation.
+    expect(state.thread(others[0]), same(first));
+    await prefetched(tester, others[MailState.keptThreads - 1]);
+    final requests = mail.requests.length;
+    expect(state.thread(state.opened!), same(a), reason: 'the open conversation is never dropped');
+    expect(state.thread(others[0]), same(first));
+    expect(mail.requests.length, requests);
+    expect(state.thread(others[1]), isNot(same(second)), reason: 'the least recently used body was dropped');
+    expect(mail.requests.length, requests + 1);
+    expect(mail.requests.last.id, others[1].id);
+  });
+
+  testWidgets('a reader still drawing a conversation and a body still loading keep their entries', (tester) async {
+    await start(rows: many());
+    final b = state.conversations.firstWhere((c) => c.id == 'b');
+    final shown = await prefetched(tester, b);
+    // A reader fading out after its conversation closed still listens to its entry.
+    await tester.pumpWidget(MacosApp(
+      theme: MailTheme.macos(Brightness.light),
+      home: Reader(state: state, conversation: b),
+    ));
+    final loadingConversation = state.conversations.firstWhere((c) => c.id == 'c0');
+    final loading = state.prefetch(loadingConversation);
+    final loadingIndex = mail.requests.length - 1;
+    final others = state.conversations.where((c) => !{'a', 'b', 'c0'}.contains(c.id)).toList();
+    for (final c in others.take(MailState.keptThreads + 4)) {
+      await prefetched(tester, c);
+    }
+    final requests = mail.requests.length;
+    expect(state.thread(b), same(shown));
+    expect(state.thread(loadingConversation), same(loading));
+    expect(mail.requests.length, requests);
+    mail.answer(loadingIndex, mail.rows.firstWhere((r) => r.id == 'c0'));
+    await tester.pump();
+    expect(loading.messages, isNotNull, reason: 'a body loading while others were dropped still arrives');
+
+    // Once no reader draws it, it ages out like any other.
+    await tester.pumpWidget(const SizedBox());
+    for (final c in others.skip(MailState.keptThreads + 4).take(MailState.keptThreads)) {
+      await prefetched(tester, c);
+    }
+    expect(state.thread(b), isNot(same(shown)));
+    expect(mail.requests.last.id, 'b');
+  });
+
+  testWidgets('reopening a dropped conversation loads its bodies again and shows them', (tester) async {
+    await start(rows: many());
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(MacosApp(
+      theme: MailTheme.macos(Brightness.light),
+      home: ListenableBuilder(
+        listenable: state,
+        builder: (context, _) => switch (state.opened) {
+          final opened? => Reader(key: ValueKey(opened.id), state: state, conversation: opened),
+          null => const SizedBox(),
+        },
+      ),
+    ));
+    await openA(tester);
+    await tester.pump();
+    expect(find.textContaining('First message: keep'), findsOneWidget);
+    final dropped = state.thread(state.opened!);
+    final a = state.opened!;
+    state.close();
+    await tester.pump();
+
+    for (final c in state.conversations.where((c) => c.id != 'a').take(MailState.keptThreads)) {
+      await prefetched(tester, c);
+    }
+    state.open(a);
+    expect(state.thread(a), isNot(same(dropped)));
+    expect(mail.requests.last.id, 'a');
+    await tester.pump();
+    mail.answer(mail.requests.length - 1, mail.rows.first);
+    await tester.pump();
+    await tester.pump();
+    expect(find.textContaining('First message: keep'), findsOneWidget);
+    expect(state.thread(a).messages!.single.id, 'a-1');
+    await tester.pumpWidget(const SizedBox());
   });
 }

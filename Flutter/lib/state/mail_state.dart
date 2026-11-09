@@ -92,7 +92,16 @@ class ThreadEntry extends ChangeNotifier {
   List<MessageDetail>? messages;
   String? error;
 
-  void completed() => notifyListeners();
+  /// Set once `mail show` answered, with messages or an error.
+  bool loaded = false;
+
+  /// A reader draws it: it stays in [MailState]'s cache while one does.
+  bool get shown => hasListeners;
+
+  void completed() {
+    loaded = true;
+    notifyListeners();
+  }
 }
 
 /// A message for a snack bar; each one shows once. [action] adds a button to it, e.g. Undo.
@@ -257,7 +266,15 @@ class MailState extends ChangeNotifier {
   Toast? toast;
 
   final Map<String, ListEntry> _lists = {};
+
+  /// Loaded conversations, least recently opened or prefetched first. Past [keptThreads] the
+  /// oldest drop out: their HTML bodies weigh up to hundreds of KB each (MS-154), and the
+  /// engine's body cache serves them again on the next open.
   final Map<String, ThreadEntry> _threads = {};
+
+  /// Conversations whose bodies stay loaded beyond the ones shown or still loading, so going
+  /// back to recently read or prefetched ones opens them at once.
+  static const keptThreads = 32;
 
   /// Change events gathered for one re-read: the engine sends bursts while it syncs.
   Timer? _changes;
@@ -734,13 +751,20 @@ class MailState extends ChangeNotifier {
     return changed;
   }
 
-  /// Resting on a row loads its bodies. Valid entries survive navigation and unrelated changes.
-  ThreadEntry thread(Conversation conversation) => _threads[conversation.id] ?? _loadThread(conversation);
+  /// Resting on a row loads its bodies. Valid entries survive navigation and unrelated changes,
+  /// until [keptThreads] newer ones push them out.
+  ThreadEntry thread(Conversation conversation) {
+    final cached = _threads.remove(conversation.id);
+    if (cached == null) return _loadThread(conversation);
+    return _threads[conversation.id] = cached;
+  }
 
   ThreadEntry _loadThread(Conversation conversation, {List<MessageDetail>? previous}) {
     final id = conversation.id;
     final entry = ThreadEntry(conversation, messages: previous);
+    _threads.remove(id);
     _threads[id] = entry;
+    _trimThreads();
     entry.future = () async {
       try {
         final thread = await mail.show_(id: id, maxChars: 400000, html: true);
@@ -760,6 +784,20 @@ class MailState extends ChangeNotifier {
     }();
     entry.future.ignore();
     return entry;
+  }
+
+  /// Drops the least recently used entries past [keptThreads], except the open conversation's,
+  /// those a reader draws (one fading out included) and those still loading, whose answer
+  /// would otherwise be lost.
+  void _trimThreads() {
+    var excess = _threads.length - keptThreads;
+    if (excess <= 0) return;
+    final open = opened?.id;
+    _threads.removeWhere((id, entry) {
+      if (excess <= 0 || id == open || entry.shown || !entry.loaded) return false;
+      excess--;
+      return true;
+    });
   }
 
   ThreadEntry prefetch(Conversation conversation) => thread(conversation);

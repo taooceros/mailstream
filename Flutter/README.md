@@ -346,11 +346,17 @@ The open reader follows the normal conversation-list updates: a changed message 
 date refreshes that conversation's cached bodies and summary, without closing the pane or
 clearing the content while it loads. Unchanged threads (including flag/tag-only updates) keep
 their cached bodies. Body completions notify the reader alone, and superseded requests cannot
-replace a newer thread revision or change the selected conversation.
+replace a newer thread revision or change the selected conversation. The state keeps the bodies
+of the 32 most recently opened or prefetched conversations (`MailState.keptThreads`) plus the
+open one, any a reader still draws and any still loading; older ones are dropped and reopening
+one asks the engine again, whose body cache answers it.
 
 `flutter test test/reader_refresh_test.dart` covers live arrival in a mounted reader, valid
-cache reuse, lazy refresh after prefetch, overlapping answers, conversation switching and
-failed refreshes retaining the previous content.
+cache reuse, lazy refresh after prefetch, overlapping answers, conversation switching, failed
+refreshes retaining the previous content, and dropping old bodies and reopening them.
+`flutter build macos --profile -t test/memory_app.dart` builds the real shell over synthetic
+news mail that opens and closes 300 conversations and prints the Dart heap (from its own VM
+service, after a full collection) after loading, 100 and 300 opens and a minute idle.
 
 The frame rate meter (`flutter.showFrameRate`, off by default; Settings ▸ Performance or View ▸
 Show Frame Rate, ⌥⌘P) floats in the window's bottom leading corner above every sheet. It shows
