@@ -4,11 +4,13 @@ import FlutterMacOS
 import WebKit
 
 /// HTML mail bodies drawn by WebKit, the engine mail is written for, as Flutter `AppKitView`s of
-/// type `mailstream/html`. Each view takes `html` and its `owner` (account, conversation, message,
-/// part) as creation arguments and reports the height its content needs, so the reader sizes it
-/// to fit and scrolls it with the rest of the conversation. Every view talks over the one channel
-/// `mailstream/html`, its calls carrying the view id: Flutter keeps a channel it has listened on
-/// for good, so a channel per view added one with every body ever shown (MS-154).
+/// type `mailstream/html`. Each view takes `html` (the mail as the engine gave it), its `owner`
+/// (account, conversation, message, part), the inline cache's folder (`inlineCache`) and whether
+/// its quoted history is open (`open`) as creation arguments, and reports the height its content
+/// needs, so the reader sizes it to fit and scrolls it with the rest of the conversation. Every
+/// view talks over the one channel `mailstream/html`, its calls carrying the view id: Flutter
+/// keeps a channel it has listened on for good, so a channel per view added one with every body
+/// ever shown (MS-154).
 ///
 /// Creating a WebKit page and loading its HTML holds the main thread for 20–35 ms, a visible stall
 /// when a reader opens (MS-109). So each view is a light `MailHtmlHost` around a page: when the
@@ -30,13 +32,19 @@ import WebKit
     super.init()
     // Flutter asks once it listens, for the height at its width: a page measured before this
     // showing (or while Flutter was not listening yet) has already sent it. A view already gone
-    // has none.
+    // has none. `fold` opens or closes the page's quoted history.
     channel.setMethodCallHandler { [weak self] call, result in
       MainActor.assumeIsolated {
-        guard call.method == "height", let args = call.arguments as? [String: Any],
-          let view = (args["view"] as? NSNumber)?.int64Value
-        else { return result(FlutterMethodNotImplemented) }
-        result(self?.hosts[view]?.host?.height(forWidth: (args["width"] as? NSNumber)?.doubleValue))
+        guard call.method == "height" || call.method == "fold" else { return result(FlutterMethodNotImplemented) }
+        guard let args = call.arguments as? [String: Any], let view = (args["view"] as? NSNumber)?.int64Value,
+          let host = self?.hosts[view]?.host
+        else { return result(nil) }
+        if call.method == "fold" {
+          host.fold(open: args["open"] as? Bool ?? false)
+          result(nil)
+        } else {
+          result(host.height(forWidth: (args["width"] as? NSNumber)?.doubleValue))
+        }
       }
     }
   }
@@ -44,7 +52,8 @@ import WebKit
   func create(withViewIdentifier viewId: Int64, arguments args: Any?) -> NSView {
     let args = args as? [String: Any]
     let key = MailHtmlView.Key(owner: args?["owner"] as? [String] ?? [], html: args?["html"] as? String ?? "")
-    let page = idle.take(key) ?? MailHtmlView(key: key)
+    let page = idle.take(key) ?? MailHtmlView(key: key, inlineCache: args?["inlineCache"] as? String ?? "")
+    page.fold(open: args?["open"] as? Bool ?? false)
     let host = MailHtmlHost(id: viewId, page: page, channel: channel, idle: idle) { [weak self] in
       self?.hosts[viewId] = nil
     }
@@ -141,8 +150,13 @@ final class MailHtmlHost: NSView {
     page.height(forWidth: width)
   }
 
-  fileprivate func send(height: Double, version: Int) {
-    channel.invokeMethod("height", arguments: [id, height, version])
+  fileprivate func fold(open: Bool) {
+    page.fold(open: open)
+  }
+
+  /// The page's height, its number, and whether it has quoted history to fold.
+  fileprivate func send(height: Double, version: Int, quoted: Bool) {
+    channel.invokeMethod("height", arguments: [id, height, version, quoted])
   }
 
   isolated deinit {
@@ -165,11 +179,13 @@ enum MailLink {
   }
 }
 
-/// One body. The mail's own scripts never run; links open in the browser only through
-/// `MailLink`; nothing navigates the view. The page has no base URL, so it may read no local
-/// file: the reader hands over prepared HTML whose inline cache images are already data URLs,
-/// with a content policy allowing HTTPS and data resources only. Remote images load, without
-/// cookies. A body wider than the column (a fixed 600 px newsletter) zooms out to fit.
+/// One body: the mail's HTML as the engine gave it, under the content policy the reader puts at
+/// its start (`webKitDocument`), which allows HTTPS, data and `mscid:` resources only. The mail's
+/// own scripts never run; links open in the browser only through `MailLink`; nothing navigates
+/// the view. The page has no base URL, so it may read no local file: its inline images come from
+/// the engine's inline cache through `InlinePartHandler`. Remote images load, without cookies. A
+/// body wider than the column (a fixed 600 px newsletter) zooms out to fit. Quoted history folds
+/// inside the page, behind the reader's toggle (MS-167).
 final class MailHtmlView: WKWebView {
   /// What a page shows, for its whole life.
   struct Key: Equatable {
@@ -196,17 +212,25 @@ final class MailHtmlView: WKWebView {
   /// The host has not heard the height yet: the next measurement goes to it even if unchanged.
   private var owed = false
 
+  /// Whether the page found quoted history to fold, and whether the reader wants it open.
+  private var quoted = false
+  private var open = false
+
   /// WebKit ended the page's process; an idle page that lost it is not shown again.
   fileprivate(set) var terminated = false
 
-  init(key: Key) {
+  /// `inlineCache` is the folder of the engine's inline parts (`messages-v2`).
+  init(key: Key, inlineCache: String) {
     self.key = key
     let configuration = WKWebViewConfiguration()
     configuration.websiteDataStore = Self.store
     configuration.defaultWebpagePreferences.allowsContentJavaScript = false
     configuration.suppressesIncrementalRendering = true
+    if key.html.contains("\(InlinePartHandler.scheme)://") {
+      configuration.setURLSchemeHandler(InlinePartHandler(root: inlineCache), forURLScheme: InlinePartHandler.scheme)
+    }
     let content = configuration.userContentController
-    // The measuring script runs in the app's own world, which the mail's disabled scripts never reach.
+    // The page's script runs in the app's own world, which the mail's disabled scripts never reach.
     content.addUserScript(WKUserScript(source: Self.script, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
     content.add(bridge, contentWorld: .defaultClient, name: "size")
     super.init(frame: .zero, configuration: configuration)
@@ -270,15 +294,22 @@ final class MailHtmlView: WKWebView {
     return length > 0 && String(decoding: path.prefix(Int(length)), as: UTF8.self).hasSuffix("/com.apple.WebKit.WebContent")
   }
 
-  /// The last height and its number, if it was measured at this width; otherwise the next
-  /// measurement goes to the host.
+  /// The last height, its number and whether the page has quoted history, if it was measured at
+  /// this width; otherwise the next measurement goes to the host.
   fileprivate func height(forWidth width: Double?) -> [Any]? {
     guard let width, height >= 0, abs(measuredWidth - width) < 0.5 else {
       owed = true
       return nil
     }
     owed = false
-    return [Double(height), version]
+    return [Double(height), version, quoted]
+  }
+
+  /// Opens or closes the page's quoted history, which lays the page out and measures it again.
+  /// Before the page has found its quotes (still loading) the first measurement applies it.
+  fileprivate func fold(open: Bool) {
+    self.open = open
+    if quoted { evaluateJavaScript("mailstreamFold(\(open))", in: nil, in: .defaultClient) }
   }
 
   /// The conversation scrolls as a whole: wheel events go on to Flutter.
@@ -297,7 +328,13 @@ final class MailHtmlView: WKWebView {
   }
 
   /// Content wider than the view zooms out until it fits; the height goes to Flutter in points.
-  fileprivate func measured(height: Double, width: Double, room: Double) {
+  /// A page whose quotes show otherwise than the reader wants folds first, which measures again.
+  fileprivate func measured(height: Double, width: Double, room: Double, quoted: Bool, open: Bool) {
+    self.quoted = quoted
+    if quoted, open != self.open {
+      fold(open: self.open)
+      return
+    }
     if room > 0, width > room + 2 {
       pageZoom = max(pageZoom * room / width, 0.3)
       return  // The zoom lays the page out again, which measures again.
@@ -312,21 +349,26 @@ final class MailHtmlView: WKWebView {
     }
     guard let host else { return }
     owed = false
-    host.send(height: Double(self.height), version: version)
+    host.send(height: Double(self.height), version: version, quoted: quoted)
   }
 
   /// Applied over the mail's own styles, as the native reader's frames are: the document sizes to
-  /// its content, which the script reports on every change (layout, late images, zoom). The view's
-  /// height is the viewport's, so nothing may size from the viewport. In quirks mode (mail without
-  /// a doctype, as Outlook writes it) an `auto` height stretches `html` and `body` to the viewport,
-  /// and a `height: 100%` (mail layout tables) passes over auto-height blocks up to it: the
-  /// reported height then grows the view, which grows the page. Zoomed out, each pass came back a
-  /// fraction of a point taller and was rounded up, so the body grew a point a frame without end
-  /// (MS-78, MS-160). A `fit-content` height is not `auto`: neither stretches, and percentages
+  /// its content, which the script reports on every change (layout, late images, zoom, the fold).
+  /// The view's height is the viewport's, so nothing may size from the viewport. In quirks mode
+  /// (mail without a doctype, as Outlook writes it) an `auto` height stretches `html` and `body` to
+  /// the viewport, and a `height: 100%` (mail layout tables) passes over auto-height blocks up to
+  /// it: the reported height then grows the view, which grows the page. Zoomed out, each pass came
+  /// back a fraction of a point taller and was rounded up, so the body grew a point a frame without
+  /// end (MS-78, MS-160). A `fit-content` height is not `auto`: neither stretches, and percentages
   /// inside them resolve as auto, so the body ends where its content does in either mode.
+  ///
+  /// Quoted history (Gmail, Outlook, Thunderbird and Apple Mail markup: the outermost element
+  /// matching, as `splitMailHtml` cuts it out for the other renderers) is hidden until the reader's
+  /// toggle opens it (`mailstreamFold`), then shows in place with a rule at its left. Mail that is
+  /// nothing but quotes (no text or image outside them) shows whole, with no toggle.
   private static let script = """
   (() => {
-    const doc = document, root = doc.documentElement;
+    const doc = document, root = doc.documentElement, body = doc.body;
     const style = doc.createElement('style');
     style.textContent = `
       html, body { height: fit-content !important; min-height: 0 !important; overflow: hidden !important; }
@@ -334,17 +376,39 @@ final class MailHtmlView: WKWebView {
         overflow-wrap: break-word; }
       img { max-width: 100%; }
       pre { white-space: pre-wrap; }
+      html[data-mailstream-folded] [data-mailstream-quote] { display: none !important; }
+      [data-mailstream-quote] { border-left: 2px solid rgba(0, 0, 0, 0.1); padding-left: 12px; }
     `;
     (doc.head || root).appendChild(style);
+    const quotes = [];
+    const isQuote = (el) => el.classList.contains('gmail_quote') || el.classList.contains('gmail_quote_container')
+      || el.classList.contains('moz-cite-prefix') || el.id === 'divRplyFwdMsg' || el.id === 'appendonsend'
+      || (el.localName === 'blockquote' && el.getAttribute('type') === 'cite');
+    const collect = (el) => {
+      for (const child of el.children) isQuote(child) ? quotes.push(child) : collect(child);
+    };
+    if (body) collect(body);
+    quotes.forEach((quote) => quote.setAttribute('data-mailstream-quote', ''));
+    const outside = (node) => !(node.nodeType === 1 ? node : node.parentElement).closest('[data-mailstream-quote]');
+    const kept = () => {
+      const texts = doc.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+      for (let text = texts.nextNode(); text; text = texts.nextNode()) {
+        if (text.data.trim() && outside(text)) return true;
+      }
+      return Array.from(body.querySelectorAll('img')).some(outside);
+    };
+    const quoted = quotes.length > 0 && kept();
+    if (quoted) root.setAttribute('data-mailstream-folded', '');
+    else quotes.forEach((quote) => quote.removeAttribute('data-mailstream-quote'));
     let pending = false;
     const measure = () => {
       pending = false;
-      const body = doc.body;
       const width = Math.max(root.scrollWidth, body ? body.scrollWidth : 0);
       const box = (body || root).getBoundingClientRect();
       const margin = body ? parseFloat(getComputedStyle(body).marginBottom) || 0 : 0;
       window.webkit.messageHandlers.size.postMessage({
         height: box.bottom + window.scrollY + margin, width, room: root.clientWidth,
+        quoted, open: !root.hasAttribute('data-mailstream-folded'),
       });
     };
     const schedule = () => {
@@ -352,8 +416,13 @@ final class MailHtmlView: WKWebView {
       pending = true;
       requestAnimationFrame(measure);
     };
-    new ResizeObserver(schedule).observe(doc.body || root);
+    new ResizeObserver(schedule).observe(body || root);
     window.mailstreamMeasure = schedule;
+    window.mailstreamFold = (open) => {
+      if (open) root.removeAttribute('data-mailstream-folded');
+      else root.setAttribute('data-mailstream-folded', '');
+      schedule();
+    };
     doc.querySelectorAll('img').forEach((img) => img.addEventListener('load', schedule));
     measure();
   })();
@@ -372,7 +441,8 @@ private final class Bridge: NSObject, WKNavigationDelegate, WKScriptMessageHandl
       let width = (size["width"] as? NSNumber)?.doubleValue,
       let room = (size["room"] as? NSNumber)?.doubleValue
     else { return }
-    view?.measured(height: height, width: width, room: room)
+    view?.measured(
+      height: height, width: width, room: room, quoted: size["quoted"] as? Bool ?? false, open: size["open"] as? Bool ?? true)
   }
 
   func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
@@ -395,5 +465,66 @@ private final class Bridge: NSObject, WKNavigationDelegate, WKScriptMessageHandl
       if initial { loaded = true }
       decisionHandler(initial ? .allow : .cancel)
     }
+  }
+}
+
+/// Serves a body's inline images at `mscid://<message-key>/<stored-name>`, the addresses the
+/// reader gives the engine's inline cache files (`webKitDocument`), as the native reader's
+/// `PartSchemeHandler` does. Only a file whose canonical path is inside the inline cache, at most
+/// 20 MB, whose bytes are PNG, JPEG, GIF or WebP, the rule HyperRender's preparation reads them by
+/// (`cachedImageData`). Files are read off the main thread; a task WebKit stopped meanwhile is
+/// never answered.
+@MainActor private final class InlinePartHandler: NSObject, WKURLSchemeHandler {
+  static let scheme = "mscid"
+  private nonisolated static let limit = 20 << 20
+
+  /// The inline cache's canonical folder; nil serves nothing.
+  private let root: URL?
+  /// Tasks started and not yet stopped or answered.
+  private var active = Set<ObjectIdentifier>()
+
+  init(root: String) {
+    self.root = root.isEmpty ? nil : URL(fileURLWithPath: root, isDirectory: true).resolvingSymlinksInPath()
+  }
+
+  func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
+    let name = task.request.url.map { String($0.path.drop(while: { $0 == "/" })) } ?? ""
+    guard let root, let url = task.request.url, let key = url.host, !key.isEmpty, key.allSatisfy(\.isHexDigit),
+      !name.isEmpty, !name.contains("/"), !name.hasPrefix(".")
+    else { return task.didFailWithError(URLError(.fileDoesNotExist)) }
+    let file = root.appendingPathComponent(key, isDirectory: true).appendingPathComponent(name)
+    let id = ObjectIdentifier(task)
+    active.insert(id)
+    Task {
+      let image = await Self.read(file, inside: root)
+      guard active.remove(id) != nil else { return }
+      guard let (data, mime) = image else { return task.didFailWithError(URLError(.fileDoesNotExist)) }
+      task.didReceive(URLResponse(url: url, mimeType: mime, expectedContentLength: data.count, textEncodingName: nil))
+      task.didReceive(data)
+      task.didFinish()
+    }
+  }
+
+  func webView(_ webView: WKWebView, stop task: any WKURLSchemeTask) {
+    active.remove(ObjectIdentifier(task))
+  }
+
+  private nonisolated static func read(_ file: URL, inside root: URL) async -> (Data, String)? {
+    let canonical = file.resolvingSymlinksInPath()
+    guard canonical.path.hasPrefix(root.path + "/"),
+      let size = (try? FileManager.default.attributesOfItem(atPath: canonical.path))?[.size] as? NSNumber,
+      size.intValue <= limit, let data = try? Data(contentsOf: canonical), let mime = rasterMime(data)
+    else { return nil }
+    return (data, mime)
+  }
+
+  /// The MIME type the bytes are, not the one the file's name claims.
+  private nonisolated static func rasterMime(_ data: Data) -> String? {
+    let b = [UInt8](data.prefix(12))
+    if b.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) { return "image/png" }
+    if b.starts(with: [0xFF, 0xD8, 0xFF]) { return "image/jpeg" }
+    if b.starts(with: Array("GIF8".utf8)) { return "image/gif" }
+    if b.count >= 12, b.starts(with: Array("RIFF".utf8)), Array(b[8..<12]) == Array("WEBP".utf8) { return "image/webp" }
+    return nil
   }
 }

@@ -188,9 +188,9 @@ void main() {
       expect(renderer.value, ReaderRenderer.webKit);
       expect(find.text('WebView (original)'), findsOneWidget);
       expect(find.byType(HyperBody), findsNothing);
-      const meta = '<meta http-equiv="Content-Security-Policy" content="$webKitContentPolicy">';
-      // The quote is still open: both parts are on screen, each under the content policy.
-      expect(webDocuments(tester), ['<!DOCTYPE html>$meta<p>main</p>', '$meta<p>history</p>']);
+      // The WebKit page holds the mail as it came, one page with its quote open in it.
+      expect(webDocuments(tester), [webKitDocument('mail')]);
+      expect(tester.widget<AppKitView>(find.byType(AppKitView)).creationParams, containsPair('open', true));
 
       await choose(tester, ReaderRenderer.blitz);
       expect(renderer.value, ReaderRenderer.blitz);

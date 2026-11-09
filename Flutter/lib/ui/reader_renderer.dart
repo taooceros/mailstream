@@ -22,6 +22,11 @@ enum ReaderRenderer {
   /// bench can open the reader in a given renderer; [initial] when unset or unknown.
   static ReaderRenderer fromName(String? name) =>
       values.firstWhere((r) => r.name.toLowerCase() == name?.toLowerCase(), orElse: () => initial);
+
+  /// Whether bodies it draws need the reader's prepared parts (`HtmlPartsCache`): the Mac's
+  /// WebKit loads the mail as the engine gave it and folds quotes in the page (MS-167); Windows'
+  /// WebView2 draws the split parts whatever the switch says.
+  bool get preparesHtml => !Host.mac || this != webKit;
 }
 
 /// The Mac reader's renderer, kept in memory: every launch starts in Blitz, and a choice
@@ -35,6 +40,10 @@ class ReaderRendererScope extends InheritedNotifier<ValueNotifier<ReaderRenderer
       context.dependOnInheritedWidgetOfExactType<ReaderRendererScope>()?.notifier;
 
   static ReaderRenderer current(BuildContext context) => maybeOf(context)?.value ?? ReaderRenderer.initial;
+
+  /// [current] for a callback: [context] does not rebuild when the renderer changes.
+  static ReaderRenderer read(BuildContext context) =>
+      context.getInheritedWidgetOfExactType<ReaderRendererScope>()?.notifier?.value ?? ReaderRenderer.initial;
 }
 
 /// The three-way switch in the reader's header, labelled with the renderer in use.

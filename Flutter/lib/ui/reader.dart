@@ -56,10 +56,11 @@ class Reader extends StatefulWidget {
   }
 
   /// Loads [c]'s messages ahead of opening it (a pointer resting on its row, a keyboard step)
-  /// and splits the HTML its reader opens with behind any open reader's, so opening it draws
-  /// the bodies at once.
-  static void prefetch(MailState state, Conversation c, {HtmlPartsCache? partsCache}) {
+  /// and, when the renderer in use draws prepared parts ([prepare]), splits the HTML its reader
+  /// opens with behind any open reader's, so opening it draws the bodies at once.
+  static void prefetch(MailState state, Conversation c, {required bool prepare, HtmlPartsCache? partsCache}) {
     final entry = state.prefetch(c);
+    if (!prepare) return;
     entry.future.then((messages) {
       // A newer load replaced this one: it warms its own messages when prefetched.
       if (identical(entry.messages, messages)) (partsCache ?? HtmlPartsCache.shared).warm(openingHtml(c, messages));
@@ -479,11 +480,12 @@ class _Body extends StatelessWidget {
 
 /// An HTML body at the height of its content. On the Mac the reader's switch picks the renderer
 /// ([ReaderRendererScope]): Blitz ([BlitzBody], laid out and painted in Rust) by default, WebKit
-/// (`MailHtmlView` in the runner), or the experimental HyperRender ([HyperBody], MS-171); all draw
-/// the same prepared parts, only the chosen one is mounted, and switching keeps the parts and the
-/// fold. Windows draws with WebView2 ([WindowsMailHtml]).
-/// Quoted history (Gmail, Outlook, Thunderbird, Apple Mail markup) is cut out of the body and
-/// folds behind a toggle, drawn when it opens.
+/// (`MailHtmlView` in the runner), or the experimental HyperRender ([HyperBody], MS-171). Blitz
+/// and HyperRender draw the same prepared parts; WebKit loads the mail as the engine gave it
+/// ([webKitDocument]) and folds its quotes in the page (MS-167). Only the chosen one is mounted,
+/// and switching keeps the parts and the fold. Windows draws the split parts with WebView2
+/// ([WindowsMailHtml]). Quoted history (Gmail, Outlook, Thunderbird, Apple Mail markup) is cut
+/// out of the body (or hidden in the WebKit page) and folds behind a toggle.
 class MailHtml extends StatefulWidget {
   const MailHtml({super.key, required this.owner, required this.html, required this.onOpenLink, this.partsCache});
 
@@ -508,22 +510,39 @@ class _MailHtmlState extends State<MailHtml> {
   HtmlParts? _parts;
   Object? _error;
 
-  /// The split this body waits for, released when it goes or shows other HTML so queued work
-  /// for mail no longer shown is skipped.
+  /// The HTML [_parts] were prepared from.
+  String? _partsHtml;
+
+  /// The HTML the parts last asked for are (or will be) prepared from.
+  String? _wanted;
+
+  /// The split this body waits for, released when it goes, shows other HTML or the WebKit body
+  /// takes over, so queued work for mail no longer shown is skipped.
   HtmlPartsRequest? _pending;
+
+  /// The WebKit body draws the HTML as it came: no parts.
+  bool _raw = false;
+
+  /// Whether the quoted history is open, whichever renderer draws it.
+  bool _open = false;
+
+  /// The HTML whose WebKit page found quoted history to fold.
+  String? _quotedPage;
 
   HtmlPartsCache get _cache => widget.partsCache ?? HtmlPartsCache.shared;
 
   @override
-  void initState() {
-    super.initState();
-    _prepare();
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _raw = !ReaderRendererScope.current(context).preparesHtml;
+    _sync();
   }
 
   @override
   void didUpdateWidget(MailHtml old) {
     super.didUpdateWidget(old);
-    if (old.html != widget.html || old.partsCache != widget.partsCache) _prepare();
+    if (old.partsCache != widget.partsCache) _wanted = null;
+    _sync();
   }
 
   @override
@@ -532,14 +551,26 @@ class _MailHtmlState extends State<MailHtml> {
     super.dispose();
   }
 
+  /// Asks for the parts of the HTML shown, unless the WebKit body draws it as it came.
+  void _sync() {
+    if (!_raw) {
+      if (_wanted != widget.html) _prepare();
+    } else if (_pending case final pending?) {
+      pending.release();
+      _pending = null;
+      _wanted = _partsHtml;
+    }
+  }
+
   void _prepare() {
     _pending?.release();
     _pending = null;
-    final html = widget.html;
+    final html = _wanted = widget.html;
     _error = null;
     final cached = _cache.peek(html);
     if (cached != null) {
       _parts = cached;
+      _partsHtml = html;
       return;
     }
     // A refresh keeps this message's mounted body/fold until its replacement is ready.
@@ -548,7 +579,10 @@ class _MailHtmlState extends State<MailHtml> {
     pending.parts.then((parts) {
       if (!mounted || !identical(pending, _pending)) return;
       _pending = null;
-      setState(() => _parts = parts);
+      setState(() {
+        _parts = parts;
+        _partsHtml = html;
+      });
     }, onError: (Object error, StackTrace stack) {
       if (!mounted || !identical(pending, _pending)) return;
       _pending = null;
@@ -557,41 +591,62 @@ class _MailHtmlState extends State<MailHtml> {
     });
   }
 
+  void _toggle() => setState(() => _open = !_open);
+
   @override
   Widget build(BuildContext context) {
+    final renderer = ReaderRendererScope.current(context);
+    if (_raw) {
+      final html = widget.html;
+      final owner = widget.owner;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _WebBody(
+            key: ValueKey(html),
+            owner: [owner.account, owner.conversation, owner.message],
+            html: html,
+            open: _open,
+            onQuoted: (quoted) => setState(() => _quotedPage = quoted ? html : null),
+          ),
+          if (_quotedPage == html) Align(alignment: Alignment.topLeft, child: _FoldToggle(open: _open, onTap: _toggle)),
+        ],
+      );
+    }
     final parts = _parts;
     if (parts == null) {
       if (_error != null) return Text('Could not prepare HTML: $_error', style: context.text.body);
       return const SizedBox(height: 40, child: Center(child: Spinner()));
     }
     final (main, quoted) = parts;
-    final owner = widget.owner;
-    List<String> part(String name) => [owner.account, owner.conversation, owner.message, name];
-    final renderer = ReaderRendererScope.current(context);
-    Widget view(String html, String name) => !Host.mac
+    Widget view(String html) => !Host.mac
         ? WindowsMailHtml(key: ValueKey(html), html: html, onOpenLink: widget.onOpenLink)
-        : switch (renderer) {
-            ReaderRenderer.hyper => HyperBody(key: ValueKey(html), html: html),
-            ReaderRenderer.blitz => BlitzBody(key: ValueKey(html), html: html),
-            ReaderRenderer.webKit => _WebBody(key: ValueKey(html), owner: part(name), html: html),
-          };
+        : renderer == ReaderRenderer.hyper
+        ? HyperBody(key: ValueKey(html), html: html)
+        : BlitzBody(key: ValueKey(html), html: html);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        view(main, 'body'),
-        if (quoted != null) _Fold(child: view(quoted, 'quote')),
+        view(main),
+        if (quoted != null) _Fold(open: _open, onToggle: _toggle, child: view(quoted)),
       ],
     );
   }
 }
 
-/// One WebKit view, as tall as the page it holds says it is, under [webKitContentPolicy].
+/// One WebKit view of a whole mail, as tall as the page it holds says it is, under
+/// [webKitContentPolicy]. Its quoted history, if the page finds any ([onQuoted]), shows when
+/// [open].
 class _WebBody extends StatefulWidget {
-  const _WebBody({super.key, required this.owner, required this.html});
+  const _WebBody({super.key, required this.owner, required this.html, required this.open, required this.onQuoted});
 
-  /// Account, conversation, message and part (body or quote).
+  /// Account, conversation and message.
   final List<String> owner;
   final String html;
+  final bool open;
+
+  /// Whether the page has quoted history to fold, each time that changes.
+  final ValueChanged<bool> onQuoted;
 
   @override
   State<_WebBody> createState() => _WebBodyState();
@@ -613,7 +668,7 @@ class _WebBodyState extends State<_WebBody> {
 
   static Future<void> _receive(MethodCall call) async {
     final arguments = call.arguments;
-    if (call.method != 'height' || arguments is! List || arguments.length != 3) return;
+    if (call.method != 'height' || arguments is! List || arguments.length < 3) return;
     final [view, ...height] = arguments;
     final body = _bodies[view];
     if (body != null) {
@@ -631,6 +686,9 @@ class _WebBodyState extends State<_WebBody> {
   /// The number of the height shown: the page numbers its heights, so an older one arriving late
   /// is dropped.
   int _version = 0;
+
+  /// What the page last said about its quoted history.
+  bool _quoted = false;
 
   /// The body's key is its HTML, so the document is fixed for this state's lifetime.
   late final _document = webKitDocument(widget.html);
@@ -653,12 +711,22 @@ class _WebBodyState extends State<_WebBody> {
     });
   }
 
+  /// The page's height, its number and whether it has quoted history.
   void _measured(Object? height) {
-    if (!mounted || height is! List || height.length != 2) return;
+    if (!mounted || height is! List || height.length < 2) return;
     final version = height[1] as int;
     if (version <= _version) return;
     _version = version;
     setState(() => _height = (height[0] as num).toDouble());
+    final quoted = height.length > 2 && height[2] == true;
+    if (quoted != _quoted) widget.onQuoted(_quoted = quoted);
+  }
+
+  @override
+  void didUpdateWidget(_WebBody old) {
+    super.didUpdateWidget(old);
+    // The view can go before it answers.
+    if (old.open != widget.open && _view != null) _channel.invokeMethod<void>('fold', {'view': _view, 'open': widget.open}).ignore();
   }
 
   @override
@@ -672,7 +740,7 @@ class _WebBodyState extends State<_WebBody> {
     height: _height,
     child: AppKitView(
       viewType: 'mailstream/html',
-      creationParams: {'owner': widget.owner, 'html': _document},
+      creationParams: {'owner': widget.owner, 'html': _document, 'inlineCache': inlineCacheRoot, 'open': widget.open},
       creationParamsCodec: const StandardMessageCodec(),
       onPlatformViewCreated: _created,
     ),
@@ -738,11 +806,15 @@ class FoldedText extends StatelessWidget {
   }
 }
 
-/// Folded content behind a small tonal "more" button.
+/// Folded content behind a small tonal "more" button ([_FoldToggle]). Open while [open] says so
+/// when given (its owner keeps the state, as an HTML body does across renderers), otherwise by
+/// its own taps.
 class _Fold extends StatefulWidget {
-  const _Fold({required this.child});
+  const _Fold({required this.child, this.open, this.onToggle});
 
   final Widget child;
+  final bool? open;
+  final VoidCallback? onToggle;
 
   @override
   State<_Fold> createState() => _FoldState();
@@ -753,7 +825,7 @@ class _FoldState extends State<_Fold> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.colors;
+    final open = widget.open ?? _open;
     return AnimatedSize(
       duration: Motion.enter,
       curve: Motion.curve,
@@ -761,25 +833,39 @@ class _FoldState extends State<_Fold> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: MacosTooltip(
-              message: _open ? 'Hide quoted text' : 'Show quoted text',
-              child: Hoverable(
-                onTap: () => setState(() => _open = !_open),
-                selected: true,
-                selectedColor: colors.strongFill,
-                child: SizedBox(width: 32, height: 18, child: Icon(CupertinoIcons.ellipsis, size: 14, color: colors.secondaryLabel)),
-              ),
-            ),
-          ),
-          if (_open)
+          _FoldToggle(open: open, onTap: widget.onToggle ?? () => setState(() => _open = !_open)),
+          if (open)
             Container(
               padding: const EdgeInsets.only(left: 12),
-              decoration: BoxDecoration(border: Border(left: BorderSide(color: colors.separator, width: 2))),
+              decoration: BoxDecoration(border: Border(left: BorderSide(color: context.colors.separator, width: 2))),
               child: widget.child,
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// The "more" button that opens and closes quoted history.
+class _FoldToggle extends StatelessWidget {
+  const _FoldToggle({required this.open, required this.onTap});
+
+  final bool open;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: MacosTooltip(
+        message: open ? 'Hide quoted text' : 'Show quoted text',
+        child: Hoverable(
+          onTap: onTap,
+          selected: true,
+          selectedColor: colors.strongFill,
+          child: SizedBox(width: 32, height: 18, child: Icon(CupertinoIcons.ellipsis, size: 14, color: colors.secondaryLabel)),
+        ),
       ),
     );
   }

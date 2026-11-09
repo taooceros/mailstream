@@ -60,18 +60,28 @@ bool isMailLink(String source) {
   return uri != null && {'https', 'http', 'mailto'}.contains(uri.scheme.toLowerCase()) && uri.userInfo.isEmpty && (uri.scheme == 'mailto' || uri.host.isNotEmpty);
 }
 
-/// The policy WebKit applies to a body: the same resources HyperRender may use
-/// (HTTPS and data images, styles and fonts), nothing else. Inline cache images are data URLs by
-/// then, so no `file:` source is needed; mail scripts stay disabled in the view's configuration.
-const webKitContentPolicy = "default-src 'none'; img-src https: data:; style-src 'unsafe-inline' https:; "
+/// The policy WebKit applies to a body: HTTPS and data images, styles and fonts, and the inline
+/// images the runner serves at `mscid:` (`InlinePartHandler` in `MailHtmlView.swift`), nothing
+/// else. No `file:` source; mail scripts stay disabled in the view's configuration.
+const webKitContentPolicy = "default-src 'none'; img-src https: data: mscid:; style-src 'unsafe-inline' https:; "
     "font-src https: data:; base-uri 'none'; form-action 'none'";
 
-final _webKitPrologue = RegExp(r'^(?:\s|<!--[\s\S]*?-->)*<!doctype[^>]*>', caseSensitive: false);
+/// What may come before a doctype without putting the page in quirks mode: a byte-order mark,
+/// white space, comments and the `<?xml …?>` line XHTML mail starts with (a bogus comment to HTML).
+final _webKitPrologue = RegExp(r'^(?:\s|\uFEFF|<!--[\s\S]*?-->|<\?[^>]*>)*<!doctype[^>]*>', caseSensitive: false);
 
-/// [html] with [webKitContentPolicy] ahead of everything but a leading doctype: the parser puts
-/// the meta into the (implied) head, and a standards-mode body is not laid out in quirks mode.
+/// The engine's `file:` URL of the inline cache, as it writes the folder of each message's inline
+/// parts (`MailCache::message_directory_url`: the path percent-encoded as `URL` paths are).
+final inlineCacheUrl = Uri.directory(inlineCacheRoot).toString();
+
+/// The page a WebKit body loads: the mail exactly as the engine gave it, with two string edits
+/// and no parsing (MS-167). Its inline cache images are addressed at `mscid://<message>/<part>`,
+/// which the runner serves, instead of the `file:` URLs the engine writes (a page may read no
+/// file); [webKitContentPolicy] goes ahead of everything but a leading doctype, so the parser puts
+/// it into the (implied) head and a standards-mode body is not laid out in quirks mode.
 String webKitDocument(String html) {
   const meta = '<meta http-equiv="Content-Security-Policy" content="$webKitContentPolicy">';
+  if (html.contains('file:')) html = html.replaceAll(inlineCacheUrl, 'mscid://');
   final at = _webKitPrologue.firstMatch(html)?.end ?? 0;
   return '${html.substring(0, at)}$meta${html.substring(at)}';
 }

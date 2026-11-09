@@ -14,9 +14,10 @@ typedef HtmlParts = (String main, String? quoted);
 Future<HtmlParts> splitMailHtmlInBackground(String html) =>
     Isolate.run(() => splitMailHtml(html), debugName: 'mail-html');
 
-/// The Mac reader's preparation, shared by both its renderers: inline cache images become data
-/// URLs, unsafe sources go, presentational attributes get `data-ms-*` copies, then quotes are
-/// split. Windows' WebView2 bodies get the plain split.
+/// The Mac reader's preparation for HyperRender and Blitz: inline cache images become data URLs,
+/// unsafe sources go, presentational attributes get `data-ms-*` copies, then quotes are split.
+/// The WebKit body takes the mail as it came (`webKitDocument`, MS-167). Windows' WebView2 bodies
+/// get the plain split.
 Future<HtmlParts> prepareMailHtmlInBackground(String html) =>
     Isolate.run(() async => splitMailHtml(await prepareHyperResources(html)), debugName: 'mail-html');
 

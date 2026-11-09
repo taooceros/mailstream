@@ -276,39 +276,52 @@ the width makes them cells again (MS-165). In the same test mail, at a reader na
 points the "Other rentals" card stacks its picture over its text. Known Blitz gap: an image URL
 Blitz can't resolve (`<img src="http://">`) leaves that body blank.
 
-Preparation (`prepareHyperResources` in `lib/ui/hyper_resources.dart`) is the one resource
-policy for both: inline parts (`file://` copies under Mailstream's `messages-v2` cache, canonical
-paths only, raster bytes checked) become data URLs, images that are not HTTPS or raster data are
-removed, and `align`/`valign`/`bgcolor`/`border`/`cellpadding` get `data-ms-*` copies that
-HyperRender's sanitizer keeps. Prepared and split HTML is written back with the doctype the mail
-wrote (`documentHtml`): package:html drops a doctype's PUBLIC/SYSTEM keyword, which put XHTML and
-HTML 4 newsletters into quirks mode in the WebView (MS-160). `lib/ui/hyper_table.dart` lays mail
+Preparation (`prepareHyperResources` in `lib/ui/hyper_resources.dart`) is the resource policy
+for HyperRender and Blitz: inline parts (`file://` copies under Mailstream's `messages-v2` cache,
+canonical paths only, raster bytes checked) become data URLs, images that are not HTTPS or raster
+data are removed, and `align`/`valign`/`bgcolor`/`border`/`cellpadding` get `data-ms-*` copies
+that HyperRender's sanitizer keeps. Prepared and split HTML is written back with the doctype the
+mail wrote (`documentHtml`): package:html drops a doctype's PUBLIC/SYSTEM keyword, which put
+XHTML and HTML 4 newsletters into quirks mode (MS-160). `lib/ui/hyper_table.dart` lays mail
 tables out as mail clients do: no grid unless `border="1"`, widths fit the reading column.
 HyperRender's core is vendored in `third_party/hyper_render_core` with one change: the image
 widget builder reaches table cells.
-Links open through the runner's `MailLink` (HTTP(S) with a host, or mailto), in either renderer.
+Links open through the runner's `MailLink` (HTTP(S) with a host, or mailto), in every renderer.
 
-The WebView is `macos/Runner/MailHtmlView.swift`, a platform view (`mailstream/html`) that runs
-none of the mail's scripts, loads the page without a base URL under a content policy allowing
-HTTPS and data resources only, allows only its own first load (no redirects, frames or meta
-refreshes), loads remote images without cookies, zooms out a body wider than the column, and
-reports its content height so the body scrolls with the conversation. Every view talks over the
-one channel `mailstream/html`, its calls carrying the view id (a channel per view stayed
-registered in the engine after the view went, MS-154). Its `html` and `body` are as tall as
-their content (`height: fit-content`): in quirks mode an `auto` height stretched them to the
-view, so a zoomed-out page grew by a point with each height it reported, or kept a gap under the
-mail after the window was resized (MS-78, MS-160). For checks without private mail, run
+The WebView is `macos/Runner/MailHtmlView.swift`, a platform view (`mailstream/html`). It gets
+the mail as the engine gave it, not the prepared parts (MS-167): `webKitDocument` makes two
+string edits and parses nothing. It puts a content policy (HTTPS, data and `mscid:` resources
+only) ahead of everything but a leading doctype, and readdresses the inline cache's `file://`
+folder URL to `mscid://<message>/<part>`, which the page's `InlinePartHandler` serves: only
+canonical files inside the inline cache, at most 20 MB, whose bytes are PNG, JPEG, GIF or WebP
+(the rule preparation reads them by). So the page keeps the mail's doctype, Outlook's
+conditional comments and `srcset`; an http image or an unresolved `cid:` stays blocked by the
+policy instead of being removed. The view runs none of the mail's scripts, has no base URL,
+allows only its own first load (no redirects, frames or meta refreshes), loads remote images
+without cookies, zooms out a body wider than the column, and reports its content height so the
+body scrolls with the conversation. Every view talks over the one channel `mailstream/html`, its
+calls carrying the view id (a channel per view stayed registered in the engine after the view
+went, MS-154). The app's script in the page hides quoted history (the same Gmail, Outlook,
+Thunderbird and Apple Mail markup the split cuts out, mail that is nothing but quotes shown whole)
+and reports whether it found any with each height; the reader then shows the "…" toggle under
+the page, which opens the quotes in place (`fold`), with a rule at their left. Dark mode is the
+white card the reader draws around every HTML body, as before. Its `html` and `body` are as
+tall as their content (`height: fit-content`): in quirks mode an `auto` height stretched them to
+the view, so a zoomed-out page grew by a point with each height it reported, or kept a gap under
+the mail after the window was resized (MS-78, MS-160). For checks without private mail, run
 `MAILSTREAM_READER_RENDERER=webKit flutter run -d macos -t test/html_zoom_app.dart`: open each
 of its three synthetic mails, 900 px wide, and resize the window back and forth; each body stays
-fully visible and as tall as its content.
+fully visible and as tall as its content. `MAILSTREAM_READER_RENDERER=webKit flutter run -d
+macos -t test/html_webkit_app.dart` shows quotes that fold, an inline image (a synthetic PNG it
+writes to the inline cache's folder `f167…`), a `srcset` image and a forward that is all quote.
 
 Creating a WebKit page and loading its HTML holds the main thread for 20–35 ms, so each platform
-view is a light host around a page (MS-109). When a reader or fold closes, its page waits idle and
-is shown again only for the same account, conversation, message, part (body or quote) and full
-HTML; a page never loads other HTML and is never taken from a host still showing it. Heights
-carry a per-page number, and the Dart view asks for the latest height at its own width once it
-listens, so a late or stale height cannot resize another showing; a page reused at another width
-measures again.
+view is a light host around a page (MS-109). When a reader closes, its page waits idle and is
+shown again only for the same account, conversation, message and full HTML; a page never loads
+other HTML and is never taken from a host still showing it, and it opens or closes its quotes as
+the reader's fold is when shown again. Heights carry a per-page number, and the Dart view asks
+for the latest height at its own width once it listens, so a late or stale height cannot resize
+another showing; a page reused at another width measures again.
 
 An idle page keeps its own WebContent process and the images it decoded, up to hundreds of MB for
 a newsletter, so idle pages close after a minute, past eight, or once their processes together
@@ -317,13 +330,15 @@ WebKit ends a closed page's process by leaving it to exit by itself, which a bac
 on a busy machine did not get to do, so every closed page kept its process (MS-153); the pool
 kills the process of each page it lets go, once WebKit has closed the page.
 
-HTML DOM parsing, quote traversal and serialization run in a background Dart isolate before
-creating the WebKit bodies (MS-87). A shared eight-entry LRU reuses unchanged HTML and shares
-in-flight requests; only one parse isolate runs at a time. Main/quoted parts retain the original
-head styling and Gmail/Outlook/Thunderbird/Apple quote rules, including keeping pure-quote mail
-whole. A refresh retains the mounted body until replacement parts arrive; message keys and
-request handles prevent a disposed or superseded request from replacing another selection.
-Opening/closing a quote never reparses HTML or creates its WebKit view before expansion.
+For HyperRender and Blitz, HTML DOM parsing, quote traversal and serialization run in a
+background Dart isolate before the bodies show (MS-87). A shared eight-entry LRU reuses unchanged
+HTML and shares in-flight requests; only one parse isolate runs at a time. Main/quoted parts
+retain the original head styling and Gmail/Outlook/Thunderbird/Apple quote rules, including
+keeping pure-quote mail whole. A refresh retains the mounted body until replacement parts arrive;
+message keys and request handles prevent a disposed or superseded request from replacing another
+selection. Opening/closing a quote never reparses HTML. The WebKit body waits for none of this:
+it asks for no parts (a request queued when the switch moves to WebKit is let go), and prefetch
+splits nothing while it is chosen.
 
 Each body releases its request when it goes or its HTML changes, and a split every request
 released before its turn is skipped, so switching conversations quickly never waits for the
@@ -335,9 +350,13 @@ them, so they never push a reader's parts out. Opening a prefetched conversation
 bodies in the first frame instead of a spinner.
 
 `flutter test test/hyper_render_test.dart` covers the resource policy, mail tables and the
-renderer switch; `test/html_parts_test.dart` output, caching, replacement/disposal races (in both
-renderers), queue skipping and prefetch priority, fold behavior and the height protocol (owner parameters, the
-pull, late older heights, views gone before they answer). `flutter run -d macos --release -t test/html_parts_app.dart` opens a synthetic-only
+renderer switch; `test/html_parts_test.dart` output, caching, replacement/disposal races,
+queue skipping and prefetch priority, fold behavior, the WebKit page's HTML (the engine's but for
+the policy and inline image addresses) and its fold, and the height protocol (owner parameters, the
+pull, late older heights, views gone before they answer). `flutter build macos --release -t
+test/html_open_app.dart`, launched with `MAILSTREAM_HTML_OPEN_OUT=/tmp/open.json`, times how long
+a WebKit body takes to open (mount to first reported height) for four synthetic mails (4, 22, 65
+and 300 KB) one at a time and all at once (MS-167). `flutter run -d macos --release -t test/html_parts_app.dart` opens a synthetic-only
 native reader without accounts or private mail. Set `MAILSTREAM_HTML_BENCH_OUT=/tmp/html-parts.json`
 when launching that fixture to compare the exact pre-MS-87 synchronous algorithm (a1fc4b3d)
 with queued isolate parsing in the same release runtime: 20 alternating-order pairs each for
