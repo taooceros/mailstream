@@ -369,21 +369,26 @@ impl Pages {
     }
 }
 
+/// `html` parsed, its requests going to `net`.
+fn document(html: &str, net: Arc<dyn NetProvider>, shell: Arc<PageShell>, fonts: &FontContext) -> HtmlDocument {
+    HtmlDocument::from_html(
+        html,
+        DocumentConfig {
+            net_provider: Some(net),
+            shell_provider: Some(shell),
+            font_ctx: Some(fonts.clone()),
+            base_url: Some(BASE_URL.into()),
+            viewport: Some(Viewport::new(1, 1, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        },
+    )
+}
+
 impl Page {
     fn open(id: u64, html: &str, fonts: &FontContext) -> Self {
         let shell = Arc::new(PageShell { id, quiet: AtomicBool::new(false) });
         let gate = Arc::new(Gate::default());
-        let mut doc = HtmlDocument::from_html(
-            html,
-            DocumentConfig {
-                net_provider: Some(gate.clone() as _),
-                shell_provider: Some(shell.clone() as _),
-                font_ctx: Some(fonts.clone()),
-                base_url: Some(BASE_URL.into()),
-                viewport: Some(Viewport::new(1, 1, 1.0, ColorScheme::Light)),
-                ..Default::default()
-            },
-        );
+        let mut doc = document(html, gate.clone(), shell.clone(), fonts);
         let blocked = sanitize(doc.as_mut());
         gate.open(blocked);
         Self { doc, shell, width: 0.0, scale: 0.0, zoom: 1.0, height: 0.0, version: 0, waiting: Vec::new() }
@@ -767,6 +772,50 @@ mod tests {
         page.doc.as_mut().resolve(0.0);
         assert!(!page.doc.as_ref().has_pending_critical_resources());
         assert_eq!(page.text(), "Kept");
+    }
+
+    #[test]
+    fn absolute_https_urls_are_still_asked_for_and_relative_ones_go_nowhere() {
+        // The base only gives relative URLs somewhere to resolve: `https:` ones are asked for as
+        // before (images load, stylesheets and fonts get nothing either way), while `//host/…`
+        // and `logo.png` resolve to a scheme `fetch` never reads, as WebKit's view, whose base
+        // is `about:blank`, resolves them to nothing (MS-161).
+        struct Record(Mutex<HashSet<String>>);
+        impl NetProvider for Record {
+            fn fetch(&self, _doc_id: usize, request: Request, handler: Box<dyn NetHandler>) {
+                self.0.lock().unwrap().insert(request.url.to_string());
+                refuse(request.url, handler);
+            }
+        }
+        let net = Arc::new(Record(Mutex::new(HashSet::new())));
+        let shell = Arc::new(PageShell { id: 0, quiet: AtomicBool::new(false) });
+        let mut doc = document(
+            concat!(
+                r#"<html><head><link href="//fonts.example.com/css?family=Sans" rel="stylesheet">"#,
+                r#"<link href="https://fonts.example.com/css?family=Serif" rel="stylesheet"></head>"#,
+                r#"<body><img src="//images.example.com/a.png"><img src="https://images.example.com/b.png"><img src="c.png">"#,
+                r#"<div style="height:10px;background:url(//images.example.com/d.png)"></div>"#,
+                r#"<div style="height:10px;background:url(https://images.example.com/e.png)"></div></body></html>"#,
+            ),
+            net.clone(),
+            shell,
+            &Pages::new().fonts,
+        );
+        doc.as_mut().set_viewport(Viewport::new(400, 800, 1.0, ColorScheme::Light));
+        doc.as_mut().resolve(0.0);
+        let asked = net.0.lock().unwrap();
+        let https: HashSet<_> = asked.iter().filter(|url| url.starts_with("https://")).map(String::as_str).collect();
+        assert_eq!(
+            https,
+            HashSet::from([
+                "https://fonts.example.com/css?family=Serif",
+                "https://images.example.com/b.png",
+                "https://images.example.com/e.png"
+            ])
+        );
+        let based: Vec<_> = asked.iter().filter(|url| !url.starts_with("https://")).collect();
+        assert_eq!(based.len(), 4, "{based:?}");
+        assert!(based.iter().all(|url| url.starts_with(BASE_URL.trim_end_matches('/'))), "{based:?}");
     }
 
     #[test]
