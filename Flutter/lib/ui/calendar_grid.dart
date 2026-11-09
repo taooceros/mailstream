@@ -9,6 +9,7 @@ import 'package:macos_ui/macos_ui.dart';
 
 import 'package:mailstream/mailstream.dart' as engine;
 
+import '../backend/models.dart' show Address;
 import '../bench.dart';
 import '../state/calendar_state.dart';
 import 'calendar.dart';
@@ -139,6 +140,88 @@ int _daysBetween(DateTime from, DateTime to) =>
   return (placements: out, rows: rowEnds.length);
 }
 
+/// How an event's card reads (MS-163): a white card for what is still ahead, hatched inside a
+/// dashed border while the invitation waits for an answer (or got a maybe), flattened into the
+/// tray once over or declined.
+enum EventLook { upcoming, invited, past, declined }
+
+EventLook eventLook(engine.CalendarItem event, DateTime now) {
+  if (event.response == 'declined') return EventLook.declined;
+  if (!eventSpan(event).end.isAfter(now)) return EventLook.past;
+  if (event.response == 'needsAction' || event.response == 'tentative') return EventLook.invited;
+  return EventLook.upcoming;
+}
+
+/// The account will be there: it accepted, organizes it, or it is its own event without guests.
+bool _committed(engine.CalendarItem event) => switch (event.response) {
+  null || 'accepted' || 'organizer' => true,
+  _ => false,
+};
+
+/// Which of a day's placed events ([layoutDay]) clash: two the account is committed to whose
+/// times overlap (not merely their drawn heights).
+List<bool> dayConflicts(List<DayPlacement> placements) {
+  final out = List.filled(placements.length, false);
+  for (var i = 0; i < placements.length; i++) {
+    final a = placements[i];
+    if (a.columns < 2 || !_committed(a.event)) continue;
+    final spanA = eventSpan(a.event);
+    for (var j = i + 1; j < placements.length; j++) {
+      final b = placements[j];
+      if (b.columns < 2 || !_committed(b.event)) continue;
+      final spanB = eventSpan(b.event);
+      if (spanA.start.isBefore(spanB.end) && spanB.start.isBefore(spanA.end)) out[i] = out[j] = true;
+    }
+  }
+  return out;
+}
+
+/// Hours a day is booked by its placed events, overlaps counted once and declined ones left out.
+double bookedHours(List<DayPlacement> placements) {
+  final spans = [for (final p in placements) if (p.event.response != 'declined') (p.top, p.bottom)]..sort((a, b) => a.$1.compareTo(b.$1));
+  var minutes = 0, end = 0;
+  for (final (top, bottom) in spans) {
+    final from = math.max(top, end);
+    if (bottom > from) minutes += bottom - from;
+    end = math.max(end, bottom);
+  }
+  return minutes / 60;
+}
+
+/// Booked hours that fill a day's load bar.
+const fullDayHours = 8;
+
+/// How much of a card's content its stretch of time has room for: one line (title, start and
+/// length), the title and time, or those over the call and the guests.
+enum CardFit { line, standard, full }
+
+CardFit cardFit(int minutes) => minutes < 45 ? CardFit.line : (minutes < 75 ? CardFit.standard : CardFit.full);
+
+/// From `start` to `end`, the period once when both share it: 10:15 – 11:30 AM.
+String timeRange(DateTime start, DateTime end) {
+  final format = DateFormat.jm();
+  final to = format.format(end);
+  final twelveHour = format.pattern!.contains('a');
+  if (twelveHour && (start.hour < 12) == (end.hour < 12)) return '${DateFormat('h:mm').format(start)} – $to';
+  return '${format.format(start)} – $to';
+}
+
+/// An event's length, short: 15m, 1h, 1h 30m.
+String shortDuration(Duration length) {
+  final hours = length.inHours, minutes = length.inMinutes % 60;
+  if (hours == 0) return '${minutes}m';
+  return minutes == 0 ? '${hours}h' : '${hours}h ${minutes}m';
+}
+
+/// The video call's service, for its chip: Zoom, Teams, Webex, else Meet.
+String meetingLabel(String url) {
+  final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
+  if (host.contains('zoom.')) return 'Zoom';
+  if (host.contains('teams.')) return 'Teams';
+  if (host.contains('webex.')) return 'Webex';
+  return 'Meet';
+}
+
 /// The first day of the week `day` is in, as this locale starts weeks (Sunday in the US).
 DateTime weekOf(DateTime day) {
   // intl counts from Monday = 0; DateTime from Monday = 1.
@@ -246,11 +329,13 @@ class _ViewSwitch extends StatelessWidget {
   }
 }
 
-/// Days side by side on a 24-hour timeline: each day's date (today's in red), the all-day row,
-/// then the hours with the timed events placed by [layoutDay] and a line at the current time.
-/// Days the engine does not fetch are shaded and named over the dates. The layout is worked out
-/// only when the events or days change; scrolling moves the timeline's layer and the time line
-/// repaints alone, once a minute.
+/// Days side by side on a 24-hour timeline, after MS-163: each day's date (today's raised on a
+/// card, the others flat over a bar of how booked they are), the all-day row, then the hours with
+/// the timed events as cards placed by [layoutDay], today's column lit, and the current time as a
+/// line with its time in the gutter. Days the engine does not fetch are shaded and named over the
+/// dates. The layout is worked out only when the events or days change; scrolling moves the
+/// timeline's layer and the time line repaints alone, once a minute (the cards again only when
+/// one of them ends).
 class CalendarGrid extends StatefulWidget {
   const CalendarGrid({
     super.key,
@@ -302,6 +387,8 @@ class _CalendarGridState extends State<CalendarGrid> {
   final _clock = ValueNotifier<DateTime>(DateTime.now());
   Timer? _tick;
   late List<List<DayPlacement>> _timed;
+  late List<List<bool>> _conflicts;
+  late List<double> _booked;
   late ({List<AllDayPlacement> placements, int rows}) _allDay;
 
   @override
@@ -335,17 +422,33 @@ class _CalendarGridState extends State<CalendarGrid> {
 
   void _layout() {
     _timed = [for (final day in widget.days) layoutDay(widget.events, day)];
+    _conflicts = [for (final placements in _timed) dayConflicts(placements)];
+    _booked = [for (final placements in _timed) bookedHours(placements)];
     _allDay = layoutAllDay(widget.events, widget.days);
   }
 
-  /// Moves the time line on each minute; a new day rebuilds for today's date.
+  /// Whether an event ended in `(from, to]`: its card flattens into the tray.
+  bool _endedBetween(DateTime from, DateTime to) => widget.events.any((event) {
+    final end = eventSpan(event).end;
+    return end.isAfter(from) && !end.isAfter(to);
+  });
+
+  /// Whether an all-day row event goes on past the last day shown.
+  bool _continuesAfter(engine.CalendarItem event) {
+    final span = eventSpan(event);
+    final last = span.end.isAfter(span.start) ? dayOf(span.end.subtract(const Duration(microseconds: 1))) : dayOf(span.start);
+    return last.isAfter(widget.days.last);
+  }
+
+  /// Moves the time line on each minute; a new day rebuilds for today's date, an event ending
+  /// for its card.
   void _scheduleTick() {
     final now = DateTime.now();
     _tick = Timer(Duration(seconds: 60 - now.second, milliseconds: -now.millisecond + 5), () {
       final before = _clock.value, after = DateTime.now();
       _clock.value = after;
       if (!mounted) return;
-      if (!sameDayOf(before, after)) setState(() {});
+      if (!sameDayOf(before, after) || _endedBetween(before, after)) setState(() {});
       _scheduleTick();
     });
   }
@@ -378,6 +481,7 @@ class _CalendarGridState extends State<CalendarGrid> {
     final colors = context.colors;
     final days = widget.days;
     final today = dayOf(_clock.value);
+    final todayIndex = days.indexWhere((day) => sameDayOf(day, today));
     final unfetched = [for (final day in days) !_fetched(day)];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -391,7 +495,10 @@ class _CalendarGridState extends State<CalendarGrid> {
           height: CalendarGrid.headerHeight,
           child: Row(children: [
             const SizedBox(width: CalendarGrid.gutter),
-            for (final day in days) Expanded(child: _DayHeader(day: day, today: sameDayOf(day, today), onTap: widget.onDay)),
+            for (var i = 0; i < days.length; i++)
+              Expanded(
+                child: _DayHeader(day: days[i], today: i == todayIndex, booked: _booked[i], onTap: widget.onDay),
+              ),
           ]),
         ),
         if (_allDay.rows > 0) _allDayRow(context, today),
@@ -413,6 +520,8 @@ class _CalendarGridState extends State<CalendarGrid> {
                       child: CustomPaint(
                         painter: _HoursPainter(
                           unfetched: unfetched,
+                          today: todayIndex,
+                          spotlight: colors.spotlight,
                           line: colors.separator,
                           label: context.text.caption1.copyWith(color: colors.secondaryLabel),
                           shade: colors.label.withValues(alpha: colors.brightness == Brightness.light ? 0.035 : 0.05),
@@ -432,6 +541,7 @@ class _CalendarGridState extends State<CalendarGrid> {
                               child: _DayColumn(
                                 day: days[i],
                                 placements: _timed[i],
+                                conflicts: _conflicts[i],
                                 colorOf: widget.colorOf,
                                 selected: widget.selected,
                                 now: _clock.value,
@@ -444,7 +554,19 @@ class _CalendarGridState extends State<CalendarGrid> {
                     ),
                     Positioned.fill(
                       child: IgnorePointer(
-                        child: CustomPaint(painter: _NowPainter(clock: _clock, days: days, color: colors.red)),
+                        child: CustomPaint(
+                          painter: _NowPainter(
+                            clock: _clock,
+                            days: days,
+                            color: colors.red,
+                            mask: colors.tray,
+                            label: context.text.caption1.copyWith(
+                              color: MacosColors.white,
+                              fontWeight: FontWeight.w600,
+                              fontFeatures: const [FontFeature.tabularFigures()],
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                   ]),
@@ -472,12 +594,13 @@ class _CalendarGridState extends State<CalendarGrid> {
               width: (placed.last - placed.first + 1) * column - 2,
               top: placed.row * CalendarGrid.allDayHeight + 2,
               height: CalendarGrid.allDayHeight - 2,
-              child: _EventBlock(
+              child: _AllDayBar(
                 event: placed.event,
                 color: widget.colorOf(placed.event),
                 selected: widget.selected == eventKey(placed.event),
                 past: !eventSpan(placed.event).end.isAfter(_clock.value),
-                compact: true,
+                before: _daysBetween(widget.days.first, dayOf(eventSpan(placed.event).start)) < 0,
+                after: placed.last == widget.days.length - 1 && _continuesAfter(placed.event),
                 onTap: widget.onOpen == null ? null : () => widget.onOpen!(placed.event),
               ),
             ),
@@ -499,48 +622,78 @@ class _CalendarGridState extends State<CalendarGrid> {
   }
 }
 
-/// A day's weekday and date; today's date on red.
+/// A day's weekday and date. Today's lifts off the tray as a small card in the accent color; the
+/// other days lie flat over a bar as long as their booked hours ([fullDayHours] fill it).
 class _DayHeader extends StatelessWidget {
-  const _DayHeader({required this.day, required this.today, required this.onTap});
+  const _DayHeader({required this.day, required this.today, required this.booked, required this.onTap});
 
   final DateTime day;
   final bool today;
+  final double booked;
   final ValueChanged<DateTime>? onTap;
+
+  /// The load bar of a fully booked day.
+  static const _barWidth = 24.0;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
+    final load = today || booked <= 0 ? 0.0 : (booked / fullDayHours).clamp(0.15, 1.0);
+    final date = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          DateFormat.E().format(day),
+          style: context.text.caption1.copyWith(color: today ? colors.accent : colors.secondaryLabel, fontWeight: FontWeight.w500),
+        ),
+        Text(
+          '${day.day}',
+          style: context.text.callout.copyWith(fontWeight: today ? FontWeight.w700 : FontWeight.w600, color: today ? colors.accent : colors.label),
+        ),
+        const SizedBox(height: 3),
+        SizedBox(
+          key: load > 0 ? const ValueKey('load') : null,
+          width: _barWidth * load,
+          height: CalendarMetrics.loadBar,
+          child: load > 0
+              ? DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: colors.accent.withValues(alpha: CalendarMetrics.loadOpacity),
+                    borderRadius: BorderRadius.circular(CalendarMetrics.loadBar / 2),
+                  ),
+                )
+              : null,
+        ),
+      ],
+    );
     return Hoverable(
       onTap: onTap == null ? null : () => onTap!(day),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(
-            DateFormat.E().format(day),
-            style: context.text.caption1.copyWith(color: today ? colors.red : colors.secondaryLabel, fontWeight: FontWeight.w500),
-          ),
-          const SizedBox(height: 1),
-          Container(
-            width: 24,
-            height: 22,
-            alignment: Alignment.center,
-            decoration: today ? BoxDecoration(color: colors.red, borderRadius: BorderRadius.circular(11)) : null,
-            child: Text(
-              '${day.day}',
-              style: context.text.callout.copyWith(fontWeight: FontWeight.w600, color: today ? MacosColors.white : colors.label),
-            ),
-          ),
-        ],
+      child: Center(
+        child: !today
+            ? date
+            : Container(
+                key: const ValueKey('today'),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                decoration: BoxDecoration(
+                  color: colors.raisedCard,
+                  borderRadius: BorderRadius.circular(CalendarMetrics.cardRadius),
+                  border: Border.all(color: colors.cardBorder, width: CalendarMetrics.cardBorder),
+                  boxShadow: colors.cardShadow,
+                ),
+                child: date,
+              ),
       ),
     );
   }
 }
 
-/// One day's timed events, placed in their columns; a click in between starts a new event there.
+/// One day's timed events as cards in their columns, [CalendarMetrics.conflictGap] apart; a
+/// click in between starts a new event there.
 class _DayColumn extends StatelessWidget {
   const _DayColumn({
     required this.day,
     required this.placements,
+    required this.conflicts,
     required this.colorOf,
     required this.selected,
     required this.now,
@@ -550,6 +703,7 @@ class _DayColumn extends StatelessWidget {
 
   final DateTime day;
   final List<DayPlacement> placements;
+  final List<bool> conflicts;
   final Color Function(engine.CalendarItem event) colorOf;
   final EventKey? selected;
   final DateTime now;
@@ -558,9 +712,10 @@ class _DayColumn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const perMinute = CalendarGrid.hourHeight / 60;
+    const perMinute = CalendarGrid.hourHeight / 60, gap = CalendarMetrics.conflictGap;
     return LayoutBuilder(builder: (context, constraints) {
-      final width = constraints.maxWidth - 2;
+      // Half a gap from the day's line on the left, a whole one before the next day's.
+      final width = constraints.maxWidth - 1.5 * gap;
       return Stack(children: [
         if (onCreate != null)
           Positioned.fill(
@@ -572,37 +727,324 @@ class _DayColumn extends StatelessWidget {
               },
             ),
           ),
-        for (final placed in placements)
-          Positioned(
-            left: width * placed.column / placed.columns,
-            width: width * placed.span / placed.columns,
-            top: placed.top * perMinute,
-            height: (placed.bottom - placed.top) * perMinute,
-            child: _EventBlock(
-              event: placed.event,
-              color: colorOf(placed.event),
-              selected: selected == eventKey(placed.event),
-              past: !eventSpan(placed.event).end.isAfter(now),
-              compact: (placed.bottom - placed.top) < 40,
-              narrow: width * placed.span / placed.columns < 64,
-              onTap: onOpen == null ? null : () => onOpen!(placed.event),
-            ),
-          ),
+        for (var i = 0; i < placements.length; i++)
+          () {
+            final placed = placements[i];
+            final cardWidth = width * placed.span / placed.columns - (placed.column + placed.span < placed.columns ? gap : 0);
+            final cardHeight = (placed.bottom - placed.top) * perMinute - gap / 2;
+            return Positioned(
+              left: gap / 2 + width * placed.column / placed.columns,
+              width: cardWidth,
+              top: placed.top * perMinute,
+              height: cardHeight,
+              child: _EventCard(
+                event: placed.event,
+                color: colorOf(placed.event),
+                selected: selected == eventKey(placed.event),
+                look: eventLook(placed.event, now),
+                conflict: conflicts[i],
+                fit: cardFit(placed.bottom - placed.top),
+                width: cardWidth,
+                height: cardHeight,
+                onTap: onOpen == null ? null : () => onOpen!(placed.event),
+              ),
+            );
+          }(),
       ]);
     });
   }
 }
 
-/// An event on the timeline or in the all-day row: tinted with its calendar's color and a bar
-/// of it at the leading edge, solid when it is open; past and declined ones faded.
-class _EventBlock extends StatelessWidget {
-  const _EventBlock({
+/// What the account answered, for the chip on a wide card.
+String? _answerLabel(String? response) => switch (response) {
+  'accepted' => 'Going',
+  'tentative' => 'Maybe',
+  'needsAction' => 'Invited',
+  _ => null,
+};
+
+/// An event on the timeline as a card on the tray (MS-163, variant A): its calendar's color only
+/// in a dot before the title, the call as a quiet chip and the guests as a cluster at its foot
+/// when there is room ([CardFit]). Open, it lifts with an accent rim; clashing with another the
+/// account is going to, it shows a red dot; waiting for an answer, it is hatched inside a dashed
+/// border; over or declined, it lies flat on the tray, faded ([EventLook]).
+class _EventCard extends StatelessWidget {
+  const _EventCard({
+    required this.event,
+    required this.color,
+    required this.selected,
+    required this.look,
+    required this.conflict,
+    required this.fit,
+    required this.width,
+    required this.height,
+    required this.onTap,
+  });
+
+  final engine.CalendarItem event;
+  final Color color;
+  final bool selected;
+  final EventLook look;
+  final bool conflict;
+  final CardFit fit;
+  final double width;
+  final double height;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final flat = look == EventLook.past || look == EventLook.declined;
+    final fade = switch (look) {
+      EventLook.past => CalendarMetrics.pastOpacity,
+      EventLook.declined => CalendarMetrics.declinedOpacity,
+      _ => 1.0,
+    };
+    final ink = colors.label.withValues(alpha: fade);
+    final title = context.text.callout.copyWith(
+      fontWeight: FontWeight.w600,
+      color: ink,
+      decoration: look == EventLook.declined ? TextDecoration.lineThrough : null,
+      decorationColor: ink,
+    );
+    final detail = context.text.subheadline.copyWith(
+      color: colors.secondaryLabel.withValues(alpha: fade),
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );
+    final span = eventSpan(event);
+    final meeting = flat ? null : event.meetingUrl;
+    final dot = Container(
+      key: const ValueKey('dot'),
+      width: CalendarMetrics.dot,
+      height: CalendarMetrics.dot,
+      decoration: BoxDecoration(color: calendarDot(color, colors).withValues(alpha: fade), shape: BoxShape.circle),
+    );
+    final answer = fit == CardFit.line || width < 150 || flat ? null : _answerLabel(event.response);
+    final trailing = [
+      if (answer != null) _QuietChip(label: answer),
+      if (fit == CardFit.line && meeting != null && width >= 90)
+        MacosIcon(CupertinoIcons.video_camera, size: 13, color: colors.secondaryLabel),
+      if (conflict && look == EventLook.upcoming)
+        Container(
+          key: const ValueKey('conflict'),
+          width: CalendarMetrics.dot,
+          height: CalendarMetrics.dot,
+          decoration: BoxDecoration(color: colors.red, shape: BoxShape.circle),
+        ),
+    ];
+    final trailingRow = [for (final widget in trailing) Padding(padding: const EdgeInsets.only(left: 4), child: widget)];
+
+    final Widget content;
+    if (width < 36) {
+      // A sliver beside its neighbors: the dot alone says something is there.
+      content = Padding(padding: const EdgeInsets.fromLTRB(5, 5, 0, 0), child: Align(alignment: Alignment.topLeft, child: dot));
+    } else if (fit == CardFit.line) {
+      content = Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        child: Row(children: [
+          dot,
+          const SizedBox(width: 5),
+          Expanded(
+            child: Text.rich(
+              TextSpan(children: [
+                TextSpan(text: event.title, style: title),
+                TextSpan(text: '  ${DateFormat.jm().format(span.start)} · ${shortDuration(span.end.difference(span.start))}', style: detail),
+              ]),
+              maxLines: 1,
+              overflow: TextOverflow.clip,
+              softWrap: false,
+            ),
+          ),
+          ...trailingRow,
+        ]),
+      );
+    } else {
+      final when = width < 100 ? DateFormat.jm().format(span.start) : timeRange(span.start, span.end);
+      final location = event.location;
+      final guests = flat ? const <engine.CalendarPerson>[] : GuestAvatars.guestsOf(event);
+      final foot = fit == CardFit.full && width >= 50 && (meeting != null || guests.isNotEmpty);
+      // As many title lines as fit over the time (and the foot), each word whole: a word wider
+      // than the card keeps the title to one line, cut with an ellipsis, rather than broken.
+      final longest = event.title.split(' ').fold('', (a, b) => b.length > a.length ? b : a);
+      final measure = TextPainter(text: TextSpan(text: longest, style: title), textDirection: TextDirection.ltr, maxLines: 1)
+        ..layout();
+      final wordTooWide = measure.width > width - 22 - (trailing.isEmpty ? 0 : 10);
+      final lineHeight = measure.preferredLineHeight;
+      measure.dispose();
+      final room = height - 7 - lineHeight * (detail.fontSize! / title.fontSize!) - (foot ? CalendarMetrics.avatar + 2 : 0);
+      final titleLines = wordTooWide ? 1 : (room / lineHeight).floor().clamp(1, 3);
+      final text = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Flexible(
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Padding(padding: EdgeInsets.only(top: (title.fontSize! * 1.2 - CalendarMetrics.dot) / 2), child: dot),
+              const SizedBox(width: 5),
+              Expanded(
+                child: Text(
+                  event.title,
+                  maxLines: titleLines,
+                  softWrap: !wordTooWide,
+                  overflow: TextOverflow.ellipsis,
+                  style: title,
+                ),
+              ),
+              ...trailingRow,
+            ]),
+          ),
+          Flexible(
+            child: Text(
+              location == null ? when : '$when · $location',
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.ellipsis,
+              style: detail,
+            ),
+          ),
+        ],
+      );
+      content = Padding(
+        padding: const EdgeInsets.fromLTRB(6, 3, 5, 4),
+        child: !foot
+            ? text
+            : Stack(children: [
+                Positioned.fill(bottom: CalendarMetrics.avatar + 2, child: text),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  height: CalendarMetrics.avatar,
+                  // Too narrow for both: the guests alone.
+                  child: Row(children: [
+                    if (meeting != null && (guests.isEmpty || width >= 70))
+                      _QuietChip(label: width >= 110 ? meetingLabel(meeting) : null, icon: CupertinoIcons.video_camera),
+                    const Spacer(),
+                    if (guests.isNotEmpty)
+                      GuestAvatars(
+                        event: event,
+                        max: width >= 130 ? 3 : (width >= 96 ? 2 : 1),
+                        ring: selected ? colors.liftedCard.last : colors.card,
+                      ),
+                  ]),
+                ),
+              ]),
+      );
+    }
+
+    const radius = BorderRadius.all(Radius.circular(CalendarMetrics.cardRadius));
+    final Widget card;
+    if (!selected && look == EventLook.invited) {
+      card = CustomPaint(
+        key: const ValueKey('invited'),
+        painter: _InvitedPainter(
+          face: colors.card,
+          hatch: color.withValues(alpha: CalendarMetrics.hatchOpacity),
+          border: calendarDot(color, colors),
+        ),
+        child: ClipRRect(borderRadius: radius, child: content),
+      );
+    } else {
+      card = Container(
+        clipBehavior: Clip.hardEdge,
+        decoration: selected
+            ? BoxDecoration(
+                gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: colors.liftedCard),
+                borderRadius: radius,
+                border: Border.all(color: colors.accent),
+                boxShadow: colors.liftedShadow,
+              )
+            : switch (look) {
+                EventLook.past => BoxDecoration(
+                  color: Color.lerp(colors.tray, colors.card, fade),
+                  borderRadius: radius,
+                  border: Border.all(color: colors.cardBorder, width: CalendarMetrics.cardBorder),
+                ),
+                EventLook.declined => BoxDecoration(color: Color.alphaBlend(colors.hover, colors.tray), borderRadius: radius),
+                _ => BoxDecoration(
+                  color: colors.card,
+                  borderRadius: radius,
+                  border: Border.all(color: colors.cardBorder, width: CalendarMetrics.cardBorder),
+                  boxShadow: colors.cardShadow,
+                ),
+              },
+        child: content,
+      );
+    }
+    return GestureDetector(behavior: HitTestBehavior.opaque, onTap: onTap, child: card);
+  }
+}
+
+/// A small neutral capsule on a card: the answer (Going), the call (a camera, and its service
+/// when there is room).
+class _QuietChip extends StatelessWidget {
+  const _QuietChip({this.label, this.icon});
+
+  final String? label;
+  final IconData? icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return Container(
+      height: CalendarMetrics.avatar,
+      padding: const EdgeInsets.symmetric(horizontal: 5),
+      decoration: ShapeDecoration(color: colors.fill, shape: const StadiumBorder()),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (icon != null) MacosIcon(icon, size: 11, color: colors.secondaryLabel),
+        if (icon != null && label != null) const SizedBox(width: 3),
+        if (label != null)
+          Text(label!, maxLines: 1, style: context.text.caption1.copyWith(color: colors.secondaryLabel, fontWeight: FontWeight.w500)),
+      ]),
+    );
+  }
+}
+
+/// An unanswered invitation's card: [face] hatched at 45° in [hatch] inside a dashed [border].
+class _InvitedPainter extends CustomPainter {
+  _InvitedPainter({required this.face, required this.hatch, required this.border});
+
+  final Color face;
+  final Color hatch;
+  final Color border;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final card = RRect.fromRectAndRadius(Offset.zero & size, const Radius.circular(CalendarMetrics.cardRadius));
+    canvas.drawRRect(card, Paint()..color = face);
+    canvas.save();
+    canvas.clipRRect(card);
+    final lines = Paint()
+      ..color = hatch
+      ..strokeWidth = 1;
+    for (var x = -size.height; x < size.width; x += CalendarMetrics.hatchSpacing) {
+      canvas.drawLine(Offset(x, size.height), Offset(x + size.height, 0), lines);
+    }
+    canvas.restore();
+    final stroke = Paint()
+      ..color = border
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+    for (final metric in (Path()..addRRect(card.deflate(0.5))).computeMetrics()) {
+      for (var at = 0.0; at < metric.length; at += 2 * CalendarMetrics.dash) {
+        canvas.drawPath(metric.extractPath(at, at + CalendarMetrics.dash), stroke);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_InvitedPainter old) => old.face != face || old.hatch != hatch || old.border != border;
+}
+
+/// An event in the all-day row: a bar tinted with its calendar's color, raised with an accent rim
+/// when open, flattened when over; ‹ and › where it goes on before or after the days shown.
+class _AllDayBar extends StatelessWidget {
+  const _AllDayBar({
     required this.event,
     required this.color,
     required this.selected,
     required this.past,
-    required this.compact,
-    this.narrow = false,
+    required this.before,
+    required this.after,
     required this.onTap,
   });
 
@@ -610,92 +1052,151 @@ class _EventBlock extends StatelessWidget {
   final Color color;
   final bool selected;
   final bool past;
-
-  /// One line: the title, and the start after it on the timeline.
-  final bool compact;
-
-  /// Too narrow for a word: lines are cut at the edge rather than broken inside words.
-  final bool narrow;
+  final bool before;
+  final bool after;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    final light = colors.brightness == Brightness.light;
-    final declined = event.response == 'declined';
-    final dim = past || declined;
-    // Opaque, so overlapping events don't show through each other.
-    final tint = Color.alphaBlend(color.withValues(alpha: (light ? 0.22 : 0.34) * (dim ? 0.6 : 1)), colors.tray);
-    final ink = selected ? MacosColors.white : (dim ? colors.secondaryLabel : colors.label);
-    final title = context.text.footnote.copyWith(
-      fontWeight: FontWeight.w600,
-      color: ink,
-      decoration: declined ? TextDecoration.lineThrough : null,
-    );
-    final timed = !event.allDay && !inAllDayRow(event);
-    final start = timed ? DateFormat.jm().format(eventSpan(event).start) : null;
-    final Widget label;
-    if (compact) {
-      label = Text.rich(
-        TextSpan(children: [
-          TextSpan(text: event.title, style: title),
-          if (start != null && timed) TextSpan(text: '  $start', style: title.copyWith(fontWeight: FontWeight.w400)),
-        ]),
-        maxLines: 1,
-        overflow: TextOverflow.clip,
-        softWrap: false,
-      );
-    } else {
-      label = Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Flexible(
-            child: Text(
-              event.title,
-              maxLines: narrow ? 1 : 3,
-              softWrap: !narrow,
-              overflow: narrow ? TextOverflow.clip : TextOverflow.ellipsis,
-              style: title,
-            ),
-          ),
-          if (start != null) Text(start, maxLines: 1, overflow: TextOverflow.clip, softWrap: false, style: title.copyWith(fontWeight: FontWeight.w400)),
-          if (event.location != null)
-            Flexible(
-              child: Text(event.location!, maxLines: 1, overflow: TextOverflow.ellipsis, style: title.copyWith(fontWeight: FontWeight.w400)),
-            ),
-        ],
-      );
-    }
+    final fade = past ? CalendarMetrics.pastOpacity : 1.0;
+    final style = context.text.callout.copyWith(fontWeight: FontWeight.w600, color: colors.label.withValues(alpha: fade));
+    const radius = BorderRadius.all(Radius.circular(CalendarMetrics.cardRadius));
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
       child: Container(
         clipBehavior: Clip.hardEdge,
-        decoration: BoxDecoration(
-          color: selected ? color : tint,
-          borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: colors.tray, width: 0.5),
-        ),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          Container(width: 3, color: color.withValues(alpha: dim ? 0.5 : 1)),
-          Expanded(
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(4, compact ? 1 : 2, 3, 1),
-              child: compact ? Align(alignment: Alignment.centerLeft, child: label) : label,
-            ),
-          ),
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        alignment: Alignment.centerLeft,
+        decoration: selected
+            ? BoxDecoration(
+                gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: colors.liftedCard),
+                borderRadius: radius,
+                border: Border.all(color: colors.accent),
+                boxShadow: colors.liftedShadow,
+              )
+            : BoxDecoration(
+                color: Color.alphaBlend(color.withValues(alpha: CalendarMetrics.allDayTint * fade), past ? colors.tray : colors.card),
+                borderRadius: radius,
+              ),
+        child: Row(children: [
+          if (before) Text('‹ ', style: style),
+          Expanded(child: Text(event.title, maxLines: 1, softWrap: false, overflow: TextOverflow.ellipsis, style: style)),
+          if (after) Text(' ›', style: style),
         ]),
       ),
     );
   }
 }
 
-/// The timeline's hour lines and their labels, the lines between days and the shade over days
-/// the engine does not fetch.
+/// One guest's monogram: their initial on their [guestColor], ringed in [ring] (the card under
+/// it) when given.
+class GuestMonogram extends StatelessWidget {
+  const GuestMonogram({super.key, required this.person, this.size = CalendarMetrics.avatar, this.ring});
+
+  final engine.CalendarPerson person;
+  final double size;
+  final Color? ring;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = guestColor(person.email ?? person.name ?? '');
+    final ring = this.ring;
+    return Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color.lerp(color, MacosColors.white, 0.18)!, color],
+        ),
+        border: ring == null ? null : Border.all(color: ring, width: CalendarMetrics.avatarRing, strokeAlign: BorderSide.strokeAlignOutside),
+      ),
+      child: Text(
+        Address(name: person.name, email: person.email ?? '').initials,
+        style: TextStyle(color: MacosColors.white, fontSize: size * 0.45, fontWeight: FontWeight.w600, height: 1),
+      ),
+    );
+  }
+}
+
+/// An event's guests, the account itself left out, as overlapping [GuestMonogram]s: the first
+/// [max], then +N for the rest.
+class GuestAvatars extends StatelessWidget {
+  const GuestAvatars({super.key, required this.event, this.max = 3, this.ring});
+
+  final engine.CalendarItem event;
+  final int max;
+
+  /// The surface under the cluster, which rings each monogram; the resting card's by default.
+  final Color? ring;
+
+  /// The guests to show: everyone invited but the account.
+  static List<engine.CalendarPerson> guestsOf(engine.CalendarItem event) {
+    final account = event.account.toLowerCase();
+    return [for (final person in event.attendees) if (person.email?.toLowerCase() != account) person];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final guests = guestsOf(event);
+    if (guests.isEmpty) return const SizedBox.shrink();
+    final ring = this.ring ?? colors.card;
+    const size = CalendarMetrics.avatar, step = size * 0.7;
+    final shown = guests.length > max ? max : guests.length;
+    final rest = guests.length - shown;
+    final count = shown + (rest > 0 ? 1 : 0);
+    return SizedBox(
+      width: step * (count - 1) + size,
+      height: size,
+      child: Stack(clipBehavior: Clip.none, children: [
+        for (var i = 0; i < shown; i++) Positioned(left: i * step, top: 0, child: GuestMonogram(person: guests[i], ring: ring)),
+        if (rest > 0)
+          Positioned(
+            left: shown * step,
+            top: 0,
+            child: Container(
+              width: size,
+              height: size,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: colors.strongFill,
+                shape: BoxShape.circle,
+                border: Border.all(color: ring, width: CalendarMetrics.avatarRing, strokeAlign: BorderSide.strokeAlignOutside),
+              ),
+              child: Text(
+                '+$rest',
+                style: TextStyle(color: colors.secondaryLabel, fontSize: size * 0.4, fontWeight: FontWeight.w600, height: 1),
+              ),
+            ),
+          ),
+      ]),
+    );
+  }
+}
+
+/// The timeline's hour lines and their labels, the lines between days, the light over [today]'s
+/// column and the shade over days the engine does not fetch.
 class _HoursPainter extends CustomPainter {
-  _HoursPainter({required this.unfetched, required this.line, required this.label, required this.shade});
+  _HoursPainter({
+    required this.unfetched,
+    required this.today,
+    required this.spotlight,
+    required this.line,
+    required this.label,
+    required this.shade,
+  });
 
   final List<bool> unfetched;
+
+  /// Today's column, or -1 when today isn't shown.
+  final int today;
+  final Color spotlight;
   final Color line;
   final TextStyle label;
   final Color shade;
@@ -704,6 +1205,7 @@ class _HoursPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     const gutter = CalendarGrid.gutter, inset = CalendarGrid.inset, hour = CalendarGrid.hourHeight;
     final column = (size.width - gutter) / unfetched.length;
+    if (today >= 0) canvas.drawRect(Rect.fromLTWH(gutter + today * column, 0, column, size.height), Paint()..color = spotlight);
     final shadePaint = Paint()..color = shade;
     for (var i = 0; i < unfetched.length; i++) {
       if (unfetched[i]) canvas.drawRect(Rect.fromLTWH(gutter + i * column, 0, column, size.height), shadePaint);
@@ -731,34 +1233,77 @@ class _HoursPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_HoursPainter old) =>
-      !listEquals(old.unfetched, unfetched) || old.line != line || old.label != label || old.shade != shade;
+      !listEquals(old.unfetched, unfetched) ||
+      old.today != today ||
+      old.spotlight != spotlight ||
+      old.line != line ||
+      old.label != label ||
+      old.shade != shade;
 }
 
-/// The current time across today's column, a dot at its leading end; repaints on its own as
-/// [clock] moves.
+/// The current time in the timeline's gutter: 10:08, or 22:08 where the clock runs to 24 hours.
+String gutterTime(DateTime now) => DateFormat(DateFormat.jm().pattern!.contains('a') ? 'h:mm' : 'H:mm').format(now);
+
+/// The current time: a pill with the time in the gutter (over the hour label it would collide
+/// with), a line with a dot across today's column and a dashed one across the other days;
+/// repaints on its own as [clock] moves.
 class _NowPainter extends CustomPainter {
-  _NowPainter({required this.clock, required this.days, required this.color}) : super(repaint: clock);
+  _NowPainter({required this.clock, required this.days, required this.color, required this.mask, required this.label})
+    : super(repaint: clock);
 
   final ValueListenable<DateTime> clock;
   final List<DateTime> days;
   final Color color;
+
+  /// The gutter's background, which covers the hour label under the pill.
+  final Color mask;
+  final TextStyle label;
+
+  static const _pillHeight = 16.0;
 
   @override
   void paint(Canvas canvas, Size size) {
     final now = clock.value;
     final index = days.indexWhere((day) => day.year == now.year && day.month == now.month && day.day == now.day);
     if (index < 0) return;
-    const gutter = CalendarGrid.gutter;
+    const gutter = CalendarGrid.gutter, inset = CalendarGrid.inset, hour = CalendarGrid.hourHeight;
     final column = (size.width - gutter) / days.length;
-    final y = CalendarGrid.inset + _clockMinutes(now) / 60 * CalendarGrid.hourHeight;
+    final minutes = _clockMinutes(now);
+    final y = inset + minutes / 60 * hour;
     final left = gutter + index * column;
-    final paint = Paint()
+
+    final trail = Paint()
+      ..color = color.withValues(alpha: CalendarMetrics.nowTrailOpacity)
+      ..strokeWidth = 1;
+    for (var x = gutter; x < size.width; x += 2 * CalendarMetrics.dash) {
+      if (x + CalendarMetrics.dash > left && x < left + column) continue;
+      canvas.drawLine(Offset(x, y), Offset(math.min(x + CalendarMetrics.dash, size.width), y), trail);
+    }
+    final solid = Paint()
       ..color = color
       ..strokeWidth = 1.5;
-    canvas.drawLine(Offset(left, y), Offset(left + column, y), paint);
-    canvas.drawCircle(Offset(left, y), 4, paint);
+    canvas.drawLine(Offset(left, y), Offset(left + column, y), solid);
+    canvas.drawCircle(Offset(left, y), CalendarMetrics.dot / 2, solid);
+
+    final hourY = inset + (minutes / 60).round() * hour;
+    if ((hourY - y).abs() < _pillHeight) {
+      canvas.drawRect(Rect.fromLTRB(0, hourY - _pillHeight / 2, gutter - 4, hourY + _pillHeight / 2), Paint()..color = mask);
+    }
+    final text = TextPainter(text: TextSpan(text: gutterTime(now), style: label), textDirection: TextDirection.ltr)..layout();
+    const padding = 5.0;
+    final pill = RRect.fromLTRBR(
+      gutter - 3 - text.width - 2 * padding,
+      y - _pillHeight / 2,
+      gutter - 3,
+      y + _pillHeight / 2,
+      const Radius.circular(_pillHeight / 2),
+    );
+    canvas.drawRRect(pill, Paint()..color = color);
+    text.paint(canvas, Offset(pill.left + padding, y - text.height / 2));
+    text.dispose();
   }
 
   @override
-  bool shouldRepaint(_NowPainter old) => old.clock != clock || old.color != color || !listEquals(old.days, days);
+  bool shouldRepaint(_NowPainter old) =>
+      old.clock != clock || old.color != color || old.mask != mask || old.label != label || !listEquals(old.days, days);
 }

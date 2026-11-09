@@ -1,10 +1,41 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart' hide TextDirection;
 import 'package:macos_ui/macos_ui.dart';
+import 'package:mailstream/mailstream.dart' as engine;
 import 'package:mailstream_ui/ui/calendar_grid.dart';
 import 'package:mailstream_ui/ui/design.dart';
 
 import 'calendar_agenda_test.dart' show item;
+
+/// A meeting the account was invited to, answered `response`, with `guests` others.
+engine.CalendarItem meeting(String title, DateTime start, int minutes, String? response, {int guests = 0, bool call = false}) =>
+    engine.CalendarItem(
+      account: 'me@example.test',
+      calendar: 'primary',
+      calendarName: 'Me',
+      color: '#4285f4',
+      id: title,
+      title: title,
+      start: start.toUtc().toIso8601String(),
+      end: start.add(Duration(minutes: minutes)).toUtc().toIso8601String(),
+      allDay: false,
+      startDay: null,
+      endDay: null,
+      location: null,
+      meetingUrl: call ? 'https://meet.google.com/abc-defg-hij' : null,
+      organizer: null,
+      attendees: [
+        engine.CalendarPerson(name: 'Me', email: 'ME@example.test', response: response),
+        for (var i = 1; i <= guests; i++) engine.CalendarPerson(name: 'Person $i', email: 'person$i@example.test', response: 'accepted'),
+      ],
+      response: response,
+      notes: null,
+      notesCut: false,
+      link: null,
+      series: null,
+      editable: false,
+    );
 
 void main() {
   final day = DateTime(2026, 11, 10);
@@ -122,6 +153,176 @@ void main() {
 
     await tester.tap(find.text('Trip'));
     expect(opened, ['Trip']);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  test('a card reads declined, then over, then waiting for an answer, else ahead', () {
+    final now = DateTime(2026, 11, 10, 12);
+    final later = DateTime(2026, 11, 10, 15), earlier = DateTime(2026, 11, 10, 9);
+    expect(eventLook(meeting('Dentist', later, 60, 'declined'), now), EventLook.declined);
+    expect(eventLook(meeting('Old no', earlier, 60, 'declined'), now), EventLook.declined);
+    expect(eventLook(meeting('Done', earlier, 60, 'accepted'), now), EventLook.past);
+    expect(eventLook(meeting('Missed invite', earlier, 60, 'needsAction'), now), EventLook.past);
+    // Ending at noon is over at noon.
+    expect(eventLook(meeting('Morning', DateTime(2026, 11, 10, 11), 60, 'accepted'), now), EventLook.past);
+    expect(eventLook(meeting('Invite', later, 60, 'needsAction'), now), EventLook.invited);
+    expect(eventLook(meeting('Maybe', later, 60, 'tentative'), now), EventLook.invited);
+    expect(eventLook(meeting('Going', later, 60, 'accepted'), now), EventLook.upcoming);
+    expect(eventLook(meeting('Mine', later, 60, 'organizer'), now), EventLook.upcoming);
+    expect(eventLook(meeting('Own', later, 60, null), now), EventLook.upcoming);
+    // On now.
+    expect(eventLook(meeting('Running', DateTime(2026, 11, 10, 11, 30), 60, 'accepted'), now), EventLook.upcoming);
+  });
+
+  test('only events the account is going to clash, and only where their times overlap', () {
+    List<String> clashing(List<engine.CalendarItem> events) {
+      final placed = layoutDay(events, day);
+      final conflicts = dayConflicts(placed);
+      return [for (var i = 0; i < placed.length; i++) if (conflicts[i]) placed[i].event.title]..sort();
+    }
+
+    final nine = DateTime(2026, 11, 10, 9);
+    expect(clashing([meeting('Review', nine, 60, 'accepted'), meeting('Sync', nine.add(const Duration(minutes: 30)), 60, 'organizer')]),
+        ['Review', 'Sync']);
+    expect(clashing([meeting('Review', nine, 60, 'accepted'), meeting('Focus', nine, 30, null)]), ['Focus', 'Review']);
+    expect(clashing([meeting('Review', nine, 60, 'accepted'), meeting('Maybe', nine, 60, 'tentative')]), isEmpty);
+    expect(clashing([meeting('Review', nine, 60, 'accepted'), meeting('Invite', nine, 60, 'needsAction')]), isEmpty);
+    expect(clashing([meeting('Review', nine, 60, 'accepted'), meeting('No', nine, 60, 'declined')]), isEmpty);
+    // Back to back, and a five-minute ping drawn 20 minutes tall beside the next: no clash.
+    expect(clashing([meeting('First', nine, 60, 'accepted'), meeting('Second', nine.add(const Duration(hours: 1)), 60, 'accepted')]), isEmpty);
+    expect(clashing([meeting('Ping', nine, 5, 'accepted'), meeting('Next', nine.add(const Duration(minutes: 10)), 30, 'accepted')]), isEmpty);
+  });
+
+  test('booked hours count overlaps once and leave declined events out', () {
+    final nine = DateTime(2026, 11, 10, 9);
+    expect(bookedHours(layoutDay([], day)), 0);
+    expect(
+      bookedHours(layoutDay([
+        meeting('A', nine, 60, 'accepted'),
+        meeting('B', nine.add(const Duration(minutes: 30)), 60, 'accepted'),
+        meeting('C', nine.add(const Duration(hours: 3)), 30, null),
+        meeting('No', nine.add(const Duration(hours: 5)), 120, 'declined'),
+      ], day)),
+      2,
+    );
+  });
+
+  test('a card fits one line under 45 minutes and its guests from 75', () {
+    expect(cardFit(minEventMinutes), CardFit.line);
+    expect(cardFit(30), CardFit.line);
+    expect(cardFit(44), CardFit.line);
+    expect(cardFit(45), CardFit.standard);
+    expect(cardFit(74), CardFit.standard);
+    expect(cardFit(75), CardFit.full);
+  });
+
+  test('card text: time ranges, lengths, call services and the gutter time', () {
+    final pm = DateFormat.jm().format(DateTime(2026, 11, 10, 13));
+    expect(timeRange(DateTime(2026, 11, 10, 10, 15), DateTime(2026, 11, 10, 11, 30)), '10:15 – ${DateFormat.jm().format(DateTime(2026, 11, 10, 11, 30))}');
+    expect(timeRange(DateTime(2026, 11, 10, 11), DateTime(2026, 11, 10, 13)), '${DateFormat.jm().format(DateTime(2026, 11, 10, 11))} – $pm');
+    expect(shortDuration(const Duration(minutes: 15)), '15m');
+    expect(shortDuration(const Duration(hours: 1)), '1h');
+    expect(shortDuration(const Duration(minutes: 90)), '1h 30m');
+    expect(meetingLabel('https://meet.google.com/abc'), 'Meet');
+    expect(meetingLabel('https://us02web.zoom.us/j/1'), 'Zoom');
+    expect(meetingLabel('https://teams.microsoft.com/l/x'), 'Teams');
+    expect(gutterTime(DateTime(2026, 11, 10, 22, 8)), '10:08');
+  });
+
+  testWidgets('the day view marks clashes, invitations, declines, guests, calls and short meetings', (tester) async {
+    tester.view.physicalSize = const Size(1000, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    // Years ahead, so nothing is over yet.
+    final ahead = DateTime(2031, 3, 4);
+    DateTime at(int hour, [int minute = 0]) => DateTime(ahead.year, ahead.month, ahead.day, hour, minute);
+    await tester.pumpWidget(MacosApp(
+      theme: MailTheme.macos(Brightness.light),
+      home: CalendarGrid(
+        days: [ahead],
+        events: [
+          meeting('Standup', at(9, 15), 15, 'accepted', call: true),
+          meeting('Review', at(10), 90, 'accepted', guests: 4, call: true),
+          meeting('Sync', at(10, 30), 60, 'organizer'),
+          meeting('Interview', at(13), 60, 'needsAction'),
+          meeting('Dentist', at(15), 60, 'declined'),
+        ],
+        colorOf: (_) => const Color(0xFF4285F4),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    // Every card carries its calendar's dot; Review and Sync overlap and both are on.
+    expect(find.byKey(const ValueKey('dot')), findsNWidgets(5));
+    expect(find.byKey(const ValueKey('conflict')), findsNWidgets(2));
+    expect(find.byKey(const ValueKey('invited')), findsOneWidget);
+    final dentist = tester.widget<Text>(find.text('Dentist'));
+    expect(dentist.style!.decoration, TextDecoration.lineThrough);
+    // The 15-minute standup is one line: title, start and length.
+    expect(find.textContaining('· 15m', findRichText: true), findsOneWidget);
+    // Review is long enough for its call and guests: three of four, then +1 (the account left out).
+    expect(find.text('Meet'), findsOneWidget);
+    expect(find.byType(GuestMonogram), findsNWidgets(3));
+    expect(find.text('+1'), findsOneWidget);
+    expect(find.text('Going'), findsOneWidget);
+    expect(find.text('Invited'), findsOneWidget);
+    // A future day: no today card, a load bar.
+    expect(find.byKey(const ValueKey('today')), findsNothing);
+    expect(find.byKey(const ValueKey('load')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets("only today's date is raised; the other days with events show a load bar", (tester) async {
+    tester.view.physicalSize = const Size(1000, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final now = DateTime.now();
+    final week = weekDays(weekOf(now));
+    final other = week.firstWhere((d) => d.day != now.day);
+    await tester.pumpWidget(MacosApp(
+      theme: MailTheme.macos(Brightness.dark),
+      home: CalendarGrid(
+        days: week,
+        events: [
+          meeting('Elsewhere', DateTime(other.year, other.month, other.day, 9), 60, 'accepted'),
+          meeting('Today', DateTime(now.year, now.month, now.day, 9), 60, 'accepted'),
+        ],
+        colorOf: (_) => const Color(0xFF4285F4),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('today')), findsOneWidget);
+    expect(find.byKey(const ValueKey('load')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('cards in a narrow week drop what does not fit instead of overflowing', (tester) async {
+    tester.view.physicalSize = const Size(560, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final week = weekDays(DateTime(2031, 3, 2));
+    DateTime at(int day, int hour, [int minute = 0]) => DateTime(week[day].year, week[day].month, week[day].day, hour, minute);
+    await tester.pumpWidget(MacosApp(
+      theme: MailTheme.macos(Brightness.light),
+      home: CalendarGrid(
+        days: week,
+        events: [
+          // Three side by side: slivers a third of a 73pt day wide.
+          meeting('Architecture review', at(1, 10), 90, 'accepted', guests: 4, call: true),
+          meeting('Sync', at(1, 10, 30), 60, 'organizer', guests: 1, call: true),
+          meeting('Vendor demo', at(1, 10, 45), 30, 'accepted', call: true),
+          // Two side by side, and one alone with a call and guests.
+          meeting('Offsite prep', at(2, 13), 90, 'organizer', guests: 3, call: true),
+          meeting('Hiring sync', at(2, 13), 30, 'tentative'),
+          meeting('Workshop', at(5, 13), 180, 'accepted', guests: 2, call: true),
+        ],
+        colorOf: (_) => const Color(0xFF4285F4),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    // Every card has its dot; the overflow checks of the layout ran without a report.
+    expect(find.byKey(const ValueKey('dot')), findsNWidgets(6));
+    expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   });
 }

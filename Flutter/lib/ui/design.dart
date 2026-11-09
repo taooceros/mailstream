@@ -217,8 +217,10 @@ abstract final class Panes {
 /// [cardBorder] hairline, a [dot] of the calendar's color before the title, guests as [avatar]
 /// monograms ringed [avatarRing] in the card's color. Overlapping events stand [conflictGap]
 /// apart; past ones fade to [pastOpacity], declined ones to [declinedOpacity]; an unanswered
-/// invitation is hatched at [hatchOpacity] inside a dashed border. A day's header carries a
-/// [loadBar] tall bar as long as its booked hours.
+/// invitation is hatched at [hatchOpacity], every [hatchSpacing], inside a border dashed in
+/// [dash] lengths. All-day events are bars tinted [allDayTint] with their calendar's color. A
+/// day's header carries a [loadBar] tall bar at [loadOpacity] of the accent, as long as its
+/// booked hours; the current time runs on across the other days dashed at [nowTrailOpacity].
 abstract final class CalendarMetrics {
   static const dot = 6.0;
   static const cardRadius = 8.0;
@@ -227,9 +229,14 @@ abstract final class CalendarMetrics {
   static const avatar = 16.0;
   static const avatarRing = 1.5;
   static const loadBar = 2.5;
+  static const loadOpacity = 0.55;
   static const pastOpacity = 0.48;
   static const declinedOpacity = 0.40;
   static const hatchOpacity = 0.07;
+  static const hatchSpacing = 6.0;
+  static const dash = 3.0;
+  static const allDayTint = 0.18;
+  static const nowTrailOpacity = 0.5;
 }
 
 /// A calendar's color softened for its dot, so a screen of events stays quiet.
