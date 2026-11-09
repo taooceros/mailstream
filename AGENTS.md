@@ -74,8 +74,8 @@ hashes stay as they are.
   `MS`, short Chinese name, one-line scope description, lead taooceros). Sub-issues go in their
   parent's project.
 - Label and place issues you file when creating them. Issues the user files often have neither:
-  whoever claims one adds them first (the polling session before handing it out, otherwise the
-  agent before its start comment).
+  the agent that claims one adds them before its start comment (the polling session leaves this
+  to it).
 - File your own issues in Backlog; only the user starts them (moving one to Todo or adding `omp`).
   Problems found outside the current change get their own Backlog issue; don't fix them in passing.
 
@@ -120,32 +120,49 @@ hashes stay as they are.
 
 An omp session runs `RUNNING_FILE=~/.local/state/linear-poll/running python3 scripts/linear-poll.py watch`
 as one background bash job with no deadline (`timeout: 0`) and `wait`s on it: the script checks
-Linear every minute and returns only once it has claimed something. The session hands the issues
-it claims, and the user's comments, to subagents, then starts it again. A subagent starts in the
-session's folder, the default checkout (omp can't start it elsewhere), so every task opens with
-this, `<slug>` filled in: "Work in your own checkout `~/checkouts/<slug>`: open it with `python3
-~/projects/mailstream/scripts/checkout.py <slug>` and read the `ovnfs` skill. Your tools start
-in the locked default checkout `~/projects/mailstream`: give every `read`, `edit`, `write`,
-`grep`, `glob`, `find` and `ast_edit` an absolute path under `~/checkouts/<slug>`, every `bash`
-call `cwd: ~/checkouts/<slug>`, and every eval subprocess `cwd=`." It keeps that file a JSON
-array of its running agent ids, rewritten whenever one starts or finishes; the script re-reads it
-each pass. The script's header says what it claims and how the session picks the agent. On an
-`install` line it starts one `sonic` agent with an id starting `Install` (`Install3`) for the
-listed issues, which follows [Release delivery](#release-delivery); it doesn't count against the
-heavy agents below. Each time before it starts the script again, the session runs `python3
+Linear every minute and returns only once it has claimed something. Each line it prints carries
+what the session needs to hand the work out (an issue's title, state, labels, project, parent,
+creator and the start of its description; a comment's issue title and body; the script's header
+lists every field), so the session doesn't read issues on Linear itself (MS-174). The session
+hands the issues it claims, and the user's comments, to subagents, then starts it again. It keeps
+RUNNING_FILE a JSON array of its running agent ids, rewritten whenever one starts or finishes;
+the script re-reads it each pass. The script's header says what it claims and how the session
+picks the agent. Each time before it starts the script again, the session runs `python3
 scripts/warm-build.py` in the default checkout ([Building](#building)).
 `python3 scripts/linear-omp.py MS-12` opens one issue in a new Tern tab instead. The scripts are
 Python (standard library only) so both machines run the same ones; on Windows the command is
 `python`, and the poller also needs `HOST_LABEL=windows LINEAR_TOKEN_FILE=~/.config/linear/token.json
 LINEAR_CREDENTIALS=~/.config/linear/credentials`.
 
+Subagents start from the repo's agent definitions in `.omp/agents`, which carry what every
+hand-out repeats: open a checkout of their own named after their agent id, give tools absolute
+paths under it (a subagent starts in the session's folder, the locked default checkout, and omp
+can't start it elsewhere), read AGENTS.md (subagents don't get it otherwise), read and claim the
+issue, report on it, yield two or three lines. The session picks one per task item:
+
+- `ms-issue`: an issue to work (code or tooling), named `MS<number><Topic>` (`MS173BlitzLinear`).
+- `ms-discuss`: a question, design or discussion to answer on the issue without changing code.
+- `ms-install`: the `install` line, named `Install<n>` (`Install7`), its task the listed
+  identifiers; it follows [Release delivery](#release-delivery) and doesn't count against the
+  heavy agents below. Its model is in its frontmatter (sonic or quick-task: MS-176).
+
+The task text is the issue identifier plus at most a line or two the issue doesn't say (a peer
+changing the same code, a narrower scope); the agent reads the issue, labels and places it and
+claims it. `context`, which the task tool requires, is one line. For example:
+`{"context": "Polling session hand-out.", "tasks": [{"agent": "ms-issue", "name":
+"MS173BlitzLinear", "task": "MS-173. MS164BlitzFonts is changing the Blitz page code: coordinate
+via write agent://MS164BlitzFonts first.", "solutionSpace": "cause open"}]}`. omp reads the
+definitions from the session's folder, so a change to them reaches the session once
+`warm-build.py` moves the default checkout to `main`.
+
 Cost rules (MS-157): at most three heavy agents (ones that write code) run at once; other
-claimed issues wait in the queue of `~/.local/state/linear-poll/session.md`, moved to Backlog
-with a comment saying they are queued, and start in order as slots free. Code is written by the
-default model; release builds, installs, smoke checks and screenshots go to the batch install
-agent, one run for every issue waiting, at most once an hour (`INSTALL_EVERY`). Agents write
-their full report on the issue and yield only two or three lines (result, commit, issue state,
-anything the user must do).
+claimed issues wait in the queue of `~/.local/state/linear-poll/session.md`, stay in Todo with a
+comment saying they are queued (Backlog holds only what nobody plans to do yet, MS-175), and start
+in order as slots free; the poller doesn't hand out a Todo issue again once omp has commented on
+it or claimed it. Code is written by the default model; release builds, installs, smoke checks
+and screenshots go to the batch install agent, one run for every issue waiting, at most once an
+hour (`INSTALL_EVERY`). Agents write their full report on the issue and yield only two or three
+lines (result, commit, issue state, anything the user must do).
 
 The session hands over to a fresh one once its own context passes about 150K tokens: every wake
 re-reads the whole conversation. It waits until no agent of its own is running (their results

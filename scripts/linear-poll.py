@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """One pass over Linear (`watch`: one a minute until one has output): claims what an omp session
 should act on now and prints it as JSON lines, which that session hands to subagents, each
-working in its own checkout (AGENTS.md, Version control). Python 3.9+ standard library only, so
-the same script runs on macOS and Windows.
+working in its own checkout (AGENTS.md, Version control). Each line carries what the session
+needs to hand it out, so it doesn't ask Linear about it (MS-174). Python 3.9+ standard library
+only, so the same script runs on macOS and Windows.
 
-  {"kind": "issue", "id", "identifier", "resume", "unblockedBy"}: an issue to start. Claimed when
-    it is
+  {"kind": "issue", "id", "identifier", "resume", "unblockedBy", "title", "state", "labels",
+    "creator", "project", "parent", "description"}: an issue to start. labels are its label names
+    (`omp` left out), creator the name of whoever filed it, parent `<identifier> <title>`,
+    description its first DESCRIPTION characters (default 600, `…` when cut); project, parent
+    and description are left out when unset. Claimed when it is
     - in Todo, created by a workspace member or by omp itself (not another app, a guest or a
       GitHub import: the repo is public and the subagents run with full access), not claimed
       before and not yet commented on by an app (omp); or
@@ -19,19 +23,21 @@ the same script runs on macOS and Windows.
     blockers are on `main` (`install` or In Review), not for the user's review. resume is true
     for an issue claimed before (the subagent carries on from the issue's comments); unblockedBy
     lists the identifiers of its resolved blockers. Agents file their own issues in Backlog and move
-    issues to Todo to ask the user something (with an omp comment), so neither is picked up
-    unless the user moves an uncommented one to Todo or it was claimed before and gets
-    unblocked.
+    issues to Todo to ask the user something (with an omp comment), and the polling session leaves
+    issues it queues in Todo with an omp comment saying so (MS-175), so none of them is picked up
+    again unless the user moves an uncommented one to Todo, adds `omp`, or it was claimed before
+    and gets unblocked.
   {"kind": "install", "issues"}: the identifiers of every open issue labelled `install` (INSTALL),
     which code agents add once their change is on `main` (AGENTS.md, Release delivery). Printed
     when at least one waits, no agent whose id starts with `Install` is in RUNNING, and the
     previous install line is INSTALL_EVERY seconds old (default 3600). The caller starts one
-    cheap agent that installs `main`'s tip once and checks every listed issue.
-  {"kind": "comment", "id", "issue", "issueId", "state", "createdAt", "author", "body"}: a comment
-    posted on any team issue in the last 7 days, each once, by a workspace member (not an app, a
-    guest or a GitHub sync) or by another machine's omp app (one of PEERS, comma-separated app
-    names, default `omp,windows-omp`). The caller routes it to the issue's subagent or starts one.
-  {"kind": "stale", "id", "identifier", "agent", "claimedAt"}: an In Progress issue labelled
+    `ms-install` agent (.omp/agents) that installs `main`'s tip once and checks every listed issue.
+  {"kind": "comment", "id", "issue", "issueId", "title", "state", "createdAt", "author", "body"}: a
+    comment posted on any team issue in the last 7 days, each once, by a workspace member (not an
+    app, a guest or a GitHub sync) or by another machine's omp app (one of PEERS, comma-separated
+    app names, default `omp,windows-omp`); title and state are its issue's. The caller routes it
+    to the issue's subagent or starts one.
+  {"kind": "stale", "id", "identifier", "title", "agent", "claimedAt"}: an In Progress issue labelled
     `claimed` whose owner, the agent named in its latest start comment
     (`[omp @ <checkout>] start (<agent id>): …`, posted at claimedAt), is not in RUNNING, and
     whose claim is at least 10 minutes old. agent is null when no start comment names one. Each
@@ -74,9 +80,11 @@ woken with `write agent://<id>` even after it finished (it reads its transcript 
 parked), when its last request is under ~55 minutes old and its context under 400K tokens.
 Otherwise, and for any other issue or a stale one, a new agent picks up from the issue's
 comments and posts its own start comment: rewriting an expired transcript costs more than
-re-reading the files the work needs. Forking an agent's session (`omp --fork`) saves nothing: the
-fork runs with the main system prompt and tools, so its prefix misses the cache. An agent that is
-running gets more work only on its own issue.
+re-reading the files the work needs. New agents start from the repo's templates in .omp/agents
+(`ms-issue`, `ms-discuss`, `ms-install`), which carry the fixed instructions, so the task names
+only the issue and what the issue doesn't say (AGENTS.md, Polling session). Forking an agent's
+session (`omp --fork`) saves nothing: the fork runs with the main system prompt and tools, so
+its prefix misses the cache. An agent that is running gets more work only on its own issue.
 """
 import json
 import os
@@ -113,6 +121,7 @@ STALE = STATE / "stale"
 INSTALL = os.environ.get("INSTALL", "install")
 INSTALLED = STATE / "install"
 INSTALL_EVERY = int(os.environ.get("INSTALL_EVERY", "3600"))
+DESCRIPTION = int(os.environ.get("DESCRIPTION", "600"))
 START = re.compile(r"^\[omp @ [^\]]*\] start \((?P<a>[^)]+)\)")
 
 
@@ -252,7 +261,8 @@ QUERY = """query($teams: [ID!], $label: String!, $claimed: String!, $install: St
     team: { id: { in: $teams } }, state: { type: { in: ["triage", "backlog", "unstarted"] } },
     or: [{ labels: { some: { name: { eq: $label } } } }, { state: { name: { eq: "Todo" } } },
       { hasBlockedByRelations: { eq: true } }] }) {
-    nodes { id identifier number team { key } state { name } creator { id app guest }
+    nodes { id identifier number title description team { key } state { name }
+      creator { id name app guest } project { name } parent { identifier title }
       labels { nodes { id name } } comments(first: 100) { nodes { user { app } } }
       inverseRelations(first: 50) { nodes { type issue { id identifier state { name type }
         labels { nodes { name } } } } } } }
@@ -262,11 +272,11 @@ QUERY = """query($teams: [ID!], $label: String!, $claimed: String!, $install: St
     nodes { identifier number team { key } labels { nodes { name } } } }
   claimed: issues(first: 100, filter: {
     team: { id: { in: $teams } }, labels: { some: { name: { eq: $claimed } } } }) {
-    nodes { id identifier team { key } state { name } labels { nodes { id name } }
+    nodes { id identifier title team { key } state { name } labels { nodes { id name } }
       comments(first: 100) { nodes { id createdAt body user { app } } } } }
   comments(first: 100, filter: { createdAt: { gt: "-P7D" }, issue: { team: { id: { in: $teams } } } }) {
     nodes { id createdAt body user { id name app guest }
-      issue { id identifier team { key } state { name } labels { nodes { name } } } } }
+      issue { id identifier title team { key } state { name } labels { nodes { name } } } } }
 }"""
 
 
@@ -310,6 +320,21 @@ def resolved(issue):
             or any(l["name"] == INSTALL for l in issue["labels"]["nodes"]))
 
 
+def about(issue):
+    """What the caller needs to hand an issue out without asking Linear: see the issue line above."""
+    out = {"title": issue["title"], "state": issue["state"]["name"],
+           "labels": [l["name"] for l in issue["labels"]["nodes"] if l["name"] != LABEL],
+           "creator": (issue["creator"] or {}).get("name")}
+    if issue["project"]:
+        out["project"] = issue["project"]["name"]
+    if issue["parent"]:
+        out["parent"] = f"{issue['parent']['identifier']} {issue['parent']['title']}"
+    text = (issue["description"] or "").strip()
+    if text:
+        out["description"] = text if len(text) <= DESCRIPTION else text[:DESCRIPTION].rstrip() + "…"
+    return out
+
+
 def timestamp(text):
     return datetime.strptime(re.sub(r"\.[0-9]+Z$", "Z", text), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
@@ -334,7 +359,7 @@ def plan(data, running):
         unblocked = claimed and key is not None and key not in freed
         if labelled(issue) is not None or (free and (fresh or unblocked)):
             todo.append({"kind": "issue", "id": issue["id"], "identifier": issue["identifier"], "resume": claimed,
-                         "unblockedBy": [b["identifier"] for b in blocking if resolved(b)],
+                         "unblockedBy": [b["identifier"] for b in blocking if resolved(b)], **about(issue),
                          "label": labelled(issue), "unblockKey": key, "number": issue["number"]})
     out = sorted(todo, key=lambda line: line["number"])
     for line in out:
@@ -359,14 +384,14 @@ def plan(data, running):
                 continue
             key = f"{issue['id']} {start['id'] if start else 'none'}"
             if key not in reported and (start is None or (now - timestamp(start["createdAt"])).total_seconds() >= 600):
-                out.append({"kind": "stale", "id": issue["id"], "identifier": issue["identifier"], "agent": agent,
-                            "claimedAt": start["createdAt"] if start else None, "staleKey": key})
+                out.append({"kind": "stale", "id": issue["id"], "identifier": issue["identifier"], "title": issue["title"],
+                            "agent": agent, "claimedAt": start["createdAt"] if start else None, "staleKey": key})
     for comment in sorted(data["comments"]["nodes"], key=lambda c: c["createdAt"]):
         if routed(comment, data["viewer"]) and comment["id"] not in handled:
             out.append({"kind": "comment", "id": comment["id"], "issue": comment["issue"]["identifier"],
-                        "issueId": comment["issue"]["id"], "state": comment["issue"]["state"]["name"],
-                        "createdAt": comment["createdAt"], "author": comment["user"]["name"],
-                        "body": comment["body"]})
+                        "issueId": comment["issue"]["id"], "title": comment["issue"]["title"],
+                        "state": comment["issue"]["state"]["name"], "createdAt": comment["createdAt"],
+                        "author": comment["user"]["name"], "body": comment["body"]})
     return out
 
 
