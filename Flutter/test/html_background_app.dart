@@ -6,7 +6,9 @@ import 'package:mailstream_ui/state/mail_state.dart';
 
 import 'reader_fixture.dart';
 
-// A listing card whose photo is its cell's `background` attribute, as Zillow's are (MS-162).
+// A listing card whose photo is its cell's `background` attribute, as Zillow's are (MS-162), and an
+// "Other rentals" card whose photo and text are two `<th>`s of one row that Zillow's phone styles
+// turn into blocks below 600px, stacking them (MS-165).
 // Synthetic mail only: no real backend, accounts, or private mail.
 // flutter run -d macos -t test/html_background_app.dart
 void main() async {
@@ -24,7 +26,9 @@ const _photo =
 const _subject = 'Listing card with a background photo';
 
 const _html =
-    '<!DOCTYPE html><html><head></head><body style="margin:0">'
+    '<!DOCTYPE html><html><head><style>@media only screen and (max-width: 600px) {'
+    ' .displayBlock { display: block !important; width: 100% !important }'
+    ' .wrapper { width: 100% !important } }</style></head><body style="margin:0">'
     '<table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center" style="padding:24px">'
     '<h2 style="font:800 24px Arial,sans-serif;margin:0 0 16px">This home has been listed for rent at \$2,000 per month</h2>'
     '<table class="cardElevated" align="center" cellpadding="0" cellspacing="0" border="0" '
@@ -38,7 +42,16 @@ const _html =
     'color:#111116">For rent</span></div></a></td></tr>'
     '<tr><td style="padding:16px 24px;font:14px Helvetica,Arial,sans-serif;color:#111116;text-align:left">'
     '<b style="font-size:20px">\$2,000/mo</b><br>3 bd | 2 ba | 1,000 sqft<br>1 Example Street, Springfield</td></tr>'
-    '</tbody></table></td></tr></table></body></html>';
+    '</tbody></table>'
+    '<h3 style="font:700 18px Arial,sans-serif;margin:32px 0 12px;text-align:left">Other rentals you might like</h3>'
+    '<table class="wrapper" align="center" cellpadding="0" cellspacing="0" border="0" '
+    'style="width:501px;border:1px solid #cdcdd3;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.12)"><tr>'
+    '<th class="displayBlock" width="243" valign="top" background="$_photo" '
+    'style="width:243px;height:160px;background-size:cover;background-color:#dddde1;border-radius:12px 0 0 12px"></th>'
+    '<th class="displayBlock" valign="top" style="padding:16px;font:400 14px Helvetica,Arial,sans-serif;'
+    'color:#111116;text-align:left"><b style="font-size:20px">\$2,150/mo</b><br>2 bd | 1 ba | 850 sqft<br>'
+    '2 Example Avenue, Springfield</th></tr></table>'
+    '</td></tr></table></body></html>';
 
 class BackgroundMail extends ReaderMail {
   BackgroundMail() {

@@ -40,6 +40,7 @@ use mailstream_engine::avatars::web::{Browser, Web};
 use peniko::kurbo::Rect;
 use peniko::{Color, Fill};
 use sha2::{Digest, Sha256};
+use style::values::specified::box_::{DisplayInside, DisplayOutside};
 
 /// The reader's look over the mail's own styles, the one WebKit's view applies
 /// (`MailHtmlView.swift`): the document is as tall as its content, so nothing sizes from the
@@ -68,6 +69,11 @@ const BACKGROUNDS: &str = "body[background], table[background], thead[background
 
 /// Marks each [`BACKGROUNDS`] element for the rule that gives it its image.
 const BACKGROUND_MARK: &str = "data-mailstream-background";
+
+/// The elements [`wrap_loose_table_parts`] stands in for CSS's anonymous table cells and rows
+/// with.
+const LOOSE_CELL: &str = "mailstream-cell";
+const LOOSE_ROW: &str = "mailstream-row";
 
 /// What a mail's relative URLs resolve against. Blitz panics on a URL it can't resolve, and its
 /// default base (`data:`) resolves none: a Google security alert's protocol-relative font link
@@ -497,6 +503,9 @@ impl Page {
         for _ in 0..4 {
             self.apply_viewport();
             self.doc.as_mut().resolve(0.0);
+            if wrap_loose_table_parts(self.doc.as_mut()) {
+                self.doc.as_mut().resolve(0.0);
+            }
             let doc = self.doc.as_ref();
             let Some(root) = doc.try_root_element() else { break };
             let content = content_width(doc).max(root.scroll_width()) as f64;
@@ -589,6 +598,119 @@ impl Page {
         self.shell.quiet.store(false, Ordering::Relaxed);
         selected
     }
+}
+
+/// Wraps each run of a table's, row group's or row's children that are no table part (cells a
+/// phone `@media` rule made blocks, as in Zillow's cards) in a cell, inside a row unless the
+/// parent is one, as CSS does with anonymous boxes and WebKit shows them: Blitz makes no
+/// anonymous table boxes and drops such children (MS-165). Which children are loose changes with
+/// the width, so the wrappers of the last pass are undone when they differ, their children keeping
+/// the styles they had. Returns whether the tree changed; it is then resolved again.
+fn wrap_loose_table_parts(doc: &mut BaseDocument) -> bool {
+    let Some(root) = doc.try_root_element().map(|root| root.id) else { return false };
+    let mut runs = Vec::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        let Some(node) = doc.get_node(id) else { continue };
+        if node.primary_styles().is_some_and(|style| style.clone_display().inside() == DisplayInside::Table) {
+            loose_runs(doc, id, false, &mut runs);
+        }
+        stack.extend(node.children.iter().copied());
+    }
+    let wrappers = doc.query_selector_all(&format!("{LOOSE_ROW}, {LOOSE_CELL}")).map(|ids| ids.to_vec()).unwrap_or_default();
+    let mut wrapped: Vec<(Vec<NodeId>, bool)> = wrappers
+        .iter()
+        .filter_map(|&id| doc.get_node(id))
+        .filter(|node| is_wrapper(node, LOOSE_CELL))
+        .map(|cell| {
+            let in_row = cell.parent.and_then(|parent| doc.get_node(parent)).is_some_and(|parent| is_wrapper(parent, LOOSE_ROW));
+            (cell.children.to_vec(), in_row)
+        })
+        .collect();
+    runs.sort_unstable();
+    wrapped.sort_unstable();
+    if runs == wrapped {
+        return false;
+    }
+    let mut mutator = doc.mutate();
+    for id in wrappers {
+        let children = mutator.child_ids(id);
+        mutator.insert_nodes_before(id, &children);
+        mutator.remove_and_drop_node(id);
+    }
+    let element = |mutator: &mut blitz_dom::DocumentMutator, name: &str, display: &str| {
+        let id = mutator.create_element(QualName::new(None, ns!(html), name.into()), Vec::new());
+        mutator.set_style_property(id, "display", display);
+        id
+    };
+    for (run, in_row) in runs {
+        let cell = element(&mut mutator, LOOSE_CELL, "table-cell");
+        let outer = if in_row {
+            let row = element(&mut mutator, LOOSE_ROW, "table-row");
+            mutator.append_children(row, &[cell]);
+            row
+        } else {
+            cell
+        };
+        mutator.insert_nodes_before(run[0], &[outer]);
+        mutator.append_children(cell, &run);
+    }
+    true
+}
+
+/// Whether `node` is one of [`wrap_loose_table_parts`]'s `name` wrappers.
+fn is_wrapper(node: &blitz_dom::Node, name: &str) -> bool {
+    node.data.is_element_with_tag_name(&blitz_dom::LocalName::from(name))
+}
+
+/// The runs of `parent`'s loose children, as [`wrap_loose_table_parts`] wraps them, and of its
+/// row groups' and rows' unless `parent` is a row; each with whether it needs a row of its own.
+/// The wrappers already there count as their children.
+fn loose_runs(doc: &BaseDocument, parent: NodeId, row: bool, runs: &mut Vec<(Vec<NodeId>, bool)>) {
+    let mut run = Vec::new();
+    for child in table_parts(doc, parent) {
+        let Some(style) = doc.get_node(child).filter(|node| node.is_element()).and_then(|node| node.primary_styles()) else {
+            continue;
+        };
+        let display = style.clone_display();
+        match display.outside() {
+            // No box: it splits no run.
+            DisplayOutside::None => continue,
+            DisplayOutside::Block | DisplayOutside::Inline if !style.clone_position().is_absolutely_positioned() => {
+                run.push(child);
+                continue;
+            }
+            _ => {}
+        }
+        if !run.is_empty() {
+            runs.push((std::mem::take(&mut run), !row));
+        }
+        if !row {
+            match display.inside() {
+                DisplayInside::TableRowGroup | DisplayInside::TableHeaderGroup | DisplayInside::TableFooterGroup => {
+                    loose_runs(doc, child, false, runs)
+                }
+                DisplayInside::TableRow => loose_runs(doc, child, true, runs),
+                _ => {}
+            }
+        }
+    }
+    if !run.is_empty() {
+        runs.push((run, !row));
+    }
+}
+
+/// `parent`'s children, with the children of [`wrap_loose_table_parts`]'s wrappers in their place.
+fn table_parts(doc: &BaseDocument, parent: NodeId) -> Vec<NodeId> {
+    let Some(node) = doc.get_node(parent) else { return Vec::new() };
+    let mut found = Vec::with_capacity(node.children.len());
+    for &child in &node.children {
+        match doc.get_node(child) {
+            Some(wrapper) if is_wrapper(wrapper, LOOSE_ROW) || is_wrapper(wrapper, LOOSE_CELL) => found.extend(table_parts(doc, child)),
+            _ => found.push(child),
+        }
+    }
+    found
 }
 
 /// How far right the document's tables and images reach, in CSS pixels: a fixed-width table
@@ -1472,6 +1594,36 @@ mod tests {
         let tile = page.tile(200.0, 1.0, 0.0, 180.0);
         assert_eq!(pixel(&tile, 100, 50)[..3], [255, 0, 0]);
         assert_eq!(pixel(&tile, 100, 150)[..3], [0, 0, 255]);
+    }
+
+    #[test]
+    fn cells_a_media_query_makes_blocks_stack_in_their_row() {
+        // Zillow's "Other rentals" cards put the photo and the text in two `<th>`s of one row,
+        // which its phone styles turn into blocks; WebKit stacks them in one anonymous cell, Blitz
+        // dropped them, leaving the cards empty below 600px (MS-165).
+        let mut page = page(concat!(
+            "<style>@media only screen and (max-width: 600px) {",
+            " .displayBlock { display: block !important; width: 100% !important }",
+            " .wrap { width: 100% !important } }</style>",
+            r#"<table class="wrap" width="501" cellpadding="0" cellspacing="0" border="0" style="width:501px"><tr>"#,
+            r#"<th class="displayBlock" width="243" style="width:243px;height:100px;background-color:#ff0000"></th>"#,
+            r#"<th class="displayBlock" style="height:50px;background-color:#0000ff"></th>"#,
+            "</tr></table>",
+        ));
+        page.lay_out(400.0, 1.0);
+        assert_eq!(page.zoom, 1.0);
+        assert!(page.height >= 150.0, "{}", page.height);
+        let tile = page.tile(400.0, 1.0, 0.0, 160.0);
+        assert_eq!(pixel(&tile, 200, 50)[..3], [255, 0, 0]);
+        assert_eq!(pixel(&tile, 200, 125)[..3], [0, 0, 255]);
+        // Wider than 600, the cells sit side by side again.
+        page.lay_out(800.0, 1.0);
+        assert!(page.height < 150.0, "{}", page.height);
+        let tile = page.tile(800.0, 1.0, 0.0, 100.0);
+        assert_eq!(pixel(&tile, 100, 50)[..3], [255, 0, 0]);
+        assert_eq!(pixel(&tile, 400, 25)[..3], [0, 0, 255]);
+        page.lay_out(400.0, 1.0);
+        assert!(page.height >= 150.0, "{}", page.height);
     }
 
     #[test]

@@ -266,10 +266,14 @@ no legacy `background` attribute, which Outlook-style mail (Zillow's listing pho
 pictures in, so the page turns each one on `body`/`table`/`tr`/`td`/`th` into a zero-specificity
 `background-image` rule ahead of the mail's own styles, which still win over it (MS-162). To check
 it without private mail, run `flutter run -d macos -t test/html_background_app.dart` and open its
-one conversation: the listing card shows a sky-over-grass picture, not a gray box. Known Blitz
-gaps: at 600 points or narrower, mail whose mobile styles make table cells `display: block`
-(Zillow's "Other rentals") loses those cells (MS-165); an image URL Blitz can't resolve
-(`<img src="http://">`) leaves that body blank.
+one conversation: the listing card shows a sky-over-grass picture, not a gray box. Blitz makes
+no anonymous table boxes and dropped a row's children that aren't cells, such as the `<th>`s that
+Zillow's phone styles (`@media (max-width: 600px)`) turn into blocks, so its "Other rentals" cards
+were empty at 600 points or narrower; the page now wraps each run of such children in a cell (and
+a row, under a table or row group) of its own, as CSS's anonymous boxes do, and undoes it when
+the width makes them cells again (MS-165). In the same test mail, at a reader narrower than 600
+points the "Other rentals" card stacks its picture over its text. Known Blitz gap: an image URL
+Blitz can't resolve (`<img src="http://">`) leaves that body blank.
 
 Preparation (`prepareHyperResources` in `lib/ui/hyper_resources.dart`) is the one resource
 policy for both: inline parts (`file://` copies under Mailstream's `messages-v2` cache, canonical
