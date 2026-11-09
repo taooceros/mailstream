@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Refreshes the warm build of `main` in the default checkout (~/projects/mailstream), which every
 new ovnfs checkout reads as its own `target/` and `.turso/` (MS-151): the release engine, command
-line, Apple Intelligence tagger and Dart binding generator (`CONFIG=release scripts/ffi.py`) and
-the Turso library (`scripts/turso.sh`).
+line, Apple Intelligence tagger and Dart binding generator (`CONFIG=release scripts/ffi.py`, into
+FFI/target), the engine's tests (`cargo test --no-run` in Engine/, into Engine/target/debug) and
+the Turso library (`scripts/turso.sh`). It builds without the toolchain variables ffi.py drops
+(SDKROOT, CPATH, …): agents' shells don't set them, and a warm build made with them rebuilt 15
+crates in every checkout (MS-159).
 
 Usage: python3 scripts/warm-build.py [--allow CHECKOUT ...]
 
@@ -23,6 +26,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT = ["FFI/target", "Engine/target", ".turso"]
+sys.path.insert(0, str(ROOT / "scripts"))
+sys.dont_write_bytecode = True
+from ffi import DRIFTING  # noqa: E402
+ENV = {k: v for k, v in os.environ.items() if k not in DRIFTING}
 
 
 def run(*args, **kwargs):
@@ -78,13 +85,14 @@ def main():
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="mailstream-warm-dart-") as dart:
         steps = [
-            (["sh", "scripts/turso.sh"], {}),
-            ([sys.executable, "scripts/ffi.py"], {"CONFIG": "release", "DART_OUT": dart}),
+            ("turso.sh", ["sh", "scripts/turso.sh"], ROOT, {}),
+            ("ffi.py", [sys.executable, "scripts/ffi.py"], ROOT, {"CONFIG": "release", "DART_OUT": dart}),
+            ("engine tests", ["cargo", "test", "--no-run"], ROOT / "Engine", {}),
         ]
-        for command, extra in steps:
+        for name, command, cwd, extra in steps:
             step = time.monotonic()
-            subprocess.run(command, cwd=ROOT, check=True, env={**os.environ, **extra})
-            print(f"{command[-1]}: {time.monotonic() - step:.0f} s", flush=True)
+            subprocess.run(command, cwd=cwd, check=True, env={**ENV, **extra})
+            print(f"{name}: {time.monotonic() - step:.0f} s", flush=True)
     print(f"Warm build done in {time.monotonic() - started:.0f} s; " +
           ", ".join(f"{path} {size(path)}" for path in OUTPUT))
 

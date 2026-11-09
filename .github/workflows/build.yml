@@ -129,8 +129,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             FFI/target
-            Engine/target
-          key: ffi-cargo-${{ runner.os }}-${{ hashFiles('FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml', 'Engine/Cargo.lock') }}
+          key: ffi-cargo-${{ runner.os }}-${{ hashFiles('FFI/Cargo.lock', 'FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml', 'Engine/Cargo.toml') }}
           restore-keys: ffi-cargo-${{ runner.os }}-
 
       - name: Engine, command line and Dart bindings (release)

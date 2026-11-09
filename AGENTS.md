@@ -18,10 +18,11 @@ Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` 
 - Every agent works in its own ovnfs checkout, never the default checkout and never
   `jj workspace add` (the `../mailstream-*` workspaces take no new work): `ovnfs new --rev main
   --name <unique>` (it prints the path, under `~/checkouts/`), then `jj git init --colocate &&
-  jj bookmark track main@origin` (a checkout has a private `.git` and no `.jj`). It commits and
-  pushes `main` from there, and runs `ovnfs rm <name>` once the issue is delivered; a woken agent
-  opens a fresh one. Subagents are spawned without omp's `isolated` option. Work the user keeps
-  off `main` (a standalone trial) stays in its own existing checkout.
+  jj bookmark track main@origin` (a checkout has a private `.git` and no `.jj`). It commits,
+  pushes `main` and delivers from there ([Release delivery](#release-delivery)), and runs
+  `ovnfs rm <name>` once the issue is delivered; a woken agent opens a fresh one. Subagents are
+  spawned without omp's `isolated` option. Work the user keeps off `main` (a standalone trial)
+  stays in its own existing checkout.
 - One line: every front end (the AppKit app, `GPUI/`, `Flutter/`) and the engine they share
   (`Sources/MailstreamKit`, `FFI/`) live on `main`, and every checkout works on it; the
   `gpui-ui` and `flutter-ui` bookmarks are history and take no new commits. An engine change
@@ -122,8 +123,10 @@ Cost rules (MS-157): at most three heavy agents (ones that write code) run at on
 claimed issues wait in the queue of `~/.local/state/linear-poll/session.md`, moved to Backlog
 with a comment saying they are queued, and start in order as slots free. Code is written by the
 default model; build, install, smoke checks and screenshots that need no code go to a cheaper
-agent. Agents write their full report on the issue and yield only two or three lines (result,
-commit, issue state, anything the user must do).
+agent. A code agent handing delivery over leaves its checkout open and names it; the delivery
+agent installs from that checkout (one of them, for several issues at once) and removes it, since
+a fresh checkout builds Flutter and Swift from nothing. Agents write their full report on the
+issue and yield only two or three lines (result, commit, issue state, anything the user must do).
 
 The session hands over to a fresh one once its own context passes about 150K tokens: every wake
 re-reads the whole conversation. It waits until no agent of its own is running (their results
@@ -151,14 +154,27 @@ name in backticks (`` `@omp` ``), since Linear rejects an app's @-mention of an 
   checkout opens. A build or delete in the default checkout afterwards shows up in every open
   checkout, and cargo there can then keep an artifact built from the default checkout's source
   (MS-152).
-- The default checkout keeps a warm release build of `main` (`FFI/target`, `Engine/target`,
-  `.turso/`) that every new checkout starts from: its first release FFI build takes ~21 s instead
-  of ~90 s (MS-151). Never delete the default checkout's build folders to free disk; free your
-  own checkout's output instead (delete it there, or `ovnfs rm` the checkout once done). Only
-  `python3 scripts/warm-build.py` builds there: it fetches `main`, moves the default checkout's
-  empty change onto it and builds, and refuses while any checkout of it is open (MS-152). Don't
-  share one `CARGO_TARGET_DIR` between checkouts: cargo locks it for one build at a time and each
-  checkout's source rebuilds the repo's crates over the others'.
+- The default checkout keeps a warm build of `main` (`FFI/target` release, `Engine/target`
+  debug for the engine's tests, `.turso/`) that every new checkout starts from: its first release
+  `ffi.py` rebuilds only the repo's 2 crates (~25 s) instead of 460 (~3–4 min) (MS-151, MS-159).
+  `ffi.py` builds the library and the command line in one cargo run into `FFI/target` and drops
+  `SDKROOT`/`CPATH`-style variables: C build scripts rebuild everything above them when those
+  differ from the warm build's. Run release engine builds through `ffi.py`, not a second cargo in
+  `Engine/` (that compiles the engine and its dependencies again). Never delete the default
+  checkout's build folders to free disk; free your own checkout's output instead (delete it
+  there, or `ovnfs rm` the checkout once done). Only `python3 scripts/warm-build.py` builds
+  there: it fetches `main`, moves the default checkout's empty change onto it and builds, and
+  refuses while any checkout of it is open (MS-152). Nothing builds Swift there, so a checkout's
+  `.build` is always its own. Don't share one `CARGO_TARGET_DIR` between checkouts: cargo locks
+  it for one build at a time and each checkout's source rebuilds the repo's crates over the
+  others'.
+- Run anything that may take over a minute (a cold cargo build, `ffi.py`, `install.sh`, `flutter
+  build`, a Swift release build, `bench.sh`) as one blocking eval cell, not `bash`: Python
+  `subprocess.run(…, capture_output=True, text=True)` with the cell's `timeout` set (up to 3600),
+  printing the exit code and the output's last lines. A `bash` call moves to the background after
+  60 s, and `wait` then hands back a still-running snapshot every ~10 s, each one a full request
+  that re-reads the whole conversation: ~860 such wake-ups on 11-07–11-09, ~590 of them on
+  builds (MS-159). Don't start a long build and then wait on it with `wait` or `sleep`.
 - The app links the Turso database engine (`.turso/lib/libturso_sqlite3.a`). Run `scripts/turso.sh`
   once before `swift build` (it needs rustup; `bundle.sh` runs it too). It builds the pinned
   version with cargo in a few minutes and returns at once after that.
@@ -189,16 +205,17 @@ update without approval, which the installed Mailstream Flutter installs by itse
    `gpui` (`Mailstream GPUI.app`) only when the user asks or its installed behavior is directly
    affected; never install an app that isn't installed yet. Tooling-only changes install
    nothing; changes to deployment itself exercise the real path.
-2. Push the issue-referencing commit to live `main` without losing other agents' changes. Build
-   in a fresh checkout at `main` (`ovnfs new --rev main --name <unique-build-name>`, jj set up as
-   in [Version control](#version-control-jj)), never an area workspace or the default checkout.
-   The checkout carries the default checkout's build output: delete `.build` in it first (Swift's
-   module cache records the folder it was built in and fails anywhere else; this only touches
-   the checkout). Cargo's `target/` folders and `.turso/` stay: they are the warm build
-   ([Building](#building)) and cargo rebuilds what changed. There run
-   `./scripts/install.sh <targets>`: it checks source, signing and the deploy lock itself and
-   stops only the installed copy. If `main` moves meanwhile, rebuild from its tip. Never delete
-   another agent's lock or kill its processes.
+2. Push the issue-referencing commit to live `main` without losing other agents' changes, then
+   build from your own checkout at that `main`: `jj git fetch && jj new main` there (never an
+   area workspace or the default checkout). It already holds your incremental builds (cargo,
+   Flutter, Swift); a fresh checkout would rebuild Flutter and Swift from nothing. Open a fresh
+   one (`ovnfs new --rev main --name <unique-build-name>`, jj set up as in
+   [Version control](#version-control-jj)) only when you have no checkout with the work, and
+   take over a code agent's when it hands one to you. There run
+   `./scripts/install.sh <targets>`: it refuses a checkout that differs from `main`, checks
+   signing and the deploy lock itself and stops only the installed copy. If `main` moves
+   meanwhile, `jj new main` again and rebuild from its tip. Never delete another agent's lock or
+   kill its processes.
 3. Smoke each installed `/Applications/…app` with computer helpers: the running executable, the
    bundle revision, `codesign --verify --deep --strict`, the real window showing loaded data, and
    the affected behavior (no sending mail, nothing destructive). GPUI also: `otool -l` shows no
@@ -206,8 +223,8 @@ update without approval, which the installed Mailstream Flutter installs by itse
    `open` or a process name alone proves nothing. Keep personal content out of screenshots and
    logs.
 4. Record the evidence you gathered, or the exact blocker, on the issue; never claim another
-   issue's pending checks passed. Then `ovnfs rm` your build checkout; leave every other checkout
-   and workspace alone.
+   issue's pending checks passed. Then `ovnfs rm` your checkout; leave every other checkout and
+   workspace alone.
 
 ## Performance: 120 fps
 
