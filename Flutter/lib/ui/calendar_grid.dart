@@ -902,7 +902,9 @@ class _CalendarGridState extends State<CalendarGrid> with TickerProviderStateMix
         final column = constraints.maxWidth / page.days.length;
         return Stack(children: [
           for (final placed in page.allDay.placements)
+            // Keyed by event, so a half lift stays with the bar under the pointer.
             Positioned(
+              key: ValueKey(eventKey(placed.event)),
               left: placed.first * column + 1,
               width: (placed.last - placed.first + 1) * column - 2,
               top: placed.row * CalendarGrid.allDayHeight + 2,
@@ -1067,6 +1069,7 @@ class _DayColumn extends StatelessWidget {
             final cardWidth = width * placed.span / placed.columns - (placed.column + placed.span < placed.columns ? gap : 0);
             final cardHeight = (placed.bottom - placed.top) * perMinute - gap / 2;
             return Positioned(
+              key: ValueKey(eventKey(placed.event)),
               left: gap / 2 + width * placed.column / placed.columns,
               width: cardWidth,
               top: placed.top * perMinute,
@@ -1099,9 +1102,10 @@ String? _answerLabel(String? response) => switch (response) {
 
 /// An event on the timeline as a card on the tray (MS-163, variant A): its calendar's color only
 /// in a dot before the title, the call as a quiet chip and the guests as a cluster at its foot
-/// when there is room ([CardFit]). Open, it lifts with an accent rim; clashing with another the
-/// account is going to, it shows a red dot; waiting for an answer, it is hatched inside a dashed
-/// border; over or declined, it lies flat on the tray, faded ([EventLook]).
+/// when there is room ([CardFit]). Open, it lifts as the lists' rows do ([LiftedCard.lifted],
+/// without their bar), and under the pointer half as far; clashing with another the account is
+/// going to, it shows a red dot; waiting for an answer, it is hatched inside a dashed border; over
+/// or declined, it lies flat on the tray, faded ([EventLook]).
 class _EventCard extends StatelessWidget {
   const _EventCard({
     required this.event,
@@ -1259,45 +1263,48 @@ class _EventCard extends StatelessWidget {
     }
 
     const radius = BorderRadius.all(Radius.circular(CalendarMetrics.cardRadius));
-    final Widget card;
-    if (!selected && look == EventLook.invited) {
-      card = CustomPaint(
-        key: const ValueKey('invited'),
-        painter: _InvitedPainter(
-          face: colors.card,
-          hatch: color.withValues(alpha: CalendarMetrics.hatchOpacity),
-          border: calendarDot(color, colors),
-        ),
-        child: ClipRRect(borderRadius: radius, child: content),
-      );
-    } else {
-      card = Container(
-        clipBehavior: Clip.hardEdge,
-        decoration: selected
-            ? BoxDecoration(
-                gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: colors.liftedCard),
-                borderRadius: radius,
-                border: Border.all(color: colors.accent),
-                boxShadow: colors.liftedShadow,
-              )
-            : switch (look) {
-                EventLook.past => BoxDecoration(
-                  color: Color.lerp(colors.tray, colors.card, fade),
-                  borderRadius: radius,
-                  border: Border.all(color: colors.cardBorder, width: CalendarMetrics.cardBorder),
-                ),
-                EventLook.declined => BoxDecoration(color: Color.alphaBlend(colors.hover, colors.tray), borderRadius: radius),
-                _ => BoxDecoration(
-                  color: colors.card,
-                  borderRadius: radius,
-                  border: Border.all(color: colors.cardBorder, width: CalendarMetrics.cardBorder),
-                  boxShadow: colors.cardShadow,
-                ),
-              },
-        child: content,
-      );
-    }
-    return GestureDetector(behavior: HitTestBehavior.opaque, onTap: onTap, child: card);
+    final rest = switch (look) {
+      EventLook.past => BoxDecoration(
+        color: Color.lerp(colors.tray, colors.card, fade),
+        borderRadius: radius,
+        border: Border.all(color: colors.cardBorder, width: CalendarMetrics.cardBorder),
+      ),
+      EventLook.declined => BoxDecoration(color: Color.alphaBlend(colors.hover, colors.tray), borderRadius: radius),
+      _ => BoxDecoration(
+        color: colors.card,
+        borderRadius: radius,
+        border: Border.all(color: colors.cardBorder, width: CalendarMetrics.cardBorder),
+        boxShadow: colors.cardShadow,
+      ),
+    };
+    return Liftable(
+      onTap: onTap,
+      builder: (context, half) {
+        if (!selected && look == EventLook.invited) {
+          return DecoratedBox(
+            decoration: BoxDecoration(borderRadius: radius, boxShadow: half ? colors.raisedShadow : null),
+            child: CustomPaint(
+              key: const ValueKey('invited'),
+              painter: _InvitedPainter(
+                face: colors.card,
+                hatch: color.withValues(alpha: CalendarMetrics.hatchOpacity),
+                border: calendarDot(color, colors),
+              ),
+              child: ClipRRect(borderRadius: radius, child: content),
+            ),
+          );
+        }
+        return Container(
+          clipBehavior: Clip.hardEdge,
+          decoration: selected
+              ? LiftedCard.lifted(colors, radius)
+              : half
+              ? LiftedCard.half(colors, radius, face: rest.color)
+              : rest,
+          child: content,
+        );
+      },
+    );
   }
 }
 
@@ -1337,8 +1344,9 @@ class _InvitedPainter extends CustomPainter {
   bool shouldRepaint(_InvitedPainter old) => old.face != face || old.hatch != hatch || old.border != border;
 }
 
-/// An event in the all-day row: a bar tinted with its calendar's color, raised with an accent rim
-/// when open, flattened when over; ‹ and › where it goes on before or after the days shown.
+/// An event in the all-day row: a bar tinted with its calendar's color, lifted when open and half
+/// lifted under the pointer as the timeline's cards are, flattened when over; ‹ and › where it goes
+/// on before or after the days shown.
 class _AllDayBar extends StatelessWidget {
   const _AllDayBar({
     required this.event,
@@ -1364,29 +1372,30 @@ class _AllDayBar extends StatelessWidget {
     final fade = past ? CalendarMetrics.pastOpacity : 1.0;
     final style = context.text.callout.copyWith(fontWeight: FontWeight.w600, color: colors.label.withValues(alpha: fade));
     const radius = BorderRadius.all(Radius.circular(CalendarMetrics.cardRadius));
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
+    final face = Color.alphaBlend(color.withValues(alpha: CalendarMetrics.allDayTint * fade), past ? colors.tray : colors.card);
+    final label = Row(children: [
+      if (before) Text('‹ ', style: style),
+      Expanded(child: Text(event.title, maxLines: 1, softWrap: false, overflow: TextOverflow.ellipsis, style: style)),
+      if (after) Text(' ›', style: style),
+    ]);
+    return Liftable(
       onTap: onTap,
-      child: Container(
+      builder: (context, half) => Container(
         clipBehavior: Clip.hardEdge,
         padding: const EdgeInsets.symmetric(horizontal: 6),
         alignment: Alignment.centerLeft,
         decoration: selected
-            ? BoxDecoration(
-                gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: colors.liftedCard),
-                borderRadius: radius,
-                border: Border.all(color: colors.accent),
-                boxShadow: colors.liftedShadow,
-              )
+            ? LiftedCard.lifted(colors, radius)
+            : half
+            ? LiftedCard.half(colors, radius, face: face)
+            // A hairline in the face's own color where the half-lifted one goes, so the title
+            // stays put.
             : BoxDecoration(
-                color: Color.alphaBlend(color.withValues(alpha: CalendarMetrics.allDayTint * fade), past ? colors.tray : colors.card),
+                color: face,
                 borderRadius: radius,
+                border: Border.all(color: face, width: Strokes.hairline),
               ),
-        child: Row(children: [
-          if (before) Text('‹ ', style: style),
-          Expanded(child: Text(event.title, maxLines: 1, softWrap: false, overflow: TextOverflow.ellipsis, style: style)),
-          if (after) Text(' ›', style: style),
-        ]),
+        child: label,
       ),
     );
   }

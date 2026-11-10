@@ -236,22 +236,22 @@ class Tag extends StatelessWidget {
   }
 }
 
-/// A row on a list island's tray (the mail and chat lists), after Dia: selected, it lifts off
-/// the tray as a [LiftedCard]; under the pointer or pressed, half as far. The card is inset
-/// [ListMetrics.liftGap] / 2 top and bottom, so lifted neighbors stay apart; the hit area is not.
-class LiftedRow extends StatefulWidget {
-  const LiftedRow({super.key, required this.selected, required this.onTap, this.onHover, required this.child});
+/// Something on a tray that lifts half off it under the pointer or while pressed (MS-189): [builder]
+/// draws it, `half` when it should. Only the thing under the pointer lifts: keep its element to
+/// one item (a key in lists), so the state never passes to a neighbor. Without [onTap] it stays
+/// down.
+class Liftable extends StatefulWidget {
+  const Liftable({super.key, required this.onTap, this.onHover, required this.builder});
 
-  final bool selected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final ValueChanged<bool>? onHover;
-  final Widget child;
+  final Widget Function(BuildContext context, bool half) builder;
 
   @override
-  State<LiftedRow> createState() => _LiftedRowState();
+  State<Liftable> createState() => _LiftableState();
 }
 
-class _LiftedRowState extends State<LiftedRow> {
+class _LiftableState extends State<Liftable> {
   bool _hovered = false;
   bool _pressed = false;
 
@@ -260,75 +260,98 @@ class _LiftedRowState extends State<LiftedRow> {
     widget.onHover?.call(hovered);
   }
 
+  void _press(bool pressed) => setState(() => _pressed = pressed);
+
   @override
-  Widget build(BuildContext context) => MouseRegion(
-    onEnter: (_) => _hover(true),
-    onExit: (_) => _hover(false),
-    child: GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapDown: (_) => setState(() => _pressed = true),
-      onTapUp: (_) => setState(() => _pressed = false),
-      onTapCancel: () => setState(() => _pressed = false),
-      onTap: widget.onTap,
-      child: Stack(
-        fit: StackFit.passthrough,
-        children: [
-          if (widget.selected || _hovered || _pressed)
-            Positioned.fill(
-              top: ListMetrics.liftGap / 2,
-              bottom: ListMetrics.liftGap / 2,
-              child: LiftedCard(selected: widget.selected),
-            ),
-          widget.child,
-        ],
+  Widget build(BuildContext context) {
+    final enabled = widget.onTap != null;
+    return MouseRegion(
+      onEnter: (_) => _hover(true),
+      onExit: (_) => _hover(false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: enabled ? (_) => _press(true) : null,
+        onTapUp: enabled ? (_) => _press(false) : null,
+        onTapCancel: enabled ? () => _press(false) : null,
+        onTap: widget.onTap,
+        child: widget.builder(context, enabled && (_hovered || _pressed)),
       ),
+    );
+  }
+}
+
+/// A row on a list island's tray (the mail, bundle, chat and agenda lists), after Dia: selected,
+/// it lifts off the tray as a [LiftedCard]; under the pointer or pressed, half as far. The card is
+/// inset [ListMetrics.liftGap] / 2 top and bottom, so lifted neighbors stay apart; the hit area
+/// is not.
+class LiftedRow extends StatelessWidget {
+  const LiftedRow({super.key, required this.selected, required this.onTap, this.onHover, required this.child});
+
+  final bool selected;
+  final VoidCallback onTap;
+  final ValueChanged<bool>? onHover;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Liftable(
+    onTap: onTap,
+    onHover: onHover,
+    builder: (context, half) => Stack(
+      fit: StackFit.passthrough,
+      children: [
+        if (selected || half)
+          Positioned.fill(
+            top: ListMetrics.liftGap / 2,
+            bottom: ListMetrics.liftGap / 2,
+            child: LiftedCard(selected: selected),
+          ),
+        child,
+      ],
     ),
   );
 }
 
-/// A lifted row's card. Selected: a white card lit from above, with a faint blue rim, a soft
-/// shadow and a blue bar at its start; otherwise half raised, a translucent white.
+/// A lifted row's card, [Radii.card] round: selected, the lifted recipe ([lifted]) with an accent
+/// bar at its start; otherwise half lifted ([half]). The calendar's events take the same two
+/// decorations at their own radius, without the bar.
 class LiftedCard extends StatelessWidget {
   const LiftedCard({super.key, required this.selected});
 
   final bool selected;
 
+  static const _radius = BorderRadius.all(Radius.circular(Radii.card));
+
+  /// What the user opened or selected: the [MailColors.liftedCard] face, a [MailColors.liftedRim]
+  /// rim and the [MailColors.liftedShadow].
+  static BoxDecoration lifted(MailColors colors, BorderRadius radius) => BoxDecoration(
+    gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: colors.liftedCard),
+    borderRadius: radius,
+    border: Border.all(color: colors.liftedRim, width: Strokes.rim),
+    boxShadow: colors.liftedShadow,
+  );
+
+  /// Under the pointer or pressed: [face] (a card's own; [MailColors.halfLifted] for a row,
+  /// which has none) in a [MailColors.cardBorder] hairline, on the [MailColors.raisedShadow].
+  static BoxDecoration half(MailColors colors, BorderRadius radius, {Color? face}) => BoxDecoration(
+    color: face ?? colors.halfLifted,
+    borderRadius: radius,
+    border: Border.all(color: colors.cardBorder, width: Strokes.hairline),
+    boxShadow: colors.raisedShadow,
+  );
+
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    final light = colors.brightness == Brightness.light;
-    const radius = BorderRadius.all(Radius.circular(10));
-    if (!selected) {
-      return DecoratedBox(
-        decoration: BoxDecoration(
-          color: light ? const Color(0xB8FFFFFF) : const Color(0x14FFFFFF),
-          borderRadius: radius,
-          border: Border.all(color: light ? const Color(0x12000000) : const Color(0x1AFFFFFF), width: 0.5),
-          boxShadow: const [BoxShadow(color: Color(0x0A000000), blurRadius: 3, offset: Offset(0, 1))],
-        ),
-      );
-    }
+    if (!selected) return DecoratedBox(decoration: half(colors, _radius));
     return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: light ? const [MacosColors.white, Color(0xFFFAFCFF)] : const [Color(0xFF2C2C30), Color(0xFF252529)],
-        ),
-        borderRadius: radius,
-        border: Border.all(color: light ? const Color(0x380066FF) : const Color(0x450A84FF), width: 0.5),
-        boxShadow: [
-          const BoxShadow(color: Color(0x0F0F172A), blurRadius: 2, offset: Offset(0, 1)),
-          BoxShadow(color: light ? const Color(0x170055FF) : const Color(0x45000000), blurRadius: 14, offset: const Offset(0, 4)),
-        ],
-      ),
+      decoration: lifted(colors, _radius),
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 14),
+        padding: const EdgeInsets.symmetric(vertical: ListMetrics.liftBarInset),
         child: Align(
           alignment: Alignment.centerLeft,
           child: Container(
-            width: 3,
-            decoration: BoxDecoration(color: colors.accent, borderRadius: BorderRadius.circular(2)),
+            width: ListMetrics.liftBar,
+            decoration: BoxDecoration(color: colors.accent, borderRadius: BorderRadius.circular(ListMetrics.liftBar / 2)),
           ),
         ),
       ),
@@ -336,8 +359,9 @@ class LiftedCard extends StatelessWidget {
   }
 }
 
-/// A surface that answers the pointer as the Mac's lists and sidebars do: a rounded gray wash on
-/// hover, a deeper one while pressed, [selectedColor] when [selected].
+/// A surface that answers the pointer as the Mac's sidebars and buttons do: a rounded gray wash on
+/// hover, a deeper one while pressed, [selectedColor] when [selected]. Rows and cards on a tray
+/// lift instead ([Liftable], [LiftedRow]).
 class Hoverable extends StatefulWidget {
   const Hoverable({
     super.key,

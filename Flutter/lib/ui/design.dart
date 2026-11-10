@@ -192,20 +192,22 @@ final class MailColors {
   /// Chat user id).
   Color avatarHue(String key) => avatarPalette[stableIndex(key.toLowerCase(), avatarPalette.length)];
 
-  /// Hover and press washes over a surface.
+  /// Hover and press washes over the sidebar, buttons and menu items; rows and cards lift instead
+  /// ([halfLifted]).
   Color get hover => label.withValues(alpha: brightness == Brightness.light ? 0.05 : 0.08);
   Color get pressed => label.withValues(alpha: brightness == Brightness.light ? 0.1 : 0.14);
 
-  // Elevation, lowest first: a resting card ([cardShadow]), a raised control ([raisedShadow]), a
-  // lifted card ([liftedShadow]), an island on the window ([islandShadow]), a popover, menu or
-  // toast ([popoverShadow]), a sheet ([sheetShadow]).
+  // Elevation, lowest first: a resting card ([cardShadow]), a raised control or a card half lifted
+  // under the pointer ([raisedShadow]), a lifted card ([liftedShadow]), an island on the window
+  // ([islandShadow]), a popover, menu or toast ([popoverShadow]), a sheet ([sheetShadow]).
 
   /// A resting [card]'s shadow, one soft layer.
   List<BoxShadow> get cardShadow => brightness == Brightness.light
       ? const [BoxShadow(color: Color(0x0F0F172A), blurRadius: 3, offset: Offset(0, 1))]
       : const [BoxShadow(color: Color(0x33000000), blurRadius: 3, offset: Offset(0, 1))];
 
-  /// A control raised off its surface: a selected segment, a capsule over a row, today's date.
+  /// A control raised off its surface (a selected segment, a capsule over a row, today's date), and
+  /// a row or card half lifted under the pointer.
   List<BoxShadow> get raisedShadow => brightness == Brightness.light
       ? const [
           BoxShadow(color: Color(0x14000000), blurRadius: 2, offset: Offset(0, 1)),
@@ -216,11 +218,18 @@ final class MailColors {
           BoxShadow(color: Color(0x4D000000), blurRadius: 10, offset: Offset(0, 4)),
         ];
 
-  /// An open card, lifted: a white face lit from above (the dark mode's grays), a 1pt accent
-  /// rim, two soft shadows.
+  /// The one lifted-card recipe (MS-189), for whatever the user opened or selected on a tray:
+  /// list rows ([LiftedCard], with its accent bar) and the calendar's events alike. A face lit
+  /// from above ([liftedCard], white or one dark gray), a [Strokes.rim] of [liftedRim], the
+  /// [liftedShadow]. Under the pointer or pressed, a thing lifts half as far: a [halfLifted] face
+  /// where it has none of its own, a [cardBorder] hairline and the [raisedShadow].
   List<Color> get liftedCard => brightness == Brightness.light
       ? const [Color(0xFFFFFFFF), Color(0xFFFAFCFF)]
-      : const [Color(0xFF2E323C), Color(0xFF252830)];
+      : const [Color(0xFF2C2C30), Color(0xFF252529)];
+  Color get liftedRim => brightness == Brightness.light ? const Color(0x52007AFF) : const Color(0x4D0A84FF);
+  /// Opaque, so the [raisedShadow] under it doesn't show through: the tray brightened most of the
+  /// way to white, one step over it in dark mode.
+  Color get halfLifted => brightness == Brightness.light ? const Color(0xFFFCFCFE) : const Color(0xFF2A2A2C);
   List<BoxShadow> get liftedShadow => brightness == Brightness.light
       ? const [
           BoxShadow(color: Color(0x0F0F172A), blurRadius: 2, offset: Offset(0, 1)),
@@ -361,6 +370,11 @@ abstract final class ListMetrics {
 
   /// Lifted rows (selected, under the pointer) stay this far apart, their cards inset by half.
   static const liftGap = 4.0;
+
+  /// A selected row's accent bar at its card's start: [liftBar] wide, [liftBarInset] from the
+  /// card's top and bottom.
+  static const liftBar = 3.0;
+  static const liftBarInset = 14.0;
 }
 
 /// The window as islands, after Dia: the sidebar sits on the window's Liquid Glass, and the list

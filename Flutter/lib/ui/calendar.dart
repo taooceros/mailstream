@@ -606,50 +606,54 @@ class _UpNextBarState extends State<_UpNextBar> {
     if (event == null) return const SizedBox.shrink();
     final colors = context.colors;
     final url = event.meetingUrl;
+    const radius = BorderRadius.all(Radius.circular(CalendarMetrics.cardRadius));
+    final content = SizedBox(
+      height: 36,
+      child: Row(children: [
+        const SizedBox(width: 12),
+        MarkDot(colors.accent),
+        const SizedBox(width: 8),
+        Text(
+          _shown!.$2,
+          style: context.text.callout.copyWith(color: colors.accent, fontWeight: FontWeight.w600, fontFeatures: _tabular),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            event.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: context.text.callout.copyWith(color: colors.label, fontWeight: FontWeight.w600),
+          ),
+        ),
+        if (url != null) ...[
+          const SizedBox(width: 8),
+          MailButton(
+            label: 'Join',
+            icon: CupertinoIcons.videocam_fill,
+            kind: MailButtonKind.primary,
+            size: MailControlSize.small,
+            onPressed: () => widget.state.openExternal(url),
+          ),
+        ],
+        const SizedBox(width: 8),
+      ]),
+    );
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: colors.card,
-          borderRadius: BorderRadius.circular(CalendarMetrics.cardRadius),
-          border: Border.all(color: colors.cardBorder, width: CalendarMetrics.cardBorder),
-          boxShadow: colors.cardShadow,
-        ),
-        child: Hoverable(
-          onTap: () => widget.onOpen(event),
-          radius: CalendarMetrics.cardRadius,
-          child: SizedBox(
-            height: 36,
-            child: Row(children: [
-              const SizedBox(width: 12),
-              MarkDot(colors.accent),
-              const SizedBox(width: 8),
-              Text(
-                _shown!.$2,
-                style: context.text.callout.copyWith(color: colors.accent, fontWeight: FontWeight.w600, fontFeatures: _tabular),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  event.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: context.text.callout.copyWith(color: colors.label, fontWeight: FontWeight.w600),
+      // A card on the tray like the timeline's events, half lifted under the pointer.
+      child: Liftable(
+        onTap: () => widget.onOpen(event),
+        builder: (context, half) => DecoratedBox(
+          decoration: half
+              ? LiftedCard.half(colors, radius, face: colors.card)
+              : BoxDecoration(
+                  color: colors.card,
+                  borderRadius: radius,
+                  border: Border.all(color: colors.cardBorder, width: CalendarMetrics.cardBorder),
+                  boxShadow: colors.cardShadow,
                 ),
-              ),
-              if (url != null) ...[
-                const SizedBox(width: 8),
-                MailButton(
-                  label: 'Join',
-                  icon: CupertinoIcons.videocam_fill,
-                  kind: MailButtonKind.primary,
-                  size: MailControlSize.small,
-                  onPressed: () => widget.state.openExternal(url),
-                ),
-              ],
-              const SizedBox(width: 8),
-            ]),
-          ),
+          child: content,
         ),
       ),
     );
