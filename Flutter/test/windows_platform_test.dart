@@ -84,11 +84,13 @@ void main() {
             home: const Center(child: GlassCapsule(child: SizedBox(width: 30, height: 30))),
           ));
           expect(find.byType(AppKitView), findsNothing);
-          expect(find.byType(BackdropFilter), findsOneWidget);
+          // No backdrop blur: it cost every frame of the reader's swipe (MS-187).
+          expect(find.byType(BackdropFilter), findsNothing);
           expect(tester.getSize(find.byType(GlassCapsule)).height, GlassCapsule.height);
           final face = tester.widget<DecoratedBox>(find.descendant(of: find.byType(GlassCapsule), matching: find.byType(DecoratedBox)));
           final expected = brightness == Brightness.light ? MailColors.light.capsule : MailColors.dark.capsule;
           expect((face.decoration as ShapeDecoration).color, expected);
+          expect(expected.a, 1.0);
         }
       }
     });

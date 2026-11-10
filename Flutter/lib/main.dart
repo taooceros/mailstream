@@ -51,8 +51,7 @@ class _MailstreamAppState extends State<MailstreamApp> {
     localizationsDelegates: const [DefaultMaterialLocalizations.delegate],
     theme: MailTheme.macos(Brightness.light),
     darkTheme: MailTheme.macos(Brightness.dark),
-    // The toolbars' capsules share one backdrop blur (`GlassCapsule`).
-    home: BackdropGroup(child: ReaderRendererScope(controller: _renderer, child: MailShell(state: widget.state))),
+    home: ReaderRendererScope(controller: _renderer, child: MailShell(state: widget.state)),
     // On the Mac the window's glass shows around the islands; elsewhere nothing is under the
     // Flutter view, so the app paints the window's color itself.
     builder: (context, child) {

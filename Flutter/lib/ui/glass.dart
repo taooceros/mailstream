@@ -3,11 +3,9 @@
 /// and the sidebar sits on it; on Windows the window is a color (`MailColors.window`). That is
 /// window chrome, the one place the platforms differ: everything drawn on it is the app's own and
 /// the same on both (MS-182). The list and the conversation are [Island]s; toolbar groups float
-/// on frosted [GlassCapsule]s over the content scrolling under them; the controls that float
+/// on opaque [GlassCapsule]s over the content scrolling under them; the controls that float
 /// over a row are [RaisedCapsule]s, a little skeuomorphic.
 library;
-
-import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
@@ -48,19 +46,16 @@ class Island extends StatelessWidget {
 }
 
 /// Controls grouped on a capsule floating over the content, as macOS 26 groups toolbar items:
-/// what scrolls under it blurs behind a translucent [MailColors.capsule] face inside a hairline
-/// rim. Flutter draws it on every platform, in the app's light or dark (MS-177: the system's
-/// glass followed the system's appearance, not the app's, and went pale under dark controls).
-/// The capsules share the app's [BackdropGroup] (`main.dart`): the engine reads and blurs the
-/// window once for all of them rather than once per capsule.
+/// an opaque [MailColors.capsule] face inside a [MailColors.capsuleRim] hairline. Flutter draws
+/// it on every platform, in the app's light or dark (MS-177: the system's glass followed the
+/// system's appearance, not the app's, and went pale under dark controls). It blurs nothing
+/// beneath it: a backdrop blur, even one shared by every capsule, cost 2–3 ms of every frame in
+/// the reader's swipe (MS-187).
 class GlassCapsule extends StatelessWidget {
   const GlassCapsule({super.key, required this.child});
 
   /// The capsule's height: a 30 pt control and its padding.
   static const height = 36.0;
-
-  /// How far what lies beneath blurs.
-  static const blur = 12.0;
 
   final Widget child;
 
@@ -69,18 +64,12 @@ class GlassCapsule extends StatelessWidget {
     final colors = context.colors;
     return SizedBox(
       height: height,
-      child: ClipRRect(
-        borderRadius: const BorderRadius.all(Radius.circular(height / 2)),
-        child: BackdropFilter.grouped(
-          filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
-          child: DecoratedBox(
-            decoration: ShapeDecoration(
-              color: colors.capsule,
-              shape: StadiumBorder(side: BorderSide(color: colors.capsuleRim, width: Strokes.hairline)),
-            ),
-            child: Padding(padding: const EdgeInsets.all(3), child: child),
-          ),
+      child: DecoratedBox(
+        decoration: ShapeDecoration(
+          color: colors.capsule,
+          shape: StadiumBorder(side: BorderSide(color: colors.capsuleRim, width: Strokes.hairline)),
         ),
+        child: Padding(padding: const EdgeInsets.all(3), child: child),
       ),
     );
   }

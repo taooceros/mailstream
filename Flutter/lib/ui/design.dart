@@ -83,7 +83,7 @@ final class MailColors {
     cardBorder: Color(0x14000000),
     raisedCard: Color(0xFFFFFFFF),
     spotlight: Color(0xA6FFFFFF),
-    capsule: Color(0xB8FFFFFF),
+    capsule: Color(0xFFF5F5F7),
     capsuleRim: Color(0x14000000),
     avatarPalette: [
       Color(0xFF007AFF), Color(0xFFAF52DE), Color(0xFFFF2D55), Color(0xFFFF3B30), Color(0xFFFF9500), Color(0xFF34C759),
@@ -118,7 +118,7 @@ final class MailColors {
     cardBorder: Color(0x1AFFFFFF),
     raisedCard: Color(0xFF2C2C32),
     spotlight: Color(0x06FFFFFF),
-    capsule: Color(0xB83A3A3C),
+    capsule: Color(0xFF2C2C2E),
     capsuleRim: Color(0x1FFFFFFF),
     avatarPalette: [
       Color(0xFF0A84FF), Color(0xFFBF5AF2), Color(0xFFFF375F), Color(0xFFFF453A), Color(0xFFFF9F0A), Color(0xFF30D158),
@@ -175,8 +175,8 @@ final class MailColors {
   /// The wash over today's column of the timeline, lighter than the tray.
   final Color spotlight;
 
-  /// The face of a toolbar capsule floating over content, translucent over a blur of what
-  /// scrolls beneath, inside a [capsuleRim] hairline.
+  /// The face of a toolbar capsule floating over content, opaque, inside a [capsuleRim]
+  /// hairline.
   final Color capsule;
   final Color capsuleRim;
 

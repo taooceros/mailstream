@@ -203,9 +203,10 @@ under the transparent Flutter view, through `macos_window_utils`), the sidebar s
 list and the conversation are rounded islands floating on it with a gap between them: the
 conversation's white, the lists' a shade grayer, a tray their highlighted row lifts off as a white
 card (the row under the pointer half as far, lifted rows 4 pt apart). The toolbars' controls
-float on frosted capsules Flutter draws (a backdrop blur, a translucent `MailColors.capsule`
-face, a hairline rim), the controls over a row on a raised capsule. Only the window's glass is
-the system's: everything on it is the app's own and looks the same on Windows (MS-182). Colors,
+float on capsules Flutter draws (an opaque `MailColors.capsule` face, a hairline rim; no backdrop
+blur, which cost every frame of a swipe, MS-187), the controls over a row on a raised capsule.
+Only the window's glass is the system's: everything on it is the app's own and looks the same on
+Windows (MS-182). Colors,
 radii, spacing, elevations, icon sizes and text roles are tokens in `lib/ui/design.dart`; use
 them rather than literals. Buttons, icon buttons, the search and text fields and spinners are
 still `macos_ui`'s until the app's own control set replaces them (MS-193); Material's remaining
@@ -492,8 +493,8 @@ kept hours and the order ↑ and ↓ follow.
 | `lib/state/chat_state.dart` | `ChatState`: chat accounts and spaces, the open space's messages, sending and starting chats; re-read on the engine's `chat`/`chatMessages` events |
 | `lib/ui/chat.dart` | The chat list, the open space (newest at the bottom, older pages loading at the top, messages as Chat draws their Markdown, videos playing and pictures showing in the log, other attachments as tiles, a composer: Return sends, ⇧Return a new line) and the New chat dialog (completing to the account's chat partners, then mail contacts) |
 | `lib/ui/chat_markup.dart` | A Chat message's `formattedText`, which the Chat API answers in Markdown (CommonMark and GitHub's extensions, `<chat-user>` mentions), parsed with `package:markdown` and drawn as text: bold, italic, strike, code, monospace blocks, lists, quotes, tables, links, mentions |
-| `lib/ui/design.dart` | `MailTheme` (the `macos_ui` theme and Material's, in macOS colors and type sizes), motion, list and island metrics, stable account/topic/avatar colors |
-| `lib/ui/glass.dart` | Islands, glass capsules (system glass under the controls), raised capsules, toolbar buttons, spinner |
+| `lib/ui/design.dart` | The style tokens, the same on every platform: color roles and elevations (`MailColors`), radii, spacing, strokes, icon sizes, text roles, motion, list and island metrics, stable account/topic/avatar colors; `MailTheme` (the `macos_ui` theme the remaining `macos_ui` controls use) |
+| `lib/ui/glass.dart` | Islands, toolbar capsules (`GlassCapsule`, drawn by Flutter), raised capsules, toolbar buttons, spinner |
 | `lib/ui/shell.dart` | Islands layout, toolbars, search field, keys, snackbars |
 | `lib/ui/sidebar.dart` | Mail-style sidebar and rail |
 | `lib/ui/conversation_list.dart` | Fixed-height lazy list that loads the next page near its end, Smart Inbox bundles and its "Waiting on you" group, hover actions |
