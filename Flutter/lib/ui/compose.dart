@@ -601,6 +601,8 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
     onChanged: onChanged,
   );
 
+  /// The draft's toolbar, as every detail pane's: its close capsule, the title ("New Message",
+  /// "Reply"), its tools and Send.
   Widget _titleBar(BuildContext context) {
     final state = widget.state;
     final floating = state.composeFloating;
@@ -608,7 +610,7 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
       d.replyAll ? 'Reply All' : d.kind.title,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: context.text.title3.copyWith(fontWeight: FontWeight.w700),
+      style: context.roles.paneTitle,
     );
     final draggableTitle = floating && widget.onDragFloating != null
         ? MouseRegion(
@@ -623,67 +625,62 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
             child: Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: titleWidget),
           );
 
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 10, 12, 6),
-      child: Row(
-        children: [
-          GlassCapsule(
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ToolButton(tooltip: 'Close draft (${Host.shortcut('W')})', icon: CupertinoIcons.xmark, onPressed: d.sending ? null : requestClose),
-                ToolButton(
-                  tooltip: 'Minimize to bottom-right',
-                  icon: CupertinoIcons.minus,
-                  onPressed: () {
-                    state.setComposeStashed(true);
-                    widget.onUnfocus();
-                  },
-                ),
-              ],
+    return DetailToolbar(
+      leading: GlassCapsule(
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ToolButton(tooltip: 'Close draft (${Host.shortcut('W')})', icon: CupertinoIcons.xmark, onPressed: d.sending ? null : requestClose),
+            ToolButton(
+              tooltip: 'Minimize to bottom-right',
+              icon: CupertinoIcons.minus,
+              onPressed: () {
+                state.setComposeStashed(true);
+                widget.onUnfocus();
+              },
             ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(child: draggableTitle),
-          GlassCapsule(
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (state.composes.length == 1)
-                  ToolButton(tooltip: 'New message (${Host.shortcut('N')})', icon: CupertinoIcons.plus, onPressed: state.composeNew),
-                if (!floating)
-                  ToolButton(
-                    tooltip: state.composeSwapped ? 'Move column to right edge' : 'Swap column position',
-                    icon: CupertinoIcons.arrow_left_right,
-                    onPressed: state.toggleComposeSwapped,
-                  ),
-                ToolButton(
-                  tooltip: floating ? 'Dock as column' : 'Float over window',
-                  icon: floating ? CupertinoIcons.sidebar_right : CupertinoIcons.macwindow,
-                  onPressed: state.toggleComposeFloating,
-                ),
-                ToolButton(
-                  tooltip: 'Attach files (or drop them on the message)',
-                  icon: CupertinoIcons.paperclip,
-                  onPressed: d.sending ? null : _pick,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          MacosTooltip(
-            message: Host.shortcut('Return'),
-            child: MailButton(
-              label: d.sending ? 'Sending' : 'Send',
-              icon: CupertinoIcons.paperplane_fill,
-              kind: MailButtonKind.primary,
-              size: MailControlSize.large,
-              busy: d.sending,
-              onPressed: _send,
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
+      title: draggableTitle,
+      actions: [
+        GlassCapsule(
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (state.composes.length == 1)
+                ToolButton(tooltip: 'New message (${Host.shortcut('N')})', icon: CupertinoIcons.plus, onPressed: state.composeNew),
+              if (!floating)
+                ToolButton(
+                  tooltip: state.composeSwapped ? 'Move column to right edge' : 'Swap column position',
+                  icon: CupertinoIcons.arrow_left_right,
+                  onPressed: state.toggleComposeSwapped,
+                ),
+              ToolButton(
+                tooltip: floating ? 'Dock as column' : 'Float over window',
+                icon: floating ? CupertinoIcons.sidebar_right : CupertinoIcons.macwindow,
+                onPressed: state.toggleComposeFloating,
+              ),
+              ToolButton(
+                tooltip: 'Attach files (or drop them on the message)',
+                icon: CupertinoIcons.paperclip,
+                onPressed: d.sending ? null : _pick,
+              ),
+            ],
+          ),
+        ),
+        MacosTooltip(
+          message: Host.shortcut('Return'),
+          child: MailButton(
+            label: d.sending ? 'Sending' : 'Send',
+            icon: CupertinoIcons.paperplane_fill,
+            kind: MailButtonKind.primary,
+            size: MailControlSize.large,
+            busy: d.sending,
+            onPressed: _send,
+          ),
+        ),
+      ],
     );
   }
 

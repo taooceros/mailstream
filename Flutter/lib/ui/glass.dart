@@ -7,12 +7,13 @@
 /// over a row are [RaisedCapsule]s, a little skeuomorphic.
 library;
 
-import 'package:flutter/cupertino.dart' show CupertinoActivityIndicator;
+import 'package:flutter/cupertino.dart' show CupertinoActivityIndicator, CupertinoIcons;
 import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
 import 'package:macos_ui/macos_ui.dart';
 
 import '../platform.dart';
+import 'common.dart';
 import 'controls.dart';
 import 'design.dart';
 
@@ -113,6 +114,99 @@ class ToolButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => MailIconButton(icon: icon, tooltip: tooltip, onPressed: onPressed, color: color);
+}
+
+/// A detail pane's toolbar (the open conversation, chat, event or draft; MS-188): its close
+/// capsule at the leading edge, the pane's [title] after it when it has one (a chat's name,
+/// "New Message", in [TextRoles.paneTitle]), and its action capsules at the trailing edge, with
+/// no bar or rule under them. A pane's own title (a subject, an event's) is its content's first
+/// line, in [TextRoles.display], and scrolls under the toolbar with it.
+class DetailToolbar extends StatelessWidget {
+  const DetailToolbar({super.key, required this.leading, this.title, this.actions = const []});
+
+  /// The band at the top of a detail pane that its toolbar floats in.
+  static const height = 56.0;
+
+  final Widget leading;
+  final Widget? title;
+  final List<Widget> actions;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    height: height,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: Space.s10),
+      child: Row(children: [
+        leading,
+        if (title case final title?) ...[const SizedBox(width: Space.s12), Expanded(child: title)] else const Spacer(),
+        for (final (index, action) in actions.indexed) ...[
+          if (index > 0 || title != null) const SizedBox(width: Space.s8),
+          action,
+        ],
+      ]),
+    ),
+  );
+}
+
+/// A detail pane: [content] fills it and scrolls under its [toolbar] (a [DetailToolbar]), which
+/// floats over the top and, on the Mac, moves the window. With [fade] the content melts into the
+/// pane's background under the toolbar, so a title on the toolbar stays readable over it (chat,
+/// whose name rides on the toolbar). Mail leaves it off: nothing Flutter draws may cover its
+/// WebKit bodies ([Island]).
+class DetailPane extends StatelessWidget {
+  const DetailPane({super.key, required this.toolbar, required this.content, this.fade = false});
+
+  final Widget toolbar;
+  final Widget content;
+  final bool fade;
+
+  @override
+  Widget build(BuildContext context) {
+    final background = context.colors.background;
+    return Stack(
+      children: [
+        Positioned.fill(child: content),
+        if (fade)
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: DetailToolbar.height + Space.s16,
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [background, background, background.withValues(alpha: 0)],
+                    stops: const [0, 0.6, 1],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        Positioned(top: 0, left: 0, right: 0, child: WindowDragArea(child: toolbar)),
+      ],
+    );
+  }
+}
+
+/// The capsule that leads a detail pane's toolbar: ✕ closes the pane beside the list (two
+/// panes), ‹ goes back to the list it covers.
+class CloseCapsule extends StatelessWidget {
+  const CloseCapsule({super.key, required this.twoPane, required this.onPressed});
+
+  final bool twoPane;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) => GlassCapsule(
+    child: ToolButton(
+      tooltip: '${twoPane ? 'Close' : 'Back'} (Esc or ${Host.shortcut('W')})',
+      icon: twoPane ? CupertinoIcons.xmark : CupertinoIcons.chevron_left,
+      onPressed: onPressed,
+    ),
+  );
 }
 
 /// The activity spinner, in the secondary label (or [color]: white on a filled button).

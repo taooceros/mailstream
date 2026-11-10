@@ -1000,108 +1000,85 @@ class CalendarEventPane extends StatelessWidget {
     final text = context.text.body;
     final actions = _actionBar(context);
     final guests = eventGuests(event);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        WindowDragArea(
-          child: SizedBox(
-            height: 52,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Row(children: [
-                GlassCapsule(
-                  child: ToolButton(
-                    tooltip: '${twoPane ? 'Close' : 'Back'} (Esc or ${Host.shortcut('W')})',
-                    icon: twoPane ? CupertinoIcons.xmark : CupertinoIcons.chevron_left,
-                    onPressed: onBack,
-                  ),
+    return DetailPane(
+      toolbar: DetailToolbar(
+        leading: CloseCapsule(twoPane: twoPane, onPressed: onBack),
+        actions: [
+          if (event.editable)
+            GlassCapsule(
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                ToolButton(
+                  tooltip: 'Edit',
+                  icon: CupertinoIcons.pencil,
+                  onPressed: () => showEventEditor(context, state, event: event),
                 ),
-                const Spacer(),
-                if (event.editable)
-                  GlassCapsule(
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      ToolButton(
-                        tooltip: 'Edit',
-                        icon: CupertinoIcons.pencil,
-                        onPressed: () => showEventEditor(context, state, event: event),
-                      ),
-                      ToolButton(
-                        tooltip: 'Delete',
-                        icon: CupertinoIcons.trash,
-                        onPressed: () => confirmDeleteEvent(context, state, event),
-                      ),
-                    ]),
-                  ),
-                if (event.link != null) ...[
-                  if (event.editable) const SizedBox(width: 8),
-                  GlassCapsule(
-                    child: ToolButton(
-                      tooltip: provider == 'microsoft' ? 'Open in Outlook' : 'Open in Google Calendar',
-                      icon: CupertinoIcons.arrow_up_right_square,
-                      onPressed: () => state.openExternal(event.link!),
-                    ),
-                  ),
-                ],
+                ToolButton(
+                  tooltip: 'Delete',
+                  icon: CupertinoIcons.trash,
+                  onPressed: () => confirmDeleteEvent(context, state, event),
+                ),
               ]),
             ),
-          ),
-        ),
-        const Hairline(),
-        Expanded(
-          child: Selectable(
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
-              children: [
-                Wrap(spacing: 6, runSpacing: 6, children: [
-                  MarkChip(
-                    label: [event.calendarName ?? event.calendar, if (event.calendarName != event.account) event.account].join(' · '),
-                    mark: calendarDot(eventColor(state, event), colors),
-                  ),
-                  if (event.series != null) const Pill(label: 'Repeats'),
-                ]),
-                const SizedBox(height: 10),
-                Text(
-                  event.title,
-                  style: context.text.title2.copyWith(
-                    fontWeight: FontWeight.w700,
-                    decoration: event.response == 'declined' ? TextDecoration.lineThrough : null,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                line(CupertinoIcons.clock, Text(_when(DateTime.now()), style: text.copyWith(color: colors.secondaryLabel))),
-                if (actions != null) Padding(padding: const EdgeInsets.only(top: 4, bottom: 14), child: actions),
-                if (event.location != null) line(CupertinoIcons.location, Text(event.location!, style: text)),
-                if (guests.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  Row(children: [
-                    Text(guests.length == 1 ? '1 guest' : '${guests.length} guests', style: text.copyWith(fontWeight: FontWeight.w600)),
-                    const Spacer(),
-                    Text(guestSummary(event.attendees), style: context.text.footnote.copyWith(color: colors.secondaryLabel)),
-                  ]),
-                  const SizedBox(height: 8),
-                  LayoutBuilder(builder: (context, constraints) {
-                    const gap = 8.0;
-                    final columns = constraints.maxWidth >= _twoColumns ? 2 : 1;
-                    final width = (constraints.maxWidth - gap * (columns - 1)) / columns;
-                    return Wrap(spacing: gap, runSpacing: gap, children: [
-                      for (final guest in guests)
-                        SizedBox(width: width, child: _GuestCard(person: guest.person, organizer: guest.organizer)),
-                    ]);
-                  }),
-                  const SizedBox(height: 14),
-                ],
-                if (event.notes != null) ...[
-                  const Hairline(),
-                  const SizedBox(height: 14),
-                  Text('Notes', style: text.copyWith(fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 6),
-                  Text(event.notes!, style: text),
-                ],
-              ],
+          if (event.link != null)
+            GlassCapsule(
+              child: ToolButton(
+                tooltip: provider == 'microsoft' ? 'Open in Outlook' : 'Open in Google Calendar',
+                icon: CupertinoIcons.arrow_up_right_square,
+                onPressed: () => state.openExternal(event.link!),
+              ),
             ),
-          ),
+        ],
+      ),
+      // The event scrolls under the toolbar, as a conversation does.
+      content: Selectable(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(Space.s24, DetailToolbar.height + Space.s8, Space.s24, Space.s24),
+          children: [
+            Wrap(spacing: 6, runSpacing: 6, children: [
+              MarkChip(
+                label: [event.calendarName ?? event.calendar, if (event.calendarName != event.account) event.account].join(' · '),
+                mark: calendarDot(eventColor(state, event), colors),
+              ),
+              if (event.series != null) const Pill(label: 'Repeats'),
+            ]),
+            const SizedBox(height: 10),
+            Text(
+              event.title,
+              style: context.roles.display.copyWith(decoration: event.response == 'declined' ? TextDecoration.lineThrough : null),
+            ),
+            const SizedBox(height: 6),
+            line(CupertinoIcons.clock, Text(_when(DateTime.now()), style: text.copyWith(color: colors.secondaryLabel))),
+            if (actions != null) Padding(padding: const EdgeInsets.only(top: 4, bottom: 14), child: actions),
+            if (event.location != null) line(CupertinoIcons.location, Text(event.location!, style: text)),
+            if (guests.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Row(children: [
+                Text(guests.length == 1 ? '1 guest' : '${guests.length} guests', style: text.copyWith(fontWeight: FontWeight.w600)),
+                const Spacer(),
+                Text(guestSummary(event.attendees), style: context.text.footnote.copyWith(color: colors.secondaryLabel)),
+              ]),
+              const SizedBox(height: 8),
+              LayoutBuilder(builder: (context, constraints) {
+                const gap = 8.0;
+                final columns = constraints.maxWidth >= _twoColumns ? 2 : 1;
+                final width = (constraints.maxWidth - gap * (columns - 1)) / columns;
+                return Wrap(spacing: gap, runSpacing: gap, children: [
+                  for (final guest in guests)
+                    SizedBox(width: width, child: _GuestCard(person: guest.person, organizer: guest.organizer)),
+                ]);
+              }),
+              const SizedBox(height: 14),
+            ],
+            if (event.notes != null) ...[
+              const Hairline(),
+              const SizedBox(height: 14),
+              Text('Notes', style: text.copyWith(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 6),
+              Text(event.notes!, style: text),
+            ],
+          ],
         ),
-      ],
+      ),
     );
   }
 }

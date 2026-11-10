@@ -412,7 +412,7 @@ class _ChatReaderState extends State<ChatReader> {
       log = ListView.builder(
         controller: _scroll,
         reverse: true,
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+        padding: const EdgeInsets.fromLTRB(Space.s20, DetailToolbar.height, Space.s20, Space.s12),
         itemCount: items.length + extra,
         itemBuilder: (context, index) {
           if (index == items.length) {
@@ -445,30 +445,23 @@ class _ChatReaderState extends State<ChatReader> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        WindowDragArea(
-          child: SizedBox(
-            height: 52,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Row(children: [
-                GlassCapsule(
-                  child: ToolButton(
-                    tooltip: '${widget.twoPane ? 'Close' : 'Back'} (Esc or ${Host.shortcut('W')})',
-                    icon: widget.twoPane ? CupertinoIcons.xmark : CupertinoIcons.chevron_left,
-                    onPressed: widget.onBack,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.headline)),
-                if (chat.accounts.length > 1)
-                  Text(widget.space.account, style: context.text.callout.copyWith(color: colors.secondaryLabel)),
-                const SizedBox(width: 8),
+        // The log scrolls under the toolbar, fading out beneath the space's name.
+        Expanded(
+          child: DetailPane(
+            fade: true,
+            toolbar: DetailToolbar(
+              leading: CloseCapsule(twoPane: widget.twoPane, onPressed: widget.onBack),
+              title: Row(children: [
+                Flexible(child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.roles.paneTitle)),
+                if (chat.accounts.length > 1) ...[
+                  const SizedBox(width: Space.s8),
+                  Text(widget.space.account, maxLines: 1, style: context.roles.meta),
+                ],
               ]),
             ),
+            content: log,
           ),
         ),
-        const Hairline(),
-        Expanded(child: log),
         Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: Reader.column + 40),

@@ -274,7 +274,7 @@ class _Header extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(subject.title, style: context.text.title1.copyWith(color: colors.label, fontWeight: FontWeight.w700)),
+        Text(subject.title, style: context.roles.display),
         const SizedBox(height: 12),
         Wrap(
           spacing: 8,

@@ -743,54 +743,32 @@ class _MailShellState extends State<MailShell> {
   Widget _onCalendar(Widget Function() build, {Key? key}) =>
       ListenableBuilder(key: key, listenable: state.calendar, builder: (context, _) => build());
 
-  /// The conversation's island: the message scrolls under its toolbar, glass capsules floating
-  /// over the top of it.
-  Widget _detailPane(BuildContext context, Conversation opened) => Stack(
-    children: [
-      Positioned.fill(
-        child: AnimatedSwitcher(
-          duration: Motion.medium,
-          switchInCurve: Motion.curve,
-          // Keep WebKit's native viewport unscaled: its asynchronously composited page
-          // can drift relative to the Flutter card during a scale transition (MS-82).
-          // Fading preserves the transition without changing native clip geometry.
-          transitionBuilder: (child, animation) => FadeTransition(
-            opacity: animation,
-            child: child,
-          ),
-          child: KeyedSubtree(
-            key: ValueKey(opened.id),
-            child: Reader(key: _reader, state: state, conversation: opened, topInset: toolbarHeight),
-          ),
-        ),
+  /// The conversation's island: the message scrolls under its toolbar, capsules floating over the
+  /// top of it.
+  Widget _detailPane(BuildContext context, Conversation opened) => DetailPane(
+    content: AnimatedSwitcher(
+      duration: Motion.medium,
+      switchInCurve: Motion.curve,
+      // Keep WebKit's native viewport unscaled: its asynchronously composited page
+      // can drift relative to the Flutter card during a scale transition (MS-82).
+      // Fading preserves the transition without changing native clip geometry.
+      transitionBuilder: (child, animation) => FadeTransition(
+        opacity: animation,
+        child: child,
       ),
-      Positioned(
-        top: 0,
-        left: 0,
-        right: 0,
-        height: toolbarHeight,
-        child: WindowDragArea(child: _readerToolbar(context, opened)),
+      child: KeyedSubtree(
+        key: ValueKey(opened.id),
+        child: Reader(key: _reader, state: state, conversation: opened, topInset: DetailToolbar.height),
       ),
-    ],
+    ),
+    toolbar: _readerToolbar(context, opened),
   );
 
-  /// The band at the top of a conversation's island that its toolbar floats in.
-  static const toolbarHeight = 56.0;
-
-  /// The toolbar's groups are capsules of the system's glass, as in macOS 26 Mail.
   Widget _readerToolbar(BuildContext context, Conversation opened) {
     final colors = context.colors;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      child: Row(children: [
-        GlassCapsule(
-          child: ToolButton(
-            tooltip: '${_twoPane ? 'Close' : 'Back'} (Esc or ${Host.shortcut('W')})',
-            icon: _twoPane ? CupertinoIcons.xmark : CupertinoIcons.chevron_left,
-            onPressed: _back,
-          ),
-        ),
-        const Spacer(),
+    return DetailToolbar(
+      leading: CloseCapsule(twoPane: _twoPane, onPressed: _back),
+      actions: [
         GlassCapsule(
           child: Row(mainAxisSize: MainAxisSize.min, children: [
             if (opened.waiting)
@@ -815,7 +793,6 @@ class _MailShellState extends State<MailShell> {
             ),
           ]),
         ),
-        const SizedBox(width: 8),
         GlassCapsule(
           child: Row(mainAxisSize: MainAxisSize.min, children: [
             ToolButton(tooltip: 'Reply (R)', icon: CupertinoIcons.arrowshape_turn_up_left, onPressed: () => _reader.currentState?.reply()),
@@ -831,7 +808,7 @@ class _MailShellState extends State<MailShell> {
             ),
           ]),
         ),
-      ]),
+      ],
     );
   }
 }
