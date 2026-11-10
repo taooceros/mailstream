@@ -208,10 +208,12 @@ blur, which cost every frame of a swipe, MS-187), the controls over a row on a r
 Only the window's glass is the system's: everything on it is the app's own and looks the same on
 Windows (MS-182). Colors,
 radii, spacing, elevations, icon sizes and text roles are tokens in `lib/ui/design.dart`; use
-them rather than literals. Buttons, icon buttons, the search and text fields and spinners are
-still `macos_ui`'s until the app's own control set replaces them (MS-193); Material's remaining
-widgets are themed to match (system font sizes, accent blue, gray fills, SF Symbols-style icons
-from `CupertinoIcons`). It needs macOS 26.
+them rather than literals. The controls are the app's own, drawn from those tokens in
+`lib/ui/controls.dart` (MS-193): buttons (primary, secondary, destructive, plain; small, regular,
+large), icon buttons, a segmented control, text and search fields, menu buttons, a date button,
+a switch, a checkbox and a confirmation sheet; use them rather than `macos_ui`'s or Cupertino's.
+Text editing inside the fields and tooltips are still `macos_ui`'s, which Flutter draws the same
+on both platforms. Icons are `CupertinoIcons`. It needs macOS 26.
 
 The sidebar shows from 1200 dp wide (a rail below, whose menu button opens it). The list's
 island fills the window; from 1000 dp opening a conversation splits it, the conversation's
@@ -492,6 +494,7 @@ kept hours and the order ↑ and ↓ follow.
 | `lib/state/mail_state.dart` | `MailState`: selection, paged lists served from memory for 90 s, previews, search, the reader, and optimistic actions that roll back on failure |
 | `lib/state/chat_state.dart` | `ChatState`: chat accounts and spaces, the open space's messages, sending and starting chats; re-read on the engine's `chat`/`chatMessages` events |
 | `lib/ui/chat.dart` | The chat list, the open space (newest at the bottom, older pages loading at the top, messages as Chat draws their Markdown, videos playing and pictures showing in the log, other attachments as tiles, a composer: Return sends, ⇧Return a new line) and the New chat dialog (completing to the account's chat partners, then mail contacts) |
+| `lib/ui/controls.dart` | The app's own controls, the same on every platform: `MailButton`, `MailIconButton`, `MailSegmented`, `MailTextField`, `MailSearchField`, `MailMenuButton`, `MailDateButton`, `MailSwitch`, `MailCheckbox`, `confirmAction` |
 | `lib/ui/chat_markup.dart` | A Chat message's `formattedText`, which the Chat API answers in Markdown (CommonMark and GitHub's extensions, `<chat-user>` mentions), parsed with `package:markdown` and drawn as text: bold, italic, strike, code, monospace blocks, lists, quotes, tables, links, mentions |
 | `lib/ui/design.dart` | The style tokens, the same on every platform: color roles and elevations (`MailColors`), radii, spacing, strokes, icon sizes, text roles, motion, list and island metrics, stable account/topic/avatar colors; `MailTheme` (the `macos_ui` theme the remaining `macos_ui` controls use) |
 | `lib/ui/glass.dart` | Islands, toolbar capsules (`GlassCapsule`, drawn by Flutter), raised capsules, toolbar buttons, spinner |

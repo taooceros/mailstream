@@ -5,6 +5,7 @@ import 'package:mailstream/mailstream.dart' as engine;
 import 'package:mailstream_ui/state/mail_state.dart';
 import 'package:mailstream_ui/ui/calendar_editor.dart';
 import 'package:mailstream_ui/ui/design.dart';
+import 'package:mailstream_ui/ui/controls.dart';
 
 import 'reader_fixture.dart';
 
@@ -106,7 +107,7 @@ void main() {
     await tester.pumpWidget(MacosApp(
       theme: MailTheme.macos(Brightness.light),
       home: Builder(
-        builder: (context) => Center(child: PushButton(controlSize: ControlSize.large, onPressed: () => open(context), child: const Text('Open'))),
+        builder: (context) => Center(child: MailButton(label: 'Open', onPressed: () => open(context))),
       ),
     ));
     await tester.tap(find.text('Open'));
@@ -117,7 +118,7 @@ void main() {
     await window(tester, (context) => showEventEditor(context, state, start: DateTime(2026, 11, 10, 14)));
     expect(find.text('New event'), findsOneWidget);
     expect(find.textContaining('Times in Europe/Berlin.'), findsOneWidget);
-    await tester.enterText(find.byType(MacosTextField).first, 'Lunch');
+    await tester.enterText(find.byType(MailTextField).first, 'Lunch');
     await tester.pump();
     await tester.tap(find.text('Add event'));
     await tester.pumpAndSettle();
@@ -134,7 +135,7 @@ void main() {
     expect(find.text('Edit event'), findsOneWidget);
     expect(find.text('bo@example.test'), findsOneWidget, reason: 'the guests, without the account itself');
     expect(find.text(me), findsNothing);
-    await tester.enterText(find.byType(MacosTextField).first, 'Planning v2');
+    await tester.enterText(find.byType(MailTextField).first, 'Planning v2');
     await tester.pump();
     await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();

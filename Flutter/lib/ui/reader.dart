@@ -10,6 +10,7 @@ import '../platform.dart';
 import '../state/mail_state.dart';
 import 'common.dart';
 import 'compose.dart';
+import 'controls.dart';
 import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
@@ -433,16 +434,8 @@ class _AttachmentChip extends StatelessWidget {
   final VoidCallback onOpen;
 
   @override
-  Widget build(BuildContext context) => PushButton(
-    controlSize: ControlSize.regular,
-    secondary: true,
-    onPressed: onOpen,
-    child: Row(mainAxisSize: MainAxisSize.min, children: [
-      const MacosIcon(CupertinoIcons.paperclip, size: 13),
-      const SizedBox(width: 6),
-      Text('${attachment.filename}  ·  ${fileSize(attachment.size)}'),
-    ]),
-  );
+  Widget build(BuildContext context) =>
+      MailButton(label: '${attachment.filename}  ·  ${fileSize(attachment.size)}', icon: CupertinoIcons.paperclip, onPressed: onOpen);
 }
 
 /// A body: HTML mail flush with the message, as in Mail.app (`.mail-frame` in the native reader);
@@ -1122,14 +1115,14 @@ class _ReplyBar extends StatelessWidget {
   final VoidCallback onReply;
   final VoidCallback onReplyAll;
 
-  /// Push buttons on a capsule of the system's glass, floating over the conversation.
+  /// The two reply buttons on a capsule floating over the conversation.
   @override
   Widget build(BuildContext context) => Center(
     child: GlassCapsule(
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        PushButton(controlSize: ControlSize.large, onPressed: onReply, child: const Text('Reply')),
-        const SizedBox(width: 6),
-        PushButton(controlSize: ControlSize.large, secondary: true, onPressed: onReplyAll, child: const Text('Reply All')),
+        MailButton(label: 'Reply', kind: MailButtonKind.primary, onPressed: onReply),
+        const SizedBox(width: Space.s6),
+        MailButton(label: 'Reply All', onPressed: onReplyAll),
       ]),
     ),
   );
@@ -1290,13 +1283,12 @@ class _ComposerState extends State<_Composer> {
                 ToolButton(tooltip: 'Discard', icon: CupertinoIcons.trash, onPressed: _discard),
               ]),
               const SizedBox(height: 8),
-              MacosTextField(
+              MailTextField(
                 controller: _text,
                 focusNode: _focus,
                 autofocus: true,
                 minLines: 3,
                 maxLines: 12,
-                style: text.body,
                 placeholder: 'Write a reply',
               ),
               const SizedBox(height: 12),
@@ -1305,12 +1297,12 @@ class _ComposerState extends State<_Composer> {
                   child: Text('The original is quoted below your text.  ${Host.shortcut('Return')} sends.',
                       style: text.subheadline.copyWith(color: colors.secondaryLabel)),
                 ),
-                PushButton(
-                  controlSize: ControlSize.large,
-                  onPressed: _sending ? null : _send,
-                  child: _sending
-                      ? const Row(mainAxisSize: MainAxisSize.min, children: [Spinner(radius: 6), SizedBox(width: 6), Text('Sending')])
-                      : const Text('Send'),
+                MailButton(
+                  label: _sending ? 'Sending' : 'Send',
+                  kind: MailButtonKind.primary,
+                  size: MailControlSize.large,
+                  busy: _sending,
+                  onPressed: _send,
                 ),
               ]),
             ],

@@ -18,6 +18,7 @@ import 'chat.dart';
 import 'common.dart';
 import 'compose.dart';
 import 'conversation_list.dart';
+import 'controls.dart';
 import 'design.dart';
 import 'glass.dart';
 import 'reader.dart';
@@ -929,13 +930,7 @@ class _SearchField extends StatelessWidget {
   @override
   Widget build(BuildContext context) => CallbackShortcuts(
     bindings: {const SingleActivator(LogicalKeyboardKey.escape): onEscape},
-    child: MacosSearchField(
-      controller: controller,
-      focusNode: focus,
-      onChanged: onChanged,
-      placeholder: 'Search',
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-    ),
+    child: MailSearchField(controller: controller, focusNode: focus, onChanged: onChanged),
   );
 }
 

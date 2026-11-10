@@ -4,6 +4,7 @@ import 'package:macos_ui/macos_ui.dart';
 import 'package:mailstream_ui/state/mail_state.dart';
 import 'package:mailstream_ui/ui/design.dart';
 import 'package:mailstream_ui/ui/settings.dart';
+import 'package:mailstream_ui/ui/controls.dart';
 
 import 'tag_sync_app.dart' show TagSyncMail;
 
@@ -26,16 +27,16 @@ void main() {
     // No address chips: the switches stand for the list.
     expect(find.text('Add address'), findsNothing);
     bool on(String title) =>
-        tester.widget<MacosSwitch>(find.descendant(of: find.widgetWithText(Row, title), matching: find.byType(MacosSwitch))).value;
+        tester.widget<MailSwitch>(find.descendant(of: find.widgetWithText(Row, title), matching: find.byType(MailSwitch))).value;
     expect(on('Work  ·  Gmail labels'), isTrue);
     expect(on('Home  ·  Outlook categories'), isFalse);
 
-    await tester.tap(find.descendant(of: find.widgetWithText(Row, 'Home  ·  Outlook categories'), matching: find.byType(MacosSwitch)));
+    await tester.tap(find.descendant(of: find.widgetWithText(Row, 'Home  ·  Outlook categories'), matching: find.byType(MailSwitch)));
     await tester.pump();
     expect(mail.written.last, ['gone@example.test', 'home@example.test', 'work@example.test']);
     expect(on('Home  ·  Outlook categories'), isTrue);
 
-    await tester.tap(find.descendant(of: find.widgetWithText(Row, 'gone@example.test  ·  not signed in'), matching: find.byType(MacosSwitch)));
+    await tester.tap(find.descendant(of: find.widgetWithText(Row, 'gone@example.test  ·  not signed in'), matching: find.byType(MailSwitch)));
     await tester.pump();
     expect(mail.written.last, ['home@example.test', 'work@example.test']);
     expect(find.text('gone@example.test  ·  not signed in'), findsNothing);

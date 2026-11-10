@@ -1,9 +1,6 @@
-import 'package:flutter/cupertino.dart' show CupertinoIcons;
-import 'package:flutter/material.dart' show TimeOfDay;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:intl/intl.dart';
-import 'package:macos_ui/macos_ui.dart';
 
 import 'package:mailstream/mailstream.dart' as engine;
 
@@ -11,6 +8,7 @@ import '../platform.dart';
 import '../state/mail_state.dart';
 import 'calendar.dart';
 import 'common.dart';
+import 'controls.dart';
 import 'design.dart';
 import 'glass.dart';
 import 'people.dart';
@@ -39,28 +37,13 @@ Future<void> confirmDeleteEvent(BuildContext context, MailState state, engine.Ca
     if (guests == 1) 'Its guest is told it is cancelled.',
     if (guests > 1) 'Its $guests guests are told it is cancelled.',
   ].join(' ');
-  final confirmed = await showMacosAlertDialog<bool>(
-    context: context,
-    builder: (context) => MacosAlertDialog(
-      appIcon: const MacosIcon(CupertinoIcons.calendar_badge_minus, size: 56),
-      title: Text('Delete “${event.title}”?', style: context.text.headline),
-      message: Text(message, textAlign: TextAlign.center, style: context.text.subheadline),
-      horizontalActions: true,
-      secondaryButton: PushButton(
-        controlSize: ControlSize.large,
-        secondary: true,
-        onPressed: () => Navigator.of(context).pop(false),
-        child: const Text('Cancel'),
-      ),
-      primaryButton: PushButton(
-        controlSize: ControlSize.large,
-        color: context.colors.red,
-        onPressed: () => Navigator.of(context).pop(true),
-        child: const Text('Delete'),
-      ),
-    ),
+  final confirmed = await confirmAction(
+    context,
+    title: 'Delete “${event.title}”?',
+    message: message,
+    confirm: 'Delete',
   );
-  if (confirmed == true) await state.calendar.delete(event);
+  if (confirmed) await state.calendar.delete(event);
 }
 
 /// One calendar an event can go on: its account and id.
@@ -107,8 +90,6 @@ class _EventEditorState extends State<EventEditor> {
   late final String _initialWhen;
   late final List<String> _initialGuests;
 
-  /// Bumped when the end moves with the start, so its pickers show it.
-  int _endRevision = 0;
   int _revision = 0;
   bool _saving = false;
   String? _error;
@@ -189,7 +170,6 @@ class _EventEditorState extends State<EventEditor> {
     setState(() {
       _start = start;
       _end = start.add(length);
-      _endRevision++;
       _error = null;
     });
   }
@@ -329,34 +309,31 @@ class _EventEditorState extends State<EventEditor> {
     );
 
     Widget field(TextEditingController controller, String placeholder, {int minLines = 1, int maxLines = 1, bool enabled = true}) =>
-        MacosTextField(
+        MailTextField(
           controller: controller,
           enabled: enabled && !_saving,
           minLines: minLines,
           maxLines: maxLines,
-          style: text.body,
           placeholder: placeholder,
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
         );
 
-    Widget moment(String which, DateTime value, ValueChanged<DateTime> onChanged, Key key) => Row(children: [
-      MacosDatePicker(
-        key: ValueKey(('$which-day', key)),
-        style: DatePickerStyle.textual,
-        initialDate: value,
-        onDateChanged: (day) => onChanged(DateTime(day.year, day.month, day.day, value.hour, value.minute)),
-      ),
-      if (!_allDay) ...[
-        const SizedBox(width: 8),
-        MacosTimePicker(
-          key: ValueKey(('$which-time', key)),
-          style: TimePickerStyle.textual,
-          initialTime: TimeOfDay.fromDateTime(value),
-          onTimeChanged: (time) => onChanged(DateTime(value.year, value.month, value.day, time.hour, time.minute)),
-        ),
-      ],
-      const Spacer(),
-    ]);
+    // A day, and a time of day every 15 minutes (with the event's own when it falls between).
+    Widget moment(DateTime value, ValueChanged<DateTime> onChanged) {
+      final minutes = value.hour * 60 + value.minute;
+      final times = {for (var m = 0; m < 24 * 60; m += 15) m, minutes}.toList()..sort();
+      return Row(children: [
+        MailDateButton(value: value, onChanged: _saving ? null : onChanged),
+        if (!_allDay) ...[
+          const SizedBox(width: Space.s8),
+          MailMenuButton<int>(
+            value: minutes,
+            onChanged: _saving ? null : (m) => onChanged(DateTime(value.year, value.month, value.day, m ~/ 60, m % 60)),
+            items: [for (final m in times) MailMenuItem(m, DateFormat.jm().format(DateTime(2000, 1, 1, m ~/ 60, m % 60)))],
+          ),
+        ],
+        const Spacer(),
+      ]);
+    }
 
     final calendarRow = event != null
         ? Text(
@@ -367,31 +344,26 @@ class _EventEditorState extends State<EventEditor> {
         ? Text('No calendar here can take new events.', style: text.body.copyWith(color: colors.secondaryLabel))
         : Align(
             alignment: Alignment.centerLeft,
-            child: MacosPopupButton<_CalendarChoice>(
+            child: MailMenuButton<_CalendarChoice>(
               value: _calendar,
               onChanged: _saving ? null : (choice) => setState(() => _calendar = choice),
               items: [
                 for (final choice in choices)
-                  MacosPopupMenuItem(
-                    value: choice,
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      Container(
-                        width: 9,
-                        height: 9,
-                        decoration: BoxDecoration(
-                          color: hexColor(_calendarInfo(choice)?.color) ??
-                              accountPalette[widget.state.accountIndex(choice.account) % accountPalette.length],
-                          borderRadius: BorderRadius.circular(2),
-                        ),
+                  MailMenuItem(
+                    choice,
+                    [
+                      _calendarInfo(choice)?.name ?? choice.calendar,
+                      if (choices.any((c) => c.account != choice.account) && _calendarInfo(choice)?.name != choice.account) choice.account,
+                    ].join(' · '),
+                    leading: Container(
+                      width: CalendarMetrics.dot,
+                      height: CalendarMetrics.dot,
+                      decoration: BoxDecoration(
+                        color: hexColor(_calendarInfo(choice)?.color) ??
+                            accountPalette[widget.state.accountIndex(choice.account) % accountPalette.length],
+                        shape: BoxShape.circle,
                       ),
-                      const SizedBox(width: 6),
-                      Text(
-                        [
-                          _calendarInfo(choice)?.name ?? choice.calendar,
-                          if (choices.any((c) => c.account != choice.account) && _calendarInfo(choice)?.name != choice.account) choice.account,
-                        ].join(' · '),
-                      ),
-                    ]),
+                    ),
                   ),
               ],
             ),
@@ -401,18 +373,13 @@ class _EventEditorState extends State<EventEditor> {
       width: 540,
       title: event == null ? 'New event' : 'Edit event',
       actions: [
-        PushButton(
-          controlSize: ControlSize.large,
-          secondary: true,
-          onPressed: _saving ? null : () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        PushButton(
-          controlSize: ControlSize.large,
-          onPressed: _saving || _title.text.trim().isEmpty || (event == null && _calendar == null) ? null : _save,
-          child: _saving
-              ? const Row(mainAxisSize: MainAxisSize.min, children: [Spinner(radius: 6), SizedBox(width: 6), Text('Saving')])
-              : Text(event == null ? 'Add event' : 'Save'),
+        MailButton(label: 'Cancel', size: MailControlSize.large, onPressed: _saving ? null : () => Navigator.of(context).pop()),
+        MailButton(
+          label: _saving ? 'Saving' : (event == null ? 'Add event' : 'Save'),
+          kind: MailButtonKind.primary,
+          size: MailControlSize.large,
+          busy: _saving,
+          onPressed: _title.text.trim().isEmpty || (event == null && _calendar == null) ? null : _save,
         ),
       ],
       child: CallbackShortcuts(
@@ -425,13 +392,12 @@ class _EventEditorState extends State<EventEditor> {
             children: [
               row(
                 'Title',
-                MacosTextField(
+                MailTextField(
                   controller: _title,
                   autofocus: true,
                   enabled: !_saving,
                   style: text.body.copyWith(fontWeight: FontWeight.w600),
                   placeholder: 'Event title',
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
                   onSubmitted: (_) => _save(),
                 ),
               ),
@@ -440,20 +406,20 @@ class _EventEditorState extends State<EventEditor> {
                 'All day',
                 Align(
                   alignment: Alignment.centerLeft,
-                  child: MacosCheckbox(
+                  child: MailCheckbox(
                     value: _allDay,
+                    semanticLabel: 'All day',
                     onChanged: _saving
                         ? null
                         : (on) => setState(() {
                             _allDay = on;
-                            _endRevision++;
                             _error = null;
                           }),
                   ),
                 ),
               ),
-              row('Starts', moment('start', _start, _moveStart, ValueKey(_allDay))),
-              row('Ends', moment('end', _end, _moveEnd, ValueKey((_allDay, _endRevision)))),
+              row('Starts', moment(_start, _moveStart)),
+              row('Ends', moment(_end, _moveEnd)),
               row('Location', field(_location, 'Add a place or a link')),
               row(
                 'Guests',
@@ -487,13 +453,11 @@ class _EventEditorState extends State<EventEditor> {
                           _addGuest(person.address.email);
                           _guestField.clear();
                         },
-                        child: MacosTextField(
+                        child: MailTextField(
                           controller: _guestField,
                           focusNode: _guestFocus,
                           enabled: !_saving,
-                          style: text.body,
                           placeholder: 'Name or email address',
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
                         ),
                       ),
                     ),

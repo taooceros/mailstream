@@ -16,6 +16,7 @@ import '../bench.dart';
 import '../state/calendar_state.dart';
 import 'calendar.dart';
 import 'common.dart';
+import 'controls.dart';
 import 'design.dart';
 import 'glass.dart';
 import 'slide_layer.dart';
@@ -307,67 +308,11 @@ class _ViewSwitch extends StatelessWidget {
   static const _views = [(CalendarView.agenda, 'Agenda', 'A'), (CalendarView.day, 'Day', 'D'), (CalendarView.week, 'Week', 'W')];
 
   @override
-  Widget build(BuildContext context) {
-    final colors = context.colors;
-    final light = colors.brightness == Brightness.light;
-    Widget segment(CalendarView value, String label, String key) {
-      final selected = value == view;
-      return MacosTooltip(
-        message: '$label ($key)',
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () => onChanged(value),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Center(
-              child: AnimatedDefaultTextStyle(
-                duration: Motion.short,
-                curve: Motion.curve,
-                style: context.text.callout.copyWith(
-                  fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                  color: selected ? colors.label : colors.secondaryLabel,
-                ),
-                child: Text(label),
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-
-    final index = _views.indexWhere((v) => v.$1 == view);
-    return Container(
-      height: 28,
-      padding: const EdgeInsets.all(2),
-      decoration: BoxDecoration(color: colors.strongFill.withValues(alpha: light ? 0.7 : 0.5), borderRadius: BorderRadius.circular(8)),
-      child: IntrinsicWidth(
-        child: Stack(children: [
-          Positioned.fill(
-            child: AnimatedAlign(
-              key: const ValueKey('viewIndicator'),
-              duration: Motion.short,
-              curve: Motion.curve,
-              alignment: Alignment(index * 2 / (_views.length - 1) - 1, 0),
-              child: FractionallySizedBox(
-                widthFactor: 1 / _views.length,
-                heightFactor: 1,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: light ? MacosColors.white : colors.strongFill,
-                    borderRadius: BorderRadius.circular(6),
-                    boxShadow: light
-                        ? [BoxShadow(color: MacosColors.black.withValues(alpha: 0.12), blurRadius: 2, offset: const Offset(0, 1))]
-                        : null,
-                  ),
-                ),
-              ),
-            ),
-          ),
-          Row(children: [for (final (value, label, key) in _views) Expanded(child: segment(value, label, key))]),
-        ]),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => MailSegmented<CalendarView>(
+    selected: view,
+    onChanged: onChanged,
+    segments: [for (final (value, label, key) in _views) MailSegment(value, label, tooltip: '$label ($key)')],
+  );
 }
 
 /// Where the timeline is scrolled, kept by the calendar's pane for the grids that show it in turn:

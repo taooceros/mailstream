@@ -7,11 +7,13 @@
 /// over a row are [RaisedCapsule]s, a little skeuomorphic.
 library;
 
+import 'package:flutter/cupertino.dart' show CupertinoActivityIndicator;
 import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
 import 'package:macos_ui/macos_ui.dart';
 
 import '../platform.dart';
+import 'controls.dart';
 import 'design.dart';
 
 /// A rounded island on the window's glass, in the window's background color (or `color`): a
@@ -100,7 +102,7 @@ class RaisedCapsule extends StatelessWidget {
   }
 }
 
-/// A toolbar's icon button: macos_ui's, a rounded hover fill, with a tooltip.
+/// A toolbar's icon button: a [MailIconButton] at the toolbar's size, with a tooltip.
 class ToolButton extends StatelessWidget {
   const ToolButton({super.key, required this.icon, required this.tooltip, required this.onPressed, this.color});
 
@@ -110,34 +112,18 @@ class ToolButton extends StatelessWidget {
   final Color? color;
 
   @override
-  Widget build(BuildContext context) {
-    final colors = context.colors;
-    final tint = color ?? colors.secondaryLabel;
-    return MacosTooltip(
-      message: tooltip,
-      child: MacosIconButton(
-        icon: MacosIcon(icon, size: IconSizes.toolbar, color: onPressed == null ? tint.withValues(alpha: 0.35) : tint),
-        onPressed: onPressed,
-        semanticLabel: tooltip,
-        backgroundColor: MacosColors.transparent,
-        disabledColor: MacosColors.transparent,
-        hoverColor: colors.label.withValues(alpha: 0.07),
-        borderRadius: BorderRadius.circular(GlassCapsule.height / 2),
-        padding: EdgeInsets.zero,
-        boxConstraints: const BoxConstraints.tightFor(width: 30, height: 30),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => MailIconButton(icon: icon, tooltip: tooltip, onPressed: onPressed, color: color);
 }
 
-/// macos_ui's spinner.
+/// The activity spinner, in the secondary label (or [color]: white on a filled button).
 class Spinner extends StatelessWidget {
-  const Spinner({super.key, this.radius = 9});
+  const Spinner({super.key, this.radius = 9, this.color});
 
   final double radius;
+  final Color? color;
 
   @override
-  Widget build(BuildContext context) => ProgressCircle(radius: radius);
+  Widget build(BuildContext context) => CupertinoActivityIndicator(radius: radius, color: color ?? context.colors.secondaryLabel);
 }
 
 /// Opens [builder]'s [Sheet] over the window, the window dimmed behind it.

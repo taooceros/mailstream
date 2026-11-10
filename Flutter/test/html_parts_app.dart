@@ -8,6 +8,7 @@ import 'package:macos_ui/macos_ui.dart';
 import 'package:mailstream_ui/ui/design.dart';
 import 'package:mailstream_ui/ui/html_parts.dart';
 import 'package:mailstream_ui/ui/reader.dart';
+import 'package:mailstream_ui/ui/controls.dart';
 
 // Release-only synthetic runtime evidence; never starts the engine or reads private mail.
 // flutter run -d macos --release -t test/html_parts_app.dart
@@ -126,9 +127,9 @@ class _HtmlPartsAppState extends State<HtmlPartsApp> {
         Text(_status, style: const TextStyle(fontSize: 13, color: Color(0xff51627a))),
         const SizedBox(height: 12),
         Row(children: [
-          PushButton(controlSize: ControlSize.regular, onPressed: () => setState(() => _revision++), child: const Text('Refresh synthetic message')),
+          MailButton(label: 'Refresh synthetic message', onPressed: () => setState(() => _revision++)),
           const SizedBox(width: 12),
-          PushButton(controlSize: ControlSize.regular, onPressed: () => setState(() => _revision = 0), child: const Text('Reopen cached message')),
+          MailButton(label: 'Reopen cached message', onPressed: () => setState(() => _revision = 0)),
         ]),
         const SizedBox(height: 16),
         Expanded(child: SingleChildScrollView(child: Container(

@@ -8,6 +8,7 @@ import 'package:macos_ui/macos_ui.dart';
 
 import '../backend/models.dart';
 import '../platform.dart';
+import 'controls.dart';
 import 'design.dart';
 
 /// A sender's picture from the app's avatar cache (else one at `photoUrl`, such as the picture
@@ -144,18 +145,7 @@ class Pill extends StatelessWidget {
         ),
         if (onDelete != null) ...[
           const SizedBox(width: 2),
-          MacosTooltip(
-            message: deleteTooltip,
-            child: MacosIconButton(
-              icon: MacosIcon(deleteIcon, size: 11, color: foreground),
-              onPressed: onDelete,
-              backgroundColor: MacosColors.transparent,
-              hoverColor: colors.hover,
-              shape: BoxShape.circle,
-              padding: EdgeInsets.zero,
-              boxConstraints: const BoxConstraints.tightFor(width: 16, height: 16),
-            ),
-          ),
+          MailIconButton(icon: deleteIcon, tooltip: deleteTooltip, size: 16, iconSize: 11, color: foreground, onPressed: onDelete),
         ],
       ]),
     );

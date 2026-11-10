@@ -3,13 +3,14 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/widgets.dart';
 import 'package:intl/intl.dart';
-import 'package:macos_ui/macos_ui.dart';
 
 import 'package:mailstream/mailstream.dart' as engine;
 
 import '../state/mail_state.dart';
+import 'controls.dart';
 import 'design.dart';
 import 'format.dart';
+import 'glass.dart' show Spinner;
 
 /// The answers an invitation takes, as the engine names them, with their buttons' labels.
 const _answers = [('accepted', 'Accept'), ('tentative', 'Tentative'), ('declined', 'Decline')];
@@ -202,16 +203,24 @@ class _InvitationCardState extends State<InvitationCard> {
               padding: const EdgeInsets.only(top: 10),
               child: Row(children: [
                 Text('Going?', style: secondary),
-                const SizedBox(width: 10),
-                for (final (value, label) in _answers) ...[
-                  _AnswerButton(
-                    label: label,
-                    chosen: (_sending ?? response) == value,
-                    sending: _sending == value,
-                    onPressed: _sending == null && response != value ? () => _respond(value) : null,
-                  ),
-                  const SizedBox(width: 6),
-                ],
+                const SizedBox(width: Space.s10),
+                MailSegmented<String>(
+                  selected: _sending ?? response,
+                  onChanged: _sending == null ? _respond : null,
+                  segments: [
+                    for (final (value, label) in _answers)
+                      MailSegment(
+                        value,
+                        label,
+                        tint: value == 'declined' ? colors.red : colors.accent,
+                        leading: _sending == value
+                            ? const Spinner(radius: 5)
+                            : (_sending ?? response) == value
+                            ? Icon(CupertinoIcons.checkmark, size: IconSizes.inline, color: value == 'declined' ? colors.red : colors.accent)
+                            : null,
+                      ),
+                  ],
+                ),
               ]),
             ),
           if (_error != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_error!, style: text.body.copyWith(color: colors.red))),
@@ -239,27 +248,5 @@ class _Chip extends StatelessWidget {
     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
     decoration: BoxDecoration(color: color.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(9)),
     child: Text(label, style: context.text.footnote.copyWith(color: color, fontWeight: FontWeight.w600)),
-  );
-}
-
-/// One answer: filled when it is the account's (or the one being sent), with a spinner while sent.
-class _AnswerButton extends StatelessWidget {
-  const _AnswerButton({required this.label, required this.chosen, required this.sending, required this.onPressed});
-
-  final String label;
-  final bool chosen, sending;
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) => PushButton(
-    controlSize: ControlSize.regular,
-    secondary: !chosen,
-    // The chosen answer stays drawn as chosen while nothing else can be pressed.
-    onPressed: onPressed ?? (chosen ? () {} : null),
-    child: Row(mainAxisSize: MainAxisSize.min, children: [
-      if (sending) ...[const SizedBox(width: 10, height: 10, child: ProgressCircle(radius: 5)), const SizedBox(width: 6)],
-      if (chosen && !sending) ...[const MacosIcon(CupertinoIcons.checkmark, size: 12), const SizedBox(width: 4)],
-      Text(label),
-    ]),
   );
 }

@@ -12,6 +12,7 @@ import '../backend/models.dart';
 import '../platform.dart';
 import '../state/mail_state.dart';
 import 'common.dart';
+import 'controls.dart';
 import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
@@ -261,14 +262,12 @@ class _ComposeTabBar extends StatelessWidget {
                             ),
                           ),
                           const SizedBox(width: 4),
-                          MacosIconButton(
-                            icon: MacosIcon(CupertinoIcons.xmark, size: 10, color: colors.secondaryLabel),
+                          MailIconButton(
+                            icon: CupertinoIcons.xmark,
+                            tooltip: 'Close tab',
+                            size: 16,
+                            iconSize: 10,
                             onPressed: () => onCloseTab(draft),
-                            backgroundColor: MacosColors.transparent,
-                            hoverColor: colors.hover,
-                            shape: BoxShape.circle,
-                            padding: EdgeInsets.zero,
-                            boxConstraints: const BoxConstraints.tightFor(width: 16, height: 16),
                           ),
                         ],
                       ),
@@ -498,16 +497,14 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
               _Field.cc,
               trailing: d.showBcc
                   ? null
-                  : PushButton(
-                      controlSize: ControlSize.regular,
-                      secondary: true,
+                  : MailButton(
+                      label: 'Bcc',
                       onPressed: d.sending
                           ? null
                           : () {
                               setState(() => d.showBcc = true);
                               _focus[_Field.bcc]!.requestFocus();
                             },
-                      child: const Text('Bcc'),
                     ),
             ),
             if (d.showBcc) _recipients(context, _Field.bcc),
@@ -589,7 +586,7 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
     required TextStyle style,
     String? placeholder,
     ValueChanged<String>? onChanged,
-  }) => MacosTextField(
+  }) => MailTextField(
     controller: controller,
     focusNode: focusNode,
     enabled: enabled,
@@ -600,10 +597,7 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
     keyboardType: expands ? TextInputType.multiline : null,
     style: style,
     placeholder: placeholder,
-    placeholderStyle: style.copyWith(color: context.colors.border),
-    decoration: null,
-    focusedDecoration: null,
-    padding: EdgeInsets.zero,
+    bare: true,
     onChanged: onChanged,
   );
 
@@ -679,19 +673,13 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
           const SizedBox(width: 8),
           MacosTooltip(
             message: Host.shortcut('Return'),
-            child: PushButton(
-              controlSize: ControlSize.large,
-              onPressed: d.sending ? null : _send,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  d.sending
-                      ? const Spinner(radius: 6)
-                      : const MacosIcon(CupertinoIcons.paperplane_fill, size: 14, color: MacosColors.white),
-                  const SizedBox(width: 6),
-                  Text(d.sending ? 'Sending' : 'Send'),
-                ],
-              ),
+            child: MailButton(
+              label: d.sending ? 'Sending' : 'Send',
+              icon: CupertinoIcons.paperplane_fill,
+              kind: MailButtonKind.primary,
+              size: MailControlSize.large,
+              busy: d.sending,
+              onPressed: _send,
             ),
           ),
         ],
@@ -794,10 +782,10 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
     if (accounts.length < 2) return Text(title(d.from!), style: context.text.body);
     return Align(
       alignment: Alignment.centerLeft,
-      child: MacosPopupButton<String>(
+      child: MailMenuButton<String>(
         value: d.from,
         onChanged: d.sending ? null : (id) => setState(() => d.from = id),
-        items: [for (final account in accounts) MacosPopupMenuItem(value: account.id, child: Text(title(account.id)))],
+        items: [for (final account in accounts) MailMenuItem(account.id, title(account.id))],
       ),
     );
   }
@@ -810,14 +798,9 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
       child: Row(
         children: [
           Expanded(child: Text('Discard this message?', style: context.text.body)),
-          PushButton(
-            controlSize: ControlSize.regular,
-            secondary: true,
-            onPressed: () => setState(() => d.confirmingDiscard = false),
-            child: const Text('Keep Editing'),
-          ),
-          const SizedBox(width: 8),
-          PushButton(controlSize: ControlSize.regular, color: colors.red, onPressed: _close, child: const Text('Discard')),
+          MailButton(label: 'Keep Editing', onPressed: () => setState(() => d.confirmingDiscard = false)),
+          const SizedBox(width: Space.s8),
+          MailButton(label: 'Discard', kind: MailButtonKind.destructive, onPressed: _close),
         ],
       ),
     );

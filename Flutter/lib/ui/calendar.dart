@@ -13,6 +13,7 @@ import '../state/mail_state.dart';
 import 'calendar_editor.dart';
 import 'calendar_grid.dart';
 import 'common.dart';
+import 'controls.dart';
 import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
@@ -643,14 +644,12 @@ class _UpNextBarState extends State<_UpNextBar> {
               ),
               if (url != null) ...[
                 const SizedBox(width: 8),
-                PushButton(
-                  controlSize: ControlSize.small,
+                MailButton(
+                  label: 'Join',
+                  icon: CupertinoIcons.videocam_fill,
+                  kind: MailButtonKind.primary,
+                  size: MailControlSize.small,
                   onPressed: () => widget.state.openExternal(url),
-                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(CupertinoIcons.videocam_fill, size: 13, color: MacosColors.white),
-                    SizedBox(width: 4),
-                    Text('Join'),
-                  ]),
                 ),
               ],
               const SizedBox(width: 8),
@@ -825,44 +824,23 @@ class _ReplySwitch extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    final light = colors.brightness == Brightness.light;
-    final style = compact ? context.text.footnote : context.text.callout;
-    Widget segment(String value, String label) {
-      final chosen = reply.chosen == value;
-      final sending = reply.sending == value;
-      final tint = !chosen ? colors.secondaryLabel : value == 'declined' ? colors.red : colors.accent;
-      return Hoverable(
-        onTap: reply.answerable && reply.sending == null && !chosen ? () => onReply(value) : null,
-        radius: CalendarMetrics.cardRadius - 2,
-        child: Container(
-          height: compact ? 20 : 26,
-          padding: EdgeInsets.symmetric(horizontal: compact ? 8 : 12),
-          decoration: chosen
-              ? BoxDecoration(
-                  color: colors.raisedCard,
-                  borderRadius: BorderRadius.circular(CalendarMetrics.cardRadius - 2),
-                  border: Border.all(color: colors.cardBorder, width: CalendarMetrics.cardBorder),
-                  boxShadow: colors.cardShadow,
-                )
-              : null,
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            if (sending) ...[const Spinner(radius: 5), const SizedBox(width: 5)],
-            if (chosen && !sending) ...[Icon(CupertinoIcons.checkmark, size: compact ? 10 : 12, color: tint), const SizedBox(width: 4)],
-            Text(label, style: style.copyWith(color: chosen ? tint : colors.label, fontWeight: chosen ? FontWeight.w600 : FontWeight.w500)),
-          ]),
-        ),
-      );
-    }
-
-    return Container(
-      padding: const EdgeInsets.all(2),
-      decoration: BoxDecoration(
-        color: colors.strongFill.withValues(alpha: light ? 0.7 : 0.5),
-        borderRadius: BorderRadius.circular(CalendarMetrics.cardRadius),
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        for (final (value, label) in replies) segment(value, label),
-      ]),
+    return MailSegmented<String>(
+      compact: compact,
+      selected: reply.chosen,
+      onChanged: reply.answerable && reply.sending == null ? onReply : null,
+      segments: [
+        for (final (value, label) in replies)
+          MailSegment(
+            value,
+            label,
+            tint: value == 'declined' ? colors.red : colors.accent,
+            leading: reply.sending == value
+                ? const Spinner(radius: 5)
+                : reply.chosen == value
+                ? Icon(CupertinoIcons.checkmark, size: compact ? 10 : 12, color: value == 'declined' ? colors.red : colors.accent)
+                : null,
+          ),
+      ],
     );
   }
 }
@@ -909,7 +887,7 @@ class _NoticeRow extends StatelessWidget {
           if (!failed) ...[
             const SizedBox(width: 8),
             if (signingIn) const Padding(padding: EdgeInsets.only(right: 8), child: Spinner(radius: 7)),
-            PushButton(controlSize: ControlSize.regular, secondary: true, onPressed: onSignIn, child: const Text('Sign In…')),
+            MailButton(label: 'Sign In…', onPressed: onSignIn),
           ],
         ]),
       ),
@@ -1010,14 +988,11 @@ class CalendarEventPane extends StatelessWidget {
           ),
         const Spacer(),
         if (url != null)
-          PushButton(
-            controlSize: ControlSize.regular,
+          MailButton(
+            label: 'Join',
+            icon: CupertinoIcons.videocam_fill,
+            kind: MailButtonKind.primary,
             onPressed: () => state.openExternal(url),
-            child: const Row(mainAxisSize: MainAxisSize.min, children: [
-              Icon(CupertinoIcons.videocam_fill, size: 15, color: MacosColors.white),
-              SizedBox(width: 6),
-              Text('Join'),
-            ]),
           ),
       ]),
     );

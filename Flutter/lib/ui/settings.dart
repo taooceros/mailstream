@@ -8,6 +8,7 @@ import 'package:mailstream/mailstream.dart' as engine;
 import '../backend/models.dart';
 import '../state/mail_state.dart';
 import 'common.dart';
+import 'controls.dart';
 import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
@@ -328,7 +329,7 @@ class _SyncAccountsRowState extends State<_SyncAccountsRow> {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  MacosSwitch(value: listed.contains(row.address), onChanged: (on) => _set(row.address, on)),
+                  MailSwitch(value: listed.contains(row.address), semanticLabel: row.address, onChanged: (on) => _set(row.address, on)),
                 ],
               ),
             ),
@@ -384,12 +385,7 @@ class _AutoReadLog extends StatelessWidget {
             ),
             trailing: entries.isEmpty
                 ? null
-                : PushButton(
-                    controlSize: ControlSize.regular,
-                    secondary: true,
-                    onPressed: () => state.undoAutoRead([for (final e in entries) e.id]),
-                    child: const Text('Mark All Unread'),
-                  ),
+                : MailButton(label: 'Mark All Unread', onPressed: () => state.undoAutoRead([for (final e in entries) e.id])),
           ),
           for (final entry in entries.take(limit))
             _Row(
@@ -473,33 +469,15 @@ class _AccountsState extends State<_Accounts> {
   }
 
   Future<void> _remove(Account account) async {
-    final confirmed = await showMacosAlertDialog<bool>(
-      context: context,
-      builder: (context) => MacosAlertDialog(
-        appIcon: const MacosIcon(CupertinoIcons.person_crop_circle_badge_minus, size: 56),
-        title: Text('Remove ${account.title}?', style: context.text.headline),
-        message: Text(
+    final confirmed = await confirmAction(
+      context,
+      title: 'Remove ${account.title}?',
+      message:
           'Mailstream signs out of ${account.id} and deletes its saved sign-in. '
           'Mail on the server is not affected; you can add the account again later.',
-          textAlign: TextAlign.center,
-          style: context.text.subheadline,
-        ),
-        horizontalActions: true,
-        secondaryButton: PushButton(
-          controlSize: ControlSize.large,
-          secondary: true,
-          onPressed: () => Navigator.of(context).pop(false),
-          child: const Text('Cancel'),
-        ),
-        primaryButton: PushButton(
-          controlSize: ControlSize.large,
-          color: context.colors.red,
-          onPressed: () => Navigator.of(context).pop(true),
-          child: const Text('Remove'),
-        ),
-      ),
+      confirm: 'Remove',
     );
-    if (confirmed == true) {
+    if (confirmed) {
       setState(() => _status = null);
       await state.removeAccount(account.id);
     }
@@ -562,11 +540,9 @@ class _AccountsState extends State<_Accounts> {
           child: Row(
             children: [
               for (final provider in ['google', 'microsoft']) ...[
-                PushButton(
-                  controlSize: ControlSize.regular,
-                  secondary: true,
+                MailButton(
+                  label: '${_providerName(provider)} Account…',
                   onPressed: _signingIn == null ? () => _add(provider) : null,
-                  child: Text('${_providerName(provider)} Account…'),
                 ),
                 const SizedBox(width: 8),
               ],
@@ -650,13 +626,8 @@ class _ClientDialogState extends State<_ClientDialog> {
       width: 460,
       title: _google ? 'Sign in with Google' : 'Sign in with Microsoft',
       actions: [
-        PushButton(
-          controlSize: ControlSize.large,
-          secondary: true,
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        PushButton(controlSize: ControlSize.large, onPressed: _submit, child: const Text('Continue in Browser')),
+        MailButton(label: 'Cancel', size: MailControlSize.large, onPressed: () => Navigator.of(context).pop()),
+        MailButton(label: 'Continue in Browser', kind: MailButtonKind.primary, size: MailControlSize.large, onPressed: _submit),
       ],
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -682,29 +653,25 @@ class _ClientDialogState extends State<_ClientDialog> {
             const SizedBox(height: 14),
             _field(
               _google ? 'Client ID' : 'Application ID',
-              MacosTextField(
+              MailTextField(
                 controller: _id,
                 autofocus: !_focusSecret,
-                style: text.body,
                 placeholder: _google ? 'Client ID' : 'Application (client) ID',
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
                 onSubmitted: (_) => _submit(),
               ),
             ),
             const SizedBox(height: 8),
             _field(
               'Client secret',
-              MacosTextField(
+              MailTextField(
                 controller: _secret,
                 autofocus: _focusSecret,
                 obscureText: true,
-                style: text.body,
                 placeholder: _savedSecret
                     ? 'Saved; leave empty to keep it'
                     : _google
                     ? 'Client secret'
                     : 'Empty for a public client',
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
                 onSubmitted: (_) => _submit(),
               ),
             ),
@@ -757,16 +724,12 @@ class _RenameDialogState extends State<_RenameDialog> {
       width: 380,
       title: 'Account label',
       actions: [
-        PushButton(
-          controlSize: ControlSize.large,
-          secondary: true,
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        PushButton(
-          controlSize: ControlSize.large,
+        MailButton(label: 'Cancel', size: MailControlSize.large, onPressed: () => Navigator.of(context).pop()),
+        MailButton(
+          label: 'Save',
+          kind: MailButtonKind.primary,
+          size: MailControlSize.large,
           onPressed: () => Navigator.of(context).pop(_label.text.trim()),
-          child: const Text('Save'),
         ),
       ],
       child: Padding(
@@ -775,12 +738,10 @@ class _RenameDialogState extends State<_RenameDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            MacosTextField(
+            MailTextField(
               controller: _label,
               autofocus: true,
-              style: text.body,
               placeholder: widget.account.id,
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
               onSubmitted: (value) => Navigator.of(context).pop(value.trim()),
             ),
             const SizedBox(height: 6),
@@ -876,40 +837,37 @@ class _SettingRowState extends State<_SettingRow> {
     final text = context.text;
     final range = entry.minimum != null && entry.maximum != null ? '${entry.minimum}–${entry.maximum}' : null;
     final control = switch (entry.value) {
-      engine.FlagSettingValue(:final enabled) => MacosSwitch(
+      engine.FlagSettingValue(:final enabled) => MailSwitch(
         value: enabled,
+        semanticLabel: _titles[entry.key] ?? entry.key,
         onChanged: (on) => _write(engine.FlagSettingValue(on)),
       ),
       engine.NumberSettingValue() => SizedBox(
         width: 120,
-        child: MacosTextField(
+        child: MailTextField(
           controller: _field,
           focusNode: _focus,
           textAlign: TextAlign.end,
           keyboardType: TextInputType.number,
           inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-          style: text.body,
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
           suffix: entry.key.endsWith('Seconds')
-              ? Padding(padding: const EdgeInsets.only(right: 6), child: Text('s', style: text.body.copyWith(color: colors.secondaryLabel)))
+              ? Padding(padding: const EdgeInsets.only(right: Space.s6), child: Text('s', style: text.body.copyWith(color: colors.secondaryLabel)))
               : null,
           onSubmitted: (_) => _commitField(),
         ),
       ),
-      engine.TextSettingValue(text: final current) when entry.choices.isNotEmpty => MacosPopupButton<String>(
+      engine.TextSettingValue(text: final current) when entry.choices.isNotEmpty => MailMenuButton<String>(
         value: current,
         onChanged: (word) {
-          if (word != null && word != current) _write(engine.TextSettingValue(word));
+          if (word != current) _write(engine.TextSettingValue(word));
         },
-        items: [for (final word in entry.choices) MacosPopupMenuItem(value: word, child: Text(_choiceTitles[word] ?? word))],
+        items: [for (final word in entry.choices) MailMenuItem(word, _choiceTitles[word] ?? word)],
       ),
       engine.TextSettingValue() => SizedBox(
         width: 220,
-        child: MacosTextField(
+        child: MailTextField(
           controller: _field,
           focusNode: _focus,
-          style: text.body,
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
           placeholder: entry.key == 'aiTagging.ompPath' ? 'From the login shell\'s PATH' : null,
           onSubmitted: (_) => _commitField(),
         ),
@@ -1002,19 +960,12 @@ class _AddressesState extends State<_Addresses> {
           Pill(label: address, onDelete: () => widget.onChanged([...widget.addresses]..remove(address))),
         SizedBox(
           width: 260,
-          child: MacosTextField(
+          child: MailTextField(
             controller: _field,
-            style: context.text.body,
             placeholder: 'Add address',
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-            suffix: MacosIconButton(
-              semanticLabel: 'Add',
-              icon: MacosIcon(CupertinoIcons.plus, size: 13, color: context.colors.secondaryLabel),
-              backgroundColor: MacosColors.transparent,
-              hoverColor: context.colors.hover,
-              padding: EdgeInsets.zero,
-              boxConstraints: const BoxConstraints.tightFor(width: 22, height: 22),
-              onPressed: _add,
+            suffix: Padding(
+              padding: const EdgeInsets.only(right: Space.s2),
+              child: MailIconButton(icon: CupertinoIcons.plus, tooltip: 'Add', size: 22, iconSize: IconSizes.inline, onPressed: _add),
             ),
             onSubmitted: (_) => _add(),
           ),

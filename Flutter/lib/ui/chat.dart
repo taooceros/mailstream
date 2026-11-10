@@ -15,6 +15,7 @@ import '../state/mail_state.dart';
 import 'chat_markup.dart';
 import 'common.dart';
 import 'conversation_list.dart';
+import 'controls.dart';
 import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
@@ -486,40 +487,29 @@ class _ChatReaderState extends State<ChatReader> {
               const SingleActivator(LogicalKeyboardKey.enter): _send,
               const SingleActivator(LogicalKeyboardKey.escape): widget.onBack,
             },
-            // Messages' field: a capsule with a hairline, the send arrow at its end.
-            child: MacosTextField(
+            // Messages' field: a capsule, the send arrow at its end.
+            child: MailTextField(
               controller: _text,
               focusNode: _focus,
               minLines: 1,
               maxLines: 6,
               keyboardType: TextInputType.multiline,
               textInputAction: TextInputAction.newline,
-              style: context.text.body,
               placeholder: title.isEmpty ? 'Message' : 'Message $title',
-              padding: const EdgeInsets.fromLTRB(14, 7, 8, 7),
-              decoration: BoxDecoration(
-                color: colors.background,
-                border: Border.all(color: colors.border, width: 0.5),
-                borderRadius: BorderRadius.circular(18),
-              ),
-              focusedDecoration: BoxDecoration(
-                color: colors.background,
-                border: Border.all(color: colors.accent.withValues(alpha: 0.6), width: 1),
-                borderRadius: BorderRadius.circular(18),
-              ),
+              capsule: true,
+              padding: const EdgeInsets.fromLTRB(Space.s12, 7, Space.s8, 7),
               suffix: Padding(
-                padding: const EdgeInsets.only(right: 4),
+                padding: const EdgeInsets.only(right: Space.s4),
                 child: ListenableBuilder(
                   listenable: _text,
                   builder: (context, _) {
                     final empty = _text.text.trim().isEmpty;
-                    return MacosIconButton(
+                    return MailIconButton(
                       semanticLabel: 'Send (Return)',
-                      icon: MacosIcon(CupertinoIcons.arrow_up_circle_fill, size: 24, color: empty ? colors.border : colors.accent),
-                      backgroundColor: MacosColors.transparent,
-                      hoverColor: MacosColors.transparent,
-                      padding: EdgeInsets.zero,
-                      boxConstraints: const BoxConstraints.tightFor(width: 26, height: 26),
+                      icon: CupertinoIcons.arrow_up_circle_fill,
+                      size: 26,
+                      iconSize: 24,
+                      color: empty ? colors.border : colors.accent,
                       onPressed: empty || _sending ? null : _send,
                     );
                   },
@@ -876,8 +866,11 @@ class _ChatVideoState extends State<_ChatVideo> {
                         ),
                       ),
                     ),
-                    MacosIconButton(
-                      icon: const MacosIcon(CupertinoIcons.arrow_up_right_square, size: 16, color: Color(0xFFFFFFFF)),
+                    MailIconButton(
+                      icon: CupertinoIcons.arrow_up_right_square,
+                      tooltip: 'Open',
+                      iconSize: IconSizes.row,
+                      color: const Color(0xFFFFFFFF),
                       onPressed: () => widget.state.openExternal(_path!),
                     ),
                   ]),
@@ -1102,18 +1095,13 @@ class _NewChatDialogState extends State<_NewChatDialog> {
       width: 460,
       title: 'New chat',
       actions: [
-        PushButton(
-          controlSize: ControlSize.large,
-          secondary: true,
-          onPressed: _starting ? null : () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        PushButton(
-          controlSize: ControlSize.large,
-          onPressed: _starting || (_people.isEmpty && _field.text.trim().isEmpty) ? null : _start,
-          child: _starting
-              ? const Row(mainAxisSize: MainAxisSize.min, children: [Spinner(radius: 6), SizedBox(width: 6), Text('Starting')])
-              : Text(_people.length > 1 ? 'Start group chat' : 'Start chat'),
+        MailButton(label: 'Cancel', size: MailControlSize.large, onPressed: _starting ? null : () => Navigator.of(context).pop()),
+        MailButton(
+          label: _starting ? 'Starting' : (_people.length > 1 ? 'Start group chat' : 'Start chat'),
+          kind: MailButtonKind.primary,
+          size: MailControlSize.large,
+          busy: _starting,
+          onPressed: _people.isEmpty && _field.text.trim().isEmpty ? null : _start,
         ),
       ],
       child: Padding(
@@ -1126,13 +1114,13 @@ class _NewChatDialogState extends State<_NewChatDialog> {
               Row(children: [
                 Text('Account', style: text.body.copyWith(color: colors.secondaryLabel)),
                 const SizedBox(width: 10),
-                MacosPopupButton<String>(
+                MailMenuButton<String>(
                   value: _account,
-                  items: [for (final a in chat.accounts) MacosPopupMenuItem(value: a.id, child: Text(a.id))],
+                  items: [for (final a in chat.accounts) MailMenuItem(a.id, a.id)],
                   onChanged: _starting
                       ? null
                       : (value) {
-                          if (value == null || value == _account) return;
+                          if (value == _account) return;
                           setState(() {
                             _account = value;
                             _known = const [];
@@ -1180,14 +1168,12 @@ class _NewChatDialogState extends State<_NewChatDialog> {
                   _add(person.address.email);
                   _field.clear();
                 },
-                child: MacosTextField(
+                child: MailTextField(
                   controller: _field,
                   focusNode: _focus,
                   autofocus: true,
                   enabled: !_starting,
-                  style: text.body,
                   placeholder: 'Name or email address',
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
                 ),
               ),
             ),

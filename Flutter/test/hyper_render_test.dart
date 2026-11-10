@@ -17,6 +17,7 @@ import 'package:mailstream_ui/ui/hyper_table.dart';
 import 'package:mailstream_ui/ui/blitz_body.dart';
 import 'package:mailstream_ui/ui/reader.dart';
 import 'package:mailstream_ui/ui/reader_renderer.dart';
+import 'package:mailstream_ui/ui/controls.dart';
 
 /// An 80×40 PNG.
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAFAAAAAoCAYAAABpYH0BAAAAX0lEQVR4nO3QMQ0AIADAMKQgDWk4BQ88ZEmP/UvH3OvovfF7oB5AgADTAQQIMB1AgADTAQQIMB1AgADTAQQIMB1AgADTAQQIMB1AgADTAQQIMB1AgADTAQQIMB1AgH+7KgaFB1y8+H4AAAAASUVORK5CYII=';
@@ -162,7 +163,7 @@ void main() {
     Iterable<String> webDocuments(WidgetTester tester) => tester.widgetList<AppKitView>(find.byType(AppKitView))
         .map((view) => (view.creationParams! as Map)['html'] as String);
     Future<void> choose(WidgetTester tester, ReaderRenderer renderer) async {
-      await tester.tap(find.byType(MacosPopupButton<ReaderRenderer>));
+      await tester.tap(find.byType(MailMenuButton<ReaderRenderer>));
       await tester.pumpAndSettle();
       await tester.tap(find.text(renderer.title).last);
       await tester.pumpAndSettle();
@@ -235,7 +236,7 @@ void main() {
         theme: MailTheme.macos(Brightness.light),
         home: ReaderRendererScope(controller: renderer, child: const Center(child: ReaderRendererSwitch())),
       ));
-      expect(find.byType(MacosPopupButton<ReaderRenderer>), findsNothing);
+      expect(find.byType(MailMenuButton<ReaderRenderer>), findsNothing);
       expect(find.textContaining('Renderer:'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
@@ -248,10 +249,10 @@ void main() {
         home: ReaderRendererScope(controller: renderer, child: const Center(child: ReaderRendererSwitch())),
       ));
       expect(find.text('Blitz'), findsOneWidget);
-      final items = tester.widget<MacosPopupButton<ReaderRenderer>>(find.byType(MacosPopupButton<ReaderRenderer>)).items!;
+      final items = tester.widget<MailMenuButton<ReaderRenderer>>(find.byType(MailMenuButton<ReaderRenderer>)).items;
       expect(items.map((item) => item.value), [ReaderRenderer.blitz, ReaderRenderer.webKit, ReaderRenderer.hyper]);
-      expect(items.map((item) => (item.child as Text).data), ['Blitz', 'WebView (original)', 'HyperRender (experimental)']);
-      await tester.tap(find.byType(MacosPopupButton<ReaderRenderer>));
+      expect(items.map((item) => item.label), ['Blitz', 'WebView (original)', 'HyperRender (experimental)']);
+      await tester.tap(find.byType(MailMenuButton<ReaderRenderer>));
       await tester.pumpAndSettle();
       await tester.tap(find.text('HyperRender (experimental)').last);
       await tester.pumpAndSettle();

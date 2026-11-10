@@ -1,7 +1,7 @@
 import 'package:flutter/widgets.dart';
-import 'package:macos_ui/macos_ui.dart';
 
 import '../platform.dart';
+import 'controls.dart';
 import 'design.dart';
 
 /// What draws an HTML body in the reader, in the switch's order. HyperRender is experimental and
@@ -56,13 +56,12 @@ class ReaderRendererSwitch extends StatelessWidget {
     if (controller == null || !Host.mac) return const SizedBox.shrink();
     return Row(mainAxisSize: MainAxisSize.min, children: [
       Text('Renderer:', style: context.text.body),
-      const SizedBox(width: 6),
-      MacosPopupButton<ReaderRenderer>(
+      const SizedBox(width: Space.s6),
+      MailMenuButton<ReaderRenderer>(
         value: controller.value,
-        onChanged: (renderer) {
-          if (renderer != null) controller.value = renderer;
-        },
-        items: [for (final r in ReaderRenderer.values) MacosPopupMenuItem(value: r, child: Text(r.title))],
+        size: MailControlSize.small,
+        onChanged: (renderer) => controller.value = renderer,
+        items: [for (final r in ReaderRenderer.values) MailMenuItem(r, r.title)],
       ),
     ]);
   }
