@@ -224,6 +224,14 @@ a bar or a square. Unread is an accent dot before the avatar in the mail and cha
 (`UnreadDot`), the date staying gray; counts are gray, the rail's on a neutral capsule, red being
 kept for errors. `flutter test test/marks_test.dart` covers them.
 
+People have one avatar (`PersonAvatar` in `lib/ui/common.dart`, MS-192), the web reader's look:
+their picture, else their initial in one of the 11 system hues on a 15% wash of it
+(`MailColors.avatarHue`, `AvatarMetrics`), the hue picked from the lowercased address as the native
+app's `Avatar.color` picks it. Senders, Chat people and spaces (a group glyph when a space has no
+picture), calendar guests (ringed in the card's color where they overlap) and the accounts in
+Settings all use it; only Smart Inbox bundles keep their category glyph (`IconAvatar`). `flutter
+test test/avatars_test.dart` covers it.
+
 The sidebar shows from 1200 dp wide (a rail below, whose menu button opens it). The list's
 island fills the window; from 1000 dp opening a conversation splits it, the conversation's
 island beside the list's, and closing it gives the list the width back. Narrower windows slide
@@ -470,7 +478,7 @@ per mail account, plus one per listed account no longer signed in; the engine do
 mail and two made-up accounts with the setting kept in memory, for screenshots.
 
 The agenda (`lib/ui/calendar.dart`, MS-169) lists each day's events as rows: a time column in
-tabular figures, the calendar's 6 pt dot, title and place, the guests' monograms, or Going, Maybe
+tabular figures, the calendar's 6 pt dot, title and place, the guests' avatars, or Going, Maybe
 and Decline while the account has not answered. Above it, this week's days (today raised, a
 bar for the time each day books; a day scrolls the agenda to it or opens it in the day view) and,
 from 30 minutes before a meeting (one with a call or guests) until it ends, an Up Next card with
@@ -505,7 +513,7 @@ kept hours and the order ↑ and ↓ follow.
 | `lib/ui/chat.dart` | The chat list, the open space (newest at the bottom, older pages loading at the top, messages as Chat draws their Markdown, videos playing and pictures showing in the log, other attachments as tiles, a composer: Return sends, ⇧Return a new line) and the New chat dialog (completing to the account's chat partners, then mail contacts) |
 | `lib/ui/controls.dart` | The app's own controls, the same on every platform: `MailButton`, `MailIconButton`, `MailSegmented`, `MailTextField`, `MailSearchField`, `MailMenuButton`, `MailDateButton`, `MailSwitch`, `MailCheckbox`, `confirmAction` |
 | `lib/ui/chat_markup.dart` | A Chat message's `formattedText`, which the Chat API answers in Markdown (CommonMark and GitHub's extensions, `<chat-user>` mentions), parsed with `package:markdown` and drawn as text: bold, italic, strike, code, monospace blocks, lists, quotes, tables, links, mentions |
-| `lib/ui/design.dart` | The style tokens, the same on every platform: color roles and elevations (`MailColors`), radii, spacing, strokes, icon sizes, text roles, motion, list and island metrics, marks and tags (`MarkMetrics`, `TagMetrics`), stable account/topic/avatar colors; `MailTheme` (the `macos_ui` theme the remaining `macos_ui` controls use) |
+| `lib/ui/design.dart` | The style tokens, the same on every platform: color roles and elevations (`MailColors`), radii, spacing, strokes, icon sizes, text roles, motion, list and island metrics, marks, avatars and tags (`MarkMetrics`, `AvatarMetrics`, `TagMetrics`), stable account/topic/avatar colors; `MailTheme` (the `macos_ui` theme the remaining `macos_ui` controls use) |
 | `lib/ui/glass.dart` | Islands, toolbar capsules (`GlassCapsule`, drawn by Flutter), raised capsules, toolbar buttons, spinner |
 | `lib/ui/shell.dart` | Islands layout, toolbars, search field, keys, snackbars |
 | `lib/ui/sidebar.dart` | Mail-style sidebar and rail |

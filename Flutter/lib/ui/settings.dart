@@ -487,12 +487,7 @@ class _AccountsState extends State<_Accounts> {
           ),
         for (final account in state.accounts)
           _Row(
-            leading: IconAvatar(
-              size: 32,
-              icon: account.provider == 'google' ? CupertinoIcons.envelope_fill : CupertinoIcons.mail_solid,
-              background: accountColor(state.accountIndex(account.id)),
-              foreground: MacosColors.white,
-            ),
+            leading: PersonAvatar(address: Address(name: account.title, email: account.id), photo: state.avatarFor(account.id), size: 32),
             title: Text(account.title),
             subtitle: Text(
               [

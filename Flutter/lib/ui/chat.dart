@@ -232,7 +232,7 @@ class _ChatRowState extends State<_ChatRow> {
               // Unread as in the mail list: a dot before the avatar; the date stays gray.
               UnreadDot(unread: space.unread),
               space.kind == 'space' && space.avatarKey.isEmpty
-                  ? IconAvatar(icon: CupertinoIcons.person_3_fill, background: colors.waiting, foreground: MacosColors.white)
+                  ? PersonAvatar(address: Address(name: space.avatarName, email: space.space), icon: CupertinoIcons.person_3_fill)
                   : ChatAvatar(state: widget.state, avatarKey: space.avatarKey.isEmpty ? space.space : space.avatarKey,
                       name: space.avatarName, url: space.avatarUrl),
               const SizedBox(width: 12),

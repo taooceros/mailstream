@@ -8,6 +8,7 @@ import 'package:mailstream/mailstream.dart' as engine;
 import 'package:mailstream_ui/state/calendar_state.dart';
 import 'package:mailstream_ui/ui/calendar.dart';
 import 'package:mailstream_ui/ui/calendar_grid.dart';
+import 'package:mailstream_ui/ui/common.dart';
 import 'package:mailstream_ui/ui/design.dart';
 
 import 'calendar_agenda_test.dart' show item;
@@ -291,7 +292,7 @@ void main() {
     expect(find.textContaining('· 15m', findRichText: true), findsOneWidget);
     // Review is long enough for its call and guests: three of four, then +1 (the account left out).
     expect(find.text('Meet'), findsOneWidget);
-    expect(find.byType(GuestMonogram), findsNWidgets(3));
+    expect(find.byType(PersonAvatar), findsNWidgets(3));
     expect(find.text('+1'), findsOneWidget);
     expect(find.text('Going'), findsOneWidget);
     expect(find.text('Invited'), findsOneWidget);

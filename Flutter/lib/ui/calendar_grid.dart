@@ -340,6 +340,8 @@ class CalendarGrid extends StatefulWidget {
     required this.days,
     required this.events,
     required this.colorOf,
+    this.photoOf,
+    this.photosVersion = 0,
     this.synced,
     this.selected,
     this.onOpen,
@@ -354,6 +356,11 @@ class CalendarGrid extends StatefulWidget {
   final List<DateTime> days;
   final List<engine.CalendarItem> events;
   final Color Function(engine.CalendarItem event) colorOf;
+
+  /// A guest's picture (by address), when the app has one; [photosVersion] moves on as pictures
+  /// arrive, so the pages kept build their cards again.
+  final String? Function(String email)? photoOf;
+  final int photosVersion;
   final ({DateTime from, DateTime until})? synced;
   final EventKey? selected;
   final ValueChanged<engine.CalendarItem>? onOpen;
@@ -478,6 +485,7 @@ class _CalendarGridState extends State<CalendarGrid> with TickerProviderStateMix
       }
     } else if (old.selected != widget.selected ||
         old.synced != widget.synced ||
+        old.photosVersion != widget.photosVersion ||
         (old.onOpen == null) != (widget.onOpen == null) ||
         (old.onDay == null) != (widget.onDay == null) ||
         (old.onCreate == null) != (widget.onCreate == null)) {
@@ -876,6 +884,7 @@ class _CalendarGridState extends State<CalendarGrid> with TickerProviderStateMix
                     placements: page.timed[i],
                     conflicts: page.conflicts[i],
                     colorOf: widget.colorOf,
+                    photoOf: widget.photoOf,
                     selected: widget.selected,
                     now: _clock.value,
                     onOpen: widget.onOpen,
@@ -1031,6 +1040,7 @@ class _DayColumn extends StatelessWidget {
     required this.placements,
     required this.conflicts,
     required this.colorOf,
+    required this.photoOf,
     required this.selected,
     required this.now,
     required this.onOpen,
@@ -1041,6 +1051,7 @@ class _DayColumn extends StatelessWidget {
   final List<DayPlacement> placements;
   final List<bool> conflicts;
   final Color Function(engine.CalendarItem event) colorOf;
+  final String? Function(String email)? photoOf;
   final EventKey? selected;
   final DateTime now;
   final ValueChanged<engine.CalendarItem>? onOpen;
@@ -1077,6 +1088,7 @@ class _DayColumn extends StatelessWidget {
               child: _EventCard(
                 event: placed.event,
                 color: colorOf(placed.event),
+                photoOf: photoOf,
                 selected: selected == eventKey(placed.event),
                 look: eventLook(placed.event, now),
                 conflict: conflicts[i],
@@ -1110,6 +1122,7 @@ class _EventCard extends StatelessWidget {
   const _EventCard({
     required this.event,
     required this.color,
+    required this.photoOf,
     required this.selected,
     required this.look,
     required this.conflict,
@@ -1121,6 +1134,7 @@ class _EventCard extends StatelessWidget {
 
   final engine.CalendarItem event;
   final Color color;
+  final String? Function(String email)? photoOf;
   final bool selected;
   final EventLook look;
   final bool conflict;
@@ -1255,6 +1269,7 @@ class _EventCard extends StatelessWidget {
                         event: event,
                         max: width >= 130 ? 3 : (width >= 96 ? 2 : 1),
                         ring: selected ? colors.liftedCard.last : colors.card,
+                        photoOf: photoOf,
                       ),
                   ]),
                 ),
@@ -1401,50 +1416,20 @@ class _AllDayBar extends StatelessWidget {
   }
 }
 
-/// One guest's monogram: their initial on their [guestColor], ringed in [ring] (the card under
-/// it) when given.
-class GuestMonogram extends StatelessWidget {
-  const GuestMonogram({super.key, required this.person, this.size = CalendarMetrics.avatar, this.ring});
+/// A guest as the [Address] of their [PersonAvatar].
+Address guestAddress(engine.CalendarPerson person) => Address(name: person.name, email: person.email ?? '');
 
-  final engine.CalendarPerson person;
-  final double size;
-  final Color? ring;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = guestColor(person.email ?? person.name ?? '');
-    final ring = this.ring;
-    return Container(
-      width: size,
-      height: size,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color.lerp(color, MacosColors.white, 0.18)!, color],
-        ),
-        border: ring == null ? null : Border.all(color: ring, width: CalendarMetrics.avatarRing, strokeAlign: BorderSide.strokeAlignOutside),
-      ),
-      child: Text(
-        Address(name: person.name, email: person.email ?? '').initials,
-        style: TextStyle(color: MacosColors.white, fontSize: size * 0.45, fontWeight: FontWeight.w600, height: 1),
-      ),
-    );
-  }
-}
-
-/// An event's guests, the account itself left out, as overlapping [GuestMonogram]s: the first
-/// [max], then +N for the rest.
+/// An event's guests, the account itself left out, as overlapping [PersonAvatar]s ([photoOf]
+/// gives their pictures): the first [max], then +N for the rest.
 class GuestAvatars extends StatelessWidget {
-  const GuestAvatars({super.key, required this.event, this.max = 3, this.ring});
+  const GuestAvatars({super.key, required this.event, this.max = 3, this.ring, this.photoOf});
 
   final engine.CalendarItem event;
   final int max;
 
-  /// The surface under the cluster, which rings each monogram; the resting card's by default.
+  /// The surface under the cluster, which rings each avatar; the resting card's by default.
   final Color? ring;
+  final String? Function(String email)? photoOf;
 
   /// The guests to show: everyone invited but the account.
   static List<engine.CalendarPerson> guestsOf(engine.CalendarItem event) {
@@ -1466,7 +1451,17 @@ class GuestAvatars extends StatelessWidget {
       width: step * (count - 1) + size,
       height: size,
       child: Stack(clipBehavior: Clip.none, children: [
-        for (var i = 0; i < shown; i++) Positioned(left: i * step, top: 0, child: GuestMonogram(person: guests[i], ring: ring)),
+        for (var i = 0; i < shown; i++)
+          Positioned(
+            left: i * step,
+            top: 0,
+            child: PersonAvatar(
+              address: guestAddress(guests[i]),
+              photo: guests[i].email == null ? null : photoOf?.call(guests[i].email!),
+              ring: ring,
+              size: size,
+            ),
+          ),
         if (rest > 0)
           Positioned(
             left: shown * step,
@@ -1478,11 +1473,11 @@ class GuestAvatars extends StatelessWidget {
               decoration: BoxDecoration(
                 color: colors.strongFill,
                 shape: BoxShape.circle,
-                border: Border.all(color: ring, width: CalendarMetrics.avatarRing, strokeAlign: BorderSide.strokeAlignOutside),
+                border: Border.all(color: ring, width: AvatarMetrics.ring, strokeAlign: BorderSide.strokeAlignOutside),
               ),
               child: Text(
                 '+$rest',
-                style: TextStyle(color: colors.secondaryLabel, fontSize: size * 0.4, fontWeight: FontWeight.w600, height: 1),
+                style: context.roles.headline.copyWith(color: colors.secondaryLabel, fontSize: size * AvatarMetrics.letter, height: 1),
               ),
             ),
           ),

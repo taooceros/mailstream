@@ -11,11 +11,15 @@ import '../platform.dart';
 import 'controls.dart';
 import 'design.dart';
 
-/// A sender's picture from the app's avatar cache (else one at `photoUrl`, such as the picture
-/// Google Chat publishes), else their initials on the gray monogram of Contacts.
+/// A person's avatar, the one look for senders, Chat, guests and accounts (MS-192, the web
+/// reader's `.avatar`): their picture from the app's avatar cache (else one at [photoUrl], such as
+/// the picture Google Chat publishes), else their initial, or a group's [icon], in their
+/// [MailColors.avatarHue] on an [AvatarMetrics.tint] wash of it. Given a [ring] (the surface under
+/// avatars that overlap), it is ringed in it and its wash laid on it, so none shows through.
 class PersonAvatar extends StatelessWidget {
-  const PersonAvatar({super.key, required this.address, this.photo, this.photoUrl, this.size = ListMetrics.avatarSize});
+  const PersonAvatar({super.key, required this.address, this.photo, this.photoUrl, this.icon, this.ring, this.size = ListMetrics.avatarSize});
 
+  /// Who: the hue follows the lowercased address (else a Chat id, else the name), the letter the name.
   final Address address;
 
   /// The picture's file, when the app has one.
@@ -23,63 +27,57 @@ class PersonAvatar extends StatelessWidget {
 
   /// A picture on the web, shown while there is no file.
   final String? photoUrl;
+
+  /// A glyph in place of the initial (a Chat space without a picture).
+  final IconData? icon;
+  final Color? ring;
   final double size;
 
   @override
   Widget build(BuildContext context) {
-    final colors = avatarColors(address.email, context.brightness);
-    final initials = Text(
-      address.initials,
-      style: TextStyle(color: colors.foreground, fontSize: size * 0.4, fontWeight: FontWeight.w600, height: 1),
+    final hue = context.colors.avatarHue(address.email.isNotEmpty ? address.email : address.displayName);
+    final ring = this.ring;
+    final wash = hue.withValues(alpha: AvatarMetrics.tint);
+    final icon = this.icon;
+    final mark = Center(
+      child: icon != null
+          ? MacosIcon(icon, size: size * AvatarMetrics.glyph, color: hue)
+          : Text(address.initials, style: context.roles.headline.copyWith(color: hue, fontSize: size * AvatarMetrics.letter, height: 1)),
     );
     final photo = this.photo;
     final photoUrl = this.photoUrl;
-    if (photo == null && photoUrl == null) {
-      return Container(
-        width: size,
-        height: size,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color.lerp(colors.background, MacosColors.white, 0.18)!, colors.background],
-          ),
-        ),
-        child: initials,
-      );
-    }
     final cacheWidth = (size * MediaQuery.devicePixelRatioOf(context)).round();
     return Container(
       width: size,
       height: size,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: colors.background,
-        border: Border.all(color: context.colors.separator.withValues(alpha: 0.6), width: 0.5),
+        color: ring == null ? wash : Color.alphaBlend(wash, ring),
+        border: ring == null ? null : Border.all(color: ring, width: AvatarMetrics.ring, strokeAlign: BorderSide.strokeAlignOutside),
       ),
-      child: ClipOval(
-        child: photo != null
-            ? Image.file(
-                File(photo),
-                width: size,
-                height: size,
-                fit: BoxFit.cover,
-                cacheWidth: cacheWidth,
-                filterQuality: FilterQuality.medium,
-                errorBuilder: (_, _, _) => Center(child: initials),
-              )
-            : Image.network(
-                photoUrl!,
-                width: size,
-                height: size,
-                fit: BoxFit.cover,
-                cacheWidth: cacheWidth,
-                filterQuality: FilterQuality.medium,
-                errorBuilder: (_, _, _) => Center(child: initials),
-              ),
-      ),
+      child: photo == null && photoUrl == null
+          ? mark
+          : ClipOval(
+              child: photo != null
+                  ? Image.file(
+                      File(photo),
+                      width: size,
+                      height: size,
+                      fit: BoxFit.cover,
+                      cacheWidth: cacheWidth,
+                      filterQuality: FilterQuality.medium,
+                      errorBuilder: (_, _, _) => mark,
+                    )
+                  : Image.network(
+                      photoUrl!,
+                      width: size,
+                      height: size,
+                      fit: BoxFit.cover,
+                      cacheWidth: cacheWidth,
+                      filterQuality: FilterQuality.medium,
+                      errorBuilder: (_, _, _) => mark,
+                    ),
+            ),
     );
   }
 }

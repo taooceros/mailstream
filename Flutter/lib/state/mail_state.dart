@@ -304,6 +304,18 @@ class MailState extends ChangeNotifier {
   /// The picture for `email`, once the engine found one.
   String? avatar(String email) => _avatars[email.toLowerCase()];
 
+  /// [email]'s picture, asking the engine for it while there is none: people shown outside the
+  /// lists that ask for theirs (calendar guests, the accounts).
+  String? avatarFor(String email) {
+    final photo = avatar(email);
+    if (photo == null) requestAvatars([(email, false)]);
+    return photo;
+  }
+
+  /// Moves on each time pictures arrive, so views that keep their widgets (the calendar's pages)
+  /// build them again.
+  int avatarsVersion = 0;
+
   /// Inline reply drafts by conversation, kept until sent or discarded (in memory, like the app).
   final Map<String, String> drafts = {};
 
@@ -651,7 +663,10 @@ class MailState extends ChangeNotifier {
         shown |= !_foldedSenders.contains(email);
       }
       _foldedSenders.removeAll(batch.keys);
-      if (shown) notifyListeners();
+      if (shown) {
+        avatarsVersion++;
+        notifyListeners();
+      }
     } on engine.MailException {
       // Initials stay; the next listing asks again.
       batch.keys.forEach(_avatars.remove);

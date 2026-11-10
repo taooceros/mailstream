@@ -391,6 +391,8 @@ class _CalendarListPaneState extends State<CalendarListPane> {
               days: days,
               events: calendar.events,
               colorOf: (event) => eventColor(widget.state, event),
+              photoOf: widget.state.avatarFor,
+              photosVersion: widget.state.avatarsVersion,
               synced: calendar.synced,
               selected: calendar.opened,
               onOpen: open,
@@ -684,7 +686,7 @@ class _DayHeader extends StatelessWidget {
 }
 
 /// One event in the agenda: a time column (when it starts and how long it runs, or All day),
-/// its calendar's dot, the title and where it is, then its guests' monograms, or the answers
+/// its calendar's dot, the title and where it is, then its guests' avatars, or the answers
 /// when the account is invited and has not answered. Past events fade; declined ones fade
 /// further, struck through. Selected, the row lifts as a card with a blue mark at its edge.
 class _EventRow extends StatelessWidget {
@@ -742,7 +744,7 @@ class _EventRow extends StatelessWidget {
     final Widget? trailing = reply.invited
         ? _ReplySwitch(reply: reply, compact: true, onReply: (response) => calendar.respond(event, response))
         : guests.isNotEmpty
-        ? GuestAvatars(event: event, max: 3)
+        ? GuestAvatars(event: event, max: 3, photoOf: state.avatarFor)
         : null;
     Widget row = Row(children: [
       SizedBox(
@@ -1038,7 +1040,7 @@ class CalendarEventPane extends StatelessWidget {
                 final width = (constraints.maxWidth - gap * (columns - 1)) / columns;
                 return Wrap(spacing: gap, runSpacing: gap, children: [
                   for (final guest in guests)
-                    SizedBox(width: width, child: _GuestCard(person: guest.person, organizer: guest.organizer)),
+                    SizedBox(width: width, child: _GuestCard(person: guest.person, organizer: guest.organizer, photo: guest.person.email == null ? null : state.avatarFor(guest.person.email!))),
                 ]);
               }),
               const SizedBox(height: 14),
@@ -1057,15 +1059,16 @@ class CalendarEventPane extends StatelessWidget {
   }
 }
 
-/// A guest on the open event: their monogram, name, and part (Organizer) and answer; the
+/// A guest on the open event: their avatar, name, and part (Organizer) and answer; the
 /// answers still owed (Maybe, Invited) in the waiting color.
 class _GuestCard extends StatelessWidget {
-  const _GuestCard({required this.person, required this.organizer});
+  const _GuestCard({required this.person, required this.organizer, required this.photo});
 
   final engine.CalendarPerson person;
   final bool organizer;
+  final String? photo;
 
-  static const _monogram = 26.0;
+  static const _avatar = 26.0;
 
   @override
   Widget build(BuildContext context) {
@@ -1078,7 +1081,7 @@ class _GuestCard extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(color: colors.fill, borderRadius: BorderRadius.circular(CalendarMetrics.cardRadius)),
       child: Row(children: [
-        GuestMonogram(person: person, size: _monogram),
+        PersonAvatar(address: guestAddress(person), photo: photo, size: _avatar),
         const SizedBox(width: 8),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [

@@ -388,7 +388,7 @@ abstract final class Panes {
 
 /// The calendar's events as cards on the tray (MS-163, variant A): [cardRadius] corners and a
 /// [cardBorder] hairline, a [MarkMetrics.dot] of the calendar's color before the title, guests as
-/// [avatar] monograms ringed [avatarRing] in the card's color. Overlapping events stand
+/// [avatar] [PersonAvatar]s ringed in the card's color. Overlapping events stand
 /// [conflictGap] apart; past ones fade to [pastOpacity], declined ones to [declinedOpacity]; an
 /// unanswered invitation is hatched at [hatchOpacity], every [hatchSpacing], inside a border
 /// dashed in [dash] lengths. All-day events are bars tinted [allDayTint] with their calendar's
@@ -399,7 +399,6 @@ abstract final class CalendarMetrics {
   static const cardBorder = Strokes.hairline;
   static const conflictGap = 2.0;
   static const avatar = 16.0;
-  static const avatarRing = 1.5;
   static const loadBar = 2.5;
   static const loadOpacity = 0.55;
   static const pastOpacity = 0.48;
@@ -418,6 +417,17 @@ abstract final class MarkMetrics {
   static const dot = 6.0;
   static const unread = 7.0;
   static const unreadSlot = 16.0;
+}
+
+/// Avatars (MS-192), the web reader's look everywhere: a person's picture, else their initial in
+/// their [MailColors.avatarHue] at [letter] of the avatar's size (a group's glyph at [glyph]), on
+/// a [tint] wash of that hue. Where avatars overlap (a card's guests) each is ringed [ring] wide
+/// in the surface under it.
+abstract final class AvatarMetrics {
+  static const tint = 0.15;
+  static const letter = 0.4;
+  static const glyph = 0.5;
+  static const ring = 1.5;
 }
 
 /// Tags (MS-190): small print in its color on a [tint] wash of it, fully round, [height] tall or
@@ -441,14 +451,6 @@ abstract final class NoticeMetrics {
 
 /// A calendar's color softened for its dot, so a screen of events stays quiet.
 Color calendarDot(Color calendar, MailColors colors) => Color.lerp(calendar, colors.card, 0.2)!;
-
-/// Guests' monograms on calendar cards: muted indigo, pine, apricot, lavender and slate.
-const guestPalette = [
-  Color(0xFF6B78B4), Color(0xFF4F8A7B), Color(0xFFC0916A), Color(0xFF9784BE), Color(0xFF7A8290),
-];
-
-/// A guest's monogram color, the same for them on every card.
-Color guestColor(String key) => guestPalette[stableIndex(key.toLowerCase(), guestPalette.length)];
 
 /// Stable per-account colors, in sidebar order: the system blue, orange, purple, green, red, teal.
 const accountPalette = [
@@ -505,11 +507,6 @@ Color topicColor(String label, Brightness brightness) {
   final pair = _knownTopics[key] ?? _fallbackTopics[stableIndex(key, _fallbackTopics.length)];
   return brightness == Brightness.dark ? pair.$2 : pair.$1;
 }
-
-/// Sender avatars without a photo: the gray monogram of Contacts and Mail.
-({Color background, Color foreground}) avatarColors(String email, Brightness brightness) => brightness == Brightness.light
-    ? (background: const Color(0xFFA3A8B3), foreground: const Color(0xFFFFFFFF))
-    : (background: const Color(0xFF6B6F78), foreground: const Color(0xFFFFFFFF));
 
 /// A slot in `0..<count` for `key` that is the same on every launch and matches the native app
 /// (FNV-1a 64 over UTF-8; Dart's native ints wrap like the Swift `&*`).
