@@ -640,41 +640,41 @@ class _AttachmentTile extends StatelessWidget {
   final engine.ChatAttachment attachment;
   final void Function(String url) onOpen;
 
-  ({IconData icon, Color color, String label}) _kind() {
+  ({IconData icon, AttachmentKind kind, String label}) _kind() {
     final type = attachment.contentType ?? '';
     final dot = attachment.name.lastIndexOf('.');
     final ext = dot < 0 ? '' : attachment.name.substring(dot + 1).toLowerCase();
-    if (type.startsWith('video/')) return (icon: CupertinoIcons.film, color: const Color(0xFFD93025), label: 'Video');
-    if (type.startsWith('image/')) return (icon: CupertinoIcons.photo, color: const Color(0xFFD93025), label: 'Image');
-    if (type.startsWith('audio/')) return (icon: CupertinoIcons.music_note, color: const Color(0xFFE8710A), label: 'Audio');
-    if (type == 'application/pdf' || ext == 'pdf') return (icon: CupertinoIcons.doc_text, color: const Color(0xFFD93025), label: 'PDF');
+    if (type.startsWith('video/')) return (icon: CupertinoIcons.film, kind: AttachmentKind.video, label: 'Video');
+    if (type.startsWith('image/')) return (icon: CupertinoIcons.photo, kind: AttachmentKind.image, label: 'Image');
+    if (type.startsWith('audio/')) return (icon: CupertinoIcons.music_note, kind: AttachmentKind.audio, label: 'Audio');
+    if (type == 'application/pdf' || ext == 'pdf') return (icon: CupertinoIcons.doc_text, kind: AttachmentKind.pdf, label: 'PDF');
     if (attachment.url?.contains('drive.google.com') ?? false) {
-      return (icon: CupertinoIcons.doc, color: const Color(0xFF1A73E8), label: 'Google Drive');
+      return (icon: CupertinoIcons.doc, kind: AttachmentKind.document, label: 'Google Drive');
     }
-    return (icon: CupertinoIcons.doc, color: const Color(0xFF5F6368), label: ext.isEmpty ? 'File' : ext.toUpperCase());
+    return (icon: CupertinoIcons.doc, kind: AttachmentKind.file, label: ext.isEmpty ? 'File' : ext.toUpperCase());
   }
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
     final url = attachment.url;
-    final kind = _kind();
+    final (:icon, :kind, :label) = _kind();
     final tile = Container(
       constraints: const BoxConstraints(minWidth: 220, maxWidth: 340),
-      padding: const EdgeInsets.fromLTRB(12, 10, 14, 10),
+      padding: const EdgeInsets.symmetric(horizontal: Space.s12, vertical: Space.s10),
       decoration: BoxDecoration(
         color: colors.fill,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: colors.separator),
+        borderRadius: BorderRadius.circular(Radii.card),
+        border: Border.all(color: colors.separator, width: Strokes.hairline),
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        MacosIcon(kind.icon, size: 22, color: kind.color),
-        const SizedBox(width: 10),
+        MacosIcon(icon, size: IconSizes.hero, color: attachmentColor(kind, colors.brightness)),
+        const SizedBox(width: Space.s10),
         Flexible(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(attachment.name, maxLines: 1, overflow: TextOverflow.ellipsis,
-                style: context.text.body.copyWith(color: colors.label, fontWeight: FontWeight.w500)),
-            Text(kind.label, style: context.text.caption1.copyWith(color: colors.secondaryLabel)),
+                style: context.roles.body.copyWith(fontWeight: FontWeight.w500)),
+            Text(label, style: context.roles.meta),
           ]),
         ),
       ]),

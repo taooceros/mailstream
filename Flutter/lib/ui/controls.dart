@@ -2,11 +2,12 @@
 /// the Mac and on Windows: buttons ([MailButton], [MailIconButton]), a segmented control
 /// ([MailSegmented]), text fields ([MailTextField], [MailSearchField]), a menu button
 /// ([MailMenuButton]), a date button ([MailDateButton]), a switch and a checkbox ([MailSwitch],
-/// [MailCheckbox]) and a confirmation sheet ([confirmAction]). They share one look:
-/// [Radii.control] corners, a quiet [MailColors.fill] face inside a hairline for secondary
-/// controls, the accent for the primary one, the hover and pressed washes, and a ring in the
-/// accent while the keyboard focuses them. Text editing itself is macos_ui's `MacosTextField`,
-/// which Flutter draws on both platforms; [MailTextField] gives it the app's frame.
+/// [MailCheckbox]), a notice ([MailNotice], MS-191) and a confirmation sheet ([confirmAction]).
+/// They share one look: [Radii.control] corners, a quiet [MailColors.fill] face inside a
+/// hairline for secondary controls, the accent for the primary one, the hover and pressed
+/// washes, and a ring in the accent while the keyboard focuses them. Text editing itself is
+/// macos_ui's `MacosTextField`, which Flutter draws on both platforms; [MailTextField] gives it
+/// the app's frame.
 library;
 
 import 'dart:math' as math;
@@ -938,6 +939,100 @@ class MailCheckbox extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// What a [MailNotice] tells: [action], something to do (sign in again), in the indigo of
+/// "waiting on you"; [error], something that failed, in red.
+enum MailNoticeTone { action, error }
+
+/// A notice in a page (MS-191), the one look of every banner: [icon] (the tone's by default) in
+/// the tone's color before [message], under a [title] when there is one, on a [NoticeMetrics]
+/// wash of that color inside a hairline of it, [Radii.card] corners. A card ends in [trailing]
+/// (a button); [compact], it is one [NoticeMetrics.compactHeight] line over a view, ending in
+/// [action] in the tone's color. With [onTap] the whole notice presses, washed under the pointer.
+class MailNotice extends StatelessWidget {
+  const MailNotice({
+    super.key,
+    required this.tone,
+    required this.message,
+    this.title,
+    this.icon,
+    this.trailing,
+    this.action,
+    this.onTap,
+    this.compact = false,
+  });
+
+  final MailNoticeTone tone;
+  final String message;
+  final String? title;
+  final IconData? icon;
+  final Widget? trailing;
+  final String? action;
+  final VoidCallback? onTap;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final roles = context.roles;
+    final error = tone == MailNoticeTone.error;
+    final hue = error ? colors.red : colors.waiting;
+    final ink = error ? colors.onRedFill : colors.onWaitingFill;
+    final face = hue.withValues(alpha: colors.brightness == Brightness.light ? NoticeMetrics.tint : NoticeMetrics.darkTint);
+    final glyph = Icon(
+      icon ?? (error ? CupertinoIcons.exclamationmark_triangle : CupertinoIcons.info_circle),
+      size: compact ? IconSizes.row : IconSizes.toolbar,
+      color: ink,
+    );
+    final content = compact
+        ? Row(children: [
+            glyph,
+            const SizedBox(width: Space.s8),
+            Expanded(
+              child: Text(message, maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: roles.meta.copyWith(color: colors.label, fontWeight: FontWeight.w500)),
+            ),
+            if (action != null) ...[
+              const SizedBox(width: Space.s8),
+              Text(action!, maxLines: 1, style: roles.meta.copyWith(color: ink, fontWeight: FontWeight.w500)),
+            ],
+          ])
+        : Row(children: [
+            glyph,
+            const SizedBox(width: Space.s10),
+            Expanded(
+              child: title == null
+                  ? Text(message, style: roles.body)
+                  : Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(title!, maxLines: 1, overflow: TextOverflow.ellipsis, style: roles.headline),
+                      Text(message, maxLines: 2, overflow: TextOverflow.ellipsis, style: roles.meta),
+                    ]),
+            ),
+            if (trailing != null) ...[const SizedBox(width: Space.s8), trailing!],
+          ]);
+    Widget frame(Color wash, {bool focused = false}) => AnimatedContainer(
+      duration: Motion.quick,
+      height: compact ? NoticeMetrics.compactHeight : null,
+      padding: compact
+          ? const EdgeInsets.symmetric(horizontal: Space.s10)
+          : const EdgeInsets.symmetric(horizontal: Space.s12, vertical: Space.s10),
+      decoration: BoxDecoration(
+        color: Color.alphaBlend(wash, face),
+        borderRadius: BorderRadius.circular(Radii.card),
+        border: Border.all(color: hue.withValues(alpha: NoticeMetrics.rim), width: Strokes.hairline),
+        boxShadow: focused ? _focusRing(colors) : null,
+      ),
+      child: content,
+    );
+    const none = Color(0x00000000);
+    if (onTap == null) return frame(none);
+    return _Pressable(
+      onPressed: onTap,
+      semanticLabel: message,
+      builder: (context, state) => frame(state.pressed ? colors.pressed : (state.hovered ? colors.hover : none), focused: state.focused),
     );
   }
 }

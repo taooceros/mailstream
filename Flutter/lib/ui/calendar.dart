@@ -239,7 +239,8 @@ class CalendarListPane extends StatefulWidget {
   final MailState state;
 
   static const rowHeight = 52.0;
-  static const noticeHeight = 64.0;
+  /// A notice card with a two-line message and its [Space.s4] gaps above and below.
+  static const noticeHeight = 72.0;
 
   @override
   State<CalendarListPane> createState() => _CalendarListPaneState();
@@ -848,39 +849,20 @@ class _NoticeRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.colors;
     final failed = problem != null;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: BoxDecoration(color: failed ? colors.redFill : colors.waitingFill, borderRadius: BorderRadius.circular(Panes.corner)),
-        child: Row(children: [
-          Icon(failed ? CupertinoIcons.exclamationmark_triangle : CupertinoIcons.calendar_badge_plus, size: 18,
-              color: failed ? colors.onRedFill : colors.onWaitingFill),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(account.label.isEmpty ? account.id : account.label, maxLines: 1, overflow: TextOverflow.ellipsis,
-                    style: context.text.body.copyWith(fontWeight: FontWeight.w600)),
-                Text(
-                  failed ? 'Could not update: $problem' : 'Sign in again to allow calendar access.',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: context.text.footnote.copyWith(color: colors.secondaryLabel),
-                ),
-              ],
-            ),
-          ),
-          if (!failed) ...[
-            const SizedBox(width: 8),
-            if (signingIn) const Padding(padding: EdgeInsets.only(right: 8), child: Spinner(radius: 7)),
-            MailButton(label: 'Sign In…', onPressed: onSignIn),
-          ],
-        ]),
+      padding: const EdgeInsets.symmetric(horizontal: Space.s12, vertical: Space.s4),
+      child: MailNotice(
+        tone: failed ? MailNoticeTone.error : MailNoticeTone.action,
+        icon: failed ? null : CupertinoIcons.calendar_badge_plus,
+        title: account.label.isEmpty ? account.id : account.label,
+        message: failed ? 'Could not update: $problem' : 'Sign in again to allow calendar access.',
+        trailing: failed
+            ? null
+            : Row(mainAxisSize: MainAxisSize.min, children: [
+                if (signingIn) const Padding(padding: EdgeInsets.only(right: Space.s8), child: Spinner(radius: 7)),
+                MailButton(label: 'Sign In…', onPressed: onSignIn),
+              ]),
       ),
     );
   }
@@ -896,32 +878,20 @@ class _NoticeLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.colors;
     final failed = notices.any((n) => n.problem != null);
     final only = notices.length == 1 ? notices.single.account : null;
     final text = only != null
         ? '${only.label.isEmpty ? only.id : only.label}: ${failed ? 'could not update' : 'sign in again to show its calendar'}'
         : '${notices.length} accounts cannot show their calendars';
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-      child: Hoverable(
+      padding: const EdgeInsets.fromLTRB(Space.s12, 0, Space.s12, Space.s6),
+      child: MailNotice(
+        compact: true,
+        tone: failed ? MailNoticeTone.error : MailNoticeTone.action,
+        icon: failed ? null : CupertinoIcons.calendar_badge_plus,
+        message: text,
+        action: 'Show in Agenda',
         onTap: onTap,
-        selected: true,
-        selectedColor: failed ? colors.redFill : colors.waitingFill,
-        child: SizedBox(
-          height: 28,
-          child: Row(children: [
-            const SizedBox(width: 10),
-            Icon(failed ? CupertinoIcons.exclamationmark_triangle : CupertinoIcons.calendar_badge_plus, size: 15,
-                color: failed ? colors.onRedFill : colors.onWaitingFill),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(text, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.text.footnote.copyWith(fontWeight: FontWeight.w500)),
-            ),
-            Text('Show in Agenda', style: context.text.footnote.copyWith(color: failed ? colors.onRedFill : colors.onWaitingFill)),
-            const SizedBox(width: 10),
-          ]),
-        ),
       ),
     );
   }

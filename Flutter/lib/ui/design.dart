@@ -429,6 +429,16 @@ abstract final class TagMetrics {
   static const padding = Space.s6;
 }
 
+/// Notices (MS-191, `MailNotice`): a wash of the tone's color, [tint] of it in light mode and
+/// [darkTint] in dark, where the low share keeps the hue quiet so a notice never outweighs the
+/// page, inside a [rim] hairline of it; [compactHeight] tall as one line over a view.
+abstract final class NoticeMetrics {
+  static const tint = 0.10;
+  static const darkTint = 0.14;
+  static const rim = 0.22;
+  static const compactHeight = 28.0;
+}
+
 /// A calendar's color softened for its dot, so a screen of events stays quiet.
 Color calendarDot(Color calendar, MailColors colors) => Color.lerp(calendar, colors.card, 0.2)!;
 
@@ -450,6 +460,26 @@ Color accountColor(int index) => accountPalette[index % accountPalette.length];
 
 /// Stars: the system yellow, deep enough to read on white.
 const starColor = Color(0xFFFFB800);
+
+/// What a file is, for the color of its glyph.
+enum AttachmentKind { image, video, audio, pdf, document, file }
+
+/// Attachments' colors by kind (MS-191), light and dark, after the system hues the rest of the
+/// app uses: pictures purple, videos pink, audio orange, PDFs red, documents (a Drive file)
+/// blue, any other file gray.
+const _attachmentHues = <AttachmentKind, (Color, Color)>{
+  AttachmentKind.image: (Color(0xFFAF52DE), Color(0xFFBF5AF2)),
+  AttachmentKind.video: (Color(0xFFFF2D55), Color(0xFFFF375F)),
+  AttachmentKind.audio: (Color(0xFFFF9500), Color(0xFFFF9F0A)),
+  AttachmentKind.pdf: (Color(0xFFFF3B30), Color(0xFFFF453A)),
+  AttachmentKind.document: (Color(0xFF007AFF), Color(0xFF0A84FF)),
+  AttachmentKind.file: (Color(0xFF8E8E93), Color(0xFF98989D)),
+};
+
+Color attachmentColor(AttachmentKind kind, Brightness brightness) {
+  final pair = _attachmentHues[kind]!;
+  return brightness == Brightness.dark ? pair.$2 : pair.$1;
+}
 
 /// Topic colors: known topics keep fixed hues, the rest take a stable one.
 const _knownTopics = <String, (Color, Color)>{

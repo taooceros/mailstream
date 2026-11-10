@@ -232,21 +232,10 @@ class _Issue extends StatelessWidget {
   final String message;
 
   @override
-  Widget build(BuildContext context) {
-    final colors = context.colors;
-    return Padding(
-      padding: const EdgeInsets.only(top: 8),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(color: colors.redFill, borderRadius: BorderRadius.circular(Panes.corner)),
-        child: Row(children: [
-          MacosIcon(CupertinoIcons.exclamationmark_circle, size: 17, color: colors.onRedFill),
-          const SizedBox(width: 10),
-          Expanded(child: Text(message, style: context.text.body.copyWith(color: colors.onRedFill))),
-        ]),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: Space.s8),
+    child: MailNotice(tone: MailNoticeTone.error, message: message),
+  );
 }
 
 // MARK: - Tag sync
