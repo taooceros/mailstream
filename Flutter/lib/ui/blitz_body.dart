@@ -9,16 +9,16 @@ import 'package:flutter/widgets.dart';
 import 'package:mailstream/mailstream.dart' as engine;
 
 import '../platform.dart';
-import 'hyper_body.dart';
+import 'mail_resources.dart';
 
 /// An HTML body drawn by Blitz (MS-147) in the engine's library (`FFI/src/html_page.rs`): parsing,
 /// layout and drawing run on a thread of their own there, and this widget only shows the tiles it
 /// draws, strips [tileHeight] points tall, for the part of the body in or near the reader's
 /// viewport. The body is as tall as its content and scrolls with the conversation, as the WebView's
-/// does. A click opens the link under it ([HyperBody.openLink], the same check the other renderers
-/// use), a mouse drag selects text and ⌘C (Ctrl+C) copies it.
+/// does. A click opens the link under it ([openMailLink], under the WebView's rules), a mouse drag
+/// selects text and ⌘C (Ctrl+C) copies it.
 class BlitzBody extends StatefulWidget {
-  const BlitzBody({super.key, required this.html, this.page = _page, this.openLink = HyperBody.openLink});
+  const BlitzBody({super.key, required this.html, this.page = _page, this.openLink = BlitzBody.openMailLink});
 
   final String html;
 
@@ -29,6 +29,12 @@ class BlitzBody extends StatefulWidget {
   static const tileHeight = 512.0;
 
   static engine.HtmlPageInterface _page(String html) => engine.HtmlPage(html: html);
+
+  /// Opens [url] through the runner's `MailLink`, which checks it again and refuses what it does
+  /// not allow.
+  static void openMailLink(String url) {
+    if (isMailLink(url)) const MethodChannel('mailstream/window').invokeMethod<void>('openMailLink', url).ignore();
+  }
 
   /// Tiles this far (in tiles) beyond the viewport are drawn ahead; past twice this they are freed.
   static const ahead = 1;

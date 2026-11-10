@@ -16,9 +16,8 @@ import 'format.dart';
 import 'glass.dart';
 import 'html_parts.dart';
 import 'mail_html_windows.dart';
-import 'hyper_body.dart';
 import 'blitz_body.dart';
-import 'hyper_resources.dart';
+import 'mail_resources.dart';
 import 'invitation.dart';
 import 'reader_renderer.dart';
 
@@ -471,13 +470,12 @@ class _Body extends StatelessWidget {
 }
 
 /// An HTML body at the height of its content. On the Mac the reader's switch picks the renderer
-/// ([ReaderRendererScope]): Blitz ([BlitzBody], laid out and painted in Rust) by default, WebKit
-/// (`MailHtmlView` in the runner), or the experimental HyperRender ([HyperBody], MS-171). Blitz
-/// and HyperRender draw the same prepared parts; WebKit loads the mail as the engine gave it
-/// ([webKitDocument]) and folds its quotes in the page (MS-167). Only the chosen one is mounted,
-/// and switching keeps the parts and the fold. Windows draws the split parts with WebView2
-/// ([WindowsMailHtml]). Quoted history (Gmail, Outlook, Thunderbird, Apple Mail markup) is cut
-/// out of the body (or hidden in the WebKit page) and folds behind a toggle.
+/// ([ReaderRendererScope]): Blitz ([BlitzBody], laid out and painted in Rust) by default, or WebKit
+/// (`MailHtmlView` in the runner). Blitz draws the prepared parts; WebKit loads the mail as the
+/// engine gave it ([webKitDocument]) and folds its quotes in the page (MS-167). Only the chosen
+/// one is mounted, and switching keeps the parts and the fold. Windows draws the split parts with
+/// WebView2 ([WindowsMailHtml]). Quoted history (Gmail, Outlook, Thunderbird, Apple Mail markup) is
+/// cut out of the body (or hidden in the WebKit page) and folds behind a toggle.
 class MailHtml extends StatefulWidget {
   const MailHtml({super.key, required this.owner, required this.html, required this.onOpenLink, this.partsCache});
 
@@ -587,7 +585,6 @@ class _MailHtmlState extends State<MailHtml> {
 
   @override
   Widget build(BuildContext context) {
-    final renderer = ReaderRendererScope.current(context);
     if (_raw) {
       final html = widget.html;
       final owner = widget.owner;
@@ -613,8 +610,6 @@ class _MailHtmlState extends State<MailHtml> {
     final (main, quoted) = parts;
     Widget view(String html) => !Host.mac
         ? WindowsMailHtml(key: ValueKey(html), html: html, onOpenLink: widget.onOpenLink)
-        : renderer == ReaderRenderer.hyper
-        ? HyperBody(key: ValueKey(html), html: html)
         : BlitzBody(key: ValueKey(html), html: html);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

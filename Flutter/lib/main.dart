@@ -1,6 +1,5 @@
 import 'dart:io' show Platform;
 
-import 'package:flutter/material.dart' show DefaultMaterialLocalizations;
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
 
@@ -47,8 +46,6 @@ class _MailstreamAppState extends State<MailstreamApp> {
   Widget build(BuildContext context) => MacosApp(
     title: 'Mailstream',
     debugShowCheckedModeBanner: false,
-    // HyperRender's selection menus ask for Material's strings.
-    localizationsDelegates: const [DefaultMaterialLocalizations.delegate],
     theme: MailTheme.macos(Brightness.light),
     darkTheme: MailTheme.macos(Brightness.dark),
     home: ReaderRendererScope(controller: _renderer, child: MailShell(state: widget.state)),

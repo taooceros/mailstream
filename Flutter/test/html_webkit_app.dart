@@ -6,7 +6,7 @@ import 'package:macos_ui/macos_ui.dart';
 import 'package:mailstream/mailstream.dart' as engine;
 import 'package:mailstream_ui/main.dart';
 import 'package:mailstream_ui/state/mail_state.dart';
-import 'package:mailstream_ui/ui/hyper_resources.dart';
+import 'package:mailstream_ui/ui/mail_resources.dart';
 
 import 'reader_fixture.dart';
 

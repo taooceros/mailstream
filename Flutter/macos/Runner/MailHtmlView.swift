@@ -483,7 +483,7 @@ private final class Bridge: NSObject, WKNavigationDelegate, WKScriptMessageHandl
 /// Serves a body's inline images at `mscid://<message-key>/<stored-name>`, the addresses the
 /// reader gives the engine's inline cache files (`webKitDocument`), as the native reader's
 /// `PartSchemeHandler` does. Only a file whose canonical path is inside the inline cache, at most
-/// 20 MB, whose bytes are PNG, JPEG, GIF or WebP, the rule HyperRender's preparation reads them by
+/// 20 MB, whose bytes are PNG, JPEG, GIF or WebP, the rule Blitz's preparation reads them by
 /// (`cachedImageData`). Files are read off the main thread; a task WebKit stopped meanwhile is
 /// never answered.
 @MainActor private final class InlinePartHandler: NSObject, WKURLSchemeHandler {

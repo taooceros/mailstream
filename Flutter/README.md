@@ -256,16 +256,13 @@ pixels/screenshots). Normal text paste still edits the focused field. Attachment
 before sending and remain with their draft when switching tabs or browsing other mail.
 
 HTML mail on the Mac is drawn by Blitz (in Rust, below) unless the reader's switch (beside the
-header's chips, "Renderer:" Blitz / WebView (original) / HyperRender (experimental)) picks
-another (MS-138, MS-147, MS-166). HyperRender (`hyper_render` 1.14.1, in Flutter,
-`lib/ui/hyper_body.dart`) is experimental and set aside (MS-171): it stays in the switch, last,
-and its code stays, but it gets no further work for now. Every launch starts in Blitz
-(`MAILSTREAM_READER_RENDERER=webKit|hyper` starts in another, for `scripts/bench.sh`); the
-choice holds until the app quits and nothing changes it but the switch: a body a renderer draws
-poorly never falls back to another by itself. All three draw the same prepared parts, so
-switching keeps the message, its open quote and the parts cache; only the chosen renderer's
-bodies are mounted. Known HyperRender gaps: a rule made only of top/bottom borders is not drawn,
-cell percentage widths are ignored, `<center>`/`<font>` are dropped.
+header's chips, "Renderer:" Blitz / WebView (original)) picks the WebView (MS-138, MS-147,
+MS-166). Every launch starts in Blitz (`MAILSTREAM_READER_RENDERER=webKit` starts in the WebView,
+for `scripts/bench.sh`); the choice holds until the app quits and nothing changes it but the
+switch: a body a renderer draws poorly never falls back to another by itself. Switching keeps the
+message, its open quote and the parts cache; only the chosen renderer's bodies are mounted. The
+experimental HyperRender reader (in Flutter, set aside in MS-171) was removed in MS-196, with its
+vendored core; a `hyper` renderer name now starts in Blitz.
 
 Blitz (`blitz-dom`/`blitz-html`/`blitz-paint`, `FFI/src/html_page.rs`; `lib/ui/blitz_body.dart`)
 parses, lays out and paints each body on a thread of its own in the engine's library; Flutter
@@ -303,16 +300,12 @@ the width makes them cells again (MS-165). In the same test mail, at a reader na
 points the "Other rentals" card stacks its picture over its text. Known Blitz gap: an image URL
 Blitz can't resolve (`<img src="http://">`) leaves that body blank.
 
-Preparation (`prepareHyperResources` in `lib/ui/hyper_resources.dart`) is the resource policy
-for HyperRender and Blitz: inline parts (`file://` copies under Mailstream's `messages-v2` cache,
-canonical paths only, raster bytes checked) become data URLs, images that are not HTTPS or raster
-data are removed, and `align`/`valign`/`bgcolor`/`border`/`cellpadding` get `data-ms-*` copies
-that HyperRender's sanitizer keeps. Prepared and split HTML is written back with the doctype the
+Preparation (`prepareMailImages` in `lib/ui/mail_resources.dart`) is Blitz's image policy: inline
+parts (`file://` copies under Mailstream's `messages-v2` cache, canonical paths only, raster bytes
+checked) become data URLs, and images that are not HTTPS or raster data are removed; mail without
+images goes through as it came. Prepared and split HTML is written back with the doctype the
 mail wrote (`documentHtml`): package:html drops a doctype's PUBLIC/SYSTEM keyword, which put
-XHTML and HTML 4 newsletters into quirks mode (MS-160). `lib/ui/hyper_table.dart` lays mail
-tables out as mail clients do: no grid unless `border="1"`, widths fit the reading column.
-HyperRender's core is vendored in `third_party/hyper_render_core` with one change: the image
-widget builder reaches table cells.
+XHTML and HTML 4 newsletters into quirks mode (MS-160).
 Links open through the runner's `MailLink` (HTTP(S) with a host, or mailto), in every renderer.
 
 The WebView is `macos/Runner/MailHtmlView.swift`, a platform view (`mailstream/html`). It gets
@@ -372,7 +365,7 @@ WebKit ends a closed page's process by leaving it to exit by itself, which a bac
 on a busy machine did not get to do, so every closed page kept its process (MS-153); the pool
 kills the process of each page it lets go, once WebKit has closed the page.
 
-For HyperRender and Blitz, HTML DOM parsing, quote traversal and serialization run in a
+For Blitz, HTML DOM parsing, quote traversal and serialization run in a
 background Dart isolate before the bodies show (MS-87). A shared eight-entry LRU reuses unchanged
 HTML and shares in-flight requests; only one parse isolate runs at a time. Main/quoted parts
 retain the original head styling and Gmail/Outlook/Thunderbird/Apple quote rules, including
@@ -391,8 +384,8 @@ replaces the queued one, and prefetched parts wait in an LRU of their own until 
 them, so they never push a reader's parts out. Opening a prefetched conversation then draws its
 bodies in the first frame instead of a spinner.
 
-`flutter test test/hyper_render_test.dart` covers the resource policy, mail tables and the
-renderer switch; `test/html_parts_test.dart` output, caching, replacement/disposal races,
+`flutter test test/mail_resources_test.dart` covers the resource policy and the renderer
+switch; `test/html_parts_test.dart` output, caching, replacement/disposal races,
 queue skipping and prefetch priority, fold behavior, the WebKit page's HTML (the engine's but for
 the policy and inline image addresses) and its fold, and the height protocol (owner parameters, the
 pull, late older heights, views gone before they answer). `flutter build macos --release -t

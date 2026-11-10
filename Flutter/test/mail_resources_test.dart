@@ -2,18 +2,14 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
-import 'package:flutter/material.dart' show MaterialApp;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:hyper_render/hyper_render.dart';
 import 'package:macos_ui/macos_ui.dart';
 import 'package:mailstream_ui/platform.dart';
 import 'package:mailstream_ui/ui/design.dart';
 import 'package:mailstream_ui/ui/html_parts.dart';
-import 'package:mailstream_ui/ui/hyper_body.dart';
-import 'package:mailstream_ui/ui/hyper_resources.dart';
-import 'package:mailstream_ui/ui/hyper_table.dart';
+import 'package:mailstream_ui/ui/mail_resources.dart';
 import 'package:mailstream_ui/ui/blitz_body.dart';
 import 'package:mailstream_ui/ui/reader.dart';
 import 'package:mailstream_ui/ui/reader_renderer.dart';
@@ -42,7 +38,7 @@ void main() {
   });
 
   test('unsupported resources and script/file links stay blocked', () async {
-    final result = await prepareHyperResources(
+    final result = await prepareMailImages(
       '<img src="file:///tmp/ms138-no-read.png"><img src="http://example.test/a.png"><img src="data:text/html;base64,PHNjcmlwdD4=">',
     );
     expect(result, isNot(contains('src=')));
@@ -68,14 +64,15 @@ void main() {
     expect(webKitContentPolicy, isNot(contains('script')));
   });
 
-  test('presentational attributes the sanitizer drops are kept as inert data-ms copies', () async {
-    final prepared = await prepareHyperResources(
-      '<table border="0" cellpadding="0" bgcolor="#EEEEEE"><tr align="Center"><td valign="top">x</td></tr></table>',
-    );
-    for (final copy in ['data-ms-border="0"', 'data-ms-cellpadding="0"', 'data-ms-bgcolor="#eeeeee"', 'data-ms-align="center"', 'data-ms-valign="top"']) {
-      expect(prepared, contains(copy));
+  test("Blitz gets the mail's presentational attributes as written, without copies (MS-196)", () async {
+    const mail = '<table border="0" cellpadding="0" bgcolor="#EEEEEE"><tr align="Center"><td valign="top"><img src="https://example.test/a.png"></td></tr></table>';
+    final prepared = await prepareMailImages(mail);
+    for (final attribute in ['border="0"', 'cellpadding="0"', 'bgcolor="#EEEEEE"', 'align="Center"', 'valign="top"']) {
+      expect(prepared, contains(attribute));
     }
-    expect(prepared, contains('align="Center"'));
+    expect(prepared, isNot(contains('data-ms-')));
+    // Mail without images is not parsed at all.
+    expect(await prepareMailImages('<table bgcolor="#EEEEEE"><tr><td>x</td></tr></table>'), '<table bgcolor="#EEEEEE"><tr><td>x</td></tr></table>');
   });
 
   test('prepared mail keeps its doctype, so WebKit lays it out in the mode it was written for (MS-160)', () async {
@@ -92,56 +89,11 @@ void main() {
     for (final MapEntry(key: written, value: expected) in doctypes.entries) {
       final mail = '$written<html><head></head><body><table bgcolor="#EEEEEE"><tr><td>x'
           '<img src="https://example.test/a.png"></td></tr></table><div class="gmail_quote">history</div></body></html>';
-      final prepared = await prepareHyperResources(mail);
+      final prepared = await prepareMailImages(mail);
       expect(prepared, startsWith(expected));
       expect(splitMailHtml(prepared).$1, startsWith(expected));
       expect(windowsMailPage(mail), startsWith(expected));
     }
-  });
-
-  testWidgets('the image builder reaches nested table cells without a WebView', (tester) async {
-    final seen = <String>[];
-    await tester.pumpWidget(MaterialApp(home: SingleChildScrollView(child: HyperViewer(
-      html: '<table><tr><td><table><tr><td><img src="data:image/png;base64,$png" width="80" height="40"></td></tr></table></td></tr></table>',
-      mode: HyperRenderMode.sync,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      widgetBuilder: (node) {
-        if (node.tagName == 'img') seen.add((node as AtomicNode).src ?? '');
-        return HyperBody.imageWidget(node);
-      },
-      imageLoader: HyperBody.loadImage,
-    ))));
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(seen, contains('data:image/png;base64,$png'));
-    expect(find.byType(Image), findsOneWidget);
-    expect(find.byType(AppKitView), findsNothing);
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox());
-  });
-
-  testWidgets('mail layout tables fit the column and draw grid lines only for border="1"', (tester) async {
-    tester.view.physicalSize = const Size(400, 900);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.reset);
-    final html = await tester.runAsync(() => prepareHyperResources(
-      '<table width="600" border="0" cellpadding="0"><tr><td>${'Wrapping words in a fixed 600 pixel layout table. ' * 6}</td></tr></table>'
-      '<table border="1"><tr><td>A</td><td>B</td></tr></table>'
-      '<table width="50%" border="0"><tr><td>Half</td></tr></table>',
-    ));
-    await tester.pumpWidget(MaterialApp(home: SingleChildScrollView(child: HyperBody(html: html!))));
-    await tester.pump(const Duration(milliseconds: 300));
-    final tables = tester.widgetList<HyperTable>(find.byType(HyperTable)).toList();
-    expect(tables.map((t) => t.borderWidth), [0, 1, 0]);
-    expect(tables.every((t) => t.onLinkTap != null), isTrue, reason: 'links in inline-only cells open');
-    final sizes = [for (final table in find.byType(HyperTable).evaluate()) (table.renderObject! as RenderBox).size.width];
-    expect(sizes[0], lessThanOrEqualTo(400));
-    // An auto-width table keeps its natural width; a 50% one takes half the column, once.
-    expect(sizes[1], lessThan(100));
-    expect(sizes[2], closeTo(200, 1));
-    expect(find.descendant(of: find.byType(MailTable), matching: find.byType(SingleChildScrollView)), findsNothing);
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox());
   });
 
   group('renderer switch', () {
@@ -175,56 +127,50 @@ void main() {
         prepared++;
         return ('<!DOCTYPE html><p>main</p>', '<p>history</p>');
       });
-      final renderer = ValueNotifier(ReaderRenderer.hyper);
+      final renderer = ValueNotifier(ReaderRenderer.blitz);
       addTearDown(renderer.dispose);
       await tester.pumpWidget(host(renderer, cache));
       await tester.pumpAndSettle();
-      expect(find.text('HyperRender (experimental)'), findsOneWidget);
+      expect(find.text('Blitz'), findsOneWidget);
       await tester.tap(find.byIcon(CupertinoIcons.ellipsis));
       await tester.pumpAndSettle();
-      expect(find.byType(HyperBody), findsNWidgets(2));
+      // Blitz draws the prepared parts, the quote open, and nothing else is mounted.
+      expect(tester.widgetList<BlitzBody>(find.byType(BlitzBody)).map((b) => b.html), ['<!DOCTYPE html><p>main</p>', '<p>history</p>']);
       expect(find.byType(AppKitView), findsNothing);
 
       await choose(tester, ReaderRenderer.webKit);
       expect(renderer.value, ReaderRenderer.webKit);
       expect(find.text('WebView (original)'), findsOneWidget);
-      expect(find.byType(HyperBody), findsNothing);
+      expect(find.byType(BlitzBody), findsNothing);
       // The WebKit page holds the mail as it came, one page with its quote open in it.
       expect(webDocuments(tester), [webKitDocument('mail')]);
       expect(tester.widget<AppKitView>(find.byType(AppKitView)).creationParams, containsPair('open', true));
 
       await choose(tester, ReaderRenderer.blitz);
       expect(renderer.value, ReaderRenderer.blitz);
-      // Blitz draws the same prepared parts, the quote still open, and nothing else is mounted.
       expect(tester.widgetList<BlitzBody>(find.byType(BlitzBody)).map((b) => b.html), ['<!DOCTYPE html><p>main</p>', '<p>history</p>']);
-      expect(find.byType(HyperBody), findsNothing);
-      expect(find.byType(AppKitView), findsNothing);
-
-      await choose(tester, ReaderRenderer.hyper);
-      expect(find.byType(HyperBody), findsNWidgets(2));
-      expect(find.byType(BlitzBody), findsNothing);
       expect(find.byType(AppKitView), findsNothing);
       expect(prepared, 1);
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('HyperRender never falls back to the WebView by itself', (tester) async {
-      final renderer = ValueNotifier(ReaderRenderer.hyper);
+    testWidgets('Blitz never falls back to the WebView by itself', (tester) async {
+      final renderer = ValueNotifier(ReaderRenderer.blitz);
       addTearDown(renderer.dispose);
-      // Markup HyperRender draws poorly or not at all, then a body whose preparation fails.
+      // Markup that draws poorly or not at all, then a body whose preparation fails.
       final cache = HtmlPartsCache(split: (html) async => html == 'broken'
           ? throw const FormatException('broken')
           : ('<svg><foreignObject><iframe src="https://example.test"></iframe></foreignObject></svg><center><font>x</font></center>', null));
       await tester.pumpWidget(host(renderer, cache));
       await tester.pumpAndSettle();
-      expect(find.byType(HyperBody), findsOneWidget);
+      expect(find.byType(BlitzBody), findsOneWidget);
       expect(find.byType(AppKitView), findsNothing);
       await tester.pumpWidget(host(renderer, cache, html: 'broken', message: 'broken'));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isA<FormatException>());
       expect(find.textContaining('Could not prepare HTML'), findsOneWidget);
       expect(find.byType(AppKitView), findsNothing);
-      expect(renderer.value, ReaderRenderer.hyper);
+      expect(renderer.value, ReaderRenderer.blitz);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -241,7 +187,7 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('the switch lists Blitz, the WebView, then HyperRender marked experimental (MS-171)', (tester) async {
+    testWidgets('the switch lists Blitz, then the WebView (MS-196)', (tester) async {
       final renderer = ValueNotifier(ReaderRenderer.initial);
       addTearDown(renderer.dispose);
       await tester.pumpWidget(MacosApp(
@@ -250,20 +196,21 @@ void main() {
       ));
       expect(find.text('Blitz'), findsOneWidget);
       final items = tester.widget<MailMenuButton<ReaderRenderer>>(find.byType(MailMenuButton<ReaderRenderer>)).items;
-      expect(items.map((item) => item.value), [ReaderRenderer.blitz, ReaderRenderer.webKit, ReaderRenderer.hyper]);
-      expect(items.map((item) => item.label), ['Blitz', 'WebView (original)', 'HyperRender (experimental)']);
+      expect(items.map((item) => item.value), [ReaderRenderer.blitz, ReaderRenderer.webKit]);
+      expect(items.map((item) => item.label), ['Blitz', 'WebView (original)']);
       await tester.tap(find.byType(MailMenuButton<ReaderRenderer>));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('HyperRender (experimental)').last);
+      await tester.tap(find.text('WebView (original)').last);
       await tester.pumpAndSettle();
-      expect(renderer.value, ReaderRenderer.hyper);
+      expect(renderer.value, ReaderRenderer.webKit);
       await tester.pumpWidget(const SizedBox());
     });
 
     test('every launch starts in Blitz unless MAILSTREAM_READER_RENDERER names another (MS-166)', () {
       expect(ReaderRenderer.fromName(null), ReaderRenderer.blitz);
       expect(ReaderRenderer.fromName('unknown'), ReaderRenderer.blitz);
-      expect(ReaderRenderer.fromName('hyper'), ReaderRenderer.hyper);
+      // The removed HyperRender (MS-196).
+      expect(ReaderRenderer.fromName('hyper'), ReaderRenderer.blitz);
       expect(ReaderRenderer.fromName('webkit'), ReaderRenderer.webKit);
     });
   });

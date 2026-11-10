@@ -6,7 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
 import 'package:mailstream_ui/ui/design.dart';
 import 'package:mailstream_ui/ui/html_parts.dart';
-import 'package:mailstream_ui/ui/hyper_resources.dart';
+import 'package:mailstream_ui/ui/mail_resources.dart';
 import 'package:mailstream_ui/ui/reader.dart';
 import 'package:mailstream_ui/ui/reader_renderer.dart';
 
@@ -132,7 +132,7 @@ class _HtmlOpenAppState extends State<HtmlOpenApp> {
         }
         final all = await _open(_mails);
         if (round >= warmup) thread.add(all.reduce((a, b) => a > b ? a : b));
-        // The Mac's preparation alone (both renderers used it before MS-167; HyperRender and Blitz still do).
+        // The Mac's preparation alone (both renderers used it before MS-167; Blitz still does).
         for (final (name, html) in _mails) {
           final watch = Stopwatch()..start();
           await prepareMailHtmlInBackground(html(++_opening));

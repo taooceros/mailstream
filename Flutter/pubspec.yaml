@@ -11,8 +11,6 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^2.0.0
   html: ^0.15.7
-  # Draws HTML mail in Flutter (the reader's default; the WebView stays one switch away).
-  hyper_render: 1.14.1
   intl: ^0.20.3
   mailstream:
     path: packages/mailstream
@@ -30,11 +28,6 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
-
-dependency_overrides:
-  # hyper_render_core 1.14.1 with one change: the image widget builder reaches table cells.
-  hyper_render_core:
-    path: third_party/hyper_render_core
 
 flutter:
   uses-material-design: true

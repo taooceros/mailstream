@@ -4,13 +4,10 @@ import '../platform.dart';
 import 'controls.dart';
 import 'design.dart';
 
-/// What draws an HTML body in the reader, in the switch's order. HyperRender is experimental and
-/// set aside (MS-171): last in the switch and labelled so, still reachable there and through
-/// `MAILSTREAM_READER_RENDERER=hyper`.
+/// What draws an HTML body in the reader, in the switch's order.
 enum ReaderRenderer {
   blitz('Blitz'),
-  webKit('WebView (original)'),
-  hyper('HyperRender (experimental)');
+  webKit('WebView (original)');
 
   const ReaderRenderer(this.title);
   final String title;
@@ -18,8 +15,9 @@ enum ReaderRenderer {
   /// What every launch starts in (MS-166): Blitz, at the user's request.
   static const initial = blitz;
 
-  /// The renderer named by `MAILSTREAM_READER_RENDERER` (`hyper`, `blitz` or `webKit`), so the
-  /// bench can open the reader in a given renderer; [initial] when unset or unknown.
+  /// The renderer named by `MAILSTREAM_READER_RENDERER` (`blitz` or `webKit`), so the bench can
+  /// open the reader in a given renderer; [initial] when unset or unknown (the removed `hyper`
+  /// included, MS-196).
   static ReaderRenderer fromName(String? name) =>
       values.firstWhere((r) => r.name.toLowerCase() == name?.toLowerCase(), orElse: () => initial);
 
@@ -46,7 +44,7 @@ class ReaderRendererScope extends InheritedNotifier<ValueNotifier<ReaderRenderer
       context.getInheritedWidgetOfExactType<ReaderRendererScope>()?.notifier?.value ?? ReaderRenderer.initial;
 }
 
-/// The three-way switch in the reader's header, labelled with the renderer in use.
+/// The two-way switch in the reader's header, labelled with the renderer in use.
 class ReaderRendererSwitch extends StatelessWidget {
   const ReaderRendererSwitch({super.key});
 

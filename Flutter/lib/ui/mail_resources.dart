@@ -22,7 +22,7 @@ Uint8List? inlineImageBytes(String source) {
 }
 
 /// Read only canonical descendants of the application's existing inline-part cache.
-/// File URLs never reach HyperRender: valid raster bytes become sanitized data URLs.
+/// File URLs never reach Blitz (its page reads no file): valid raster bytes become sanitized data URLs.
 Future<String?> cachedImageData(String source, {String? cacheRoot}) async {
   try {
     final uri = Uri.parse(source);
@@ -112,25 +112,12 @@ class _Doctype extends dom.DocumentType {
   }
 }
 
-/// Mail's presentational attributes that HyperRender's sanitizer drops (it keeps `width` and
-/// `height`). Preparation copies them, lower-cased, to inert `data-ms-*` attributes, which the
-/// sanitizer keeps when data attributes are allowed and the WebView ignores.
-const presentationalAttributes = ['align', 'valign', 'bgcolor', 'border', 'cellpadding'];
-final _presentational = RegExp(r'\s(?:align|valign|bgcolor|border|cellpadding)\s*=', caseSensitive: false);
-
-Future<String> prepareHyperResources(String html) async {
-  final images = html.toLowerCase().contains('<img');
-  final hints = _presentational.hasMatch(html);
-  if (!images && !hints) return html;
+/// The image policy of the bodies Blitz draws (WebKit loads the mail as it came, [webKitDocument]):
+/// inline cache images become data URLs ([cachedImageData]), raster `data:` and HTTPS images stay,
+/// and every other source goes, its `alt` saying why. `srcset` goes too.
+Future<String> prepareMailImages(String html) async {
+  if (!html.toLowerCase().contains('<img')) return html;
   final document = html_parser.parse(html);
-  if (hints) {
-    for (final element in document.querySelectorAll(presentationalAttributes.map((name) => '[$name]').join(','))) {
-      for (final name in presentationalAttributes) {
-        final value = element.attributes[name];
-        if (value != null) element.attributes['data-ms-$name'] = value.trim().toLowerCase();
-      }
-    }
-  }
   for (final image in document.querySelectorAll('img')) {
     final source = image.attributes['src'] ?? '';
     final uri = Uri.tryParse(source);

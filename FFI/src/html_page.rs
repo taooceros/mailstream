@@ -1,5 +1,5 @@
 //! Mail HTML laid out and drawn by Blitz (MS-147), the reader's default renderer (MS-166) beside
-//! WebKit and the experimental HyperRender. Every page lives on one thread of its own: parsing,
+//! WebKit. Every page lives on one thread of its own: parsing,
 //! styling, layout and drawing never touch the front end's UI thread, which only asks for a
 //! page's height and for tiles, strips of RGBA pixels it shows as they scroll into view.
 //!

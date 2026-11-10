@@ -6,7 +6,7 @@ import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 
 import '../platform.dart';
-import 'hyper_resources.dart';
+import 'mail_resources.dart';
 
 typedef HtmlParts = (String main, String? quoted);
 
@@ -14,12 +14,11 @@ typedef HtmlParts = (String main, String? quoted);
 Future<HtmlParts> splitMailHtmlInBackground(String html) =>
     Isolate.run(() => splitMailHtml(html), debugName: 'mail-html');
 
-/// The Mac reader's preparation for HyperRender and Blitz: inline cache images become data URLs,
-/// unsafe sources go, presentational attributes get `data-ms-*` copies, then quotes are split.
-/// The WebKit body takes the mail as it came (`webKitDocument`, MS-167). Windows' WebView2 bodies
-/// get the plain split.
+/// The Mac reader's preparation for Blitz: inline cache images become data URLs and unsafe
+/// sources go ([prepareMailImages]), then quotes are split. The WebKit body takes the mail as it
+/// came (`webKitDocument`, MS-167). Windows' WebView2 bodies get the plain split.
 Future<HtmlParts> prepareMailHtmlInBackground(String html) =>
-    Isolate.run(() async => splitMailHtml(await prepareHyperResources(html)), debugName: 'mail-html');
+    Isolate.run(() async => splitMailHtml(await prepareMailImages(html)), debugName: 'mail-html');
 
 /// The body's original quote policy, shared with the runtime comparison harness.
 HtmlParts splitMailHtml(String html) {

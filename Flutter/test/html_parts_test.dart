@@ -11,8 +11,8 @@ import 'package:mailstream_ui/state/mail_state.dart';
 import 'package:mailstream_ui/ui/design.dart';
 import 'package:mailstream_ui/ui/glass.dart';
 import 'package:mailstream_ui/ui/html_parts.dart';
-import 'package:mailstream_ui/ui/hyper_body.dart';
-import 'package:mailstream_ui/ui/hyper_resources.dart';
+import 'package:mailstream_ui/ui/blitz_body.dart';
+import 'package:mailstream_ui/ui/mail_resources.dart';
 import 'package:mailstream_ui/ui/reader.dart';
 import 'package:mailstream_ui/ui/reader_renderer.dart';
 
@@ -286,11 +286,11 @@ void main() {
 
   /// The HTML each mounted body draws; only the selected renderer's bodies are mounted.
   List<String> rendered(WidgetTester tester) {
-    expect(find.byType(renderer == ReaderRenderer.hyper ? AppKitView : HyperBody), findsNothing);
+    expect(find.byType(renderer == ReaderRenderer.blitz ? AppKitView : BlitzBody), findsNothing);
     return [
       for (final view in tester.widgetList<AppKitView>(find.byType(AppKitView)))
         ((view.creationParams as Map)['html'] as String).replaceFirst(webKitDocument(''), ''),
-      for (final body in tester.widgetList<HyperBody>(find.byType(HyperBody))) body.html,
+      for (final body in tester.widgetList<BlitzBody>(find.byType(BlitzBody))) body.html,
     ];
   }
   Finder toggle() => find.byIcon(CupertinoIcons.ellipsis);
@@ -430,7 +430,7 @@ void main() {
 
   testWidgets('switching to WebKit lets queued preparation go; switching back prepares again', (tester) async {
     final (:calls, :answers, :cache) = held();
-    final controller = ValueNotifier(ReaderRenderer.hyper);
+    final controller = ValueNotifier(ReaderRenderer.blitz);
     addTearDown(controller.dispose);
     Widget switchable(String html) => MacosApp(
       theme: MailTheme.macos(Brightness.light),
@@ -448,17 +448,16 @@ void main() {
     answers['running']!.complete(('running', null));
     await tester.pump();
     expect(calls, ['running'], reason: 'nothing waits for the parts of a body WebKit draws');
-    controller.value = ReaderRenderer.hyper;
+    controller.value = ReaderRenderer.blitz;
     await tester.pump();
     expect(calls, ['running', 'a']);
     await tester.pumpWidget(const SizedBox());
   });
 
-  // The anti-crosstalk rules (MS-87, MS-79) for the prepared parts, drawn here by HyperRender
-  // (Blitz draws the same parts; hyper_render_test checks it gets them). The WebKit body has no
-  // parts to wait for: it draws the HTML it is given at once.
+  // The anti-crosstalk rules (MS-87, MS-79) for the prepared parts Blitz draws. The WebKit body
+  // has no parts to wait for: it draws the HTML it is given at once.
   group('prepared parts', () {
-    setUp(() => renderer = ReaderRenderer.hyper);
+    setUp(() => renderer = ReaderRenderer.blitz);
     testWidgets('pending replacement cannot overwrite refreshed content or reopen a fold', (tester) async {
       final stale = Completer<HtmlParts>();
       final fresh = Completer<HtmlParts>();
@@ -551,7 +550,7 @@ void main() {
   });
 
   testWidgets("a closed conversation's queued bodies are skipped; the next one splits right after the running one", (tester) async {
-    renderer = ReaderRenderer.hyper;
+    renderer = ReaderRenderer.blitz;
     final (:calls, :answers, :cache) = held();
     await tester.pumpWidget(bodies(cache, {'1': 'a1', '2': 'a2', '3': 'a3'}));
     // A refresh with new HTML releases the old.
@@ -570,7 +569,7 @@ void main() {
   });
 
   testWidgets('a prefetched conversation draws its bodies in its first frame; pending prefetch waits for the open one', (tester) async {
-    renderer = ReaderRenderer.hyper;
+    renderer = ReaderRenderer.blitz;
     final (:calls, :answers, :cache) = held();
     final mail = ReaderMail();
     final state = MailState(mail);
