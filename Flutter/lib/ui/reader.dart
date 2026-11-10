@@ -292,8 +292,7 @@ class _Header extends StatelessWidget {
               ),
             if (subject.tag.isNotEmpty) MarkChip(label: subject.tag),
             for (final label in c.labels) MarkChip(label: label, mark: topicColor(label, context.brightness)),
-            if (account != null)
-              MarkChip(label: account.title, mark: accountPalette[state.accountIndex(account.id) % accountPalette.length], bar: true),
+            if (account != null) MarkChip(label: account.title, mark: accountColor(state.accountIndex(account.id))),
             for (final role in c.mailboxes.where((r) => r != MailboxRole.inbox && r != MailboxRole.other)) MarkChip(label: role.title),
             if (c.messageCount > 1) MarkChip(label: '${c.messageCount} messages'),
             const ReaderRendererSwitch(),

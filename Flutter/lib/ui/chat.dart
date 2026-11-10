@@ -227,8 +227,10 @@ class _ChatRowState extends State<_ChatRow> {
         selected: widget.selected,
         onTap: widget.onTap,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
+          padding: const EdgeInsets.only(right: Space.s12),
             child: Row(children: [
+              // Unread as in the mail list: a dot before the avatar; the date stays gray.
+              UnreadDot(unread: space.unread),
               space.kind == 'space' && space.avatarKey.isEmpty
                   ? IconAvatar(icon: CupertinoIcons.person_3_fill, background: colors.waiting, foreground: MacosColors.white)
                   : ChatAvatar(state: widget.state, avatarKey: space.avatarKey.isEmpty ? space.space : space.avatarKey,
@@ -247,17 +249,11 @@ class _ChatRowState extends State<_ChatRow> {
                       const SizedBox(width: 8),
                       // The account, as in the mail list: a dot before the date.
                       if (multiAccount)
-                        Container(
-                          margin: const EdgeInsets.only(right: 6),
-                          width: 6,
-                          height: 6,
-                          decoration: BoxDecoration(
-                            color: accountPalette[widget.state.accountIndex(space.account) % accountPalette.length],
-                            shape: BoxShape.circle,
-                          ),
+                        Padding(
+                          padding: const EdgeInsets.only(right: Space.s6),
+                          child: MarkDot(accountColor(widget.state.accountIndex(space.account))),
                         ),
-                      Text(space.date, style: context.text.callout.copyWith(
-                        color: space.unread ? colors.accent : colors.secondaryLabel)),
+                      Text(space.date, style: context.text.callout.copyWith(color: colors.secondaryLabel)),
                     ]),
                     const SizedBox(height: 2),
                     Row(children: [
@@ -271,10 +267,6 @@ class _ChatRowState extends State<_ChatRow> {
                               color: space.unread ? colors.label : colors.secondaryLabel,
                               fontWeight: space.unread ? FontWeight.w500 : FontWeight.w400)),
                       ),
-                      if (space.unread) ...[
-                        const SizedBox(width: 8),
-                        Container(width: 7, height: 7, decoration: BoxDecoration(color: colors.accent, shape: BoxShape.circle)),
-                      ],
                     ]),
                   ],
                 ),

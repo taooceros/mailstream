@@ -373,15 +373,14 @@ abstract final class Panes {
 }
 
 /// The calendar's events as cards on the tray (MS-163, variant A): [cardRadius] corners and a
-/// [cardBorder] hairline, a [dot] of the calendar's color before the title, guests as [avatar]
-/// monograms ringed [avatarRing] in the card's color. Overlapping events stand [conflictGap]
-/// apart; past ones fade to [pastOpacity], declined ones to [declinedOpacity]; an unanswered
-/// invitation is hatched at [hatchOpacity], every [hatchSpacing], inside a border dashed in
-/// [dash] lengths. All-day events are bars tinted [allDayTint] with their calendar's color. A
-/// day's header carries a [loadBar] tall bar at [loadOpacity] of the accent, as long as its
-/// booked hours; the current time runs on across the other days dashed at [nowTrailOpacity].
+/// [cardBorder] hairline, a [MarkMetrics.dot] of the calendar's color before the title, guests as
+/// [avatar] monograms ringed [avatarRing] in the card's color. Overlapping events stand
+/// [conflictGap] apart; past ones fade to [pastOpacity], declined ones to [declinedOpacity]; an
+/// unanswered invitation is hatched at [hatchOpacity], every [hatchSpacing], inside a border
+/// dashed in [dash] lengths. All-day events are bars tinted [allDayTint] with their calendar's
+/// color. A day's header carries a [loadBar] tall bar at [loadOpacity] of the accent, as long as
+/// its booked hours; the current time runs on across the other days dashed at [nowTrailOpacity].
 abstract final class CalendarMetrics {
-  static const dot = 6.0;
   static const cardRadius = Radii.control;
   static const cardBorder = Strokes.hairline;
   static const conflictGap = 2.0;
@@ -396,6 +395,24 @@ abstract final class CalendarMetrics {
   static const dash = 3.0;
   static const allDayTint = 0.18;
   static const nowTrailOpacity = 0.5;
+}
+
+/// Marks (MS-190): an account, a calendar or a topic is a [dot] of its color, the one shape for
+/// them everywhere; unread is an [unread] accent dot in an [unreadSlot] wide column before the
+/// avatar, in every list.
+abstract final class MarkMetrics {
+  static const dot = 6.0;
+  static const unread = 7.0;
+  static const unreadSlot = 16.0;
+}
+
+/// Tags (MS-190): small print in its color on a [tint] wash of it, fully round, [height] tall or
+/// [compactHeight] on cards and in dense rows, [padding] at either end.
+abstract final class TagMetrics {
+  static const height = 18.0;
+  static const compactHeight = 16.0;
+  static const tint = 0.12;
+  static const padding = Space.s6;
 }
 
 /// A calendar's color softened for its dot, so a screen of events stays quiet.
@@ -413,6 +430,9 @@ Color guestColor(String key) => guestPalette[stableIndex(key.toLowerCase(), gues
 const accountPalette = [
   Color(0xFF007AFF), Color(0xFFFF9500), Color(0xFFAF52DE), Color(0xFF34C759), Color(0xFFFF3B30), Color(0xFF30B0C7),
 ];
+
+/// The color of the account at [index] in the sidebar's order (`MailState.accountIndex`).
+Color accountColor(int index) => accountPalette[index % accountPalette.length];
 
 /// Stars: the system yellow, deep enough to read on white.
 const starColor = Color(0xFFFFB800);

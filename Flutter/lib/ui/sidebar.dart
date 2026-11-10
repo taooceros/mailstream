@@ -36,7 +36,7 @@ class _SidebarState extends State<Sidebar> {
   bool _inboxOpen = true;
   final Set<String> _openAccounts = {};
 
-  Color _accountColor(String account) => accountPalette[widget.state.accountIndex(account) % accountPalette.length];
+  Color _accountColor(String account) => accountColor(widget.state.accountIndex(account));
 
   @override
   Widget build(BuildContext context) {
@@ -261,16 +261,14 @@ class _RailItem extends StatelessWidget {
   }
 }
 
+/// An account's [MarkDot], centered in the column the other rows' glyphs take.
 class _AccountDot extends StatelessWidget {
   const _AccountDot({required this.color});
 
   final Color color;
 
   @override
-  Widget build(BuildContext context) => SizedBox(
-    width: 20,
-    child: Center(child: Container(width: 9, height: 9, decoration: BoxDecoration(color: color, shape: BoxShape.circle))),
-  );
+  Widget build(BuildContext context) => SizedBox(width: IconSizes.toolbar, child: Center(child: MarkDot(color)));
 }
 
 /// A sidebar row: an accent glyph and the name, the unread count at the trailing end, a

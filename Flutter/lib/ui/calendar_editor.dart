@@ -355,15 +355,7 @@ class _EventEditorState extends State<EventEditor> {
                       _calendarInfo(choice)?.name ?? choice.calendar,
                       if (choices.any((c) => c.account != choice.account) && _calendarInfo(choice)?.name != choice.account) choice.account,
                     ].join(' · '),
-                    leading: Container(
-                      width: CalendarMetrics.dot,
-                      height: CalendarMetrics.dot,
-                      decoration: BoxDecoration(
-                        color: hexColor(_calendarInfo(choice)?.color) ??
-                            accountPalette[widget.state.accountIndex(choice.account) % accountPalette.length],
-                        shape: BoxShape.circle,
-                      ),
-                    ),
+                    leading: MarkDot(hexColor(_calendarInfo(choice)?.color) ?? accountColor(widget.state.accountIndex(choice.account))),
                   ),
               ],
             ),

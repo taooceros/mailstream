@@ -950,7 +950,7 @@ class _NowDotClip extends CustomClipper<Rect> {
   const _NowDotClip();
 
   @override
-  Rect getClip(Size size) => Rect.fromLTRB(-CalendarMetrics.dot / 2, 0, size.width, size.height);
+  Rect getClip(Size size) => Rect.fromLTRB(-MarkMetrics.dot / 2, 0, size.width, size.height);
 
   @override
   bool shouldReclip(_NowDotClip old) => false;
@@ -1147,24 +1147,13 @@ class _EventCard extends StatelessWidget {
     );
     final span = eventSpan(event);
     final meeting = flat ? null : event.meetingUrl;
-    final dot = Container(
-      key: const ValueKey('dot'),
-      width: CalendarMetrics.dot,
-      height: CalendarMetrics.dot,
-      decoration: BoxDecoration(color: calendarDot(color, colors).withValues(alpha: fade), shape: BoxShape.circle),
-    );
+    final dot = MarkDot(calendarDot(color, colors).withValues(alpha: fade), key: const ValueKey('dot'));
     final answer = fit == CardFit.line || width < 150 || flat ? null : _answerLabel(event.response);
     final trailing = [
-      if (answer != null) _QuietChip(label: answer),
+      if (answer != null) Tag(label: answer, compact: true),
       if (fit == CardFit.line && meeting != null && width >= 90)
         MacosIcon(CupertinoIcons.video_camera, size: 13, color: colors.secondaryLabel),
-      if (conflict && look == EventLook.upcoming)
-        Container(
-          key: const ValueKey('conflict'),
-          width: CalendarMetrics.dot,
-          height: CalendarMetrics.dot,
-          decoration: BoxDecoration(color: colors.red, shape: BoxShape.circle),
-        ),
+      if (conflict && look == EventLook.upcoming) MarkDot(colors.red, key: const ValueKey('conflict')),
     ];
     final trailingRow = [for (final widget in trailing) Padding(padding: const EdgeInsets.only(left: 4), child: widget)];
 
@@ -1210,7 +1199,7 @@ class _EventCard extends StatelessWidget {
         children: [
           Flexible(
             child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Padding(padding: EdgeInsets.only(top: (title.fontSize! * 1.2 - CalendarMetrics.dot) / 2), child: dot),
+              Padding(padding: EdgeInsets.only(top: (title.fontSize! * 1.2 - MarkMetrics.dot) / 2), child: dot),
               const SizedBox(width: 5),
               Expanded(
                 // Each word whole: measured against the width the title really gets (after the
@@ -1255,7 +1244,7 @@ class _EventCard extends StatelessWidget {
                   // Too narrow for both: the guests alone.
                   child: Row(children: [
                     if (meeting != null && (guests.isEmpty || width >= 70))
-                      Flexible(child: _QuietChip(label: width >= 110 ? meetingLabel(meeting) : null, icon: CupertinoIcons.video_camera)),
+                      Flexible(child: Tag(label: width >= 110 ? meetingLabel(meeting) : null, icon: CupertinoIcons.video_camera, compact: true)),
                     const Spacer(),
                     if (guests.isNotEmpty)
                       GuestAvatars(
@@ -1309,37 +1298,6 @@ class _EventCard extends StatelessWidget {
       );
     }
     return GestureDetector(behavior: HitTestBehavior.opaque, onTap: onTap, child: card);
-  }
-}
-
-/// A small neutral capsule on a card: the answer (Going), the call (a camera, and its service
-/// when there is room).
-class _QuietChip extends StatelessWidget {
-  const _QuietChip({this.label, this.icon});
-
-  final String? label;
-  final IconData? icon;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.colors;
-    return Container(
-      height: CalendarMetrics.avatar,
-      padding: const EdgeInsets.symmetric(horizontal: 5),
-      decoration: ShapeDecoration(color: colors.fill, shape: const StadiumBorder()),
-      // Squeezed by the guests beside it: cut at the chip's edge.
-      child: UnconstrainedBox(
-        constrainedAxis: Axis.vertical,
-        alignment: Alignment.centerLeft,
-        clipBehavior: Clip.hardEdge,
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          if (icon != null) MacosIcon(icon, size: 11, color: colors.secondaryLabel),
-          if (icon != null && label != null) const SizedBox(width: 3),
-          if (label != null)
-            Text(label!, maxLines: 1, style: context.text.caption1.copyWith(color: colors.secondaryLabel, fontWeight: FontWeight.w500)),
-        ]),
-      ),
-    );
   }
 }
 
@@ -1674,7 +1632,7 @@ class _NowLinePainter extends CustomPainter {
       ..color = color
       ..strokeWidth = 1.5;
     canvas.drawLine(Offset(left, y), Offset(left + column, y), solid);
-    canvas.drawCircle(Offset(left, y), CalendarMetrics.dot / 2, solid);
+    canvas.drawCircle(Offset(left, y), MarkMetrics.dot / 2, solid);
   }
 
   @override

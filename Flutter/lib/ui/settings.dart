@@ -501,7 +501,7 @@ class _AccountsState extends State<_Accounts> {
             leading: IconAvatar(
               size: 32,
               icon: account.provider == 'google' ? CupertinoIcons.envelope_fill : CupertinoIcons.mail_solid,
-              background: accountPalette[state.accountIndex(account.id) % accountPalette.length],
+              background: accountColor(state.accountIndex(account.id)),
               foreground: MacosColors.white,
             ),
             title: Text(account.title),

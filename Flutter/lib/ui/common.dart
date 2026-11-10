@@ -103,8 +103,10 @@ class IconAvatar extends StatelessWidget {
   );
 }
 
-/// A rounded pill of small print: tags, recipients, attachments. A [leading] glyph or mark, an
-/// [onPressed] that makes the whole pill a button, an [onDelete] that adds a remove button.
+/// A rounded pill of small print you can act on or that names a thing: recipients, attachments,
+/// an event's calendar. A [leading] glyph or mark, an [onPressed] that makes the whole pill a
+/// button, an [onDelete] that adds a remove button. Labels that only describe (topics, counts,
+/// answers) are a [Tag].
 class Pill extends StatelessWidget {
   const Pill({
     super.key,
@@ -154,25 +156,84 @@ class Pill extends StatelessWidget {
   }
 }
 
-/// A label with a colored mark: topics take a dot, accounts a bar.
+/// A pill naming a thing with its colored [MarkDot]: an account, a calendar, a topic.
 class MarkChip extends StatelessWidget {
-  const MarkChip({super.key, required this.label, this.mark, this.bar = false});
+  const MarkChip({super.key, required this.label, this.mark});
 
   final String label;
   final Color? mark;
-  final bool bar;
 
   @override
-  Widget build(BuildContext context) => Pill(
-    label: label,
-    leading: mark == null
-        ? null
-        : Container(
-            width: bar ? 4 : 7,
-            height: bar ? 12 : 7,
-            decoration: BoxDecoration(color: mark, borderRadius: BorderRadius.circular(bar ? 2 : 4)),
-          ),
+  Widget build(BuildContext context) => Pill(label: label, leading: mark == null ? null : MarkDot(mark!));
+}
+
+/// An account, a calendar or a topic: a dot of its color, the one mark for them (MS-190).
+class MarkDot extends StatelessWidget {
+  const MarkDot(this.color, {super.key});
+
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => SizedBox.square(
+    dimension: MarkMetrics.dot,
+    child: DecoratedBox(decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
   );
+}
+
+/// The column before a list row's avatar: an accent dot while the row is [unread]. The dot sits
+/// a little right of center, clear of the lifted card's bar at the row's start.
+class UnreadDot extends StatelessWidget {
+  const UnreadDot({super.key, required this.unread});
+
+  final bool unread;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: MarkMetrics.unreadSlot,
+    child: unread
+        ? Align(
+            alignment: const Alignment(1 / 3, 0),
+            child: SizedBox.square(
+              dimension: MarkMetrics.unread,
+              child: DecoratedBox(decoration: BoxDecoration(color: context.colors.accent, shape: BoxShape.circle)),
+            ),
+          )
+        : null,
+  );
+}
+
+/// A tag (MS-190): small print that describes, not acts: a topic, a bundle's count, an
+/// invitation's answer, an event's call. A [label] and/or an [icon] in [color] on a
+/// [TagMetrics.tint] wash of it, fully round; neutral (the secondary label color) when [color]
+/// is null. [compact] on cards and in dense rows. Squeezed (a card's foot beside its guests), it
+/// is cut at its edge.
+class Tag extends StatelessWidget {
+  const Tag({super.key, this.label, this.icon, this.color, this.compact = false}) : assert(label != null || icon != null);
+
+  final String? label;
+  final IconData? icon;
+  final Color? color;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = this.color ?? context.colors.secondaryLabel;
+    return Container(
+      height: compact ? TagMetrics.compactHeight : TagMetrics.height,
+      padding: const EdgeInsets.symmetric(horizontal: TagMetrics.padding),
+      decoration: ShapeDecoration(color: color.withValues(alpha: TagMetrics.tint), shape: const StadiumBorder()),
+      child: UnconstrainedBox(
+        constrainedAxis: Axis.vertical,
+        alignment: AlignmentDirectional.centerStart,
+        clipBehavior: Clip.hardEdge,
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (icon != null) Icon(icon, size: IconSizes.inline, color: color),
+          if (icon != null && label != null) const SizedBox(width: Space.s2),
+          if (label != null) Text(label!, maxLines: 1, softWrap: false, style: context.roles.tag.copyWith(color: color)),
+        ]),
+      ),
+    );
+  }
 }
 
 /// A row on a list island's tray (the mail and chat lists), after Dia: selected, it lifts off
@@ -360,7 +421,8 @@ class Hairline extends StatelessWidget {
   }
 }
 
-/// A count on the system red, over the corner of a glyph (the rail's unread counts).
+/// A count over the corner of a glyph (the rail's unread counts): a neutral capsule, as the
+/// sidebar's counts are gray; red is kept for errors.
 class CountBadge extends StatelessWidget {
   const CountBadge({super.key, required this.count, required this.child});
 
@@ -370,23 +432,24 @@ class CountBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (count == 0) return child;
+    final colors = context.colors;
     return Stack(
       clipBehavior: Clip.none,
       children: [
         child,
         Positioned(
-          right: -10,
-          top: -6,
+          right: -Space.s10,
+          top: -Space.s6,
           child: Container(
-            constraints: const BoxConstraints(minWidth: 16),
-            height: 16,
-            padding: const EdgeInsets.symmetric(horizontal: 4),
+            constraints: const BoxConstraints(minWidth: TagMetrics.compactHeight),
+            height: TagMetrics.compactHeight,
+            padding: const EdgeInsets.symmetric(horizontal: Space.s4),
             alignment: Alignment.center,
-            decoration: ShapeDecoration(color: context.colors.red, shape: const StadiumBorder()),
-            child: Text(
-              count > 999 ? '999+' : '$count',
-              style: context.text.subheadline.copyWith(color: MacosColors.white, fontWeight: FontWeight.w600, height: 1),
+            decoration: ShapeDecoration(
+              color: colors.strongFill,
+              shape: StadiumBorder(side: BorderSide(color: colors.cardBorder, width: Strokes.hairline)),
             ),
+            child: Text(count > 999 ? '999+' : '$count', style: context.roles.tag.copyWith(color: colors.label, height: 1)),
           ),
         ),
       ],

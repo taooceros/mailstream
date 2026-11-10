@@ -398,20 +398,7 @@ class _RowLayout extends StatelessWidget {
     padding: const EdgeInsets.fromLTRB(0, 8, 14, 8),
     child: Row(
       children: [
-        // The dot sits 6 pt in, clear of the lifted card's bar at its start.
-        SizedBox(
-          width: 16,
-          child: unread
-              ? Align(
-                  alignment: const Alignment(1 / 3, 0),
-                  child: Container(
-                    width: 7,
-                    height: 7,
-                    decoration: BoxDecoration(color: context.colors.accent, shape: BoxShape.circle),
-                  ),
-                )
-              : null,
-        ),
+        UnreadDot(unread: unread),
         avatar,
         const SizedBox(width: 12),
         Expanded(
@@ -514,14 +501,9 @@ class _ConversationRowState extends State<ConversationRow> {
             child: Icon(CupertinoIcons.paperclip, size: 13, color: colors.secondaryLabel),
           ),
         if (state.accounts.length > 1)
-          Container(
-            margin: const EdgeInsets.only(right: 6),
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(
-              color: accountPalette[state.accountIndex(c.account) % accountPalette.length],
-              shape: BoxShape.circle,
-            ),
+          Padding(
+            padding: const EdgeInsets.only(right: Space.s6),
+            child: MarkDot(accountColor(state.accountIndex(c.account))),
           ),
         Text(listDate(c.date, widget.now), style: text.callout.copyWith(color: colors.secondaryLabel, fontWeight: FontWeight.w400)),
       ],
@@ -619,7 +601,7 @@ class _ConversationRowState extends State<ConversationRow> {
                 style: text.body.copyWith(color: colors.secondaryLabel),
               ),
               marks: [
-                if (topic != null) ...[const SizedBox(width: 8), _TopicLabel(topic)],
+                if (topic != null) ...[const SizedBox(width: 8), Tag(label: topic, color: topicColor(topic, context.brightness))],
                 if (c.starred)
                   const Padding(
                     padding: EdgeInsets.only(left: 6),
@@ -649,27 +631,6 @@ class _ConversationRowState extends State<ConversationRow> {
                 ),
               ),
           ],
-      ),
-    );
-  }
-}
-
-class _TopicLabel extends StatelessWidget {
-  const _TopicLabel(this.topic);
-
-  final String topic;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = topicColor(topic, context.brightness);
-    return Container(
-      height: 18,
-      padding: const EdgeInsets.symmetric(horizontal: 7),
-      alignment: Alignment.center,
-      decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(9)),
-      child: Text(
-        topic,
-        style: context.text.subheadline.copyWith(fontSize: 11, color: color, fontWeight: FontWeight.w600),
       ),
     );
   }
@@ -733,16 +694,7 @@ class BundleRow extends StatelessWidget {
                 style: text.body.copyWith(color: colors.label, fontWeight: strong),
               ),
               const SizedBox(width: 8),
-              Container(
-                height: 18,
-                padding: const EdgeInsets.symmetric(horizontal: 7),
-                alignment: Alignment.center,
-                decoration: BoxDecoration(color: tone.background.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(9)),
-                child: Text(
-                  unread > 0 ? '$unread new' : '${items.length}',
-                  style: text.subheadline.copyWith(color: tone.background, fontWeight: FontWeight.w600),
-                ),
-              ),
+              Tag(label: unread > 0 ? '$unread new' : '${items.length}', color: tone.background),
             ],
           ),
           meta: Text(listDate(items.first.date, now), style: text.callout.copyWith(color: colors.secondaryLabel, fontWeight: FontWeight.w400)),

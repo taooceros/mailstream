@@ -215,6 +215,15 @@ a switch, a checkbox and a confirmation sheet; use them rather than `macos_ui`'s
 Text editing inside the fields and tooltips are still `macos_ui`'s, which Flutter draws the same
 on both platforms. Icons are `CupertinoIcons`. It needs macOS 26.
 
+Small print has two shapes (`lib/ui/common.dart`, MS-190): a `Pill` (22 pt) for things you act on
+or that name a thing (recipients, attachments, an event's calendar), and a `Tag` for words that
+only describe (a topic, a bundle's count, an invitation's answer, an event's call): 10 pt
+semibold in its color on a 12% wash, fully round, 18 pt or 16 pt (`TagMetrics`). Accounts,
+calendars and topics are marked by a 6 pt dot of their color (`MarkDot`, `MarkMetrics.dot`), never
+a bar or a square. Unread is an accent dot before the avatar in the mail and chat lists alike
+(`UnreadDot`), the date staying gray; counts are gray, the rail's on a neutral capsule, red being
+kept for errors. `flutter test test/marks_test.dart` covers them.
+
 The sidebar shows from 1200 dp wide (a rail below, whose menu button opens it). The list's
 island fills the window; from 1000 dp opening a conversation splits it, the conversation's
 island beside the list's, and closing it gives the list the width back. Narrower windows slide
@@ -496,7 +505,7 @@ kept hours and the order ↑ and ↓ follow.
 | `lib/ui/chat.dart` | The chat list, the open space (newest at the bottom, older pages loading at the top, messages as Chat draws their Markdown, videos playing and pictures showing in the log, other attachments as tiles, a composer: Return sends, ⇧Return a new line) and the New chat dialog (completing to the account's chat partners, then mail contacts) |
 | `lib/ui/controls.dart` | The app's own controls, the same on every platform: `MailButton`, `MailIconButton`, `MailSegmented`, `MailTextField`, `MailSearchField`, `MailMenuButton`, `MailDateButton`, `MailSwitch`, `MailCheckbox`, `confirmAction` |
 | `lib/ui/chat_markup.dart` | A Chat message's `formattedText`, which the Chat API answers in Markdown (CommonMark and GitHub's extensions, `<chat-user>` mentions), parsed with `package:markdown` and drawn as text: bold, italic, strike, code, monospace blocks, lists, quotes, tables, links, mentions |
-| `lib/ui/design.dart` | The style tokens, the same on every platform: color roles and elevations (`MailColors`), radii, spacing, strokes, icon sizes, text roles, motion, list and island metrics, stable account/topic/avatar colors; `MailTheme` (the `macos_ui` theme the remaining `macos_ui` controls use) |
+| `lib/ui/design.dart` | The style tokens, the same on every platform: color roles and elevations (`MailColors`), radii, spacing, strokes, icon sizes, text roles, motion, list and island metrics, marks and tags (`MarkMetrics`, `TagMetrics`), stable account/topic/avatar colors; `MailTheme` (the `macos_ui` theme the remaining `macos_ui` controls use) |
 | `lib/ui/glass.dart` | Islands, toolbar capsules (`GlassCapsule`, drawn by Flutter), raised capsules, toolbar buttons, spinner |
 | `lib/ui/shell.dart` | Islands layout, toolbars, search field, keys, snackbars |
 | `lib/ui/sidebar.dart` | Mail-style sidebar and rail |

@@ -188,8 +188,7 @@ Color? hexColor(String? hex) {
 }
 
 /// The event's color: its calendar's, else its account's.
-Color eventColor(MailState state, engine.CalendarItem event) =>
-    hexColor(event.color) ?? accountPalette[state.accountIndex(event.account) % accountPalette.length];
+Color eventColor(MailState state, engine.CalendarItem event) => hexColor(event.color) ?? accountColor(state.accountIndex(event.account));
 
 String _responseLabel(String? response) => switch (response) {
   'accepted' => 'Going',
@@ -623,11 +622,7 @@ class _UpNextBarState extends State<_UpNextBar> {
             height: 36,
             child: Row(children: [
               const SizedBox(width: 12),
-              Container(
-                width: CalendarMetrics.dot,
-                height: CalendarMetrics.dot,
-                decoration: BoxDecoration(color: colors.accent, shape: BoxShape.circle),
-              ),
+              MarkDot(colors.accent),
               const SizedBox(width: 8),
               Text(
                 _shown!.$2,
@@ -758,11 +753,7 @@ class _EventRow extends StatelessWidget {
         ),
       ),
       const SizedBox(width: 12),
-      Container(
-        width: CalendarMetrics.dot,
-        height: CalendarMetrics.dot,
-        decoration: BoxDecoration(color: calendarDot(eventColor(state, event), colors), shape: BoxShape.circle),
-      ),
+      MarkDot(calendarDot(eventColor(state, event), colors)),
       const SizedBox(width: 8),
       Expanded(
         child: Column(
@@ -782,11 +773,7 @@ class _EventRow extends StatelessWidget {
             if (detail.isNotEmpty || tag != null)
               Row(children: [
                 if (tag != null) ...[
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 5),
-                    decoration: BoxDecoration(color: colors.waitingFill, borderRadius: BorderRadius.circular(4)),
-                    child: Text(tag, style: context.text.footnote.copyWith(color: colors.onWaitingFill, fontWeight: FontWeight.w600)),
-                  ),
+                  Tag(label: tag, color: colors.waiting, compact: true),
                   if (detail.isNotEmpty) const SizedBox(width: 6),
                 ],
                 if (event.location != null || event.meetingUrl != null) ...[
@@ -1066,13 +1053,9 @@ class CalendarEventPane extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
               children: [
                 Wrap(spacing: 6, runSpacing: 6, children: [
-                  Pill(
+                  MarkChip(
                     label: [event.calendarName ?? event.calendar, if (event.calendarName != event.account) event.account].join(' · '),
-                    leading: Container(
-                      width: CalendarMetrics.dot,
-                      height: CalendarMetrics.dot,
-                      decoration: BoxDecoration(color: calendarDot(eventColor(state, event), colors), shape: BoxShape.circle),
-                    ),
+                    mark: calendarDot(eventColor(state, event), colors),
                   ),
                   if (event.series != null) const Pill(label: 'Repeats'),
                 ]),

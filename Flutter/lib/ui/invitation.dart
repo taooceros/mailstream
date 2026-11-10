@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 import 'package:mailstream/mailstream.dart' as engine;
 
 import '../state/mail_state.dart';
+import 'common.dart' show Tag;
 import 'controls.dart';
 import 'design.dart';
 import 'format.dart';
@@ -190,9 +191,9 @@ class _InvitationCardState extends State<InvitationCard> {
               ),
             ),
             if (cancelled)
-              _Chip(label: 'Cancelled', color: colors.red)
+              Tag(label: 'Cancelled', color: colors.red)
             else if (_answered(response).isNotEmpty)
-              _Chip(label: _answered(response), color: response == 'declined' ? colors.secondaryLabel : colors.accent),
+              Tag(label: _answered(response), color: response == 'declined' ? null : colors.accent),
           ]),
           line(CupertinoIcons.clock, [_when(DateTime.now()), if (invitation.recurring) 'Repeats'].join(' · ')),
           if (location != null) line(CupertinoIcons.location, location),
@@ -235,18 +236,4 @@ class _InvitationCardState extends State<InvitationCard> {
     (_, final email?) => email,
     _ => 'someone',
   };
-}
-
-class _Chip extends StatelessWidget {
-  const _Chip({required this.label, required this.color});
-
-  final String label;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-    decoration: BoxDecoration(color: color.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(9)),
-    child: Text(label, style: context.text.footnote.copyWith(color: color, fontWeight: FontWeight.w600)),
-  );
 }
