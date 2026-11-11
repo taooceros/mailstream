@@ -19,7 +19,7 @@ use gpui::{
 use serde_json::{Map, Value};
 
 use crate::engine::{MailError, engine};
-use crate::design::{self, Palette, UI_FONT, radius, settings as metrics, text};
+use crate::design::{self, Palette, radius, settings as metrics, text};
 use crate::format;
 use crate::input::{InputEvent, TextInput};
 
@@ -27,7 +27,7 @@ actions!(settings, [ShowSettings]);
 
 /// Binds cmd-, to `ShowSettings`, which opens the window with `on_changed` (see `open_settings`).
 pub fn init(on_changed: impl Fn(&mut App) + 'static, cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("cmd-,", ShowSettings, None)]);
+    cx.bind_keys([KeyBinding::new("secondary-,", ShowSettings, None)]);
     let on_changed = Rc::new(on_changed);
     cx.on_action(move |_: &ShowSettings, cx| {
         let on_changed = on_changed.clone();
@@ -458,7 +458,7 @@ impl Render for Settings {
             .id("settings")
             .size_full()
             .overflow_y_scroll()
-            .font_family(UI_FONT)
+            .font_family(design::ui_font())
             .text_size(px(text::BODY))
             .text_color(p.text)
             .bg(p.page)

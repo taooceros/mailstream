@@ -86,8 +86,22 @@ pub fn palette(appearance: WindowAppearance) -> &'static Palette {
     }
 }
 
-/// The system font.
-pub const UI_FONT: &str = ".SystemUIFont";
+/// The system's UI font: the Mac's own, and on Linux the desktop's sans-serif family as fontconfig
+/// names it (Flutter's `MailFonts`); GPUI's stand-in there is IBM Plex Sans, rarely installed.
+pub fn ui_font() -> &'static str {
+    #[cfg(target_os = "macos")]
+    return ".SystemUIFont";
+    #[cfg(not(target_os = "macos"))]
+    {
+        static FAMILY: LazyLock<String> = LazyLock::new(|| {
+            let mut fonts =
+                fontique::Collection::new(fontique::CollectionOptions { shared: false, system_fonts: true });
+            let sans = fonts.generic_families(fontique::GenericFamily::SansSerif).next();
+            sans.and_then(|id| fonts.family_name(id).map(str::to_owned)).unwrap_or_else(|| ".SystemUIFont".into())
+        });
+        &FAMILY
+    }
+}
 
 /// The type scale, in points.
 pub mod text {
@@ -145,8 +159,12 @@ pub mod layout {
     pub const SIDEBAR_INDENT: f32 = 14.0;
     /// The toolbar, which is also the title bar the traffic lights sit in.
     pub const TOOLBAR_HEIGHT: f32 = 52.0;
-    /// Room for the traffic lights when the sidebar is hidden.
+    /// Room for the traffic lights when the sidebar is hidden; elsewhere the compositor draws the
+    /// window's controls, and the toolbar starts at its usual inset.
+    #[cfg(target_os = "macos")]
     pub const TRAFFIC_LIGHTS: f32 = 78.0;
+    #[cfg(not(target_os = "macos"))]
+    pub const TRAFFIC_LIGHTS: f32 = 10.0;
     /// The reader's text column.
     pub const READING_WIDTH: f32 = 720.0;
     pub const MENU_WIDTH: f32 = 236.0;

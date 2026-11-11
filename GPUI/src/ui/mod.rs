@@ -16,7 +16,7 @@ use gpui::{
 };
 
 use crate::avatars;
-use crate::design::{self, Palette, UI_FONT, icon as icon_size, layout, list as metrics, radius, text};
+use crate::design::{self, Palette, icon as icon_size, layout, list as metrics, radius, text};
 use crate::format;
 use crate::icons::{Icon, icon};
 use crate::webview;
@@ -69,14 +69,21 @@ impl Render for MailApp {
             )
             .size_full()
             .flex()
-            .font_family(UI_FONT)
+            .font_family(design::ui_font())
             .text_size(px(text::BODY))
             .text_color(p.text)
             .bg(p.page)
-            // Painted first: native web views placed last frame are hidden until painted again.
+            // Painted first: native web views placed last frame are hidden until painted again
+            // (the Mac); pages no longer painted are closed (Blitz, elsewhere).
             .child({
-                let covered = self.context_menu.is_some();
-                canvas(|_, _, _| {}, move |_, _, _, _| webview::begin_frame(covered)).absolute().size_0()
+                #[cfg(target_os = "macos")]
+                let begin = {
+                    let covered = self.context_menu.is_some();
+                    canvas(|_, _, _| {}, move |_, _, _, _| webview::begin_frame(covered))
+                };
+                #[cfg(not(target_os = "macos"))]
+                let begin = canvas(|_, _, _| {}, |_, _, window, _| webview::begin_frame(window));
+                begin.absolute().size_0()
             })
             .when(self.sidebar_open, |d| d.child(self.render_sidebar(p, cx)))
             .child(
@@ -137,7 +144,7 @@ struct Tooltip {
 impl Render for Tooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-            .font_family(UI_FONT)
+            .font_family(design::ui_font())
             .px(px(8.))
             .py(px(4.))
             .rounded(px(radius::SMALL))

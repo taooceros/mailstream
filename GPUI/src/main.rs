@@ -1,5 +1,5 @@
-//! Mailstream's GPUI front end. The Swift engine runs in this process through the
-//! `mailstream` crate in `FFI/`. See README.md.
+//! Mailstream's GPUI front end, on macOS and Linux. The Rust engine runs in this process through
+//! the `mailstream` crate in `FFI/`. See README.md.
 
 mod avatars;
 mod bench;
@@ -16,11 +16,13 @@ mod state;
 mod swipe;
 mod textarea;
 mod ui;
+// HTML bodies: native `WKWebView`s on the Mac, the engine's Blitz pages drawn by GPUI elsewhere.
+#[cfg_attr(not(target_os = "macos"), path = "blitz_body.rs")]
 mod webview;
 
 use gpui::{
-    App, AppContext, Application, Bounds, Menu, MenuItem, OsAction, TitlebarOptions, WindowBounds, WindowOptions,
-    point, px, size,
+    App, AppContext, Application, Bounds, Menu, MenuItem, OsAction, TitlebarOptions, WindowBounds, WindowDecorations,
+    WindowOptions, point, px, size,
 };
 
 use crate::input::{Copy, Cut, Paste, SelectAll};
@@ -31,6 +33,7 @@ use crate::state::{
 
 fn main() {
     Application::new().with_assets(icons::Assets).run(|cx: &mut App| {
+        #[cfg(target_os = "macos")]
         set_dock_icon();
         // The engine paints from the cache and syncs while the window opens.
         engine::engine();
@@ -40,6 +43,8 @@ fn main() {
         textarea::bind_keys(cx);
         compose::bind_keys(cx);
         state::bind_keys(cx);
+        #[cfg(not(target_os = "macos"))]
+        webview::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(menus());
         cx.on_window_closed(|cx| {
@@ -58,6 +63,10 @@ fn main() {
                 traffic_light_position: Some(point(px(16.), px(19.))),
             }),
             window_min_size: Some(size(px(760.), px(420.))),
+            // Linux: the compositor draws the frame and title bar where it offers to (where it
+            // doesn't, the toolbar moves the window); desktop files and window rules match the id.
+            window_decorations: Some(WindowDecorations::Server),
+            app_id: Some(APP_ID.into()),
             ..Default::default()
         };
         let window = cx
@@ -82,9 +91,13 @@ fn main() {
     });
 }
 
+/// The window's application id on Linux (Wayland `app_id`, X11 `WM_CLASS`).
+const APP_ID: &str = "dev.mailstream.MailstreamGPUI";
+
 /// The Dock icon: the binary runs outside an app bundle, so without this the Dock shows the
 /// generic executable icon. `assets/AppIcon.png` is Mailstream's icon with a "GPUI" badge
 /// (`swift scripts/make-icon.swift GPUI/assets/AppIcon.png GPUI`, then `sips -Z 512`).
+#[cfg(target_os = "macos")]
 fn set_dock_icon() {
     use objc2::MainThreadMarker;
     use objc2::AllocAnyThread;

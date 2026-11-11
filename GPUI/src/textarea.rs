@@ -49,8 +49,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-shift-right", SelectWordRight, context),
         KeyBinding::new("cmd-left", LineStart, context),
         KeyBinding::new("cmd-right", LineEnd, context),
-        KeyBinding::new("ctrl-a", LineStart, context),
-        KeyBinding::new("ctrl-e", LineEnd, context),
         KeyBinding::new("cmd-shift-left", SelectLineStart, context),
         KeyBinding::new("cmd-shift-right", SelectLineEnd, context),
         KeyBinding::new("cmd-up", DocumentStart, context),
@@ -61,13 +59,16 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-down", SelectDocumentEnd, context),
         KeyBinding::new("shift-home", SelectDocumentStart, context),
         KeyBinding::new("shift-end", SelectDocumentEnd, context),
-        KeyBinding::new("cmd-a", SelectAll, context),
-        KeyBinding::new("cmd-c", Copy, context),
-        KeyBinding::new("cmd-x", Cut, context),
-        KeyBinding::new("cmd-v", Paste, context),
-        KeyBinding::new("cmd-enter", Submit, context),
+        KeyBinding::new("secondary-a", SelectAll, context),
+        KeyBinding::new("secondary-c", Copy, context),
+        KeyBinding::new("secondary-x", Cut, context),
+        KeyBinding::new("secondary-v", Paste, context),
+        KeyBinding::new("secondary-enter", Submit, context),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, context),
     ]);
+    // The Mac's text fields also take Emacs' line keys; elsewhere Ctrl+A selects all.
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([KeyBinding::new("ctrl-a", LineStart, context), KeyBinding::new("ctrl-e", LineEnd, context)]);
 }
 
 pub enum TextAreaEvent {

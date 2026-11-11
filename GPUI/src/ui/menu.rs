@@ -75,7 +75,7 @@ impl MailApp {
             .border_1()
             .border_color(p.line)
             .shadow(popover_shadow(p))
-            .font_family(UI_FONT)
+            .font_family(design::ui_font())
             .text_size(px(text::BODY))
             .text_color(p.text);
         for (index, group) in groups.into_iter().enumerate() {

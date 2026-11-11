@@ -207,16 +207,16 @@ impl MailApp {
     }
 }
 
-/// An HTML body: a placeholder the native web view is laid over, as tall as its page once that
-/// is measured.
+/// An HTML body: a placeholder the native web view is laid over (the Mac) or Blitz's tiles are
+/// drawn in (elsewhere), as tall as its page once that is measured.
 fn html_body(id: SharedString, html: SharedString) -> AnyElement {
     let height = webview::height(&id).unwrap_or(40.);
-    div()
-        .pl(px(42.))
-        .child(
-            canvas(|_, _, _| {}, move |bounds, _, window, _| webview::paint(&id, &html, bounds, window))
-                .w_full()
-                .h(px(height)),
-        )
-        .into_any_element()
+    #[cfg(target_os = "macos")]
+    let body = canvas(|_, _, _| {}, move |bounds, _, window, _| webview::paint(&id, &html, bounds, window));
+    #[cfg(not(target_os = "macos"))]
+    let body = canvas(
+        |bounds, window, _| webview::prepaint(bounds, window),
+        move |bounds, hitbox, window, cx| webview::paint(&id, &html, bounds, hitbox, window, cx),
+    );
+    div().pl(px(42.)).child(body.w_full().h(px(height))).into_any_element()
 }

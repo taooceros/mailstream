@@ -71,31 +71,31 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", Open, list),
         KeyBinding::new("space", Open, list),
         KeyBinding::new("escape", Back, list),
-        KeyBinding::new("cmd-[", Back, window),
+        KeyBinding::new("secondary-[", Back, window),
         KeyBinding::new("e", Archive, list),
         KeyBinding::new("ctrl-cmd-a", Archive, window),
         KeyBinding::new("backspace", Trash, list),
         KeyBinding::new("delete", Trash, list),
-        KeyBinding::new("cmd-backspace", Trash, list),
+        KeyBinding::new("secondary-backspace", Trash, list),
         KeyBinding::new("s", Star, list),
-        KeyBinding::new("cmd-shift-l", Star, window),
+        KeyBinding::new("secondary-shift-l", Star, window),
         KeyBinding::new("u", ToggleRead, list),
-        KeyBinding::new("cmd-shift-u", ToggleRead, window),
+        KeyBinding::new("secondary-shift-u", ToggleRead, window),
         KeyBinding::new("d", ToggleWaiting, list),
-        KeyBinding::new("cmd-shift-d", ToggleWaiting, window),
+        KeyBinding::new("secondary-shift-d", ToggleWaiting, window),
         KeyBinding::new("r", Reply, list),
-        KeyBinding::new("cmd-r", Reply, window),
+        KeyBinding::new("secondary-r", Reply, window),
         KeyBinding::new("a", ReplyAll, list),
-        KeyBinding::new("cmd-shift-r", ReplyAll, window),
+        KeyBinding::new("secondary-shift-r", ReplyAll, window),
         KeyBinding::new("f", Forward, list),
-        KeyBinding::new("cmd-shift-f", Forward, window),
-        KeyBinding::new("cmd-n", NewMessage, window),
+        KeyBinding::new("secondary-shift-f", Forward, window),
+        KeyBinding::new("secondary-n", NewMessage, window),
         KeyBinding::new("/", FocusSearch, list),
-        KeyBinding::new("cmd-f", FocusSearch, window),
-        KeyBinding::new("cmd-shift-n", Refresh, window),
+        KeyBinding::new("secondary-f", FocusSearch, window),
+        KeyBinding::new("secondary-shift-n", Refresh, window),
         KeyBinding::new("ctrl-cmd-s", ToggleSidebar, window),
         KeyBinding::new("escape", CloseMenu, Some("ContextMenu")),
-        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("secondary-q", Quit, None),
     ]);
 }
 
@@ -431,7 +431,9 @@ impl MailApp {
     /// (other lists count as stale), counts on mailbox and account changes, previews as they load.
     fn follow_engine(&self, cx: &mut Context<Self>) {
         let (sender, mut events) = unbounded();
-        engine().subscribe(Arc::new(Changes(sender)));
+        // The listener only queues the event, so it runs on the engine's thread: GPUI's own loop
+        // never drains the main-thread queue `subscribe` posts to on Linux (GLib's).
+        engine().subscribe_any_thread(Arc::new(Changes(sender)));
         cx.spawn(async move |this, cx| {
             while let Some(first) = events.next().await {
                 // A sync sends bursts; one pass answers everything queued.

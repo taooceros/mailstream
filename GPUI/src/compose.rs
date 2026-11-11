@@ -11,7 +11,7 @@ use gpui::{
 };
 use crate::avatars;
 use crate::engine::engine;
-use crate::design::{self, Palette, UI_FONT, compose as metrics, editor, layout, radius, text};
+use crate::design::{self, Palette, compose as metrics, editor, layout, radius, text};
 use crate::input::{InputEvent, TextInput};
 use crate::model::{Account, Address};
 use crate::textarea::{TextArea, TextAreaEvent};
@@ -25,9 +25,9 @@ const REPLY_CONTEXT: &str = "ReplyBox";
 pub fn bind_keys(cx: &mut App) {
     let window = Some(CONTEXT);
     cx.bind_keys([
-        KeyBinding::new("cmd-enter", Send, window),
+        KeyBinding::new("secondary-enter", Send, window),
         KeyBinding::new("escape", Cancel, window),
-        KeyBinding::new("cmd-w", Close, window),
+        KeyBinding::new("secondary-w", Close, window),
         KeyBinding::new("tab", FocusNext, window),
         KeyBinding::new("shift-tab", FocusPrevious, window),
         KeyBinding::new("down", SuggestionNext, Some(RECIPIENTS)),
@@ -892,7 +892,7 @@ impl Render for Compose {
             .size_full()
             .flex()
             .flex_col()
-            .font_family(UI_FONT)
+            .font_family(design::ui_font())
             .text_size(px(text::BODY))
             .text_color(p.text)
             .bg(p.page)

@@ -29,6 +29,8 @@ mod people;
 #[cfg(feature = "swift-engine")]
 mod swift;
 
+#[cfg(feature = "blitz")]
+pub use html_page::{HtmlPage, HtmlSize, HtmlTile};
 pub use people::Person;
 
 /// A failed request: the engine's stable `code` (`unknown_account`, `provider`, `confirm`, …)
@@ -1167,6 +1169,21 @@ impl Mailstream {
             let listener = listener.clone();
             main_thread::run(move || listener.on_event(Change { event: Event::named(event) }));
         });
+    }
+}
+
+/// For Rust hosts that link this crate directly (GPUI) and run an event loop of their own.
+impl Mailstream {
+    /// Calls `listener` on an engine thread for every change from now on, while the process runs.
+    /// For a host whose main thread is not the queue [`Mailstream::subscribe`] posts to (GPUI on
+    /// Linux runs its own loop, not GLib's): `listener` hands the event over itself.
+    pub fn subscribe_any_thread(&self, listener: Arc<dyn EventListener>) {
+        #[cfg(feature = "swift-engine")]
+        if *swift::USE_SWIFT_ENGINE {
+            swift::subscribe(listener);
+            return;
+        }
+        ENGINE.subscribe(move |event| listener.on_event(Change { event: Event::named(event) }));
     }
 }
 

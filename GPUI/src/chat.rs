@@ -22,7 +22,7 @@ use gpui::{
     relative, uniform_list,
 };
 
-use crate::design::{self, Palette, UI_FONT, chat as metrics, layout, list as rows, radius, text};
+use crate::design::{self, Palette, chat as metrics, layout, list as rows, radius, text};
 use crate::engine::{MailError, engine};
 use crate::format;
 use crate::input::{InputEvent, TextInput};
@@ -42,14 +42,14 @@ pub fn bind_keys(cx: &mut App) {
     let pane = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("escape", Back, list),
-        KeyBinding::new("cmd-[", Back, pane),
+        KeyBinding::new("secondary-[", Back, pane),
         KeyBinding::new("j", Next, list),
         KeyBinding::new("down", Next, list),
         KeyBinding::new("k", Previous, list),
         KeyBinding::new("up", Previous, list),
         KeyBinding::new("enter", Open, list),
-        KeyBinding::new("cmd-n", NewChat, pane),
-        KeyBinding::new("cmd-r", Refresh, pane),
+        KeyBinding::new("secondary-n", NewChat, pane),
+        KeyBinding::new("secondary-r", Refresh, pane),
     ]);
 }
 
@@ -1268,7 +1268,7 @@ impl Render for ChatPane {
             .size_full()
             .flex()
             .flex_col()
-            .font_family(UI_FONT)
+            .font_family(design::ui_font())
             .text_size(px(text::BODY))
             .bg(p.page)
             .text_color(p.text)

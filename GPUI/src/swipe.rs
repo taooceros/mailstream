@@ -2,6 +2,7 @@
 //! page (the reader, a bundle) off the list; gestures that start vertical pass through untouched,
 //! so the page scrolls. Fed from scroll events in the capture phase.
 
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::Instant;
 
@@ -46,6 +47,7 @@ impl Default for Preferences {
 
 impl Preferences {
     /// `defaults` values, with the system defaults (both on) when a key is unset. Blocking.
+    #[cfg(target_os = "macos")]
     pub fn read() -> Self {
         let flag = |key: &str| {
             Command::new("/usr/bin/defaults")
@@ -57,6 +59,13 @@ impl Preferences {
                 .unwrap_or(true)
         };
         Self { enabled: flag("AppleEnableSwipeNavigateWithScrolls"), natural: flag("com.apple.swipescrolldirection") }
+    }
+
+    /// Linux keeps no such settings where every desktop reads them: the swipe stays on, and the
+    /// compositor has already turned the scroll for the person's scrolling direction.
+    #[cfg(not(target_os = "macos"))]
+    pub fn read() -> Self {
+        Self::default()
     }
 }
 
