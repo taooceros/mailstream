@@ -13,8 +13,11 @@ use serde_json::{Map, Value, json};
 
 /// The front end started when none serves the socket: Mailstream Flutter, by bundle id when this
 /// binary is not inside its bundle.
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 const FRONT_END: &str = "dev.mailstream.MailstreamFlutter";
+/// Linux: Mailstream Flutter's executable, beside this one in the release bundle.
+#[cfg(all(unix, not(target_os = "macos")))]
+const FRONT_END: &str = "mailstream_ui";
 /// How long an answer may take: `accounts add` waits up to 5 minutes for the browser sign-in.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(420);
 /// How long a started front end may take to open the socket.
@@ -305,7 +308,7 @@ fn connect_or_launch() -> Result<connection::Connection, EngineError> {
 }
 
 /// Starts Mailstream Flutter in the background; answers what it started.
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 fn launch() -> Result<String, EngineError> {
     use std::process::{Command, Stdio};
 
@@ -329,6 +332,33 @@ fn launch() -> Result<String, EngineError> {
     }
 }
 
+/// Starts Mailstream Flutter in the background, from the bundle this executable (or the target of
+/// a symlink such as ~/.local/bin/mailstream) lives in; answers what it started.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn launch() -> Result<String, EngineError> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let not_running = |message: String| EngineError::new("not_running", message);
+    let executable = std::env::current_exe().and_then(|path| path.canonicalize());
+    let front_end = executable.ok().and_then(|path| Some(path.parent()?.join(FRONT_END))).filter(|path| path.is_file());
+    let Some(front_end) = front_end else {
+        return Err(not_running(format!("Mailstream is not running, and there is no {FRONT_END} beside this command to start; start it, then try again.")));
+    };
+    let name = front_end.display().to_string();
+    // A process group of its own, so the app outlives this command and its terminal's signals.
+    let started = Command::new(&front_end)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn();
+    match started {
+        Ok(_) => Ok(name),
+        Err(error) => Err(not_running(format!("Could not start {name}: {error}"))),
+    }
+}
+
 /// Windows has no app to start by name: the person starts Mailstream.
 #[cfg(windows)]
 fn launch() -> Result<String, EngineError> {
@@ -336,7 +366,7 @@ fn launch() -> Result<String, EngineError> {
 }
 
 /// The .app this executable lives in, following a symlink such as ~/.local/bin/mailstream.
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 fn app_bundle() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?.canonicalize().ok()?;
     executable.ancestors().skip(1).find(|path| path.extension().is_some_and(|extension| extension == "app")).map(Path::to_path_buf)

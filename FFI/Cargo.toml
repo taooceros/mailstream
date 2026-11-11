@@ -49,6 +49,10 @@ tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
 
+# Linux: GLib's default main context, which listeners are called through.
+[target.'cfg(all(unix, not(target_vendor = "apple")))'.dependencies]
+glib-sys = "0.21"
+
 [features]
 # The Blitz HTML pages (html_page.rs) the Flutter reader draws with. On by default (the dylib
 # ffi.py builds); GPUI leaves it off: it doesn't draw with Blitz, and stylo fails to compile in

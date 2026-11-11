@@ -41,7 +41,7 @@ Designed after macOS Liquid Glass with Dia's floating islands, Mailstream delive
 
 ### 🔒 Zero Middleman, True Direct Privacy
 - **Direct-to-Provider**: Communicates directly with the Gmail API, Microsoft Graph, and Google Chat API over encrypted HTTPS from your device.
-- **Local Credentials**: Refresh tokens are sealed directly in your macOS Keychain or Windows DPAPI. No central server ever sees your tokens, passwords, or emails.
+- **Local Credentials**: Refresh tokens are sealed directly in your macOS Keychain or Windows DPAPI (on Linux, a file only you can read in `~/.local/share/Mailstream`). No central server ever sees your tokens, passwords, or emails.
 - **Strict Content Sandboxing**: Remote images are blocked by default for untrusted senders, and message bodies are isolated in sandboxed iframes with page scripts disabled.
 
 ### 🧠 Smart Inbox & On-Device AI Triage
@@ -74,6 +74,7 @@ Designed after macOS Liquid Glass with Dia's floating islands, Mailstream delive
 | :--- | :--- | :--- |
 | **macOS** | `Mailstream Flutter.app` | macOS 26 or later (Apple Silicon) |
 | **Windows** | `mailstream_ui.exe` | Windows 11 / Windows 10 (x64) |
+| **Linux** | `mailstream_ui` | Build from source (x64 or arm64, GTK 3): see `Flutter/README.md` ▸ Linux |
 
 Pre-built binaries are generated on every push to `main` via GitHub Actions (`.github/workflows/build.yml`). You can download the latest nightly disk images (`Mailstream-Flutter.dmg` / Windows release zip) from the repository's Actions artifacts or Releases.
 
@@ -220,6 +221,7 @@ The relay receives webhook calls from Gmail Pub/Sub and Microsoft Graph, forward
 ### Prerequisites
 - **macOS**: macOS 26+, Xcode Command Line Tools, Flutter 3.x, Rust (cargo), Python 3.
 - **Windows**: Windows 11/10 x64, Visual Studio 2022 (C++ desktop workload), Flutter, Rust.
+- **Linux**: Flutter, Rust (rustup), clang/libclang, CMake, Ninja, pkg-config, and GTK 3, GLib and fontconfig development files (`nix develop` provides all but Rust). Build steps: `Flutter/README.md` ▸ Linux.
 
 ### Build Steps (macOS Flutter)
 

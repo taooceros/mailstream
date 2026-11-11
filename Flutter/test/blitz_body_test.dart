@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mailstream/mailstream.dart' as engine;
+import 'package:mailstream_ui/platform.dart';
 import 'package:mailstream_ui/ui/blitz_body.dart';
 
 /// A page 3000 points tall whose first 100 points are a link.
@@ -105,6 +106,9 @@ void main() {
 
   testWidgets('a click opens the link under it; a drag selects and ⌘C copies', (tester) async {
     final copied = <String>[];
+    // ⌘C is the Mac's copy (Ctrl+C elsewhere); the Mac's branch on any host.
+    Host.debugMacOverride = true;
+    addTearDown(() => Host.debugMacOverride = null);
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
       if (call.method == 'Clipboard.setData') copied.add((call.arguments as Map)['text'] as String);
       return null;

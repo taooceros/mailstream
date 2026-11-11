@@ -1,10 +1,10 @@
 name: mailstream_ui
-description: "Flutter desktop front end (macOS, Windows) for Mailstream, running its engine in process."
+description: "Flutter desktop front end (macOS, Windows, Linux) for Mailstream, running its engine in process."
 publish_to: 'none'
 version: 0.1.1+4
 
 environment:
-  sdk: ^3.13.7
+  sdk: ^3.13.0
 
 dependencies:
   flutter:

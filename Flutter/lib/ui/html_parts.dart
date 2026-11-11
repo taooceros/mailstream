@@ -14,9 +14,10 @@ typedef HtmlParts = (String main, String? quoted);
 Future<HtmlParts> splitMailHtmlInBackground(String html) =>
     Isolate.run(() => splitMailHtml(html), debugName: 'mail-html');
 
-/// The Mac reader's preparation for Blitz: inline cache images become data URLs and unsafe
-/// sources go ([prepareMailImages]), then quotes are split. The WebKit body takes the mail as it
-/// came (`webKitDocument`, MS-167). Windows' WebView2 bodies get the plain split.
+/// The Blitz reader's preparation (the Mac's, and Linux's, which has only Blitz): inline cache
+/// images become data URLs and unsafe sources go ([prepareMailImages]), then quotes are split. The
+/// Mac's WebKit body takes the mail as it came (`webKitDocument`, MS-167). Windows' WebView2
+/// bodies get the plain split.
 Future<HtmlParts> prepareMailHtmlInBackground(String html) =>
     Isolate.run(() async => splitMailHtml(await prepareMailImages(html)), debugName: 'mail-html');
 
@@ -74,7 +75,8 @@ String windowsMailPage(String html) {
 class HtmlPartsCache {
   HtmlPartsCache({this._split = splitMailHtmlInBackground});
 
-  static final shared = HtmlPartsCache(split: Host.mac ? prepareMailHtmlInBackground : splitMailHtmlInBackground);
+  static final shared =
+      HtmlPartsCache(split: Host.mac || Host.linux ? prepareMailHtmlInBackground : splitMailHtmlInBackground);
   static const capacity = 8;
   final Future<HtmlParts> Function(String) _split;
   final _ready = <String, HtmlParts>{};

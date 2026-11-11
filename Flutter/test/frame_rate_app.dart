@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
 import 'package:mailstream/mailstream.dart' as engine;
 import 'package:mailstream_ui/main.dart';
+import 'package:mailstream_ui/platform.dart';
 import 'package:mailstream_ui/state/mail_state.dart';
 
 import 'reader_fixture.dart';
@@ -12,7 +13,7 @@ import 'reader_fixture.dart';
 // flutter build macos --release -t test/frame_rate_app.dart
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await WindowManipulator.initialize(enableWindowDelegate: true);
+  if (Host.mac) await WindowManipulator.initialize(enableWindowDelegate: true);
   final mail = FrameRateMail()..rows = [for (var i = 0; i < 1000; i++) conversation('synthetic-$i', minute: i)];
   final state = MailState(mail);
   await state.start();

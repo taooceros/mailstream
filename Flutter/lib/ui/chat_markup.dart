@@ -81,7 +81,7 @@ class _ChatTextState extends State<ChatText> {
     _disposeRecognizers();
     final colors = context.colors;
     final body = chatReading(context);
-    final mono = TextStyle(fontFamily: 'Menlo', fontSize: (body.fontSize ?? 14) * 0.86, height: 1.5, color: colors.label);
+    final mono = TextStyle(fontFamily: MailFonts.mono, fontSize: (body.fontSize ?? 14) * 0.86, height: 1.5, color: colors.label);
     final renderer = _Renderer(
       colors: colors,
       body: body,

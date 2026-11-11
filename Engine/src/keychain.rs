@@ -7,6 +7,9 @@
 //! Windows has no such item: the same JSON is one file, `<service>.signins` in
 //! `%LOCALAPPDATA%\Mailstream`, sealed with DPAPI for the signed-in Windows user (Credential
 //! Manager caps an item at 2.5 KB, less than a few Microsoft refresh tokens).
+//!
+//! Linux keeps the same file, `<service>.signins` in `~/.local/share/Mailstream`, readable by the
+//! user alone (mode 0600): many desktops run no Secret Service to hold it.
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -67,6 +70,8 @@ pub struct Keychain {
 pub use apple::KeychainError;
 #[cfg(windows)]
 pub use sealed::KeychainError;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use private_file::KeychainError;
 
 #[cfg(target_os = "macos")]
 mod apple {
@@ -293,6 +298,81 @@ mod sealed {
         let bytes = unsafe { std::slice::from_raw_parts(blob.pbData, blob.cbData as usize) }.to_vec();
         unsafe { LocalFree(blob.pbData.cast()) };
         bytes
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+mod private_file {
+    use std::io::{ErrorKind, Write};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    /// A failed read or write of the sign-ins file.
+    #[derive(Clone, Debug)]
+    pub struct KeychainError(String);
+
+    impl fmt::Display for KeychainError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "Saved sign-ins: {}", self.0)
+        }
+    }
+
+    impl Keychain {
+        pub fn new(service: impl Into<String>) -> Self {
+            Self { service: service.into() }
+        }
+
+        /// The stored sign-ins; empty when there are none.
+        pub fn load(&self) -> Result<SignIns, KeychainError> {
+            match std::fs::read(self.path()) {
+                Ok(data) => Ok(SignIns::decode(&data)),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(SignIns::default()),
+                Err(error) => Err(KeychainError(error.to_string())),
+            }
+        }
+
+        /// Replaces the stored sign-ins; with no refresh token and no remembered client left the
+        /// file is deleted.
+        pub fn store(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
+            let path = self.path();
+            if sign_ins.refresh_tokens.is_empty() && sign_ins.last_clients.is_empty() {
+                return match std::fs::remove_file(&path) {
+                    Err(error) if error.kind() != ErrorKind::NotFound => Err(KeychainError(error.to_string())),
+                    _ => Ok(()),
+                };
+            }
+            write_private(&path, &sign_ins.encode()).map_err(|error| KeychainError(error.to_string()))
+        }
+
+        fn path(&self) -> PathBuf {
+            let local = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+            local.join("Mailstream").join(format!("{}.signins", self.service))
+        }
+    }
+
+    /// Replaces `path` whole with `data` in a file only its owner reads, created 0600 from the
+    /// start so the tokens are never readable by others, even for a moment.
+    fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let directory = path.parent().expect("the file is in a directory");
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(directory)?;
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("signins");
+        let temporary =
+            directory.join(format!(".{name}.{}.{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .and_then(|mut file| file.write_all(data).and_then(|()| file.sync_all()))
+            .and_then(|()| std::fs::rename(&temporary, path));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        written
     }
 }
 

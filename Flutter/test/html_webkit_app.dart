@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
 import 'package:mailstream/mailstream.dart' as engine;
 import 'package:mailstream_ui/main.dart';
+import 'package:mailstream_ui/platform.dart';
 import 'package:mailstream_ui/state/mail_state.dart';
 import 'package:mailstream_ui/ui/mail_resources.dart';
 
@@ -17,7 +18,7 @@ import 'reader_fixture.dart';
 // MAILSTREAM_READER_RENDERER=webKit flutter run -d macos -t test/html_webkit_app.dart
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await WindowManipulator.initialize(enableWindowDelegate: true);
+  if (Host.mac) await WindowManipulator.initialize(enableWindowDelegate: true);
   await _drawInlineParts();
   final state = MailState(WebKitMail());
   await state.start();

@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
+import 'package:mailstream_ui/platform.dart';
 import 'package:mailstream_ui/ui/design.dart';
 import 'package:mailstream_ui/ui/html_parts.dart';
 import 'package:mailstream_ui/ui/reader.dart';
@@ -15,7 +16,7 @@ import 'package:mailstream_ui/ui/controls.dart';
 // MAILSTREAM_HTML_BENCH_OUT=/tmp/html-parts.json enables the paired comparison.
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await WindowManipulator.initialize(enableWindowDelegate: true);
+  if (Host.mac) await WindowManipulator.initialize(enableWindowDelegate: true);
   runApp(const HtmlPartsApp());
 }
 

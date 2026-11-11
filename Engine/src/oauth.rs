@@ -217,10 +217,17 @@ impl Default for OAuthConfig {
 }
 
 /// The default browser, as `open` picks it.
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 fn open_in_browser(url: &str) {
     let url = url.to_owned();
     std::thread::spawn(move || std::process::Command::new("/usr/bin/open").arg(url).status());
+}
+
+/// The default browser, as the desktop's `xdg-open` picks it.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_in_browser(url: &str) {
+    let url = url.to_owned();
+    std::thread::spawn(move || std::process::Command::new("xdg-open").arg(url).status());
 }
 
 /// The default browser, as the shell's "open" verb picks it.

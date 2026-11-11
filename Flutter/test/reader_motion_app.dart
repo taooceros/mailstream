@@ -8,6 +8,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
 import 'package:mailstream_ui/main.dart';
+import 'package:mailstream_ui/platform.dart';
 import 'package:mailstream_ui/state/mail_state.dart';
 
 import 'html_alignment_app.dart' show AlignmentMail;
@@ -18,7 +19,7 @@ import 'reader_fixture.dart';
 // MAILSTREAM_BENCH_OUT is a prefix: each continuous gesture/settle gets its own TSV.
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await WindowManipulator.initialize(enableWindowDelegate: true);
+  if (Host.mac) await WindowManipulator.initialize(enableWindowDelegate: true);
   final mail = AlignmentMail()
     ..rows = [for (var i = 0; i < 1000; i++) conversation(i == 0 ? 'a' : 'synthetic-$i', minute: i)];
   final state = MailState(mail);

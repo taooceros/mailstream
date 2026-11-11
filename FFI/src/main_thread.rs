@@ -4,10 +4,11 @@
 //! On Apple platforms that is libdispatch's main queue. On Windows the thread that subscribes
 //! first (Flutter's platform thread, or a tool's main thread before [`run_loop`]) gets a
 //! message-only window; work is posted to it and runs when that thread's message loop dispatches
-//! the message.
+//! the message. On Linux it is GLib's default main context, which GTK (and so Flutter's platform
+//! thread) runs.
 pub use imp::{adopt_current_thread, run, run_loop};
 
-#[cfg(not(windows))]
+#[cfg(target_vendor = "apple")]
 mod imp {
     use std::ffi::c_void;
 
@@ -39,6 +40,39 @@ mod imp {
     /// Runs the main queue on this (the main) thread; never returns.
     pub fn run_loop() -> ! {
         unsafe { dispatch_main() }
+    }
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+mod imp {
+    use glib_sys::{G_PRIORITY_DEFAULT, G_SOURCE_REMOVE, gboolean, gpointer};
+
+    type Work = Box<dyn FnOnce() + Send>;
+
+    /// The default main context is the main thread's already.
+    pub fn adopt_current_thread() {}
+
+    /// Runs `work` on the thread running GLib's default main context.
+    pub fn run(work: impl FnOnce() + Send + 'static) {
+        unsafe extern "C" fn call(context: gpointer) -> gboolean {
+            // SAFETY: `context` is the `Box<Work>` leaked below, handed over exactly once.
+            let work = unsafe { Box::from_raw(context.cast::<Work>()) };
+            work();
+            G_SOURCE_REMOVE
+        }
+        let work: Box<Work> = Box::new(Box::new(work));
+        // SAFETY: GLib calls `call` once with the pointer, on the default context's thread.
+        unsafe { glib_sys::g_idle_add_full(G_PRIORITY_DEFAULT, Some(call), Box::into_raw(work).cast(), None) };
+    }
+
+    /// Runs GLib's default main context on this (the main) thread; never returns.
+    pub fn run_loop() -> ! {
+        // SAFETY: a loop on the default context (null), run forever.
+        unsafe {
+            let main = glib_sys::g_main_loop_new(std::ptr::null_mut(), 0);
+            glib_sys::g_main_loop_run(main);
+        }
+        unreachable!("the main loop never quits")
     }
 }
 

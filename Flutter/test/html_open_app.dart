@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
+import 'package:mailstream_ui/platform.dart';
 import 'package:mailstream_ui/ui/design.dart';
 import 'package:mailstream_ui/ui/html_parts.dart';
 import 'package:mailstream_ui/ui/mail_resources.dart';
@@ -20,7 +21,7 @@ import 'package:mailstream_ui/ui/reader_renderer.dart';
 // MAILSTREAM_HTML_OPEN_OUT=/tmp/open.json "build/macos/Build/Products/Release/Mailstream Flutter.app/Contents/MacOS/Mailstream Flutter"
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await WindowManipulator.initialize(enableWindowDelegate: true);
+  if (Host.mac) await WindowManipulator.initialize(enableWindowDelegate: true);
   runApp(const HtmlOpenApp());
 }
 

@@ -1,0 +1,25 @@
+[package]
+name = "mailstream-runner"
+version = "0.1.0"
+edition = "2024"
+description = "Mailstream Flutter's Linux runner: the GTK window around Flutter's view, and the channels the Dart UI calls"
+publish = false
+
+[lib]
+# A static library defining `main`: CMake links it into the executable Flutter's tool builds,
+# with Flutter's embedder, GTK and the plugin registrant (runner/CMakeLists.txt).
+crate-type = ["staticlib"]
+
+[dependencies]
+# GTK 3, which Flutter's Linux embedder is built on.
+gtk = "0.18"
+gdk = "0.18"
+gdk-pixbuf = "0.18"
+gio = "0.18"
+# v2_66: GUri, which checks the links a mail body opens.
+glib = { version = "0.18", features = ["v2_66"] }
+
+[build-dependencies]
+# build.rs: Rust bindings of Flutter's embedder headers (flutter_linux) and the plugin registrant.
+bindgen = "0.72"
+pkg-config = "0.3"

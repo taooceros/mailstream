@@ -302,10 +302,20 @@ abstract final class IconSizes {
 }
 
 /// The type's families: the system's UI font on the Mac, Segoe UI on Windows, each falling back
-/// to the platform's Chinese UI font.
+/// to the platform's Chinese UI font; on Linux the desktop's own (fontconfig's `sans-serif` and
+/// `monospace`), which fontconfig falls back from per character. [mono] sets code.
 abstract final class MailFonts {
-  static String get family => Host.mac ? '.AppleSystemUIFont' : 'Segoe UI Variable Text';
-  static List<String> get fallback => Host.mac ? const ['PingFang SC'] : const ['Segoe UI', 'Microsoft YaHei UI'];
+  static String get family => Host.mac
+      ? '.AppleSystemUIFont'
+      : Host.linux
+          ? 'sans-serif'
+          : 'Segoe UI Variable Text';
+  static List<String> get fallback => Host.mac
+      ? const ['PingFang SC']
+      : Host.linux
+          ? const []
+          : const ['Segoe UI', 'Microsoft YaHei UI'];
+  static String get mono => Host.linux ? 'monospace' : 'Menlo';
 }
 
 /// The text roles, in the label color unless a role says otherwise: [display] titles a detail

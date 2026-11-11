@@ -8,7 +8,18 @@ import 'package:html/parser.dart' as html_parser;
 const maxInlineImageBytes = 20 * 1024 * 1024;
 const rasterMimeTypes = {'image/png', 'image/jpeg', 'image/gif', 'image/webp'};
 
-String get inlineCacheRoot => '${Platform.environment['HOME']}/Library/Caches/dev.mailstream.Mailstream/messages-v2';
+/// The engine's inline-part cache (`cache_directory()` in `Engine/src/lib.rs`, after the `dirs`
+/// crate): `~/Library/Caches` on the Mac, `$XDG_CACHE_HOME` (else `~/.cache`) on Linux.
+String get inlineCacheRoot {
+  final environment = Platform.environment;
+  final xdg = environment['XDG_CACHE_HOME'];
+  final caches = !Platform.isLinux
+      ? '${environment['HOME']}/Library/Caches'
+      : xdg != null && xdg.startsWith('/')
+          ? xdg
+          : '${environment['HOME']}/.cache';
+  return '$caches/dev.mailstream.Mailstream/messages-v2';
+}
 
 Uint8List? inlineImageBytes(String source) {
   try {

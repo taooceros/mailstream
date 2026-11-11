@@ -608,7 +608,7 @@ class _MailHtmlState extends State<MailHtml> {
       return const SizedBox(height: 40, child: Center(child: Spinner()));
     }
     final (main, quoted) = parts;
-    Widget view(String html) => !Host.mac
+    Widget view(String html) => !Host.mac && !Host.linux
         ? WindowsMailHtml(key: ValueKey(html), html: html, onOpenLink: widget.onOpenLink)
         : BlitzBody(key: ValueKey(html), html: html);
     return Column(

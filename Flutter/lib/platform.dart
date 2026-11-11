@@ -5,16 +5,21 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart' show SingleActivator;
 
 /// The desktop whose conventions the app follows. On the Mac: ⌘ shortcuts, the runner's window
-/// glass and chrome and WebKit bodies (`macos/Runner`). Elsewhere (Windows): Ctrl shortcuts, the
-/// system title bar and the Windows runner's channels (`windows/runner`). Everything the app
-/// draws looks the same on both (`ui/design.dart`).
+/// glass and chrome and WebKit bodies (`macos/Runner`). Elsewhere (Windows, Linux): Ctrl shortcuts,
+/// the system title bar and the runner's channels (`windows/runner`, `linux/runner`). Everything
+/// the app draws looks the same on all of them (`ui/design.dart`).
 abstract final class Host {
-  /// Set by tests to take the other desktop's branch on any host; `null` follows the host.
+  /// Set by tests to take the other desktop's branch on any host; `null` follows the host. Tests
+  /// pick the Mac or Windows: an override is never [linux].
   @visibleForTesting
   static bool? debugMacOverride;
 
   /// Whether the app runs on the Mac.
   static bool get mac => debugMacOverride ?? Platform.isMacOS;
+
+  /// Whether the app runs on Linux: Windows' conventions, but HTML bodies drawn by Blitz, as on
+  /// the Mac (there is no WebView2), and the Linux desktop's fonts.
+  static bool get linux => debugMacOverride == null && Platform.isLinux;
 
   /// Whether the command modifier is down: ⌘ on the Mac, Ctrl elsewhere. Ctrl with Alt is AltGr
   /// on Windows, which types characters (`[` on many layouts) rather than commands.

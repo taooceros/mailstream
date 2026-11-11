@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Builds the engine for FFI front ends: the UniFFI crate in FFI/ with the Rust engine in Engine/
-(libmailstream.dylib on macOS, mailstream.dll on Windows), the mailstream command line
-(FFI/target/<config>/mailstream, which the Flutter app bundles on macOS), on macOS the Apple
-Intelligence tagger (FFI/target/<config>/mailstream-apple-tagger, bundled beside it) and, with
-DART_OUT=<dir>, the Dart bindings into <dir>.
+(libmailstream.dylib on macOS, mailstream.dll on Windows, libmailstream.so on Linux), the
+mailstream command line (FFI/target/<config>/mailstream, which the Flutter app bundles on macOS
+and Linux), on macOS the Apple Intelligence tagger (FFI/target/<config>/mailstream-apple-tagger,
+bundled beside it) and, with DART_OUT=<dir>, the Dart bindings into <dir>.
 CONFIG=debug|release (default: debug).
 
 The library and the command line come from one cargo run in FFI/'s workspace, so the engine and
@@ -16,7 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = os.environ.get("CONFIG", "debug")
-LIBRARY = "mailstream.dll" if sys.platform == "win32" else "libmailstream.dylib"
+LIBRARY = {"win32": "mailstream.dll", "darwin": "libmailstream.dylib"}.get(sys.platform, "libmailstream.so")
 PROFILE = ["--release"] if CONFIG == "release" else []
 # C build scripts (ring, simsimd) rebuild, and everything above them with them, whenever one of
 # these differs from the build being reused. Shells pick them up unevenly (the warm build of

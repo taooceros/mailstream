@@ -12,7 +12,8 @@ import 'calendar_state.dart';
 import 'chat_state.dart';
 
 /// Off the Mac, the runner opens files and links (`windows/runner/window_channels.cpp`: the
-/// shell's default verb, as Explorer's double-click and the browser's link handling do).
+/// shell's default verb, as Explorer's double-click and the browser's link handling do;
+/// `linux/runner/src/channels.rs`: the desktop's default app).
 const _shell = MethodChannel('mailstream/shell');
 
 /// What the list shows: one role across every account, or one account's mailbox.
