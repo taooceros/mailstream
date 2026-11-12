@@ -160,7 +160,7 @@ Mailstream decouples front-end presentation from core email synchronisation and 
 ```
 ┌────────────────────────────────────────────────────────┐
 │                   Desktop Front Ends                   │
-│   Flutter Desktop (Primary)   │   GPUI   │   AppKit    │
+│    GPUI (Primary)    │   Flutter Desktop   │   AppKit  │
 └───────────────────────────┬────────────────────────────┘
                             │ UniFFI / FFI Layer
 ┌───────────────────────────▼────────────────────────────┐

@@ -1,10 +1,13 @@
 # AGENTS.md
 
-## Current focus: Flutter
+## Current focus: GPUI
 
-- Product work, new features and UI acceptance go to `Flutter/` unless the user names another
-  front end. The AppKit and GPUI front ends stay (not deprecated) and keep working through
-  engine changes, but don't grow their features or port new Flutter features to them.
+- Product work, new features and UI acceptance go to `GPUI/` unless the user names another
+  front end (MS-240; until then it was Flutter). The AppKit and Flutter front ends stay (not
+  deprecated) and keep working through engine changes, but don't grow their features or port
+  new GPUI features to them. Issues the user files for Flutter (by name, its `flutter` Area or
+  a Flutter project) are still Flutter work, and so is Windows, where Flutter is the only front
+  end.
 
 ## Version control: jj
 
@@ -258,28 +261,28 @@ Finished fixes reach `/Applications` as signed release builds, never Debug, in b
 on Linux they reach `~/.local/opt` the same way (MS-224, below).
 All testing happens before that (MS-176): each code agent checks its own change in the real app,
 and one cheap agent then installs `main`'s tip for every issue waiting and checks only that the
-install worked. Separately, each push to `main` that touches the Flutter app or its engine
-publishes a signed update without approval, which the installed Mailstream Flutter installs by
-itself (`Flutter/README.md`); the batch install still runs for each issue.
+install worked. Separately, each push to `main` that touches the GPUI or Flutter app or the
+engine publishes a signed update of that app without approval, which its installed copy installs
+by itself (`GPUI/README.md`, `Flutter/README.md`); the batch install still runs for each issue.
 
 The code agent:
 
 1. Tests its change in the real app before landing: a release or debug build from its own
    checkout (never an `/Applications` copy; it doesn't install), over synthetic data (no
-   accounts or personal mail, like the fixtures `Flutter/README.md` lists), driven with computer
-   helpers; no sending mail, nothing destructive. It takes every screenshot or recording the
-   change needs, UI states in light and dark (launching the executable with
-   `-AppleInterfaceStyle Dark` shows it dark), and attaches them to the issue. On Linux it runs
-   the app only in a private Hyprland desktop of its own, `python3 scripts/vhypr.py start <name>
-   [--dark]` (the script's header has every verb: `run`, `shot`, `click`, `drag`, `scroll`,
-   `type`, `key`, `appearance`, `stop`), never on the user's screen, and stops it when done.
-   The app there gets an empty data folder of its own. Never start another compositor (sway,
-   cage, weston) on the GPU: a headless sway hung it twice on 11-11, resetting the GPU and
-   crashing the user's session.
+   accounts or personal mail, like the fixtures `GPUI/README.md` and `Flutter/README.md` list),
+   driven with computer helpers; no sending mail, nothing destructive. It takes every
+   screenshot or recording the change needs, UI states in light and dark (launching the
+   executable with `-AppleInterfaceStyle Dark` shows it dark), and attaches them to the issue.
+   On Linux it runs the app only in a private Hyprland desktop of its own, `python3
+   scripts/vhypr.py start <name> [--dark]` (the script's header has every verb: `run`, `shot`,
+   `click`, `drag`, `scroll`, `type`, `key`, `appearance`, `stop`), never on the user's screen,
+   and stops it when done. The app there gets an empty data folder of its own. Never start
+   another compositor (sway, cage, weston) on the GPU: a headless sway hung it twice on 11-11,
+   resetting the GPU and crashing the user's session.
 2. Lands its `ms-<n>` bookmark on live `main` with `python3 scripts/land.py MS-<n>` ([Version
    control](#version-control-jj)), which keeps other agents' changes.
-3. Picks the targets: `flutter` (`Mailstream Flutter.app`) by default; `native`
-   (`Mailstream.app`) or `gpui` (`Mailstream GPUI.app`) only when the user asks or its installed
+3. Picks the targets: `gpui` (`Mailstream GPUI.app`) by default; `flutter` (`Mailstream
+   Flutter.app`) or `native` (`Mailstream.app`) only when the user asks or its installed
    behavior is directly affected; never an app that isn't installed yet. On Linux: `gpui`
    (`~/.local/opt/mailstream-gpui`) and `flutter` (`~/.local/opt/mailstream`), each when the
    change reaches it (an engine change reaches both). Tooling-only changes
