@@ -7,7 +7,7 @@ CONFIG="${CONFIG:-release}"
 VERSION="0.1.0"
 
 ./scripts/turso.sh
-swift build -c "$CONFIG"
+./scripts/capped swift build -c "$CONFIG"
 BIN="$(swift build -c "$CONFIG" --show-bin-path)/Mailstream"
 
 APP="build/Mailstream.app"

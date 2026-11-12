@@ -158,7 +158,7 @@ def main():
         if LINUX:
             target_outside()
         # Under the machine's compile limit (scripts/capped: Linux's capped slice, MS-268; the
-        # Mac's build-slot where installed).
+        # Mac's compile budget, MS-260).
         commands.append("(cd GPUI && ../scripts/capped cargo build --release --features shots)")
         commands.append(f"cp GPUI/target/release/mailstream-gpui {BINARY}")
     elif not (ROOT / BINARY).exists():

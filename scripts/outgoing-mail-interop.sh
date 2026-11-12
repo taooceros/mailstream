@@ -12,7 +12,7 @@ tmp=${TMPDIR:-/tmp}
 work=$(mktemp -d "${tmp%/}/mailstream-outgoing.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
-swift build --build-tests >/dev/null
+./scripts/capped swift build --build-tests >/dev/null
 if ! out=$(MAILSTREAM_OUTGOING_INTEROP="$work/swift.json" swift test --skip-build --filter OutgoingMailInteropTests 2>&1); then
     printf '%s\n' "$out" | tail -40; echo "FAILED: Swift side"; exit 1
 fi

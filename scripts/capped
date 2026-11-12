@@ -7,8 +7,10 @@
 # inside it `nproc`, cargo and rustc see 8 CPUs. The slice's limits are set on every run (they
 # are runtime-only and gone after a reboot). A command already in the slice runs directly, so
 # scripts that wrap their builds can be nested (install-linux.py → ffi.py).
-# The Mac: the interim one-compile-at-a-time wrapper `~/.local/bin/build-slot` where installed,
-# else directly.
+# The Mac (MS-260): every compile together gets at most 6 CPU cores and 8 GB, through
+# scripts/build-budget.py (its header): swift build/test, xcodebuild and flutter build wait for
+# their share; anything else (cargo, scripts that build) runs at once, each rustc under it waiting
+# for its own share in the budget's rustc wrapper. Nested calls inside a budgeted build run directly.
 #
 # Exit status is the command's. Cheap commands (jj, git, rg) don't need it.
 set -euo pipefail
@@ -23,8 +25,7 @@ if [ "$(uname -s)" = Linux ] && command -v systemd-run >/dev/null 2>&1; then
   exec systemd-run --user --scope --slice=mailstream-build.slice --collect --quiet -- "$@"
 fi
 
-slot="$HOME/.local/bin/build-slot"
-if [ -x "$slot" ]; then
-  exec "$slot" "$@"
+if [ "$(uname -s)" = Darwin ]; then
+  exec python3 "$(dirname "$0")/build-budget.py" run -- "$@"
 fi
 exec "$@"

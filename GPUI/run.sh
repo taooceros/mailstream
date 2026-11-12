@@ -13,10 +13,10 @@ CONFIG=${CONFIG:-debug}
 TARGET=${CARGO_TARGET_DIR:-GPUI/target}
 
 if [ "$CONFIG" = release ]; then
-  (cd GPUI && cargo build --release)
+  (cd GPUI && ../scripts/capped cargo build --release)
   BINARY=$TARGET/release/mailstream-gpui
 else
-  (cd GPUI && cargo build)
+  (cd GPUI && ../scripts/capped cargo build)
   BINARY=$TARGET/debug/mailstream-gpui
 fi
 

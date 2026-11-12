@@ -46,13 +46,13 @@ for frontend in "$@"; do
       name='Mailstream Flutter'
       executable='Mailstream Flutter'
       CONFIG=release DART_OUT="$PWD/Flutter/packages/mailstream/lib/src" python3 scripts/ffi.py
-      (cd Flutter && flutter pub get && flutter build macos --release)
+      (cd Flutter && flutter pub get && ../scripts/capped flutter build macos --release)
       app="Flutter/build/macos/Build/Products/Release/$name.app"
       ;;
     gpui)
       name='Mailstream GPUI'
       executable=mailstream-gpui
-      (cd GPUI && cargo build --release)
+      (cd GPUI && ../scripts/capped cargo build --release)
       ./scripts/gpui-bundle.sh
       app="build/$name.app"
       ;;

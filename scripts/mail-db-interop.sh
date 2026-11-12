@@ -14,7 +14,7 @@ work=$(mktemp -d "${tmp%/}/mailstream-interop.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/swift" "$work/rust"
 
-swift build --build-tests >/dev/null
+./scripts/capped swift build --build-tests >/dev/null
 (cd Engine && cargo test --no-run -q 2>/dev/null)
 
 run() { # label, command...: prints the command's verdict line; stops with its output if it failed

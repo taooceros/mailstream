@@ -1,5 +1,7 @@
-# Every cargo build in this repo runs plain rustc: an empty wrapper overrides the rcache wrapper
-# set in ~/.cargo/config.toml (rcache handed out corrupt artifacts in ovnfs checkouts, MS-131).
+# Every cargo build in this repo runs plain rustc: rcache, the wrapper ~/.cargo/config.toml runs
+# on the Mac, passes it through untouched (it handed out corrupt artifacts in ovnfs checkouts,
+# MS-131). The repo sets no wrapper of its own, so the Mac's compile budget (MS-260,
+# scripts/build-budget.py), which ~/.cargo/config.toml runs ahead of rcache, covers it too.
 # An ovnfs checkout already starts from the default checkout's warm target folders (MS-151, MS-152).
-[build]
-rustc-wrapper = ""
+[env]
+RCACHE_DISABLE = "1"

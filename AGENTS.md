@@ -239,17 +239,27 @@ it is handed over; it is not moved mid-way.
 
 ## Building
 
-- Rust builds (`Engine/`, `FFI/`, `GPUI/`, Turso) run plain cargo: the repo's
-  `.cargo/config.toml` turns off the rcache wrapper in `~/.cargo/config.toml`, which handed out
-  corrupt artifacts in ovnfs checkouts (MS-131). Don't set `RUSTC_WRAPPER` to bring it back.
-- Every compile on Linux runs under the machine's limit: at most 8 CPUs and 16 GB for all of
-  them together (MS-268). Prefix builds and tests you run yourself with `scripts/capped` (from
-  the repo root: `scripts/capped devenv shell -- cargo test`, `scripts/capped flutter build
-  linux`); it runs them in the shared systemd user slice `mailstream-build.slice`, where cargo
-  sees 8 CPUs, so don't pass a larger `-j`. `ffi.py`, `warm-build.py`, `shots.py` and
-  `install-linux.py` already build through it. Cheap commands (jj, rg, reading files) don't
-  need it. On the Mac it runs the interim one-compile-at-a-time `~/.local/bin/build-slot` where
-  that is installed.
+- Rust builds (`Engine/`, `FFI/`, `GPUI/`, Turso) run plain rustc: the repo's
+  `.cargo/config.toml` sets `RCACHE_DISABLE=1`, so the rcache wrapper in `~/.cargo/config.toml`
+  (it handed out corrupt artifacts in ovnfs checkouts, MS-131) passes rustc through untouched.
+  Don't set `RUSTC_WRAPPER` or `build.rustc-wrapper`: on the Mac the compile budget below is the
+  wrapper.
+- Every compile runs under the machine's limit for all agents together. Prefix builds and tests
+  you run yourself with `scripts/capped` (from the repo root: `scripts/capped cargo test`,
+  `scripts/capped devenv shell -- cargo test`, `scripts/capped flutter build macos`);
+  `ffi.py`, `warm-build.py`, `shots.py`, `install.sh`, `install-linux.py`, `bundle.sh` and
+  `GPUI/run.sh` already build through it, and a `capped` inside a capped build runs straight
+  through. Cheap commands (jj, rg, reading files) don't need it.
+  - Linux (MS-268): at most 8 CPUs and 16 GB. `capped` runs the command in the shared systemd
+    user slice `mailstream-build.slice`, where cargo sees 8 CPUs, so don't pass a larger `-j`.
+  - Mac (MS-260): at most 6 CPU cores and 8 GB, kept by `scripts/build-budget.py` (its header
+    has the rules). Every rustc, in any checkout or folder, waits in the rustc wrapper
+    `build-budget.py install` puts in `~/.cargo/config.toml` (`warm-build.py` runs it) for a CPU
+    slot and the memory its crate took last time, and its codegen threads take further slots;
+    `capped` makes `swift build`/`swift test`, `xcodebuild` and `flutter build` one job of 4
+    slots and passes `-j 4` on. Builds queue rather than fail, so a slow build may just be
+    waiting: `python3 scripts/build-budget.py status` shows who holds what. Don't pass cargo a
+    `-j` or add a build lock of your own.
 - The default checkout keeps a warm build of `main` (`FFI/target` release, `Engine/target`
   debug for the engine's tests, `.turso/`) that every new checkout starts from and keeps (MS-151,
   MS-152, MS-159): a checkout's first release `ffi.py` rebuilds only the repo's 2 crates (~30 s)

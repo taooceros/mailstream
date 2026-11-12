@@ -5,7 +5,8 @@ command line, Apple Intelligence tagger and Dart binding generator (`CONFIG=rele
 scripts/ffi.py`, into FFI/target), the engine's tests (`cargo test --no-run` in Engine/, into
 Engine/target/debug), the Turso library (`scripts/turso.sh`) and, on the Mac, GPUI in every
 configuration agents build it (release, release with `shots`, debug and its tests, into
-GPUI/target; MS-273). It builds without the toolchain
+GPUI/target; MS-273). On the Mac it first installs main's compile budget (`scripts/build-budget.py
+install`, MS-260). It builds without the toolchain
 variables scripts/repo.py drops on macOS (SDKROOT, CPATH, …): agents' shells don't set them, and a warm build made
 with them rebuilt 15 crates in every checkout (MS-159).
 
@@ -92,9 +93,11 @@ def build(open_before):
     print(f"Building main at {revision}", flush=True)
 
     started = time.monotonic()
+    # The Mac's compile budget (MS-260) as main has it: its rustc wrapper in ~/.cargo/config.toml.
+    subprocess.run([sys.executable, "scripts/build-budget.py", "install"], cwd=ROOT, check=True)
     with tempfile.TemporaryDirectory(prefix="mailstream-warm-dart-") as dart:
         steps = [
-            # ffi.py caps its own cargo; the Mac's build-slot must not be entered twice.
+            # ffi.py caps its own cargo.
             ("turso.sh", capped(["sh", "scripts/turso.sh"]), ROOT, {}),
             ("ffi.py", [sys.executable, "scripts/ffi.py"], ROOT, {"CONFIG": "release", "DART_OUT": dart}),
             ("engine tests", capped(["cargo", "test", "--no-run"]), ROOT / "Engine", {}),
