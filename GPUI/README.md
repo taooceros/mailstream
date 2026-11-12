@@ -97,8 +97,9 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 Keys (⌘ is Ctrl on Linux): ↑/↓ or J/K move (in the reader they page through conversations),
 Return or Space opens, Esc or ⌘[ goes back, E or ⌃⌘A archives, ⌫ trashes, S or ⇧⌘L stars, U or
 ⇧⌘U toggles read, D or ⇧⌘D toggles waiting on you, R or ⌘R replies, A or ⇧⌘R replies to all, F
-or ⇧⌘F forwards, ⌘N writes a new message (a new chat in Chat), / or ⌘F searches, ⇧⌘N refreshes,
-⌃⌘S toggles the sidebar, ⌘, opens Settings. In a draft ⌘Return sends and Esc closes (asking first
+or ⇧⌘F forwards, ⌘N writes a new message (a new chat in Chat), ⌘W closes the open conversation (or
+Chat's open space or New Chat form), / or ⌘F searches, ⇧⌘N refreshes, ⌃⌘S toggles the sidebar, ⌘,
+opens Settings. In a draft ⌘Return sends and Esc closes (asking first
 when something was written). Right-click a conversation for the same commands.
 
 The window follows Flutter's (MS-200): the sidebar sits on the window (a rail of the unified

@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Datelike, Days, Local, NaiveDate, Utc};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable, FontStyle,
@@ -525,7 +525,7 @@ impl Msg {
             id: message.id.into(),
             created,
             day: local.map(|date| date.date_naive()),
-            day_label: local.map(|date| day_label(date, now)).unwrap_or_default().into(),
+            day_label: local.map(|date| format::day_divider(date, now)).unwrap_or_default().into(),
             time: local.map(|date| date.format("%-I:%M %p").to_string()).unwrap_or_default().into(),
             thread: message.thread.map(Into::into),
             thread_reply: message.thread_reply,
@@ -1427,7 +1427,6 @@ impl ChatPane {
 
     /// Closes the open space or the new-chat form (⌘W, which the window binds); nothing on the
     /// space list.
-    #[expect(dead_code, reason = "the window binds ⌘W to it in MS-217")]
     pub fn close_space(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.view, View::Spaces) {
             self.close(window, cx);
@@ -2168,23 +2167,6 @@ fn initial(name: &str) -> SharedString {
         .map(|c| c.to_uppercase().collect::<String>().into())
         .unwrap_or_else(|| "?".into())
 }
-
-/// A day divider's label (`ReaderPage.dayDivider`).
-fn day_label(date: DateTime<Local>, now: DateTime<Local>) -> String {
-    let day = date.date_naive();
-    let today = now.date_naive();
-    if day == today {
-        "Today".into()
-    } else if Some(day) == today.checked_sub_days(Days::new(1)) {
-        "Yesterday".into()
-    } else if date.year() == now.year() {
-        date.format("%A, %B %-d").to_string()
-    } else {
-        date.format("%B %-d, %Y").to_string()
-    }
-}
-
-
 
 /// A line across the log with a label in it.
 fn divider(label: SharedString, color: gpui::Hsla, line: gpui::Hsla) -> Div {

@@ -408,9 +408,12 @@ impl MailApp {
         cx.notify();
     }
 
-    /// Closes the open conversation (⌘W, MS-69); nothing else.
+    /// Closes the open conversation, or Chat's open space or new-chat form (⌘W, MS-69); nothing
+    /// else.
     pub fn close(&mut self, _: &Close, window: &mut Window, cx: &mut Context<Self>) {
-        if self.chat_view.is_none() && self.reader().is_some() {
+        if self.chat_view.is_some() {
+            self.chat.update(cx, |chat, cx| chat.close_space(window, cx));
+        } else if self.reader().is_some() {
             self.back(&Back, window, cx);
         }
     }
