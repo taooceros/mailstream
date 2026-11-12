@@ -1,4 +1,5 @@
-//! A single-line text field with IME, selection and the clipboard, for the search box.
+//! A single-line text field with IME, selection and the clipboard, for the search box and forms;
+//! `obscured`, it draws a dot per character and keeps its text off the clipboard (a secret).
 //! Adapted from gpui's `examples/input.rs` (Apache-2.0).
 
 use std::ops::Range;
@@ -20,6 +21,8 @@ actions!(
 );
 
 const CONTEXT: &str = "TextInput";
+/// What an obscured field draws for each character.
+const MASK: char = '•';
 
 pub fn bind_keys(cx: &mut App) {
     let context = Some(CONTEXT);
@@ -63,6 +66,7 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    obscured: bool,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -79,6 +83,7 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            obscured: false,
         }
     }
 
@@ -108,6 +113,33 @@ impl TextInput {
         self.marked_range = None;
         self.select_everything(cx);
         cx.emit(InputEvent::Changed);
+    }
+
+    /// Draws `•` for each character (grapheme) and refuses copy and cut, for a secret.
+    pub fn set_obscured(&mut self, obscured: bool, cx: &mut Context<Self>) {
+        self.obscured = obscured;
+        cx.notify();
+    }
+
+    /// What the field draws: the text, or a dot per grapheme while obscured.
+    fn display_text(&self) -> SharedString {
+        if self.obscured { MASK.to_string().repeat(self.content.graphemes(true).count()).into() } else { self.content.clone() }
+    }
+
+    /// `offset` into the text as an offset into what the field draws.
+    fn display_offset(&self, offset: usize) -> usize {
+        if !self.obscured {
+            return offset;
+        }
+        self.content.grapheme_indices(true).take_while(|(index, _)| *index < offset).count() * MASK.len_utf8()
+    }
+
+    /// An offset into what the field draws as an offset into the text.
+    fn content_offset(&self, display: usize) -> usize {
+        if !self.obscured {
+            return display;
+        }
+        self.content.grapheme_indices(true).nth(display / MASK.len_utf8()).map_or(self.content.len(), |(index, _)| index)
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -198,13 +230,13 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.obscured && !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(self.content[self.selected_range.clone()].to_string()));
         }
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.obscured && !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(self.content[self.selected_range.clone()].to_string()));
             self.replace_text_in_range(None, "", window, cx)
         }
@@ -232,7 +264,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        self.content_offset(line.closest_index_for_x(position.x - bounds.left()))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -380,8 +412,8 @@ impl EntityInputHandler for TextInput {
         let last_layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
-            point(bounds.left() + last_layout.x_for_index(range.start), bounds.top()),
-            point(bounds.left() + last_layout.x_for_index(range.end), bounds.bottom()),
+            point(bounds.left() + last_layout.x_for_index(self.display_offset(range.start)), bounds.top()),
+            point(bounds.left() + last_layout.x_for_index(self.display_offset(range.end)), bounds.bottom()),
         ))
     }
 
@@ -393,8 +425,8 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
-        Some(self.offset_to_utf16(utf8_index))
+        let display_index = last_layout.index_for_x(point.x - line_point.x)?;
+        Some(self.offset_to_utf16(self.content_offset(display_index)))
     }
 }
 
@@ -452,9 +484,11 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let palette = design::palette(window.appearance());
         let input = self.input.read(cx);
-        let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
+        let content = input.display_text();
+        let selected_range = input.display_offset(input.selected_range.start)..input.display_offset(input.selected_range.end);
+        let cursor = input.display_offset(input.cursor_offset());
+        let marked_range =
+            input.marked_range.as_ref().map(|range| input.display_offset(range.start)..input.display_offset(range.end));
         let style = window.text_style();
 
         let (display_text, text_color) =
@@ -468,7 +502,7 @@ impl Element for TextElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+        let runs = if let Some(marked_range) = marked_range.as_ref() {
             vec![
                 TextRun { len: marked_range.start, ..run.clone() },
                 TextRun {
@@ -516,7 +550,10 @@ impl Element for TextElement {
     ) {
         let focus_handle = self.input.read(cx).focus_handle.clone();
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
-        if let Some(selection) = prepaint.selection.take() {
+        // Like the caret, the selection shows only while the field has the keys.
+        if focus_handle.is_focused(window)
+            && let Some(selection) = prepaint.selection.take()
+        {
             window.paint_quad(selection)
         }
         let Some(line) = prepaint.line.take() else { return };

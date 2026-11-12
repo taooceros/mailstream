@@ -79,11 +79,11 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 | `src/swipe.rs` | Two-finger back swipe over the bundle and reader layers, following the system's swipe-between-pages setting |
 | `src/chat.rs` | `ChatPane`: Google Chat spaces (older pages load near the list's end, `chat_more`), a space's log (bottom-aligned, runs and day dividers, markup and links, uploaded pictures shown in it once `chat_attachment` downloads them, other files and videos as tiles in their kind's color that open in the system's default app), sending, earlier pages, threads, New Chat completing the account's Chat partners (`chat_people`) before contacts; the engine keeps the open space (`chat_open`) and the pane re-reads the list and the space on its `Chat`/`ChatMessages` events. `MAILSTREAM_CHAT_FIXTURE=<file.json>` shows a synthetic chat without an account (the module's `fixture` says what the file holds) |
 | `src/compose.rs` | The New Message and Forward windows (From picker, recipient completion, discard confirmation) and the reader's reply card |
-| `src/settings.rs` | Accounts (rename, sign in, sign out), AI tagging and re-tagging, engine status |
+| `src/settings.rs` | Settings as Flutter's (`settings.dart`, MS-214): accounts (sign in with your own OAuth client, prefilled with the last one; rename, remove), every setting of settings.json in Flutter's groups through the engine (`settings`, `set_setting`, `reset_setting`; re-read on its `Settings` event, the file's problems on top; the `flutter.*` keys stay out), tag sync per mail account, what auto-read marked read with undo, re-tagging, engine status |
 | `src/avatars.rs` | Contact photos from `mail.avatars`, cached in memory; initials otherwise |
 | `src/design.rs` | Flutter's style tokens (`Flutter/lib/ui/design.dart`): both palettes with their elevations, the type, radii, spacing, strokes, motion, list, mark, avatar, tag and notice metrics, avatar/topic/account/attachment colors |
 | `src/icons.rs`, `src/format.rs` | Material Symbols glyphs; dates and sizes |
-| `src/input.rs`, `src/textarea.rs` | Single-line field (IME, selection, clipboard) adapted from gpui's input example, and the multi-line editor for bodies |
+| `src/input.rs`, `src/textarea.rs` | Single-line field (IME, selection, clipboard; masked for a secret) adapted from gpui's input example, and the multi-line editor for bodies |
 | `src/bench.rs` | The frame measurement `scripts/bench.sh gpui` runs (`MAILSTREAM_BENCH=scroll`): the list scrolls itself and every frame's start and render-to-paint time is logged |
 | `src/updater.rs` | Mac only: starts Sparkle from the bundle's Frameworks and adds the two update items to the application menu |
 
