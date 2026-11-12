@@ -27,7 +27,10 @@ Mailstream is a modern, keyboard-first desktop mail client engineered for speed,
 Designed after macOS Liquid Glass with Dia's floating islands, Mailstream delivers a native 120 FPS experience powered by a multithreaded Rust engine, local Turso SQLite storage, and an on-device AI triage pipeline.
 
 <p align="center">
-  <img src="docs/assets/mailstream-macos.png" alt="Mailstream macOS Desktop UI" width="100%">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/mailstream-gpui-dark.png">
+    <img src="docs/assets/mailstream-gpui-light.png" alt="Mailstream's GPUI window on macOS: the sidebar on Liquid Glass, the inbox and an open conversation (synthetic demo mail)" width="100%">
+  </picture>
 </p>
 
 ---
