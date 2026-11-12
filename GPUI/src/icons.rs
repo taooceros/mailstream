@@ -58,6 +58,8 @@ icons! {
     Important => "priority_high",
     Star => "star",
     Starred => "star_fill",
+    Video => "videocam",
+    VideoFill => "videocam_fill",
     Waiting => "schedule",
 }
 

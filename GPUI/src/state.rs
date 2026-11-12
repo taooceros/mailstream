@@ -24,6 +24,7 @@ use gpui::{
 use mailstream::{Change, Event, EventListener, ListQuery};
 
 use crate::bench::Bench;
+use crate::calendar::{CalendarPane, CalendarToast};
 use crate::chat::ChatPane;
 use crate::compose::ReplyBox;
 use crate::engine::{MailError, engine};
@@ -63,8 +64,9 @@ actions!(
 pub const CONTEXT: &str = "Mail";
 
 pub fn bind_keys(cx: &mut App) {
-    // Single keys act on the list, never while a text field has focus or in Chat, which has its own.
-    let list = Some("Mail && !TextInput && !TextArea && !Chat");
+    // Single keys act on the list, never while a text field has focus or in Chat or the
+    // calendar, which have their own.
+    let list = Some("Mail && !TextInput && !TextArea && !Chat && !Calendar");
     let window = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("j", Next, list),
@@ -388,6 +390,9 @@ pub struct MailApp {
     pub chat: Entity<ChatPane>,
     /// The chat account in view (None: every account), while Chat is selected.
     pub chat_view: Option<Option<SharedString>>,
+    /// The calendar, shown instead of the mail list while `calendar_view` is set.
+    pub calendar: Entity<CalendarPane>,
+    pub calendar_view: bool,
     /// The inline reply under a conversation in the reader.
     pub reply: Option<ReplyDraft>,
     /// A conversation to forward once its messages arrive.
@@ -408,11 +413,13 @@ impl MailApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| TextInput::new("Search", cx));
         let chat = cx.new(|cx| ChatPane::new(window, cx));
+        let calendar = cx.new(|cx| CalendarPane::new(window, cx));
         let subscriptions = vec![
             cx.subscribe_in(&search, window, Self::on_search_event),
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
             // Chat accounts and unread counts feed the sidebar.
             cx.observe(&chat, |_, _, cx| cx.notify()),
+            cx.subscribe(&calendar, |this, _, toast: &CalendarToast, cx| this.show_toast(toast.0.clone(), cx)),
         ];
         let mut this = Self {
             focus: cx.focus_handle(),
@@ -453,6 +460,8 @@ impl MailApp {
             renderer: Renderer::from_name(std::env::var("MAILSTREAM_READER_RENDERER").ok().as_deref()),
             chat,
             chat_view: None,
+            calendar,
+            calendar_view: false,
             reply: None,
             forward_pending: None,
             bench: Bench::from_env(cx),
@@ -510,6 +519,9 @@ impl MailApp {
                     }
                     if batch.contains(&Event::Calendar) {
                         this.calendar_changed(cx);
+                    }
+                    if batch.iter().any(|e| matches!(e, Event::Calendar | Event::Accounts)) {
+                        this.calendar.update(cx, |pane, cx| pane.changed(cx));
                     }
                     let mailboxes = batch.iter().any(|e| matches!(e, Event::Accounts | Event::Mailboxes));
                     if mailboxes {

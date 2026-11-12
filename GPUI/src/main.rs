@@ -3,6 +3,7 @@
 
 mod avatars;
 mod bench;
+mod calendar;
 mod chat;
 mod compose;
 mod controls;
@@ -45,6 +46,7 @@ fn main() {
         avatars::init(cx);
         input::bind_keys(cx);
         chat::bind_keys(cx);
+        calendar::bind_keys(cx);
         textarea::bind_keys(cx);
         compose::bind_keys(cx);
         state::bind_keys(cx);

@@ -52,6 +52,9 @@ impl Render for MailApp {
         let content = if self.chat_view.is_some() {
             // Chat draws its own header; it takes one island.
             island(p.background, p).occlude().size_full().child(self.chat.clone()).into_any_element()
+        } else if self.calendar_view {
+            // The calendar lays out its own islands.
+            div().size_full().child(self.calendar.clone()).into_any_element()
         } else {
             self.render_content(room, p, window, cx)
         };
@@ -82,7 +85,7 @@ impl Render for MailApp {
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
                 cx.listener(|this, _, window, cx| {
-                    if this.chat_view.is_none() {
+                    if this.mail_in_view() {
                         this.back(&Back, window, cx);
                     }
                 }),

@@ -36,6 +36,7 @@ enum Pick {
     Mail(Source),
     /// Google Chat: every account's spaces, or one account's.
     Chat(Option<SharedString>),
+    Calendar,
 }
 
 impl MailApp {
@@ -110,7 +111,7 @@ impl MailApp {
                 continue;
             }
             let source = Source::Unified(role);
-            let selected = self.chat_view.is_none() && self.source == source && self.query.is_none();
+            let selected = self.mail_in_view() && self.source == source && self.query.is_none();
             let count = members.iter().map(|b| b.badge()).sum::<u32>();
             items.push(
                 rail_item(role.arg(), Icon::for_role(role), role.title(), count, selected, p)
@@ -123,6 +124,13 @@ impl MailApp {
             items.push(
                 rail_item("chat", Icon::Chat, "Chat", count, self.chat_view.is_some(), p)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.select_chat(None, window, cx)))
+                    .into_any_element(),
+            );
+        }
+        if !self.accounts.is_empty() {
+            items.push(
+                rail_item("calendar", Icon::Calendar, "Calendar", 0, self.calendar_view, p)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.select_calendar(window, cx)))
                     .into_any_element(),
             );
         }
@@ -242,6 +250,16 @@ impl MailApp {
         if self.accounts.is_empty() {
             return nodes;
         }
+        nodes.push(Node {
+            key: "calendar".into(),
+            depth: 0,
+            title: "Calendar".into(),
+            leading: Leading::Icon(Icon::Calendar),
+            badge: 0,
+            expandable: false,
+            source: Some(Pick::Calendar),
+            tooltip: None,
+        });
         let section: SharedString = "section:accounts".into();
         let open = self.expanded.contains(&section);
         nodes.push(Node {
@@ -302,8 +320,9 @@ impl MailApp {
 
     fn sidebar_row(&self, node: Node, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let selected = node.source.as_ref().is_some_and(|pick| match pick {
-            Pick::Mail(source) => self.chat_view.is_none() && self.source == *source && self.query.is_none(),
+            Pick::Mail(source) => self.mail_in_view() && self.source == *source && self.query.is_none(),
             Pick::Chat(account) => self.chat_view.as_ref() == Some(account),
+            Pick::Calendar => self.calendar_view,
         });
         let expanded = self.expanded.contains(&node.key);
         let key = node.key.clone();
@@ -355,6 +374,7 @@ impl MailApp {
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| match &source {
                 Some(Pick::Mail(source)) => this.select(source.clone(), window, cx),
                 Some(Pick::Chat(account)) => this.select_chat(account.clone(), window, cx),
+                Some(Pick::Calendar) => this.select_calendar(window, cx),
                 // Rows that show nothing themselves fold, as clicking them does natively.
                 None => this.toggle_expanded(&key, cx),
             }))

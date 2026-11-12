@@ -1,0 +1,498 @@
+//! The calendar's list island (Flutter's `CalendarListPane`): the title row with Refresh, this
+//! week's days on a strip (today raised, the others over a bar of the hours they book), the
+//! meeting about to start on one card with Join, then the agenda: notices for accounts to sign
+//! in again or whose fetch failed, and each day from today with its events under its header.
+
+use chrono::{DateTime, Local, NaiveDate};
+use gpui::prelude::FluentBuilder;
+use gpui::{
+    AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, ListOffset,
+    ParentElement, StatefulInteractiveElement, Styled, Window, div, list, px,
+};
+use mailstream::CalendarPerson;
+
+use super::model::{self, ReplyState};
+use super::{CalendarPane, Entry, Refresh};
+use crate::avatars;
+use crate::controls::{
+    ButtonKind, ControlSize, Tone, button, capsule, icon_button, icon_label_button, island, list_row, mark_dot, notice,
+    segment, segmented, tag, title_bar,
+};
+use crate::design::{self, Palette, calendar as metrics, icon as icon_size, layout, list as rows, space, stroke, text};
+use crate::icons::{Icon, icon};
+use crate::model::Address;
+use crate::settings::ShowSettings;
+
+/// A guest as the address their avatar is drawn for.
+pub(super) fn guest_address(person: &CalendarPerson) -> Address {
+    Address { name: person.name.clone().map(Into::into), email: person.email.clone().unwrap_or_default().into() }
+}
+
+impl CalendarPane {
+    /// The list island: its title row, the week strip and the Up Next card over the agenda.
+    pub(super) fn render_list_island(
+        &self,
+        today: NaiveDate,
+        p: &'static Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let now = Local::now();
+        let body: AnyElement = if self.listed {
+            list(self.agenda.clone(), cx.processor(move |this, ix: usize, _, cx| this.render_entry(ix, now, p, cx)))
+                .size_full()
+                .pt(px(space::S4))
+                .pb(px(space::S24))
+                .into_any_element()
+        } else {
+            crate::controls::centered_note("Loading…", p).into_any_element()
+        };
+        island(p.tray, p)
+            .occlude()
+            .flex()
+            .flex_col()
+            .child(self.render_header(now, p, window, cx))
+            .child(self.render_week_strip(today, p, cx))
+            .children(self.render_up_next(now, p, cx))
+            .child(div().flex_1().min_h_0().child(body))
+    }
+
+    fn render_header(&self, now: DateTime<Local>, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        title_bar("calendar-header", window, cx)
+            .flex_shrink_0()
+            .h(px(layout::HEADER_HEIGHT))
+            .px(px(space::S10))
+            .flex()
+            .items_center()
+            .gap(px(space::S10))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pl(px(space::S6))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(space::S8))
+                            .child(div().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::BOLD).child("Calendar"))
+                            .when(self.loading, |d| {
+                                d.child(div().text_size(px(text::CAPTION)).text_color(p.muted).child("Updating…"))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(text::CAPTION))
+                            .text_color(p.muted)
+                            .child(now.format("%A, %B %-d").to_string()),
+                    ),
+            )
+            .child(capsule(p).child(
+                icon_button("calendar-refresh", Icon::Refresh, "Refresh", self.has_calendars(), p.muted, p)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
+            ))
+    }
+
+    /// This week's seven days: today raised on a card, the others over a bar as long as their
+    /// booked hours. A day the agenda lists scrolls it there.
+    fn render_week_strip(&self, today: NaiveDate, p: &'static Palette, cx: &mut Context<Self>) -> Div {
+        let days = model::week_days(model::week_of(today));
+        div().flex_shrink_0().h(px(metrics::WEEK_STRIP)).mx(px(space::S10)).mb(px(space::S8)).flex().children(
+            days.into_iter().enumerate().map(|(slot, day)| {
+                let is_today = day == today;
+                let booked = self.week_booked[slot] as f32;
+                let load = if is_today || booked <= 0. { 0. } else { (booked / metrics::FULL_DAY_MINUTES).clamp(0.15, 1.) };
+                let date = div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_size(px(text::CAPTION))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(if is_today { p.accent } else { p.muted })
+                            .child(day.format("%a").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(text::BODY))
+                            .line_height(px(16.))
+                            .font_weight(if is_today { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
+                            .text_color(if is_today { p.accent } else { p.text })
+                            .child(day.format("%-d").to_string()),
+                    )
+                    .child(
+                        div()
+                            .mt(px(3.))
+                            .h(px(metrics::LOAD_BAR))
+                            .w(px(metrics::LOAD_WIDTH * load))
+                            .rounded_full()
+                            .bg(design::tint(p.accent, metrics::LOAD_OPACITY)),
+                    );
+                div()
+                    .id(ElementId::Name(format!("week-day:{day}").into()))
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .rounded(px(metrics::CARD_RADIUS))
+                    .hover(|s| s.bg(p.hover))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.show_day(day, cx)))
+                    .child(if is_today {
+                        div()
+                            .px(px(space::S10))
+                            .py(px(space::S2))
+                            .rounded(px(metrics::CARD_RADIUS))
+                            .bg(p.background)
+                            .border(px(stroke::HAIRLINE))
+                            .border_color(p.card_border)
+                            .shadow(p.card_shadow.clone())
+                            .child(date)
+                    } else {
+                        date
+                    })
+            }),
+        )
+    }
+
+    /// The agenda scrolls to `day`'s header when it lists the day.
+    fn show_day(&mut self, day: NaiveDate, cx: &mut Context<Self>) {
+        let at = self.entries.iter().position(|entry| matches!(entry, Entry::Day { day: listed, .. } if *listed == day));
+        if let Some(item_ix) = at {
+            self.agenda.scroll_to(ListOffset { item_ix, offset_in_item: px(0.) });
+            cx.notify();
+        }
+    }
+
+    /// The meeting about to start or under way on one card: how soon, its title, and Join when
+    /// it has a call; a click opens it. The pane's clock keeps it current.
+    fn render_up_next(&self, now: DateTime<Local>, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let index = model::up_next(&self.events, now)?;
+        let event = &self.events[index];
+        let key = event.key.clone();
+        let url = event.item.meeting_url.clone();
+        let raised = p.raised_shadow.clone();
+        Some(
+            div()
+                .flex_shrink_0()
+                .px(px(space::S12))
+                .pb(px(space::S8))
+                .child(
+                    div()
+                        .id("up-next")
+                        .h(px(metrics::UP_NEXT))
+                        .px(px(space::S12))
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S8))
+                        .rounded(px(metrics::CARD_RADIUS))
+                        .bg(p.background)
+                        .border(px(stroke::HAIRLINE))
+                        .border_color(p.card_border)
+                        .shadow(p.card_shadow.clone())
+                        .cursor_pointer()
+                        .hover(move |s| s.shadow(raised.clone()))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(key.clone(), cx)))
+                        .child(mark_dot(p.accent))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(p.accent)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(model::up_next_label(event, now)),
+                        )
+                        .child(
+                            div().flex_1().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(event.item.title.clone()),
+                        )
+                        .when_some(url, |d, url| {
+                            d.child(
+                                icon_label_button("up-next-join", Some(Icon::VideoFill), "Join", ButtonKind::Primary, ControlSize::Small, true, p)
+                                    .on_click(move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.open_url(&url);
+                                    }),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_entry(&self, ix: usize, now: DateTime<Local>, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let line = match &self.entries[ix] {
+            Entry::Notice(account) => self.render_notice(*account, p).into_any_element(),
+            Entry::Day { title, summary, .. } => div()
+                .h(px(rows::SECTION_HEIGHT))
+                .flex()
+                .items_end()
+                .gap(px(space::S8))
+                .pb(px(5.))
+                .pl(px(rows::SECTION_X - rows::INSET))
+                .pr(px(space::S12))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(text::FOOTNOTE))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.muted)
+                        .child(title.clone()),
+                )
+                .child(div().flex_shrink_0().text_size(px(text::CAPTION)).text_color(p.muted).child(summary.clone()))
+                .into_any_element(),
+            Entry::Event { index, day } => self.render_row(*index, *day, now, p, cx),
+            Entry::Note(note) => div()
+                .h(px(metrics::NOTE_HEIGHT))
+                .px(px(space::S24))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_center()
+                .text_color(p.muted)
+                .child(note.clone())
+                .into_any_element(),
+        };
+        // The list's own padding stops at its top and bottom; lines step in by hand.
+        div().px(px(rows::INSET)).child(line).into_any_element()
+    }
+
+    /// An account whose calendar cannot show: sign in again (in Settings) for calendar access,
+    /// or its last fetch failed.
+    fn render_notice(&self, account: usize, p: &'static Palette) -> Div {
+        let account = &self.accounts[account];
+        let failed = account.problem.clone().filter(|_| account.granted);
+        let title = if account.label.is_empty() { account.id.clone() } else { account.label.clone() };
+        let (tone, message) = match &failed {
+            Some(problem) => (Tone::Error, format!("Could not update: {problem}")),
+            None => (Tone::Action, "Sign in again to allow calendar access.".to_owned()),
+        };
+        // As tall as its message wraps to: the list measures each line.
+        div().py(px(space::S4)).px(px(space::S12 - rows::INSET)).child(
+            notice(tone, Some(title.into()), message, false, p).when(failed.is_none(), |d| {
+                d.child(
+                    button(
+                        ElementId::Name(format!("sign-in:{}", account.id).into()),
+                        "Sign In…",
+                        ButtonKind::Secondary,
+                        ControlSize::Small,
+                        true,
+                        p,
+                    )
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ShowSettings), cx)),
+                )
+            }),
+        )
+    }
+
+    /// One event in the agenda: a time column (when it starts and how long it runs, or All day),
+    /// its calendar's dot, the title and where it is, then its guests' avatars, or the answers
+    /// when the account is invited and has not answered. Past events fade; declined ones fade
+    /// further, struck through. Selected, the row lifts as a card.
+    fn render_row(
+        &self,
+        index: usize,
+        day: NaiveDate,
+        now: DateTime<Local>,
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let event = &self.events[index];
+        let item = &event.item;
+        let past = event.end <= now;
+        let declined = event.declined();
+        // A timed event shows its times on the day it starts; days it runs through say All day,
+        // and the day it ends, when it ends.
+        let starts = !item.all_day && event.start.date_naive() == day;
+        let ends = !item.all_day && (event.end.date_naive() == day || event.end == model::midnight(model::next_day(day)));
+        let time = if starts { model::clock(event.start) } else { "All day".to_owned() };
+        let under = match (starts, ends) {
+            (true, true) => Some(model::short_duration((event.end - event.start).num_minutes())),
+            (false, true) => Some(format!("until {}", model::clock(event.end))),
+            _ => None,
+        };
+        let several = self.accounts.iter().filter(|account| account.granted).count() > 1;
+        let mut detail: Vec<String> = Vec::new();
+        detail.extend(item.location.clone());
+        detail.extend(item.meeting_url.as_deref().map(|url| model::meeting_label(url).to_owned()));
+        if several || item.calendar_name.as_ref().is_some_and(|name| name != &item.account) {
+            detail.push(item.calendar_name.clone().unwrap_or_else(|| item.account.clone()));
+        }
+        let detail = detail.join(" · ");
+        let tag_label = match item.response.as_deref() {
+            Some("needsAction") => Some("Invited"),
+            Some("tentative") => Some("Maybe"),
+            _ => None,
+        };
+        let reply = self.reply(event);
+        let selected = self.opened.as_ref() == Some(&event.key);
+        let trailing: Option<AnyElement> = if reply.invited {
+            Some(self.reply_switch(index, reply, "row", p, cx).into_any_element())
+        } else {
+            let guests = model::others(item);
+            (!guests.is_empty()).then(|| guest_avatars(&guests, 3, p.background, p, cx).into_any_element())
+        };
+        let glyph = if item.location.is_some() {
+            Some(Icon::Location)
+        } else if item.meeting_url.is_some() {
+            Some(Icon::Video)
+        } else {
+            None
+        };
+        let key = event.key.clone();
+        let content = div()
+            .relative()
+            .size_full()
+            .pl(px(space::S4))
+            .pr(px(space::S12))
+            .flex()
+            .items_center()
+            .when(past || declined, |d| d.opacity(if declined { metrics::DECLINED_OPACITY } else { metrics::PAST_OPACITY }))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(metrics::TIME_WIDTH))
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(time))
+                    .when_some(under, |d, under| {
+                        d.child(div().max_w_full().truncate().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(under))
+                    }),
+            )
+            .child(div().flex_shrink_0().w(px(space::S12)))
+            .child(mark_dot(dot_color(self.event_color(event), p)))
+            .child(div().flex_shrink_0().w(px(space::S8)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .truncate()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .when(declined, |d| d.line_through())
+                            .child(item.title.clone()),
+                    )
+                    .when(!detail.is_empty() || tag_label.is_some(), |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(3.))
+                                .when_some(tag_label, |d, label| {
+                                    d.child(tag(label, Some(p.waiting), p).h(px(16.)).mr(px(3.)))
+                                })
+                                .when_some(glyph, |d, glyph| d.child(icon(glyph, icon_size::INLINE, p.muted)))
+                                .child(div().flex_1().min_w_0().truncate().text_color(p.muted).child(detail)),
+                        )
+                    }),
+            )
+            .when_some(trailing, |d, trailing| d.child(div().flex_shrink_0().w(px(space::S8))).child(trailing));
+        list_row(ElementId::Name(format!("event:{}:{}:{}:{day}", key.account, key.calendar, key.id).into()), selected, false, p)
+            .h(px(metrics::ROW_HEIGHT))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(key.clone(), cx)))
+            .child(content)
+            .into_any_element()
+    }
+
+    /// Going, Maybe and Decline side by side, the account's answer raised and checked; the
+    /// answer being sent shows the clock. `place` keeps the row's and the detail's apart.
+    pub(super) fn reply_switch(
+        &self,
+        index: usize,
+        reply: ReplyState,
+        place: &str,
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let key = &self.events[index].key;
+        segmented(p).children(model::REPLIES.map(|(value, label)| {
+            let tint = if value == "declined" { p.danger } else { p.accent };
+            let chosen = reply.chosen == Some(value);
+            let glyph = if reply.sending == Some(value) {
+                Some(Icon::Waiting)
+            } else if chosen {
+                Some(Icon::Check)
+            } else {
+                None
+            };
+            let enabled = reply.answerable && reply.sending.is_none() && !chosen;
+            let target = key.clone();
+            let id = format!("reply:{place}:{}:{}:{}:{value}", key.account, key.calendar, key.id);
+            segment(ElementId::Name(id.into()), "", chosen, p)
+                .gap(px(space::S4))
+                .when(chosen, |d| d.text_color(tint))
+                .when_some(glyph, |d, glyph| d.child(icon(glyph, icon_size::INLINE, tint)))
+                .child(label)
+                // Never opens the row under it.
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    if enabled {
+                        this.respond(&target, value, cx);
+                    }
+                }))
+        }))
+    }
+}
+
+/// A calendar's dot: its color a little toward the card under it.
+pub(super) fn dot_color(color: Hsla, p: &Palette) -> Hsla {
+    color.blend(design::tint(p.background, metrics::DOT_SOFTEN))
+}
+
+/// Guests as overlapping avatars, each ringed in `ring` (the surface under them): the first
+/// `max`, then +N for the rest.
+fn guest_avatars(guests: &[&CalendarPerson], max: usize, ring: Hsla, p: &'static Palette, cx: &mut gpui::App) -> Div {
+    let size = metrics::AVATAR;
+    let step = size * metrics::AVATAR_STEP;
+    let ring_width = metrics::AVATAR_RING;
+    let shown = guests.len().min(max);
+    let rest = guests.len() - shown;
+    let count = shown + usize::from(rest > 0);
+    let disc = |slot: usize| {
+        div()
+            .absolute()
+            .left(px(slot as f32 * step - ring_width))
+            .top(px(-ring_width))
+            .size(px(size + 2. * ring_width))
+            .p(px(ring_width))
+            .rounded_full()
+            .bg(ring)
+    };
+    div()
+        .relative()
+        .flex_shrink_0()
+        .w(px(step * (count.max(1) - 1) as f32 + size))
+        .h(px(size))
+        .children(
+            guests[..shown]
+                .iter()
+                .enumerate()
+                .map(|(slot, person)| disc(slot).child(avatars::avatar(&guest_address(person), size, p, cx))),
+        )
+        .when(rest > 0, |d| {
+            d.child(
+                disc(shown).child(
+                    div()
+                        .size_full()
+                        .rounded_full()
+                        .bg(p.chip)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(size * design::avatar::LETTER))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.muted)
+                        .child(format!("+{rest}")),
+                ),
+            )
+        })
+}

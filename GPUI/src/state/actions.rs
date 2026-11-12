@@ -45,9 +45,10 @@ impl MailApp {
         self.target()
     }
 
-    /// The open conversation, else the highlighted row; nothing while Chat is shown.
+    /// The open conversation, else the highlighted row; nothing while Chat or the calendar is
+    /// shown.
     pub fn target(&self) -> Option<Conversation> {
-        if self.chat_view.is_some() {
+        if !self.mail_in_view() {
             return None;
         }
         if let Some(conversation) = self.reader() {

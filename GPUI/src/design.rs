@@ -398,6 +398,36 @@ pub mod chat {
     pub const DIMMED: f32 = 0.5;
 }
 
+/// The calendar (Flutter's `CalendarMetrics` and the agenda's sizes).
+pub mod calendar {
+    /// An agenda row.
+    pub const ROW_HEIGHT: f32 = 52.0;
+    /// The empty agenda's note.
+    pub const NOTE_HEIGHT: f32 = 120.0;
+    /// The agenda's time column.
+    pub const TIME_WIDTH: f32 = 64.0;
+    /// The week strip over the agenda, and the Up Next card.
+    pub const WEEK_STRIP: f32 = 44.0;
+    pub const UP_NEXT: f32 = 36.0;
+    pub const CARD_RADIUS: f32 = super::radius::CONTROL;
+    /// Guests' avatars overlapping on a row, each `AVATAR_STEP` of the last one's size on and
+    /// ringed `AVATAR_RING` wide in the surface under them; a guest card's avatar.
+    pub const AVATAR: f32 = 16.0;
+    pub const AVATAR_STEP: f32 = 0.7;
+    pub const AVATAR_RING: f32 = 1.5;
+    pub const GUEST_AVATAR: f32 = 26.0;
+    /// A day's load bar: `LOAD_BAR` thick, `LOAD_WIDTH` long when `FULL_DAY_MINUTES` are booked.
+    pub const LOAD_BAR: f32 = 2.5;
+    pub const LOAD_WIDTH: f32 = 24.0;
+    pub const LOAD_OPACITY: f32 = 0.55;
+    pub const FULL_DAY_MINUTES: f32 = 8.0 * 60.0;
+    /// Past events fade, declined ones further.
+    pub const PAST_OPACITY: f32 = 0.48;
+    pub const DECLINED_OPACITY: f32 = 0.40;
+    /// A calendar's dot, this far toward the card under it.
+    pub const DOT_SOFTEN: f32 = 0.2;
+}
+
 /// The house easing curve (Flutter's `Motion.curve`), `cubic-bezier(0.05, 0.7, 0.1, 1)`: a strong
 /// deceleration, quick off the mark, a long settle.
 pub fn house_curve(progress: f32) -> f32 {

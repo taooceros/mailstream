@@ -6,9 +6,22 @@ use crate::swipe::{self, Step};
 use gpui::ScrollWheelEvent;
 
 impl MailApp {
-    pub fn select(&mut self, source: Source, window: &mut Window, cx: &mut Context<Self>) {
-        let same = self.source == source && self.query.is_none() && self.chat_view.is_none();
+    /// Mail is in view: neither Chat nor the calendar is.
+    pub fn mail_in_view(&self) -> bool {
+        self.chat_view.is_none() && !self.calendar_view
+    }
+
+    /// Chat or the calendar gives way to mail.
+    fn leave_panes(&mut self, cx: &mut Context<Self>) {
         self.chat_view = None;
+        if std::mem::take(&mut self.calendar_view) {
+            self.calendar.update(cx, |calendar, cx| calendar.hide(cx));
+        }
+    }
+
+    pub fn select(&mut self, source: Source, window: &mut Window, cx: &mut Context<Self>) {
+        let same = self.source == source && self.query.is_none() && self.mail_in_view();
+        self.leave_panes(cx);
         self.context_menu = None;
         self.source = source;
         self.query = None;
@@ -26,10 +39,21 @@ impl MailApp {
 
     /// Shows Google Chat: every account's spaces (None) or one account's.
     pub fn select_chat(&mut self, account: Option<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
+        self.leave_panes(cx);
         self.chat_view = Some(account.clone());
         self.context_menu = None;
         self.hovered_row = None;
         self.chat.update(cx, |chat, cx| chat.show(account, window, cx));
+        cx.notify();
+    }
+
+    /// Shows the calendar.
+    pub fn select_calendar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat_view = None;
+        self.calendar_view = true;
+        self.context_menu = None;
+        self.hovered_row = None;
+        self.calendar.update(cx, |calendar, cx| calendar.show(window, cx));
         cx.notify();
     }
 
@@ -46,7 +70,7 @@ impl MailApp {
                 if text.is_empty() {
                     self.end_search(cx);
                 } else {
-                    self.chat_view = None;
+                    self.leave_panes(cx);
                     self.query = Some(text.into());
                     self.layers.clear();
                     self.highlight = None;
@@ -408,11 +432,13 @@ impl MailApp {
         cx.notify();
     }
 
-    /// Closes the open conversation, or Chat's open space or new-chat form (⌘W, MS-69); nothing
-    /// else.
+    /// Closes the open conversation, Chat's open space or new-chat form, or the calendar's open
+    /// event (⌘W, MS-69); nothing else.
     pub fn close(&mut self, _: &Close, window: &mut Window, cx: &mut Context<Self>) {
         if self.chat_view.is_some() {
             self.chat.update(cx, |chat, cx| chat.close_space(window, cx));
+        } else if self.calendar_view {
+            self.calendar.update(cx, |calendar, cx| calendar.close_event(cx));
         } else if self.reader().is_some() {
             self.back(&Back, window, cx);
         }
