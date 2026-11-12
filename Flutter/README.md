@@ -118,7 +118,7 @@ the build hook bundles into the bundle's `lib/`; the `mailstream` command line s
 `mailstream_ui` and starts it when no front end runs (also through a symlink such as
 `~/.local/bin/mailstream`). Build with Rust (rustup), Flutter, clang (libclang for bindgen),
 CMake, Ninja, pkg-config and the GTK 3, GLib and fontconfig development files; on NixOS
-`nix develop` (the repository's `flake.nix`) provides all but Rust:
+`devenv shell` (the repository's `devenv.nix`) provides all but Rust:
 
 ```sh
 # at the repository root

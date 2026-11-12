@@ -8,3 +8,9 @@ node_modules/
 # Rust/Cargo build output anywhere in the tree
 target/
 Flutter/.dart_tool/
+
+# devenv (devenv.nix)
+.devenv/
+.devenv.flake.nix
+devenv.local.nix
+.direnv/

@@ -4,7 +4,7 @@
 # signature; a binary signed any other way makes macOS ask, and "Always Allow" there re-pins the
 # item to that one build. So on the Mac this refuses to start a binary that did not get the app's
 # signature. Linux keeps the sign-ins in a file of the user's (Engine/src/keychain.rs) and needs
-# no signature; on NixOS run it inside `nix develop`, which provides the libraries GPUI loads.
+# no signature; on NixOS run it inside `devenv shell`, which provides the libraries GPUI loads.
 # Usage: [CONFIG=release] GPUI/run.sh
 #   CONFIG=release builds the engine and the window optimized.
 set -eu

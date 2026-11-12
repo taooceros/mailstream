@@ -221,7 +221,7 @@ The relay receives webhook calls from Gmail Pub/Sub and Microsoft Graph, forward
 ### Prerequisites
 - **macOS**: macOS 26+, Xcode Command Line Tools, Flutter 3.x, Rust (cargo), Python 3.
 - **Windows**: Windows 11/10 x64, Visual Studio 2022 (C++ desktop workload), Flutter, Rust.
-- **Linux**: Flutter, Rust (rustup), clang/libclang, CMake, Ninja, pkg-config, and GTK 3, GLib and fontconfig development files (`nix develop` provides all but Rust). Build steps: `Flutter/README.md` ▸ Linux. The GPUI front end also needs Wayland or X11 (xcb), xkbcommon and the Vulkan loader, which `nix develop` provides too: `nix develop -c GPUI/run.sh` (`GPUI/README.md`).
+- **Linux**: Flutter, Rust (rustup), clang/libclang, CMake, Ninja, pkg-config, and GTK 3, GLib and fontconfig development files (`devenv shell` provides all but Rust). Build steps: `Flutter/README.md` ▸ Linux. The GPUI front end also needs Wayland or X11 (xcb), xkbcommon and the Vulkan loader, which `devenv shell` provides too: `devenv shell -- GPUI/run.sh` (`GPUI/README.md`).
 
 ### Build Steps (macOS Flutter)
 

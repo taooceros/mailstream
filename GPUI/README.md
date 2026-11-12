@@ -13,7 +13,7 @@ share `mail.db` (see "Front ends in other languages" in the top-level README).
 GPUI/run.sh                 # from the repo root: cargo build, sign (macOS), launch
 CONFIG=release GPUI/run.sh  # engine and window optimized: use this to judge smoothness
 (cd GPUI && cargo test)
-nix develop -c GPUI/run.sh  # Linux (NixOS): the shell has the libraries GPUI links and loads
+devenv shell -- GPUI/run.sh  # Linux (NixOS): the shell has the libraries GPUI links and loads
 ```
 
 The engine works on its own threads; only its change events reach the window's main thread.
