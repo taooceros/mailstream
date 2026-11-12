@@ -5,7 +5,6 @@ set -eu
 cd "$(dirname "$0")/.."
 CONFIG="${CONFIG:-release}"
 VERSION="0.1.0"
-SERVICE="dev.mailstream.build"
 
 ./scripts/turso.sh
 swift build -c "$CONFIG"

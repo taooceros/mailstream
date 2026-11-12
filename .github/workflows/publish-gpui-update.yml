@@ -14,6 +14,9 @@ on:
       - scripts/gpui-bundle.sh
       - scripts/apple-tagger.py
       - scripts/sign.sh
+      - scripts/release-sign.sh
+      - scripts/ci-publish.sh
+      - scripts/sparkle.sh
       - scripts/prepare-update.py
       - scripts/publish-update.py
       - scripts/verify-update.swift
@@ -87,27 +90,7 @@ jobs:
           CERTIFICATE: ${{ secrets.MAILSTREAM_SIGNING_P12 }}
           CERTIFICATE_PASSWORD: ${{ secrets.MAILSTREAM_SIGNING_P12_PASSWORD }}
           UPDATE_KEY: ${{ secrets.MAILSTREAM_UPDATE_PRIVATE_KEY }}
-        run: |
-          set -eu
-          umask 077
-          work=$(mktemp -d)
-          keychain="$work/signing.keychain-db"
-          password=$(openssl rand -hex 24)
-          cleanup() { security delete-keychain "$keychain" || true; rm -rf "$work"; }
-          trap cleanup EXIT
-          printf '%s' "$CERTIFICATE" | base64 --decode > "$work/signing.p12"
-          printf '%s' "$UPDATE_KEY" > "$work/update-key"
-          security create-keychain -p "$password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$password" "$keychain"
-          security import "$work/signing.p12" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign -t cert -f pkcs12 -k "$keychain"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
-          security list-keychains -d user -s "$keychain"
-          app='build/Mailstream GPUI.app'
-          /usr/libexec/PlistBuddy -c "Add :MSInstalledRevision string $GITHUB_SHA" "$app/Contents/Info.plist"
-          ./scripts/sign.sh "$app"
-          # gpui-bundle.sh fetched and checked the pinned Sparkle distribution; its tools are here.
-          python3 scripts/prepare-update.py "$app" build/update --sparkle-bin build/sparkle-2.10.1/bin --key-file "$work/update-key"
+        run: ./scripts/ci-publish.sh 'build/Mailstream GPUI.app'
       - uses: actions/upload-artifact@v7
         with:
           name: Mailstream-GPUI-authenticated-update-${{ github.sha }}

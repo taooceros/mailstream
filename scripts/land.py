@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.dont_write_bytecode = True
-from checkout import default_checkout  # noqa: E402
+from repo import default_checkout  # noqa: E402
 
 TRIES = 3
 

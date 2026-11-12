@@ -107,8 +107,8 @@ Linux differs from the Mac in:
 
 On the Mac `Mailstream GPUI.app` updates itself as Mailstream Flutter does (MS-219; the
 Application updates section of `Flutter/README.md` has the details both share). `scripts/gpui-bundle.sh`
-bundles the release binary with the Apple Intelligence tagger, Sparkle 2.10.1 (fetched once into
-`build/` and checked against its pinned SHA-256) and an Info.plist naming the feed
+bundles the release binary with the Apple Intelligence tagger, Sparkle (the pinned
+version `scripts/sparkle.sh` fetches once into `build/`) and an Info.plist naming the feed
 `https://github.com/taooceros/mailstream/releases/download/updates/appcast-gpui.xml`, the
 approved public key and the `prerelease` channel; `src/updater.rs` loads Sparkle at launch and adds
 **Check for Updates…** and **Automatically Check for Updates** to the application menu. It checks

@@ -65,11 +65,8 @@ for frontend in "$@"; do
   case "$frontend" in
     flutter|gpui) ./scripts/app-config.sh "$HOME/Library/Application Support/Mailstream/config.json" ;;
   esac
-  /usr/libexec/PlistBuddy -c "Add :MSInstalledRevision string $revision" "$app/Contents/Info.plist"
-  ./scripts/sign.sh "$app"
-  codesign --verify --deep --strict "$app"
-  codesign -d -v "$app" 2>&1 | /usr/bin/grep -q '^TeamIdentifier=K7HG6KZNNP$' ||
-    fail "release must use the shared team K7HG6KZNNP"
+  # MSInstalledRevision, signature and the shared team, as CI's signed updates get them.
+  ./scripts/release-sign.sh "$app" "$revision"
   [ "$(jj log --no-graph -r main -T commit_id)" = "$revision" ] ||
     fail "main advanced during build; rebuild at current main before installing"
 

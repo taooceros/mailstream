@@ -231,7 +231,7 @@ def relock():
     if sys.platform != "darwin":
         return
     try:
-        if source_lock.default_checkout() and (open_paths := source_lock.writable()):
+        if source_lock.is_default_checkout() and (open_paths := source_lock.writable()):
             source_lock.lock()
             log(f"locked the default checkout again: {len(open_paths)} tracked files or folders were writable")
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:

@@ -10,7 +10,7 @@
 set -eu
 target="$1"
 case "$target" in *.json) json=1 ;; *) json= ;; esac
-SERVICE="dev.mailstream.build"
+. "$(dirname "$0")/build-keychain.sh"
 
 umask 077
 fragment=$(mktemp -t mailstream-app-config)

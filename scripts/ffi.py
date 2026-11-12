@@ -14,16 +14,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.dont_write_bytecode = True
+from repo import ROOT, build_env  # noqa: E402
+
 CONFIG = os.environ.get("CONFIG", "debug")
 LIBRARY = {"win32": "mailstream.dll", "darwin": "libmailstream.dylib"}.get(sys.platform, "libmailstream.so")
 PROFILE = ["--release"] if CONFIG == "release" else []
-# C build scripts (ring, simsimd) rebuild, and everything above them with them, whenever one of
-# these differs from the build being reused. Shells pick them up unevenly (the warm build of
-# 11-09 had SDKROOT and CPATH, agents' shells don't: every checkout rebuilt 15 crates twice,
-# MS-159); on macOS the C compiler finds the SDK through xcrun without them.
-DRIFTING = ["SDKROOT", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "LIBRARY_PATH"]
-ENV = {k: v for k, v in os.environ.items() if sys.platform != "darwin" or k not in DRIFTING}
+# Without SDKROOT, CPATH and the like on macOS, which rebuilt C crates in every checkout (repo.py).
+ENV = build_env()
 
 
 def cargo(directory, *args):

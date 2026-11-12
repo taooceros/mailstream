@@ -13,6 +13,9 @@ on:
       - FFI/**
       - scripts/ffi.py
       - scripts/sign.sh
+      - scripts/release-sign.sh
+      - scripts/ci-publish.sh
+      - scripts/sparkle.sh
       - scripts/prepare-update.py
       - scripts/publish-update.py
       - scripts/verify-update.swift
@@ -96,29 +99,7 @@ jobs:
           CERTIFICATE: ${{ secrets.MAILSTREAM_SIGNING_P12 }}
           CERTIFICATE_PASSWORD: ${{ secrets.MAILSTREAM_SIGNING_P12_PASSWORD }}
           UPDATE_KEY: ${{ secrets.MAILSTREAM_UPDATE_PRIVATE_KEY }}
-        run: |
-          set -eu
-          umask 077
-          work=$(mktemp -d)
-          keychain="$work/signing.keychain-db"
-          password=$(openssl rand -hex 24)
-          cleanup() { security delete-keychain "$keychain" || true; rm -rf "$work"; }
-          trap cleanup EXIT
-          printf '%s' "$CERTIFICATE" | base64 --decode > "$work/signing.p12"
-          printf '%s' "$UPDATE_KEY" > "$work/update-key"
-          security create-keychain -p "$password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$password" "$keychain"
-          security import "$work/signing.p12" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign -t cert -f pkcs12 -k "$keychain"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
-          security list-keychains -d user -s "$keychain"
-          app='Flutter/build/macos/Build/Products/Release/Mailstream Flutter.app'
-          /usr/libexec/PlistBuddy -c "Add :MSInstalledRevision string $GITHUB_SHA" "$app/Contents/Info.plist"
-          ./scripts/sign.sh "$app"
-          curl --fail --location --retry 8 --retry-delay 45 --retry-all-errors --output "$work/Sparkle.tar.xz" https://github.com/sparkle-project/Sparkle/releases/download/2.10.1/Sparkle-2.10.1.tar.xz
-          printf '1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27  %s\n' "$work/Sparkle.tar.xz" | shasum -a 256 -c -
-          tar -xf "$work/Sparkle.tar.xz" -C "$work"
-          python3 scripts/prepare-update.py "$app" build/update --sparkle-bin "$work/bin" --key-file "$work/update-key"
+        run: ./scripts/ci-publish.sh 'Flutter/build/macos/Build/Products/Release/Mailstream Flutter.app'
       - uses: actions/upload-artifact@v7
         with:
           name: Mailstream-authenticated-update-${{ github.sha }}

@@ -134,7 +134,7 @@ def main():
     parser.add_argument("app", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--sparkle-bin", type=Path, required=True,
-                        help="bin directory from pinned Sparkle 2.10.1 distribution")
+                        help="bin directory of the pinned Sparkle distribution (scripts/sparkle.sh)")
     parser.add_argument("--key-file", type=Path,
                         help="optional private seed file outside the repo; otherwise Sparkle uses Keychain")
     args = parser.parse_args()

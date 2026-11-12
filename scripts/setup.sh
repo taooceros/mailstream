@@ -4,7 +4,7 @@
 # finished steps are skipped, so only what is still missing is asked for.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-SERVICE=dev.mailstream.build
+. ./scripts/build-keychain.sh
 
 have() { security find-generic-password -s $SERVICE -a "$1" >/dev/null 2>&1; }
 value() { security find-generic-password -s $SERVICE -a "$1" -w; }

@@ -195,13 +195,15 @@ environment, which admits `main` only and holds `MAILSTREAM_SIGNING_P12`,
    newest published build and `pubspec.yaml`'s (what `scripts/install.sh` builds locally).
    Sparkle compares `CFBundleVersion`, not a commit SHA, so every update gets a larger one
    and a local install is replaced by the next published build.
-3. The release build is signed with `scripts/sign.sh`, retaining the shared Apple signing team
-   `K7HG6KZNNP` and host signing identifier `dev.mailstream.Mailstream`. It signs Sparkle's
-   nested helpers inside-out without changing their identifiers.
+3. `scripts/release-sign.sh` (shared by `scripts/install.sh` and CI's `scripts/ci-publish.sh`)
+   writes `MSInstalledRevision` and signs the release with `scripts/sign.sh`, retaining the
+   shared Apple signing team `K7HG6KZNNP` and host signing identifier
+   `dev.mailstream.Mailstream`. It signs Sparkle's nested helpers inside-out without changing
+   their identifiers.
 4. `python3 scripts/prepare-update.py "/path/Mailstream Flutter.app" /new/output/directory
    --sparkle-bin /path/to/Sparkle/bin` prepares artifacts from those exact signed bytes. The
-   pinned Sparkle distribution is 2.10.1, SHA-256
-   `1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27`.
+   pinned Sparkle distribution (version and SHA-256 in `scripts/sparkle.sh`, which fetches it
+   into `build/`) supplies that `bin`.
    Sparkle uses an existing Keychain signing key, or `--key-file /private/path` outside the
    repository. The script never creates keys or publishes anything. It checks the app signature,
    generates and signs the appcast using Sparkle with the bundle's stable/prerelease channel,

@@ -20,31 +20,22 @@ again before each pass when anything there is writable. status exits 1 when anyt
 A jj command that rewrites the working copy there (`jj new`, `jj edit`, `jj restore`) fails while
 it is locked and leaves the working copy stale; `unlock`, which doesn't need jj, then `jj
 workspace update-stale` and `lock` recover it."""
-import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+sys.dont_write_bytecode = True
+from repo import ROOT, is_default_checkout, jj  # noqa: E402
+
 FILE_ACE = "everyone deny write,append,delete"
 DIR_ACE = "everyone deny add_file,add_subdirectory,delete_child,delete"
 BATCH = 500
 
 
-def run(*args):
-    return subprocess.run(args, cwd=ROOT, check=True, text=True, capture_output=True).stdout
-
-
-def default_checkout():
-    """Whether ROOT is the default checkout rather than an ovnfs checkout of it."""
-    mount = Path(json.loads(run("ovnfs", "--json", "status"))["mount"]).resolve()
-    return (ROOT / ".jj").is_dir() and not ROOT.is_relative_to(mount)
-
-
 def paths():
     """The tracked files (symlinks left out: chmod would follow them) and the folders holding them."""
-    files = [ROOT / name for name in run("jj", "--no-pager", "file", "list").splitlines()]
+    files = [ROOT / name for name in jj("file", "list").splitlines()]
     files = [path for path in files if not path.is_symlink() and path.exists()]
     folders = {ROOT / parent for path in files for parent in path.relative_to(ROOT).parents}
     return files, sorted(folders)
@@ -85,7 +76,7 @@ def main():
         sys.exit(__doc__.split("\n\n")[2])
     if sys.platform != "darwin":
         sys.exit("source_lock: macOS only")
-    if not default_checkout():
+    if not is_default_checkout():
         sys.exit(f"source_lock: {ROOT} is not the default checkout")
     if command == ["lock"]:
         lock()

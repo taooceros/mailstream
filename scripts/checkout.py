@@ -40,32 +40,17 @@ and goes stale: use jj there, not git.
 
 `rm NAME` forgets workspace NAME, runs `ovnfs rm NAME` and deletes its target folders outside the
 mount; any of them may be gone already."""
-import json
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+sys.dont_write_bytecode = True
+from repo import ROOT, default_checkout, jj, ovnfs, run  # noqa: E402
+
 BUILD = ["FFI/target", "Engine/target", ".turso"]
 TARGETS = Path.home() / ".cache/mailstream-checkouts"
-
-
-def run(*args, cwd=ROOT):
-    return subprocess.run(args, cwd=cwd, check=True, text=True, capture_output=True).stdout
-
-
-def ovnfs(*args):
-    return json.loads(run("ovnfs", "--json", *args))
-
-
-def default_checkout():
-    """The default checkout, also when this script runs from one of its checkouts."""
-    for checkout in ovnfs("ls").get("checkouts") or []:
-        if Path(checkout["path"]).resolve() == ROOT:
-            return Path(checkout["source"])
-    return ROOT
 
 
 def frozen(checkout):
@@ -79,10 +64,9 @@ def frozen(checkout):
     return kind(".jj") == "hidden" and all(kind(path) == "source" for path in BUILD)
 
 
-
 def workspaces(source):
-    listing = run("jj", "--no-pager", "--ignore-working-copy", "workspace", "list", "-T",
-                  'name ++ "\\n"', cwd=source)
+    listing = jj("--ignore-working-copy", "workspace", "list", "-T", 'name ++ "\\n"',
+                      cwd=source)
     return listing.split()
 
 
@@ -91,7 +75,7 @@ def forget(source, name):
     its working-copy change when that is empty; `--ignore-working-copy` leaves the default
     checkout's own working copy alone."""
     if name in workspaces(source):
-        run("jj", "--no-pager", "--ignore-working-copy", "workspace", "forget", name, cwd=source)
+        jj("--ignore-working-copy", "workspace", "forget", name, cwd=source)
 
 
 def graft(source, path, name):
@@ -103,7 +87,7 @@ def graft(source, path, name):
     forget(source, name)
     with tempfile.TemporaryDirectory(prefix=f"checkout-{name}-") as temporary:
         workspace = Path(temporary) / name
-        run("jj", "--no-pager", "workspace", "add", "--name", name, str(workspace), cwd=source)
+        jj("workspace", "add", "--name", name, str(workspace), cwd=source)
         shutil.move(str(workspace / ".jj"), str(path / ".jj"))
     (path / ".jj" / "repo").write_text(str(source / ".jj" / "repo"))
 
@@ -164,20 +148,17 @@ def unmount_targets(source, path, name):
 def set_up(source, path, name):
     graft(source, path, name)
 
-    def jj(*args):
-        return run("jj", "--no-pager", *args, cwd=path)
-
-    if jj("diff", "--name-only").strip():
+    if jj("diff", "--name-only", cwd=path).strip():
         # The capture and the default checkout's working copy disagree (warm-build.py moved it
         # meanwhile): the fresh checkout holds no work, so take the revision's files.
-        jj("restore")
-    jj("git", "fetch")
-    jj("new", "main")
+        jj("restore", cwd=path)
+    jj("git", "fetch", cwd=path)
+    jj("new", "main", cwd=path)
     if sys.platform == "linux":
         # After `jj new main`, whose .gitignore also ignores the symlinks.
         unmount_targets(source, path, name)
     print(path, "at main", jj("log", "--no-graph", "-r", "main",
-                              "-T", 'commit_id.short() ++ " " ++ description.first_line()'))
+                              "-T", 'commit_id.short() ++ " " ++ description.first_line()', cwd=path))
 
 
 if __name__ == "__main__":

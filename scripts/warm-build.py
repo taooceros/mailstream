@@ -4,7 +4,7 @@ new ovnfs checkout starts from as its own `target/` and `.turso/` (MS-151): the 
 command line, Apple Intelligence tagger and Dart binding generator (`CONFIG=release
 scripts/ffi.py`, into FFI/target), the engine's tests (`cargo test --no-run` in Engine/, into
 Engine/target/debug) and the Turso library (`scripts/turso.sh`). It builds without the toolchain
-variables ffi.py drops (SDKROOT, CPATH, …): agents' shells don't set them, and a warm build made
+variables scripts/repo.py drops on macOS (SDKROOT, CPATH, …): agents' shells don't set them, and a warm build made
 with them rebuilt 15 crates in every checkout (MS-159).
 
 Usage: python3 scripts/warm-build.py [--allow CHECKOUT ...]
@@ -19,40 +19,23 @@ end as `main` has them and nothing else in the tree changes (the Dart bindings g
 folder). It unlocks the default checkout's source for its run and locks it again when it ends,
 failed or not (scripts/source_lock.py, MS-156)."""
 import argparse
-import json
-import os
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-OUTPUT = ["FFI/target", "Engine/target", ".turso"]
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.dont_write_bytecode = True
-from ffi import DRIFTING  # noqa: E402
+from repo import ROOT, build_env, checkouts_of, is_default_checkout, jj  # noqa: E402
 from checkout import frozen  # noqa: E402
 import source_lock  # noqa: E402
-ENV = {k: v for k, v in os.environ.items() if k not in DRIFTING}
 
-
-def run(*args, **kwargs):
-    return subprocess.run(args, cwd=ROOT, check=True, text=True, capture_output=True, **kwargs).stdout
-
-
-def jj(*args):
-    return run("jj", "--no-pager", *args)
+OUTPUT = ["FFI/target", "Engine/target", ".turso"]
 
 
 def fail(message):
     sys.exit(f"warm-build: {message}")
-
-
-def checkouts():
-    """The open ovnfs checkouts of this folder (`ovnfs --json ls` entries)."""
-    listing = json.loads(run("ovnfs", "--json", "ls"))
-    return [c for c in listing.get("checkouts") or [] if Path(c["source"]).resolve() == ROOT]
 
 
 def size(path):
@@ -70,12 +53,11 @@ def main():
                         help="an open checkout that builds nothing and may stay open")
     allowed = set(parser.parse_args().allow)
 
-    mount = json.loads(run("ovnfs", "--json", "status"))["mount"]
-    if ROOT.is_relative_to(Path(mount).resolve()) or not (ROOT / ".jj").is_dir():
+    if not is_default_checkout():
         fail(f"run it in the default checkout, not {ROOT}")
     if jj("diff", "--name-only").strip() or jj("log", "--no-graph", "-r", "@", "-T", "description").strip():
         fail("the default checkout has changes or a described working-copy change; see `jj st`")
-    open_now = checkouts()
+    open_now = checkouts_of(ROOT)
     blocking = [c["name"] for c in open_now if c["name"] not in allowed and not frozen(c)]
 
     source_lock.unlock()
@@ -116,14 +98,14 @@ def build(open_before):
         ]
         for name, command, cwd, extra in steps:
             step = time.monotonic()
-            subprocess.run(command, cwd=cwd, check=True, env={**ENV, **extra})
+            subprocess.run(command, cwd=cwd, check=True, env=build_env(**extra))
             print(f"{name}: {time.monotonic() - step:.0f} s", flush=True)
     print(f"Warm build done in {time.monotonic() - started:.0f} s; " +
           ", ".join(f"{path} {size(path)}" for path in OUTPUT))
 
     if changed := jj("diff", "--name-only").strip():
         fail("the build changed tracked files:\n" + changed)
-    if opened := [c["name"] for c in checkouts() if c["name"] not in open_before]:
+    if opened := [c["name"] for c in checkouts_of(ROOT) if c["name"] not in open_before]:
         print("warm-build: checkouts opened during the build and may hold half-built output: " +
               ", ".join(opened), file=sys.stderr)
 
