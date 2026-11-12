@@ -149,7 +149,8 @@ hashes stay as they are.
 - UI changes (a new or changed view, flow or interaction, in any front end): before handing
   over, the code agent attaches to the issue screenshots of its own build of the real app (a
   recording for motion) showing every state the change adds or alters, light and dark; without
-  them the work is not ready to install.
+  them the work is not ready to install. For GPUI they come from `python3 scripts/shots.py`
+  ([Release delivery](#release-delivery)), not computer use.
 - Parents: whoever moves a sub-issue to In Review checks its siblings. Once none is left in
   Backlog, Todo or In Progress, it finishes the parent too: a summary comment listing each
   sub-issue and what remains, then In Review. Nobody else picks up a parent an agent filed.
@@ -287,16 +288,25 @@ The code agent:
 
 1. Tests its change in the real app before landing: a release or debug build from its own
    checkout (never an `/Applications` copy; it doesn't install), over synthetic data (no
-   accounts or personal mail, like the fixtures `GPUI/README.md` and `Flutter/README.md` list),
-   driven with computer helpers; no sending mail, nothing destructive. It takes every
-   screenshot or recording the change needs, UI states in light and dark (launching the
-   executable with `-AppleInterfaceStyle Dark` shows it dark), and attaches them to the issue.
-   On Linux it runs the app only in a private Hyprland desktop of its own, `python3
-   scripts/vhypr.py start <name> [--dark]` (the script's header has every verb: `run`, `shot`,
-   `click`, `drag`, `scroll`, `type`, `key`, `appearance`, `stop`), never on the user's screen,
-   and stops it when done. The app there gets an empty data folder of its own. Never start
-   another compositor (sway, cage, weston) on the GPU: a headless sway hung it twice on 11-11,
-   resetting the GPU and crashing the user's session.
+   accounts or personal mail, like the fixtures `GPUI/README.md` and `Flutter/README.md` list);
+   no sending mail, nothing destructive. It takes every screenshot or recording the change
+   needs, UI states in light and dark, and attaches them to the issue.
+   - GPUI, on the Mac and Linux: `python3 scripts/shots.py SCRIPT --upload` in its checkout
+     (MS-243). It builds the app with the `shots` feature and runs it headless over the
+     synthetic mail of `GPUI/src/shots/seed.rs`, light and dark, driven by SCRIPT (clicks,
+     scrolls, keys, typing, resizes, `shot NAME`; the script's header has every command), and
+     prints the Markdown of the uploaded PNGs for the hand-over comment. No display, focus or
+     computer use: it works with the screen locked. Add to the seed what the change needs to
+     show.
+   - What shots.py can't show (the real compositor or Liquid Glass behind the window, a real
+     sign-in, the Mac's WebView renderer, menus, motion), and Flutter: the real app driven with
+     computer helpers. On the Mac, launching the executable with `-AppleInterfaceStyle Dark`
+     shows it dark. On Linux only in a private Hyprland desktop of its own, `python3
+     scripts/vhypr.py start <name> [--dark]` (the script's header has every verb: `run`,
+     `shot`, `click`, `drag`, `scroll`, `type`, `key`, `appearance`, `stop`), never on the
+     user's screen, stopped when done; the app there gets an empty data folder of its own.
+     Never start another compositor (sway, cage, weston) on the GPU: a headless sway hung it
+     twice on 11-11, resetting the GPU and crashing the user's session.
 2. Lands its `ms-<n>` bookmark on live `main` with `python3 scripts/land.py MS-<n>` ([Version
    control](#version-control-jj)), which keeps other agents' changes.
 3. Picks the targets: `gpui` (`Mailstream GPUI.app`) by default; `flutter` (`Mailstream

@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """A private Hyprland desktop for testing the Linux front ends without the user's screen (MS-204).
 
+For hand-over screenshots of GPUI use scripts/shots.py instead (MS-243): it draws the app headless
+in its own process, light and dark, from a script, with no desktop, on the Mac too. Use this
+desktop for what that can't show: Flutter, the compositor's blur behind the window, real input
+and windowing, motion, the installed copy's launch check.
+
 Usage: python3 scripts/vhypr.py start NAME [--size WxH] [--scale S] [--hz HZ] [--dark] [--blur] [--wallpaper]
        python3 scripts/vhypr.py run NAME -- COMMAND [ARG...]
        python3 scripts/vhypr.py shot NAME FILE [--class CLASS]

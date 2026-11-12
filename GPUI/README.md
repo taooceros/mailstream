@@ -65,6 +65,20 @@ On the Mac, `-AppleInterfaceStyle Dark` (or `Light`) after the executable shows 
 appearance without changing the system's, for screenshots: AppKit ignores that argument for an
 app's appearance, so `main.rs` applies it; a launch without it follows the system.
 
+Screenshots for a hand-over come from the app itself, headless (MS-243): `python3
+scripts/shots.py SCRIPT [--upload]` builds it with the `shots` feature and runs `mailstream-gpui
+--shots SCRIPT --out DIR [--dark]` light and dark. `src/shots.rs` opens the app's own window,
+views and engine in gpui-kit's `HeadlessAppContext` (GPUI's test platform with the system's text
+system and GPUI's offscreen renderer, Metal on the Mac and wgpu on Linux), drives it with the
+script's clicks, scrolls, keys, typing and resizes in real time, and saves the window as PNGs at
+2x. The data is `src/shots/seed.rs`'s synthetic mail in a fresh folder (HOME on the Mac, the XDG
+data and cache folders elsewhere), written through the engine's cache layer: a Gmail and an
+Outlook account, threads with HTML, attachments and inline answers, an invitation with its
+event, a long report with a table, Chinese mail, bundles, Chat and the calendars. The mode has
+no system appearance or desktop behind it, so `design::palette` takes its appearance and
+`design::window_material` is opaque; installed builds leave the feature out. The accounts aren't
+signed in: actions that reach the provider fail with a toast.
+
 HTML bodies are drawn by Blitz, the engine's renderer (`src/blitz_body.rs`, as in Flutter's
 reader), on every platform: the build turns on the FFI crate's `blitz` feature, with one
 adjustment for GPUI's dependency graph: `vendor/stylo_derive` is Stylo's derive crate 0.22.0 with
@@ -145,6 +159,7 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 | `src/icons.rs`, `src/format.rs` | Material Symbols glyphs; dates and sizes |
 | `src/input.rs` | `field` / `area`: gpui-kit's one-line and multi-line text fields in the surrounding text style (see above) |
 | `src/bench.rs` | The frame measurement `scripts/bench.sh gpui` runs (`MAILSTREAM_BENCH=scroll`): the list scrolls itself and every frame's start and render-to-paint time is logged. The window runs in the background, so it opens without GPUI Fast's limit of about 30 fps for a window that isn't key |
+| `src/shots.rs`, `src/shots/seed.rs` | The `shots` feature's headless screenshot mode (`--shots`, see above) and its synthetic mail |
 | `src/updater.rs` | Mac only: starts Sparkle from the bundle's Frameworks and adds the two update items to the application menu |
 
 Keys (⌘ is Ctrl on Linux): ↑/↓ or J/K move (in the reader they page through conversations),
