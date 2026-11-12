@@ -4,14 +4,15 @@
 
 use super::*;
 use gpui::{ListState, MouseDownEvent, list};
+use mailstream::Account;
 
 impl MailApp {
     pub(super) fn render_list(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         if self.items.is_empty() {
             let list = self.list();
             let note: SharedString = match list {
-                Some(list) if list.loading => "Loading…".into(),
-                Some(List { error: Some(error), .. }) => error.clone(),
+                Some(list) if list.loading || list.fetching => "Loading…".into(),
+                Some(List { error: Some(error), .. }) | Some(List { failures: Some(error), .. }) => error.clone(),
                 None => "Loading…".into(),
                 Some(_) if self.query.is_some() => "No matches".into(),
                 Some(_) => "No conversations".into(),
@@ -31,6 +32,46 @@ impl MailApp {
         .size_full()
         .py(px(space::S6))
         .into_any_element()
+    }
+
+    /// The accounts of the list on screen that can't connect (MS-278), on one line over its rows,
+    /// which keep what the engine holds; a click tries every account again.
+    pub(super) fn render_account_notice(&self, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let failing: Vec<(&Account, &SharedString)> = self
+            .accounts
+            .iter()
+            .filter(|account| match &self.source {
+                Source::Mailbox { account: shown, .. } => *shown == account.id,
+                Source::Unified(_) => true,
+            })
+            .filter_map(|account| self.account_problems.get(&account.id).map(|problem| (account, problem)))
+            .collect();
+        let (account, problem) = failing.first()?;
+        let message = match failing.len() {
+            1 => format!("{} can't connect: {problem}", account.title()),
+            count => format!("{count} accounts can't connect"),
+        };
+        Some(
+            div()
+                .flex_shrink_0()
+                .px(px(space::S12))
+                .pb(px(space::S10))
+                .child(
+                    notice(Tone::Error, None, message, true, p)
+                        .id("account-notice")
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx)))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(text::CAPTION))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(p.accent)
+                                .child("Try Again"),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The id of the row after `ix` in the main list, if a row follows.

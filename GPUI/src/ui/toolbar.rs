@@ -33,7 +33,7 @@ impl MailApp {
                 (self.source.title(), (!parts.is_empty()).then(|| parts.join(" · ").into()))
             }
         };
-        let loading = self.list().is_some_and(|list| list.loading);
+        let loading = self.list().is_some_and(|list| list.loading || list.fetching);
         let can_go_back = bundle.is_some() || self.query.is_some();
         title_bar("list-header", window, cx)
             .flex_shrink_0()

@@ -153,8 +153,9 @@ pub struct ListKey {
 }
 
 impl ListKey {
-    /// One page of this list from the engine, prepared for display.
-    async fn fetch(self, cursor: Option<String>) -> Result<Listing, MailError> {
+    /// One page of this list from the engine, prepared for display. `cached`: what the engine
+    /// holds, at once, without asking a provider; a search always asks.
+    async fn fetch(self, cursor: Option<String>, cached: bool) -> Result<Listing, MailError> {
         let account = self.source.account().cloned();
         match &self.query {
             Some(query) => engine().search(query.to_string(), account, PAGE).await,
@@ -163,7 +164,7 @@ impl ListKey {
                     Source::Unified(role) => role.as_str().to_owned(),
                     Source::Mailbox { id, .. } => id.clone(),
                 };
-                let query = ListQuery { mailboxes: vec![mailbox], account, limit: PAGE, cursor, ..ListQuery::default() };
+                let query = ListQuery { mailboxes: vec![mailbox], account, limit: PAGE, cursor, cached, ..ListQuery::default() };
                 engine().list(query).await
             }
         }
@@ -180,15 +181,34 @@ pub struct List {
     pub conversations: Vec<Conversation>,
     /// The following page's cursor.
     next: Option<String>,
+    /// When the providers last answered for it.
     fetched: Option<Instant>,
+    /// A read of what the engine holds (a search: the search) is under way.
     pub loading: bool,
-    /// The engine changed it while a load was under way: load again when that one lands.
+    /// The engine changed it while a read was under way: read again when that one lands.
     stale: bool,
+    /// The providers are asked for its newest (`fetch_list`); what arrives meanwhile shows as
+    /// the engine's change events bring it.
+    pub fetching: bool,
     loading_more: bool,
     /// The view and its length that asked for the last page. A page that leaves that view's
     /// length unchanged (all of it folded into bundles) asks for no more from that view.
     paged_at: Option<(PagedView, usize)>,
+    /// The engine refused the last answer (no such mailbox yet).
     pub error: Option<SharedString>,
+    /// The mailboxes whose providers failed when last asked.
+    pub failures: Option<SharedString>,
+}
+
+/// What a list answer was asked as.
+#[derive(Clone, Copy, PartialEq)]
+enum Arrival {
+    /// What the engine holds (a search's results).
+    Read,
+    /// The providers' newest.
+    Fetch,
+    /// The page after the last.
+    More,
 }
 
 /// A scrolling view that pages the list when its end comes into view.
@@ -343,6 +363,8 @@ pub struct MailApp {
     pub search: Entity<InputState>,
     pub accounts: Vec<Account>,
     pub mailboxes: HashMap<String, Vec<Mailbox>>,
+    /// The accounts that can't connect just now, and why (the engine's `status`, MS-278).
+    pub account_problems: HashMap<String, SharedString>,
     pub source: Source,
     pub query: Option<SharedString>,
     pub lists: HashMap<ListKey, List>,
@@ -471,6 +493,7 @@ impl MailApp {
             search,
             accounts: Vec::new(),
             mailboxes: HashMap::new(),
+            account_problems: HashMap::new(),
             source: Source::Unified(MailboxRole::Inbox),
             query: None,
             lists: HashMap::new(),
@@ -525,6 +548,7 @@ impl MailApp {
             _subscriptions: subscriptions,
         };
         this.load_mailboxes(cx);
+        this.load_problems(cx);
         this.load_list(this.key(), false, cx);
         this.follow_engine(cx);
         this.load_layout_settings(cx);
@@ -557,7 +581,8 @@ impl MailApp {
     // MARK: - Loading
 
     /// Re-reads what the engine says changed: the list on screen on new mail, moves and tags
-    /// (other lists count as stale), counts on mailbox and account changes, previews as they load.
+    /// (other lists count as stale), counts on mailbox and account changes, previews as they load,
+    /// the accounts that can't connect.
     fn follow_engine(&self, cx: &mut Context<Self>) {
         let (sender, mut events) = unbounded();
         // The listener only queues the event, so it runs on the engine's thread: GPUI's own loop
@@ -588,16 +613,21 @@ impl MailApp {
                     if mailboxes {
                         this.load_mailboxes(cx);
                     }
+                    if batch.iter().any(|e| matches!(e, Event::Accounts | Event::Problems)) {
+                        this.load_problems(cx);
+                    }
                     // A list asked for before the engine knew the mailboxes failed; it can load now.
                     let failed = mailboxes && this.list().is_some_and(|list| list.error.is_some());
-                    if failed || batch.iter().any(|e| matches!(e, Event::Conversations | Event::Tags)) {
+                    if failed {
+                        this.load_list(this.key(), true, cx);
+                    } else if batch.iter().any(|e| matches!(e, Event::Conversations | Event::Tags)) {
                         let key = this.key();
                         for (other, list) in &mut this.lists {
                             if other != &key {
                                 list.fetched = None;
                             }
                         }
-                        this.load_list(key, true, cx);
+                        this.read_list(key, cx);
                     } else if batch.contains(&Event::Previews) {
                         this.load_previews(&this.key(), cx);
                     }
@@ -634,21 +664,62 @@ impl MailApp {
         );
     }
 
-    /// Asks for `key`'s first page unless a fresh copy is in memory (or `force`). A forced load
-    /// while one is under way runs again once that one lands.
+    /// The accounts that can't connect, as the engine's `status` has them.
+    fn load_problems(&mut self, cx: &mut Context<Self>) {
+        self.background(cx, engine().status(), |this, result, cx| {
+            let Ok(status) = result else { return };
+            let problems: HashMap<String, SharedString> =
+                status.accounts.into_iter().filter_map(|account| Some((account.id, account.problem?.into()))).collect();
+            if problems != this.account_problems {
+                this.account_problems = problems;
+                cx.notify();
+            }
+        });
+    }
+
+    /// Shows `key`'s list: what the engine holds at once (`read_list`), and unless a fresh copy is
+    /// in memory (or `force`), the providers' newest (`fetch_list`), which the engine takes in
+    /// mailbox by mailbox, each showing as its change event arrives: a slow or failing account
+    /// holds up neither the others nor the list (MS-278).
     pub fn load_list(&mut self, key: ListKey, force: bool, cx: &mut Context<Self>) {
         let list = self.lists.entry(key.clone()).or_default();
-        if list.loading {
-            list.stale |= force;
+        if !force && list.fetched.is_some_and(|at| at.elapsed() < FRESH) {
             return;
         }
-        if !force && list.fetched.is_some_and(|at| at.elapsed() < FRESH) {
+        self.read_list(key.clone(), cx);
+        if key.query.is_none() {
+            self.fetch_list(key, cx);
+        }
+    }
+
+    /// Reads `key`'s first page as the engine holds it (a search asks the providers). A read asked
+    /// for while one is under way runs again once that one lands.
+    fn read_list(&mut self, key: ListKey, cx: &mut Context<Self>) {
+        let list = self.lists.entry(key.clone()).or_default();
+        if list.loading {
+            list.stale = true;
             return;
         }
         list.loading = true;
         list.stale = false;
         cx.notify();
-        self.background(cx, key.clone().fetch(None), move |this, result, cx| this.list_arrived(key, result, false, cx));
+        self.background(cx, key.clone().fetch(None, true), move |this, result, cx| {
+            this.list_arrived(key, result, Arrival::Read, cx)
+        });
+    }
+
+    /// Asks the providers for `key`'s newest, unless that is under way; its answer, which waits for
+    /// every account, lands like a read, with the accounts that failed.
+    fn fetch_list(&mut self, key: ListKey, cx: &mut Context<Self>) {
+        let list = self.lists.entry(key.clone()).or_default();
+        if list.fetching {
+            return;
+        }
+        list.fetching = true;
+        cx.notify();
+        self.background(cx, key.clone().fetch(None, false), move |this, result, cx| {
+            this.list_arrived(key, result, Arrival::Fetch, cx)
+        });
     }
 
     /// Asks for the page after the current list's last, when there is one and none is loading.
@@ -662,22 +733,25 @@ impl MailApp {
         }
         list.loading_more = true;
         list.paged_at = Some((view, shown));
-        self.background(cx, key.clone().fetch(Some(cursor)), move |this, result, cx| {
-            this.list_arrived(key, result, true, cx)
+        self.background(cx, key.clone().fetch(Some(cursor), false), move |this, result, cx| {
+            this.list_arrived(key, result, Arrival::More, cx)
         });
     }
 
-    fn list_arrived(&mut self, key: ListKey, result: Result<Listing, MailError>, more: bool, cx: &mut Context<Self>) {
+    fn list_arrived(&mut self, key: ListKey, result: Result<Listing, MailError>, arrival: Arrival, cx: &mut Context<Self>) {
         let list = self.lists.entry(key.clone()).or_default();
-        if !more {
-            list.loading = false;
+        match arrival {
+            Arrival::Read => list.loading = false,
+            Arrival::Fetch => list.fetching = false,
+            Arrival::More => list.loading_more = false,
         }
-        list.loading_more = false;
-        let again = !more && std::mem::take(&mut list.stale);
+        let again = arrival == Arrival::Read && std::mem::take(&mut list.stale);
+        // The providers answered: a fetch, or a search.
+        let asked = arrival == Arrival::Fetch || (arrival == Arrival::Read && key.query.is_some());
         match result {
             Ok(mut listing) => {
                 listing.conversations.retain(|c| !self.removing.contains(&c.id));
-                if more {
+                if arrival == Arrival::More {
                     let known: HashSet<String> = list.conversations.iter().map(|c| c.id.clone()).collect();
                     list.conversations.extend(listing.conversations.into_iter().filter(|c| !known.contains(&c.id)));
                     list.next = listing.next;
@@ -691,15 +765,21 @@ impl MailApp {
                         .filter(|c| !fresh.contains(&c.id) && oldest.is_some_and(|oldest| c.time().is_some_and(|d| d < oldest)))
                         .collect();
                     list.conversations = listing.conversations;
-                    list.fetched = Some(Instant::now());
                     list.paged_at = None;
+                    if asked {
+                        list.fetched = Some(Instant::now());
+                    }
                     if tail.is_empty() {
                         list.next = listing.next;
                     } else {
                         list.conversations.extend(tail);
                     }
                 }
-                list.error = (!listing.failures.is_empty()).then(|| listing.failures.join("; ").into());
+                list.error = None;
+                // What is held says nothing of the providers: their failures stay until they answer.
+                if asked || !listing.failures.is_empty() {
+                    list.failures = (!listing.failures.is_empty()).then(|| listing.failures.join("; ").into());
+                }
             }
             Err(error) => list.error = Some(error.to_string().into()),
         }
@@ -709,7 +789,7 @@ impl MailApp {
         }
         self.load_previews(&key, cx);
         if again {
-            self.load_list(key, true, cx);
+            self.read_list(key, cx);
         }
         cx.notify();
     }

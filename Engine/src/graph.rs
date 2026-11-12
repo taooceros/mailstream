@@ -257,14 +257,18 @@ impl Graph {
         Ok(Address::new(user.display_name, email))
     }
 
+    /// Every folder. `counts` (with their counts) is the background refresh: it asks at
+    /// background priority, so a provider that stops answering never queues the listings behind
+    /// it (MS-278).
     pub async fn mailboxes(&self, counts: bool) -> Result<Vec<Mailbox>, ApiError> {
+        let priority = if counts { Priority::Background } else { Priority::Interactive };
         let top_url = self.url("me/mailFolders", &[("$top", "100"), ("$select", FOLDER_FIELDS)]);
-        let (known, top) = tokio::join!(self.well_known_ids(), self.pages::<Folder>(top_url, Priority::Interactive));
+        let (known, top) = tokio::join!(self.well_known_ids(priority), self.pages::<Folder>(top_url, priority));
         let (well_known, top) = (known?, top?);
         let hidden: HashSet<String> = SYSTEM_FOLDERS.iter().filter_map(|name| well_known.get(*name).cloned()).collect();
         let roles: HashMap<String, MailboxRole> =
             ROLE_FOLDERS.iter().filter_map(|(name, role)| Some((well_known.get(*name)?.clone(), *role))).collect();
-        let folders = self.expand(top, None, Arc::new(hidden)).await?;
+        let folders = self.expand(top, None, Arc::new(hidden), priority).await?;
         Ok(folders
             .into_iter()
             .map(|(folder, name)| Mailbox {
@@ -278,7 +282,7 @@ impl Graph {
             .collect())
     }
 
-    async fn well_known_ids(&self) -> Result<HashMap<String, String>, ApiError> {
+    async fn well_known_ids(&self, priority: Priority) -> Result<HashMap<String, String>, ApiError> {
         let mut known = self.well_known.lock().await;
         let wanted: Vec<&str> = ROLE_FOLDERS
             .iter()
@@ -295,7 +299,7 @@ impl Graph {
         }
         let lookups = wanted.into_iter().map(|name| async move {
             let url = self.url(&format!("me/mailFolders/{name}"), &[("$select", "id")]);
-            match self.decode::<FolderId>(url, None, Priority::Interactive).await {
+            match self.decode::<FolderId>(url, None, priority).await {
                 Ok(folder) => Ok((name, Some(folder.id))),
                 Err(error) if error.status == 404 => Ok((name, None)),
                 Err(error) => Err(error),
@@ -315,6 +319,7 @@ impl Graph {
         folders: Vec<Folder>,
         path: Option<String>,
         hidden: Arc<HashSet<String>>,
+        priority: Priority,
     ) -> BoxFuture<'a, Result<Vec<(Folder, String)>, ApiError>> {
         async move {
             let mut found = Vec::new();
@@ -332,8 +337,8 @@ impl Graph {
                     );
                     let (hidden, name) = (hidden.clone(), name.clone());
                     children.push(async move {
-                        let nested = self.pages::<Folder>(url, Priority::Interactive).await?;
-                        self.expand(nested, Some(name), hidden).await
+                        let nested = self.pages::<Folder>(url, priority).await?;
+                        self.expand(nested, Some(name), hidden, priority).await
                     });
                 }
                 found.push((folder, name));

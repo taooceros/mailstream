@@ -30,6 +30,10 @@ are window points from its top left (a PNG's pixels halved: shots are drawn at 2
     size W H                   resize the window
     window other|main          drive and shoot the other window the app opened (Settings, after
                                `key secondary-,`), or the main one again
+    provider google|microsoft answer|hang|fail
+                               that provider's requests from now on: answered as usual, never
+                               (each times out after the engine's 30 s) or with a 503, for an
+                               account that can't connect; `key secondary-shift-n` asks again
 
 The window opens at --size (default 1240x800, the app's) with the inbox loaded. Each input lets
 0.6 s pass. Shot first, then click: open `NAME-light.png` to find where things are.

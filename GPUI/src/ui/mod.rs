@@ -404,6 +404,7 @@ impl MailApp {
                         .child(div().flex_1().min_w_0().child(input::field(&self.search))),
                 ),
             )
+            .children(self.render_account_notice(p, cx))
             .child(hairline(p))
             .child(
                 div()

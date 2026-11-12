@@ -28,6 +28,8 @@ struct Node {
     /// What selecting it shows; `None` rows only fold.
     source: Option<Pick>,
     tooltip: Option<SharedString>,
+    /// Why the row's account can't connect (MS-278): a warning glyph at the row's end says so.
+    problem: Option<SharedString>,
 }
 
 /// What a selectable row shows.
@@ -196,6 +198,7 @@ impl MailApp {
                 expandable: children,
                 source: Some(Pick::Mail(Source::Unified(role))),
                 tooltip: None,
+                problem: None,
             });
             if expanded {
                 for (index, account, inbox) in members {
@@ -208,6 +211,7 @@ impl MailApp {
                         expandable: false,
                         source: Some(Pick::Mail(mailbox_source(account, inbox))),
                         tooltip: Some(account.id.clone().into()),
+                        problem: self.account_problems.get(&account.id).cloned(),
                     });
                 }
             }
@@ -228,6 +232,7 @@ impl MailApp {
                 expandable: several,
                 source: Some(Pick::Chat(None)),
                 tooltip: None,
+                problem: None,
             });
             if open {
                 for (position, account) in chat.accounts().iter().enumerate() {
@@ -242,6 +247,7 @@ impl MailApp {
                         expandable: false,
                         source: Some(Pick::Chat(Some(account.id.clone()))),
                         tooltip: Some(account.id.clone().into()),
+                        problem: None,
                     });
                 }
             }
@@ -259,6 +265,7 @@ impl MailApp {
             expandable: false,
             source: Some(Pick::Calendar),
             tooltip: None,
+            problem: None,
         });
         let section: SharedString = "section:accounts".into();
         let open = self.expanded.contains(&section);
@@ -271,6 +278,7 @@ impl MailApp {
             expandable: true,
             source: None,
             tooltip: None,
+            problem: None,
         });
         if !open {
             return nodes;
@@ -288,6 +296,7 @@ impl MailApp {
                 expandable: !all.is_empty(),
                 source: None,
                 tooltip: Some(account.id.clone().into()),
+                problem: self.account_problems.get(&account.id).cloned(),
             });
             if !expanded {
                 continue;
@@ -310,6 +319,7 @@ impl MailApp {
                 expandable: true,
                 source: None,
                 tooltip: None,
+                problem: None,
             });
             if folders_open {
                 nodes.extend(others.into_iter().map(|mailbox| mailbox_node(account, mailbox, 2)));
@@ -367,10 +377,12 @@ impl MailApp {
                 ))))
         });
 
+        let tip = match (node.tooltip, &node.problem) {
+            (Some(tip), Some(problem)) => Some(format!("{tip} can't connect: {problem}").into()),
+            (tip, _) => tip,
+        };
         destination(node.key.clone(), node.depth, selected, p)
-            .when_some(node.tooltip, |d, tip| {
-                d.tooltip(tooltip(tip))
-            })
+            .when_some(tip, |d, tip: SharedString| d.tooltip(tooltip(tip)))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| match &source {
                 Some(Pick::Mail(source)) => this.select(source.clone(), window, cx),
                 Some(Pick::Chat(account)) => this.select_chat(account.clone(), window, cx),
@@ -390,6 +402,7 @@ impl MailApp {
             .when(node.badge > 0, |d| {
                 d.child(div().flex_shrink_0().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(count(node.badge)))
             })
+            .when(node.problem.is_some(), |d| d.child(icon(Icon::Spam, icon_size::ROW, p.danger)))
             .children(disclosure)
             .into_any_element()
     }
@@ -512,5 +525,6 @@ fn mailbox_node(account: &Account, mailbox: &Mailbox, depth: usize) -> Node {
         expandable: false,
         source: Some(Pick::Mail(source)),
         tooltip: None,
+        problem: None,
     }
 }

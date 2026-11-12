@@ -29,6 +29,10 @@
 //! toast TEXT                 show the rest of the line in the app's toast (`controls::toast`)
 //! window other|main          drive and shoot another window the app opened (Settings, after
 //!                            `key secondary-,`), or the main one again
+//! provider google|microsoft answer|hang|fail
+//!                            from now on that provider's requests are answered as usual, never
+//!                            (each times out after the engine's 30 s) or with a 503: an account
+//!                            that can't connect (MS-278); `key secondary-shift-n` asks again
 //! ```
 //!
 //! Every input command then lets `SETTLE` pass. The window opens at `--size` (default 1240×800,
@@ -246,6 +250,7 @@ enum Command {
     Toast(String),
     /// The other window (`true`) or the main one.
     Window(bool),
+    Provider(mailstream_engine::Provider, mailstream_engine::shots::Outage),
 }
 
 impl Command {
@@ -294,6 +299,21 @@ impl Command {
             "toast" if !rest.is_empty() => Command::Toast(rest.into()),
             "window" if rest == "other" || rest == "main" => Command::Window(rest == "other"),
             "window" => return Err("window: other or main".into()),
+            "provider" => {
+                use mailstream_engine::{Provider, shots::Outage};
+                let provider = match words.first().copied() {
+                    Some("google") => Provider::Google,
+                    Some("microsoft") => Provider::Microsoft,
+                    _ => return Err("provider: google or microsoft, then answer, hang or fail".into()),
+                };
+                let outage = match words.get(1).copied() {
+                    Some("answer") => Outage::Answer,
+                    Some("hang") => Outage::Hang,
+                    Some("fail") => Outage::Fail,
+                    _ => return Err("provider: google or microsoft, then answer, hang or fail".into()),
+                };
+                Command::Provider(provider, outage)
+            }
             _ => return Err(format!("unknown command: {line}")),
         })
     }
@@ -366,6 +386,10 @@ impl Run {
                 self.pass(time);
                 Ok(())
             },
+            Command::Provider(provider, outage) => {
+                mailstream_engine::shots::set_outage(provider, outage);
+                return Ok(());
+            }
             Command::Shot(name) => {
                 self.pass(FRAME);
                 let image = self.cx.capture_screenshot(self.window).map_err(|error| format!("capture: {error}"))?;

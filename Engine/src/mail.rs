@@ -576,7 +576,15 @@ impl Mail {
         let Some(backend) = self.backend(&name) else { return };
         let mail = self.clone();
         tokio::spawn(async move {
-            let Ok(fresh) = backend.mailboxes(true).await else { return };
+            let fresh = match backend.mailboxes(true).await {
+                Ok(fresh) => fresh,
+                Err(error) => {
+                    if error.cuts_off() {
+                        mail.account_failed(&name, &error);
+                    }
+                    return;
+                }
+            };
             let counts: HashMap<String, (Option<i64>, Option<i64>)> =
                 fresh.into_iter().map(|mailbox| (mailbox.id, (mailbox.unread, mailbox.total))).collect();
             let mut state = mail.state();
@@ -803,9 +811,11 @@ impl Mail {
     }
 
     /// First pages of `keys`, and the keys that failed. Each page is taken in as it arrives, so a
-    /// slow or failing mailbox holds up no other (MS-278), and once an account's pages are all in
-    /// it says whether its mail loaded (`account_loaded`, `account_failed`). A key's answer counts
-    /// only if no later request for it was made, so a slow older pass never overwrites a newer one.
+    /// slow or failing mailbox holds up no other (MS-278); an account can't connect from its first
+    /// answer that says so (`account_failed`) and has loaded once its pages are all in without one
+    /// (`account_loaded`). A key's page is taken in only if no later request for it was made, so a
+    /// slow older pass never overwrites a newer one; its answer still tells whether the account
+    /// connects.
     async fn fetch_first_pages(self: &Arc<Self>, keys: &[MailboxKey]) -> HashMap<MailboxKey, ApiError> {
         let mut tickets = HashMap::new();
         {
@@ -818,8 +828,8 @@ impl Mail {
         }
         let asked: Vec<(MailboxKey, Arc<Backend>)> =
             keys.iter().filter_map(|key| self.backend(&key.account).map(|backend| (key.clone(), backend))).collect();
-        // Per account: its pages still out, whether one counted, and the failure that cut it off.
-        let mut accounts: HashMap<String, (usize, bool, Option<ApiError>)> = HashMap::new();
+        // Per account: its pages still out, and whether one was cut off.
+        let mut accounts: HashMap<String, (usize, bool)> = HashMap::new();
         for (key, _) in &asked {
             accounts.entry(key.account.clone()).or_default().0 += 1;
         }
@@ -832,42 +842,36 @@ impl Mail {
             .collect();
         let mut failures = HashMap::new();
         while let Some((key, result)) = jobs.next().await {
-            // None: the answer doesn't count (signed out, or a newer request was made).
-            let answer: Option<Result<(), ApiError>> = {
+            // Only the latest request's page is taken in; any answer says whether the account
+            // connects.
+            let result = {
                 let mut state = self.state();
-                if !state.accounts.iter().any(|account| account.name == key.account)
-                    || state.first_page_requests.get(&key) != tickets.get(&key)
-                {
-                    None
-                } else {
-                    Some(result.map(|page| {
-                        if self.merge_first_page(&mut state, page.envelopes, page.next, &key)
-                            && Self::default_keys(&state).contains(&key)
-                        {
-                            self.conversations_changed();
-                        }
-                    }))
+                if !state.accounts.iter().any(|account| account.name == key.account) {
+                    continue;
                 }
+                let latest = state.first_page_requests.get(&key) == tickets.get(&key);
+                result.map(|page| {
+                    if latest
+                        && self.merge_first_page(&mut state, page.envelopes, page.next, &key)
+                        && Self::default_keys(&state).contains(&key)
+                    {
+                        self.conversations_changed();
+                    }
+                })
             };
             let tally = accounts.get_mut(&key.account).expect("every asked account is counted");
             tally.0 -= 1;
-            match answer {
-                Some(Ok(())) => tally.1 = true,
-                Some(Err(error)) => {
+            if let Err(error) = result {
+                self.report(&error, Some(&key.account));
+                // Said at once: the account's other pages may wait out their own timeouts.
+                if error.cuts_off() {
                     tally.1 = true;
-                    self.report(&error, Some(&key.account));
-                    if error.cuts_off() {
-                        tally.2 = Some(error.clone());
-                    }
-                    failures.insert(key.clone(), error);
+                    self.account_failed(&key.account, &error);
                 }
-                None => {}
+                failures.insert(key.clone(), error);
             }
-            if tally.0 == 0 && tally.1 {
-                match tally.2.take() {
-                    Some(error) => self.account_failed(&key.account, &error),
-                    None => self.account_loaded(&key.account),
-                }
+            if *tally == (0, false) {
+                self.account_loaded(&key.account);
             }
         }
         failures

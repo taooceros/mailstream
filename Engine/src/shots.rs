@@ -12,15 +12,19 @@
 //! has, so nothing it shows is replaced. The one read it answers is whether conversations the
 //! user started were answered (Gmail's threads, Graph's messages of a conversation, in batches):
 //! never, so they list in the inbox. Calendar and Chat changes are refused too.
+//!
+//! [`set_outage`] makes one provider never answer, or fail, for screenshots of an account that
+//! can't connect while the others go on (MS-278).
 use std::path::Path;
 use std::sync::{LazyLock, Mutex, OnceLock};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use crate::accounts::Accounts;
 use crate::fake_server::{self, FakeRequest, FakeServer, Reply};
 use crate::keychain::SignIns;
-use crate::{Config, OAuthClient, push};
+use crate::{Config, OAuthClient, Provider, push};
 
 /// The sign-ins the engine reads while the screenshot mode runs: in memory only, never a
 /// Keychain item or a file.
@@ -28,6 +32,26 @@ pub const SERVICE: &str = "dev.mailstream.Mailstream.shots";
 
 static PROVIDER: OnceLock<FakeServer> = OnceLock::new();
 static LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static OUTAGES: Mutex<Vec<(Provider, Outage)>> = Mutex::new(Vec::new());
+
+/// How the stand-in answers a provider's requests (the token endpoint, which every provider
+/// shares, answers whatever this says).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outage {
+    /// As above.
+    Answer,
+    /// Never: the engine gives up on each request after its 30 s.
+    Hang,
+    /// 503, the provider failing.
+    Fail,
+}
+
+/// From now on, `provider`'s requests get `outage`.
+pub fn set_outage(provider: Provider, outage: Outage) {
+    let mut outages = OUTAGES.lock().expect("outages lock");
+    outages.retain(|(known, _)| *known != provider);
+    outages.push((provider, outage));
+}
 
 /// The in-memory sign-ins under [`SERVICE`].
 pub(crate) static SIGN_INS: LazyLock<Mutex<SignIns>> = LazyLock::new(Default::default);
@@ -65,6 +89,19 @@ pub fn log() -> Vec<String> {
 
 fn answer(request: &FakeRequest) -> Reply {
     let (method, path) = (request.method.as_str(), request.path.as_str());
+    let provider = if path.starts_with("/v1.0/") { Provider::Microsoft } else { Provider::Google };
+    let outage = OUTAGES.lock().expect("outages lock").iter().find(|(known, _)| *known == provider).map(|(_, outage)| *outage);
+    match outage.filter(|_| path != "/token") {
+        Some(Outage::Hang) => {
+            LOG.lock().expect("log lock").push(format!("--- {method} {path} (never answered)"));
+            return Reply::bytes(200, Vec::new()).after(Duration::from_secs(24 * 3600));
+        }
+        Some(Outage::Fail) => {
+            LOG.lock().expect("log lock").push(format!("503 {method} {path}"));
+            return Reply::status(503, json!({ "error": { "message": "The service is unavailable." } }));
+        }
+        Some(Outage::Answer) | None => {}
+    }
     let mut lines = Vec::new();
     let reply = match (method, path) {
         ("POST", "/token") => Reply::json(json!({ "access_token": "shots", "expires_in": 3600 })),
