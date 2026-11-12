@@ -279,6 +279,31 @@ pub struct ThreadEntry {
     request: u64,
 }
 
+/// Where the open conversation holds its scroll while its messages load and grow, until the
+/// reader scrolls it or opens a fold (MS-70, MS-255).
+#[derive(Clone, PartialEq)]
+pub enum ReaderPin {
+    /// Where the reader left it.
+    Free,
+    /// Just opened: where it opens is decided once its messages are in (`pin_opening`).
+    Opening,
+    /// The head of this message just under the toolbar: the first unread (else the last) of a
+    /// thread whose first message isn't it. A single mail, or a thread opening at its first
+    /// message, stays at its top.
+    Message(SharedString),
+    /// Its end: the reply box being written, or the reply just sent.
+    End,
+}
+
+/// How far the open conversation is scrolled, as the toolbar above it shows: a scrim behind the
+/// toolbar once anything passes under it, and the subject between its capsules once the title has.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ReaderTop {
+    Top,
+    Scrolled,
+    PastTitle,
+}
+
 /// How the top layer sits over what lies beneath.
 #[derive(Clone, Copy)]
 pub enum Slide {
@@ -353,9 +378,8 @@ pub struct MailApp {
     pub quotes_open: HashSet<SharedString>,
     /// Meeting invitations' cards, by message.
     pub invitations: HashMap<SharedString, InvitationCard>,
-    /// The open conversation stays scrolled to its end (its latest message) while bodies load and
-    /// grow, until the reader scrolls it or opens a fold (Flutter's `EndPin`, MS-70).
-    pub reader_pinned: bool,
+    pub reader_pin: ReaderPin,
+    pub reader_top: ReaderTop,
     /// The chat log's message under the pointer, which shows its reply buttons.
     pub hovered_message: Option<SharedString>,
     thread_requests: u64,
@@ -469,7 +493,8 @@ impl MailApp {
             unfolded: HashSet::new(),
             quotes_open: HashSet::new(),
             invitations: HashMap::new(),
-            reader_pinned: false,
+            reader_pin: ReaderPin::Free,
+            reader_top: ReaderTop::Top,
             hovered_message: None,
             thread_requests: 0,
             removing: HashSet::new(),
@@ -892,6 +917,7 @@ impl MailApp {
                 }
                 if let Some(messages) = loaded {
                     this.read_invitations(&id, &messages, cx);
+                    this.pin_opening(&id);
                 }
                 if this.forward_pending.as_ref() == Some(&id) {
                     this.forward_pending = None;
@@ -900,6 +926,21 @@ impl MailApp {
                 cx.notify();
             },
         );
+    }
+
+    /// Decides where the conversation just opened holds, once its messages are in: the head of
+    /// its first unread message, else of its last; its top when that is its first message (a
+    /// single mail always), where the title shows.
+    pub(crate) fn pin_opening(&mut self, id: &SharedString) {
+        if self.reader_pin != ReaderPin::Opening || self.reader().is_none_or(|open| &open.id != id) {
+            return;
+        }
+        let Some(ThreadState::Loaded(messages)) = self.threads.get(id).map(|thread| &thread.state) else { return };
+        let target = messages.iter().position(|message| message.unread).unwrap_or(messages.len().saturating_sub(1));
+        self.reader_pin = match messages.get(target) {
+            Some(message) if target > 0 => ReaderPin::Message(message.id.clone()),
+            _ => ReaderPin::Free,
+        };
     }
 }
 

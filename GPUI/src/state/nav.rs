@@ -402,7 +402,8 @@ impl MailApp {
             self.highlight = Some(id.clone());
         }
         self.reader_scroll = ScrollHandle::new();
-        self.reader_pinned = true;
+        self.reader_pin = ReaderPin::Opening;
+        self.reader_top = ReaderTop::Top;
         self.hovered_message = None;
         self.load_thread(&conversation, false, cx);
         let unread = conversation.unread;
@@ -412,6 +413,8 @@ impl MailApp {
             self.layers.pop();
         }
         self.push_layer(Layer::Reader(Box::new(conversation.clone())), animate && !replacing);
+        // Loaded already: it opens where its messages say now.
+        self.pin_opening(&conversation.id);
         if unread {
             self.set_unread(&conversation, false, cx);
         }
@@ -438,7 +441,7 @@ impl MailApp {
     }
 
     pub fn toggle_fold(&mut self, message: &SharedString, cx: &mut Context<Self>) {
-        self.reader_pinned = false;
+        self.reader_pin = ReaderPin::Free;
         if !self.unfolded.remove(message) {
             self.unfolded.insert(message.clone());
         }
@@ -447,7 +450,7 @@ impl MailApp {
 
     /// Opens or closes a message's quoted history.
     pub fn toggle_quotes(&mut self, message: &SharedString, cx: &mut Context<Self>) {
-        self.reader_pinned = false;
+        self.reader_pin = ReaderPin::Free;
         if !self.quotes_open.remove(message) {
             self.quotes_open.insert(message.clone());
         }

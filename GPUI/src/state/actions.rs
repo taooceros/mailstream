@@ -113,7 +113,8 @@ impl MailApp {
             cx.notify();
         });
         self.reply = Some(super::ReplyDraft { conversation: id, all, view, _subscription: subscription });
-        self.reader_scroll.scroll_to_bottom();
+        // The box opens under the last message: the reader holds its end while it is written.
+        self.reader_pin = ReaderPin::End;
         cx.notify();
     }
 
@@ -121,7 +122,7 @@ impl MailApp {
     /// lists with it.
     fn reload_replied(&mut self, id: &SharedString, cx: &mut Context<Self>) {
         if let Some(open) = self.reader().filter(|open| &open.id == id).cloned() {
-            self.reader_pinned = true;
+            self.reader_pin = ReaderPin::End;
             self.load_thread(&open, true, cx);
         }
         self.load_list(self.key(), true, cx);

@@ -1,111 +1,184 @@
 //! The reader: a conversation's messages, folded except the newest and the unread, or, between
 //! people, a chat log (Flutter's `Reader` and `_ChatLog`, MS-73). Quoted history and signatures
-//! fold behind a "more" toggle in each body. The reader opens at its end and holds there while
-//! bodies load, until it is scrolled (MS-70).
+//! fold behind a "more" toggle in each body. A single mail opens at its top; a thread at the head
+//! of its first unread message, else its last, held there while bodies load until it is scrolled
+//! (MS-70, MS-255). The toolbar above shows how far it is scrolled (`ReaderTop`).
 
 use chrono::{DateTime, Local};
-use gpui::ScrollDelta;
+use gpui::{ScrollDelta, point};
 
 use super::*;
 use crate::controls::tooltip;
 use crate::design::reader as metrics_reader;
+use crate::state::{ReaderPin, ReaderTop};
 
 impl MailApp {
-    pub(super) fn render_reader(&self, conversation: &Conversation, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let body: AnyElement = match self.threads.get(&conversation.id).map(|t| &t.state) {
-            None | Some(ThreadState::Loading) => {
-                div().py(px(24.)).text_color(p.muted).child("Loading messages…").into_any_element()
-            }
-            Some(ThreadState::Failed(error)) => notice(Tone::Error, None, error.clone(), false, p).into_any_element(),
-            Some(ThreadState::Loaded(messages)) if conversation.chat_log() => self.render_chat_log(messages, p, cx),
-            Some(ThreadState::Loaded(messages)) => {
-                let last = messages.len().saturating_sub(1);
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(space::S12))
-                    .children(messages.iter().enumerate().map(|(index, message)| {
-                        let open = index == last || message.unread || self.unfolded.contains(&message.id);
-                        self.render_message(message, open, index == last, p, cx)
-                    }))
-                    .into_any_element()
-            }
-        };
+    /// The conversation scrolling under its toolbar. The scroll container's children are its rows
+    /// (the title and its pills, each message, or the log's days and messages, then the reply
+    /// box), so the row a thread opens at can be found in its layout.
+    pub(super) fn render_reader(
+        &self,
+        conversation: &Conversation,
+        p: &'static Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let column = || div().w_full().max_w(px(layout::READING_WIDTH)).px(px(space::S32));
         let account = self.accounts.iter().position(|a| a.id == conversation.account).map(|index| {
             let title = self.accounts[index].title();
             pill(title, Some(mark_dot(design::account_color(index)).into_any_element()), p)
         });
-        if self.reader_pinned {
+        let head = column()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .text_size(px(text::DISPLAY))
+                    .line_height(relative(1.2))
+                    .font_weight(FontWeight::BOLD)
+                    .child(conversation.title.clone()),
+            )
+            .child(
+                div()
+                    .mt(px(space::S12))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(space::S8))
+                    .when(conversation.waiting, |d| {
+                        d.child(
+                            pill("Waiting on you", Some(icon(Icon::Reply, icon_size::INLINE, p.on_waiting_fill).into_any_element()), p)
+                                .id("reader-resolve")
+                                .bg(p.waiting_fill)
+                                .text_color(p.on_waiting_fill)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.toggle_waiting(&ToggleWaiting, window, cx)
+                                })),
+                        )
+                    })
+                    .when(!conversation.tag.is_empty(), |d| d.child(pill(conversation.tag.clone(), None, p)))
+                    .children(conversation.labels.iter().map(|label| {
+                        pill(label.clone(), Some(mark_dot(design::topic_color(label, p.dark)).into_any_element()), p)
+                    }))
+                    .children(account)
+                    .when(conversation.message_count > 1, |d| {
+                        d.child(pill(format!("{} messages", conversation.message_count), None, p))
+                    })
+                    .children(self.render_renderer_switch(p, cx)),
+            );
+        let mut rows: Vec<AnyElement> = vec![head.into_any_element()];
+        let pinned = match &self.reader_pin {
+            ReaderPin::Message(id) => Some(id),
+            _ => None,
+        };
+        let mut target = None;
+        match self.threads.get(&conversation.id).map(|t| &t.state) {
+            None | Some(ThreadState::Loading) => rows.push(
+                column().mt(px(space::S24)).py(px(24.)).text_color(p.muted).child("Loading messages…").into_any_element(),
+            ),
+            Some(ThreadState::Failed(error)) => rows.push(
+                column().mt(px(space::S24)).child(notice(Tone::Error, None, error.clone(), false, p)).into_any_element(),
+            ),
+            Some(ThreadState::Loaded(messages)) if conversation.chat_log() => {
+                for (index, (id, row)) in self.render_chat_log(messages, p, cx).into_iter().enumerate() {
+                    if pinned.is_some() && id.as_ref() == pinned {
+                        target = Some(rows.len());
+                    }
+                    rows.push(column().when(index == 0, |d| d.mt(px(space::S24))).child(row).into_any_element());
+                }
+            }
+            Some(ThreadState::Loaded(messages)) => {
+                let last = messages.len().saturating_sub(1);
+                for (index, message) in messages.iter().enumerate() {
+                    if pinned == Some(&message.id) {
+                        target = Some(rows.len());
+                    }
+                    let open = index == last || message.unread || self.unfolded.contains(&message.id);
+                    let gap = if index == 0 { space::S24 } else { space::S12 };
+                    rows.push(column().mt(px(gap)).child(self.render_message(message, open, index == last, p, cx)).into_any_element());
+                }
+            }
+        }
+        if let Some(reply) = self.reply.as_ref().filter(|r| r.conversation == conversation.id) {
+            rows.push(column().mt(px(space::S12)).child(reply.view.clone()).into_any_element());
+        }
+        match self.reader_pin {
             // Taken up as the reader lays out: the end of what it holds now.
-            self.reader_scroll.scroll_to_bottom();
+            ReaderPin::End => {
+                self.reader_scroll.scroll_to_bottom();
+                cx.on_next_frame(window, |this, _, cx| this.note_reader_top(cx));
+            }
+            ReaderPin::Message(_) => {
+                if let Some(target) = target {
+                    self.hold_row(target, rows.len(), window, cx);
+                }
+            }
+            ReaderPin::Free | ReaderPin::Opening => {}
         }
         div()
             .id("reader")
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.reader_scroll)
-            .on_scroll(cx.listener(|this, event: &ScrollEvent, _, _| {
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                 let vertical = match event.delta {
                     ScrollDelta::Pixels(delta) => delta.y != px(0.),
                     ScrollDelta::Lines(delta) => delta.y != 0.,
                 };
                 if vertical {
-                    this.reader_pinned = false;
+                    this.reader_pin = ReaderPin::Free;
+                    // Once the wheel's step is taken and clamped.
+                    cx.on_next_frame(window, |this, _, cx| this.note_reader_top(cx));
                 }
             }))
-            .child(
-                div().w_full().flex().justify_center().child(
-                    div()
-                        .w_full()
-                        .max_w(px(layout::READING_WIDTH))
-                        .px(px(space::S32))
-                        .pt(px(layout::HEADER_HEIGHT + space::S16))
-                        .pb(px(64.))
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_size(px(text::DISPLAY))
-                                .line_height(relative(1.2))
-                                .font_weight(FontWeight::BOLD)
-                                .child(conversation.title.clone()),
-                        )
-                        .child(
-                            div()
-                                .mt(px(space::S12))
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap(px(space::S8))
-                                .when(conversation.waiting, |d| {
-                                    d.child(
-                                        pill("Waiting on you", Some(icon(Icon::Reply, icon_size::INLINE, p.on_waiting_fill).into_any_element()), p)
-                                            .id("reader-resolve")
-                                            .bg(p.waiting_fill)
-                                            .text_color(p.on_waiting_fill)
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                                this.toggle_waiting(&ToggleWaiting, window, cx)
-                                            })),
-                                    )
-                                })
-                                .when(!conversation.tag.is_empty(), |d| d.child(pill(conversation.tag.clone(), None, p)))
-                                .children(conversation.labels.iter().map(|label| {
-                                    pill(label.clone(), Some(mark_dot(design::topic_color(label, p.dark)).into_any_element()), p)
-                                }))
-                                .children(account)
-                                .when(conversation.message_count > 1, |d| {
-                                    d.child(pill(format!("{} messages", conversation.message_count), None, p))
-                                })
-                                .children(self.render_renderer_switch(p, cx)),
-                        )
-                        .child(div().mt(px(space::S24)).flex().flex_col().gap(px(space::S12)).child(body))
-                        .when_some(self.reply.as_ref().filter(|r| r.conversation == conversation.id), |d, reply| {
-                            d.child(div().mt(px(space::S12)).child(reply.view.clone()))
-                        }),
-                ),
-            )
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(layout::HEADER_HEIGHT + space::S16))
+            .pb(px(64.))
+            .children(rows)
             .into_any_element()
+    }
+
+    /// Scrolls the reader so that row `row`'s top sits just under the toolbar, as the last frame
+    /// laid it out. A frame that laid out other rows (the thread was loading) is followed by
+    /// another, which finds them; either way the toolbar then learns where the reader is.
+    fn hold_row(&self, row: usize, count: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let scroll = &self.reader_scroll;
+        let laid_out = scroll.bounds_for_item(row).filter(|_| scroll.children_count() == count);
+        if let Some(bounds) = laid_out {
+            let top = bounds.top() - scroll.bounds().top() - px(layout::HEADER_HEIGHT + metrics_reader::OPEN_GAP);
+            scroll.set_offset(point(px(0.), -top.max(px(0.))));
+        }
+        let again = laid_out.is_none();
+        cx.on_next_frame(window, move |this, _, cx| {
+            this.note_reader_top(cx);
+            if again {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Notes how far the reader is scrolled, for the toolbar: past its top, and past its title
+    /// and pills (the first row).
+    fn note_reader_top(&mut self, cx: &mut Context<Self>) {
+        let scroll = &self.reader_scroll;
+        let scrolled = -scroll.offset().y;
+        let top = if scrolled <= px(0.) {
+            ReaderTop::Top
+        } else if scroll
+            .bounds_for_item(0)
+            .is_some_and(|head| head.bottom() - scroll.bounds().top() - scrolled < px(layout::HEADER_HEIGHT))
+        {
+            ReaderTop::PastTitle
+        } else {
+            ReaderTop::Scrolled
+        };
+        if top != self.reader_top {
+            self.reader_top = top;
+            cx.notify();
+        }
     }
 
     /// A message as Mail shows one: the page's surface inside a hairline, rounded; its header
@@ -332,22 +405,28 @@ impl MailApp {
 
     /// A conversation between people as a chat log: a divider per day, each message under its
     /// sender's avatar, name and time, standing on its own with its sign-off (MS-73). The message
-    /// under the pointer takes a faint wash, its reply buttons floating on its top edge.
-    fn render_chat_log(&self, messages: &[Message], p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    /// under the pointer takes a faint wash, its reply buttons floating on its top edge. Returns
+    /// its rows, each message's with its id, for the reader to scroll.
+    fn render_chat_log(
+        &self,
+        messages: &[Message],
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> Vec<(Option<SharedString>, AnyElement)> {
         let now = Local::now();
-        let mut rows: Vec<AnyElement> = Vec::with_capacity(messages.len() * 2);
+        let mut rows = Vec::with_capacity(messages.len() * 2);
         let mut previous: Option<Option<DateTime<Local>>> = None;
         for message in messages {
             let date = message.date.map(|date| date.with_timezone(&Local));
             if let Some(date) = date
                 && previous.is_none_or(|before| before.is_none_or(|before| before.date_naive() != date.date_naive()))
             {
-                rows.push(day_divider(format::day_divider(date, now), p).into_any_element());
+                rows.push((None, day_divider(format::day_divider(date, now), p).into_any_element()));
             }
             previous = Some(date);
-            rows.push(self.render_log_message(message, p, cx));
+            rows.push((Some(message.id.clone()), self.render_log_message(message, p, cx)));
         }
-        div().flex().flex_col().children(rows).into_any_element()
+        rows
     }
 
     fn render_log_message(&self, message: &Message, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {

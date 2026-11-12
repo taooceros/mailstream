@@ -397,6 +397,12 @@ pub mod reader {
     /// The rule left of opened quoted history, and the gap after it.
     pub const QUOTE_RULE: f32 = 2.0;
     pub const QUOTE_INDENT: f32 = 12.0;
+    /// The scrim behind the toolbar once the conversation scrolls under it: the page's surface
+    /// down to `SCRIM_SOLID` of its height, fading out below (MS-255).
+    pub const SCRIM_HEIGHT: f32 = super::layout::HEADER_HEIGHT + 16.0;
+    pub const SCRIM_SOLID: f32 = 0.6;
+    /// The gap between the toolbar and the head of the message a thread opens at.
+    pub const OPEN_GAP: f32 = 8.0;
 }
 
 /// Corner radii: `SMALL` for inline marks, `CONTROL` for buttons and controls, `CARD` for cards,
