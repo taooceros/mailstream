@@ -12,8 +12,12 @@
 //!   one person two minutes apart; a meeting invitation (with its event in the calendar); a long
 //!   HTML report with a table; mail with Office attachments; a Chinese mail (the CJK fallback
 //!   font) Sam answered last, so its row shows Sam's reply as from "me"; a text mail with a long
-//!   quoted history; newsletters and notifications, which the list folds into bundles. Every
-//!   conversation with mail in the inbox carries its AI tag, so nothing is tagged during a run.
+//!   quoted history; newsletters and notifications, which the list folds into bundles: a GitHub
+//!   notification (a transparent logo, a grey panel, a green button), a newsletter on its own
+//!   grey page with a brand band and a pastel callout, a morning brief with a photo, a logo and a
+//!   table of coloured rows; and a card painted on a paper texture (which dark mode keeps on
+//!   paper, MS-267). Every conversation with mail in the inbox carries its AI tag, so nothing is
+//!   tagged during a run.
 //! - Conversations Sam started that nobody answered yet, which list in the inbox from Sent alone:
 //!   the newest of all in Gmail, and one in Outlook.
 //! - Chat: a direct message, a group and a space, the group's recent messages.
@@ -389,13 +393,25 @@ fn mail() -> Vec<(Mail, Option<Value>)> {
         mail.minutes_ago = minutes;
         mail.unread = unread;
         mail.text = Some(text.into());
-        mail.html = Some(format!(
-            "<div style=\"max-width:560px;margin:0 auto;font-family:sans-serif\"><h2 style=\"color:#3b5bdb\">{subject}</h2>\
-             <p>{text}</p><p><a href=\"https://example.com/{id}\">Open in browser</a> · \
-             <a href=\"https://example.com/unsubscribe\">Unsubscribe</a></p></div>"
-        ));
+        mail.html = Some(match id {
+            "ci" => github_html(),
+            "digest" => digest_html(),
+            "brief" => brief_html(),
+            _ => format!(
+                "<div style=\"max-width:560px;margin:0 auto;font-family:sans-serif\"><h2 style=\"color:#3b5bdb\">{subject}</h2>\
+                 <p>{text}</p><p><a href=\"https://example.com/{id}\">Open in browser</a> · \
+                 <a href=\"https://example.com/unsubscribe\">Unsubscribe</a></p></div>"
+            ),
+        });
         all.push((mail, tag(category, &[], false)));
     }
+
+    // A card painted on a paper texture: dark mode can't move its colours, so it stays on paper.
+    let mut card = Mail::new(GMAIL, "card", PRIYA, "A postcard from Lisbon");
+    card.minutes_ago = 2_600.;
+    card.text = Some("Greetings from Lisbon! The trams, the tiles, the pastéis de nata. Wish you were here. Priya".into());
+    card.html = Some(card_html());
+    all.push((card, tag("people", &["Personal"], false)));
 
     // Outlook.
     let mut budget = Mail::new(OUTLOOK, "budget", DANA, "Budget review: final numbers");
@@ -461,6 +477,145 @@ fn report_html() -> String {
          pipeline and may differ from earlier reports by up to 0.3%.</p>\
          <h3>Next month</h3><p>We'll start tracking activation by cohort. Questions welcome.</p><p>Riley</p>"
     )
+}
+
+/// A GitHub notification as GitHub writes it: a transparent black logo on white, a bordered box, a
+/// grey panel of checks, a green button and a footer with a plain link.
+fn github_html() -> String {
+    let logo = png_data(&image::RgbaImage::from_fn(64, 64, |x, y| {
+        let (dx, dy) = (x as f32 - 31.5, y as f32 - 31.5);
+        let inside = dx * dx + dy * dy < 31. * 31.;
+        let eye = (dx.abs() - 10.).powi(2) + (dy + 4.).powi(2) < 25.;
+        if inside && !eye { image::Rgba([0x1f, 0x23, 0x28, 255]) } else { image::Rgba([0, 0, 0, 0]) }
+    }));
+    let check = |name: &str, time: &str| {
+        format!(
+            "<tr><td style=\"padding:6px 12px;color:#1a7f37;width:16px\">✓</td><td style=\"padding:6px 0\">{name}</td>\
+             <td align=\"right\" style=\"padding:6px 12px;color:#59636e\">{time}</td></tr>"
+        )
+    };
+    format!(
+        "<div style=\"background:#ffffff;color:#1f2328;font-family:-apple-system,'Segoe UI',sans-serif;font-size:14px\">\
+         <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"max-width:600px\"><tr><td style=\"padding:8px 0 16px\">\
+         <img src=\"{logo}\" width=\"32\" height=\"32\" alt=\"GitHub\"></td></tr>\
+         <tr><td style=\"border:1px solid #d0d7de;border-radius:6px;padding:16px\">\
+         <h2 style=\"font-weight:400;font-size:20px;margin:0 0 8px\">[taooceros/mailstream] CI passed on main</h2>\
+         <p style=\"color:#59636e;margin:0 0 16px\">All checks have passed for <code>ae417aa</code>: build, test, lint.</p>\
+         <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#f6f8fa;border-radius:6px;margin-bottom:16px\">\
+         {}{}{}</table>\
+         <a href=\"https://github.example/taooceros/mailstream/actions\" style=\"display:inline-block;background:#1f883d;color:#ffffff;\
+         padding:6px 16px;border-radius:6px;text-decoration:none;font-weight:600\">View workflow run</a></td></tr>\
+         <tr><td style=\"color:#59636e;font-size:12px;padding-top:16px\">You are receiving this because you are watching this repository. \
+         <a href=\"https://github.example/notifications/unsubscribe\">Unsubscribe</a> or manage your notification settings.</td></tr>\
+         </table></div>",
+        check("build (ubuntu-latest)", "4m 12s"),
+        check("test (ubuntu-latest)", "6m 03s"),
+        check("lint", "1m 40s"),
+    )
+}
+
+/// A newsletter on its own grey page: a white card with a brand band, a pastel callout, a yellow
+/// button, a hairline and a muted footer.
+fn digest_html() -> String {
+    "<table width=\"100%\" bgcolor=\"#f2f0eb\" cellpadding=\"0\" cellspacing=\"0\" style=\"font-family:Georgia,serif\"><tr>\
+     <td align=\"center\" style=\"padding:24px 12px\">\
+     <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" bgcolor=\"#ffffff\" style=\"max-width:520px;border-radius:8px\">\
+     <tr><td style=\"background:#3b5bdb;color:#ffffff;padding:20px 24px;border-radius:8px 8px 0 0\">\
+     <div style=\"font-size:12px;letter-spacing:2px;color:#dbe4ff\">DESIGN DIGEST · ISSUE 42</div>\
+     <div style=\"font-size:24px;font-weight:bold\">Color systems</div></td></tr>\
+     <tr><td style=\"padding:20px 24px;color:#333333;font-size:15px;line-height:1.5\">\
+     <p>How three teams built their color tokens, and what they would do again.</p>\
+     <div style=\"background:#e7f5ff;border-left:4px solid #339af0;padding:12px 16px;color:#1c4f82\">\
+     <b>This week:</b> semantic tokens beat raw palettes once a second theme ships.</div>\
+     <h3 style=\"color:#212529\">1. Name roles, not hues</h3>\
+     <p>Call it <i>surface</i> and <i>on-surface</i>, and the dark theme becomes a second table of values.</p>\
+     <p style=\"text-align:center;margin:24px 0\"><a href=\"https://designdigest.example/42\" style=\"background:#ffd43b;\
+     color:#212529;padding:10px 20px;border-radius:20px;text-decoration:none;font-weight:bold\">Read the issue</a></p>\
+     <hr style=\"border:0;border-top:1px solid #dee2e6\">\
+     <p style=\"color:#868e96;font-size:12px\">You subscribed at designdigest.example. \
+     <a href=\"https://designdigest.example/unsubscribe\" style=\"color:#868e96\">Unsubscribe</a></p>\
+     </td></tr></table></td></tr></table>"
+        .into()
+}
+
+/// A morning brief with images: a transparent dark wordmark, an opaque photo, and a table of
+/// markets on alternating row backgrounds with coloured changes.
+fn brief_html() -> String {
+    let wordmark = png_data(&image::RgbaImage::from_fn(180, 28, |x, y| {
+        let letter = (x / 14) % 2 == 0 && x < 168 && (4..24).contains(&y);
+        let bar = y >= 25 && x < 168;
+        if letter || bar { image::Rgba([0x14, 0x1a, 0x2e, 255]) } else { image::Rgba([0, 0, 0, 0]) }
+    }));
+    let photo = png_data(&image::RgbaImage::from_fn(560, 200, |x, y| {
+        let (fx, fy) = (x as f32 / 560., y as f32 / 200.);
+        let ridge = 0.55 + 0.12 * (fx * 9.).sin() + 0.06 * (fx * 23.).cos();
+        let sun = (fx - 0.75).powi(2) * 4. + (fy - 0.3).powi(2) * 14. < 0.04;
+        let pixel = if sun {
+            [255, 214, 120]
+        } else if fy > ridge {
+            [(40. + 30. * fy) as u8, (70. + 40. * fy) as u8, (50. + 20. * fx) as u8]
+        } else {
+            [(250. - 90. * fy) as u8, (170. + 40. * fy) as u8, (120. + 100. * fy) as u8]
+        };
+        image::Rgba([pixel[0], pixel[1], pixel[2], 255])
+    }));
+    let row = |name: &str, value: &str, change: &str, up: bool, shade: bool| {
+        let color = if up { "#2b8a3e" } else { "#c92a2a" };
+        let background = if shade { " style=\"background:#f8f9fa\"" } else { "" };
+        format!(
+            "<tr{background}><td style=\"padding:6px 8px\">{name}</td><td align=\"right\" style=\"padding:6px 8px\">{value}</td>\
+             <td align=\"right\" style=\"padding:6px 8px;color:{color}\">{change}</td></tr>"
+        )
+    };
+    format!(
+        "<div style=\"max-width:560px;font-family:Helvetica,Arial,sans-serif;color:#222222\">\
+         <p><img src=\"{wordmark}\" width=\"180\" height=\"28\" alt=\"The Morning Brief\"></p>\
+         <img src=\"{photo}\" width=\"560\" height=\"200\" alt=\"Sunrise over the ridge\" style=\"display:block;width:100%;height:auto\">\
+         <h2 style=\"margin:16px 0 4px\">Good morning. Here's Tuesday.</h2>\
+         <p style=\"color:#555555\">Markets, weather and five things to know today.</p>\
+         <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-collapse:collapse;border-top:2px solid #222222\">\
+         <tr style=\"background:#e9ecef\"><th align=\"left\" style=\"padding:6px 8px\">Market</th><th align=\"right\" style=\"padding:6px 8px\">Close</th>\
+         <th align=\"right\" style=\"padding:6px 8px\">Change</th></tr>{}{}{}{}</table>\
+         <p>Weather: <span style=\"background:#fff3bf;padding:0 4px\">sunny, 21°C</span> in the city, light wind.</p>\
+         <p style=\"font-size:12px;color:#999999\">The Morning Brief · <a href=\"https://morningbrief.example/unsubscribe\">Unsubscribe</a></p></div>",
+        row("S&amp;P 500", "6,012.4", "+0.8%", true, false),
+        row("Nasdaq", "19,880.1", "+1.2%", true, true),
+        row("Oil (Brent)", "71.30", "−1.4%", false, false),
+        row("EUR/USD", "1.0842", "−0.2%", false, true),
+    )
+}
+
+/// A postcard painted on a paper texture, dark ink on it: its page is an image.
+fn card_html() -> String {
+    let paper = png_data(&image::RgbaImage::from_fn(64, 64, |x, y| {
+        let grain = ((x * 7 + y * 13) % 11) as u8;
+        image::Rgba([246 - grain, 238 - grain, 222 - grain, 255])
+    }));
+    format!(
+        "<body background=\"{paper}\" style=\"font-family:Georgia,serif;color:#3d2b1f\">\
+         <div style=\"padding:24px\"><h2 style=\"color:#7a3e1d;margin-top:0\">Greetings from Lisbon!</h2>\
+         <p>The trams, the tiles, the pastéis de nata. We walked up to the castle at sunset and the whole city turned gold.</p>\
+         <p>Wish you were here.</p><p style=\"font-style:italic\">— Priya</p></div></body>"
+    )
+}
+
+/// `image` as a PNG `data:` URL.
+fn png_data(image: &image::RgbaImage) -> String {
+    let mut png = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut png, image::ImageFormat::Png).expect("a PNG encodes");
+    format!("data:image/png;base64,{}", base64(png.get_ref()))
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, &byte)| n | (byte as u32) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() { ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
 }
 
 fn write_mail(cache: &MailCache, all: &[(Mail, Option<Value>)]) {

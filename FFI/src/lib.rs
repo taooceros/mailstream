@@ -32,7 +32,7 @@ mod people;
 mod swift;
 
 #[cfg(feature = "blitz")]
-pub use html_page::{HtmlPage, HtmlPart, HtmlSize, HtmlTile};
+pub use html_page::{HtmlPage, HtmlPart, HtmlSize, HtmlTheme, HtmlTile};
 pub use display::{
     ChatRunEntry, Recipients, SubjectParts, avatar, chat_body, chat_runs, day_divider, forward_body, forward_subject, full_date,
     list_date, list_section, message_date, message_time, parse_recipients, reply_subject, split_recipients, split_subject,

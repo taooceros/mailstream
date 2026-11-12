@@ -9,7 +9,9 @@
 //! engine's `is_mail_link` allows (http, https and mailto), a drag selects text and ⌘C (Ctrl+C)
 //! copies it, and late content (a remote image, a web font) lays the page out again. The page
 //! takes the mail as the engine gave it; the rules every reader shares (quotes, inline images,
-//! style) are the engine's (`FFI/src/mail_html.rs`).
+//! style, the mail's colours on the reader's surface) are the engine's (`FFI/src/mail_html.rs`).
+//! Tiles are transparent where the mail paints nothing, so the surface under the body shows; a
+//! page on paper ([`paper`]) is opaque white.
 //!
 //! Each frame starts with [`begin_frame`] (painted first, at the window root), which closes the
 //! pages no placeholder painted in the frame before and frees their tiles; [`paint`] draws one.
@@ -23,7 +25,7 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, SharedString, Window, actions, point,
     px, size,
 };
-pub use mailstream::HtmlPart;
+pub use mailstream::{HtmlPart, HtmlTheme};
 use mailstream::{HtmlPage, HtmlTile, is_mail_link};
 
 /// Tiles are this many points tall.
@@ -62,6 +64,10 @@ struct Layout {
 struct Entry {
     /// None while the body's inline images are read.
     page: Option<Arc<HtmlPage>>,
+    /// The surface the page was opened for; another (the appearance changed) opens it again.
+    theme: Option<HtmlTheme>,
+    /// Whether the page is on paper, once it says.
+    paper: Option<bool>,
     layout: Option<Layout>,
     /// The width and scale a layout was last asked for.
     asked: Option<(f32, f32)>,
@@ -117,6 +123,13 @@ pub fn quoted(key: &SharedString) -> Option<bool> {
     PAGES.with_borrow(|pages| pages.entries.get(key).and_then(|entry| entry.quoted))
 }
 
+/// Whether the body shown under `key` is drawn on paper, as the mail wrote it on white: mail that
+/// can't move to the dark surface (`FFI/src/mail_html/colours.rs`), which the reader shows on a
+/// sheet. False until its page says.
+pub fn paper(key: &SharedString) -> bool {
+    PAGES.with_borrow(|pages| pages.entries.get(key).and_then(|entry| entry.paper).unwrap_or(false))
+}
+
 /// Starts a frame of the window: closes the pages not painted last frame and frees the tiles no
 /// longer shown.
 pub fn begin_frame(window: &mut Window) {
@@ -141,12 +154,14 @@ pub fn prepaint(bounds: Bounds<Pixels>, window: &mut Window) -> Hitbox {
     window.insert_hitbox(bounds, HitboxBehavior::Normal)
 }
 
-/// Draws `part` of `html` under `key` at `bounds`, clipped to the current content mask.
+/// Draws `part` of `html` under `key` at `bounds` on the surface `theme` describes, clipped to the
+/// current content mask.
 #[allow(clippy::too_many_arguments)]
 pub fn paint(
     key: &SharedString,
     html: &SharedString,
     part: HtmlPart,
+    theme: HtmlTheme,
     bounds: Bounds<Pixels>,
     hitbox: Hitbox,
     window: &mut Window,
@@ -159,9 +174,15 @@ pub fn paint(
     let mut images = Vec::new();
     let over_link = PAGES.with_borrow_mut(|pages| {
         let Pages { entries, retired } = pages;
+        if entries.get(key).is_some_and(|entry| entry.theme != Some(theme)) {
+            let stale = entries.remove(key).expect("the entry is there");
+            retired.extend(stale.tiles.values().map(|tile| tile.image.clone()));
+        }
         let entry = entries.entry(key.clone()).or_insert_with(|| {
-            open(key, html, part, window, cx);
-            Entry::default()
+            open(key, html, part, theme, window, cx);
+            let mut entry = Entry::default();
+            entry.theme = Some(theme);
+            entry
         });
         entry.painted = true;
         let Some(page) = entry.page.clone() else { return false };
@@ -190,9 +211,9 @@ pub fn paint(
 }
 
 /// Opens the body's page, which parses on the engine's pages thread.
-fn open(key: &SharedString, html: &SharedString, part: HtmlPart, window: &Window, cx: &App) {
+fn open(key: &SharedString, html: &SharedString, part: HtmlPart, theme: HtmlTheme, window: &Window, cx: &App) {
     let key = key.clone();
-    let page = HtmlPage::part(html.to_string(), part);
+    let page = HtmlPage::themed(html.to_string(), part, theme);
     window
         .spawn(cx, async move |cx| {
             let opened = PAGES.with_borrow_mut(|pages| match pages.entries.get_mut(&key) {
@@ -207,6 +228,9 @@ fn open(key: &SharedString, html: &SharedString, part: HtmlPart, window: &Window
                 return;
             }
             cx.update(|window, _| window.refresh()).ok();
+            if !ask_paper(&key, &page).await {
+                return;
+            }
             if part != HtmlPart::Whole {
                 let quoted = page.quoted().await;
                 if with_page(&key, &page, |entry| entry.quoted = quoted).is_none() {
@@ -222,13 +246,20 @@ fn open(key: &SharedString, html: &SharedString, part: HtmlPart, window: &Window
                     entry.version = changed;
                     entry.asked = None;
                 });
-                if current.is_none() {
+                // A stylesheet that arrived can put the page on paper or take it off.
+                if current.is_none() || !ask_paper(&key, &page).await {
                     return;
                 }
                 cx.update(|window, _| window.refresh()).ok();
             }
         })
         .detach();
+}
+
+/// Takes in whether `page` is on paper; false once the entry under `key` no longer shows it.
+async fn ask_paper(key: &SharedString, page: &Arc<HtmlPage>) -> bool {
+    let paper = page.paper().await;
+    with_page(key, page, |entry| entry.paper = paper).is_some()
 }
 
 /// Runs `f` on the entry under `key` if it still shows `page`.
@@ -346,11 +377,17 @@ fn draw_tile(
         .detach();
 }
 
-/// A tile as a GPUI image, whose pixels are BGRA.
+/// A tile as a GPUI image, whose pixels are BGRA with straight alpha (the tile's is premultiplied).
 fn render_image(tile: HtmlTile) -> Arc<RenderImage> {
     let mut pixels = tile.pixels;
     for pixel in pixels.chunks_exact_mut(4) {
         pixel.swap(0, 2);
+        let alpha = pixel[3];
+        if alpha != 0 && alpha != 255 {
+            for channel in &mut pixel[..3] {
+                *channel = ((*channel as u16 * 255 + alpha as u16 / 2) / alpha as u16).min(255) as u8;
+            }
+        }
     }
     let buffer = image::RgbaImage::from_raw(tile.width, tile.height, pixels).expect("a tile is width × height RGBA pixels");
     Arc::new(RenderImage::new([image::Frame::new(buffer)]))

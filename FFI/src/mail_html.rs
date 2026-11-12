@@ -1,6 +1,7 @@
 //! The rules every reader applies to a mail's HTML, one copy for all of them (MS-234): where
 //! quoted history starts, the reader's look over the mail's own styles, what a web view's page
-//! may load, which links a click opens and which cached inline parts a page may show. Blitz
+//! may load, which links a click opens, which cached inline parts a page may show and how a mail's
+//! colours move to the reader's surface (`colours`, Blitz's for now). Blitz
 //! (`html_page.rs`, in Flutter and GPUI) applies them itself; the web views (Flutter's WebKit
 //! `MailHtmlView.swift` and WebView2 `mail_html_windows.dart`, GPUI's `webview.rs`) load
 //! [`mail_web_document`] and run [`mail_web_script`].
@@ -9,18 +10,23 @@ use std::path::PathBuf;
 
 use mailstream_engine::cache::MailCache;
 
+#[cfg(feature = "blitz")]
+pub(crate) mod colours;
+
 /// Elements that start quoted history, the outermost one matching: Gmail's, Thunderbird's and
 /// Yahoo's quote containers, Outlook's reply header, Apple Mail's cited blockquote and the quotes
 /// the engine makes of plain text's `>` lines (`text::plain_to_html`).
 pub const QUOTES: &str = ".gmail_quote, .gmail_quote_container, .moz-cite-prefix, .yahoo_quoted, #divRplyFwdMsg, \
     #appendonsend, blockquote[type=\"cite\" i], blockquote.ms-quote";
 
-/// The reader's look over the mail's own styles, in every renderer, and the look of the markup
-/// the engine makes of plain text (`text::plain_to_html`: its line breaks kept, its `>` quotes
-/// muted, the ones inside a quote behind a rule; the reader's fold draws the outer one's).
+/// The reader's look over the mail's own styles, in every renderer (its text colour only where the
+/// mail sets none on `body`), and the look of the markup the engine makes of plain text
+/// (`text::plain_to_html`: its line breaks kept, its `>` quotes muted, the ones inside a quote
+/// behind a rule; the reader's fold draws the outer one's).
 const BODY_CSS: &str = "
-body { margin: 0; padding: 2px 0; color: #1f1f1f; font: 14px/1.45 -apple-system, \"Segoe UI\", system-ui, sans-serif;
+body { margin: 0; padding: 2px 0; font: 14px/1.45 -apple-system, \"Segoe UI\", system-ui, sans-serif;
   overflow-wrap: break-word; }
+:where(body) { color: #1f1f1f; }
 img { max-width: 100%; }
 pre { white-space: pre-wrap; }
 .ms-plain { white-space: pre-wrap; }

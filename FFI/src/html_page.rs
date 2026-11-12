@@ -46,6 +46,7 @@ use sha2::{Digest, Sha256};
 use style::values::specified::box_::{DisplayInside, DisplayOutside};
 
 use crate::mail_html;
+use crate::mail_html::colours::{self, Paint, Rgba};
 
 /// The reader's look over the mail's own styles (`mail_html.rs`, as WebKit's and WebView2's views
 /// apply it): the document is as tall as its content, so nothing sizes from the viewport.
@@ -81,6 +82,9 @@ const BASE_URL: &str = "mailstream-body:///";
 /// The viewport's height in points; only `vh` units read it, since pages are as tall as their content.
 const VIEWPORT_HEIGHT: f64 = 800.0;
 
+/// The width a page's colours are first worked out at, before the reader lays it out.
+const RECOLOUR_WIDTH: u32 = 600;
+
 /// Content wider than the page zooms out to fit, down to this.
 const MIN_ZOOM: f32 = 0.3;
 
@@ -114,7 +118,8 @@ pub struct HtmlSize {
     pub version: i64,
 }
 
-/// `width` × `height` pixels, RGBA, 8 bits each, opaque, row by row.
+/// `width` × `height` pixels, RGBA, 8 bits each, row by row, alpha premultiplied: opaque on white
+/// for a page without a [`HtmlTheme`] or on paper, transparent where a themed page paints nothing.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct HtmlTile {
     pub width: u32,
@@ -133,6 +138,28 @@ pub enum HtmlPart {
     Quoted,
 }
 
+/// The surface a themed page sits on and the reader's colours there, `0xRRGGBB`: its tiles are
+/// transparent where the mail paints nothing, and in dark mode the mail's colours move to the
+/// surface (`mail_html::colours`), unless the page is on paper ([`HtmlPage::paper`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct HtmlTheme {
+    pub dark: bool,
+    pub surface: u32,
+    pub text: u32,
+    pub link: u32,
+}
+
+impl From<HtmlTheme> for colours::Theme {
+    fn from(theme: HtmlTheme) -> Self {
+        Self {
+            dark: theme.dark,
+            surface: Rgba::hex(theme.surface),
+            text: Rgba::hex(theme.text),
+            link: Rgba::hex(theme.link),
+        }
+    }
+}
+
 /// One mail body. Calls queue on the pages' thread and answer in order; [`HtmlPage::close`] (or
 /// dropping the page) frees it.
 #[derive(uniffi::Object)]
@@ -145,13 +172,29 @@ impl HtmlPage {
     /// Starts parsing `html` on the pages' thread; returns at once.
     #[uniffi::constructor]
     pub fn new(html: String) -> Arc<Self> {
-        Self::open(html, HtmlPart::Whole, RESOURCES.clone())
+        Self::open(html, HtmlPart::Whole, None, RESOURCES.clone())
     }
 
     /// A page of one [`HtmlPart`] of `html`, parsed on the pages' thread; returns at once.
     #[uniffi::constructor]
     pub fn part(html: String, part: HtmlPart) -> Arc<Self> {
-        Self::open(html, part, RESOURCES.clone())
+        Self::open(html, part, None, RESOURCES.clone())
+    }
+
+    /// A page of one [`HtmlPart`] of `html` on the surface `theme` describes, parsed on the
+    /// pages' thread; returns at once.
+    #[uniffi::constructor]
+    pub fn themed(html: String, part: HtmlPart, theme: HtmlTheme) -> Arc<Self> {
+        Self::open(html, part, Some(theme), RESOURCES.clone())
+    }
+
+    /// Whether a themed page is drawn as the mail wrote it, on white (dark mode, for mail that
+    /// can't move to the surface: `mail_html::colours`), which the reader shows as a sheet. It
+    /// can change when a stylesheet arrives, with the page's version. `None` once closed.
+    pub async fn paper(&self) -> Option<bool> {
+        let (reply, answer) = oneshot::channel();
+        send(Job::Paper { id: self.id, reply });
+        answer.await.ok().flatten()
     }
 
     /// Whether the mail has quoted history this page's part left out (`Main`) or shows
@@ -238,16 +281,16 @@ impl Drop for HtmlPage {
 
 impl HtmlPage {
     /// A page of `part` of `html` reading its remote resources from `resources`.
-    fn open(html: String, part: HtmlPart, resources: Arc<Resources>) -> Arc<Self> {
+    fn open(html: String, part: HtmlPart, theme: Option<HtmlTheme>, resources: Arc<Resources>) -> Arc<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        send(Job::Open { id, html, part, resources });
+        send(Job::Open { id, html, part, theme, resources });
         Arc::new(Self { id })
     }
 }
 
 enum Job {
-    Open { id: u64, html: String, part: HtmlPart, resources: Arc<Resources> },
+    Open { id: u64, html: String, part: HtmlPart, theme: Option<HtmlTheme>, resources: Arc<Resources> },
     Close { id: u64 },
     Layout { id: u64, width: f64, scale: f64, reply: oneshot::Sender<Option<HtmlSize>> },
     Tile { id: u64, width: f64, scale: f64, top: f64, height: f64, reply: oneshot::Sender<Option<HtmlTile>> },
@@ -257,6 +300,7 @@ enum Job {
     SelectedText { id: u64, reply: oneshot::Sender<Option<String>> },
     Text { id: u64, reply: oneshot::Sender<Option<String>> },
     Quoted { id: u64, reply: oneshot::Sender<Option<bool>> },
+    Paper { id: u64, reply: oneshot::Sender<Option<bool>> },
     Changed { id: u64, version: i64, reply: oneshot::Sender<i64> },
     /// A resource arrived for the page: it lays out again once the queue is empty.
     Arrived { id: u64 },
@@ -276,6 +320,7 @@ impl Job {
             | Job::SelectedText { id, .. }
             | Job::Text { id, .. }
             | Job::Quoted { id, .. }
+            | Job::Paper { id, .. }
             | Job::Changed { id, .. }
             | Job::Arrived { id } => id,
         }
@@ -341,6 +386,15 @@ struct Page {
     waiting: Vec<oneshot::Sender<i64>>,
     /// Whether the mail has quoted history (see [`HtmlPage::quoted`]).
     quoted: bool,
+    /// The surface the page sits on, if themed, and the schemes its mail declares.
+    theme: Option<colours::Theme>,
+    schemes: colours::Schemes,
+    /// What the page lays out in: dark for mail with a dark look of its own in dark mode.
+    scheme: ColorScheme,
+    /// Whether it is drawn on white as written (see [`HtmlPage::paper`]).
+    paper: bool,
+    /// The elements [`Page::recolour`] gave colours, with the `style` attribute each had.
+    recoloured: Vec<(NodeId, Option<String>)>,
 }
 
 impl Pages {
@@ -390,8 +444,8 @@ impl Pages {
 
     fn handle(&mut self, job: Job) {
         match job {
-            Job::Open { id, html, part, resources } => {
-                let page = Page::open(id, &html, part, &self.fonts, resources);
+            Job::Open { id, html, part, theme, resources } => {
+                let page = Page::open(id, &html, part, theme, &self.fonts, resources);
                 self.pages.insert(id, page);
             }
             Job::Close { id } => {
@@ -434,6 +488,9 @@ impl Pages {
             Job::Quoted { id, reply } => {
                 let _ = reply.send(self.pages.get(&id).map(|page| page.quoted));
             }
+            Job::Paper { id, reply } => {
+                let _ = reply.send(self.pages.get(&id).map(|page| page.paper));
+            }
             Job::Changed { id, version, reply } => {
                 if let Some(page) = self.pages.get_mut(&id) {
                     if page.version > version {
@@ -460,6 +517,10 @@ impl Pages {
     fn relayout(&mut self, id: u64) {
         let Some(page) = self.pages.get_mut(&id) else { return };
         page.doc.as_mut().resolve(0.0);
+        // A stylesheet's colours move as the mail's own do.
+        if page.gate.shared.sheet_arrived.swap(false, Ordering::Relaxed) {
+            page.recolour();
+        }
         if page.scale > 0.0 {
             page.fit();
         }
@@ -505,14 +566,86 @@ fn document(html: &str, net: Arc<dyn NetProvider>, shell: Arc<PageShell>, fonts:
 }
 
 impl Page {
-    fn open(id: u64, html: &str, part: HtmlPart, fonts: &FontContext, resources: Arc<Resources>) -> Self {
+    fn open(id: u64, html: &str, part: HtmlPart, theme: Option<HtmlTheme>, fonts: &FontContext, resources: Arc<Resources>) -> Self {
         let shell = Arc::new(PageShell { id, quiet: AtomicBool::new(false) });
         let gate = Arc::new(Gate::new(resources));
         let mut doc = document(html, gate.clone(), shell.clone(), fonts);
         let quoted = cut_quotes(doc.as_mut(), part);
         let allowed = sanitize(doc.as_mut());
         gate.open(allowed);
-        Self { doc, shell, gate, width: 0.0, scale: 0.0, zoom: 1.0, height: 0.0, version: 0, waiting: Vec::new(), quoted }
+        let theme = theme.map(colours::Theme::from);
+        let schemes = if theme.is_some() { declared_schemes(doc.as_ref()) } else { colours::Schemes::default() };
+        let scheme = if theme.is_some_and(|theme| theme.dark) && schemes.dark { ColorScheme::Dark } else { ColorScheme::Light };
+        let mut page = Self {
+            doc,
+            shell,
+            gate,
+            width: 0.0,
+            scale: 0.0,
+            zoom: 1.0,
+            height: 0.0,
+            version: 0,
+            waiting: Vec::new(),
+            quoted,
+            theme,
+            schemes,
+            scheme,
+            paper: false,
+            recoloured: Vec::new(),
+        };
+        page.recolour();
+        page
+    }
+
+    /// Moves the mail's colours to the page's theme (`mail_html::colours`), from the colours it
+    /// computes to: the elements that change get them in their `style` attribute, ahead of every
+    /// rule of the mail's. Again from scratch each time (a stylesheet arrived). Mail that can't
+    /// move goes on paper instead.
+    fn recolour(&mut self) {
+        let Some(theme) = self.theme else { return };
+        let style = || QualName::new(None, ns!(), local_name!("style"));
+        let restored = std::mem::take(&mut self.recoloured);
+        if !restored.is_empty() {
+            let mut mutator = self.doc.mutate();
+            for (id, style_was) in restored {
+                match style_was {
+                    Some(value) => mutator.set_attribute(id, style(), &value),
+                    None => mutator.clear_attribute(id, style()),
+                }
+            }
+        }
+        if self.width == 0.0 {
+            // Before the first layout: colours don't depend on the width the reader picks.
+            let viewport = Viewport::new(RECOLOUR_WIDTH, VIEWPORT_HEIGHT as u32, 1.0, self.scheme);
+            self.doc.as_mut().set_viewport(viewport);
+        }
+        self.doc.as_mut().resolve(0.0);
+        let native = self.scheme == ColorScheme::Dark;
+        let mut walk = Recolour { doc: self.doc.as_ref(), theme, native, changes: Vec::new(), text: 0, on_images: 0, image_page: false };
+        if let Some(root) = self.doc.as_ref().try_root_element() {
+            walk.visit(root.id, Behind { was: Rgba::WHITE, now: None, pinned: false, framed: false });
+        }
+        let Recolour { changes, text, on_images, image_page, .. } = walk;
+        self.paper = theme.dark && !native && colours::needs_paper(self.schemes, image_page, text, on_images);
+        if self.paper {
+            return;
+        }
+        let changes: Vec<_> = changes
+            .into_iter()
+            .filter_map(|(id, change)| {
+                let style_was = self.doc.as_ref().get_node(id)?.attr(local_name!("style")).map(str::to_string);
+                Some((id, change, style_was))
+            })
+            .collect();
+        let mut mutator = self.doc.mutate();
+        for (id, change, style_was) in changes {
+            let value = match &style_was {
+                Some(value) => format!("{value};{change}"),
+                None => change,
+            };
+            mutator.set_attribute(id, style(), &value);
+            self.recoloured.push((id, style_was));
+        }
     }
 
     fn lay_out(&mut self, width: f64, scale: f64) {
@@ -557,7 +690,7 @@ impl Page {
 
     fn apply_viewport(&mut self) {
         let pixels = |points: f64| (points * self.scale).round().max(1.0) as u32;
-        let mut viewport = Viewport::new(pixels(self.width), pixels(VIEWPORT_HEIGHT), self.scale as f32, ColorScheme::Light);
+        let mut viewport = Viewport::new(pixels(self.width), pixels(VIEWPORT_HEIGHT), self.scale as f32, self.scheme);
         viewport.set_zoom(self.zoom);
         self.doc.as_mut().set_viewport(viewport);
     }
@@ -569,10 +702,13 @@ impl Page {
         let doc = self.doc.as_mut();
         doc.set_viewport_scroll(blitz_dom::Point { x: 0.0, y: top / zoom });
         let pixel_scale = scale * zoom;
+        let white = self.theme.is_none() || self.paper;
         let pixels = render_to_buffer::<VelloCpuImageRenderer, _>(
             |scene| {
-                let all = Rect::new(0.0, 0.0, pixel_width as f64, pixel_height as f64);
-                scene.fill(Fill::NonZero, Default::default(), Color::WHITE, None, &all);
+                if white {
+                    let all = Rect::new(0.0, 0.0, pixel_width as f64, pixel_height as f64);
+                    scene.fill(Fill::NonZero, Default::default(), Color::WHITE, None, &all);
+                }
                 paint_scene(scene, doc, pixel_scale, pixel_width, pixel_height, 0, 0);
             },
             pixel_width,
@@ -638,6 +774,147 @@ impl Page {
 /// The elements that start quoted history ([`mail_html::QUOTES`]); the outermost of them count.
 fn quote_starts(doc: &BaseDocument) -> HashSet<NodeId> {
     doc.query_selector_all(mail_html::QUOTES).map(|ids| ids.into_iter().collect()).unwrap_or_default()
+}
+
+/// The colour schemes the mail declares (`colours::schemes`) in its `color-scheme` meta tags and
+/// its own style sheets.
+fn declared_schemes(doc: &BaseDocument) -> colours::Schemes {
+    let nodes = |selector: &str| doc.query_selector_all(selector).unwrap_or_default().into_iter().filter_map(|id| doc.get_node(id));
+    let metas: Vec<String> = nodes("meta[name][content]")
+        .filter(|meta| {
+            meta.attr(local_name!("name"))
+                .is_some_and(|name| name.eq_ignore_ascii_case("color-scheme") || name.eq_ignore_ascii_case("supported-color-schemes"))
+        })
+        .filter_map(|meta| meta.attr(local_name!("content")).map(str::to_string))
+        .collect();
+    let styles: Vec<String> = nodes("style").map(|style| style.text_content()).collect();
+    colours::schemes(metas.iter().map(String::as_str), styles.iter().map(String::as_str))
+}
+
+/// What lies behind an element as [`Recolour`] walks down the page.
+#[derive(Clone, Copy)]
+struct Behind {
+    /// The mail's own background there, opaque (white where it paints none).
+    was: Rgba,
+    /// What the page paints there now; `None` where it paints nothing, over the theme's surface.
+    now: Option<Rgba>,
+    /// Whether an ancestor's text colour changed: every element under it then gets its own, as
+    /// one that inherits would otherwise take the ancestor's.
+    pinned: bool,
+    /// Whether it lies over a background image, whose colours stay the mail's.
+    framed: bool,
+}
+
+/// One pass of [`Page::recolour`] over the computed styles: the declarations each element that
+/// changes gets, and the characters of text, those over background images and whether the page
+/// itself is an image, for paper.
+struct Recolour<'a> {
+    doc: &'a BaseDocument,
+    theme: colours::Theme,
+    /// Mail with a dark look of its own, laid out dark: only its text moves.
+    native: bool,
+    changes: Vec<(NodeId, String)>,
+    text: usize,
+    on_images: usize,
+    image_page: bool,
+}
+
+impl Recolour<'_> {
+    fn visit(&mut self, id: NodeId, behind: Behind) {
+        use style::values::generics::color::GenericColor;
+        use style::values::generics::image::GenericImage;
+        use style::values::computed::BorderStyle;
+        let Some(node) = self.doc.get_node(id) else { return };
+        if let Some(text) = node.text_data() {
+            let count = text.content.trim().chars().count();
+            self.text += count;
+            if behind.framed {
+                self.on_images += count;
+            }
+            return;
+        }
+        if !node.is_element() {
+            return;
+        }
+        let Some(styles) = node.primary_styles() else { return };
+        let mut next = behind;
+        let tag = |name| node.data.is_element_with_tag_name(&name);
+        if !behind.framed && styles.get_background().background_image.0.iter().any(|image| !matches!(image, GenericImage::None)) {
+            next.framed = true;
+            self.image_page |= tag(local_name!("html")) || tag(local_name!("body"));
+        }
+        let current = styles.clone_color();
+        let colour = rgba(&current);
+        if next.framed && behind.pinned {
+            // Text over the image keeps the mail's colour, not the one an ancestor's moved to.
+            self.changes.push((id, format!("color: {} !important;", colour.css())));
+        }
+        if !next.framed {
+            let background = rgba(&styles.clone_background_color().resolve_to_absolute(&current));
+            let surface = self.theme.surface;
+            let mut change = String::new();
+            let paint = if self.native { Paint::Keep } else { colours::background(background, behind.now.is_none(), &self.theme) };
+            match paint {
+                Paint::Keep if background.a > 0.02 => next.now = Some(background.over(behind.now.unwrap_or(surface))),
+                Paint::Keep => {}
+                Paint::Clear => change.push_str("background-color: transparent !important;"),
+                Paint::Set(shown) => {
+                    change.push_str(&format!("background-color: {} !important;", shown.css()));
+                    next.now = Some(shown.over(behind.now.unwrap_or(surface)));
+                }
+            }
+            if background.a > 0.02 {
+                next.was = background.over(behind.was);
+            }
+            let link = self.theme.dark && tag(local_name!("a")) && node.attr(local_name!("href")).is_some() && colour.same(colours::DEFAULT_LINK);
+            let wanted = if link { self.theme.link } else { colour };
+            // Mail with a dark look of its own: what its text stood out from in its light one is
+            // unknown here; white, as most mail is written for.
+            let was = if self.native { Rgba::WHITE } else { next.was };
+            let shown = colours::text(wanted, was, next.now.unwrap_or(surface), &self.theme);
+            if !shown.same(colour) || behind.pinned {
+                change.push_str(&format!("color: {} !important;", shown.css()));
+                next.pinned = true;
+            }
+            if !self.native {
+                let border = styles.get_border();
+                let sides = [
+                    ("top", &border.border_top_color, border.border_top_style),
+                    ("right", &border.border_right_color, border.border_right_style),
+                    ("bottom", &border.border_bottom_color, border.border_bottom_style),
+                    ("left", &border.border_left_color, border.border_left_style),
+                ];
+                for (side, colour, style) in sides {
+                    if matches!(style, BorderStyle::None | BorderStyle::Hidden) || matches!(colour, GenericColor::CurrentColor) {
+                        continue;
+                    }
+                    if let Some(shown) = colours::border(rgba(&colour.resolve_to_absolute(&current)), &self.theme) {
+                        change.push_str(&format!("border-{side}-color: {} !important;", shown.css()));
+                    }
+                }
+                // A transparent image (a logo drawn for white) keeps the light it was drawn on.
+                if self.theme.dark
+                    && tag(local_name!("img"))
+                    && behind.was.luminance() > 0.3
+                    && behind.now.is_none_or(|now| !now.same(behind.was))
+                {
+                    change.push_str(&format!("background-color: {} !important;", behind.was.css()));
+                }
+            }
+            if !change.is_empty() {
+                self.changes.push((id, change));
+            }
+        }
+        for &child in node.children.iter() {
+            self.visit(child, next);
+        }
+    }
+}
+
+/// A computed colour in sRGB.
+fn rgba(colour: &style::color::AbsoluteColor) -> Rgba {
+    let [r, g, b, a] = *colour.to_color_space(style::color::ColorSpace::Srgb).raw_components();
+    Rgba { r, g, b, a }
 }
 
 /// Leaves `part` of the body: `Main` without its quoted history, `Quoted` only that (moved to the
@@ -931,6 +1208,8 @@ struct GateShared {
     resources: Arc<Resources>,
     /// When the page was first laid out.
     shown: OnceLock<Instant>,
+    /// Set when a stylesheet is handed to the page: its colours move at the next layout.
+    sheet_arrived: AtomicBool,
 }
 
 #[derive(Default)]
@@ -989,6 +1268,7 @@ impl GateShared {
         let text = self.state.lock().unwrap().text.clone();
         let asks = scan(std::str::from_utf8(&css).unwrap_or_default(), &url, &text);
         self.state.lock().unwrap().learn(asks, imports);
+        self.sheet_arrived.store(true, Ordering::Relaxed);
         handler.bytes(url.to_string(), css);
     }
 
@@ -1005,7 +1285,7 @@ impl GateShared {
 impl Gate {
     fn new(resources: Arc<Resources>) -> Self {
         let state = Mutex::new(GateState::default());
-        Self { shared: Arc::new(GateShared { state, resources, shown: OnceLock::new() }) }
+        Self { shared: Arc::new(GateShared { state, resources, shown: OnceLock::new(), sheet_arrived: AtomicBool::new(false) }) }
     }
 
     fn open(&self, allowed: Allowed) {
@@ -1379,7 +1659,7 @@ mod tests {
     }
 
     fn part(html: &str, part: HtmlPart) -> Page {
-        Page::open(0, html, part, &Pages::new().fonts, offline())
+        Page::open(0, html, part, None, &Pages::new().fonts, offline())
     }
 
     /// A web of the files a test gives, recording what is asked; a file can be held back until
@@ -1586,6 +1866,7 @@ mod tests {
                 r#"<object data="https://example.com/o"></object><p>Kept</p></body></html>"#,
             ),
             HtmlPart::Whole,
+            None,
             &Pages::new().fonts,
             resources(web.clone(), LATE),
         );
@@ -1988,7 +2269,7 @@ mod tests {
         let web: Arc<dyn Web> = Arc::new(Counted(log.clone()));
         let open = |resources: Arc<Resources>| {
             let start = Instant::now();
-            let page = HtmlPage::open(mail.clone(), HtmlPart::Whole, resources);
+            let page = HtmlPage::open(mail.clone(), HtmlPart::Whole, None, resources);
             let (page, painted) = in_time(async move {
                 let size = page.layout(600.0, 2.0).await.unwrap();
                 page.tile(600.0, 2.0, 0.0, 512.0).await.unwrap();
@@ -2033,7 +2314,7 @@ mod tests {
         let mut paints: Vec<Duration> = (0..20)
             .map(|_| {
                 let start = Instant::now();
-                let page = HtmlPage::open(mail.clone(), HtmlPart::Whole, offline());
+                let page = HtmlPage::open(mail.clone(), HtmlPart::Whole, None, offline());
                 in_time(async move {
                     page.layout(600.0, 2.0).await.unwrap();
                     page.tile(600.0, 2.0, 0.0, 512.0).await.unwrap();
@@ -2052,5 +2333,152 @@ mod tests {
         }
         println!("a page's copy of the font collection: {:.1?}", start.elapsed() / 100);
     }
-}
 
+    const DARK: HtmlTheme = HtmlTheme { dark: true, surface: 0x231E1B, text: 0xF6EFE7, link: 0x0A84FF };
+    const LIGHT: HtmlTheme = HtmlTheme { dark: false, surface: 0xFFFDF9, text: 0x2B2420, link: 0x007AFF };
+
+    /// A themed page, laid out 400 points wide.
+    fn themed(html: &str, theme: HtmlTheme) -> Page {
+        let mut page = Page::open(0, html, HtmlPart::Whole, Some(theme), &Pages::new().fonts, offline());
+        page.lay_out(400.0, 1.0);
+        page
+    }
+
+    /// The text colour and background `selector`'s element computes to.
+    fn computed(page: &Page, selector: &str) -> (Rgba, Rgba) {
+        let doc = page.doc.as_ref();
+        let node = doc.get_node(doc.query_selector(selector).unwrap().expect(selector)).unwrap();
+        let styles = node.primary_styles().unwrap();
+        let current = styles.clone_color();
+        (rgba(&current), rgba(&styles.clone_background_color().resolve_to_absolute(&current)))
+    }
+
+    fn near(colour: Rgba, hex: u32) -> bool {
+        colour.same(Rgba::hex(hex))
+    }
+
+    #[test]
+    fn light_mode_clears_the_page_white_and_keeps_the_rest() {
+        let mut page = themed(
+            r##"<body bgcolor="#ffffff"><table width="100%" style="background:#fff"><tr><td>
+            <p id="t" style="color:#333">Hello</p><div id="box" style="background:#f4f4f4">x</div></td></tr></table></body>"##,
+            LIGHT,
+        );
+        assert!(!page.paper);
+        assert_eq!(computed(&page, "table").1.a, 0.0);
+        assert_eq!(computed(&page, "body").1.a, 0.0);
+        assert!(near(computed(&page, "#t").0, 0x333333));
+        assert!(near(computed(&page, "#box").1, 0xF4F4F4));
+        // Where the mail paints nothing the tile is transparent.
+        let tile = page.tile(400.0, 1.0, 0.0, 40.0);
+        assert_eq!(pixel(&tile, 399, 0)[3], 0);
+    }
+
+    #[test]
+    fn dark_mode_moves_text_and_light_backgrounds_to_the_surface() {
+        let page = themed(
+            r##"<body style="background:#f4f4f4"><table id="card" style="background:#ffffff"><tr><td>
+            <p id="t" style="color:#222">Plain</p><p id="grey" style="color:#6e7781">Muted</p>
+            <a id="a" href="https://example.com">default link</a><a id="brand" href="https://x.com" style="color:#0366d6">brand</a>
+            <div id="note" style="background:#fff3cd;border:1px solid #dddddd">note</div>
+            <div id="hl" style="background:#ffd33d"><span id="on">on yellow</span></div>
+            </td></tr></table></body>"##,
+            DARK,
+        );
+        assert!(!page.paper);
+        let surface = Rgba::hex(DARK.surface);
+        // The mail's grey page steps down a little from the surface; the white card is the surface.
+        let body = computed(&page, "body").1;
+        assert!(body.luminance() > surface.luminance() && colours::contrast(body, surface) < 1.3, "{body:?}");
+        assert!(colours::contrast(computed(&page, "#card").1, surface) < 1.05);
+        assert!(near(computed(&page, "#t").0, DARK.text));
+        let grey = computed(&page, "#grey").0;
+        assert!(colours::contrast(grey, surface) >= 4.0 && grey.luminance() < Rgba::hex(DARK.text).luminance());
+        assert!(near(computed(&page, "#a").0, DARK.link));
+        let brand = computed(&page, "#brand").0;
+        assert!(colours::contrast(brand, surface) >= 4.5 && brand.b > brand.r, "{brand:?}");
+        let note = computed(&page, "#note");
+        assert!(note.1.luminance() < 0.1 && note.1.r > note.1.b, "{note:?}");
+        // The highlight and the dark text on it stay.
+        assert!(near(computed(&page, "#hl").1, 0xFFD33D));
+        assert!(computed(&page, "#on").0.luminance() < 0.05);
+    }
+
+    #[test]
+    fn dark_mode_keeps_images_and_what_lies_on_background_images() {
+        let png = PNG;
+        let page = themed(
+            &format!(
+                r#"<body><p>Text</p><img id="logo" src="{png}" width="20" height="20">
+                <div id="hero" style="background-image:url({png});color:#111"><span id="over">Sale</span></div></body>"#
+            ),
+            DARK,
+        );
+        assert!(!page.paper);
+        // A transparent logo keeps the white it was drawn on.
+        assert!(near(computed(&page, "#logo").1, 0xFFFFFF));
+        assert!(near(computed(&page, "#over").0, 0x111111));
+    }
+
+    #[test]
+    fn mail_that_cannot_move_goes_on_paper() {
+        let png = PNG;
+        let mut page = themed(&format!(r#"<body background="{png}"><p style="color:#333">Paper</p></body>"#), DARK);
+        assert!(page.paper);
+        assert!(near(computed(&page, "p").0, 0x333333));
+        let tile = page.tile(400.0, 1.0, 0.0, 40.0);
+        assert_eq!(pixel(&tile, 399, 39)[3], 255);
+        let mut page = themed(r#"<meta name="color-scheme" content="only light"><p style="color:#333">Light</p>"#, DARK);
+        assert!(page.paper);
+        // On white, as written.
+        let tile = page.tile(400.0, 1.0, 0.0, 40.0);
+        assert_eq!(pixel(&tile, 399, 39), [255, 255, 255, 255]);
+        // Light mode never needs paper.
+        assert!(!themed(r#"<meta name="color-scheme" content="only light"><p>Light</p>"#, LIGHT).paper);
+    }
+
+    #[test]
+    fn mail_with_a_dark_look_of_its_own_keeps_it() {
+        let mail = r#"<meta name="color-scheme" content="light dark"><style>
+            body { background: #ffffff; color: #111111 }
+            @media (prefers-color-scheme: dark) { body { background: #101820; color: #e0e8f0 } #lost { color: #222 } }
+            </style><body><p>Own</p><p id="lost">Forgotten</p></body>"#;
+        let page = themed(mail, DARK);
+        assert!(!page.paper && page.scheme == ColorScheme::Dark);
+        let body = computed(&page, "body");
+        assert!(near(body.1, 0x101820) && near(body.0, 0xE0E8F0), "{body:?}");
+        // Text its dark look forgot still reads.
+        assert!(colours::contrast(computed(&page, "#lost").0, Rgba::hex(0x101820)) >= 3.0);
+        let light = themed(mail, LIGHT);
+        assert!(light.scheme == ColorScheme::Light && near(computed(&light, "p").0, 0x111111));
+    }
+
+    #[test]
+    fn a_stylesheet_arriving_late_moves_too() {
+        let web = Arc::new(FakeWeb::default());
+        web.file("https://example.com/mail.css", "p { color: #222222 }");
+        let pages = Pages::new();
+        let mut page = Page::open(
+            0,
+            r#"<link rel="stylesheet" href="https://example.com/mail.css"><p>Late</p>"#,
+            HtmlPart::Whole,
+            Some(DARK),
+            &pages.fonts,
+            resources(web, LATE),
+        );
+        page.lay_out(400.0, 1.0);
+        let start = Instant::now();
+        while !page.gate.shared.sheet_arrived.load(Ordering::Relaxed) {
+            assert!(start.elapsed() < Duration::from_secs(10), "the stylesheet arrives");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        page.doc.as_mut().resolve(0.0);
+        page.gate.shared.sheet_arrived.store(false, Ordering::Relaxed);
+        page.recolour();
+        page.fit();
+        assert!(near(computed(&page, "p").0, DARK.text));
+    }
+
+    /// A 2×2 red PNG.
+    const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg==";
+}

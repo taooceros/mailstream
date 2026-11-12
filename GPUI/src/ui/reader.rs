@@ -4,7 +4,7 @@
 //! of its first unread message, else its last, held there while bodies load until it is scrolled
 //! (MS-70, MS-255). The toolbar above shows how far it is scrolled (`ReaderTop`).
 
-use gpui::{ObjectFit, ScrollDelta, StyledImage, img, point};
+use gpui::{Hsla, ObjectFit, Rgba, ScrollDelta, StyledImage, img, point};
 
 use super::*;
 use crate::controls::tooltip;
@@ -413,11 +413,11 @@ impl MailApp {
             }
             return div().flex().flex_col().child(body).child(self.render_fold(&id, open, div(), p, cx)).into_any_element();
         }
-        let main = sheet(blitz_html(id.clone(), html.clone(), blitz_body::HtmlPart::Main), p);
+        let main = blitz_html(id.clone(), html.clone(), blitz_body::HtmlPart::Main, p);
         if blitz_body::quoted(&id) != Some(true) {
             return main;
         }
-        let quoted = sheet(blitz_html(format!("{id}#quoted").into(), html, blitz_body::HtmlPart::Quoted), p);
+        let quoted = blitz_html(format!("{id}#quoted").into(), html, blitz_body::HtmlPart::Quoted, p);
         div().flex().flex_col().child(main).child(self.render_fold(&id, open, quoted, p, cx)).into_any_element()
     }
 
@@ -608,7 +608,7 @@ impl MailApp {
                     .items_start()
                     .child(div().w(px(metrics_reader::LOG_GUTTER)).flex_shrink_0().child(gutter))
                     .child(column)
-                    // The wash lies over the message, so its HTML (white, as Blitz paints it)
+                    // The wash lies over the message, so its HTML (its own backgrounds, or paper)
                     // takes it too.
                     .when(hovered, |d| d.child(div().absolute().inset_0().rounded(px(radius::CONTROL)).bg(p.hover))),
             )
@@ -651,25 +651,33 @@ fn text_runs(runs: &[format::Run], p: &'static Palette) -> Div {
     }))
 }
 
-/// An HTML page as the reader shows it: on the white Blitz paints, which dark mode makes a sheet
-/// with room around the mail and rounded corners, so mail written for white never meets the dark
-/// surface edge to edge (MS-256).
-fn sheet(page: AnyElement, p: &Palette) -> AnyElement {
-    if !p.dark {
-        return page;
-    }
-    div().p(px(metrics_reader::SHEET_PADDING)).rounded(px(radius::CARD)).bg(p.page).child(page).into_any_element()
-}
-
 /// Blitz's tiles of `part` of an HTML body, drawn in a placeholder as tall as its page once that
-/// is laid out.
-fn blitz_html(key: SharedString, html: SharedString, part: blitz_body::HtmlPart) -> AnyElement {
+/// is laid out. The mail sits on the reader's surface, its colours moved to it in dark mode
+/// (MS-267); mail that can't move is drawn on paper, which dark mode shows as a sheet with room
+/// around the mail and rounded corners, so it never meets the dark surface edge to edge (MS-256).
+fn blitz_html(key: SharedString, html: SharedString, part: blitz_body::HtmlPart, p: &Palette) -> AnyElement {
     let height = blitz_body::height(&key).unwrap_or(40.);
+    let paper = p.dark && blitz_body::paper(&key);
+    let theme = html_theme(p);
     let body = canvas(
         |bounds, window, _| blitz_body::prepaint(bounds, window),
-        move |bounds, hitbox, window, cx| blitz_body::paint(&key, &html, part, bounds, hitbox, window, cx),
+        move |bounds, hitbox, window, cx| blitz_body::paint(&key, &html, part, theme, bounds, hitbox, window, cx),
     );
-    body.w_full().h(px(height)).into_any_element()
+    let body = body.w_full().h(px(height)).into_any_element();
+    if !paper {
+        return body;
+    }
+    div().p(px(metrics_reader::SHEET_PADDING)).rounded(px(radius::CARD)).bg(p.page).child(body).into_any_element()
+}
+
+/// The reader's surface under an HTML body and its own colours there, for Blitz.
+fn html_theme(p: &Palette) -> blitz_body::HtmlTheme {
+    let rgb = |color: Hsla| {
+        let color = Rgba::from(color);
+        let byte = |channel: f32| (channel.clamp(0., 1.) * 255.).round() as u32;
+        (byte(color.r) << 16) | (byte(color.g) << 8) | byte(color.b)
+    };
+    blitz_body::HtmlTheme { dark: p.dark, surface: rgb(p.background), text: rgb(p.text), link: rgb(p.accent) }
 }
 
 /// The Mac's WebView renderer: a placeholder the native web view of the whole body is laid over,

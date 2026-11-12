@@ -63,8 +63,9 @@ pub struct Palette {
     pub card: Hsla,
     /// A hairline around cards resting on the tray (a half-lifted row).
     pub card_border: Hsla,
-    /// The paper HTML mail is drawn on: Blitz paints its pages white, as mail is written for
-    /// white; dark mode shows it as a sheet with room around the mail (MS-256).
+    /// The paper of HTML mail that can't move to the dark surface (MS-267: it asks to stay light
+    /// or paints its page with images), drawn white as written; dark mode shows it as a sheet
+    /// with room around the mail (MS-256).
     pub page: Hsla,
     /// The opaque face of a toolbar capsule (and the sidebar's count badge), inside its rim.
     pub capsule: Hsla,
@@ -472,7 +473,7 @@ pub mod reader {
     pub const SCRIM_SOLID: f32 = 0.6;
     /// The gap between the toolbar and the head of the message a thread opens at.
     pub const OPEN_GAP: f32 = 8.0;
-    /// The room around an HTML body on its sheet, in dark mode.
+    /// The room around an HTML body on its sheet (paper), in dark mode.
     pub const SHEET_PADDING: f32 = 16.0;
     /// The labels' column of a message's full headers (From, To, Cc, Date).
     pub const HEADER_LABEL: f32 = 36.0;
