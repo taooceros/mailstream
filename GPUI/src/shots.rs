@@ -187,9 +187,15 @@ fn fail(message: &str) -> ! {
 /// A fresh data folder the engine and the app use instead of the person's (`Engine/src/lib.rs`,
 /// `support_directory`, `cache_directory`): HOME on the Mac (Application Support and Caches are
 /// under it), the XDG data and cache folders elsewhere. Sign-ins stay in memory
-/// (`mailstream_engine::shots`).
+/// (`mailstream_engine::shots`). On the Mac it is under `/tmp`: under the per-user temporary
+/// folder (`/var/folders/…/T/`), the engine's control socket in `Library/Application
+/// Support/Mailstream` passes the 104-byte limit of a Unix socket's path and never opens (MS-264).
 fn data_folder() -> PathBuf {
-    let home = std::env::temp_dir().join(format!("mailstream-shots-{}", std::process::id()));
+    #[cfg(target_os = "macos")]
+    let parent = PathBuf::from("/tmp");
+    #[cfg(not(target_os = "macos"))]
+    let parent = std::env::temp_dir();
+    let home = parent.join(format!("mailstream-shots-{}", std::process::id()));
     std::fs::remove_dir_all(&home).ok();
     std::fs::create_dir_all(&home).unwrap_or_else(|error| fail(&format!("{}: {error}", home.display())));
     #[cfg(not(target_os = "macos"))]
@@ -295,9 +301,13 @@ struct Run {
 
 impl Run {
     /// Lets `time` pass in real time, running the app's tasks and drawing a frame every `FRAME`,
-    /// as the platform's display link would: the engine's answers arrive, animations finish.
+    /// as the platform's display link would: the engine's answers arrive, animations finish. The
+    /// app's clock (its timers and animations) moves by the time that really passed, drawing
+    /// included, so it keeps pace with the engine's: moved by `FRAME` per frame, it fell behind
+    /// wherever drawing takes a while (on the Mac a 5 s toast took 8 s, MS-264).
     fn pass(&mut self, time: Duration) {
         let start = Instant::now();
+        let mut moved = start;
         loop {
             self.cx.run_until_parked();
             self.on_window(|window, cx| {
@@ -308,7 +318,9 @@ impl Run {
                 break;
             }
             std::thread::sleep(FRAME);
-            self.cx.advance_clock(FRAME);
+            let now = Instant::now();
+            self.cx.advance_clock(now - moved);
+            moved = now;
         }
     }
 
