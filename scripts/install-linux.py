@@ -129,6 +129,12 @@ def install(frontend, built, revision, ld_library_path, shell):
             f"# Mailstream GPUI, built from main {revision} (scripts/install-linux.py).\n"
             "# NixOS has no global library path: GPUI dlopens Vulkan, Wayland and fontconfig from the\n"
             "# devenv shell, kept from garbage collection by the nix-env profile beside this script.\n"
+            "# --help/--version only print what is installed: probing the launcher must never open the\n"
+            "# app on the person's screen (two install agents did on 11-12).\n"
+            'case "${1:-}" in -h|--help|--version|-V)\n'
+            f'  echo "Mailstream GPUI, built from main {revision}; run without arguments to start it"\n'
+            "  exit 0;;\n"
+            "esac\n"
             f'export LD_LIBRARY_PATH="{ld_library_path}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"\n'
             f'exec "{executable}" "$@"\n')
         launcher.chmod(0o755)
