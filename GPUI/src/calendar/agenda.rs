@@ -111,10 +111,17 @@ impl CalendarPane {
                             )
                             .child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(subtitle)),
                     )
-                    .child(capsule(p).child(
-                        icon_button("calendar-refresh", Icon::Refresh, "Refresh", self.has_calendars(), p.muted)
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
-                    )),
+                    .child(
+                        capsule(p)
+                            .child(
+                                icon_button("calendar-new", Icon::AddDraft, "New event", self.can_create(), p.muted)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.create_event(None, window, cx))),
+                            )
+                            .child(
+                                icon_button("calendar-refresh", Icon::Refresh, "Refresh", self.has_calendars(), p.muted)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
+                            ),
+                    ),
             )
             .child(
                 div()

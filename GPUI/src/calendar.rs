@@ -10,6 +10,7 @@
 
 mod agenda;
 mod detail;
+mod editor;
 mod grid;
 pub mod model;
 
@@ -35,7 +36,7 @@ use model::{Event, EventKey};
 
 actions!(
     calendar,
-    [Next, Previous, Later, Earlier, PageNext, PagePrevious, ShowAgenda, ShowDay, ShowWeek, Today, Back, Refresh]
+    [Next, Previous, Later, Earlier, PageNext, PagePrevious, ShowAgenda, ShowDay, ShowWeek, Today, Back, Refresh, NewEvent]
 );
 
 const CONTEXT: &str = "Calendar";
@@ -68,7 +69,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", Back, list),
         KeyBinding::new(secondary!("["), Back, pane),
         KeyBinding::new(secondary!("r"), Refresh, pane),
+        // Over the window's New Message while the calendar has focus.
+        KeyBinding::new(secondary!("n"), NewEvent, pane),
     ]);
+    editor::bind_keys(cx);
 }
 
 /// How the calendar lays out its events: a list of the days ahead, or one day's or one week's
@@ -110,6 +114,10 @@ pub struct CalendarPane {
     /// Calendar is in view instead of mail.
     active: bool,
     accounts: Vec<CalendarAccount>,
+    /// This computer's time zone, as the engine names it, which the editor's times are in.
+    time_zone: String,
+    /// A saved new event, opened once a read brings it.
+    open_after: Option<EventKey>,
     /// Earliest first, as the engine lists them.
     events: Vec<Event>,
     loading: bool,
@@ -147,6 +155,9 @@ pub struct CalendarPane {
     /// The calendar's share of the pane beside an open event (`gpui.calendarWidth`), which the
     /// window keeps (`split.rs`).
     list_share: f32,
+    /// The timeline band's top in the window, as last drawn (moving as it scrolls), to tell the
+    /// time under a click.
+    band_top: Rc<Cell<f32>>,
     _clock: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -178,6 +189,8 @@ impl CalendarPane {
             focus: cx.focus_handle(),
             active: false,
             accounts: Vec::new(),
+            time_zone: String::new(),
+            open_after: None,
             events: Vec::new(),
             loading: false,
             listed: false,
@@ -199,6 +212,7 @@ impl CalendarPane {
             pan: Pan::Rest,
             page_width: Rc::new(Cell::new(0.)),
             list_share: layout::LIST_SHARE,
+            band_top: Rc::new(Cell::new(0.)),
             _clock: clock,
             _subscriptions: vec![cx.observe_window_appearance(window, |_, _, cx| cx.notify())],
         }
@@ -266,12 +280,16 @@ impl CalendarPane {
             match result {
                 Ok(agenda) => {
                     this.accounts = agenda.accounts;
+                    this.time_zone = agenda.time_zone;
                     this.events = agenda.events.into_iter().filter_map(Event::new).collect();
                     this.loading = agenda.loading;
                     this.listed = true;
                     this.synced = agenda.synced.from.parse().ok().zip(agenda.synced.until.parse().ok());
                     if this.opened.as_ref().is_some_and(|key| this.event_index(key).is_none()) {
                         this.opened = None;
+                    }
+                    if let Some(key) = this.open_after.take_if(|key| this.events.iter().any(|event| &event.key == key)) {
+                        this.open(key, cx);
                     }
                     this.rebuild(Local::now().date_naive());
                 }
@@ -512,6 +530,11 @@ impl CalendarPane {
             }
         });
     }
+
+    /// ⌘N: a new event from the next full hour.
+    fn new_event(&mut self, _: &NewEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.create_event(None, window, cx);
+    }
 }
 
 impl Render for CalendarPane {
@@ -541,6 +564,7 @@ impl Render for CalendarPane {
             .on_action(cx.listener(Self::today))
             .on_action(cx.listener(Self::back))
             .on_action(cx.listener(Self::refresh))
+            .on_action(cx.listener(Self::new_event))
             .relative()
             .size_full()
             .flex()

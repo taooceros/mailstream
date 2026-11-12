@@ -71,6 +71,20 @@ impl CalendarPane {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_event(cx))),
             ))
             .child(div().flex_1())
+            .when(event.item.editable, |d| {
+                let (edit, delete) = (event.key.clone(), event.key.clone());
+                d.child(
+                    capsule(p)
+                        .child(
+                            icon_button("calendar-edit", Icon::Compose, "Edit", true, p.muted)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.edit_event(&edit, window, cx))),
+                        )
+                        .child(
+                            icon_button("calendar-delete", Icon::Delete, "Delete", true, p.muted)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.confirm_delete(&delete, window, cx))),
+                        ),
+                )
+            })
             .when_some(event.item.link.clone(), |d, link| {
                 let tip = if microsoft { "Open in Outlook" } else { "Open in Google Calendar" };
                 d.child(capsule(p).child(

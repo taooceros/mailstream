@@ -429,9 +429,11 @@ impl CalendarPane {
         // a new width draws the pane again on the next frame.
         let measure = {
             let cell = self.page_width.clone();
+            let top = self.band_top.clone();
             let pane = cx.entity().downgrade();
             canvas(
                 move |bounds, window, _| {
+                    top.set(f32::from(bounds.origin.y));
                     let measured = f32::from(bounds.size.width);
                     if (cell.get() - measured).abs() > 0.5 {
                         cell.set(measured);
@@ -583,7 +585,22 @@ impl CalendarPane {
                         .child(shares(placement.columns - placement.column - placement.span)),
                 );
             }
-            d = d.child(day_column(i, count).child(cards));
+            let day = page.days[i];
+            let column = day_column(i, count).id(ElementId::Name(format!("timeline-day:{day}").into()));
+            let column = if self.can_create() {
+                // A click on free time there: a new event from the quarter hour under it.
+                let top = self.band_top.clone();
+                column.on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    let y = f32::from(event.position().y) - top.get() - metrics::INSET;
+                    let minutes = ((y / PER_MINUTE).floor() as i64).div_euclid(15) * 15;
+                    let minutes = minutes.clamp(0, DAY_MINUTES as i64 - 15);
+                    let start = day.and_hms_opt(0, 0, 0).expect("midnight") + chrono::Duration::minutes(minutes);
+                    this.create_event(Some(start), window, cx);
+                }))
+            } else {
+                column
+            };
+            d = d.child(column.child(cards));
         }
         // The time now: a line with a dot across today's column, dashed across the other days.
         if let Some(at) = today_at {
@@ -787,7 +804,11 @@ impl CalendarPane {
             .overflow_hidden()
             .rounded(px(metrics::CARD_RADIUS))
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(key.clone(), cx)));
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                // Not the free time under it.
+                cx.stop_propagation();
+                this.open(key.clone(), cx);
+            }));
         let card = if selected {
             card.bg(linear_gradient(180., linear_color_stop(p.lifted_card[0], 0.), linear_color_stop(p.lifted_card[1], 1.)))
                 .border(px(stroke::RIM))
