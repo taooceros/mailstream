@@ -106,10 +106,14 @@ hashes stay as they are.
   every push, GPUI stutter) and the current refactor. Medium: small bugs and experience
   improvements. Low: another machine's chores, the older front ends (AppKit, Flutter) and what
   nobody plans to do yet. A sub-issue is no higher than its parent unless it blocks other work.
-  Never change a priority the user set.
+- Agents set a priority only on an issue that has "No priority" (MS-271). A priority the user set,
+  when filing or later, is never changed, not even to match these levels or a parent: the issue's
+  Linear history shows who set it, and an issue the user filed with a priority has no history
+  entry for it. To argue for another level, say so in a comment. Another machine's choice on an
+  issue you take over stays too.
 - Label, place and prioritize issues you file when creating them. Issues the user files often
-  lack these: the agent that claims one adds them before its start comment (the polling session
-  leaves this to it).
+  lack these: the agent that claims one adds what is missing (a priority only if it has none)
+  before its start comment (the polling session leaves this to it).
 - File your own issues in Backlog; only the user starts them (moving one to Todo or adding `omp`).
   Problems found outside the current change get their own Backlog issue; don't fix them in passing.
 - An issue filed on Windows or Linux for that machine to do carries its machine label (`windows`,
