@@ -26,6 +26,8 @@ mod design;
 mod engine;
 mod format;
 mod frame_rate;
+#[cfg(target_os = "macos")]
+mod glass;
 mod icons;
 mod input;
 mod model;
@@ -96,8 +98,8 @@ fn main() {
             ..Default::default()
         };
         // In gpui-kit's root, which hosts the kit's tooltips, menus and popovers over the app; its
-        // surface left clear (the kit paints its theme's background there), so the window's blur
-        // shows where the app paints nothing.
+        // surface left clear (the kit paints its theme's background there), so the window's glass
+        // (or blur) shows where the app paints nothing.
         let mut app = None;
         let window = cx
             .open_window(options, |window, cx| {
@@ -117,6 +119,10 @@ fn main() {
         );
         window
             .update(cx, |_, window, cx| {
+                #[cfg(target_os = "macos")]
+                if design::window_material() == design::WindowMaterial::Glass {
+                    glass::install(window);
+                }
                 let (focus, bench) = app.read_with(cx, |app, _| (app.focus.clone(), app.bench.is_some()));
                 window.focus(&focus, cx);
                 // A measurement runs beside the user's work without taking the foreground.

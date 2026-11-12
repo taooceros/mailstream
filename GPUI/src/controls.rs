@@ -166,8 +166,9 @@ pub fn popover(p: &Palette) -> Div {
         .shadow(p.popover_shadow.clone())
 }
 
-/// Toolbar buttons grouped on a capsule floating over content (`GlassCapsule`): an opaque face
-/// inside a hairline rim, on a resting card's shadow so it stands off the tray (MS-241).
+/// Toolbar buttons grouped on a capsule floating over content (`GlassCapsule`), as macOS 26
+/// groups toolbar items (MS-242): a glass face lit from above with a specular top edge, inside a
+/// hairline rim, on a resting card's shadow so it stands off the tray.
 pub fn capsule(p: &Palette) -> Div {
     div()
         .flex_shrink_0()
@@ -176,10 +177,10 @@ pub fn capsule(p: &Palette) -> Div {
         .flex()
         .items_center()
         .rounded_full()
-        .bg(p.capsule)
+        .bg(linear_gradient(180., linear_color_stop(p.capsule_glass[0], 0.), linear_color_stop(p.capsule_glass[1], 1.)))
         .border(px(stroke::HAIRLINE))
         .border_color(p.capsule_rim)
-        .shadow(p.card_shadow.clone())
+        .shadow(p.capsule_shadow.clone())
 }
 
 /// The capsule floating over a row (its hover actions, `RaisedCapsule`): lit from above, a hairline

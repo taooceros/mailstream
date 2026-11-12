@@ -438,9 +438,12 @@ impl MailApp {
         let compose = cx.new(|_| ComposeColumn::new());
         let subscriptions = vec![
             cx.subscribe_in(&search, window, Self::on_search_event),
-            // The kit's components follow the appearance with the app (`design::sync_kit_theme`).
+            // The kit's components follow the appearance with the app (`design::sync_kit_theme`),
+            // and so does the Mac window's glass tint.
             cx.observe_window_appearance(window, |_, window, cx| {
                 crate::design::sync_kit_theme(window.appearance(), cx);
+                #[cfg(target_os = "macos")]
+                crate::glass::follow_appearance(window);
                 cx.notify()
             }),
             // Chat accounts and unread counts feed the sidebar.

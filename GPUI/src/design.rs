@@ -12,8 +12,11 @@ use gpui::{App, BoxShadow, Hsla, WindowAppearance, WindowBackgroundAppearance, p
 pub struct Palette {
     pub dark: bool,
     /// The window behind the islands, where the sidebar sits, where nothing shows through it; over
-    /// the Mac's blur only a wash of it ([`window_fill`]).
+    /// the older Mac's blur only a wash of it ([`window_fill`]).
     pub window: Hsla,
+    /// The tint of the Mac window's Liquid Glass (`glass.rs`, MS-242): warm, so the sidebar and
+    /// the gaps read cosy rather than gray whatever the desktop behind them.
+    pub glass_tint: Hsla,
     /// Islands (the conversation), sheets, fields, menus.
     pub background: Hsla,
     /// The list's island, a shade under `background`, so rows can lift off it.
@@ -57,10 +60,15 @@ pub struct Palette {
     pub card: Hsla,
     /// A hairline around cards resting on the tray (a half-lifted row).
     pub card_border: Hsla,
-    /// The opaque face of a toolbar capsule floating over content, inside its rim, on the resting
-    /// card's shadow.
+    /// The opaque face of a toolbar capsule (and the sidebar's count badge), inside its rim.
     pub capsule: Hsla,
     pub capsule_rim: Hsla,
+    /// A toolbar capsule's glass face floating over content (macOS 26's toolbar groups, MS-242):
+    /// lit from above, top to bottom, all but opaque, so what scrolls under it shows faintly
+    /// without blurring (a backdrop blur cost Flutter 2–3 ms a frame, MS-187).
+    pub capsule_glass: [Hsla; 2],
+    /// The capsule's specular top edge (an inset highlight) over the resting card's shadow.
+    pub capsule_shadow: Vec<BoxShadow>,
     /// The capsule floating over a row (its hover actions): lit from above, top to bottom.
     pub raised_capsule: [Hsla; 2],
     pub raised_capsule_rim: Hsla,
@@ -101,9 +109,15 @@ fn shadow(color: u32, y: f32, blur: f32) -> BoxShadow {
     BoxShadow { color: argb(color), offset: point(px(0.), px(y)), blur_radius: px(blur), spread_radius: px(0.), inset: false }
 }
 
+/// A highlight along an edge's inside: `y` points down from the top edge.
+fn inset(color: u32, y: f32) -> BoxShadow {
+    BoxShadow { inset: true, ..shadow(color, y, 0.) }
+}
+
 static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
     dark: false,
     window: argb(0xFFECEEF2),
+    glass_tint: argb(0x66FBF1E4),
     background: argb(0xFFFFFFFF),
     tray: argb(0xFFF5F6FA),
     text: argb(0xFF1D1D1F),
@@ -131,6 +145,8 @@ static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
     card_border: argb(0x14000000),
     capsule: argb(0xFFFFFFFF),
     capsule_rim: argb(0x14000000),
+    capsule_glass: [argb(0xF5FFFFFF), argb(0xE6FBFAF8)],
+    capsule_shadow: vec![inset(0xE6FFFFFF, 1.), shadow(0x0F0F172A, 1., 3.), shadow(0x0A000000, 4., 12.)],
     raised_capsule: [argb(0xFFFFFFFF), argb(0xFFF4F4F6)],
     raised_capsule_rim: argb(0x1A000000),
     island_rim: argb(0x12000000),
@@ -150,6 +166,7 @@ static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
 static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
     dark: true,
     window: argb(0xFF121214),
+    glass_tint: argb(0x802A2019),
     background: argb(0xFF1E1E1E),
     tray: argb(0xFF18181A),
     text: argb(0xFFF5F5F7),
@@ -177,6 +194,8 @@ static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
     card_border: argb(0x1AFFFFFF),
     capsule: argb(0xFF2C2C2E),
     capsule_rim: argb(0x1FFFFFFF),
+    capsule_glass: [argb(0xF03A393C), argb(0xE62C2B2E)],
+    capsule_shadow: vec![inset(0x2EFFFFFF, 1.), shadow(0x33000000, 1., 3.), shadow(0x26000000, 4., 12.)],
     raised_capsule: [argb(0xFF424245), argb(0xFF35353A)],
     raised_capsule_rim: argb(0x1FFFFFFF),
     island_rim: argb(0x17FFFFFF),
@@ -200,24 +219,52 @@ pub fn palette(appearance: WindowAppearance) -> &'static Palette {
     }
 }
 
-/// What the window behind the islands is, the one place that chooses it (MS-241): on the Mac
-/// the system's blur of the desktop shows through the sidebar and between the islands (Flutter's
-/// window glass); elsewhere the window is opaque.
-pub fn window_background() -> WindowBackgroundAppearance {
-    if cfg!(target_os = "macos") { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Opaque }
+/// What the window behind the islands is made of, the one place that chooses it (MS-241, MS-242).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WindowMaterial {
+    /// [`Palette::window`], where the system offers neither (Linux).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    Opaque,
+    /// macOS 26's Liquid Glass under GPUI's view (`glass.rs`), as Flutter's window: the desktop
+    /// shows through the sidebar and between the islands, in the system's glass, tinted for the
+    /// appearance by the system.
+    Glass,
+    /// An older Mac: GPUI's blur of the desktop, under a wash ([`WINDOW_WASH`]).
+    Blur,
 }
 
-/// How much of [`Palette::window`] lies over the Mac's blur: gpui's blur is the desktop alone,
-/// untinted, so without a wash of the appearance's own color a light desktop would sit under the
-/// dark mode's white sidebar text.
+pub fn window_material() -> WindowMaterial {
+    #[cfg(target_os = "macos")]
+    {
+        if crate::glass::available() { WindowMaterial::Glass } else { WindowMaterial::Blur }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        WindowMaterial::Opaque
+    }
+}
+
+/// The window's background for GPUI: transparent over the glass, which the app puts under it.
+pub fn window_background() -> WindowBackgroundAppearance {
+    match window_material() {
+        WindowMaterial::Opaque => WindowBackgroundAppearance::Opaque,
+        WindowMaterial::Glass => WindowBackgroundAppearance::Transparent,
+        WindowMaterial::Blur => WindowBackgroundAppearance::Blurred,
+    }
+}
+
+/// How much of [`Palette::window`] lies over the older Mac's blur: GPUI's blur is the desktop
+/// alone, untinted, so without a wash of the appearance's own color a light desktop would sit
+/// under the dark mode's white sidebar text. The glass tints itself and takes none.
 pub const WINDOW_WASH: f32 = 0.78;
 
-/// What the app paints behind the islands: [`Palette::window`] where the window is opaque, a
-/// [`WINDOW_WASH`] of it over a blur ([`window_background`]).
+/// What the app paints behind the islands: [`Palette::window`] where the window is opaque,
+/// nothing over the glass, a [`WINDOW_WASH`] of it over the blur.
 pub fn window_fill(p: &Palette) -> Hsla {
-    match window_background() {
-        WindowBackgroundAppearance::Opaque => p.window,
-        _ => tint(p.window, WINDOW_WASH),
+    match window_material() {
+        WindowMaterial::Opaque => p.window,
+        WindowMaterial::Glass => gpui::transparent_black(),
+        WindowMaterial::Blur => tint(p.window, WINDOW_WASH),
     }
 }
 

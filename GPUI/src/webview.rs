@@ -164,7 +164,7 @@ fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
 }
 
 /// The window's GPUI view.
-fn host_view(window: &Window) -> Option<Retained<NSView>> {
+pub fn host_view(window: &Window) -> Option<Retained<NSView>> {
     let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw() else { return None };
     unsafe { Retained::retain(handle.ns_view.as_ptr().cast::<NSView>()) }
 }
