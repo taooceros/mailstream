@@ -27,6 +27,13 @@ older than those docs: it has no `ovnfs config` verb (edit `.o2/ovnfs.yml` by ha
   built from other source for the checkout's own (MS-152). ovnfs v0.3.0 ignores that in `--rev`
   checkouts: their ignored files stay live, whatever the rules say. The same file hides the
   default checkout's `.jj` from the capture; `checkout.py` puts the workspace's own there.
+- On Linux each crate's `target` is outside the mount (MS-201): ovnfs's FUSE mount hands a process
+  that lists a folder the sizes its files had when the folder was opened, so a file written
+  meanwhile reads as empty for a second (https://github.com/stencil-hq/ovnfs/issues/48), and cargo
+  builds in the mount fail. `checkout.py` makes the checkout's `<crate>/target` a symlink to
+  `~/.cache/mailstream-checkouts/NAME/<crate>/target`, a reflink copy of the default checkout's
+  warm build taken as the checkout opens; `checkout.py rm` deletes it. Other build output (Flutter's
+  `build/`) stays in the mount.
 - The default checkout stays clean on `main` (it is locked; only `scripts/warm-build.py` moves
   it), so a checkout of it starts at `main` as of the last warm build, and `jj new main` takes it
   to `origin`'s tip. The first release `scripts/ffi.py` in a new checkout rebuilds only the repo's

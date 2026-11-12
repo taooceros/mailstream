@@ -18,6 +18,16 @@ ovnfs v0.3.0 serves ignored files of a `--rev` checkout live whatever the rules 
 checkout is clean on `main` anyway (it is locked, and only warm-build.py moves it), and `jj new
 main` brings the checkout to `main`'s tip.
 
+On Linux the cargo target folders live outside the checkout (MS-201): ovnfs's FUSE mount answers a
+directory listing with the sizes files had when the directory was opened, and the kernel takes them
+over newer writes, so a file just written reads as empty or cut short for a second
+(https://github.com/stencil-hq/ovnfs/issues/48). Every rustc lists `target/*/deps` as it starts
+while others write objects there, and cargo builds in the mount fail ("failed to map object file:
+memory map must have a non-zero length"). unmount_targets() below gives each crate (`*/Cargo.toml`)
+a target folder in ~/.cache/mailstream-checkouts/NAME, starting as a reflink copy of the default
+checkout's warm build (btrfs: no copying, no extra disk), and makes the checkout's `<crate>/target`
+a symlink to it; `rm` deletes it.
+
 Every checkout shares the default checkout's jj repository (MS-179): commits, bookmarks, the
 operation log and each checkout's working copy (`NAME@`) show in every checkout at once, without
 a fetch or push. ovnfs knows only git (https://github.com/stencil-hq/ovnfs/issues/37) and jj adds
@@ -28,7 +38,8 @@ commit made in one shows in the other's `jj log`). `jj workspace list` shows the
 as the workspace's path. The checkout's `.git` (ovnfs's private git directory) stays as captured
 and goes stale: use jj there, not git.
 
-`rm NAME` forgets workspace NAME and runs `ovnfs rm NAME`; either may be gone already."""
+`rm NAME` forgets workspace NAME, runs `ovnfs rm NAME` and deletes its target folders outside the
+mount; any of them may be gone already."""
 import json
 import shutil
 import subprocess
@@ -38,6 +49,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ["FFI/target", "Engine/target", ".turso"]
+TARGETS = Path.home() / ".cache/mailstream-checkouts"
 
 
 def run(*args, cwd=ROOT):
@@ -102,6 +114,7 @@ def remove(name):
     removed = subprocess.run(["ovnfs", "rm", name], text=True, capture_output=True)
     if removed.returncode and "not_found" not in removed.stderr:
         sys.exit(f"checkout: ovnfs rm {name} failed: {removed.stderr.strip()}")
+    shutil.rmtree(TARGETS / name, ignore_errors=True)
     print(f"removed {name}")
 
 
@@ -128,6 +141,26 @@ def main():
         raise
 
 
+def unmount_targets(source, path, name):
+    """Linux: replaces each crate's target folder in the checkout with a symlink to one outside the
+    FUSE mount, started from the default checkout's warm build (header). Folders a checkout of the
+    same name left behind without `rm` are deleted first: the ovnfs name was free."""
+    outside = TARGETS / name
+    shutil.rmtree(outside, ignore_errors=True)
+    for manifest in sorted(path.glob("*/Cargo.toml")):
+        crate = manifest.parent.name
+        target = outside / crate / "target"
+        target.parent.mkdir(parents=True)
+        warm = source / crate / "target"
+        if warm.is_dir():
+            run("cp", "-a", "--reflink=auto", str(warm), str(target))
+        else:
+            target.mkdir()
+        inside = manifest.parent / "target"
+        shutil.rmtree(inside, ignore_errors=True)
+        inside.symlink_to(target, target_is_directory=True)
+
+
 def set_up(source, path, name):
     graft(source, path, name)
 
@@ -140,6 +173,9 @@ def set_up(source, path, name):
         jj("restore")
     jj("git", "fetch")
     jj("new", "main")
+    if sys.platform == "linux":
+        # After `jj new main`, whose .gitignore also ignores the symlinks.
+        unmount_targets(source, path, name)
     print(path, "at main", jj("log", "--no-graph", "-r", "main",
                               "-T", 'commit_id.short() ++ " " ++ description.first_line()'))
 
