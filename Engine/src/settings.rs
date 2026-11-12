@@ -366,6 +366,13 @@ impl Setting {
         }
         Value::Object(out)
     }
+
+    /// Every setting as `config.list` answers it before settings.json is read: each at its
+    /// default, with its range. Front ends size their first frames from it.
+    pub fn defaults() -> Vec<Value> {
+        let values = Values::new();
+        Self::ALL.iter().map(|setting| setting.entry(&values)).collect()
+    }
 }
 
 /// An integer, or a double that holds one exactly (as the Swift engine's `JSON.int`).

@@ -1198,6 +1198,17 @@ pub fn run_main_loop() {
     main_thread::run_loop()
 }
 
+/// Every setting at its default, with its range, without reading settings.json: what a front end
+/// lays out its first frames with, before `Mailstream::settings` answers. The engine's
+/// descriptions are the one copy of the defaults.
+#[uniffi::export]
+pub fn setting_defaults() -> Vec<SettingEntry> {
+    mailstream_engine::settings::Setting::defaults()
+        .into_iter()
+        .map(|entry| serde_json::from_value(entry).expect("the engine describes every setting"))
+        .collect()
+}
+
 /// The process's engine, started on first use.
 static ENGINE: LazyLock<mailstream_engine::Engine> =
     LazyLock::new(|| mailstream_engine::Engine::start(mailstream_engine::Config::for_this_app()));

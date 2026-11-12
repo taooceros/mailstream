@@ -39,7 +39,7 @@ mod oauth;
 mod omp;
 mod polling;
 pub mod push;
-mod settings;
+pub mod settings;
 pub mod signal;
 pub mod tagging;
 pub mod tagsync;

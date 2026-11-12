@@ -8,6 +8,9 @@
 //! drag and keeps the share.
 
 use std::rc::Rc;
+use std::sync::LazyLock;
+
+use mailstream::{SettingEntry, SettingValue};
 
 use gpui::base::{InteractiveElementExt as _, ResizeHandle, ResizeHandleRenderer, ResizeHandleState, resize_handle};
 use gpui::prelude::FluentBuilder as _;
@@ -21,8 +24,23 @@ pub const LIST_WIDTH: &str = "gpui.listWidth";
 pub const CALENDAR_WIDTH: &str = "gpui.calendarWidth";
 pub const SHOW_FRAME_RATE: &str = "gpui.showFrameRate";
 
-/// The share settings.json may keep (the engine's range for both keys, in thousandths).
-pub const SHARES: (f32, f32) = (0.1, 0.9);
+/// A width setting's share as the engine describes it (`mailstream::setting_defaults`, the one
+/// copy of the defaults): the default and the range settings.json may keep, from thousandths.
+#[derive(Clone, Copy)]
+pub struct Shares {
+    pub default: f32,
+    pub least: f32,
+    pub most: f32,
+}
+
+/// The engine's `Shares` of the width setting `key`.
+pub fn shares(key: &str) -> Shares {
+    static DEFAULTS: LazyLock<Vec<SettingEntry>> = LazyLock::new(mailstream::setting_defaults);
+    let entry = DEFAULTS.iter().find(|entry| entry.key == key).expect("the engine describes every width setting");
+    let SettingValue::Number { value } = entry.default_value else { panic!("{key} is a number setting") };
+    let thousandths = |value: Option<i64>| value.expect("a number setting has a range") as f32 / 1000.;
+    Shares { default: value as f32 / 1000., least: thousandths(entry.minimum), most: thousandths(entry.maximum) }
+}
 
 /// The drag of the gap beside the mail list or the calendar (whichever is in view).
 #[derive(Clone, Copy)]
@@ -80,4 +98,17 @@ fn grip() -> ResizeHandleRenderer {
                 .into_any_element(),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn widths_come_from_the_engine() {
+        for key in [LIST_WIDTH, CALENDAR_WIDTH] {
+            let shares = shares(key);
+            assert_eq!((shares.default, shares.least, shares.most), (0.4, 0.1, 0.9), "{key}");
+        }
+    }
 }

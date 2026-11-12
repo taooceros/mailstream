@@ -515,8 +515,7 @@ pub mod layout {
     pub const CAPSULE_PADDING: f32 = 3.0;
     /// From this window width the conversation opens beside the list instead of over it.
     pub const TWO_PANE_WIDTH: f32 = 1000.0;
-    /// The list's share of the room beside the sidebar, and the narrowest list and page.
-    pub const LIST_SHARE: f32 = 0.4;
+    /// The narrowest list and page (the list's share is the engine's `gpui.listWidth`).
     pub const MIN_LIST: f32 = 300.0;
     pub const MIN_DETAIL: f32 = 420.0;
     /// The reader's text column.

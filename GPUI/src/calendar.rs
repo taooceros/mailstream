@@ -211,7 +211,7 @@ impl CalendarPane {
             swipe: BackSwipe::default(),
             pan: Pan::Rest,
             page_width: Rc::new(Cell::new(0.)),
-            list_share: layout::LIST_SHARE,
+            list_share: split::shares(split::CALENDAR_WIDTH).default,
             band_top: Rc::new(Cell::new(0.)),
             _clock: clock,
             _subscriptions: vec![cx.observe_window_appearance(window, |_, _, cx| cx.notify())],

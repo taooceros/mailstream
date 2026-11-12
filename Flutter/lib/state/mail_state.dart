@@ -1059,8 +1059,9 @@ class MailState extends ChangeNotifier {
   static const listWidthSetting = 'flutter.listWidth';
   static const calendarWidthSetting = 'flutter.calendarWidth';
 
-  /// The engine's defaults, for the first frames before settings.json is read.
-  static const _columnDefaults = {listWidthSetting: 400, calendarWidthSetting: 500};
+  /// The engine's description of each setting at its default, with its range: the one copy of
+  /// the defaults, read without settings.json so the first frames already lay out at them.
+  static final _defaults = {for (final entry in engine.settingDefaults()) entry.key: entry};
 
   /// The share (0–1) the column of [key] takes of the width beside the sidebar.
   double columnShare(String key) {
@@ -1069,13 +1070,17 @@ class MailState extends ChangeNotifier {
         return (entry.value as engine.NumberSettingValue).value / 1000;
       }
     }
-    return _columnDefaults[key]! / 1000;
+    return (_defaults[key]!.defaultValue as engine.NumberSettingValue).value / 1000;
   }
 
   /// Keeps the share a drag of the column's gap left; null goes back to the default.
   Future<void> setColumnShare(String key, double? share) async {
+    final range = _defaults[key]!;
     try {
-      await setSetting(key, share == null ? null : engine.NumberSettingValue((share * 1000).round().clamp(100, 900)));
+      await setSetting(
+        key,
+        share == null ? null : engine.NumberSettingValue((share * 1000).round().clamp(range.minimum!, range.maximum!)),
+      );
     } on engine.MailException catch (error) {
       _report('Could not keep the column width: ${describe(error)}');
     }

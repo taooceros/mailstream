@@ -7,10 +7,9 @@ use gpui::{AppContext, Context, Window};
 use mailstream::SettingValue;
 
 use super::{MailApp, ToggleFrameRate};
-use crate::design::layout;
 use crate::engine::engine;
 use crate::frame_rate::FrameRateMeter;
-use crate::split::{self, CALENDAR_WIDTH, LIST_WIDTH, ResetListWidth, SHARES, SHOW_FRAME_RATE};
+use crate::split::{self, CALENDAR_WIDTH, LIST_WIDTH, ResetListWidth, SHOW_FRAME_RATE, shares};
 
 /// A dragged width is written once the drag has rested this long.
 const SAVE_AFTER: Duration = Duration::from_millis(400);
@@ -28,8 +27,8 @@ impl MailApp {
             };
             // A drag still being written keeps its width.
             if this.share_save.is_none() {
-                this.list_share = share(LIST_WIDTH).unwrap_or(layout::LIST_SHARE);
-                let calendar = share(CALENDAR_WIDTH).unwrap_or(layout::LIST_SHARE);
+                this.list_share = share(LIST_WIDTH).unwrap_or(shares(LIST_WIDTH).default);
+                let calendar = share(CALENDAR_WIDTH).unwrap_or(shares(CALENDAR_WIDTH).default);
                 this.set_calendar_share(calendar, cx);
             }
             let shown = settings
@@ -57,15 +56,14 @@ impl MailApp {
     /// Follows a drag of the gap after the list (or the calendar) to the pointer's `x`.
     pub fn drag_list_edge(&mut self, x: f32, cx: &mut Context<Self>) {
         let width = split::dragged_width(x, self.split_left, self.split_mail);
-        let (key, share) = if self.calendar_view {
-            let share = (width / self.split_mail.max(1.)).clamp(SHARES.0, SHARES.1);
+        let (key, room) = if self.calendar_view { (CALENDAR_WIDTH, self.split_mail) } else { (LIST_WIDTH, self.split_room) };
+        let range = shares(key);
+        let share = (width / room.max(1.)).clamp(range.least, range.most);
+        if self.calendar_view {
             self.set_calendar_share(share, cx);
-            (CALENDAR_WIDTH, share)
         } else {
-            let share = (width / self.split_room.max(1.)).clamp(SHARES.0, SHARES.1);
             self.list_share = share;
-            (LIST_WIDTH, share)
-        };
+        }
         cx.notify();
         self.share_save = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SAVE_AFTER).await;
@@ -84,13 +82,13 @@ impl MailApp {
     /// Puts the default width back for the list in view (a double click on its gap).
     pub(crate) fn reset_list_width(&mut self, _: &ResetListWidth, _: &mut Window, cx: &mut Context<Self>) {
         self.share_save = None;
-        let key = if self.calendar_view {
-            self.set_calendar_share(layout::LIST_SHARE, cx);
-            CALENDAR_WIDTH
+        let key = if self.calendar_view { CALENDAR_WIDTH } else { LIST_WIDTH };
+        let share = shares(key).default;
+        if self.calendar_view {
+            self.set_calendar_share(share, cx);
         } else {
-            self.list_share = layout::LIST_SHARE;
-            LIST_WIDTH
-        };
+            self.list_share = share;
+        }
         cx.notify();
         self.background(cx, async move { engine().reset_setting(key.into()).await }, |this, result, cx| {
             if let Err(error) = result {
