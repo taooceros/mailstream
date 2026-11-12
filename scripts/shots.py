@@ -37,7 +37,9 @@ are window points from its top left (a PNG's pixels halved: shots are drawn at 2
     freeze                     stop the pages' clock: a page opened, closed or let go from now on
                                stays where it starts (MS-289)
     film NAME COUNT [FPS]      move that clock on 1/FPS s (default 60) a frame, saving COUNT
-                               frames NAME-000 on: a motion frame by frame, whatever drawing costs
+                               frames NAME-000 on: a motion frame by frame, whatever drawing costs;
+                               logs each frame's draw time (CPU: build, layout, paint) and a
+                               summary past the first, to compare a motion's cost (MS-292)
     thaw                       run the pages' clock in real time again
 
 The window opens at --size (default 1240x800, the app's) with the inbox loaded. Each input lets

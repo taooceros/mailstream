@@ -338,11 +338,17 @@ impl MailApp {
         let swipe = swipe::scroll_capture(cx.entity(), Self::feed_swipe).absolute().size_full();
         let (drag_under, drag_over) = swipe::mouse_capture(cx.entity(), Self::feed_drag);
 
-        let list = self.render_list_island(bundles, rows_shift, p, window, cx);
+        // Beside a conversation, the list's content keeps the width the list rests at once the
+        // slide ends (the list's share while the conversation slides in or is dragged, the whole
+        // width while it slides off) and the island's edge moves over it, clipping it: its rows
+        // lay out and shape their text once as the slide starts, not every frame (MS-292).
+        let laid_out = (two_pane && reader.is_some()).then(|| if self.closing() { mail } else { split_list });
+        let list = self.render_list_island(bundles, rows_shift, laid_out, p, window, cx);
         let content = div().relative().size_full().child(swipe).child(drag_under.absolute().size_0());
         let content = match reader {
             // Beside the list, which narrows as the conversation slides in from the window's edge;
-            // the conversation keeps its width, so its text does not reflow as it moves.
+            // the conversation keeps its width, so its text does not reflow as it moves, and so
+            // does the list's content (`laid_out`).
             Some((detail, shift)) if two_pane => {
                 let split = (1. - shift / travel.max(1.)).clamp(0., 1.);
                 let list_width = mail + (split_list - mail) * split;
@@ -412,20 +418,24 @@ impl MailApp {
 
     /// The list's island: its title row and search field over the rows, an open bundle sliding
     /// over the rows on a page of its own. The rows sit `rows_shift` right of their place (left,
-    /// under a bundle).
+    /// under a bundle). With `laid_out`, the content keeps that width (the island's, rim
+    /// included) whatever the island's, clipped by it.
     fn render_list_island(
         &self,
         bundles: Vec<AnyElement>,
         rows_shift: f32,
+        laid_out: Option<f32>,
         p: &'static Palette,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let search_focused = self.search.focus_handle(cx).is_focused(window);
-        island(p.tray, p)
-            .occlude()
-            .flex()
-            .flex_col()
+        let column = div().flex().flex_col().h_full();
+        let column = match laid_out {
+            Some(width) => column.flex_shrink_0().w(px(width - 2. * stroke::HAIRLINE)),
+            None => column.w_full(),
+        };
+        let column = column
             .child(self.render_list_header(p, window, cx))
             .child(
                 div().flex_shrink_0().px(px(space::S12)).pb(px(space::S10)).child(
@@ -452,7 +462,8 @@ impl MailApp {
                     .overflow_hidden()
                     .child(div().absolute().top_0().bottom_0().w_full().left(px(rows_shift)).child(self.render_list(p, cx)))
                     .children(bundles),
-            )
+            );
+        island(p.tray, p).occlude().child(column)
     }
 }
 

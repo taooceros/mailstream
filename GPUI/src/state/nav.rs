@@ -179,7 +179,7 @@ impl MailApp {
     }
 
     /// The top layer is sliding off and goes when it arrives.
-    fn closing(&self) -> bool {
+    pub fn closing(&self) -> bool {
         matches!(self.slide, Slide::Settle { back: true, .. })
             && self.layers.last().map(Layer::id).as_ref() == self.slide_layer.as_ref()
     }

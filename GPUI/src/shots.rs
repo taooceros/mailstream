@@ -36,7 +36,9 @@
 //! freeze                     stop the pages' clock (`swipe.rs`, MS-289): a page opened, closed
 //!                            or let go from now on stays where it starts, until `film`
 //! film NAME COUNT [FPS]      move the stopped clock on 1/FPS s (default 60) a frame and save
-//!                            COUNT frames, DIR/NAME-000-light.png on, the first where it stands
+//!                            COUNT frames, DIR/NAME-000-light.png on, the first where it stands;
+//!                            logs what each frame took to draw and their mean, median and max
+//!                            past the first (MS-292)
 //! thaw                       run the pages' clock in real time again
 //! ```
 //!
@@ -435,17 +437,32 @@ impl Run {
             }
             Command::Film(name, count, fps) => {
                 let mut clock = FILM.lock().expect("the film clock").ok_or("film: freeze the clock first")?;
+                let mut drawn = Vec::with_capacity(count);
                 for frame in 0..count {
                     if frame > 0 {
                         clock += Duration::from_secs_f32(1. / fps);
                         *FILM.lock().expect("the film clock") = Some(clock);
                     }
                     self.cx.run_until_parked();
+                    let started = Instant::now();
                     self.on_window(|window, cx| {
                         window.simulate_next_frame(cx);
                         window.draw(cx).clear(cx);
                     });
+                    let ms = started.elapsed().as_secs_f64() * 1000.;
+                    eprintln!("shots: film {name}-{frame:03} drawn in {ms:.2} ms");
+                    drawn.push(ms);
                     self.save(&format!("{name}-{frame:03}"))?;
+                }
+                // What the frames cost to draw (build, lay out and paint the window; the GPU's
+                // part is not in it), first frame (where the motion starts) left out (MS-292).
+                let mut moving = drawn.get(1..).unwrap_or_default().to_vec();
+                if !moving.is_empty() {
+                    moving.sort_by(f64::total_cmp);
+                    let mean = moving.iter().sum::<f64>() / moving.len() as f64;
+                    let median = moving[moving.len() / 2];
+                    let max = moving[moving.len() - 1];
+                    eprintln!("shots: film {name}: {} frames drawn in {mean:.2} ms mean, {median:.2} median, {max:.2} max", moving.len());
                 }
                 return Ok(());
             }
