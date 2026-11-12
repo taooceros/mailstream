@@ -25,6 +25,8 @@
 //! type TEXT                  type the rest of the line into the focused field
 //! size W H                   resize the window to W×H points
 //! toast TEXT                 show the rest of the line in the app's toast (`controls::toast`)
+//! window other|main          drive and shoot another window the app opened (Settings, after
+//!                            `key secondary-,`), or the main one again
 //! ```
 //!
 //! Every input command then lets `SETTLE` pass. The window opens at `--size` (default 1240×800,
@@ -153,7 +155,7 @@ impl Shots {
         })
         .ok();
 
-        let mut run = Run { cx, window, appearance: if self.dark { "dark" } else { "light" }, out: self.out, pointer: point(px(0.), px(0.)) };
+        let mut run = Run { cx, window, main: window, appearance: if self.dark { "dark" } else { "light" }, out: self.out, pointer: point(px(0.), px(0.)) };
         run.pass(START);
         let mut failed = false;
         for (line, command) in commands {
@@ -239,6 +241,8 @@ enum Command {
     Type(String),
     Size(f32, f32),
     Toast(String),
+    /// The other window (`true`) or the main one.
+    Window(bool),
 }
 
 impl Command {
@@ -280,6 +284,8 @@ impl Command {
             "type" if !rest.is_empty() => Command::Type(rest.into()),
             "size" => Command::Size(number(0)?, number(1)?),
             "toast" if !rest.is_empty() => Command::Toast(rest.into()),
+            "window" if rest == "other" || rest == "main" => Command::Window(rest == "other"),
+            "window" => return Err("window: other or main".into()),
             _ => return Err(format!("unknown command: {line}")),
         })
     }
@@ -293,7 +299,9 @@ fn platform_keys(key: &str) -> String {
 
 struct Run {
     cx: HeadlessAppContext,
+    /// The window the commands drive and shoot; `main` is the app's.
     window: AnyWindowHandle,
+    main: AnyWindowHandle,
     appearance: &'static str,
     out: PathBuf,
     pointer: Point<Pixels>,
@@ -400,6 +408,15 @@ impl Run {
                 let p = crate::design::palette(window.appearance());
                 window.push_notification(crate::controls::toast(text.into(), p), cx);
             }),
+            Command::Window(other) => {
+                let main = self.main;
+                self.window = if other {
+                    let windows = self.cx.update(|cx| cx.windows());
+                    windows.into_iter().filter(|window| *window != main).last().ok_or("window: no other window is open")?
+                } else {
+                    main
+                };
+            }
         }
         self.pass(SETTLE);
         Ok(())

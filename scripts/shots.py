@@ -27,6 +27,8 @@ are window points from its top left (a PNG's pixels halved: shots are drawn at 2
     key COMBO...               escape, down, enter, j, shift-tab, secondary-n (⌘N / Ctrl+N)
     type TEXT                  type into the focused field
     size W H                   resize the window
+    window other|main          drive and shoot the other window the app opened (Settings, after
+                               `key secondary-,`), or the main one again
 
 The window opens at --size (default 1240x800, the app's) with the inbox loaded. Each input lets
 0.6 s pass. Shot first, then click: open `NAME-light.png` to find where things are.
