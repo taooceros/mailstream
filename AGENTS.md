@@ -254,7 +254,8 @@ machine; agents write the name in backticks (`` `@omp` ``), since Linear rejects
 
 ## Release delivery
 
-Finished fixes reach `/Applications` as signed release builds, never Debug, in batches (MS-159).
+Finished fixes reach `/Applications` as signed release builds, never Debug, in batches (MS-159);
+on Linux they reach `~/.local/opt` the same way (MS-224, below).
 All testing happens before that (MS-176): each code agent checks its own change in the real app,
 and one cheap agent then installs `main`'s tip for every issue waiting and checks only that the
 install worked. Separately, each push to `main` that touches the Flutter app or its engine
@@ -279,10 +280,12 @@ The code agent:
    control](#version-control-jj)), which keeps other agents' changes.
 3. Picks the targets: `flutter` (`Mailstream Flutter.app`) by default; `native`
    (`Mailstream.app`) or `gpui` (`Mailstream GPUI.app`) only when the user asks or its installed
-   behavior is directly affected; never an app that isn't installed yet. Tooling-only changes
+   behavior is directly affected; never an app that isn't installed yet. On Linux: `gpui`
+   (`~/.local/opt/mailstream-gpui`) and `flutter` (`~/.local/opt/mailstream`), each when the
+   change reaches it (an engine change reaches both). Tooling-only changes
    install nothing (In Review directly, [Finish](#working-an-issue)). Changes to deployment
-   itself (`install.sh`, signing, updates) exercise the real path: their own agent installs them
-   as below.
+   itself (`install.sh`, `install-linux.py`, signing, updates) exercise the real path: their own
+   agent installs them as below.
 4. Hands over: a comment starting `**待安装**` with what changed, the commit, the targets and
    what it verified, with its screenshots; nothing is left for the installer to test. Then it
    adds the `install` label, removes `claimed`, leaves the issue In Progress and removes its
@@ -295,13 +298,20 @@ The batch install agent (one per `install` line of the poller, [Polling session]
 2. Opens one fresh checkout at `main`'s tip ([Version control](#version-control-jj)) and runs
    `./scripts/install.sh <every target the issues name>` there once, as one blocking eval cell
    ([Building](#building)): it refuses a checkout that differs from `main`, checks signing and
-   the deploy lock itself and stops only the installed copy. Never an area workspace or the
-   default checkout; never delete another agent's lock or kill its processes.
+   the deploy lock itself and stops only the installed copy. On Linux it runs
+   `scripts/install-linux.py` (its header: what goes where, the launcher, the nix GC root, the
+   desktop entry), which builds in `devenv shell` with cargo targets outside the ovnfs mount
+   (MS-201). Never an area workspace or the default checkout; never delete another agent's lock
+   or kill its processes.
 3. Checks each installed `/Applications/…app` from the shell, nothing more: its Info.plist
    `MSInstalledRevision` is the commit it built; `codesign --verify --deep --strict` passes;
    `open` launches it and its `/Applications/…app/Contents/MacOS/` executable is still running
    30 s later (left running). GPUI also: `otool -l` shows no workspace rpath and `vmmap <pid>`
-   loads no `libMailstreamKit.dylib`. No UI interaction, synthetic data or screenshots.
+   loads no `libMailstreamKit.dylib`. On Linux, each installed `~/.local/opt` folder: its
+   `revision` file is the commit it built, and its launcher (`mailstream-gpui.sh`,
+   `mailstream_ui`) started in a `scripts/vhypr.py` desktop of its own (never the user's screen)
+   is still running 30 s later; then it stops that desktop. No UI interaction, synthetic data or
+   screenshots.
 4. Passed → per issue a short comment (deployed commit, targets, checks), `install` and
    `claimed` removed, In Review, then the parent check. Install or launch failed → a comment
    with the exact error on each issue, `claimed` removed and `install` kept.

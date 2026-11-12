@@ -2,8 +2,10 @@
 # Install affected, already-installed front ends from a clean private checkout at main.
 # Usage: scripts/install.sh native|flutter|gpui [native|flutter|gpui ...]
 # Then check each installed app: revision, signature, launch (AGENTS.md, Release delivery).
+# On Linux it runs scripts/install-linux.py (gpui, flutter into ~/.local/opt; MS-224).
 set -eu
 cd "$(dirname "$0")/.."
+[ "$(uname)" = Linux ] && exec python3 scripts/install-linux.py "$@"
 
 fail() { echo "install: $*" >&2; exit 1; }
 if [ "$#" -eq 0 ]; then
