@@ -102,8 +102,9 @@ enum Pan {
     Rest,
     /// Under the fingers.
     Drag(f32),
-    /// Sliding from `from` to rest since `start` (one page on, or back after a swipe).
-    Settle { from: f32, start: Instant },
+    /// Sliding from `from` to rest since `start`, leaving at `velocity` points per second (one
+    /// page on, or back after a swipe).
+    Settle { from: f32, velocity: f32, start: Instant },
 }
 
 /// A message for the window's toast.
@@ -787,7 +788,7 @@ impl Render for CalendarPane {
         // motion says, and comes forward as the pane slides off (MS-289).
         let width = self.close_width.get().max(1.);
         let (beneath, dim) = if self.pane_covers && !self.page {
-            design::motion::page().beneath(1. - shift.abs() / width, width, p.dark)
+            design::motion::beneath(1. - shift.abs() / width, width, p.dark)
         } else {
             (0., 0.)
         };

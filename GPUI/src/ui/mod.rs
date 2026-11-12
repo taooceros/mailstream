@@ -273,7 +273,7 @@ impl MailApp {
         let (beneath, dim) = if self.layers.is_empty() || (two_pane && reader_on_top) {
             (0., 0.)
         } else {
-            design::motion::page().beneath(1. - offset.abs() / travel.max(1.), travel, p.dark)
+            design::motion::beneath(1. - offset.abs() / travel.max(1.), travel, p.dark)
         };
 
         let mut bundles: Vec<AnyElement> = Vec::new();

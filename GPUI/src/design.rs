@@ -5,7 +5,6 @@
 //! nearest step of a scale, and add a token rather than a literal.
 
 use std::sync::LazyLock;
-use std::time::Duration;
 
 use gpui::{
     App, Background, BoxShadow, Hsla, SharedString, WindowAppearance, WindowBackgroundAppearance, hsla, linear_color_stop,
@@ -517,103 +516,66 @@ pub mod stroke {
     pub const RIM: f32 = 1.0;
 }
 
-/// Animation durations, the curve and the pages' motion.
+/// Motion (MS-289): critically damped springs, the pages' and the calendar's, and what a page
+/// does to what it covers. Every move is a spring from where it is, at the speed it has (a
+/// released drag's), to where it goes; where it is follows the time that passed, not the frames
+/// drawn, so 60 Hz shows the same path as 120 Hz.
 pub mod motion {
-    use std::sync::LazyLock;
+    use gpui::{SpringConfig, SpringState};
 
-    use super::Duration;
-    /// A page sliding in over the list or beside it, and back out, on the house curve.
-    pub const ENTER: Duration = Duration::from_millis(400);
-    /// The calendar's days paging one page on (← and →).
-    pub const PAGE: Duration = Duration::from_millis(180);
-
-    /// A critically damped spring (no overshoot): `response` is its period in seconds, about how
-    /// long a move takes to look finished; a larger one moves more slowly.
+    /// A critically damped spring (no overshoot) of period `response` seconds: from rest, a move
+    /// looks finished after about that long.
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct Spring {
         pub response: f32,
     }
 
-    /// How every page laid over the list moves (MS-289): the reader, a bundle, the calendar's
-    /// event pane and its page, opening, closing and after a drag or swipe is let go.
-    #[derive(Clone, Copy, Debug, PartialEq)]
-    pub struct PageMotion {
-        pub name: &'static str,
-        /// None: the house curve over `ENTER`, whatever the speed of the release.
-        pub spring: Option<Spring>,
-        /// How far left of its place what lies beneath sits while the page covers it, as a share
-        /// of the page's width (iOS's push: about 0.3); it comes back as the page slides off.
-        pub parallax: f32,
-        /// The black over what lies beneath while the page covers it, light and dark; it lifts
-        /// as the page slides off.
-        pub dim: (f32, f32),
-    }
+    /// A page sliding over the list or beside it, and back off: the reader, a bundle, the
+    /// calendar's event pane and its page, opened, closed, or let go after a drag or a swipe.
+    pub const PAGE: Spring = Spring { response: 0.3 };
+    /// The calendar's days paging on (← and →, or let go after a swipe).
+    pub const PAGING: Spring = Spring { response: 0.22 };
 
-    /// The motion as it was before MS-289: the house curve over 400 ms.
-    pub const CURVE: PageMotion = PageMotion { name: "current", spring: None, parallax: 0., dim: (0., 0.) };
-    /// A: the spring, starting at the speed of the release.
-    pub const SPRING: PageMotion =
-        PageMotion { name: "A", spring: Some(Spring { response: 0.38 }), parallax: 0., dim: (0., 0.) };
-    /// B: A, and what lies beneath slides in from the left and brightens as the page leaves.
-    pub const LAYERED: PageMotion =
-        PageMotion { name: "B", spring: Some(Spring { response: 0.38 }), parallax: 0.3, dim: (0.1, 0.3) };
-    /// C: a shorter spring.
-    pub const BRISK: PageMotion =
-        PageMotion { name: "C", spring: Some(Spring { response: 0.26 }), parallax: 0., dim: (0., 0.) };
+    /// What a page covers sits this share of the page's width left of its place while the page is
+    /// in, coming back as it slides off (iOS's push sits it about 0.3 back).
+    pub const PARALLAX: f32 = 0.25;
+    /// The black over what a page covers while it is in, light and dark; it lifts as the page
+    /// slides off.
+    pub const DIM_LIGHT: f32 = 0.08;
+    pub const DIM_DARK: f32 = 0.22;
 
-    /// The pages' motion: while the person picks one (MS-289), `MAILSTREAM_MOTION=a|b|c` chooses
-    /// a candidate; otherwise the current one.
-    pub fn page() -> &'static PageMotion {
-        static CHOSEN: LazyLock<PageMotion> =
-            LazyLock::new(|| match std::env::var("MAILSTREAM_MOTION").unwrap_or_default().to_ascii_lowercase().as_str() {
-                "a" => SPRING,
-                "b" => LAYERED,
-                "c" => BRISK,
-                _ => CURVE,
-            });
-        &CHOSEN
-    }
+    /// A move this close to its end (points, and that many periods per second) has arrived.
+    const REST: f32 = 0.5;
 
-    /// A move this close to its end has arrived (points, points per second).
-    const REST_DISTANCE: f32 = 0.5;
-    const REST_SPEED: f32 = 10.;
-
-    impl PageMotion {
-        /// Where a page moving from `from` to `to`, leaving at `velocity` points per second, is
-        /// `elapsed` seconds on, and whether it has arrived. It never passes `to`: a spring
-        /// thrown hard at it stops there.
-        pub fn at(&self, from: f32, to: f32, velocity: f32, elapsed: f32) -> (f32, bool) {
-            let Some(spring) = self.spring else {
-                let progress = (elapsed / ENTER.as_secs_f32()).min(1.);
-                return (from + (to - from) * super::house_curve(progress), progress >= 1.);
-            };
-            // x(t) = (x0 + (v0 + ω·x0)·t)·e^(−ω·t), the critically damped spring from x0 at v0.
-            let omega = std::f32::consts::TAU / spring.response;
-            let (x0, v0, t) = (from - to, velocity, elapsed.max(0.));
-            let decay = (-omega * t).exp();
-            let x = (x0 + (v0 + omega * x0) * t) * decay;
-            let v = (v0 - omega * (v0 + omega * x0) * t) * decay;
-            let arrived = x * x0 <= 0. || (x.abs() < REST_DISTANCE && v.abs() < REST_SPEED);
-            if arrived { (to, true) } else { (to + x, false) }
+    impl Spring {
+        fn config(self) -> SpringConfig {
+            let omega = std::f32::consts::TAU / self.response;
+            SpringConfig::new(omega * omega, 2. * omega, 1.)
         }
 
-        /// The longest a move takes, from anywhere to anywhere on the window.
+        /// Where a move from `from` to `to`, leaving at `velocity` points per second, is
+        /// `elapsed` seconds on, and whether it has arrived. It never passes `to`: thrown hard at
+        /// it, it stops there.
+        pub fn at(self, from: f32, to: f32, velocity: f32, elapsed: f32) -> (f32, bool) {
+            let config = self.config();
+            let state = config.step(SpringState { position: from, velocity }, to, elapsed.max(0.));
+            let arrived = (state.position - to) * (from - to) <= 0. || config.is_settled(state, to, REST);
+            if arrived { (to, true) } else { (state.position, false) }
+        }
+
+        /// The longest a move from rest takes, from anywhere to anywhere on the window.
         #[cfg(test)]
-        pub fn longest(&self) -> Duration {
-            match self.spring {
-                // (1 + ωt)·e^(−ωt) falls under 1/2000 (half a point of 1000) by ωt = 10.
-                Some(spring) => Duration::from_secs_f32(10. * spring.response / std::f32::consts::TAU),
-                None => ENTER,
-            }
+        pub fn longest(self) -> std::time::Duration {
+            // (1 + ωt)·e^(−ωt) falls under 1/4000 (half a point of 2000) by ωt = 11.
+            std::time::Duration::from_secs_f32(11. * self.response / std::f32::consts::TAU)
         }
+    }
 
-        /// What lies beneath a page `covered` (1: the page in its place, 0: off) sits: how far
-        /// left of its place, for a page `width` wide, and the black over it in `dark` or light.
-        pub fn beneath(&self, covered: f32, width: f32, dark: bool) -> (f32, f32) {
-            let covered = covered.clamp(0., 1.);
-            let dim = if dark { self.dim.1 } else { self.dim.0 };
-            (-self.parallax * width * covered, dim * covered)
-        }
+    /// Where what a page `covered` (1: the page in its place, 0: off) sits: how far left of its
+    /// place, for a page `width` wide, and the black over it, `dark` or light.
+    pub fn beneath(covered: f32, width: f32, dark: bool) -> (f32, f32) {
+        let covered = covered.clamp(0., 1.);
+        (-PARALLAX * width * covered, if dark { DIM_DARK } else { DIM_LIGHT } * covered)
     }
 }
 
@@ -817,26 +779,6 @@ pub mod calendar {
     pub const PAGE_SIDE_BY_SIDE: f32 = 900.0;
 }
 
-/// The house easing curve (Flutter's `Motion.curve`), `cubic-bezier(0.05, 0.7, 0.1, 1)`: a strong
-/// deceleration, quick off the mark, a long settle.
-pub fn house_curve(progress: f32) -> f32 {
-    const X1: f32 = 0.05;
-    const Y1: f32 = 0.7;
-    const X2: f32 = 0.1;
-    const Y2: f32 = 1.0;
-    fn bezier(t: f32, p1: f32, p2: f32) -> f32 {
-        let u = 1.0 - t;
-        3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t
-    }
-    // x(t) is monotonic on [0, 1]: bisect for the t whose x is `progress`.
-    let (mut low, mut high) = (0.0f32, 1.0f32);
-    for _ in 0..24 {
-        let mid = (low + high) / 2.0;
-        if bezier(mid, X1, X2) < progress { low = mid } else { high = mid }
-    }
-    bezier((low + high) / 2.0, Y1, Y2)
-}
-
 /// The avatar palette, one color per engine slot (`mailstream::AVATAR_SLOTS`).
 const AVATAR_LIGHT: [u32; mailstream::AVATAR_SLOTS as usize] = [
     0xFF007AFF, 0xFFAF52DE, 0xFFFF2D55, 0xFFFF3B30, 0xFFFF9500, 0xFF34C759, 0xFF30B0C7, 0xFF5856D6, 0xFFA2845E,
@@ -962,16 +904,8 @@ mod tests {
     }
 
     #[test]
-    fn house_curve_runs_from_rest_to_rest_and_lands_softly() {
-        assert!(house_curve(0.0).abs() < 1e-4);
-        assert!((house_curve(1.0) - 1.0).abs() < 1e-4);
-        // Quick start: most of the move is done in the first third.
-        assert!(house_curve(0.33) > 0.8);
-    }
-
-    #[test]
     fn springs_start_at_the_release_speed_and_settle_without_passing_their_end() {
-        let motion = motion::SPRING;
+        let motion = motion::PAGE;
         // Released 300 pt in at 1200 pt/s toward a close at 900: the first millisecond moves at
         // about the release's speed, not the curve's leap.
         let (early, _) = motion.at(300., 900., 1200., 0.001);
@@ -986,9 +920,9 @@ mod tests {
             }
             t += 1. / 120.;
         }
-        // Every spring arrives within about twice its period.
-        let (offset, arrived) = motion::BRISK.at(0., 1000., 0., 2. * 0.26);
-        assert!(arrived && offset == 1000.);
+        // From rest it arrives within `longest`, at 60 Hz as at 120 Hz.
+        let (offset, arrived) = motion.at(0., 2000., 0., motion.longest().as_secs_f32());
+        assert!(arrived && offset == 2000.);
     }
 }
 

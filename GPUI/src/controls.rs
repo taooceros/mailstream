@@ -211,7 +211,7 @@ pub fn island(color: Hsla, p: &Palette) -> Div {
         .shadow(p.island_shadow.clone())
 }
 
-/// The black over what a page covers as it slides (`design::motion::PageMotion::beneath`, MS-289),
+/// The black over what a page covers as it slides (`design::motion::beneath`, MS-289),
 /// `alpha` deep, its corners `corners` round.
 pub fn scrim(alpha: f32, corners: f32) -> Div {
     div().absolute().top_0().left_0().size_full().rounded(px(corners)).bg(hsla(0., 0., 0., alpha))

@@ -13,8 +13,6 @@
 //! press outside it, Esc or another week closes it; the day view keeps the pane. A double click
 //! on a card or bar opens the event's page over the whole window, in either view.
 
-use std::time::Instant;
-
 use chrono::{DateTime, Days, Local, NaiveDate, Timelike};
 use gpui::prelude::FluentBuilder;
 use gpui::base::Selectable;
@@ -192,7 +190,7 @@ impl CalendarPane {
         self.close_week_popover(cx);
         self.move_focus(step);
         let width = self.page_width.get();
-        self.pan = Pan::Settle { from: step as f32 * width, start: Instant::now() };
+        self.pan = Pan::Settle { from: step as f32 * width, velocity: 0., start: swipe::now() };
         cx.notify();
     }
 
@@ -214,15 +212,14 @@ impl CalendarPane {
         match self.pan {
             Pan::Rest => 0.,
             Pan::Drag(offset) => offset,
-            Pan::Settle { from, start } => {
-                let progress = (start.elapsed().as_secs_f32() / motion::PAGE.as_secs_f32()).min(1.);
-                if progress < 1. {
-                    window.request_animation_frame();
-                    from * (1. - design::house_curve(progress))
-                } else {
+            Pan::Settle { from, velocity, start } => {
+                let (offset, arrived) = motion::PAGING.at(from, 0., velocity, swipe::since(start));
+                if arrived {
                     self.pan = Pan::Rest;
-                    0.
+                } else {
+                    window.request_animation_frame();
                 }
+                offset
             }
         }
     }
@@ -254,12 +251,13 @@ impl CalendarPane {
                 } else {
                     offset
                 };
-                self.pan = Pan::Settle { from, start: Instant::now() };
+                // At the speed the fingers left it (MS-289, MS-290).
+                self.pan = Pan::Settle { from, velocity, start: swipe::now() };
                 cx.notify();
                 true
             }
             Step::Cancel(offset) => {
-                self.pan = Pan::Settle { from: offset, start: Instant::now() };
+                self.pan = Pan::Settle { from: offset, velocity: 0., start: swipe::now() };
                 cx.notify();
                 true
             }
@@ -1352,7 +1350,7 @@ mod tests {
 
     /// The frames once a slide has had its time.
     fn slide_done(pane: &Entity<CalendarPane>, cx: &mut VisualTestContext) {
-        std::thread::sleep(crate::design::motion::page().longest() + std::time::Duration::from_millis(50));
+        std::thread::sleep(crate::design::motion::PAGE.longest() + std::time::Duration::from_millis(50));
         pane.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
     }

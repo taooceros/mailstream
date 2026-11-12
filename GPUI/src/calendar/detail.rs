@@ -157,7 +157,7 @@ impl CalendarPane {
         // What the page covers darkens under it and brightens as it slides off (MS-289); the window
         // beneath stays where it is.
         let width = self.close_width.get().max(1.);
-        let (_, dim) = design::motion::page().beneath(1. - shift.abs() / width, width, p.dark);
+        let (_, dim) = design::motion::beneath(1. - shift.abs() / width, width, p.dark);
         let page = div()
             .id("calendar-page")
             .debug_selector(|| "calendar-page".into())

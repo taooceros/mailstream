@@ -3,7 +3,8 @@
 //! the two-finger trackpad back swipe (`UI/BackSwipe.swift`), fed from scroll events in the
 //! capture phase, and the mouse (MS-266), a press dragged sideways. The page follows the pointer;
 //! released past a third of its width or flicked onward it goes off that side and closes,
-//! otherwise it springs back (`settle`), on the house curve either way. Gestures that set off
+//! otherwise it springs back (`settle`), on the pages' spring (`motion::PAGE`) from the speed it
+//! was let go at, so it carries on as the pointer moved (MS-289). Gestures that set off
 //! vertical pass through untouched, so the page scrolls (or the window moves).
 //!
 //! Where a mouse drag may start (MS-266): only on the page itself outside what takes presses of
@@ -311,12 +312,11 @@ impl Slide {
 
     /// Where a page `width` wide sits now, and whether its motion has arrived.
     fn place(&self, width: f32) -> (f32, bool) {
-        let motion = motion::page();
         match *self {
             Slide::Rest => (0., true),
             Slide::Drag(offset) => (offset, true),
-            Slide::Opening(start) => motion.at(width, 0., 0., since(start)),
-            Slide::Settle { from, to, velocity, start, .. } => motion.at(from, to, velocity, since(start)),
+            Slide::Opening(start) => motion::PAGE.at(width, 0., 0., since(start)),
+            Slide::Settle { from, to, velocity, start, .. } => motion::PAGE.at(from, to, velocity, since(start)),
         }
     }
 
@@ -362,9 +362,10 @@ impl Slide {
     }
 }
 
-/// Now, for the slides: in the screenshot mode the clock a script films them by while it does
-/// (`shots.rs`, `freeze`), so each frame shows the moment it stands for.
-fn now() -> Instant {
+/// Now, for the slides (and the calendar's paging): in the screenshot mode the clock a script
+/// films them by while it does (`shots.rs`, `freeze`), so each frame shows the moment it stands
+/// for.
+pub fn now() -> Instant {
     #[cfg(feature = "shots")]
     if let Some(now) = crate::shots::film_clock() {
         return now;
@@ -373,7 +374,7 @@ fn now() -> Instant {
 }
 
 /// Seconds since `start` by the slides' clock.
-fn since(start: Instant) -> f32 {
+pub fn since(start: Instant) -> f32 {
     now().saturating_duration_since(start).as_secs_f32()
 }
 
