@@ -1,27 +1,43 @@
-//! Writing mail: the compose window (a new message or a forward, sent with `mail.send`) and the
-//! reader's inline reply (`mail.reply`). Clicking Send is the confirmation the engine asks for, so
-//! both pass `confirm`. Recipients complete from `contacts.search` when the running app offers it.
+//! Writing mail: the compose window (a new message, a forward or a reply moved out of the reader,
+//! with every field editable) and the reader's inline reply (`mail.reply`). Clicking Send is the
+//! confirmation the engine asks for, so both pass `confirm`. Recipients complete from
+//! `contacts.search` when the running app offers it. Both carry attachments (`attachments.rs`).
+
+mod attachments;
+
+use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AppContext, Bounds, ClickEvent, Context, Div, ElementId, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement,
-    Render, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, Subscription, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, actions, deferred, div, point, px, relative, size,
+    ExternalPaths, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding, MouseButton,
+    ParentElement, Render, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, Subscription,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, deferred, div, point, px, relative, size,
 };
 use crate::avatars;
-use crate::controls::{ButtonKind, ControlSize, button, popover, title_bar};
+use crate::controls::{ButtonKind, ControlSize, button, icon_button, popover, title_bar};
 use crate::design::{self, Palette, compose as metrics, editor, layout, radius, space, text};
 use crate::engine::engine;
+use crate::icons::Icon;
 use crate::input::{InputEvent, TextInput};
 use crate::model::{Account, Address};
 use crate::textarea::{TextArea, TextAreaEvent};
+use attachments::{Attachments, Remove};
 
-actions!(compose, [Send, Cancel, Close, FocusNext, FocusPrevious, SuggestionNext, SuggestionPrevious]);
+actions!(
+    compose,
+    [Send, Cancel, Close, FocusNext, FocusPrevious, SuggestionNext, SuggestionPrevious, Attach, OpenInWindow]
+);
 
 const CONTEXT: &str = "Compose";
 const RECIPIENTS: &str = "Recipients";
 const REPLY_CONTEXT: &str = "ReplyBox";
+/// The groups files are dragged over.
+const COMPOSE_DROP: &str = "compose-drop";
+const REPLY_DROP: &str = "reply-drop";
+const ATTACH_TIP: &str = "Attach Files (⇧⌘A), or drop or paste them here";
+const OPEN_IN_WINDOW_TIP: &str = "Change Recipients or Subject in a Window (⇧⌘O)";
 
 pub fn bind_keys(cx: &mut App) {
     let window = Some(CONTEXT);
@@ -31,24 +47,42 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-w", Close, window),
         KeyBinding::new("tab", FocusNext, window),
         KeyBinding::new("shift-tab", FocusPrevious, window),
+        KeyBinding::new("secondary-shift-a", Attach, window),
         KeyBinding::new("down", SuggestionNext, Some(RECIPIENTS)),
         KeyBinding::new("up", SuggestionPrevious, Some(RECIPIENTS)),
         KeyBinding::new("escape", Cancel, Some(REPLY_CONTEXT)),
+        KeyBinding::new("secondary-shift-a", Attach, Some(REPLY_CONTEXT)),
+        KeyBinding::new("secondary-shift-o", OpenInWindow, Some(REPLY_CONTEXT)),
     ]);
 }
 
 /// What the compose window starts as. A forward's `subject` is the original's; `quoted` is the
-/// original as text, put under the caret.
+/// original as text, put under the caret. A reply moved out of the reader keeps its text and
+/// files; its `to` and `cc` are who the engine will send it to, unless they are edited.
 pub enum ComposeMode {
     New { from: Option<SharedString> },
     Forward { from: SharedString, subject: SharedString, quoted: SharedString },
+    Reply(MovedReply),
 }
 
-/// Opens a compose window. `accounts` fill the From menu; a forward's sender is fixed.
+/// A reply the reader moved to the compose window.
+pub struct MovedReply {
+    pub conversation: SharedString,
+    pub all: bool,
+    pub from: SharedString,
+    pub to: Vec<Address>,
+    pub cc: Vec<Address>,
+    pub subject: SharedString,
+    pub body: String,
+    pub attachments: Vec<PathBuf>,
+}
+
+/// Opens a compose window. `accounts` fill the From menu; a forward's or reply's sender is fixed.
 pub fn open_compose(mode: ComposeMode, accounts: Vec<Account>, cx: &mut App) {
-    let title: SharedString = match mode {
+    let title: SharedString = match &mode {
         ComposeMode::New { .. } => "New Message".into(),
         ComposeMode::Forward { .. } => "Forward".into(),
+        ComposeMode::Reply(reply) => (if reply.all { "Reply All" } else { "Reply" }).into(),
     };
     let bounds = Bounds::centered(None, size(px(metrics::WINDOW_WIDTH), px(metrics::WINDOW_HEIGHT)), cx);
     let options = WindowOptions {
@@ -132,6 +166,12 @@ enum Status {
     Failed(SharedString),
 }
 
+/// What Send hands the engine: a message, or a reply that keeps its thread.
+enum Outgoing {
+    Message(mailstream::Draft),
+    Reply { id: String, body: String, all: bool, overrides: mailstream::ReplyOverrides },
+}
+
 /// The recipient list split at commas and semicolons outside quotes and angle brackets.
 fn split_recipients(text: &str) -> Vec<&str> {
     let (mut parts, mut start, mut quoted, mut angle) = (Vec::new(), 0, false, false);
@@ -212,8 +252,11 @@ struct Compose {
     title: SharedString,
     accounts: Vec<Account>,
     from: Option<SharedString>,
-    /// A forward keeps the account it came to.
+    /// A forward and a reply keep the account it came to.
     from_locked: bool,
+    /// The conversation a moved reply answers, and whether it answers everyone: sent with
+    /// `mail.reply`, which keeps the thread and quotes the original.
+    reply: Option<(SharedString, bool)>,
     picking_from: bool,
     to: Entity<TextInput>,
     cc: Entity<TextInput>,
@@ -222,9 +265,13 @@ struct Compose {
     subject: Entity<TextInput>,
     body: Entity<TextArea>,
     body_scroll: ScrollHandle,
-    /// What the window opened with, to tell an edited draft from an untouched one.
+    /// What the window opened with, to tell an edited draft from an untouched one, and a reply's
+    /// recipients the engine planned from the ones the user changed.
+    initial_to: String,
+    initial_cc: String,
     initial_subject: SharedString,
     initial_body: SharedString,
+    attachments: Attachments,
     /// Fields the last Send attempt refused.
     invalid: Vec<Field>,
     suggestions: Option<Suggestions>,
@@ -256,6 +303,9 @@ impl Compose {
             body
         });
 
+        let mut attachments = Attachments::default();
+        let mut reply = None;
+        let (mut initial_to, mut initial_cc, mut text) = (String::new(), String::new(), String::new());
         let (from, from_locked, initial_subject, initial_body) = match mode {
             ComposeMode::New { from } => {
                 let from = from.or_else(|| accounts.first().map(|account| account.id.clone()));
@@ -264,15 +314,28 @@ impl Compose {
             ComposeMode::Forward { from, subject, quoted } => {
                 (Some(from), true, forward_subject(&subject), format!("\n\n{quoted}").into())
             }
+            ComposeMode::Reply(moved) => {
+                let list = |addresses: &[Address]| addresses.iter().map(Address::header_form).collect::<Vec<_>>().join(", ");
+                initial_to = list(&moved.to);
+                initial_cc = list(&moved.cc);
+                text = moved.body;
+                // Files that went missing since are left out.
+                let _ = attachments.add(moved.attachments);
+                reply = Some((moved.conversation, moved.all));
+                (Some(moved.from), true, moved.subject, SharedString::default())
+            }
         };
-        if !initial_subject.is_empty() {
-            subject.update(cx, |input, cx| {
-                input.select_everything(cx);
-                input.replace_text_in_range(None, &initial_subject, window, cx);
-            });
+        for (input, value) in [(&to, initial_to.as_str()), (&cc, initial_cc.as_str()), (&subject, initial_subject.as_ref())] {
+            if !value.is_empty() {
+                input.update(cx, |input, cx| {
+                    input.select_everything(cx);
+                    input.replace_text_in_range(None, value, window, cx);
+                });
+            }
         }
-        if !initial_body.is_empty() {
-            body.update(cx, |body, cx| body.set_text(initial_body.clone(), cx));
+        let text = if text.is_empty() { initial_body.to_string() } else { text };
+        if !text.is_empty() {
+            body.update(cx, |body, cx| body.set_text(text, cx));
         }
 
         let mut subscriptions = Vec::new();
@@ -310,6 +373,7 @@ impl Compose {
             accounts,
             from,
             from_locked,
+            reply,
             picking_from: false,
             to,
             cc,
@@ -318,8 +382,11 @@ impl Compose {
             subject,
             body,
             body_scroll,
+            initial_to,
+            initial_cc,
             initial_subject,
             initial_body,
+            attachments,
             invalid: Vec::new(),
             suggestions: None,
             lookup: 0,
@@ -387,9 +454,58 @@ impl Compose {
 
     /// Whether closing would lose something the user wrote.
     fn has_draft(&self, cx: &App) -> bool {
-        [&self.to, &self.cc, &self.bcc].iter().any(|input| !input.read(cx).text().trim().is_empty())
+        let text = |input: &Entity<TextInput>| input.read(cx).text().trim().to_owned();
+        text(&self.to) != self.initial_to
+            || text(&self.cc) != self.initial_cc
+            || !text(&self.bcc).is_empty()
             || *self.subject.read(cx).text() != self.initial_subject
             || self.body.read(cx).text() != self.initial_body.as_ref()
+            || !self.attachments.is_empty()
+    }
+
+    // MARK: Attachments
+
+    fn attach(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if matches!(self.status, Status::Sending) {
+            return;
+        }
+        self.status = match self.attachments.add(paths) {
+            Ok(()) => Status::Idle,
+            Err(message) => Status::Failed(message.into()),
+        };
+        cx.notify();
+    }
+
+    fn pick_files(&mut self, _: &Attach, _: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.status, Status::Sending) {
+            return;
+        }
+        attachments::pick(cx, |this, picked, cx| match picked {
+            Ok(paths) => this.attach(paths, cx),
+            Err(message) => this.fail(message, cx),
+        });
+    }
+
+    /// Ctrl+V (⌘V) with files or an image on the clipboard attaches them; text goes on to the
+    /// field.
+    fn paste(&mut self, cx: &mut Context<Self>) {
+        let Some(pasted) = attachments::pasted(cx) else { return };
+        cx.stop_propagation();
+        match pasted {
+            Ok(paths) => self.attach(paths, cx),
+            Err(message) => self.fail(message, cx),
+        }
+    }
+
+    fn remover(cx: &mut Context<Self>) -> Remove {
+        let this = cx.entity().downgrade();
+        Rc::new(move |index, _, cx| {
+            this.update(cx, |this, cx| {
+                this.attachments.remove(index);
+                cx.notify();
+            })
+            .ok();
+        })
     }
 
     /// Closes at once when nothing would be lost; otherwise asks in the confirm bar.
@@ -576,19 +692,38 @@ impl Compose {
             window.focus(&self.to.focus_handle(cx));
             return self.fail("Add at least one recipient.", cx);
         }
-        let draft = mailstream::Draft {
-            from: from.to_string(),
-            to,
-            cc,
-            bcc,
-            subject: self.subject.read(cx).text().trim().to_string(),
-            body: self.body.read(cx).text().to_string(),
-            attachments: vec![],
+        let subject = self.subject.read(cx).text().trim().to_string();
+        let body = self.body.read(cx).text().to_string();
+        let attachments = self.attachments.paths();
+        let request = match self.reply.clone() {
+            // Fields left as they opened keep the engine's reply plan.
+            Some((conversation, all)) => {
+                let changed = |input: &Entity<TextInput>, initial: &str| input.read(cx).text().trim() != initial;
+                let overrides = mailstream::ReplyOverrides {
+                    to: changed(&self.to, &self.initial_to).then_some(to),
+                    cc: changed(&self.cc, &self.initial_cc).then_some(cc),
+                    bcc: (!bcc.is_empty()).then_some(bcc),
+                    subject: (subject != self.initial_subject.as_ref()).then_some(subject),
+                    attachments: (!attachments.is_empty()).then_some(attachments),
+                };
+                Outgoing::Reply { id: conversation.to_string(), body, all, overrides }
+            }
+            None => Outgoing::Message(mailstream::Draft { from: from.to_string(), to, cc, bcc, subject, body, attachments }),
         };
         self.status = Status::Sending;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let answer = cx.background_executor().spawn(async move { engine().send(draft, true).await }).await;
+            let answer = cx
+                .background_executor()
+                .spawn(async move {
+                    match request {
+                        Outgoing::Message(draft) => engine().send(draft, true).await,
+                        Outgoing::Reply { id, body, all, overrides } => {
+                            engine().reply(id, body, all, Some(overrides), true).await
+                        }
+                    }
+                })
+                .await;
             this.update_in(cx, |this, window, cx| match answer {
                 Ok(_) => {
                     this.status = Status::Idle;
@@ -603,7 +738,7 @@ impl Compose {
 
     // MARK: Rendering
 
-    fn render_title_bar(&self, window: &mut Window, p: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&self, window: &mut Window, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let sending = matches!(self.status, Status::Sending);
         title_bar("compose-title", window, cx)
             .flex_shrink_0()
@@ -621,6 +756,10 @@ impl Compose {
                     .text_size(px(text::PANE_TITLE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(self.title.clone()),
+            )
+            .child(
+                icon_button("compose-attach", Icon::Attachment, ATTACH_TIP, !sending, p.muted, p)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.pick_files(&Attach, window, cx))),
             )
             .child(
                 send_button("compose-send", sending, p)
@@ -828,6 +967,7 @@ impl Render for Compose {
         let p = design::palette(window.appearance());
         let sending = matches!(self.status, Status::Sending);
         let body = self.body.clone();
+        let attached = self.attachments.render("compose-attachment", !sending, &Self::remover(cx), p);
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -838,6 +978,12 @@ impl Render for Compose {
             .on_action(cx.listener(Self::focus_previous))
             .on_action(cx.listener(Self::suggestion_next))
             .on_action(cx.listener(Self::suggestion_previous))
+            .on_action(cx.listener(Self::pick_files))
+            .capture_action(cx.listener(|this, _: &crate::input::Paste, _, cx| this.paste(cx)))
+            .capture_action(cx.listener(|this, _: &crate::textarea::Paste, _, cx| this.paste(cx)))
+            .group(COMPOSE_DROP)
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -870,7 +1016,18 @@ impl Render for Compose {
                             .text_size(px(text::PANE_TITLE))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(self.subject.clone()),
-                    ),
+                    )
+                    .when_some(attached, |d, attached| {
+                        d.child(
+                            div()
+                                .ml(px(metrics::MARGIN))
+                                .pr(px(metrics::MARGIN))
+                                .py(px(space::S8))
+                                .border_b_1()
+                                .border_color(p.line)
+                                .child(attached),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -908,6 +1065,7 @@ impl Render for Compose {
                 )
             })
             .when(self.confirming_discard, |d| d.child(self.render_confirm(p, cx)))
+            .child(attachments::drop_target(COMPOSE_DROP, radius::PANE, p))
     }
 }
 
@@ -916,9 +1074,12 @@ impl Render for Compose {
 pub enum ReplyEvent {
     Sent,
     Discarded,
+    /// Moved to the compose window to change its recipients or subject, with what it holds.
+    Moved { body: String, attachments: Vec<PathBuf> },
 }
 
-/// The reader's reply card: a mail reply (or reply all) to a conversation's latest message.
+/// The reader's reply card: a mail reply (or reply all) to a conversation's latest message, with
+/// files picked, dropped or pasted on it.
 pub struct ReplyBox {
     conversation_id: SharedString,
     all: bool,
@@ -926,6 +1087,7 @@ pub struct ReplyBox {
     text: Entity<TextArea>,
     focus: FocusHandle,
     scroll: ScrollHandle,
+    attachments: Attachments,
     status: Status,
     _subscription: Subscription,
 }
@@ -965,6 +1127,7 @@ impl ReplyBox {
             text,
             focus,
             scroll,
+            attachments: Attachments::default(),
             status: Status::Idle,
             _subscription: subscription,
         }
@@ -979,17 +1142,26 @@ impl ReplyBox {
             return;
         }
         let body = self.text.read(cx).text().to_owned();
-        if body.trim().is_empty() {
+        if body.trim().is_empty() && self.attachments.is_empty() {
             self.status = Status::Failed("Write something to send.".into());
             cx.notify();
             return;
         }
         let (id, all) = (self.conversation_id.to_string(), self.all);
+        let overrides = (!self.attachments.is_empty()).then(|| mailstream::ReplyOverrides {
+            to: None,
+            cc: None,
+            bcc: None,
+            subject: None,
+            attachments: Some(self.attachments.paths()),
+        });
         self.status = Status::Sending;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let answer =
-                cx.background_executor().spawn(async move { engine().reply(id, body, all, None, true).await }).await;
+            let answer = cx
+                .background_executor()
+                .spawn(async move { engine().reply(id, body, all, overrides, true).await })
+                .await;
             this.update(cx, |this, cx| {
                 match answer {
                     Ok(_) => {
@@ -1005,11 +1177,70 @@ impl ReplyBox {
         .detach();
     }
 
-    /// Escape leaves an empty reply; written text stays until Send or Discard.
+    /// Escape leaves an empty reply; written text and files stay until Send or Discard.
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        if self.text.read(cx).text().trim().is_empty() && !matches!(self.status, Status::Sending) {
+        if self.text.read(cx).text().trim().is_empty()
+            && self.attachments.is_empty()
+            && !matches!(self.status, Status::Sending)
+        {
             cx.emit(ReplyEvent::Discarded);
         }
+    }
+
+    /// Hands the reply to the compose window, where its recipients and subject can change.
+    fn open_in_window(&mut self, _: &OpenInWindow, _: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.status, Status::Sending) {
+            return;
+        }
+        let body = self.text.read(cx).text().to_owned();
+        cx.emit(ReplyEvent::Moved { body, attachments: self.attachments.take() });
+    }
+
+    fn attach(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if matches!(self.status, Status::Sending) {
+            return;
+        }
+        self.status = match self.attachments.add(paths) {
+            Ok(()) => Status::Idle,
+            Err(message) => Status::Failed(message.into()),
+        };
+        cx.notify();
+    }
+
+    fn pick_files(&mut self, _: &Attach, _: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.status, Status::Sending) {
+            return;
+        }
+        attachments::pick(cx, |this, picked, cx| match picked {
+            Ok(paths) => this.attach(paths, cx),
+            Err(message) => {
+                this.status = Status::Failed(message.into());
+                cx.notify();
+            }
+        });
+    }
+
+    fn paste(&mut self, cx: &mut Context<Self>) {
+        let Some(pasted) = attachments::pasted(cx) else { return };
+        cx.stop_propagation();
+        match pasted {
+            Ok(paths) => self.attach(paths, cx),
+            Err(message) => {
+                self.status = Status::Failed(message.into());
+                cx.notify();
+            }
+        }
+    }
+
+    fn remover(cx: &mut Context<Self>) -> Remove {
+        let this = cx.entity().downgrade();
+        Rc::new(move |index, _, cx| {
+            this.update(cx, |this, cx| {
+                this.attachments.remove(index);
+                cx.notify();
+            })
+            .ok();
+        })
     }
 }
 
@@ -1020,9 +1251,16 @@ impl Render for ReplyBox {
         let mut ring = p.accent;
         ring.a = metrics::FOCUS_RING_ALPHA;
         let focus = self.focus.clone();
+        let attached = self.attachments.render("reply-attachment", !sending, &Self::remover(cx), p);
         div()
             .key_context(REPLY_CONTEXT)
             .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::pick_files))
+            .on_action(cx.listener(Self::open_in_window))
+            .capture_action(cx.listener(|this, _: &crate::textarea::Paste, _, cx| this.paste(cx)))
+            .group(REPLY_DROP)
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
+            .relative()
             .w_full()
             .flex()
             .flex_col()
@@ -1070,6 +1308,7 @@ impl Render for ReplyBox {
                     .when(sending, |d| d.opacity(metrics::SENT_TEXT_OPACITY))
                     .child(self.text.clone()),
             )
+            .when_some(attached, |d, attached| d.child(div().px(px(metrics::REPLY_PADDING)).pb(px(8.)).child(attached)))
             .child(
                 div()
                     .flex()
@@ -1079,6 +1318,17 @@ impl Render for ReplyBox {
                     .pr(px(8.))
                     .pb(px(8.))
                     .child(status_line(&self.status, p).unwrap_or_else(|| div().flex_1()))
+                    .child(
+                        icon_button("reply-attach", Icon::Attachment, ATTACH_TIP, !sending, p.muted, p).on_click(
+                            cx.listener(|this, _: &ClickEvent, window, cx| this.pick_files(&Attach, window, cx)),
+                        ),
+                    )
+                    .child(
+                        icon_button("reply-window", Icon::OpenInWindow, OPEN_IN_WINDOW_TIP, !sending, p.muted, p)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_in_window(&OpenInWindow, window, cx)
+                            })),
+                    )
                     .child(
                         button("reply-discard", "Discard", ButtonKind::Secondary, ControlSize::Regular, !sending, p)
                             .when(!sending, |b| {
@@ -1090,5 +1340,6 @@ impl Render for ReplyBox {
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.send(window, cx))),
                     ),
             )
+            .child(attachments::drop_target(REPLY_DROP, radius::CARD, p))
     }
 }

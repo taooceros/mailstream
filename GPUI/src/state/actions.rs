@@ -2,7 +2,7 @@
 //! forwarding and writing new mail.
 
 use super::*;
-use crate::compose::{self, ComposeMode, ReplyEvent};
+use crate::compose::{self, ComposeMode, MovedReply, ReplyEvent};
 use crate::engine::{self, BatchResult};
 
 /// What takes a conversation out of the list.
@@ -93,24 +93,66 @@ impl MailApp {
         };
         let id = conversation.id.clone();
         let view = cx.new(|cx| ReplyBox::new(id.clone(), all, preview, window, cx));
+        let replied = id.clone();
         let subscription = cx.subscribe_in(&view, window, move |this, _, event: &ReplyEvent, window, cx| {
             this.reply = None;
             window.focus(&this.focus);
-            if matches!(event, ReplyEvent::Sent) {
-                this.show_toast("Sent", cx);
-                // The thread grows by the reply: read it again (showing it meanwhile), and the
-                // lists with it.
-                if let Some(open) = this.reader().cloned() {
-                    this.reader_pinned = true;
-                    this.load_thread(&open, true, cx);
+            match event {
+                ReplyEvent::Sent => {
+                    this.show_toast("Sent", cx);
+                    // The thread grows by the reply: read it again (showing it meanwhile), and the
+                    // lists with it.
+                    if let Some(open) = this.reader().cloned() {
+                        this.reader_pinned = true;
+                        this.load_thread(&open, true, cx);
+                    }
+                    this.load_list(this.key(), true, cx);
                 }
-                this.load_list(this.key(), true, cx);
+                ReplyEvent::Discarded => {}
+                ReplyEvent::Moved { body, attachments } => {
+                    this.move_reply(&replied, all, body.clone(), attachments.clone(), cx);
+                }
             }
             cx.notify();
         });
         self.reply = Some(super::ReplyDraft { conversation: id, all, view, _subscription: subscription });
         self.reader_scroll.scroll_to_bottom();
         cx.notify();
+    }
+
+    /// Opens the inline reply in the compose window, where its recipients and subject can change;
+    /// it still goes out with `mail.reply`, keeping the thread.
+    fn move_reply(
+        &mut self,
+        id: &SharedString,
+        all: bool,
+        body: String,
+        attachments: Vec<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let conversation = self.conversation(id).or_else(|| self.reader().filter(|c| &c.id == id).cloned());
+        let Some(conversation) = conversation else { return };
+        let own: HashSet<String> = self.accounts.iter().map(|account| account.id.to_lowercase()).collect();
+        let (to, cc) = match self.threads.get(id).map(|t| &t.state) {
+            Some(ThreadState::Loaded(messages)) => {
+                messages.last().map(|last| last.reply_recipients(&own, all)).unwrap_or_default()
+            }
+            _ => Default::default(),
+        };
+        let subject = conversation.subject.trim_start();
+        let subject =
+            if subject.to_lowercase().starts_with("re:") { subject.to_owned() } else { format!("Re: {subject}") };
+        let moved = MovedReply {
+            conversation: id.clone(),
+            all,
+            from: conversation.account.clone(),
+            to,
+            cc,
+            subject: subject.into(),
+            body,
+            attachments,
+        };
+        compose::open_compose(ComposeMode::Reply(moved), self.accounts.clone(), cx);
     }
 
     pub fn forward(&mut self, _: &Forward, window: &mut Window, cx: &mut Context<Self>) {

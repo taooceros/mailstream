@@ -1,6 +1,8 @@
 //! The UI's values, converted from the engine's records (`mailstream` crate). Conversion and the
 //! derived display strings (`prepare`) run on the background executor.
 
+use std::collections::HashSet;
+
 use chrono::{DateTime, Local, Utc};
 use gpui::SharedString;
 
@@ -467,6 +469,37 @@ impl Message {
 
     pub fn sender(&self) -> Address {
         self.from.first().cloned().unwrap_or(Address { name: None, email: "(unknown)".into() })
+    }
+
+    /// Who a reply to this message goes to, as the reader can tell from its headers (Flutter's
+    /// `_recipients`): its sender, or for the user's own message its recipients; a reply to all
+    /// adds everyone else as Cc. The user's addresses (`own`, lowercased) stay out unless they are
+    /// all there is.
+    pub fn reply_recipients(&self, own: &HashSet<String>, all: bool) -> (Vec<Address>, Vec<Address>) {
+        let mine = |address: &&Address| own.contains(&address.email.to_lowercase());
+        let primary = if self.from.iter().any(|address| mine(&address)) { &self.to } else { &self.from };
+        let mut seen = HashSet::new();
+        let mut to: Vec<Address> = primary
+            .iter()
+            .filter(|address| !mine(address) && seen.insert(address.email.to_lowercase()))
+            .cloned()
+            .collect();
+        if to.is_empty() {
+            to = primary.clone();
+            seen.extend(to.iter().map(|address| address.email.to_lowercase()));
+        }
+        let cc = if all {
+            self.to
+                .iter()
+                .chain(&self.cc)
+                .chain(&self.from)
+                .filter(|address| !mine(address) && seen.insert(address.email.to_lowercase()))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        (to, cc)
     }
 
     /// The body a forward of this message starts with (`Replies.forward`): a header block, then

@@ -42,6 +42,7 @@ icons! {
     Newsletter => "newspaper_fill",
     Notification => "notifications_fill",
     People => "group_fill",
+    OpenInWindow => "open_in_new",
     MarkRead => "mark_email_read",
     MarkUnread => "mark_email_unread",
     Person => "person",

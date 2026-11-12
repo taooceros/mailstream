@@ -584,4 +584,8 @@ pub mod compose {
     pub const SENT_TEXT_OPACITY: f32 = 0.6;
     /// The Send button's ⌘↩ hint.
     pub const KEY_HINT_OPACITY: f32 = 0.72;
+    /// Files dragged over a draft: the target's inset, its accent face's opacity and its glyph.
+    pub const DROP_INSET: f32 = 8.0;
+    pub const DROP_FILL_ALPHA: f32 = 0.92;
+    pub const DROP_GLYPH: f32 = 36.0;
 }
