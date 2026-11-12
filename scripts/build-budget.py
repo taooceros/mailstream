@@ -21,9 +21,13 @@ CPU: 6 slots. A rustc starts with one; the threads it runs to generate code take
 time through a jobserver of its own (CARGO_MAKEFLAGS fifo) that the wrapper fills from free slots
 and empties as soon as tokens sit unused (without a jobserver rustc runs up to 32 threads). A
 `run` job holds 4 slots and passes that on (`swift build -j 4`, `xcodebuild -jobs 4`, and for
-flutter's own xcodebuild the IDEBuildOperationMaxNumberOfConcurrentCompileTasks default). A job
-also starts only when the slots in use, or the cores jobs actually use when that is more, plus
-the cores compile processes outside jobs use, leave room for its slots.
+flutter's own xcodebuild the IDEBuildOperationMaxNumberOfConcurrentCompileTasks default). While
+a job runs, its wrapper measures the cores its process tree (and itself) uses and holds a slot
+for each whole core beyond its tokens (rustc's helper threads, ld's threads while linking), so
+the slots held follow what is actually used; when none is free it counts as waiting, and no
+codegen thread gets another token until it has them. A job also starts only when the slots in
+use, or the cores jobs use when that is more, plus the cores compile processes outside jobs use
+(cargo, build scripts), leave room for its slots.
 Waiting jobs start in arrival order: one waits at the door, the rest queue behind it.
 
 Nothing deadlocks: the door, each running job's record and each CPU slot are flock(2) locks,
@@ -321,7 +325,7 @@ def admit(key, share, cpus, label):
         save_meter(previous, view)
         jobs = view["jobs"]
         memory_fits = view["memory"] + need <= LIMIT or (not jobs and view["outside_rss"] + need <= BUDGET)
-        cores_fit = view["cores"] + cpus <= CPUS + 0.25 or (not jobs and view["outside_cores"] < 1)
+        cores_fit = view["cores"] + cpus <= CPUS or (not jobs and view["outside_cores"] < 1)
         if memory_fits and cores_fit and (slots := take_slots(cpus)) is not None:
             break
         if not told and time.monotonic() - started > 60:
@@ -429,6 +433,67 @@ class Jobserver:
 
 # --- running a job ---------------------------------------------------------------------------
 
+def descendants(pid):
+    """pid and every process under it, from the kernel's child lists (no `ps`)."""
+    found, stack = [], [pid]
+    buf = (ctypes.c_int * 512)()
+    while stack:
+        p = stack.pop()
+        found.append(p)
+        count = _libc.proc_listchildpids(p, buf, ctypes.sizeof(buf))
+        stack.extend(buf[:count] if count > 0 else ())
+    return found
+
+
+class Governor:
+    """Keeps a running job's CPU slots at what it actually uses. A job may use more cores than its
+    slots for a moment (rustc's helper threads beside its codegen workers, ld's threads during a
+    link, the wrapper itself): every TICK it measures its process tree and takes a further slot
+    for each whole core over, giving them back as use drops. When no slot is free it posts a
+    waiting record, so no codegen thread anywhere gets another token until the slots it needs
+    come free."""
+
+    TICK = 0.25
+
+    def __init__(self, pid, slots, server, key):
+        self.pid, self.slots, self.server, self.key = pid, slots, server, key
+        self.shadows, self.debt = [], None
+        self.before, self.at = {}, time.monotonic()
+        self.peak = 0
+
+    def tick(self):
+        cpu, rss = {}, 0
+        for p in descendants(self.pid):
+            usage = _Rusage()
+            if _libc.proc_pid_rusage(p, 0, ctypes.byref(usage)) == 0:
+                cpu[p] = (usage.user + usage.system) * _TICK
+                rss += usage.resident
+        own = resource.getrusage(resource.RUSAGE_SELF)
+        cpu[-1] = own.ru_utime + own.ru_stime
+        self.peak = max(self.peak, rss)
+        now = time.monotonic()
+        cores = sum(s - self.before[p] for p, s in cpu.items() if p in self.before) / (now - self.at)
+        self.before, self.at = cpu, now
+        tokens = len(self.slots) + (len(self.server.extras) if self.server else 0)
+        want = max(0, int(cores + 0.9) - tokens)  # whole cores over its tokens, 0.1 of grace
+        while len(self.shadows) > want:
+            os.close(self.shadows.pop())
+        while len(self.shadows) < want and (slot := take_slots(1)):
+            self.shadows.append(slot[0])
+        if len(self.shadows) < want and not self.debt:
+            self.debt = publish(WAITING, {"pid": os.getpid(), "key": f"over:{self.key}", "share": 0,
+                                          "since": time.time()})
+        elif len(self.shadows) >= want and self.debt:
+            withdraw(self.debt)
+            self.debt = None
+
+    def close(self):
+        for fd in self.shadows:
+            os.close(fd)
+        if self.debt:
+            withdraw(self.debt)
+
+
 def run_job(command, key, default, cpus, label, env=None, jobserver=False):
     """Runs command as one job and returns its exit status."""
     env = dict(env or os.environ)
@@ -442,21 +507,20 @@ def run_job(command, key, default, cpus, label, env=None, jobserver=False):
         server.thread.start()
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, lambda s, _f: child.send_signal(s))
-    peak, started = 0, time.monotonic()
+    governor = Governor(child.pid, slots, server, key)
     while True:
         try:
-            child.wait(timeout=0.5 if time.monotonic() - started < 2 else 1)
+            child.wait(timeout=Governor.TICK)
             break
         except subprocess.TimeoutExpired:
-            if time.monotonic() - started >= 2:  # most crates end sooner; sample the long ones
-                table = processes()
-                peak = max(peak, sum(table[p][1] for p in tree(child.pid, children_of(table)) if p in table))
+            governor.tick()
+    governor.close()
     if server:
         server.close()
     for fd in slots:
         os.close(fd)
     withdraw(holder)
-    peak = max(peak, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)  # bytes on macOS
+    peak = max(governor.peak, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)  # bytes on macOS
     if child.returncode == 0:
         learn(key, peak)
     return child.returncode
