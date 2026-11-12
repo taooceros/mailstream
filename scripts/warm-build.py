@@ -3,7 +3,9 @@
 new ovnfs checkout starts from as its own `target/` and `.turso/` (MS-151): the release engine,
 command line, Apple Intelligence tagger and Dart binding generator (`CONFIG=release
 scripts/ffi.py`, into FFI/target), the engine's tests (`cargo test --no-run` in Engine/, into
-Engine/target/debug) and the Turso library (`scripts/turso.sh`). It builds without the toolchain
+Engine/target/debug), the Turso library (`scripts/turso.sh`) and, on the Mac, GPUI in every
+configuration agents build it (release, release with `shots`, debug and its tests, into
+GPUI/target; MS-273). It builds without the toolchain
 variables scripts/repo.py drops on macOS (SDKROOT, CPATH, …): agents' shells don't set them, and a warm build made
 with them rebuilt 15 crates in every checkout (MS-159).
 
@@ -31,7 +33,7 @@ from repo import ROOT, build_env, capped, checkouts_of, is_default_checkout, jj 
 from checkout import frozen  # noqa: E402
 import source_lock  # noqa: E402
 
-OUTPUT = ["FFI/target", "Engine/target", ".turso"]
+OUTPUT = ["FFI/target", "Engine/target", "GPUI/target", ".turso"]
 
 
 def fail(message):
@@ -97,6 +99,17 @@ def build(open_before):
             ("ffi.py", [sys.executable, "scripts/ffi.py"], ROOT, {"CONFIG": "release", "DART_OUT": dart}),
             ("engine tests", capped(["cargo", "test", "--no-run"]), ROOT / "Engine", {}),
         ]
+        if sys.platform == "darwin":
+            # GPUI as agents build it (MS-273): release for install.sh, bench.sh and gpui-bundle.sh,
+            # release with `shots` for scripts/shots.py, debug for GPUI/run.sh and its tests.
+            # Linux keeps each checkout's GPUI/target outside the mount (MS-201).
+            gpui = ROOT / "GPUI"
+            steps += [
+                ("GPUI release", capped(["cargo", "build", "--release"]), gpui, {}),
+                ("GPUI shots", capped(["cargo", "build", "--release", "--features", "shots"]), gpui, {}),
+                ("GPUI debug", capped(["cargo", "build"]), gpui, {}),
+                ("GPUI tests", capped(["cargo", "test", "--no-run"]), gpui, {}),
+            ]
         for name, command, cwd, extra in steps:
             step = time.monotonic()
             subprocess.run(command, cwd=cwd, check=True, env=build_env(**extra))

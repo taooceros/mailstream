@@ -253,7 +253,10 @@ it is handed over; it is not moved mid-way.
 - The default checkout keeps a warm build of `main` (`FFI/target` release, `Engine/target`
   debug for the engine's tests, `.turso/`) that every new checkout starts from and keeps (MS-151,
   MS-152, MS-159): a checkout's first release `ffi.py` rebuilds only the repo's 2 crates (~30 s)
-  instead of 460 (~3–4 min). `ffi.py` builds the library and the command line in one cargo run
+  instead of 460 (~3–4 min). On the Mac it also keeps `GPUI/target` warm in every configuration agents
+  build (release, release with `shots`, debug, `cargo test --no-run`; MS-273), so a checkout's
+  first GPUI build recompiles only the repo's crates instead of ~670 (cold: ~6 min of cargo time
+  plus the wait for the build slot). `ffi.py` builds the library and the command line in one cargo run
   into `FFI/target` and drops `SDKROOT`/`CPATH`-style variables: C build scripts rebuild
   everything above them when those differ from the warm build's. Run release engine builds
   through `ffi.py`, not a second cargo in `Engine/` (that compiles the engine and its
