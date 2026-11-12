@@ -42,9 +42,13 @@ fontique = { version = "0.12", default-features = false, features = ["fontconfig
 # `vendor/gpui-fast-linux` is GPUI Fast's Linux platform 0.1.14 with smooth wheel steps and kinetic
 # touchpad scrolling on Wayland (MS-208, `src/linux/wayland/scroll_motion.rs` and its use in
 # `client.rs`, marked "Mailstream patch").
+# `vendor/gpui-fast-wgpu` is GPUI Fast's wgpu renderer and Linux text system 0.1.14 drawing a variable
+# font at the weight cosmic-text shaped it at rather than at its default instance, which for Noto
+# Sans CJK (the CJK fallback) is Thin (MS-230, `src/cosmic_text_system.rs`, marked "Mailstream patch").
 [patch.crates-io]
 stylo_derive = { path = "vendor/stylo_derive" }
 gpui-fast-linux = { path = "vendor/gpui-fast-linux" }
+gpui-fast-wgpu = { path = "vendor/gpui-fast-wgpu" }
 
 [profile.dev.package."*"]
 opt-level = 2
