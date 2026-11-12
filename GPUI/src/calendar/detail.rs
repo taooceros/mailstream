@@ -103,7 +103,7 @@ impl CalendarPane {
                 .bg(p.fill)
                 .map(|d| {
                     if reply.answerable {
-                        d.child(self.reply_switch(index, reply, "detail", p, cx).h(px(28.)))
+                        d.child(self.reply_switch(index, reply, "detail", p, cx))
                     } else if !part.is_empty() {
                         d.child(div().px(px(space::S6)).text_color(p.muted).font_weight(FontWeight::MEDIUM).child(part))
                     } else {

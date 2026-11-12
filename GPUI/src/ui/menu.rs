@@ -1,8 +1,11 @@
 //! The row's right-click menu (`ConversationListViewController.menu`): reply and forward, read and star toggles,
-//! "Waiting on you", then filing. Escape or a click outside closes it.
+//! "Waiting on you", then filing. It is gpui-kit's `PopupMenu` (MS-226), built as it opens, its entries drawn
+//! in the app's row (the glyph in the secondary label before the title, in the body text); the kit
+//! steps through them with the arrows, runs one with Return and closes on Escape or a press outside.
 
 use super::*;
-use gpui::{anchored, deferred};
+use gpui::component::menu::{PopupMenu, PopupMenuItem};
+use gpui::{Entity, anchored, deferred};
 
 /// One entry: icon, title, what it runs.
 struct Entry {
@@ -12,9 +15,14 @@ struct Entry {
 }
 
 impl MailApp {
-    pub(super) fn render_context_menu(&self, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let menu = self.context_menu.as_ref()?;
-        let conversation = self.conversation(&menu.id)?;
+    /// The menu for the row `id`, or none once its conversation is gone.
+    pub(crate) fn build_context_menu(
+        &self,
+        id: &SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<PopupMenu>> {
+        let conversation = self.conversation(id)?;
 
         let mut groups: Vec<Vec<Entry>> = vec![vec![
             Entry { glyph: Icon::Reply, title: "Reply", run: |this, w, cx| this.reply(&Reply, w, cx) },
@@ -58,46 +66,43 @@ impl MailApp {
         filing.push(Entry { glyph: Icon::Delete, title: "Move to Trash", run: |this, w, cx| this.trash(&Trash, w, cx) });
         groups.push(filing);
 
-        let count = groups.len();
-        let mut body = popover(p)
-            .id("context-menu")
-            .key_context("ContextMenu")
-            .track_focus(&menu.focus)
-            .on_action(cx.listener(Self::close_menu))
-            .on_mouse_down_out(cx.listener(|this, _, window, cx| this.dismiss_menu(window, cx)))
-            .occlude()
-            .w(px(layout::MENU_WIDTH))
-            .py(px(space::S4))
-            .flex()
-            .flex_col()
-            .font_family(design::ui_font())
-            .text_size(px(text::BODY))
-            .text_color(p.text);
-        for (index, group) in groups.into_iter().enumerate() {
-            for entry in group {
-                let run = entry.run;
-                body = body.child(
-                    div()
-                        .id(entry.title)
-                        .mx(px(space::S4))
-                        .h(px(layout::MENU_ROW))
-                        .px(px(space::S8))
-                        .flex()
-                        .items_center()
-                        .gap(px(space::S10))
-                        .rounded(px(radius::SMALL))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(p.hover))
-                        .active(|s| s.bg(p.pressed))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| run(this, window, cx)))
-                        .child(icon(entry.glyph, icon_size::ROW, p.muted))
-                        .child(entry.title),
-                );
+        let app = cx.weak_entity();
+        Some(PopupMenu::build(window, cx, move |mut menu, _, _| {
+            menu = menu.min_w(px(layout::MENU_WIDTH));
+            for (index, group) in groups.into_iter().enumerate() {
+                if index > 0 {
+                    menu = menu.separator();
+                }
+                for Entry { glyph, title, run } in group {
+                    let app = app.clone();
+                    menu = menu.item(
+                        PopupMenuItem::element(move |window, _| {
+                            let p = design::palette(window.appearance());
+                            div()
+                                .h(px(layout::MENU_ROW))
+                                .flex()
+                                .items_center()
+                                .gap(px(space::S10))
+                                .font_family(design::ui_font())
+                                .text_size(px(text::BODY))
+                                .child(icon(glyph, icon_size::ROW, p.muted))
+                                .child(title)
+                        })
+                        .on_click(move |_, window, cx| {
+                            app.update(cx, |this, cx| run(this, window, cx)).ok();
+                        }),
+                    );
+                }
             }
-            if index + 1 < count {
-                body = body.child(hairline(p).my(px(space::S4)));
-            }
-        }
-        Some(deferred(anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(body)).into_any_element())
+            menu
+        }))
+    }
+
+    pub(super) fn render_context_menu(&self) -> Option<AnyElement> {
+        let menu = self.context_menu.as_ref()?;
+        Some(
+            deferred(anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(menu.menu.clone()))
+                .into_any_element(),
+        )
     }
 }

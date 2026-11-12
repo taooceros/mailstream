@@ -1,18 +1,23 @@
 //! The app's shared controls, after Flutter's `controls.dart`, `glass.dart` and `common.dart`
 //! (MS-189–193, MS-200), drawn from the tokens in `design.rs` and used by every view. Buttons, icon
-//! buttons, their tooltips and switches are gpui-kit's components in the kit theme
-//! `design::sync_kit_theme` sets (MS-226); the rest is the app's own, where the kit has none: the
-//! capsules toolbar buttons sit on, islands, the title bars that move the window, popovers, tags,
-//! pills, marks, the lifted card of a selected row, notices, toasts, notes, the list's group titles
-//! and the search field's frame. A view composes these rather than restyling one.
+//! buttons, their tooltips, switches, segmented controls, tags and toasts are gpui-kit's components
+//! in the kit theme `design::sync_kit_theme` sets (MS-226), restyled here where the app's look
+//! differs; the rest is the app's own, where the kit has none or can't take the app's look: the
+//! capsules toolbar buttons sit on, islands, the title bars that move the window, popovers, pills,
+//! marks, the lifted card of a selected row, notices (the kit's alert takes neither a button nor a
+//! click), notes, the list's group titles and the search field's frame. A view composes these
+//! rather than restyling one.
 
 use gpui::component::button::{Button, ButtonVariants};
+use gpui::component::notification::Notification;
 use gpui::component::switch::Switch;
+use gpui::component::tab::{Tab, TabBar};
+use gpui::component::tag::Tag;
 use gpui::component::tooltip::Tooltip;
-use gpui::component::Disableable;
+use gpui::component::{Disableable, Sizable};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, AnyView, App, DispatchPhase, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
+    Anchor, AnyElement, AnyView, App, DispatchPhase, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
     MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString, Stateful,
     Styled, Window, canvas, div, linear_color_stop, linear_gradient, px,
 };
@@ -264,18 +269,17 @@ pub fn hairline(p: &Palette) -> Div {
 }
 
 /// A tag (MS-190): small print that describes, not acts (a topic, a bundle's count), in `color`
-/// on a wash of it, fully round; neutral (the secondary label) without a color.
-pub fn tag(label: impl Into<SharedString>, color: Option<Hsla>, p: &Palette) -> Div {
+/// on a wash of it, fully round; neutral (the secondary label) without a color. gpui-kit's [`Tag`]
+/// in the app's metrics, without its rim.
+pub fn tag(label: impl Into<SharedString>, color: Option<Hsla>, p: &Palette) -> Tag {
     let color = color.unwrap_or(p.muted);
-    div()
+    Tag::custom(design::tint(color, tag_metrics::TINT), color, gpui::transparent_black())
+        .rounded_full()
+        .border_0()
         .flex_shrink_0()
         .h(px(tag_metrics::HEIGHT))
         .px(px(tag_metrics::PADDING))
-        .flex()
-        .items_center()
-        .rounded_full()
-        .bg(design::tint(color, tag_metrics::TINT))
-        .text_color(color)
+        .py_0()
         .text_size(px(text::TAG))
         .font_weight(FontWeight::SEMIBOLD)
         .child(label.into())
@@ -301,28 +305,28 @@ pub fn pill(label: impl Into<SharedString>, leading: Option<AnyElement>, p: &Pal
         .child(label.into())
 }
 
-/// The track of a segmented control: [`segment`]s side by side on the quiet fill, fully round.
-pub fn segmented(p: &Palette) -> Div {
-    div().flex_shrink_0().h(px(22.)).p(px(2.)).flex().items_center().rounded_full().bg(p.chip)
+/// A segmented control (`MailSegmented`): gpui-kit's small segmented [`TabBar`] of [`segment`]s on
+/// the quiet fill (the kit theme's `tab_bar_segmented`), the `chosen` one raised on the page's
+/// surface, which slides to the next one chosen; none raised without a choice.
+pub fn segmented(id: impl Into<ElementId>, chosen: Option<usize>) -> TabBar {
+    TabBar::new(id).segmented().small().flex_shrink_0().when_some(chosen, |bar, ix| bar.selected_index(ix))
 }
 
-/// One choice of a [`segmented`] control: the chosen one raised on the page's surface, the others
-/// quiet, washed under the pointer. Chain `.on_click`; its click never moves the window.
-pub fn segment(id: impl Into<ElementId>, label: impl Into<SharedString>, chosen: bool, p: &Palette) -> Stateful<Div> {
-    let hovered = p.hover;
-    div()
-        .id(id)
-        .h_full()
-        .px(px(space::S8))
-        .flex()
-        .items_center()
-        .rounded_full()
-        .text_size(px(text::FOOTNOTE))
-        .font_weight(FontWeight::MEDIUM)
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .when(chosen, |d| d.bg(p.background).border(px(stroke::HAIRLINE)).border_color(p.card_border).text_color(p.text))
-        .when(!chosen, |d| d.text_color(p.muted).cursor_pointer().hover(move |s| s.bg(hovered)))
-        .child(label.into())
+/// One choice of a [`segmented`] control: `label` in the footnote type, in the secondary label (the
+/// text once chosen, or `color`), after `glyph` (a glyph and its color) when there is one. Chain
+/// `.on_click`; its press never reaches the row or title bar under it.
+pub fn segment(label: impl Into<SharedString>, glyph: Option<(Icon, Hsla)>, color: Option<Hsla>) -> Tab {
+    Tab::new().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(space::S4))
+            .text_size(px(text::FOOTNOTE))
+            .font_weight(FontWeight::MEDIUM)
+            .when_some(color, |d, color| d.text_color(color))
+            .when_some(glyph, |d, (glyph, color)| d.child(icon(glyph, icon_size::INLINE, color)))
+            .child(label.into()),
+    )
 }
 
 /// An account or a topic: a dot of its color, the one mark for them (MS-190).
@@ -538,22 +542,21 @@ pub fn notice(tone: Tone, title: Option<SharedString>, message: impl Into<Shared
     )
 }
 
-/// A notice floating over the bottom of the window: a dark rounded panel (red for an error).
-pub fn toast(message: SharedString, error: bool, p: &Palette) -> Div {
-    let (face, ink) = if error { (p.red_fill, p.on_red_fill) } else { (p.toast, p.on_toast) };
-    div()
-        .max_w(px(520.))
+/// A toast over the bottom of the window (`MailToast`): gpui-kit's notification in the toast's face
+/// (dark in light mode, light in dark), rounded as a pane, its message in the body text. A new one
+/// takes the place of the one shown; it leaves by itself after the kit's few seconds.
+pub fn toast(message: SharedString, p: &Palette) -> Notification {
+    struct AppToast;
+    Notification::new()
+        .id::<AppToast>()
+        .placement(Anchor::BottomCenter)
+        .content(move |_, _, _| div().text_size(px(text::BODY)).child(message.clone()).into_any_element())
+        .bg(p.toast)
+        .text_color(p.on_toast)
+        .border_0()
+        .rounded(px(radius::PANE))
         .px(px(space::S16))
         .py(px(space::S10))
-        .flex()
-        .items_center()
-        .gap(px(space::S8))
-        .rounded(px(radius::PANE))
-        .bg(face)
-        .shadow(p.popover_shadow.clone())
-        .text_color(ink)
-        .when(error, |d| d.child(icon(Icon::Spam, icon_size::ROW, ink)))
-        .child(message)
 }
 
 /// An on/off switch (`MailSwitch`): gpui-kit's [`Switch`], the accent when on, out of the Tab order

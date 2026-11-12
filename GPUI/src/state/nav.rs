@@ -3,7 +3,7 @@
 use super::*;
 use crate::design::{self, motion};
 use crate::swipe::{self, Step};
-use gpui::ScrollEvent;
+use gpui::{DismissEvent, ScrollEvent};
 
 impl MailApp {
     /// Mail is in view: neither Chat nor the calendar is.
@@ -304,14 +304,15 @@ impl MailApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let focus = cx.focus_handle();
-        window.focus(&focus, cx);
-        self.context_menu = Some(ContextMenu { id, position, focus });
+        let Some(menu) = self.build_context_menu(&id, window, cx) else { return };
+        let dismissed = cx.subscribe_in(&menu, window, |this, menu, _: &DismissEvent, window, cx| {
+            if this.context_menu.as_ref().is_some_and(|open| &open.menu == menu) {
+                this.dismiss_menu(window, cx);
+            }
+        });
+        menu.focus_handle(cx).focus(window, cx);
+        self.context_menu = Some(ContextMenu { id, position, menu, _dismissed: dismissed });
         cx.notify();
-    }
-
-    pub fn close_menu(&mut self, _: &CloseMenu, window: &mut Window, cx: &mut Context<Self>) {
-        self.dismiss_menu(window, cx);
     }
 
     pub fn dismiss_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {

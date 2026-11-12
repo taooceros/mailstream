@@ -6,6 +6,7 @@
 //! (`grid.rs`).
 
 use chrono::{DateTime, Local, NaiveDate};
+use gpui::component::tab::TabBar;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
@@ -121,12 +122,14 @@ impl CalendarPane {
                     .flex()
                     .items_center()
                     .gap(px(space::S8))
-                    .child(segmented(p).h(px(26.)).children(views.map(|(view, label, key)| {
-                        let tip: SharedString = format!("{label} ({key})").into();
-                        segment(ElementId::Name(format!("view:{label}").into()), label, self.view == view, p)
-                            .tooltip(tooltip(tip))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_view(view, cx)))
-                    })))
+                    .child(segmented("calendar-views", views.iter().position(|(view, ..)| *view == self.view)).children(
+                        views.map(|(view, label, key)| {
+                            let tip: SharedString = format!("{label} ({key})").into();
+                            segment(label, None, None)
+                                .tooltip(tooltip(tip))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_view(view, cx)))
+                        }),
+                    ))
                     .child(div().flex_1())
                     .child(
                         capsule(p)
@@ -424,9 +427,11 @@ impl CalendarPane {
         place: &str,
         p: &'static Palette,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> TabBar {
         let key = &self.events[index].key;
-        segmented(p).children(model::REPLIES.map(|(value, label)| {
+        let id = format!("reply:{place}:{}:{}:{}", key.account, key.calendar, key.id);
+        let chosen = model::REPLIES.iter().position(|(value, _)| reply.chosen == Some(*value));
+        segmented(ElementId::Name(id.into()), chosen).children(model::REPLIES.map(|(value, label)| {
             let tint = if value == "declined" { p.danger } else { p.accent };
             let chosen = reply.chosen == Some(value);
             let glyph = if reply.sending == Some(value) {
@@ -438,12 +443,7 @@ impl CalendarPane {
             };
             let enabled = reply.answerable && reply.sending.is_none() && !chosen;
             let target = key.clone();
-            let id = format!("reply:{place}:{}:{}:{}:{value}", key.account, key.calendar, key.id);
-            segment(ElementId::Name(id.into()), "", chosen, p)
-                .gap(px(space::S4))
-                .when(chosen, |d| d.text_color(tint))
-                .when_some(glyph, |d, glyph| d.child(icon(glyph, icon_size::INLINE, tint)))
-                .child(label)
+            segment(label, glyph.map(|glyph| (glyph, tint)), chosen.then_some(tint))
                 // Never opens the row under it.
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();

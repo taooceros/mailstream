@@ -29,12 +29,19 @@ Anything else a render reads (a `Cell`, a thread-local, the time) needs `cx.noti
 `GPUI_VIEW_RETENTION=0` draws every frame from scratch, to tell a stale view from a bug.
 
 The controls are gpui-kit's components where the kit has one (MS-226): buttons and icon buttons
-(`controls::button`, `icon_button`), their tooltips (`controls::tooltip`), switches and text
-fields. `main.rs` calls `gpui::init` and opens every window with `gpui::open_window`, whose root
-hosts the kit's tooltips, menus and popovers over the app; `design::sync_kit_theme` puts the
-palette into the kit's theme (colors, `radius::CONTROL` corners, the UI font, `text::BODY` as the
-rem) at launch and on every change of appearance, so the components keep MS-200's look in both.
-The app's buttons and switches stay out of the Tab order, as before the kit.
+(`controls::button`, `icon_button`), their tooltips (`controls::tooltip`), switches, text fields,
+segmented controls (`controls::segmented` / `segment`: the kit's small segmented `TabBar`), tags
+(`controls::tag`: the kit's `Tag` without its rim), toasts (`controls::toast`: a kit notification
+at the bottom center, pushed by `MailApp::show_toast`, replacing the one shown, gone after the
+kit's 5 s) and the row's right-click menu (`ui/menu.rs`: a kit `PopupMenu` built as it opens, its
+entries drawn in the app's row; arrows, Return and Escape are the kit's). Notices stay the app's
+own: the kit's alert can hold neither a button nor a click. `main.rs` calls `gpui::init` and opens
+every window with `gpui::open_window`, whose root hosts the kit's tooltips, menus, popovers and
+notifications over the app; `design::sync_kit_theme` puts the palette into the kit's theme
+(colors, `radius::CONTROL` corners, the UI font, `text::BODY` as the rem, the segmented track and
+labels, the toasts' bottom margin) at launch and on every change of appearance, so the components
+keep MS-200's look in both. The app's buttons and switches stay out of the Tab order, as before
+the kit.
 
 Text fields are the kit's `InputState` (one line; `masked` for a secret) and `TextareaState`
 (written text), drawn by `input::field` / `input::area` without the kit's frame, in the text
@@ -109,7 +116,7 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 | `src/state/nav.rs`, `src/state/actions.rs` | Navigation (sources, bundles, the reader, refresh) and optimistic actions (archive, trash, restore, star, read, waiting, tags) that roll back on failure |
 | `src/state/invitations.rs` | Meeting invitations in the reader (MS-210): each card asks the account's calendar for the event and the answer (`calendar_invitation`, again on every `Calendar` event) and answers there (`calendar_respond`) |
 | `src/ui/` | The window as islands (`mod.rs`): the sidebar tree and the rail that stands in for it (`sidebar.rs`), the list's title row and the conversation's floating toolbar (`toolbar.rs`), the lazy conversation list of two-line rows with Smart Inbox bundles pinned at its top and its "Waiting on you" group (`list.rs`), the reader's message cards with the reply card (`reader.rs`) and a meeting invitation's card with Accept / Tentative / Decline (`invitation.rs`), the context menu (`menu.rs`) |
-| `src/controls.rs` | The shared controls every view composes (Flutter's `controls.dart`, `glass.dart`, `common.dart`): buttons, icon buttons, tooltips and switches (gpui-kit's, see above), capsules, islands, the title bars that move the window, popovers, tags, pills, segmented controls, marks, list rows and their lifted card, notices, toasts |
+| `src/controls.rs` | The shared controls every view composes (Flutter's `controls.dart`, `glass.dart`, `common.dart`): buttons, icon buttons, tooltips, switches, segmented controls, tags and toasts (gpui-kit's, see above), capsules, islands, the title bars that move the window, popovers, pills, marks, list rows and their lifted card, notices |
 | `src/webview.rs` | macOS, the reader's WebView renderer: HTML bodies in native `WKWebView`s laid over the reader: placed and clipped each frame, sized to their page, page scripts off, links opened in the browser, wheel events handed back to the reader |
 | `src/blitz_body.rs` | HTML bodies drawn by Blitz on the engine's pages thread (the default renderer everywhere), shown as tiles near the viewport, quoted history as a page of its own; links open in the browser, a drag selects and ⌘C (Ctrl+C) copies, inline parts go in as `data:` URLs |
 | `src/swipe.rs` | Two-finger back swipe over the bundle and reader layers, following the system's swipe-between-pages setting |

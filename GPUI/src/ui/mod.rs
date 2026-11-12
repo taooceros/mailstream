@@ -26,8 +26,8 @@ use crate::avatars;
 use crate::compose::{ComposeColumn, ResizeColumn};
 use crate::controls::{
     ButtonKind, ControlSize, Tone, capsule, centered_note, field_frame, hairline, icon_avatar, icon_button,
-    icon_label_button, island, list_row, mark_dot, notice, pill, popover, raised_capsule, row_layout, section_header,
-    tag, title_bar, toast,
+    icon_label_button, island, list_row, mark_dot, notice, pill, raised_capsule, row_layout, section_header, tag,
+    title_bar,
 };
 #[cfg(target_os = "macos")]
 use crate::controls::{segment, segmented};
@@ -187,19 +187,7 @@ impl Render for MailApp {
                         .child(self.compose.clone()),
                 )
             })
-            .when_some(self.toast.as_ref(), |d, shown| {
-                d.child(
-                    div()
-                        .absolute()
-                        .bottom(px(space::S24))
-                        .left_0()
-                        .right_0()
-                        .flex()
-                        .justify_center()
-                        .child(toast(shown.text.clone(), false, p).text_size(px(text::BODY))),
-                )
-            })
-            .children(self.render_context_menu(p, cx))
+            .children(self.render_context_menu())
             // Painted last: ends the frame a measurement times.
             .children(bench_end)
     }

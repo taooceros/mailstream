@@ -107,14 +107,10 @@ impl MailApp {
                 _ => None,
             };
             let id = message.id.clone();
-            segment(ElementId::Name(format!("invitation:{}:{value}", message.id).into()), "", chosen == Some(value), p)
-                .gap(px(space::S4))
-                .when(chosen == Some(value), |d| d.text_color(tint))
-                .when_some(glyph, |d, glyph| d.child(icon(glyph, icon_size::INLINE, tint)))
-                .child(label)
-                .when(sending.is_none() && chosen != Some(value), |d| {
-                    d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.respond_invitation(&id, value, cx)))
-                })
+            segment(label, glyph.map(|glyph| (glyph, tint)), (chosen == Some(value)).then_some(tint)).when(
+                sending.is_none() && chosen != Some(value),
+                |d| d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.respond_invitation(&id, value, cx))),
+            )
         });
         div()
             .px(px(14.))
@@ -160,7 +156,13 @@ impl MailApp {
                         .items_center()
                         .gap(px(space::S10))
                         .child(div().text_color(p.muted).child("Going?"))
-                        .child(segmented(p).children(answers)),
+                        .child(
+                            segmented(
+                                ElementId::Name(format!("invitation:{}", message.id).into()),
+                                ANSWERS.iter().position(|(value, _)| chosen == Some(*value)),
+                            )
+                            .children(answers),
+                        ),
                 )
             })
             .when_some(card.and_then(|card| card.error.clone()), |d, error| {

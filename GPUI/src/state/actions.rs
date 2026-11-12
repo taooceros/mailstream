@@ -4,6 +4,8 @@
 use super::*;
 use crate::compose::{ColumnEvent, ComposeColumn, ComposeMode, MovedReply, ReplyEvent};
 use crate::engine::{self, BatchResult};
+use crate::{controls, design};
+use gpui::component::WindowExt;
 
 /// What takes a conversation out of the list.
 #[derive(Clone, Copy)]
@@ -402,22 +404,19 @@ impl MailApp {
         );
     }
 
+    /// Shows `text` in a toast over the bottom of the window (`controls::toast`), in place of the
+    /// one shown. Pushed once this update is over: the window can't be reached from inside it.
     pub fn show_toast(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.toast_generation += 1;
-        let generation = self.toast_generation;
-        self.toast = Some(Toast { text: text.into(), generation });
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST).await;
-            this.update(cx, |this, cx| {
-                if this.toast.as_ref().is_some_and(|t| t.generation == generation) {
-                    this.toast = None;
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
+        let text = text.into();
+        let window = self.window;
+        cx.defer(move |cx| {
+            window
+                .update(cx, |_, window, cx| {
+                    let p = design::palette(window.appearance());
+                    window.push_notification(controls::toast(text, p), cx);
+                })
+                .ok();
+        });
     }
 
     pub fn retry(&mut self, cx: &mut Context<Self>) {

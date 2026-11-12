@@ -253,7 +253,7 @@ impl MailApp {
     #[cfg(target_os = "macos")]
     fn render_renderer_switch(&self, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         let segments = Renderer::ALL.map(|renderer| {
-            segment(ElementId::Name(format!("renderer:{renderer:?}").into()), renderer.title(), renderer == self.renderer, p)
+            segment(renderer.title(), None, None)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     if this.renderer != renderer {
                         this.renderer = renderer;
@@ -268,7 +268,7 @@ impl MailApp {
             .text_size(px(text::FOOTNOTE))
             .text_color(p.muted)
             .child("Renderer:")
-            .child(segmented(p).children(segments));
+            .child(segmented("renderer", Renderer::ALL.iter().position(|renderer| *renderer == self.renderer)).children(segments));
         Some(switch.into_any_element())
     }
 

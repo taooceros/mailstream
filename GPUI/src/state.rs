@@ -18,8 +18,10 @@ use chrono::Local;
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::component::input::{Escape, InputEvent, InputState};
+use gpui::component::menu::PopupMenu;
 use gpui::{
-    App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, ListAlignment, ListOffset, ListState, Pixels,
+    AnyWindowHandle, App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, ListAlignment, ListOffset,
+    ListState, Pixels,
     Point, ScrollHandle, SharedString, Subscription, Window, actions, px,
 };
 use mailstream::{Change, Event, EventListener, ListQuery};
@@ -56,7 +58,6 @@ actions!(
         Refresh,
         ToggleSidebar,
         Retag,
-        CloseMenu,
         Quit
     ]
 );
@@ -100,7 +101,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(secondary!("f"), FocusSearch, window),
         KeyBinding::new(secondary!("shift-n"), Refresh, window),
         KeyBinding::new("ctrl-cmd-s", ToggleSidebar, window),
-        KeyBinding::new("escape", CloseMenu, Some("ContextMenu")),
         KeyBinding::new(secondary!("q"), Quit, None),
     ]);
 }
@@ -110,7 +110,6 @@ const PAGE: u32 = 100;
 /// A list this young is served from memory when shown again; the engine's change events reload
 /// the one on screen sooner.
 const FRESH: Duration = Duration::from_secs(90);
-const TOAST: Duration = Duration::from_secs(4);
 
 /// What the list shows.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -276,11 +275,6 @@ pub struct ThreadEntry {
     request: u64,
 }
 
-pub struct Toast {
-    pub text: SharedString,
-    generation: u64,
-}
-
 /// How the top layer sits over what lies beneath.
 #[derive(Clone, Copy)]
 pub enum Slide {
@@ -293,11 +287,13 @@ pub enum Slide {
     Settle { from: f32, to: f32, start: Instant, back: bool },
 }
 
-/// A right-click menu over a row.
+/// A right-click menu over a row: gpui-kit's `PopupMenu` (`ui/menu.rs`), at the pointer.
 pub struct ContextMenu {
     pub id: SharedString,
     pub position: Point<Pixels>,
-    pub focus: FocusHandle,
+    pub menu: Entity<PopupMenu>,
+    /// Closes it here when the kit dismisses it (Escape, a press outside, an entry run).
+    pub _dismissed: Subscription,
 }
 
 /// What draws an HTML body in the reader on the Mac, in the switch's order (Flutter's
@@ -364,10 +360,10 @@ pub struct MailApp {
     /// A previews request is out; `previews_again` asks once more when it lands.
     previews_asking: bool,
     previews_again: bool,
-    pub toast: Option<Toast>,
+    /// The window, for the toasts (`show_toast`) asked for from a task without one at hand.
+    pub window: AnyWindowHandle,
     /// The row under the pointer, which shows its actions.
     pub hovered_row: Option<SharedString>,
-    toast_generation: u64,
     /// The list's and the open bundle's rows (rows and group titles differ in height).
     pub list_scroll: ListState,
     pub bundle_scroll: ListState,
@@ -458,9 +454,8 @@ impl MailApp {
             removing: HashSet::new(),
             previews_asking: false,
             previews_again: false,
-            toast: None,
+            window: window.window_handle(),
             hovered_row: None,
-            toast_generation: 0,
             list_scroll: list_state(0),
             bundle_scroll: list_state(0),
             reader_scroll: ScrollHandle::new(),

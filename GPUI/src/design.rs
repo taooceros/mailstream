@@ -42,7 +42,6 @@ pub struct Palette {
     pub waiting_fill: Hsla,
     pub on_waiting_fill: Hsla,
     pub danger: Hsla,
-    pub red_fill: Hsla,
     pub on_red_fill: Hsla,
     /// Notices floating over the window.
     pub toast: Hsla,
@@ -114,7 +113,6 @@ static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
     waiting_fill: argb(0xFFECEBFB),
     on_waiting_fill: argb(0xFF3634A3),
     danger: argb(0xFFFF3B30),
-    red_fill: argb(0xFFFFE8E6),
     on_red_fill: argb(0xFFB3261E),
     toast: argb(0xFF2C2C2E),
     on_toast: argb(0xFFF5F5F7),
@@ -159,7 +157,6 @@ static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
     waiting_fill: argb(0xFF26254D),
     on_waiting_fill: argb(0xFFD0CFFF),
     danger: argb(0xFFFF453A),
-    red_fill: argb(0xFF4D1D1A),
     on_red_fill: argb(0xFFFFB4AB),
     toast: argb(0xFFE5E5EA),
     on_toast: argb(0xFF1D1D1F),
@@ -211,6 +208,8 @@ pub fn sync_kit_theme(appearance: WindowAppearance, cx: &mut App) {
         theme.radius = px(radius::CONTROL);
         theme.radius_lg = px(radius::CARD);
         theme.shadow = false;
+        // Toasts rise from the bottom of the window (`controls::toast`).
+        theme.notification.margins.bottom = px(space::S24);
         let c = &mut theme.colors;
         c.background = p.background;
         c.foreground = p.text;
@@ -231,6 +230,11 @@ pub fn sync_kit_theme(appearance: WindowAppearance, cx: &mut App) {
         c.link_active = p.accent;
         c.switch = p.border;
         c.switch_thumb = gpui::white();
+        // A segmented control's track is the quiet fill; its choices the secondary label, the
+        // chosen one (and the one under the pointer) the text.
+        c.tab_bar_segmented = p.chip;
+        c.tab_foreground = p.muted;
+        c.tab_active_foreground = p.text;
         (c.primary, c.primary_hover, c.primary_active, c.primary_foreground) =
             (p.accent, hovered(p.accent), pressed(p.accent), p.on_accent);
         (c.danger, c.danger_hover, c.danger_active, c.danger_foreground) =
