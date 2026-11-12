@@ -42,6 +42,9 @@ struct State {
     order: VecDeque<MessageRef>,
     tasks: HashMap<MessageRef, Task>,
     next_task: u64,
+    /// Bodies of mail being sent from here, which the provider doesn't have under these ids
+    /// (`mail::pending`): served until released, never evicted.
+    held: HashMap<MessageRef, Arc<MessageContent>>,
     /// Bumped by `forget`, so loads in flight then don't bring a removed account's mail back.
     generation: u64,
 }
@@ -68,8 +71,11 @@ impl Contents {
 
     /// The message's content, from memory, mail.db or the provider.
     pub async fn load(self: &Arc<Self>, message: &MessageRef, backend: Option<Arc<Backend>>) -> Result<Arc<MessageContent>, String> {
-        if let Some(body) = self.state().bodies.get(message) {
-            return Ok(body.clone());
+        {
+            let state = self.state();
+            if let Some(body) = state.held.get(message).or_else(|| state.bodies.get(message)) {
+                return Ok(body.clone());
+            }
         }
         let generation = self.state().generation;
         let content = self.finish(message, self.task(message, Priority::Interactive, backend)).await?;
@@ -192,6 +198,25 @@ impl Contents {
         Ok(content)
     }
 
+    /// Serves `content` (and its preview) for `message`, which only this engine has, until
+    /// `release`.
+    pub fn hold(&self, message: MessageRef, content: MessageContent) {
+        let mut state = self.state();
+        state.snippets.insert(message.clone(), content.snippet.clone());
+        state.held.insert(message, Arc::new(content));
+    }
+
+    /// Forgets what `hold` kept for `message`; `copy`, the provider's copy of it, takes its preview
+    /// when it has none yet, so the list's line doesn't blank while that loads.
+    pub fn release(&self, message: &MessageRef, copy: Option<&MessageRef>) {
+        let mut state = self.state();
+        let Some(content) = state.held.remove(message) else { return };
+        state.snippets.remove(message);
+        if let Some(copy) = copy {
+            state.snippets.entry(copy.clone()).or_insert_with(|| content.snippet.clone());
+        }
+    }
+
     /// Drops everything of `removed` accounts: bodies, previews and loads in flight.
     pub fn forget(&self, removed: &HashSet<String>) {
         let mut state = self.state();
@@ -206,6 +231,7 @@ impl Contents {
         state.bodies.retain(|message, _| !removed.contains(&message.account));
         state.order.retain(|message| !removed.contains(&message.account));
         state.snippets.retain(|message, _| !removed.contains(&message.account));
+        state.held.retain(|message, _| !removed.contains(&message.account));
     }
 }
 

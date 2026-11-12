@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::{Graph, IMMUTABLE_IDS};
 use crate::api::{self, ApiError, ErrorBody, Priority, Request};
-use crate::backend::Flag;
+use crate::backend::{Flag, SentCopy};
 use crate::mime::{self, OutgoingMessage};
 
 /// One message's sub-request: its id, method, path after the message and body.
@@ -54,13 +54,13 @@ impl Graph {
         Ok(())
     }
 
-    /// Sends and files the copy in Sent Items. Never repeated.
-    pub async fn send(&self, message: &OutgoingMessage) -> Result<(), ApiError> {
+    /// Sends and files the copy in Sent Items. Never repeated. Graph answers nothing of the copy.
+    pub async fn send(&self, message: &OutgoingMessage) -> Result<SentCopy, ApiError> {
         let raw = mime::render(message).map_err(|message| ApiError::new(0, message))?;
         let body = base64::engine::general_purpose::STANDARD.encode(raw).into_bytes();
         let request = Request::post(self.url("me/sendMail", &[]), "text/plain", body).header("Prefer", IMMUTABLE_IDS);
         self.api.send(request, Priority::Interactive, Some(false), 0).await?;
-        Ok(())
+        Ok(SentCopy::default())
     }
 
     /// Sends `method` to `/me/messages/{id}<path>` for every id through `$batch`, twenty at a

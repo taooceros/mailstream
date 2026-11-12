@@ -158,14 +158,14 @@ impl MailApp {
         cx.notify();
     }
 
-    /// The thread grows by a reply: read it again (showing it meanwhile) if it is open, and the
-    /// lists with it.
+    /// The thread grew by a reply, which the engine lists from the moment it went out (MS-291) and
+    /// the lists read on its change event: the open reader reads it again (showing it meanwhile),
+    /// held at its end.
     fn reload_replied(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(open) = self.reader().filter(|open| open.id == id).cloned() {
             self.reader_pin = ReaderPin::End;
             self.load_thread(&open, true, cx);
         }
-        self.load_list(self.key(), true, cx);
     }
 
     /// Moves the inline reply (to `message`, else the latest) to the compose column, where its

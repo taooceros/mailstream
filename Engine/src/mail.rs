@@ -36,6 +36,7 @@ mod actions;
 mod autoread;
 pub use autoread::AutoReadReason;
 mod contacts;
+mod pending;
 mod sending;
 mod started;
 mod tagsync;
@@ -46,6 +47,8 @@ mod action_tests;
 mod autoread_tests;
 #[cfg(test)]
 mod interop_tests;
+#[cfg(test)]
+mod pending_tests;
 #[cfg(test)]
 mod started_tests;
 #[cfg(test)]
@@ -115,6 +118,8 @@ struct State {
     account_refreshes: HashSet<String>,
     /// The conversations the user started that the inbox lists.
     started: started::Started,
+    /// Mail sent from here that Sent doesn't list yet, listed with it.
+    pending: Vec<pending::Pending>,
 }
 
 type CacheRead = Shared<BoxFuture<'static, ()>>;
@@ -444,6 +449,7 @@ impl Mail {
                     state.account_problems.remove(name);
                 }
                 state.listings.retain(|key, _| !removed.contains(&key.account));
+                state.pending.retain(|pending| !removed.contains(&pending.key.account));
                 state.first_page_requests.retain(|key, _| !removed.contains(&key.account));
                 state.known.retain(|_, known| !removed.contains(&known.conversation.account));
                 let known = &state.known;
@@ -681,8 +687,11 @@ impl Mail {
             .collect()
     }
 
+    /// The listing of `key` as held, with the mail sent from here that it doesn't list yet.
     fn loaded_envelopes(state: &State, key: &MailboxKey) -> Vec<Arc<Envelope>> {
-        state.listings.get(key).map(|listing| listing.envelopes.clone()).unwrap_or_default()
+        let mut envelopes = state.listings.get(key).map(|listing| listing.envelopes.clone()).unwrap_or_default();
+        envelopes.extend(state.pending.iter().filter(|pending| pending.key == *key).map(|pending| pending.envelope.clone()));
+        envelopes
     }
 
     fn has_next_page(state: &State, key: &MailboxKey) -> bool {
@@ -851,11 +860,12 @@ impl Mail {
                 }
                 let latest = state.first_page_requests.get(&key) == tickets.get(&key);
                 result.map(|page| {
-                    if latest
-                        && self.merge_first_page(&mut state, page.envelopes, page.next, &key)
-                        && Self::default_keys(&state).contains(&key)
-                    {
-                        self.conversations_changed();
+                    if latest {
+                        let merged = self.merge_first_page(&mut state, page.envelopes, page.next, &key);
+                        let settled = self.settle_pending(&mut state, &key);
+                        if (merged || settled) && Self::default_keys(&state).contains(&key) {
+                            self.conversations_changed();
+                        }
                     }
                 })
             };
@@ -951,6 +961,7 @@ impl Mail {
                     grew |= listing.envelopes.len() != count;
                     let kept = CachedListing { envelopes: listing.envelopes.clone(), next: listing.next.clone() };
                     self.cache.save_listing(kept, &key);
+                    grew |= self.settle_pending(&mut state, &key);
                 }
                 Err(error) => {
                     // A cursor kept on disk went stale: page on from the first page's instead.

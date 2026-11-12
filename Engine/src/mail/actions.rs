@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::undo::Change;
-use super::{Known, Mail, started};
+use super::{Known, Mail, pending, started};
 use crate::answers::{self, BatchFailure, BatchResult, UndoAction};
 use crate::api::ApiError;
 use crate::backend::{Backend, Flag};
@@ -60,10 +60,11 @@ pub(super) fn refs(messages: &[MailMessage]) -> HashSet<MessageRef> {
     messages.iter().map(MailMessage::message_ref).collect()
 }
 
-/// Message ids by the mailbox they list under.
+/// Message ids by the mailbox they list under; mail still being sent from here (`pending`) is
+/// not the provider's to change yet.
 pub(super) fn by_mailbox(messages: &[MailMessage]) -> Vec<(MailboxKey, Vec<String>)> {
     let mut groups: Vec<(MailboxKey, Vec<String>)> = Vec::new();
-    for message in messages {
+    for message in messages.iter().filter(|message| !pending::is_local(message.id())) {
         let key = (*message.key).clone();
         match groups.iter_mut().find(|(known, _)| *known == key) {
             Some((_, ids)) => ids.push(message.id().to_string()),
@@ -439,7 +440,7 @@ impl Mail {
         let mut state = self.state();
         for (key, _) in by_mailbox(messages) {
             let Some(listing) = state.listings.get_mut(&key) else { continue };
-            for message in messages.iter().filter(|message| *message.key == key) {
+            for message in messages.iter().filter(|message| *message.key == key && !pending::is_local(message.id())) {
                 if listing.envelopes.iter().any(|envelope| envelope.id == message.id()) {
                     continue;
                 }

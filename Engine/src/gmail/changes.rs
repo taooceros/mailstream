@@ -6,11 +6,11 @@
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{ALL_MAIL, EnvelopeCache, Gmail, GmailEndpoints, Label};
 use crate::api::{self, ApiError, Priority, Request};
-use crate::backend::Flag;
+use crate::backend::{Flag, SentCopy};
 use crate::mime::{self, OutgoingMessage};
 
 /// Labels Gmail keeps to itself: a move never takes them off.
@@ -76,8 +76,9 @@ impl Gmail {
         Ok(())
     }
 
-    /// Sends and files the copy in Sent, in the replied-to message's thread. Never repeated.
-    pub async fn send(&self, message: &OutgoingMessage) -> Result<(), ApiError> {
+    /// Sends and files the copy in Sent, in the replied-to message's thread; answers the copy's id
+    /// and thread. Never repeated.
+    pub async fn send(&self, message: &OutgoingMessage) -> Result<SentCopy, ApiError> {
         #[derive(Serialize)]
         struct Metadata<'a> {
             #[serde(rename = "threadId", skip_serializing_if = "Option::is_none")]
@@ -92,8 +93,16 @@ impl Gmail {
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
         let url = self.endpoints.upload_url("messages/send", &[("uploadType", "multipart")]);
         let request = Request::post(url, &format!("multipart/related; boundary={boundary}"), body);
-        self.api.send(request, Priority::Interactive, Some(false), 100).await?;
-        Ok(())
+        let response = self.api.send(request, Priority::Interactive, Some(false), 100).await?;
+        #[derive(Default, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Answer {
+            id: Option<String>,
+            thread_id: Option<String>,
+        }
+        // Sent is sent: an answer that doesn't read only leaves the copy unnamed.
+        let answer: Answer = serde_json::from_slice(&response.body).unwrap_or_default();
+        Ok(SentCopy { id: answer.id, thread: answer.thread_id })
     }
 
     /// Puts the user labels named `add` on the messages and takes those named `remove` off,

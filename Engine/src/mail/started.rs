@@ -50,7 +50,7 @@ struct Saved {
 /// What is known about the conversations the user started.
 #[derive(Debug, Default)]
 pub(super) struct Started {
-    threads: HashMap<ThreadKey, (Status, Date)>,
+    pub(super) threads: HashMap<ThreadKey, (Status, Date)>,
     checking: bool,
     /// No request before this, after one failed.
     retry_at: Option<Date>,
@@ -58,10 +58,13 @@ pub(super) struct Started {
 
 impl Started {
     /// Whether the inbox lists the conversation of `key`; `due` gets it when the provider is to
-    /// be asked about it.
+    /// be asked about it, which it can't be while the thread is still this engine's own
+    /// (`pending`).
     pub(super) fn lists(&self, key: &ThreadKey, due: &mut Vec<ThreadKey>) -> bool {
         let known = self.threads.get(key);
-        if known.is_none_or(|(status, checked)| *status == Status::Unanswered && now() - checked > RECHECK) {
+        if !super::pending::is_local(&key.1)
+            && known.is_none_or(|(status, checked)| *status == Status::Unanswered && now() - checked > RECHECK)
+        {
             due.push(key.clone());
         }
         known.is_some_and(|(status, _)| *status == Status::Unanswered)
@@ -210,7 +213,7 @@ impl Mail {
 
     /// Writes what is known to mail.db: archived threads, and the others still in a loaded Sent
     /// listing.
-    fn save_started(&self, state: &State) {
+    pub(super) fn save_started(&self, state: &State) {
         let loaded: HashSet<(&str, &str)> = state
             .listings
             .iter()

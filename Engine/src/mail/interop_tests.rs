@@ -128,6 +128,7 @@ fn answers(fixture: Fixture, folder: &std::path::Path) -> Value {
                 })
                 .collect();
             let outgoing = OutgoingMessage {
+                message_id: crate::mime::message_id(),
                 from: message.from,
                 to: message.to,
                 cc: message.cc,

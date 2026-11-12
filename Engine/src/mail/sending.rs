@@ -296,7 +296,18 @@ impl Mail {
             .find(|known| known.name == account)
             .and_then(|known| known.identity.clone())
             .unwrap_or_else(|| Address::new(None, account));
-        let mut message = OutgoingMessage { from, to, cc, bcc, subject, text, html, attachments, ..OutgoingMessage::default() };
+        let mut message = OutgoingMessage {
+            message_id: crate::mime::message_id(),
+            from,
+            to,
+            cc,
+            bcc,
+            subject,
+            text,
+            html,
+            attachments,
+            ..OutgoingMessage::default()
+        };
         let Some(source) = source else { return message };
         let references = match self.contents.load(&source.message_ref(), self.backend(account)).await {
             Ok(content) => content.references.clone(),
@@ -313,10 +324,24 @@ impl Mail {
         message
     }
 
-    /// Sends from `account`, then picks up the sent copy a moment later.
+    /// Sends from `account`, the message listing in its conversation from the start (`pending`),
+    /// then picks up the sent copy a moment later. A failed send leaves the lists again.
     async fn deliver(self: &Arc<Self>, message: &OutgoingMessage, account: &str) -> Result<(), EngineError> {
         let backend = self.backend(account).ok_or_else(|| EngineError::failed("The account is no longer signed in."))?;
-        backend.send(message).await.map_err(|error| EngineError::failed(error.message))?;
+        let local = self.sending(message, account);
+        match backend.send(message).await {
+            Ok(copy) => {
+                if let Some(local) = &local {
+                    self.delivered(local, copy);
+                }
+            }
+            Err(error) => {
+                if let Some(local) = &local {
+                    self.undelivered(local);
+                }
+                return Err(EngineError::failed(error.message));
+            }
+        }
         let (mail, account) = (self.clone(), account.to_string());
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(1500)).await;

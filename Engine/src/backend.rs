@@ -51,6 +51,14 @@ pub struct SearchHit {
     pub envelope: Envelope,
 }
 
+/// What the provider said of a message it sent: Gmail answers the sent copy's id and thread,
+/// Outlook nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SentCopy {
+    pub id: Option<String>,
+    pub thread: Option<String>,
+}
+
 /// The flags a change sets or clears.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flag {
@@ -160,7 +168,7 @@ impl Backend {
     }
 
     /// Sends and files the copy in Sent. Not idempotent: never repeated.
-    pub async fn send(&self, message: &crate::mime::OutgoingMessage) -> Result<(), ApiError> {
+    pub async fn send(&self, message: &crate::mime::OutgoingMessage) -> Result<SentCopy, ApiError> {
         match self {
             Self::Gmail(gmail) => gmail.send(message).await,
             Self::Graph(graph) => graph.send(message).await,

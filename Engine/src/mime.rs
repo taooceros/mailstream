@@ -11,10 +11,13 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::model::Address;
 
-/// A message to send. `references` and `in_reply_to` are normalized Message-IDs (no angle
-/// brackets); `thread` is the provider's thread of the message replied to.
+/// A message to send. `message_id`, `references` and `in_reply_to` are normalized Message-IDs (no
+/// angle brackets); `thread` is the provider's thread of the message replied to.
 #[derive(Clone, Debug, Default)]
 pub struct OutgoingMessage {
+    /// Its own Message-ID (`message_id()`), which the engine also lists it under until the
+    /// provider's copy arrives (`mail::pending`).
+    pub message_id: String,
     pub from: Address,
     pub to: Vec<Address>,
     pub cc: Vec<Address>,
@@ -29,11 +32,16 @@ pub struct OutgoingMessage {
     pub thread: Option<String>,
 }
 
-/// The message under a fresh Message-ID, dated now in the local time zone. Fails only when an
+/// A fresh Message-ID of this app's own.
+pub fn message_id() -> String {
+    format!("{}@mailstream.local", uuid())
+}
+
+/// The message under its Message-ID, dated now in the local time zone. Fails only when an
 /// attachment cannot be read.
 pub fn render(message: &OutgoingMessage) -> Result<Vec<u8>, String> {
     let date = chrono::Local::now().format("%a, %d %b %Y %H:%M:%S %z").to_string();
-    render_at(message, &date, &format!("{}@mailstream.local", uuid()), &mut || boundary("=_ms_", true))
+    render_at(message, &date, &message.message_id, &mut || boundary("=_ms_", true))
 }
 
 /// `render` with the varying parts given, so tests can compare whole messages.

@@ -206,8 +206,12 @@ fn changes_trashes_and_sends_gmail_mail() {
     // A reply goes to the other side of the latest message (here the user's own reply, so its
     // recipient), threaded under it.
     // The fake keeps listing the archived message in the inbox, so it threads with the reply again.
+    // Sent lists the message just sent too, until Gmail's copy arrives.
     let sent_listing = call(&engine, "mail.list", json!({ "mailbox": "sent" })).unwrap();
-    let id = ids(&sent_listing)[0].clone();
+    let subjects: Vec<&str> =
+        sent_listing["conversations"].as_array().unwrap().iter().map(|c| c["subject"].as_str().unwrap()).collect();
+    assert_eq!(subjects, ["Hello", "Lunch?"]);
+    let id = ids(&sent_listing)[1].clone();
     let error = call(&engine, "mail.reply", json!({ "id": id, "body": "See you" })).unwrap_err();
     assert_eq!(error.message, "Would send \"Re: Lunch?\" from me@gmail.com to ann@x.com, 0 attachments. Re-run with --yes.");
     let error = call(&engine, "mail.reply", json!({ "id": id, "body": "x", "to": [], "yes": true })).unwrap_err();
