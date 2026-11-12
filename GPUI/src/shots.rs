@@ -24,6 +24,7 @@
 //!                            `secondary-n` (⌘N on the Mac, Ctrl+N elsewhere)
 //! type TEXT                  type the rest of the line into the focused field
 //! size W H                   resize the window to W×H points
+//! toast TEXT                 show the rest of the line in the app's toast (`controls::toast`)
 //! ```
 //!
 //! Every input command then lets `SETTLE` pass. The window opens at `--size` (default 1240×800,
@@ -231,6 +232,7 @@ enum Command {
     Keys(Vec<String>),
     Type(String),
     Size(f32, f32),
+    Toast(String),
 }
 
 impl Command {
@@ -271,6 +273,7 @@ impl Command {
             }
             "type" if !rest.is_empty() => Command::Type(rest.into()),
             "size" => Command::Size(number(0)?, number(1)?),
+            "toast" if !rest.is_empty() => Command::Toast(rest.into()),
             _ => return Err(format!("unknown command: {line}")),
         })
     }
@@ -379,6 +382,11 @@ impl Run {
             Command::Size(width, height) => self.on_window(|window, cx| {
                 window.resize(size(px(width), px(height)));
                 window.bounds_changed(cx);
+            }),
+            Command::Toast(text) => self.on_window(|window, cx| {
+                use gpui::component::WindowExt;
+                let p = crate::design::palette(window.appearance());
+                window.push_notification(crate::controls::toast(text.into(), p), cx);
             }),
         }
         self.pass(SETTLE);
