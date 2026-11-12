@@ -1,6 +1,7 @@
 //! Dates, subjects and sizes as the native app shows them (`ConversationRow.format`, `Subject`).
 
 use chrono::{DateTime, Datelike, Days, Local, NaiveDate, Utc};
+use gpui::SharedString;
 
 fn local(date: DateTime<Utc>) -> DateTime<Local> {
     date.with_timezone(&Local)
@@ -182,13 +183,15 @@ pub fn body(text: &str) -> String {
 }
 
 /// A text body as the reader shows it (Flutter's `FoldedText`): what was written, and the quoted
-/// history and signature that fold behind a toggle, if any. Lines lose the indentation and empty
-/// cells text taken from HTML layouts keeps, runs of blank lines go, and hard-wrapped lines (a long
+/// history and signature that fold behind a toggle, if any. History or a signature folds from its
+/// first line to the end; `>` quotes fold only as the run of quotes ending the mail, so the
+/// answers under quotes in the middle stay out (MS-256). Lines keep their indentation (code,
+/// nested lists) and lose trailing blanks, runs of blank lines go, and hard-wrapped lines (a long
 /// line stopping mid-sentence before one running on in lower case) join, so they reflow.
 pub fn fold(text: &str) -> (String, Option<String>) {
     let mut lines: Vec<String> = Vec::new();
     for raw in text.lines() {
-        let line = raw.trim();
+        let line = raw.trim_end();
         if line.is_empty() && lines.last().is_none_or(|last| last.is_empty()) {
             continue;
         }
@@ -201,8 +204,16 @@ pub fn fold(text: &str) -> (String, Option<String>) {
         }
         lines.push(line.to_owned());
     }
-    let cut = lines.iter().skip(1).position(|line| folds(line)).map_or(lines.len(), |i| i + 1);
-    let join = |part: &[String]| part.join("\n").trim().to_owned();
+    let history = lines.iter().skip(1).position(|line| folds(line.trim_start())).map_or(lines.len(), |i| i + 1);
+    // The quotes (and blank lines) just above it join it; the first line never folds.
+    let mut cut = history;
+    while cut > 1 && (lines[cut - 1].starts_with('>') || lines[cut - 1].is_empty()) {
+        cut -= 1;
+    }
+    while cut < history && lines[cut].is_empty() {
+        cut += 1;
+    }
+    let join = |part: &[String]| part.join("\n").trim_end().to_owned();
     let folded = join(&lines[cut..]);
     (join(&lines[..cut]), (!folded.is_empty()).then_some(folded))
 }
@@ -210,12 +221,13 @@ pub fn fold(text: &str) -> (String, Option<String>) {
 /// Whether `line` was hard-wrapped before `next`.
 fn wrapped(line: &str, next: &str) -> bool {
     line.chars().count() >= 50
-        && !line.starts_with('>')
+        && !line.starts_with(['>', ' ', '\t'])
         && !line.ends_with(['.', '!', '?', ':', ';', ')', '>'])
         && next.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '(')
 }
 
-/// Whether quoted history or a signature starts at `line` (trimmed).
+/// Whether quoted history or a signature starts at `line` (without its indentation). `>` quotes
+/// are `fold`'s own concern.
 fn folds(line: &str) -> bool {
     let lower = line.to_lowercase();
     let length = line.chars().count();
@@ -228,10 +240,43 @@ fn folds(line: &str) -> bool {
                 .any(|title| inner.strip_prefix(title).is_some_and(|rest| rest.trim_start().starts_with("--")))
         })
         || (length >= 10 && line.chars().all(|c| c == '_'))
-        || line.starts_with('>')
         || line == "--"
         || lower.starts_with("sent from my ")
         || lower.starts_with("get outlook for ")
+}
+
+/// A run of a text body as the reader draws it: what was written, or a `>` quote, drawn in place
+/// behind a rule (its lines without one level of markers, the quotes inside it nested).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Run {
+    Text(SharedString),
+    Quote(Vec<Run>),
+}
+
+/// `text` (what `fold` shows) as runs: each run of lines starting with `>` a quote. Blank lines at
+/// a run's ends go: the reader spaces the runs.
+pub fn runs(text: &str) -> Vec<Run> {
+    fn flush(lines: &mut Vec<&str>, quote: bool, out: &mut Vec<Run>) {
+        let joined = lines.join("\n");
+        lines.clear();
+        let joined = joined.trim_end().trim_start_matches('\n');
+        if !joined.is_empty() {
+            out.push(if quote { Run::Quote(runs(joined)) } else { Run::Text(joined.to_owned().into()) });
+        }
+    }
+    let mut out = Vec::new();
+    let mut lines = Vec::new();
+    let mut quoting = false;
+    for line in text.lines() {
+        let quoted = line.strip_prefix('>');
+        if quoted.is_some() != quoting {
+            flush(&mut lines, quoting, &mut out);
+            quoting = quoted.is_some();
+        }
+        lines.push(quoted.map_or(line, |rest| rest.strip_prefix(' ').unwrap_or(rest)));
+    }
+    flush(&mut lines, quoting, &mut out);
+    out
 }
 
 #[cfg(test)]
@@ -283,7 +328,35 @@ mod tests {
         // The first line never folds, so a body is never only a toggle; mail without quotes keeps
         // everything.
         assert_eq!(fold("> all quote\n> more"), ("> all quote".into(), Some("> more".into())));
-        assert_eq!(fold("  Indented\n\n\n\nGap  "), ("Indented\n\nGap".into(), None));
+        assert_eq!(fold("Gap\n\n\n\nafter  "), ("Gap\n\nafter".into(), None));
+    }
+
+    #[test]
+    fn quotes_answered_in_place_stay_and_indentation_stays() {
+        let inline = "Answers inline:\n\n> Can we ship on Friday?\nYes, if the backfill is done.\n\n> Who owns rollback?\nPriya.\n\n    let body = message.body();\n  - pause the workers\n      - check the counts\n\nOn Wed, Nov 11, 2026 at 9:00 AM Maya <maya@example.org> wrote:\n> Can we ship on Friday?";
+        assert_eq!(
+            fold(inline),
+            (
+                "Answers inline:\n\n> Can we ship on Friday?\nYes, if the backfill is done.\n\n> Who owns rollback?\nPriya.\n\n    let body = message.body();\n  - pause the workers\n      - check the counts".into(),
+                Some("On Wed, Nov 11, 2026 at 9:00 AM Maya <maya@example.org> wrote:\n> Can we ship on Friday?".into())
+            )
+        );
+        // The quotes ending a mail are its history, with or without a line introducing them.
+        assert_eq!(fold("Agreed.\n> Ship it?\n> Dan"), ("Agreed.".into(), Some("> Ship it?\n> Dan".into())));
+        assert_eq!(
+            fold("> Ship it?\nAgreed.\n\n> old\n\nOn Mon, Dan wrote:\n> older").1.as_deref(),
+            Some("> old\n\nOn Mon, Dan wrote:\n> older")
+        );
+    }
+
+    #[test]
+    fn quotes_become_runs_of_their_own() {
+        let text = |text: &str| Run::Text(text.to_owned().into());
+        assert_eq!(
+            runs("Answers:\n\n> Ship it?\n>> Friday?\n> Yes.\nAgreed.\n\n  - indented"),
+            [text("Answers:"), Run::Quote(vec![text("Ship it?"), Run::Quote(vec![text("Friday?")]), text("Yes.")]), text("Agreed.\n\n  - indented")]
+        );
+        assert_eq!(runs(""), []);
     }
 
     #[test]

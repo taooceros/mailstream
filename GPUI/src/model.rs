@@ -400,9 +400,10 @@ pub struct Message {
     pub preview: SharedString,
     /// `to` and `cc`, joined.
     pub recipients: SharedString,
-    /// The text body as the reader shows it: what was written, and the quoted history and
-    /// signature folded behind a toggle (`format::fold`).
-    pub shown: SharedString,
+    /// The text body as the reader shows it: what was written, its `>` quotes in place as runs of
+    /// their own (`format::runs`), and the quoted history and signature folded behind a toggle
+    /// (`format::fold`).
+    pub shown: Vec<format::Run>,
     pub quoted: Option<SharedString>,
     /// The time of day, for the chat log.
     pub time: SharedString,
@@ -434,7 +435,7 @@ impl From<mailstream::Message> for Message {
             when: SharedString::default(),
             preview: SharedString::default(),
             recipients: SharedString::default(),
-            shown: SharedString::default(),
+            shown: Vec::new(),
             quoted: None,
             time: SharedString::default(),
         }
@@ -447,7 +448,7 @@ impl Message {
         self.time = format::message_time(self.date).into();
         if let Some(text) = &self.text {
             let (shown, quoted) = format::fold(text);
-            self.shown = shown.into();
+            self.shown = format::runs(&shown);
             self.quoted = quoted.map(Into::into);
             let text = format::body(text);
             self.preview = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("").to_owned().into();

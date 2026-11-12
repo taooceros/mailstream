@@ -279,8 +279,8 @@ impl MailApp {
             .into_any_element()
     }
 
-    /// A message's body: its HTML when it has one (`Message::html_body`), else its text; either
-    /// way with its quoted history folded.
+    /// A message's body: its HTML when it has one (`Message::html_body`), else its text with its
+    /// `>` quotes in place; either way with its quoted history folded.
     fn render_body(&self, message: &Message, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         if let Some(html) = message.html_body() {
             return Some(self.render_html(message, html.clone(), p, cx));
@@ -293,7 +293,7 @@ impl MailApp {
                 .flex_col()
                 .text_size(px(text::READING))
                 .line_height(relative(text::READING_LEADING))
-                .when(!message.shown.is_empty(), |d| d.child(message.shown.clone()))
+                .when(!message.shown.is_empty(), |d| d.child(text_runs(&message.shown, p)))
                 .when_some(message.quoted.clone(), |d, quoted| {
                     d.child(self.render_fold(&message.id, open, div().text_color(p.muted).child(quoted), p, cx))
                 })
@@ -316,11 +316,11 @@ impl MailApp {
             }
             return div().flex().flex_col().child(body).child(self.render_fold(&id, open, div(), p, cx)).into_any_element();
         }
-        let main = blitz_html(id.clone(), html.clone(), blitz_body::HtmlPart::Main);
+        let main = sheet(blitz_html(id.clone(), html.clone(), blitz_body::HtmlPart::Main), p);
         if blitz_body::quoted(&id) != Some(true) {
             return main;
         }
-        let quoted = blitz_html(format!("{id}#quoted").into(), html, blitz_body::HtmlPart::Quoted);
+        let quoted = sheet(blitz_html(format!("{id}#quoted").into(), html, blitz_body::HtmlPart::Quoted), p);
         div().flex().flex_col().child(main).child(self.render_fold(&id, open, quoted, p, cx)).into_any_element()
     }
 
@@ -479,14 +479,16 @@ impl MailApp {
             }))
             .child(
                 div()
+                    .relative()
                     .px(px(space::S12))
                     .py(px(space::S6))
-                    .rounded(px(radius::CONTROL))
-                    .when(hovered, |d| d.bg(p.hover))
                     .flex()
                     .items_start()
                     .child(div().w(px(metrics_reader::LOG_GUTTER)).flex_shrink_0().child(photo))
-                    .child(column),
+                    .child(column)
+                    // The wash lies over the message, so its HTML (white, as Blitz paints it)
+                    // takes it too.
+                    .when(hovered, |d| d.child(div().absolute().inset_0().rounded(px(radius::CONTROL)).bg(p.hover))),
             )
             .when(hovered, |d| d.child(div().absolute().top_0().right(px(space::S12)).child(actions)))
             .into_any_element()
@@ -528,6 +530,29 @@ fn day_divider(label: String, p: &Palette) -> Div {
         .child(rule())
         .child(label)
         .child(rule())
+}
+
+/// A text body's runs (`format::runs`): what was written, and its quotes in place behind a rule,
+/// muted.
+fn text_runs(runs: &[format::Run], p: &'static Palette) -> Div {
+    div().flex().flex_col().gap(px(space::S8)).children(runs.iter().map(|run| match run {
+        format::Run::Text(text) => div().child(text.clone()),
+        format::Run::Quote(inner) => text_runs(inner, p)
+            .border_l(px(metrics_reader::QUOTE_RULE))
+            .border_color(p.line)
+            .pl(px(metrics_reader::QUOTE_INDENT))
+            .text_color(p.muted),
+    }))
+}
+
+/// An HTML page as the reader shows it: on the white Blitz paints, which dark mode makes a sheet
+/// with room around the mail and rounded corners, so mail written for white never meets the dark
+/// surface edge to edge (MS-256).
+fn sheet(page: AnyElement, p: &Palette) -> AnyElement {
+    if !p.dark {
+        return page;
+    }
+    div().p(px(metrics_reader::SHEET_PADDING)).rounded(px(radius::CARD)).bg(p.page).child(page).into_any_element()
 }
 
 /// Blitz's tiles of `part` of an HTML body, drawn in a placeholder as tall as its page once that
