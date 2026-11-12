@@ -29,6 +29,9 @@ const _sections = [
   ('Performance', ['flutter.showFrameRate']),
 ];
 
+/// Keys only Mailstream GPUI reads; they stay out of this window.
+const _gpuiOnly = 'gpui.';
+
 /// Short names for the keys; the engine's description sits under each.
 const _titles = {
   'aiTagging.enabled': 'Sort and flag mail with AI',
@@ -118,7 +121,7 @@ class SettingsWindow extends StatelessWidget {
                       _Group(
                         children: [
                           for (final entry in settings.settings)
-                            if (!_sections.any((s) => s.$2.any(entry.key.startsWith)))
+                            if (!entry.key.startsWith(_gpuiOnly) && !_sections.any((s) => s.$2.any(entry.key.startsWith)))
                               _SettingRow(state: state, entry: entry),
                         ],
                       ),

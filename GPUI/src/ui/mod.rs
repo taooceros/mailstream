@@ -37,6 +37,7 @@ use crate::design::{
 use crate::format;
 use crate::icons::{Icon, icon};
 use crate::input;
+use crate::split::{self, ResizeList};
 use crate::model::{Category, Conversation, Message, Role};
 use crate::state::{
     Archive, Back, CONTEXT, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh, Removal, Reply,
@@ -76,6 +77,16 @@ impl Render for MailApp {
         let between = column_width.filter(|_| {
             swapped && two_pane && self.mail_in_view() && self.layers.iter().any(|layer| matches!(layer, Layer::Reader(_)))
         });
+        // Where the list (or the calendar) starts and the room it shares, for a drag of its edge.
+        self.split_left = match column_width {
+            Some(column) if swapped && between.is_none() => navigation + column + layout::GAP,
+            _ => navigation,
+        };
+        self.split_room = room;
+        self.split_mail = match between {
+            Some(_) => room - layout::GAP - compose_metrics::MIN_COLUMN,
+            None => mail,
+        };
         let content = if self.chat_view.is_some() {
             // Chat draws its own header; it takes one island.
             island(p.background, p).occlude().size_full().child(self.chat.clone()).into_any_element()
@@ -120,10 +131,16 @@ impl Render for MailApp {
             .on_action(cx.listener(Self::forward))
             .on_action(cx.listener(Self::new_message))
             .on_action(cx.listener(Self::new_chat))
+            .on_action(cx.listener(Self::reset_list_width))
+            .on_action(cx.listener(Self::toggle_frame_rate))
             // The gap beside the docked compose column moves its free edge.
             .on_drag_move(cx.listener(|this, event: &DragMoveEvent<ResizeColumn>, _, cx| {
                 let width = event.drag(cx).width(f32::from(event.event.position.x));
                 this.compose.update(cx, |column, cx| column.set_width(width, cx));
+            }))
+            // The gap after the list (or the calendar) moves the list's edge.
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<ResizeList>, _, cx| {
+                this.drag_list_edge(f32::from(event.event.position.x), cx);
             }))
             // The mouse's back button, as in the native window.
             .on_mouse_down(
@@ -188,6 +205,10 @@ impl Render for MailApp {
                 )
             })
             .children(self.render_context_menu())
+            // Over everything in the bottom leading corner, as in Flutter.
+            .when_some(self.frame_meter.clone(), |d, meter| {
+                d.child(div().absolute().left(px(space::S16)).bottom(px(space::S16)).child(meter))
+            })
             // Painted last: ends the frame a measurement times.
             .children(bench_end)
     }
@@ -215,7 +236,7 @@ impl MailApp {
         // moves that edge alone), but never narrower than `MIN_LIST` nor so wide that the
         // conversation gets less than `MIN_DETAIL`. With the column between them the list leaves
         // room for the narrowest column instead, and the column gives way to the conversation.
-        let share = layout::LIST_SHARE * room;
+        let share = self.list_share * room;
         let (split_list, mail, between) = match between {
             Some((column, navigation)) => {
                 let split_list = share.clamp(
@@ -291,7 +312,12 @@ impl MailApp {
             Some((detail, shift)) if two_pane => {
                 let split = (1. - shift / travel.max(1.)).clamp(0., 1.);
                 let list_width = mail + (split_list - mail) * split;
-                let content = content.child(list.absolute().left_0().top_0().bottom_0().w(px(list_width)));
+                let content = content
+                    .child(list.absolute().left_0().top_0().bottom_0().w(px(list_width)))
+                    // The gap after the list moves its edge, once the conversation has slid in.
+                    .when(shift == 0., |content| {
+                        content.child(split::list_handle("list-split").left(px(list_width + layout::GAP / 2.)))
+                    });
                 // The column follows the list's edge, its gap dragged against that edge; it never
                 // widens so far that the conversation would get less than `MIN_DETAIL`.
                 let (content, inset) = match between {

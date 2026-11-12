@@ -28,6 +28,7 @@ use gpui::{
 use mailstream::CalendarAccount;
 
 use crate::design::{self, layout, text};
+use crate::split;
 use crate::engine::engine;
 use crate::swipe::BackSwipe;
 use model::{Event, EventKey};
@@ -143,6 +144,9 @@ pub struct CalendarPane {
     pan: Pan,
     /// The width of one page of days, as last laid out.
     page_width: Rc<Cell<f32>>,
+    /// The calendar's share of the pane beside an open event (`gpui.calendarWidth`), which the
+    /// window keeps (`split.rs`).
+    list_share: f32,
     _clock: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -194,8 +198,17 @@ impl CalendarPane {
             swipe: BackSwipe::default(),
             pan: Pan::Rest,
             page_width: Rc::new(Cell::new(0.)),
+            list_share: layout::LIST_SHARE,
             _clock: clock,
             _subscriptions: vec![cx.observe_window_appearance(window, |_, _, cx| cx.notify())],
+        }
+    }
+
+    /// The calendar's share beside an open event, as the window keeps it.
+    pub fn set_list_share(&mut self, share: f32, cx: &mut Context<Self>) {
+        if share != self.list_share {
+            self.list_share = share;
+            cx.notify();
         }
     }
 
@@ -536,10 +549,21 @@ impl Render for CalendarPane {
             .text_size(px(text::BODY))
             .text_color(p.text)
             .map(|d| match detail {
-                // Beside the list, which keeps its share of the room.
+                // Beside the list, which keeps its share of the room; the gap between them moves
+                // its edge (`split.rs`).
                 Some(detail) if two_pane => d
-                    .child(list.h_full().flex_shrink_0().w(relative(layout::LIST_SHARE)).min_w(px(layout::MIN_LIST)))
-                    .child(div().flex_1().min_w_0().h_full().child(detail)),
+                    .child(
+                        div()
+                            .relative()
+                            .h_full()
+                            // Gives way before the event gets less than `MIN_DETAIL`.
+                            .flex_shrink_1()
+                            .w(relative(self.list_share))
+                            .min_w(px(layout::MIN_LIST))
+                            .child(list.size_full())
+                            .child(split::list_handle("calendar-split").right(px(-layout::GAP / 2.))),
+                    )
+                    .child(div().flex_1().min_w(px(layout::MIN_DETAIL)).h_full().child(detail)),
                 // Over the list.
                 Some(detail) => d.child(list.size_full()).child(div().absolute().size_full().child(detail)),
                 None => d.child(list.size_full()),

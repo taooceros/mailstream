@@ -25,10 +25,12 @@ mod controls;
 mod design;
 mod engine;
 mod format;
+mod frame_rate;
 mod icons;
 mod input;
 mod model;
 mod settings;
+mod split;
 mod state;
 mod swipe;
 mod ui;
@@ -48,7 +50,7 @@ use gpui::{
 
 use crate::state::{
     Archive, Back, FocusSearch, Forward, MailApp, NewChat, NewMessage, Quit, Refresh, Reply, ReplyAll, Restore,
-    Retag, Star, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
+    Retag, Star, ToggleFrameRate, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
 };
 
 fn main() {
@@ -161,6 +163,8 @@ fn menus() -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Get New Mail", Refresh),
             MenuItem::action("Re-tag All Mail", Retag),
+            MenuItem::separator(),
+            MenuItem::action("Show Frame Rate", ToggleFrameRate),
         ]),
         Menu::new("Message").items([
             MenuItem::action("Reply", Reply),

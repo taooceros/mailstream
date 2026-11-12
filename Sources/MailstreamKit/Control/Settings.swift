@@ -20,6 +20,9 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
     case flutterShowFrameRate = "flutter.showFrameRate"
     case flutterListWidth = "flutter.listWidth"
     case flutterCalendarWidth = "flutter.calendarWidth"
+    case gpuiShowFrameRate = "gpui.showFrameRate"
+    case gpuiListWidth = "gpui.listWidth"
+    case gpuiCalendarWidth = "gpui.calendarWidth"
     case autoReadEnabled = "autoRead.enabled"
     case autoReadDays = "autoRead.days"
 
@@ -66,6 +69,15 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         case .flutterCalendarWidth:
             (.int(100...900), 500,
              "Width of the calendar beside an open event in Mailstream Flutter, in thousandths of the window's width beside the sidebar. Drag the gap between them to change it; double-click the gap to reset.")
+        case .gpuiShowFrameRate:
+            (.bool, false,
+             "Show the frame rate and the slowest recent frame in a corner of Mailstream GPUI's window (also Ctrl+Alt+P, ⌥⌘P on the Mac).")
+        case .gpuiListWidth:
+            (.int(100...900), 400,
+             "Width of the mail list beside an open conversation in Mailstream GPUI, in thousandths of the window's width beside the sidebar. Drag the gap between them to change it; double-click the gap to reset.")
+        case .gpuiCalendarWidth:
+            (.int(100...900), 400,
+             "Width of the calendar beside an open event in Mailstream GPUI, in thousandths of the window's width beside the sidebar. Drag the gap between them to change it; double-click the gap to reset.")
         case .autoReadEnabled:
             (.bool, false,
              "Mark stale notifications and newsletters (ads, promotions) read on their own, as AI tagging sorts them: unread ones older than autoRead.days, and a newsletter once its sender sends a newer one. Never mail waiting on you, starred mail, people, invitations or threads you wrote in. Mailstream Flutter offers Undo.")

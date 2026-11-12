@@ -28,6 +28,9 @@ pub enum Setting {
     FlutterShowFrameRate,
     FlutterListWidth,
     FlutterCalendarWidth,
+    GpuiShowFrameRate,
+    GpuiListWidth,
+    GpuiCalendarWidth,
     AutoReadEnabled,
     AutoReadDays,
 }
@@ -47,7 +50,7 @@ enum Kind {
 pub type Values = BTreeMap<Setting, Value>;
 
 impl Setting {
-    pub const ALL: [Setting; 17] = [
+    pub const ALL: [Setting; 20] = [
         Self::AiTaggingEnabled,
         Self::AiTaggingBackend,
         Self::AiTaggingModel,
@@ -63,6 +66,9 @@ impl Setting {
         Self::FlutterShowFrameRate,
         Self::FlutterListWidth,
         Self::FlutterCalendarWidth,
+        Self::GpuiShowFrameRate,
+        Self::GpuiListWidth,
+        Self::GpuiCalendarWidth,
         Self::AutoReadEnabled,
         Self::AutoReadDays,
     ];
@@ -84,6 +90,9 @@ impl Setting {
             Self::FlutterShowFrameRate => "flutter.showFrameRate",
             Self::FlutterListWidth => "flutter.listWidth",
             Self::FlutterCalendarWidth => "flutter.calendarWidth",
+            Self::GpuiShowFrameRate => "gpui.showFrameRate",
+            Self::GpuiListWidth => "gpui.listWidth",
+            Self::GpuiCalendarWidth => "gpui.calendarWidth",
             Self::AutoReadEnabled => "autoRead.enabled",
             Self::AutoReadDays => "autoRead.days",
         }
@@ -148,6 +157,21 @@ impl Setting {
                 Kind::Int(100, 900),
                 json!(500),
                 "Width of the calendar beside an open event in Mailstream Flutter, in thousandths of the window's width beside the sidebar. Drag the gap between them to change it; double-click the gap to reset.",
+            ),
+            Self::GpuiShowFrameRate => (
+                Kind::Bool,
+                json!(false),
+                "Show the frame rate and the slowest recent frame in a corner of Mailstream GPUI's window (also Ctrl+Alt+P, ⌥⌘P on the Mac).",
+            ),
+            Self::GpuiListWidth => (
+                Kind::Int(100, 900),
+                json!(400),
+                "Width of the mail list beside an open conversation in Mailstream GPUI, in thousandths of the window's width beside the sidebar. Drag the gap between them to change it; double-click the gap to reset.",
+            ),
+            Self::GpuiCalendarWidth => (
+                Kind::Int(100, 900),
+                json!(400),
+                "Width of the calendar beside an open event in Mailstream GPUI, in thousandths of the window's width beside the sidebar. Drag the gap between them to change it; double-click the gap to reset.",
             ),
             Self::AutoReadEnabled => (
                 Kind::Bool,
@@ -637,7 +661,7 @@ mod tests {
         let dir = temp();
         let settings = Settings::new(&dir);
         let list = run(&settings, "config.list", json!({})).unwrap();
-        assert_eq!(list["settings"].as_array().unwrap().len(), 17);
+        assert_eq!(list["settings"].as_array().unwrap().len(), 20);
         assert_eq!(
             list["settings"][1],
             json!({

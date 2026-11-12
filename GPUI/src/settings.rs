@@ -5,7 +5,7 @@
 //! Settings go through the engine (`settings`, `set_setting`, `reset_setting`): settings.json is the
 //! file Mailstream.app, Flutter and `mailstream config` share, and the window reads it again on the
 //! engine's `Settings` event, whoever changed it. The `flutter.*` keys configure only the Flutter
-//! app and stay out of this window.
+//! app and stay out of this window; the `gpui.*` ones are this app's (list widths, frame rate).
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -199,13 +199,16 @@ struct Note {
 
 // MARK: - Keys
 
-/// Sections of settings.json by key prefix, in the order they show (Flutter's `_sections`, less
-/// its own `flutter.*` ones). Keys under none of them follow in a group without a title.
+/// Sections of settings.json by key prefix, in the order they show (Flutter's `_sections`, with
+/// this app's `gpui.*` keys for its `flutter.*` ones). Keys under none of them follow in a group
+/// without a title.
 const SECTIONS: &[(&str, &[&str])] = &[
     ("Sync", &["sync.", "chat."]),
     ("AI tagging", &["aiTagging."]),
     ("Auto-read", &["autoRead."]),
     ("Remote content", &["remoteContent."]),
+    ("Layout", &["gpui.listWidth", "gpui.calendarWidth"]),
+    ("Performance", &["gpui.showFrameRate"]),
 ];
 
 /// Keys only the Flutter app reads.
@@ -239,6 +242,9 @@ fn title(key: &str) -> &str {
         "sync.pollSeconds" => "Mail polling",
         "sync.pushPollSeconds" => "Polling while push is connected",
         "chat.pollSeconds" => "Google Chat polling",
+        "gpui.showFrameRate" => "Show frame rate",
+        "gpui.listWidth" => "List width (‰ of the window)",
+        "gpui.calendarWidth" => "Calendar width (‰ of the window)",
         other => other,
     }
 }

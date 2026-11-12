@@ -5,6 +5,7 @@
 mod actions;
 mod invitations;
 mod nav;
+mod split;
 
 pub use actions::Removal;
 pub use invitations::InvitationCard;
@@ -22,7 +23,7 @@ use gpui::component::menu::PopupMenu;
 use gpui::{
     AnyWindowHandle, App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, ListAlignment, ListOffset,
     ListState, Pixels,
-    Point, ScrollHandle, SharedString, Subscription, Window, actions, px,
+    Point, ScrollHandle, SharedString, Subscription, Task, Window, actions, px,
 };
 use mailstream::{Change, Event, EventListener, ListQuery};
 
@@ -32,6 +33,7 @@ use crate::chat::ChatPane;
 use crate::compose::{ComposeColumn, ReplyBox};
 use crate::engine::{MailError, engine};
 use crate::format;
+use crate::frame_rate::FrameRateMeter;
 use crate::model::{Account, Category, Conversation, Listing, Mailbox, Message, Role};
 use crate::swipe::{BackSwipe, Preferences};
 
@@ -58,6 +60,7 @@ actions!(
         Refresh,
         ToggleSidebar,
         Retag,
+        ToggleFrameRate,
         Quit
     ]
 );
@@ -101,6 +104,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(secondary!("f"), FocusSearch, window),
         KeyBinding::new(secondary!("shift-n"), Refresh, window),
         KeyBinding::new("ctrl-cmd-s", ToggleSidebar, window),
+        KeyBinding::new(secondary!("alt-p"), ToggleFrameRate, window),
         KeyBinding::new(secondary!("q"), Quit, None),
     ]);
 }
@@ -402,6 +406,20 @@ pub struct MailApp {
     forward_pending: Option<SharedString>,
     /// The frame measurement, when the environment asks for one (`bench.rs`).
     pub bench: Option<Bench>,
+    /// The list's share of the room beside the navigation next to an open conversation
+    /// (`gpui.listWidth`), and the calendar's of its room next to an open event
+    /// (`gpui.calendarWidth`); see `split.rs`.
+    pub list_share: f32,
+    pub calendar_share: f32,
+    /// Where the list starts, the room it and the page beside it share (less a docked compose
+    /// column), and the room beside the navigation, as last laid out, for a drag of its edge.
+    pub split_left: f32,
+    pub split_mail: f32,
+    pub split_room: f32,
+    /// Writes the dragged share once the drag rests.
+    share_save: Option<Task<()>>,
+    /// The frame rate meter, while `gpui.showFrameRate` is on.
+    pub frame_meter: Option<Entity<FrameRateMeter>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -478,11 +496,19 @@ impl MailApp {
             compose,
             forward_pending: None,
             bench: Bench::from_env(cx),
+            list_share: crate::design::layout::LIST_SHARE,
+            calendar_share: crate::design::layout::LIST_SHARE,
+            split_left: 0.,
+            split_mail: 0.,
+            split_room: 0.,
+            share_save: None,
+            frame_meter: None,
             _subscriptions: subscriptions,
         };
         this.load_mailboxes(cx);
         this.load_list(this.key(), false, cx);
         this.follow_engine(cx);
+        this.load_layout_settings(cx);
         this.background(cx, async { Preferences::read() }, |this, preferences, _| this.swipe.preferences = preferences);
         this
     }
@@ -535,6 +561,9 @@ impl MailApp {
                     }
                     if batch.iter().any(|e| matches!(e, Event::Calendar | Event::Accounts)) {
                         this.calendar.update(cx, |pane, cx| pane.changed(cx));
+                    }
+                    if batch.contains(&Event::Settings) {
+                        this.load_layout_settings(cx);
                     }
                     let mailboxes = batch.iter().any(|e| matches!(e, Event::Accounts | Event::Mailboxes));
                     if mailboxes {

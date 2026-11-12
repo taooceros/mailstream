@@ -8,7 +8,7 @@ publish = false
 # GPUI through gpui-kit (MS-226): its `gpui-fast` feature builds on GPUI Fast, longbridge's retained-mode
 # gpui that follows Zed's. The crate is named `gpui` here so GPUI's macros (`gpui::…` paths) and
 # `use gpui::…` resolve through the kit, which re-exports all of GPUI.
-gpui = { package = "gpui-kit", version = "0.9.1", features = ["gpui-fast"] }
+gpui = { package = "gpui-kit", version = "0.9.1", features = ["gpui-fast", "profiler"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # HTML bodies are drawn by the engine's Blitz pages (`blitz_body.rs`) on every platform.
@@ -21,7 +21,7 @@ base64 = "0.22"
 # Tests that draw views in a test window and feed them input as the platform would (the
 # calendar's two-finger paging, MS-212).
 [dev-dependencies]
-gpui = { package = "gpui-kit", version = "0.9.1", features = ["gpui-fast", "test-support"] }
+gpui = { package = "gpui-kit", version = "0.9.1", features = ["gpui-fast", "profiler", "test-support"] }
 
 # The Mac reader's other renderer, WKWebViews (`webview.rs`), and the Dock icon.
 [target.'cfg(target_os = "macos")'.dependencies]
