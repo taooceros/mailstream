@@ -384,6 +384,18 @@ pub mod chat {
     pub const FORM_WIDTH: f32 = 520.0;
     /// A message still being sent.
     pub const PENDING_OPACITY: f32 = 0.55;
+    /// The largest a picture takes in the log; one still downloading holds a `MEDIA_LOADING` box.
+    pub const MEDIA_WIDTH: f32 = 360.0;
+    pub const MEDIA_HEIGHT: f32 = 300.0;
+    pub const MEDIA_LOADING: (f32, f32) = (240.0, 160.0);
+    /// An attachment's tile: its width range and its kind's glyph.
+    pub const TILE_MIN_WIDTH: f32 = 220.0;
+    pub const TILE_MAX_WIDTH: f32 = 340.0;
+    pub const TILE_GLYPH: f32 = 24.0;
+    /// Rows from the space list's end at which the next page of spaces loads.
+    pub const MORE_AHEAD: usize = 8;
+    /// An attachment that opens nowhere.
+    pub const DIMMED: f32 = 0.5;
 }
 
 /// The house easing curve (Flutter's `Motion.curve`), `cubic-bezier(0.05, 0.7, 0.1, 1)`: a strong
@@ -472,6 +484,32 @@ pub fn category_color(category: crate::model::Category, p: &Palette) -> Hsla {
         Category::Invitation => argb(0xFFFF9500),
         Category::Other => argb(0xFF8E8E93),
     }
+}
+
+/// What a file is, for the color of its glyph.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AttachmentKind {
+    Image,
+    Video,
+    Audio,
+    Pdf,
+    Document,
+    File,
+}
+
+/// Attachments' colors by kind (MS-191), light and dark, after the system hues the rest of the
+/// app uses: pictures purple, videos pink, audio orange, PDFs red, documents (a Drive file) blue,
+/// any other file gray.
+pub fn attachment_color(kind: AttachmentKind, dark: bool) -> Hsla {
+    let (light, night) = match kind {
+        AttachmentKind::Image => (0xFFAF52DE, 0xFFBF5AF2),
+        AttachmentKind::Video => (0xFFFF2D55, 0xFFFF375F),
+        AttachmentKind::Audio => (0xFFFF9500, 0xFFFF9F0A),
+        AttachmentKind::Pdf => (0xFFFF3B30, 0xFFFF453A),
+        AttachmentKind::Document => (0xFF007AFF, 0xFF0A84FF),
+        AttachmentKind::File => (0xFF8E8E93, 0xFF98989D),
+    };
+    argb(if dark { night } else { light })
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! Google Chat through the in-process engine's `chat_*` methods: the space list (direct messages, group
-//! chats, spaces), a space's log with a composer, and starting a conversation. `ChatPane` fills
-//! the main window's content area; the sidebar reads `accounts()` and `unread()` from it.
+//! chats, spaces; older pages load near its end), a space's log with a composer (pictures inline,
+//! other files as tiles), and starting a conversation. `ChatPane` fills the main window's content
+//! area; the sidebar reads `accounts()` and `unread()` from it.
 //!
 //! The engine keeps the state, as it does for the native reader: it polls Google for the spaces
 //! (every `chat.pollSeconds`), and while a space is open (`chat_open`) it fetches its newest
@@ -10,23 +11,25 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Days, Local, NaiveDate, Utc};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable, FontStyle,
-    FontWeight, HighlightStyle, InteractiveElement, InteractiveText, IntoElement, KeyBinding, ListAlignment, ListState,
-    ParentElement, Render, ScrollStrategy, SharedString, StatefulInteractiveElement,
-    StrikethroughStyle, Styled, StyledText, Subscription, UniformListScrollHandle, Window, actions, div, list, px,
-    relative, uniform_list,
+    FontWeight, HighlightStyle, ImgResourceLoader, InteractiveElement, InteractiveText, IntoElement, KeyBinding,
+    ListAlignment, ListState, ObjectFit, ParentElement, Render, Resource, ScrollStrategy, SharedString,
+    StatefulInteractiveElement, StrikethroughStyle, Styled, StyledImage, StyledText, Subscription,
+    UniformListScrollHandle, Window, actions, div, img, list, px, relative, uniform_list,
 };
 
 use crate::controls::{
     ButtonKind, ControlSize, Tone, button, centered_note, icon_button, list_row, mark_dot, monogram, notice, row_layout,
 };
-use crate::design::{self, Palette, chat as metrics, layout, list as rows, radius, text};
-use crate::icons::Icon;
+use crate::design::{self, AttachmentKind, Palette, chat as metrics, layout, list as rows, radius, space, stroke, text};
+use crate::icons::{Icon, icon};
 use crate::engine::{MailError, engine};
 use crate::format;
 use crate::input::{InputEvent, TextInput};
@@ -159,13 +162,66 @@ impl From<mailstream::ChatUser> for User {
 #[derive(Clone)]
 struct Attachment {
     name: SharedString,
+    /// Where it opens in the browser (Chat's download link, or the Drive file); None when the API
+    /// gives none.
     url: Option<SharedString>,
+    /// A file uploaded to Chat, which `chat_attachment` downloads; None for Drive files.
+    resource: Option<SharedString>,
+    kind: AttachmentKind,
+    /// The tile's second line: "Image", "PDF", "Google Drive", the file's extension.
+    label: SharedString,
 }
 
 impl From<mailstream::ChatAttachment> for Attachment {
     fn from(attachment: mailstream::ChatAttachment) -> Self {
-        Attachment { name: attachment.name.into(), url: attachment.url.map(Into::into) }
+        let (kind, label) =
+            attachment_kind(&attachment.name, attachment.content_type.as_deref().unwrap_or_default(), attachment.url.as_deref());
+        Attachment {
+            name: attachment.name.into(),
+            url: attachment.url.map(Into::into),
+            resource: attachment.resource.map(Into::into),
+            kind,
+            label,
+        }
     }
+}
+
+impl Attachment {
+    /// An uploaded picture shows in the log; everything else (videos too) is a tile.
+    fn inline(&self) -> bool {
+        self.kind == AttachmentKind::Image && self.resource.is_some()
+    }
+}
+
+/// A file's kind and its tile's label, from its type, else its name and link (Flutter's
+/// `_AttachmentTile._kind`).
+fn attachment_kind(name: &str, content_type: &str, url: Option<&str>) -> (AttachmentKind, SharedString) {
+    let extension = name.rsplit_once('.').map(|(_, extension)| extension.to_lowercase()).unwrap_or_default();
+    if content_type.starts_with("video/") {
+        (AttachmentKind::Video, "Video".into())
+    } else if content_type.starts_with("image/") {
+        (AttachmentKind::Image, "Image".into())
+    } else if content_type.starts_with("audio/") {
+        (AttachmentKind::Audio, "Audio".into())
+    } else if content_type == "application/pdf" || extension == "pdf" {
+        (AttachmentKind::Pdf, "PDF".into())
+    } else if url.is_some_and(|url| url.contains("drive.google.com")) {
+        (AttachmentKind::Document, "Google Drive".into())
+    } else if extension.is_empty() {
+        (AttachmentKind::File, "File".into())
+    } else {
+        (AttachmentKind::File, extension.to_uppercase().into())
+    }
+}
+
+/// An uploaded attachment: its account and resource.
+type FileKey = (SharedString, SharedString);
+
+/// An uploaded attachment's download (`chat_attachment`); the engine keeps the file once fetched.
+enum FileState {
+    Loading,
+    Ready(Arc<Path>),
+    Failed(SharedString),
 }
 
 /// An ISO 8601 time from the engine; None when absent or unreadable.
@@ -189,6 +245,12 @@ impl From<mailstream::Person> for Person {
 impl Person {
     fn label(&self) -> SharedString {
         self.name.clone().unwrap_or_else(|| self.email.clone())
+    }
+
+    /// A Chat partner, offered only when Chat knows their address.
+    fn partner(user: mailstream::ChatUser) -> Option<Self> {
+        let email = user.email?;
+        Some(Person { name: (!user.name.is_empty()).then(|| user.name.into()), email: email.into() })
     }
 }
 
@@ -647,6 +709,10 @@ enum View {
 struct NewChatForm {
     account: Option<SharedString>,
     people: Vec<Person>,
+    /// The account's Chat partners (`chat_people`), most recently active first.
+    partners: Vec<Person>,
+    /// What the contact lookup found for the text typed now.
+    contacts: Vec<Person>,
     suggestions: Vec<Person>,
     /// Bumped per keystroke; a lookup answering for an older one is dropped.
     generation: u64,
@@ -670,6 +736,9 @@ pub struct ChatPane {
     /// Every signed-in account in sidebar order, for account colors.
     account_order: Vec<SharedString>,
     spaces: Vec<Space>,
+    /// Older spaces exist beyond the loaded ones (`chat_more`).
+    more: bool,
+    loading_more: bool,
     /// The account in view; None shows every account's spaces.
     filter: Option<SharedString>,
     /// Indices into `spaces` of the rows in view.
@@ -681,6 +750,9 @@ pub struct ChatPane {
     /// The thread the next message replies in, and who started it.
     reply_thread: Option<(SharedString, SharedString)>,
     hovered_message: Option<SharedString>,
+    files: HashMap<FileKey, FileState>,
+    /// Files to open in the system's default app once downloaded.
+    open_when_ready: HashSet<FileKey>,
     form: NewChatForm,
     pending_serial: u64,
     _subscriptions: Vec<Subscription>,
@@ -713,6 +785,8 @@ impl ChatPane {
             accounts: Vec::new(),
             account_order: Vec::new(),
             spaces: Vec::new(),
+            more: false,
+            loading_more: false,
             filter: None,
             visible: Vec::new(),
             highlight: None,
@@ -721,6 +795,8 @@ impl ChatPane {
             logs: HashMap::new(),
             reply_thread: None,
             hovered_message: None,
+            files: HashMap::new(),
+            open_when_ready: HashSet::new(),
             form: NewChatForm::default(),
             pending_serial: 0,
             _subscriptions: subscriptions,
@@ -793,7 +869,11 @@ impl ChatPane {
         self.background(
             cx,
             async move {
-                let answer = engine().chat_spaces(None).await?;
+                let answer = match fixture::spaces() {
+                    Some(answer) => answer,
+                    None => engine().chat_spaces(None).await?,
+                };
+                let more = answer.more;
                 let accounts: Vec<Account> = answer.accounts.into_iter().map(Account::from).collect();
                 let now = Local::now();
                 let spaces: Vec<Space> = answer.spaces.into_iter().map(|space| Space::new(space, now)).collect();
@@ -808,7 +888,7 @@ impl ChatPane {
                         .ok()
                         .map(|list| list.into_iter().map(|a| SharedString::from(a.id)).collect::<Vec<_>>())
                 };
-                Ok::<_, MailError>((accounts, spaces, order))
+                Ok::<_, MailError>((accounts, spaces, order, more))
             },
             |this, result, cx| {
                 this.loading = false;
@@ -816,9 +896,10 @@ impl ChatPane {
                     this.load_spaces(cx);
                 }
                 match result {
-                    Ok((accounts, spaces, order)) => {
+                    Ok((accounts, spaces, order, more)) => {
                         this.failure = None;
                         this.loaded = true;
+                        this.more = more;
                         if let Some(order) = order {
                             this.account_order = order;
                         }
@@ -837,6 +918,31 @@ impl ChatPane {
                     Err(error) => this.failure = Some(error.to_string().into()),
                 }
                 cx.notify();
+            },
+        );
+    }
+
+    /// The next page of older spaces, as the list nears its end; the engine's `Chat` event (and
+    /// the read after it) brings them. After a failure the next list read offers paging again.
+    fn load_more(&mut self, cx: &mut Context<Self>) {
+        if !self.more || self.loading_more {
+            return;
+        }
+        self.loading_more = true;
+        self.background(
+            cx,
+            async {
+                match fixture::more() {
+                    true => Ok(()),
+                    false => engine().chat_more(None).await,
+                }
+            },
+            |this, result, cx| {
+                this.loading_more = false;
+                match result {
+                    Ok(()) => this.load_spaces(cx),
+                    Err(_) => this.more = false,
+                }
             },
         );
     }
@@ -877,6 +983,8 @@ impl ChatPane {
         self.view = View::Space(key.clone());
         self.reply_thread = None;
         self.hovered_message = None;
+        // Downloads that failed are tried again.
+        self.files.retain(|_, file| !matches!(file, FileState::Failed(_)));
         self.composer.update(cx, |input, cx| input.clear(cx));
         let first_open = !self.logs.contains_key(&key);
         let log = self.logs.entry(key.clone()).or_insert_with(Log::new);
@@ -910,8 +1018,8 @@ impl ChatPane {
         }
     }
 
-    /// Asks the engine for `key`'s history with `request` and shows the answer, unless a newer
-    /// request's answer came first.
+    /// Asks the engine (or the fixture) for `key`'s history with `request` and shows the answer,
+    /// unless a newer request's answer came first.
     fn load_thread(
         &mut self,
         key: &Key,
@@ -922,9 +1030,16 @@ impl ChatPane {
         log.requested += 1;
         let serial = log.requested;
         let key = key.clone();
+        let fixture = fixture::thread(&key.account, &key.space);
         self.background(
             cx,
-            async move { request.await.map(Loaded::new) },
+            async move {
+                match fixture {
+                    Some(thread) => thread,
+                    None => request.await,
+                }
+                .map(Loaded::new)
+            },
             move |this, result, cx| {
                 let Some(log) = this.logs.get_mut(&key) else { return };
                 if serial < log.applied {
@@ -955,6 +1070,83 @@ impl ChatPane {
         log.list.splice(0..1, 1);
         let (account, space) = (key.account.to_string(), key.space.to_string());
         self.load_thread(key, async move { engine().chat_earlier(account, space).await }, cx);
+    }
+
+    // MARK: - Attachments
+
+    /// Downloads the pictures of the log's entry `ix` as it comes into view.
+    fn fetch_pictures(&mut self, key: &Key, ix: usize, cx: &mut Context<Self>) {
+        let Some(message) = ix.checked_sub(1).and_then(|ix| self.logs.get(key)?.entry(ix)) else { return };
+        let wanted: Vec<Attachment> = message
+            .attachments
+            .iter()
+            .filter(|a| a.inline() && a.resource.as_ref().is_some_and(|r| !self.files.contains_key(&(key.account.clone(), r.clone()))))
+            .cloned()
+            .collect();
+        for attachment in wanted {
+            self.fetch_file(&key.account, &attachment, false, cx);
+        }
+    }
+
+    /// Opens an attachment in the system's default app: an uploaded file once downloaded, else its
+    /// link in the browser.
+    fn open_attachment(&mut self, account: &SharedString, attachment: &Attachment, cx: &mut Context<Self>) {
+        if attachment.resource.is_some() {
+            self.fetch_file(account, attachment, true, cx);
+        } else if let Some(url) = &attachment.url {
+            cx.open_url(url);
+        }
+    }
+
+    /// Downloads an uploaded attachment unless it is downloading or here (or failed, unless
+    /// `open`); `open` opens it in the system's default app once it is here.
+    fn fetch_file(&mut self, account: &SharedString, attachment: &Attachment, open: bool, cx: &mut Context<Self>) {
+        let Some(resource) = attachment.resource.clone() else { return };
+        let key: FileKey = (account.clone(), resource);
+        match self.files.get(&key) {
+            Some(FileState::Ready(path)) => {
+                if open {
+                    cx.open_with_system(path);
+                }
+                return;
+            }
+            Some(FileState::Loading) => {
+                if open {
+                    self.open_when_ready.insert(key);
+                    cx.notify();
+                }
+                return;
+            }
+            Some(FileState::Failed(_)) if !open => return,
+            Some(FileState::Failed(_)) | None => {}
+        }
+        self.files.insert(key.clone(), FileState::Loading);
+        if open {
+            self.open_when_ready.insert(key.clone());
+        }
+        cx.notify();
+        let (account, resource, name) = (key.0.to_string(), key.1.to_string(), attachment.name.to_string());
+        let fixture = fixture::file(&resource);
+        self.background(
+            cx,
+            async move {
+                match fixture {
+                    Some(path) => path,
+                    None => engine().chat_attachment(account, resource, name).await,
+                }
+            },
+            move |this, result, cx| {
+                let file = match result {
+                    Ok(path) => FileState::Ready(Path::new(&path).into()),
+                    Err(error) => FileState::Failed(error.to_string().into()),
+                };
+                if let (true, FileState::Ready(path)) = (this.open_when_ready.remove(&key), &file) {
+                    cx.open_with_system(path);
+                }
+                this.files.insert(key, file);
+                cx.notify();
+            },
+        );
     }
 
     // MARK: - Sending
@@ -1082,6 +1274,54 @@ impl ChatPane {
         self.view = View::NewChat;
         self.people_input.update(cx, |input, cx| input.clear(cx));
         window.focus(&self.people_input.focus_handle(cx));
+        self.load_partners(cx);
+        cx.notify();
+    }
+
+    /// The form's account's Chat partners, offered before anyone the contact lookup finds.
+    fn load_partners(&mut self, cx: &mut Context<Self>) {
+        let Some(account) = self.form.account.clone() else { return };
+        let fixture = fixture::people();
+        let id = account.to_string();
+        self.background(
+            cx,
+            async move {
+                match fixture {
+                    Some(people) => Ok(people),
+                    None => engine().chat_people(id).await,
+                }
+            },
+            move |this, result, cx| {
+                // Without them only the contact lookup completes; typed addresses still work.
+                if let (Ok(people), true) = (result, this.form.account.as_ref() == Some(&account)) {
+                    this.form.partners = people.people.into_iter().filter_map(Person::partner).collect();
+                    this.suggest(cx);
+                }
+            },
+        );
+    }
+
+    /// People to complete to, as the native New Chat sheet offers them: the account's Chat
+    /// partners first (all of them while nothing is typed), then those the contact lookup found;
+    /// an address typed out in full first of all.
+    fn suggest(&mut self, cx: &mut Context<Self>) {
+        let query = self.people_input.read(cx).text().trim().to_lowercase();
+        let form = &mut self.form;
+        let mut seen: HashSet<String> = form.people.iter().map(|p| p.email.to_lowercase()).collect();
+        let partners = form.partners.iter().filter(|person| {
+            query.is_empty()
+                || person.email.to_lowercase().contains(&query)
+                || person.name.as_ref().is_some_and(|name| name.to_lowercase().contains(&query))
+        });
+        let contacts = form.contacts.iter().filter(|_| !query.is_empty());
+        let mut people: Vec<Person> =
+            partners.chain(contacts).filter(|person| seen.insert(person.email.to_lowercase())).cloned().collect();
+        if let Some(exact) = people.iter().position(|person| person.email.to_lowercase() == query) {
+            let person = people.remove(exact);
+            people.insert(0, person);
+        }
+        people.truncate(SUGGESTIONS as usize);
+        form.suggestions = people;
         cx.notify();
     }
 
@@ -1090,13 +1330,12 @@ impl ChatPane {
             InputEvent::Changed => {
                 self.form.generation += 1;
                 self.form.failure = None;
+                self.form.contacts.clear();
+                self.suggest(cx);
                 let query = input.read(cx).text().trim().to_owned();
-                if query.is_empty() {
-                    self.form.suggestions.clear();
-                    cx.notify();
-                    return;
+                if !query.is_empty() {
+                    self.search_people(query, self.form.generation, cx);
                 }
-                self.search_people(query, self.form.generation, cx);
             }
             InputEvent::Submit => {
                 let typed = input.read(cx).text().trim().to_owned();
@@ -1128,14 +1367,8 @@ impl ChatPane {
                     return;
                 }
                 // An app without people lookup offers none; typed addresses still work.
-                let chosen: HashSet<String> = this.form.people.iter().map(|p| p.email.to_lowercase()).collect();
-                this.form.suggestions = found
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|p| !chosen.contains(&p.email.to_lowercase()))
-                    .map(Person::from)
-                    .collect();
-                cx.notify();
+                this.form.contacts = found.unwrap_or_default().into_iter().map(Person::from).collect();
+                this.suggest(cx);
             })
             .ok();
         })
@@ -1146,11 +1379,11 @@ impl ChatPane {
         if !self.form.people.iter().any(|p| p.email.eq_ignore_ascii_case(&person.email)) {
             self.form.people.push(person);
         }
-        self.form.suggestions.clear();
         self.form.generation += 1;
+        self.form.contacts.clear();
         self.people_input.update(cx, |input, cx| input.clear(cx));
         window.focus(&self.people_input.focus_handle(cx));
-        cx.notify();
+        self.suggest(cx);
     }
 
     fn start_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1191,6 +1424,15 @@ impl ChatPane {
     }
 
     // MARK: - Actions
+
+    /// Closes the open space or the new-chat form (⌘W, which the window binds); nothing on the
+    /// space list.
+    #[expect(dead_code, reason = "the window binds ⌘W to it in MS-217")]
+    pub fn close_space(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.view, View::Spaces) {
+            self.close(window, cx);
+        }
+    }
 
     fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
         match self.view {
@@ -1317,6 +1559,9 @@ impl ChatPane {
                 "chat-spaces",
                 self.visible.len(),
                 cx.processor(move |this, range: Range<usize>, _, cx| {
+                    if range.end + metrics::MORE_AHEAD >= this.visible.len() {
+                        this.load_more(cx);
+                    }
                     range.map(|position| this.render_row(position, p, cx)).collect::<Vec<_>>()
                 }),
             )
@@ -1396,7 +1641,13 @@ impl ChatPane {
         let log: AnyElement = match self.logs.get(key) {
             Some(log) => {
                 let list_key = key.clone();
-                list(log.list.clone(), cx.processor(move |this, ix: usize, _, cx| this.render_entry(&list_key, ix, p, cx)))
+                list(
+                    log.list.clone(),
+                    cx.processor(move |this, ix: usize, window, cx| {
+                        this.fetch_pictures(&list_key, ix, cx);
+                        this.render_entry(&list_key, ix, window, p, cx)
+                    }),
+                )
                     .flex_1()
                     .w_full()
                     .into_any_element()
@@ -1422,7 +1673,7 @@ impl ChatPane {
             .child(div().w_full().max_w(px(layout::READING_WIDTH)).px(px(32.)).child(child))
     }
 
-    fn render_entry(&self, key: &Key, ix: usize, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_entry(&self, key: &Key, ix: usize, window: &mut Window, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let Some(log) = self.logs.get(key) else { return div().into_any_element() };
         if ix == 0 {
             return self.render_top(key, log, p, cx);
@@ -1509,26 +1760,12 @@ impl ChatPane {
                 )
             })
             .when(!message.attachments.is_empty(), |d| {
-                d.child(div().flex().flex_wrap().gap(px(6.)).pt(px(6.)).children(message.attachments.iter().enumerate().map(
-                    |(index, attachment)| {
-                        let url = attachment.url.clone();
-                        div()
-                            .id(ElementId::Name(format!("chat-file:{}:{index}", message.id).into()))
-                            .px(px(8.))
-                            .py(px(3.))
-                            .rounded(px(radius::CONTROL))
-                            .bg(p.chip)
-                            .text_size(px(text::FOOTNOTE))
-                            .when(url.is_none(), |d| d.text_color(p.muted))
-                            .when(url.is_some(), |d| d.cursor_pointer().hover(|s| s.bg(p.selection)))
-                            .on_click(move |_, _, cx| {
-                                if let Some(url) = &url {
-                                    cx.open_url(url);
-                                }
-                            })
-                            .child(format!("📎 {}", attachment.name))
-                    },
-                )))
+                d.child(div().flex().flex_wrap().items_start().gap(px(space::S8)).pt(px(space::S6)).children(
+                    message.attachments.iter().enumerate().map(|(index, attachment)| {
+                        let id = ElementId::Name(format!("chat-file:{}:{index}", message.id).into());
+                        self.render_attachment(&key.account, id, attachment, window, p, cx)
+                    }),
+                ))
             })
             .when_some(
                 match &message.status {
@@ -1640,6 +1877,83 @@ impl ChatPane {
         Self::column(content).into_any_element()
     }
 
+    /// An attachment in the log: an uploaded picture as itself once downloaded (Flutter's
+    /// `_ChatImage`); anything else, or a picture that can't be shown, as a tile.
+    fn render_attachment(
+        &self,
+        account: &SharedString,
+        id: ElementId,
+        attachment: &Attachment,
+        window: &mut Window,
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let file = attachment.resource.as_ref().and_then(|resource| self.files.get(&(account.clone(), resource.clone())));
+        if attachment.inline() {
+            match file {
+                None | Some(FileState::Loading) => return picture_loading(p),
+                Some(FileState::Ready(path)) => match window.use_asset::<ImgResourceLoader>(&Resource::Path(path.clone()), cx) {
+                    None => return picture_loading(p),
+                    Some(Ok(image)) => return picture(id, path.clone(), image),
+                    Some(Err(_)) => {}
+                },
+                Some(FileState::Failed(_)) => {}
+            }
+        }
+        self.render_tile(account, id, attachment, file, p, cx)
+    }
+
+    /// A file as Chat on the web shows it (`_AttachmentTile`): its kind's glyph in its color, its
+    /// name and kind. Clicking opens it in the system's default app: an uploaded file once
+    /// downloaded, else its link in the browser; one with neither shows dimmed.
+    fn render_tile(
+        &self,
+        account: &SharedString,
+        id: ElementId,
+        attachment: &Attachment,
+        file: Option<&FileState>,
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let opens = attachment.resource.is_some() || attachment.url.is_some();
+        let waiting = attachment
+            .resource
+            .as_ref()
+            .is_some_and(|resource| self.open_when_ready.contains(&(account.clone(), resource.clone())));
+        let (detail, detail_color) = match file {
+            Some(FileState::Failed(reason)) => (SharedString::from(format!("Could not download: {reason}")), p.danger),
+            _ if waiting => ("Downloading…".into(), p.muted),
+            _ => (attachment.label.clone(), p.muted),
+        };
+        let (account, chosen) = (account.clone(), attachment.clone());
+        div()
+            .id(id)
+            .min_w(px(metrics::TILE_MIN_WIDTH))
+            .max_w(px(metrics::TILE_MAX_WIDTH))
+            .px(px(space::S12))
+            .py(px(space::S10))
+            .flex()
+            .items_center()
+            .gap(px(space::S10))
+            .rounded(px(radius::CARD))
+            .bg(p.fill)
+            .border(px(stroke::HAIRLINE))
+            .border_color(p.line)
+            .when(!opens, |d| d.opacity(metrics::DIMMED))
+            .when(opens, |d| d.cursor_pointer())
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_attachment(&account, &chosen, cx)))
+            .child(icon(Icon::Attachment, metrics::TILE_GLYPH, design::attachment_color(attachment.kind, p.dark)))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().font_weight(FontWeight::MEDIUM).child(attachment.name.clone()))
+                    .child(div().truncate().text_size(px(text::FOOTNOTE)).text_color(detail_color).child(detail)),
+            )
+            .into_any_element()
+    }
+
     fn render_composer(&self, title: &SharedString, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let thread = self.reply_thread.as_ref().map(|(_, who)| {
             div()
@@ -1722,7 +2036,9 @@ impl ChatPane {
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.form.account = Some(id.clone());
                             this.form.failure = None;
-                            cx.notify();
+                            this.form.partners.clear();
+                            this.suggest(cx);
+                            this.load_partners(cx);
                         }))
                 }))
         });
@@ -1765,7 +2081,7 @@ impl ChatPane {
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 cx.stop_propagation();
                                 this.form.people.retain(|p| p.email != email);
-                                cx.notify();
+                                this.suggest(cx);
                             }))
                             .child("✕"),
                     )
@@ -1886,6 +2202,117 @@ fn divider(label: SharedString, color: gpui::Hsla, line: gpui::Hsla) -> Div {
         .child(div().flex_1().h(px(1.)).bg(line))
 }
 
+/// A downloaded picture at its own size, shrunk to fit the log's media box; clicking opens it in
+/// the system's image viewer.
+fn picture(id: ElementId, path: Arc<Path>, image: Arc<gpui::RenderImage>) -> AnyElement {
+    let size = image.size(0);
+    let (width, height) = (size.width.0.max(1) as f32, size.height.0.max(1) as f32);
+    let scale = (metrics::MEDIA_WIDTH / width).min(metrics::MEDIA_HEIGHT / height).min(1.0);
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .cursor_pointer()
+        .on_click(move |_, _, cx| cx.open_with_system(&path))
+        .child(img(image).w(px(width * scale)).h(px(height * scale)).rounded(px(radius::PANE)).object_fit(ObjectFit::Contain))
+        .into_any_element()
+}
+
+/// Where a picture shows once it is downloaded.
+fn picture_loading(p: &Palette) -> AnyElement {
+    let (width, height) = metrics::MEDIA_LOADING;
+    div()
+        .flex_shrink_0()
+        .w(px(width))
+        .h(px(height))
+        .rounded(px(radius::PANE))
+        .bg(p.fill)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(text::FOOTNOTE))
+        .text_color(p.faint)
+        .child("Loading…")
+        .into_any_element()
+}
+
+// MARK: - A synthetic chat
+
+/// A chat without an account, for looking at the pane (`MAILSTREAM_CHAT_FIXTURE=<file.json>`):
+/// the spaces, histories, Chat partners and downloaded files come from the file instead of the
+/// engine; everything else (sending, starting, contact lookup) still goes to the engine, which
+/// has no chat account then. The file holds `spaces` (a `ChatSpaces`, shown `page` spaces at a time
+/// while `chat_more` pages), `threads` (`ChatThread`s), `people` (`ChatUser`s) and `files` (each
+/// `resource`'s path).
+mod fixture {
+    use std::collections::HashMap;
+    use std::sync::LazyLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use mailstream::{ChatPeople, ChatSpaces, ChatThread, ChatUser, MailError};
+    use serde_json::Value;
+
+    struct Fixture {
+        spaces: ChatSpaces,
+        page: usize,
+        threads: Vec<ChatThread>,
+        people: Vec<ChatUser>,
+        files: HashMap<String, String>,
+    }
+
+    static FIXTURE: LazyLock<Option<Fixture>> = LazyLock::new(|| {
+        let path = std::env::var_os("MAILSTREAM_CHAT_FIXTURE")?;
+        let file = std::fs::read(&path).expect("MAILSTREAM_CHAT_FIXTURE: unreadable");
+        let value: Value = serde_json::from_slice(&file).expect("MAILSTREAM_CHAT_FIXTURE: not JSON");
+        let field = |name: &str| value.get(name).cloned().unwrap_or(Value::Null);
+        Some(Fixture {
+            spaces: serde_json::from_value(field("spaces")).expect("MAILSTREAM_CHAT_FIXTURE: spaces"),
+            page: value["page"].as_u64().map_or(usize::MAX, |page| page as usize),
+            threads: serde_json::from_value(field("threads")).expect("MAILSTREAM_CHAT_FIXTURE: threads"),
+            people: serde_json::from_value(field("people")).expect("MAILSTREAM_CHAT_FIXTURE: people"),
+            files: serde_json::from_value(field("files")).expect("MAILSTREAM_CHAT_FIXTURE: files"),
+        })
+    });
+
+    /// Pages of spaces shown.
+    static PAGES: AtomicUsize = AtomicUsize::new(1);
+
+    fn missing(what: &str) -> MailError {
+        MailError::Failed { code: "notFound".into(), message: format!("The chat fixture has no {what}") }
+    }
+
+    pub fn spaces() -> Option<ChatSpaces> {
+        let fixture = FIXTURE.as_ref()?;
+        let mut answer = fixture.spaces.clone();
+        let shown = fixture.page.saturating_mul(PAGES.load(Ordering::Relaxed));
+        answer.more = shown < answer.spaces.len();
+        answer.spaces.truncate(shown);
+        Some(answer)
+    }
+
+    /// Shows another page of spaces; false without a fixture.
+    pub fn more() -> bool {
+        if FIXTURE.is_none() {
+            return false;
+        }
+        PAGES.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    pub fn thread(account: &str, space: &str) -> Option<Result<ChatThread, MailError>> {
+        let fixture = FIXTURE.as_ref()?;
+        let thread = fixture.threads.iter().find(|thread| thread.account == account && thread.space == space);
+        Some(thread.cloned().ok_or_else(|| missing(space)))
+    }
+
+    pub fn people() -> Option<ChatPeople> {
+        Some(ChatPeople { can_start: true, people: FIXTURE.as_ref()?.people.clone() })
+    }
+
+    pub fn file(resource: &str) -> Option<Result<String, MailError>> {
+        Some(FIXTURE.as_ref()?.files.get(resource).cloned().ok_or_else(|| missing(resource)))
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1924,5 +2351,18 @@ mod tests {
         let body = parsed("look:\n```\nlet a = 1;\n```\ndone");
         assert_eq!(body.text.as_ref(), "look:\nlet a = 1;\ndone");
         assert_eq!(body.marks.len(), 1);
+    }
+
+    #[test]
+    fn attachments_take_their_kind_from_type_name_and_link() {
+        let kind = |name, content_type, url| attachment_kind(name, content_type, url);
+        assert_eq!(kind("clip.mov", "video/quicktime", None), (AttachmentKind::Video, "Video".into()));
+        assert_eq!(kind("a.png", "image/png", None), (AttachmentKind::Image, "Image".into()));
+        assert_eq!(kind("song", "audio/mpeg", None), (AttachmentKind::Audio, "Audio".into()));
+        assert_eq!(kind("Report.PDF", "", None), (AttachmentKind::Pdf, "PDF".into()));
+        let drive = Some("https://drive.google.com/file/d/1");
+        assert_eq!(kind("Plan", "", drive), (AttachmentKind::Document, "Google Drive".into()));
+        assert_eq!(kind("notes.txt", "text/plain", None), (AttachmentKind::File, "TXT".into()));
+        assert_eq!(kind("notes", "", None), (AttachmentKind::File, "File".into()));
     }
 }
