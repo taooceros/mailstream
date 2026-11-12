@@ -8,6 +8,7 @@ use std::sync::Mutex;
 
 use serde_json::{Map, Value, json};
 
+use crate::answers::{self, SettingEntry, SettingValue};
 use crate::EngineError;
 use crate::files;
 
@@ -336,40 +337,37 @@ impl Setting {
     }
 
     /// The setting as `config` commands answer it, given the file's valid `values`.
-    fn entry(self, values: &Values) -> Value {
+    pub fn entry(self, values: &Values) -> SettingEntry {
         let (kind, default, summary) = self.descriptor();
-        let mut out = Map::new();
-        out.insert("key".into(), json!(self.key()));
-        out.insert("value".into(), self.value(values));
-        out.insert("default".into(), default);
-        out.insert("changed".into(), json!(values.contains_key(&self)));
-        out.insert("summary".into(), json!(summary));
-        match kind {
-            Kind::Bool => {
-                out.insert("type".into(), json!("boolean"));
-            }
-            Kind::Int(low, high) => {
-                out.insert("type".into(), json!("integer"));
-                out.insert("minimum".into(), json!(low));
-                out.insert("maximum".into(), json!(high));
-            }
-            Kind::Text => {
-                out.insert("type".into(), json!("string"));
-            }
-            Kind::Choice(words) => {
-                out.insert("type".into(), json!("string"));
-                out.insert("choices".into(), json!(words));
-            }
-            Kind::Addresses => {
-                out.insert("type".into(), json!("array of email addresses"));
-            }
+        let name = match kind {
+            Kind::Bool => "boolean",
+            Kind::Int(..) => "integer",
+            Kind::Text | Kind::Choice(_) => "string",
+            Kind::Addresses => "array",
+        };
+        let typed = |value: &Value| SettingValue::of(name, value).expect("settings hold values of their kind");
+        let (minimum, maximum) = match kind {
+            Kind::Int(low, high) => (Some(low), Some(high)),
+            _ => (None, None),
+        };
+        SettingEntry {
+            key: self.key().into(),
+            value: typed(&self.value(values)),
+            default_value: typed(&default),
+            changed: values.contains_key(&self),
+            summary: summary.into(),
+            minimum,
+            maximum,
+            choices: match kind {
+                Kind::Choice(words) => words.iter().map(|word| word.to_string()).collect(),
+                _ => Vec::new(),
+            },
         }
-        Value::Object(out)
     }
 
     /// Every setting as `config.list` answers it before settings.json is read: each at its
     /// default, with its range. Front ends size their first frames from it.
-    pub fn defaults() -> Vec<Value> {
+    pub fn defaults() -> Vec<SettingEntry> {
         let values = Values::new();
         Self::ALL.iter().map(|setting| setting.entry(&values)).collect()
     }
@@ -516,23 +514,23 @@ impl Settings {
         Ok(match command {
             "config.list" => {
                 let (values, issues) = file.read();
-                json!({
-                    "file": file.path.display().to_string(),
-                    "settings": Setting::ALL.iter().map(|setting| setting.entry(&values)).collect::<Vec<_>>(),
-                    "issues": issues,
+                answers::json(&answers::Settings {
+                    file: file.path.display().to_string(),
+                    settings: Setting::ALL.iter().map(|setting| setting.entry(&values)).collect(),
+                    issues,
                 })
             }
-            "config.get" => setting()?.entry(&file.read().0),
+            "config.get" => answers::json(&setting()?.entry(&file.read().0)),
             "config.set" => {
                 let setting = setting()?;
                 let value = setting.parse(args.get("value").and_then(Value::as_str).unwrap_or(""))?;
                 file.update(setting, Some(&value))?;
-                setting.entry(&file.read().0)
+                answers::json(&setting.entry(&file.read().0))
             }
             "config.reset" => {
                 let setting = setting()?;
                 file.update(setting, None)?;
-                setting.entry(&file.read().0)
+                answers::json(&setting.entry(&file.read().0))
             }
             "config.add" | "config.remove" => {
                 let setting = setting()?;
@@ -555,7 +553,7 @@ impl Settings {
                     current.into_iter().filter(|address| !given.contains(address)).collect()
                 };
                 file.update(setting, Some(&json!(next)))?;
-                setting.entry(&file.read().0)
+                answers::json(&setting.entry(&file.read().0))
             }
             "config.schema" => Setting::file_schema(),
             "config.path" => json!({ "path": file.path.display().to_string(), "exists": file.path.exists() }),

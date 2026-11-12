@@ -2,9 +2,14 @@
 //! chat logs, avatars' initials and color slots, the recipients a compose field holds, the body a
 //! forward starts with and where a chat log's runs and day dividers fall. Front ends draw what
 //! these answer instead of keeping rules of their own; subjects are in [`crate::text`].
+use std::collections::HashMap;
+
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike};
 
+use crate::answers::{ChatPeople, ChatSpaces, ChatThread, ChatUser, Conversation, Listing, Message, Person, Thread};
+use crate::chat_markup;
 use crate::model::{Address, Date, unix_seconds};
+use crate::text::Subject;
 
 // MARK: - Dates
 
@@ -134,7 +139,7 @@ pub fn parse_iso(date: &str) -> Option<DateTime<Local>> {
 pub const AVATAR_SLOTS: u32 = 11;
 
 /// A person's avatar where there is no picture: their initial in the color of their slot.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct Avatar {
     pub initial: String,
     /// In `0..AVATAR_SLOTS`, the same on every launch.
@@ -266,8 +271,8 @@ pub struct RunEntry<'a> {
 }
 
 /// Where an entry stands in its log (`ReaderPage.chatRuns`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Run {
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ChatRun {
     /// The day divider above it; empty on the day of the entry before.
     pub divider: String,
     /// It continues the run above: same sender, same day, within [`RUN_SECONDS`].
@@ -275,7 +280,7 @@ pub struct Run {
 }
 
 /// Each entry's place: an entry without a date opens no day and breaks the run.
-pub fn chat_runs(entries: &[RunEntry<'_>], labels: &DateLabels) -> Vec<Run> {
+pub fn chat_runs(entries: &[RunEntry<'_>], labels: &DateLabels) -> Vec<ChatRun> {
     let mut runs = Vec::with_capacity(entries.len());
     let mut previous: Option<&RunEntry<'_>> = None;
     for entry in entries {
@@ -284,10 +289,125 @@ pub fn chat_runs(entries: &[RunEntry<'_>], labels: &DateLabels) -> Vec<Run> {
         let close = matches!((entry.date, last), (Some(day), Some(last)) if (day - last).num_seconds() < RUN_SECONDS);
         let continued = same_day && close && !entry.opens_run && previous.is_some_and(|previous| previous.sender == entry.sender);
         let divider = if same_day { String::new() } else { entry.date.map(|date| labels.day(&date)).unwrap_or_default() };
-        runs.push(Run { divider, continued });
+        runs.push(ChatRun { divider, continued });
         previous = Some(entry);
     }
     runs
+}
+
+// MARK: - Answers filled in
+//
+// The FFI fills in an answer's display fields as it hands the answer over (MS-235), once per answer
+// rather than once per row; Rust hosts that make values of their own (GPUI's synthetic chat) call
+// `dress` themselves.
+
+fn local_iso(date: Option<&str>) -> Option<DateTime<Local>> {
+    date.and_then(parse_iso)
+}
+
+impl Conversation {
+    pub fn dress(&mut self, labels: &DateLabels) {
+        (self.tag, self.title) = Subject::list_parts(&self.subject);
+        let date = local_iso(self.date.as_deref());
+        self.when = date.map(|date| labels.list(&date)).unwrap_or_default();
+        self.section = date.map_or_else(|| "Older".into(), |date| labels.section(&date));
+        self.avatar = match (&self.from, self.participants.first()) {
+            (Some(from), _) => Avatar::of(from),
+            (None, Some(name)) => Avatar::new(name, name),
+            (None, None) => Avatar::new("", "?"),
+        };
+    }
+}
+
+impl Listing {
+    pub fn dress(&mut self) {
+        let labels = DateLabels::now();
+        for conversation in &mut self.conversations {
+            conversation.dress(&labels);
+        }
+    }
+}
+
+impl Message {
+    fn dress(&mut self, labels: &DateLabels, date: Option<DateTime<Local>>, run: ChatRun) {
+        self.when = date.map(|date| labels.message(&date)).unwrap_or_default();
+        self.time = date.map(|date| time(&date)).unwrap_or_default();
+        self.avatar = self.from.first().map_or_else(|| Avatar::new("", "?"), Avatar::of);
+        (self.divider, self.continued) = (run.divider, run.continued);
+    }
+}
+
+impl Thread {
+    pub fn dress(&mut self) {
+        let labels = DateLabels::now();
+        self.conversation.dress(&labels);
+        let senders: Vec<String> =
+            self.messages.iter().map(|message| message.from.first().map(Address::normalized_email).unwrap_or_default()).collect();
+        let dates: Vec<_> = self.messages.iter().map(|message| local_iso(message.date.as_deref())).collect();
+        let entries: Vec<RunEntry<'_>> =
+            senders.iter().zip(&dates).map(|(sender, date)| RunEntry { sender, date: *date, opens_run: false }).collect();
+        let runs = chat_runs(&entries, &labels);
+        for ((message, run), date) in self.messages.iter_mut().zip(runs).zip(dates) {
+            message.dress(&labels, date, run);
+        }
+    }
+}
+
+impl Person {
+    pub fn dress(&mut self) {
+        self.avatar = Avatar::new(self.name.as_deref().unwrap_or_default(), &self.email);
+    }
+}
+
+impl ChatUser {
+    pub fn dress(&mut self) {
+        self.avatar = Avatar::new(&self.name, &self.avatar_key);
+    }
+}
+
+impl ChatPeople {
+    pub fn dress(&mut self) {
+        for person in &mut self.people {
+            person.dress();
+        }
+    }
+}
+
+impl ChatSpaces {
+    pub fn dress(&mut self) {
+        for space in &mut self.spaces {
+            space.avatar = Avatar::new(&space.avatar_name, &space.avatar_color_key);
+        }
+    }
+}
+
+impl ChatThread {
+    pub fn dress(&mut self) {
+        // Mentions name members and anyone who wrote here.
+        let mut names: HashMap<String, String> =
+            self.members.iter().map(|user| (user.id.clone(), user.name.clone())).collect();
+        for message in &self.messages {
+            names.entry(message.sender.id.clone()).or_insert_with(|| message.sender.name.clone());
+        }
+        for user in &mut self.members {
+            user.dress();
+        }
+        let labels = DateLabels::now();
+        let dates: Vec<_> = self.messages.iter().map(|message| local_iso(message.created.as_deref())).collect();
+        let entries: Vec<RunEntry<'_>> = self
+            .messages
+            .iter()
+            .zip(&dates)
+            .map(|(message, date)| RunEntry { sender: &message.sender.id, date: *date, opens_run: false })
+            .collect();
+        let runs = chat_runs(&entries, &labels);
+        for ((message, run), date) in self.messages.iter_mut().zip(runs).zip(dates) {
+            message.sender.dress();
+            message.body = chat_markup::parse(&message.markup, &|id| names.get(id).cloned());
+            message.time = date.map(|date| time(&date)).unwrap_or_default();
+            (message.divider, message.continued) = (run.divider, run.continued);
+        }
+    }
 }
 
 #[cfg(test)]

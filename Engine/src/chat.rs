@@ -18,13 +18,14 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::{Value, json};
 
 use crate::accounts::{AccountRecord, Accounts};
+use crate::answers::{self, ChatPending, ChatPeople, ChatSpaceRef, ChatSpaces, ChatThread};
 use crate::api::{Api, ApiError};
 use crate::avatars::Avatars;
 use crate::cache::{MailCache, hash};
 use crate::chat_api::{ChatRemote, chat_error};
 use crate::chat_model::{
-    ChatAccount, ChatMessage, ChatMessagePage, ChatRow, ChatSpace, ChatSpaceKey, ChatSpaceKind, ChatSpaceList, ChatUser,
-    DateLabels, sort_newest_first,
+    ChatAccount, ChatMessage, ChatMessagePage, ChatSpace, ChatSpaceKey, ChatSpaceKind, ChatSpaceList, ChatUser, DateLabels,
+    row, sort_newest_first,
 };
 use crate::commands::Arguments;
 use crate::mail::Mail;
@@ -87,7 +88,7 @@ struct State {
     accounts: Vec<ChatAccount>,
     listings: HashMap<String, Listing>,
     /// Every account's spaces as list rows, newest first; rebuilt when a listing changes.
-    rows: Vec<ChatRow>,
+    rows: Vec<answers::ChatSpace>,
     loading: bool,
     /// The space in the reader: polling keeps its messages current and read.
     open: Option<ChatSpaceKey>,
@@ -116,14 +117,14 @@ impl State {
 
     fn rebuild(&mut self) {
         let labels = DateLabels::now();
-        let mut rows: Vec<ChatRow> = self
+        let mut rows: Vec<_> = self
             .accounts
             .iter()
             .filter_map(|account| self.listings.get(&account.name).map(|listing| (account, listing)))
-            .flat_map(|(account, listing)| listing.list.spaces.iter().map(|space| ChatRow::new(space, &account.name, &labels)))
+            .flat_map(|(account, listing)| listing.list.spaces.iter().map(|space| row(space, &account.name, &labels)))
             .collect();
-        sort_newest_first(&mut rows, |row| row.activity);
-        self.rows = rows;
+        sort_newest_first(&mut rows, |(activity, _)| *activity);
+        self.rows = rows.into_iter().map(|(_, row)| row).collect();
     }
 }
 
@@ -1027,13 +1028,13 @@ impl Chat {
             "chat.send" => self.send_command(args).await,
             "chat.people" => {
                 let account = self.chat_account(&args.required("account")?)?;
-                let people: Vec<Value> = self.people(&account).iter().map(ChatUser::json).collect();
-                Ok(json!({ "canStart": self.can_start_chats(&account), "people": people }))
+                let people = self.people(&account).iter().map(ChatUser::answer).collect();
+                Ok(answers::json(&ChatPeople { can_start: self.can_start_chats(&account), people }))
             }
             "chat.start" => {
                 let account = self.chat_account(&args.required("account")?)?;
                 let key = self.start_chat(&account, &args.list("people").unwrap_or_default()).await.map_err(|error| failed(&error))?;
-                Ok(json!({ "account": key.account, "space": key.space }))
+                Ok(answers::json(&ChatSpaceRef { account: key.account, space: key.space }))
             }
             "chat.attachment" => {
                 let account = self.chat_account(&args.required("account")?)?;
@@ -1060,7 +1061,7 @@ impl Chat {
 
     fn spaces_json(&self, account: Option<&str>) -> Value {
         let state = self.state();
-        let accounts: Vec<Value> = state
+        let accounts = state
             .accounts
             .iter()
             .filter(|chat| account.is_none_or(|account| account == chat.name))
@@ -1070,19 +1071,17 @@ impl Chat {
                     .listings
                     .get(name)
                     .map_or(0, |listing| listing.list.spaces.iter().filter(|space| space.unread > 0).count());
-                json!({
-                    "id": name, "label": self.accounts.record(name).map_or_else(|| name.clone(), |record| record.label),
-                    "canStart": self.can_start_chats(name), "unread": unread,
-                })
+                answers::ChatAccount {
+                    id: name.clone(),
+                    label: self.accounts.record(name).map_or_else(|| name.clone(), |record| record.label),
+                    can_start: self.can_start_chats(name),
+                    unread: unread as u32,
+                }
             })
             .collect();
-        let spaces: Vec<Value> = state
-            .rows
-            .iter()
-            .filter(|row| account.is_none_or(|account| account == row.key.account))
-            .map(ChatRow::json)
-            .collect();
-        json!({ "accounts": accounts, "loading": state.loading, "more": Self::can_load_more(&state, account), "spaces": spaces })
+        let spaces =
+            state.rows.iter().filter(|row| account.is_none_or(|account| account == row.account)).cloned().collect();
+        answers::json(&ChatSpaces { accounts, loading: state.loading, more: Self::can_load_more(&state, account), spaces })
     }
 
     /// What the store holds of `key`'s history. Senders' pictures go to the avatar store, so
@@ -1098,16 +1097,28 @@ impl Chat {
         }
         let space = state.space(key);
         let me = state.listings.get(&key.account).and_then(|listing| listing.list.me.clone());
-        json!({
-            "account": key.account, "space": key.space, "title": space.map(|space| &space.title), "me": me,
-            "members": space.map_or_else(Vec::new, |space| space.members.iter().map(ChatUser::json).collect()),
-            "lastRead": thread.last_read.map(iso8601),
-            "messages": thread.messages.iter().map(ChatMessage::json).collect::<Vec<_>>(),
-            "pending": thread.pending.iter().map(|pending| json!({
-                "id": pending.id, "text": pending.text, "created": iso8601(pending.created), "failure": pending.failure,
-            })).collect::<Vec<_>>(),
-            "more": thread.more, "loaded": thread.loaded, "failure": thread.failure,
-            "loadingEarlier": state.earlier.contains(key),
+        answers::json(&ChatThread {
+            account: key.account.clone(),
+            space: key.space.clone(),
+            title: space.map(|space| space.title.clone()),
+            me,
+            members: space.map_or_else(Vec::new, |space| space.members.iter().map(ChatUser::answer).collect()),
+            last_read: thread.last_read.map(iso8601),
+            messages: thread.messages.iter().map(ChatMessage::answer).collect(),
+            pending: thread
+                .pending
+                .iter()
+                .map(|pending| ChatPending {
+                    id: pending.id.clone(),
+                    text: pending.text.clone(),
+                    created: Some(iso8601(pending.created)),
+                    failure: pending.failure.clone(),
+                })
+                .collect(),
+            more: thread.more,
+            loaded: thread.loaded,
+            failure: thread.failure.clone(),
+            loading_earlier: state.earlier.contains(key),
         })
     }
 

@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::accounts::{AccountRecord, Accounts};
+use crate::answers::{self, CalendarAccount, CalendarAgenda, CalendarDays, CalendarItem};
 use crate::api::Priority;
-use crate::calendar_api::{Calendar, CalendarEvent, CalendarRemote, local_day, local_midnight, local_zone};
+use crate::calendar_api::{CalendarEvent, CalendarInfo, CalendarRemote, local_day, local_midnight, local_zone};
 use crate::cache::MailCache;
 use crate::commands::Arguments;
 use crate::mail::Mail;
@@ -36,7 +37,7 @@ const FUTURE_DAYS: i64 = 60;
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CalendarCopy {
     pub fetched: Date,
-    pub calendars: Vec<Calendar>,
+    pub calendars: Vec<CalendarInfo>,
     pub events: Vec<CalendarEvent>,
     /// [`COPY_FORMAT`] when it was fetched: a copy from an older one paints, then is fetched.
     #[serde(default)]
@@ -313,51 +314,51 @@ impl CalendarStore {
         let end = local_midnight(&(end + chrono::Duration::days(days)).format("%Y-%m-%d").to_string()).unwrap_or(start);
         let state = self.state();
         let mut accounts = Vec::new();
-        let mut events: Vec<(Date, bool, Value)> = Vec::new();
+        let mut events: Vec<(Date, CalendarItem)> = Vec::new();
         for record in self.accounts.list() {
             if only.is_some_and(|only| only != record.id) {
                 continue;
             }
             let account = state.accounts.get(&record.id);
             let copy = account.and_then(|account| account.copy.as_ref());
-            accounts.push(json!({
-                "id": record.id, "label": record.label, "provider": record.provider.as_str(),
-                "granted": account.is_some(),
-                "writable": account.is_some() && record.can_edit_calendars(),
-                "loading": account.is_some_and(|account| account.fetching),
-                "problem": account.and_then(|account| account.problem.as_deref()),
-                "fetched": copy.map(|copy| iso8601(copy.fetched)),
-                "calendars": copy.map_or(Vec::new(), |copy| copy.calendars.clone()),
-            }));
+            accounts.push(CalendarAccount {
+                id: record.id.clone(),
+                label: record.label.clone(),
+                provider: record.provider,
+                granted: account.is_some(),
+                writable: account.is_some() && record.can_edit_calendars(),
+                loading: account.is_some_and(|account| account.fetching),
+                problem: account.and_then(|account| account.problem.clone()),
+                fetched: copy.map(|copy| iso8601(copy.fetched)),
+                calendars: copy.map_or(Vec::new(), |copy| copy.calendars.clone()),
+            });
             let Some(copy) = copy else { continue };
-            let calendars: HashMap<&str, &Calendar> =
+            let calendars: HashMap<&str, &CalendarInfo> =
                 copy.calendars.iter().map(|calendar| (calendar.id.as_str(), calendar)).collect();
             for event in &copy.events {
                 let overlaps =
                     if event.end > event.start { event.end > start && event.start < end } else { event.start >= start && event.start < end };
                 if overlaps {
                     let calendar = calendars.get(event.calendar.as_str()).copied();
-                    let mut value = event.json(&record.id, calendar);
-                    value["editable"] = json!(editable(&record, calendar, event));
-                    events.push((event.start, event.all_day, value));
+                    events.push((event.start, event.item(&record.id, calendar, editable(&record, calendar, event))));
                 }
             }
         }
         // All-day events first on their day, then by start.
-        events.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+        events.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.all_day.cmp(&a.1.all_day)));
         let loading = state.accounts.values().any(|account| account.fetching);
-        Ok(json!({
-            "accounts": accounts,
-            "loading": loading,
-            "synced": { "from": local_day(-PAST_DAYS), "until": local_day(FUTURE_DAYS + 1) },
-            "events": events.into_iter().map(|(_, _, event)| event).collect::<Vec<_>>(),
-            "timeZone": local_zone(),
+        Ok(answers::json(&CalendarAgenda {
+            accounts,
+            loading,
+            events: events.into_iter().map(|(_, event)| event).collect(),
+            time_zone: local_zone(),
+            synced: CalendarDays { from: local_day(-PAST_DAYS), until: local_day(FUTURE_DAYS + 1) },
         }))
     }
 }
 
 /// Whether `record` may change or delete `event`: it organizes it, on a calendar it may write
 /// to, and its sign-in lets it change events.
-fn editable(record: &AccountRecord, calendar: Option<&Calendar>, event: &CalendarEvent) -> bool {
+fn editable(record: &AccountRecord, calendar: Option<&CalendarInfo>, event: &CalendarEvent) -> bool {
     event.mine && calendar.is_some_and(|calendar| calendar.writable) && record.can_edit_calendars()
 }

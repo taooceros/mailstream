@@ -15,9 +15,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::Mail;
+use crate::answers::{self, AutoReadEntry, AutoReadLog, BatchFailure, BatchResult};
 use crate::commands::Arguments;
 use crate::model::{Conversation, Date, iso8601, now};
 use crate::settings::Setting;
@@ -35,9 +36,9 @@ const LOG_LIMIT: usize = 200;
 const DAY: f64 = 86_400.0;
 
 /// Why a conversation counted as stale.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 #[serde(rename_all = "lowercase")]
-pub enum Reason {
+pub enum AutoReadReason {
     /// Its latest message is `autoRead.days` old.
     Age,
     /// A newsletter whose sender sent a newer one.
@@ -55,7 +56,7 @@ struct Entry {
     sender: String,
     subject: String,
     category: Category,
-    reason: Reason,
+    reason: AutoReadReason,
     at: Date,
     /// The pass that marked it; undo without ids takes the latest.
     batch: u64,
@@ -84,7 +85,7 @@ struct Pick {
     conversation: Conversation,
     key: String,
     category: Category,
-    reason: Reason,
+    reason: AutoReadReason,
 }
 
 pub(super) struct AutoRead {
@@ -142,9 +143,9 @@ fn stale(
             continue;
         }
         let reason = if conversation.latest_date.is_some_and(|date| date <= cutoff) {
-            Reason::Age
+            AutoReadReason::Age
         } else if superseded {
-            Reason::Superseded
+            AutoReadReason::Superseded
         } else {
             continue;
         };
@@ -289,20 +290,24 @@ impl Mail {
         match command {
             "mail.autoread" => {
                 let saved = self.saved_auto_read().await;
-                let entries: Vec<Value> = saved
+                let entries = saved
                     .entries
                     .iter()
-                    .map(|entry| {
-                        json!({
-                            "id": entry.id, "account": entry.account, "sender": entry.sender, "subject": entry.subject,
-                            "category": entry.category, "reason": entry.reason, "at": iso8601(entry.at), "batch": entry.batch,
-                        })
+                    .map(|entry| AutoReadEntry {
+                        id: entry.id.clone(),
+                        account: entry.account.clone(),
+                        sender: entry.sender.clone(),
+                        subject: entry.subject.clone(),
+                        category: entry.category,
+                        reason: entry.reason,
+                        at: iso8601(entry.at),
+                        batch: entry.batch,
                     })
                     .collect();
-                Ok(json!({
-                    "enabled": self.auto_read_enabled(),
-                    "days": self.settings.value(Setting::AutoReadDays),
-                    "entries": entries,
+                Ok(answers::json(&AutoReadLog {
+                    enabled: self.auto_read_enabled(),
+                    days: self.settings.value(Setting::AutoReadDays).as_i64().unwrap_or_default(),
+                    entries,
                 }))
             }
             "mail.autoread.undo" => self.undo_auto_read(args.list("ids")).await,
@@ -319,12 +324,12 @@ impl Mail {
             let latest = saved.entries.iter().map(|entry| entry.batch).max();
             saved.entries.iter().filter(|entry| Some(entry.batch) == latest).map(|entry| entry.id.clone()).collect()
         });
-        let mut failed: Vec<Value> = Vec::new();
+        let mut failed: Vec<BatchFailure> = Vec::new();
         let mut by_account: HashMap<String, Vec<Conversation>> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
         for id in &ids {
             if !saved.entries.iter().any(|entry| entry.id == *id) {
-                failed.push(json!({ "id": id, "code": "not_found", "message": format!("{id} was not auto-read.") }));
+                failed.push(BatchFailure { id: id.clone(), code: Some("not_found".into()), message: format!("{id} was not auto-read.") });
                 continue;
             }
             match self.known(id) {
@@ -335,7 +340,7 @@ impl Mail {
                     }
                     by_account.entry(account).or_default().push(known.conversation);
                 }
-                Err(error) => failed.push(json!({ "id": id, "code": error.code, "message": error.message })),
+                Err(error) => failed.push(BatchFailure::of(id, &error)),
             }
         }
         let mut done: Vec<String> = Vec::new();
@@ -343,9 +348,7 @@ impl Mail {
             let conversations = by_account.remove(&account).unwrap_or_default();
             match self.set_read_all(&conversations, false).await {
                 Ok(()) => done.extend(conversations.into_iter().map(|conversation| conversation.id)),
-                Err(error) => failed.extend(conversations.iter().map(|conversation| {
-                    json!({ "id": conversation.id, "code": error.code, "message": error.message })
-                })),
+                Err(error) => failed.extend(conversations.iter().map(|conversation| BatchFailure::of(&conversation.id, &error))),
             }
         }
         if !done.is_empty() {
@@ -354,7 +357,7 @@ impl Mail {
             self.cache.save_auto_read(&saved);
             self.events.emit_soon("autoRead");
         }
-        Ok(json!({ "done": done, "failed": failed }))
+        Ok(answers::json(&BatchResult { done, failed }))
     }
 }
 
@@ -440,8 +443,8 @@ mod tests {
             NOW,
             3.0,
         );
-        let picked: Vec<(&str, Reason)> = picks.iter().map(|pick| (pick.key.as_str(), pick.reason)).collect();
-        assert_eq!(picked, [("n2@x", Reason::Superseded), ("a1@x", Reason::Age)]);
+        let picked: Vec<(&str, AutoReadReason)> = picks.iter().map(|pick| (pick.key.as_str(), pick.reason)).collect();
+        assert_eq!(picked, [("n2@x", AutoReadReason::Superseded), ("a1@x", AutoReadReason::Age)]);
         assert_eq!(picks[1].category, Category::Notification);
         // A longer wait leaves only the superseded newsletter.
         let picks = stale(&candidates, |c| tags.get(tagging::key(c).as_str()).cloned(), |_| false, NOW, 7.0);

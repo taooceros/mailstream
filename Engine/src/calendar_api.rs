@@ -7,6 +7,7 @@ use chrono::{Local, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::answers::CalendarItem;
 use crate::api::{self, Api, ApiError, GooglePage, GraphPage, Listing, Priority, Request};
 use crate::ics::{Invitation, normalized_uid};
 use crate::model::{Date, date_from_unix, iso8601, now, parse_iso8601, unix_seconds};
@@ -25,9 +26,9 @@ const PAGES: usize = 20;
 const NOTES_LIMIT: usize = 4000;
 
 /// One of an account's calendars.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
 #[serde(rename_all = "camelCase")]
-pub struct Calendar {
+pub struct CalendarInfo {
     pub id: String,
     pub name: String,
     /// `#rrggbb` as the provider shows it; none when it picks no color.
@@ -43,9 +44,9 @@ pub struct Calendar {
 }
 
 /// An organizer or attendee.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
 #[serde(rename_all = "camelCase")]
-pub struct Person {
+pub struct CalendarPerson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -78,9 +79,9 @@ pub struct CalendarEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meeting_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub organizer: Option<Person>,
+    pub organizer: Option<CalendarPerson>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attendees: Vec<Person>,
+    pub attendees: Vec<CalendarPerson>,
     /// The account's answer to the invitation: `accepted`, `tentative`, `declined`,
     /// `needsAction`, or `organizer` for its own meeting; none for an event without guests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,22 +110,42 @@ pub struct CalendarEvent {
 }
 
 impl CalendarEvent {
-    /// As `calendar.events` answers it, with its calendar's name and color.
-    pub fn json(&self, account: &str, calendar: Option<&Calendar>) -> Value {
-        let mut value = serde_json::to_value(self).expect("events encode");
-        value["account"] = json!(account);
-        value["start"] = json!(iso8601(self.start));
-        value["end"] = json!(iso8601(self.end));
-        value["calendarName"] = json!(calendar.map(|calendar| calendar.name.as_str()));
-        value["color"] = json!(calendar.and_then(|calendar| calendar.color.as_deref()));
-        value
+    /// As `calendar.events` answers it, with its account, its calendar's name and color, and
+    /// whether the account may change it.
+    pub fn item(&self, account: &str, calendar: Option<&CalendarInfo>, editable: bool) -> CalendarItem {
+        let event = self.clone();
+        CalendarItem {
+            account: account.into(),
+            calendar: event.calendar,
+            calendar_name: calendar.map(|calendar| calendar.name.clone()),
+            color: calendar.and_then(|calendar| calendar.color.clone()),
+            id: event.id,
+            title: event.title,
+            start: iso8601(event.start),
+            end: iso8601(event.end),
+            all_day: event.all_day,
+            start_day: event.start_day,
+            end_day: event.end_day,
+            location: event.location,
+            meeting_url: event.meeting_url,
+            organizer: event.organizer,
+            attendees: event.attendees,
+            response: event.response,
+            notes: event.notes,
+            notes_cut: event.notes_cut,
+            link: event.link,
+            uid: event.uid,
+            series: event.series,
+            mine: event.mine,
+            editable,
+        }
     }
 }
 
 /// An account's calendars and their events from `start` to `end`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Fetched {
-    pub calendars: Vec<Calendar>,
+    pub calendars: Vec<CalendarInfo>,
     pub events: Vec<CalendarEvent>,
 }
 
@@ -210,9 +231,9 @@ impl CalendarRemote<'_> {
 
     /// Fetches each calendar's events; a calendar the account may no longer read (shared ones
     /// taken back) is left out rather than failing the rest.
-    async fn each_calendar<F, Fut>(&self, calendars: &[Calendar], events: F) -> Result<Vec<CalendarEvent>, ApiError>
+    async fn each_calendar<F, Fut>(&self, calendars: &[CalendarInfo], events: F) -> Result<Vec<CalendarEvent>, ApiError>
     where
-        F: Fn(Calendar) -> Fut,
+        F: Fn(CalendarInfo) -> Fut,
         Fut: Future<Output = Result<Vec<CalendarEvent>, ApiError>>,
     {
         let results = futures::future::join_all(calendars.iter().cloned().map(events)).await;
@@ -234,10 +255,10 @@ impl CalendarRemote<'_> {
         let first = api::url(self.google, "users/me/calendarList", &[("minAccessRole", "reader"), ("maxResults", "250")]);
         let entries = self.all::<GooglePage<GoogleCalendar>>(first, None).await?;
         // The calendars Google Calendar shows: the primary one and those ticked in its list.
-        let calendars: Vec<Calendar> = entries
+        let calendars: Vec<CalendarInfo> = entries
             .into_iter()
             .filter(|entry| entry.primary == Some(true) || (entry.selected == Some(true) && entry.hidden != Some(true)))
-            .map(|entry| Calendar {
+            .map(|entry| CalendarInfo {
                 name: non_empty(entry.summary_override)
                     .or_else(|| non_empty(entry.summary))
                     .unwrap_or_else(|| entry.id.clone()),
@@ -278,9 +299,9 @@ impl CalendarRemote<'_> {
         let first =
             api::url(self.graph, "me/calendars", &[("$top", "100"), ("$select", "id,name,hexColor,isDefaultCalendar,canEdit")]);
         let found = self.all::<GraphPage<GraphCalendar>>(first, None).await?;
-        let calendars: Vec<Calendar> = found
+        let calendars: Vec<CalendarInfo> = found
             .into_iter()
-            .map(|calendar| Calendar {
+            .map(|calendar| CalendarInfo {
                 name: non_empty(calendar.name).unwrap_or_else(|| calendar.id.clone()),
                 id: calendar.id,
                 color: non_empty(calendar.hex_color),
@@ -518,8 +539,8 @@ struct GooglePerson {
 }
 
 impl GooglePerson {
-    fn person(&self) -> Person {
-        Person {
+    fn person(&self) -> CalendarPerson {
+        CalendarPerson {
             name: non_empty(self.display_name.clone()),
             email: non_empty(self.email.clone()),
             response: non_empty(self.response_status.clone()),
@@ -722,9 +743,9 @@ fn graph_response(response: Option<&str>) -> Option<String> {
     )
 }
 
-fn graph_person(address: Option<GraphAddress>, response: Option<String>) -> Person {
+fn graph_person(address: Option<GraphAddress>, response: Option<String>) -> CalendarPerson {
     let (name, email) = address.map_or((None, None), |address| (address.name, address.address));
-    Person { name: non_empty(name), email: non_empty(email), response }
+    CalendarPerson { name: non_empty(name), email: non_empty(email), response }
 }
 
 impl GraphEvent {
@@ -740,7 +761,7 @@ impl GraphEvent {
         } else {
             (start, end, None, None)
         };
-        let attendees: Vec<Person> = self
+        let attendees: Vec<CalendarPerson> = self
             .attendees
             .unwrap_or_default()
             .into_iter()

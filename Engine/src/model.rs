@@ -101,7 +101,7 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, uniffi::Record)]
 pub struct Address {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -172,7 +172,7 @@ impl Address {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, uniffi::Enum)]
 #[serde(rename_all = "lowercase")]
 pub enum MailboxRole {
     Inbox,

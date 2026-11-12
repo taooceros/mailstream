@@ -5,9 +5,9 @@ use std::collections::HashMap;
 
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Weekday};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
-use crate::calendar_api::{Person, local_midnight};
+use crate::answers::MeetingInvitation;
+use crate::calendar_api::{CalendarPerson, local_midnight};
 use crate::model::{Date, date_from_unix, iso8601};
 
 /// A meeting invitation, or the notice that one was cancelled, as the message states it. Whether
@@ -34,7 +34,7 @@ pub struct Invitation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub organizer: Option<Person>,
+    pub organizer: Option<CalendarPerson>,
     /// A recurring meeting, answered as a whole.
     #[serde(default)]
     pub recurring: bool,
@@ -49,11 +49,23 @@ pub struct Invitation {
 
 impl Invitation {
     /// As the reader gets it in `mail.show`.
-    pub fn json(&self) -> Value {
-        let mut value = serde_json::to_value(self).expect("invitations encode");
-        value["start"] = json!(iso8601(self.start));
-        value["end"] = json!(iso8601(self.end));
-        value
+    pub fn answer(&self) -> MeetingInvitation {
+        let invitation = self.clone();
+        MeetingInvitation {
+            method: invitation.method,
+            uid: invitation.uid,
+            title: invitation.title,
+            start: iso8601(invitation.start),
+            end: iso8601(invitation.end),
+            all_day: invitation.all_day,
+            start_day: invitation.start_day,
+            end_day: invitation.end_day,
+            location: invitation.location,
+            organizer: invitation.organizer,
+            recurring: invitation.recurring,
+            occurrence: invitation.occurrence,
+            event: invitation.event,
+        }
     }
 }
 
@@ -260,11 +272,11 @@ fn unescape(text: &str) -> String {
     out
 }
 
-fn person(property: &Property) -> Person {
+fn person(property: &Property) -> CalendarPerson {
     let value = property.value.trim();
     let email = value.get(..7).filter(|scheme| scheme.eq_ignore_ascii_case("mailto:")).map_or(value, |_| &value[7..]);
     let non_empty = |text: &str| Some(text.trim().to_string()).filter(|text| !text.is_empty());
-    Person { name: property.param("CN").and_then(non_empty), email: non_empty(email), response: None }
+    CalendarPerson { name: property.param("CN").and_then(non_empty), email: non_empty(email), response: None }
 }
 
 // MARK: - Times

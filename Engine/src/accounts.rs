@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
+use crate::answers;
 use crate::oauth::{GOOGLE_CALENDARS, GOOGLE_EVENTS, Grant, MICROSOFT_CALENDARS, MICROSOFT_CALENDARS_READ, Provider, has_scope};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,17 +25,20 @@ pub struct AccountRecord {
 
 impl AccountRecord {
     /// The account as `accounts.*` commands answer it.
-    pub fn json(&self) -> Value {
+    pub fn answer(&self) -> answers::Account {
         let scopes = self.scopes.join(" ").to_lowercase();
-        let mut services: Vec<&str> =
-            ["mail", "contacts", "chat"].into_iter().filter(|service| scopes.contains(service)).collect();
+        let mut services: Vec<String> =
+            ["mail", "contacts", "chat"].into_iter().filter(|service| scopes.contains(service)).map(String::from).collect();
         if self.has_calendars() {
-            services.push("calendar");
+            services.push("calendar".into());
         }
-        json!({
-            "id": self.id, "label": self.label, "provider": self.provider.as_str(), "name": self.display_name,
-            "services": services,
-        })
+        answers::Account {
+            id: self.id.clone(),
+            label: self.label.clone(),
+            provider: self.provider,
+            name: self.display_name.clone(),
+            services,
+        }
     }
 
     /// Whether its sign-in lets it read its calendars: those signed in before Mailstream asked
@@ -147,7 +150,7 @@ mod tests {
         std::fs::write(dir.join("accounts.json"), swift).unwrap();
         let accounts = Accounts::new(&dir);
         let me = accounts.record("me@x.com").unwrap();
-        assert_eq!(me.json()["services"], json!(["mail", "chat"]));
+        assert_eq!(me.answer().services, ["mail", "chat"]);
         // A rename to the same label writes the same bytes back.
         accounts.rename("me@x.com", "  Work ").unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("accounts.json")).unwrap(), swift);

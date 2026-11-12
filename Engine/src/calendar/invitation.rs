@@ -8,12 +8,13 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::{CalendarStore, FRESH};
+use crate::EngineError;
 use crate::accounts::AccountRecord;
+use crate::answers::{self, InvitationStatus};
 use crate::calendar_api::{CalendarEvent, matching};
 use crate::commands::Arguments;
 use crate::ics::{Invitation, normalized_uid};
 use crate::model::now;
-use crate::EngineError;
 
 /// The answers `calendar.respond` gives, in Google's words.
 pub const RESPONSES: &[&str] = &["accepted", "tentative", "declined"];
@@ -34,27 +35,37 @@ impl CalendarStore {
         let (account, invitation) = self.mail.invitation(&args.required("id")?, &args.required("message")?).await?;
         let record = self.accounts.record(&account);
         let granted = record.as_ref().is_some_and(AccountRecord::has_calendars);
-        let mut answer = json!({
-            "account": account,
-            "invitation": invitation.as_ref().map(Invitation::json),
-            "granted": granted,
-            "editable": record.as_ref().is_some_and(AccountRecord::can_edit_calendars),
-            "event": null, "calendar": null, "target": null, "problem": null,
-        });
-        let (Some(invitation), Some(record)) = (invitation, record.filter(|_| granted)) else { return Ok(answer) };
-        let (event, calendar) = match self.find(&record, &invitation).await {
-            Ok(found) => found,
-            Err(message) => {
-                answer["problem"] = json!(message);
-                return Ok(answer);
-            }
+        let mut answer = InvitationStatus {
+            account,
+            invitation: invitation.as_ref().map(Invitation::answer),
+            granted,
+            editable: record.as_ref().is_some_and(AccountRecord::can_edit_calendars),
+            event: None,
+            calendar: None,
+            target: None,
+            problem: None,
         };
-        let Some(event) = event else { return Ok(answer) };
-        let target = if invitation.recurring { event.series.clone().unwrap_or_else(|| event.id.clone()) } else { event.id.clone() };
-        answer["calendar"] = json!(event.calendar);
-        answer["target"] = json!(target);
-        answer["event"] = event.json(&account, calendar.as_ref());
-        Ok(answer)
+        if let (Some(invitation), Some(record)) = (invitation, record.filter(|_| granted)) {
+            match self.find(&record, &invitation).await {
+                Ok((Some(event), calendar)) => {
+                    answer.target = Some(if invitation.recurring {
+                        event.series.clone().unwrap_or_else(|| event.id.clone())
+                    } else {
+                        event.id.clone()
+                    });
+                    answer.calendar = Some(event.calendar.clone());
+                    answer.event = Some(event.item(&answer.account, calendar.as_ref(), false));
+                }
+                Ok((None, _)) => {}
+                Err(message) => answer.problem = Some(message),
+            }
+        }
+        // The event's JSON here has no `editable`: answering needs only the account's sign-in.
+        let mut json = answers::json(&answer);
+        if let Some(event) = json["event"].as_object_mut() {
+            event.remove("editable");
+        }
+        Ok(json)
     }
 
     /// The event `invitation` names in `record`'s calendar, with that calendar: from the
@@ -63,7 +74,7 @@ impl CalendarStore {
         &self,
         record: &AccountRecord,
         invitation: &Invitation,
-    ) -> Result<(Option<CalendarEvent>, Option<crate::calendar_api::Calendar>), String> {
+    ) -> Result<(Option<CalendarEvent>, Option<crate::calendar_api::CalendarInfo>), String> {
         let key = lookup_key(invitation).map(|key| (record.id.clone(), key));
         {
             let state = self.state();

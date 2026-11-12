@@ -13,6 +13,7 @@ use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
 
 use super::Mail;
+use crate::answers::{self, Person};
 use crate::commands::Arguments;
 use crate::model::{Address, DISTANT_PAST, Date, Envelope};
 
@@ -189,16 +190,16 @@ impl Mail {
         }
         let limit = args.int("limit").unwrap_or(10).clamp(1, SUGGESTIONS as i64) as usize;
         let contacts = self.contacts(people).await;
-        let found: Vec<Value> = suggestions(&contacts, &query)
+        let found: Vec<Person> = suggestions(&contacts, &query)
             .into_iter()
             .take(limit)
             .map(|contact| {
                 let display = contact.address.display_name();
                 let name = (display != contact.address.email).then_some(display);
-                json!({ "name": name, "email": contact.address.email })
+                Person { name, email: contact.address.email.clone(), avatar: Default::default() }
             })
             .collect();
-        Value::Array(found)
+        answers::json(&found)
     }
 
     /// Everyone compose completes to, loaded once a minute and shared by searches that arrive

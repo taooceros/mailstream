@@ -6,9 +6,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{Known, Mail};
+use crate::answers::{self, BatchFailure, BatchResult};
 use crate::api::ApiError;
 use crate::backend::{Backend, Flag};
 use crate::cache::CachedListing;
@@ -83,8 +84,8 @@ impl Mail {
         if ids.is_empty() {
             return Err(EngineError::usage("Give at least one conversation id."));
         }
-        let mut done: Vec<Value> = Vec::new();
-        let mut failed: Vec<Value> = Vec::new();
+        let mut done: Vec<String> = Vec::new();
+        let mut failed: Vec<BatchFailure> = Vec::new();
         for id in ids {
             let outcome = match self.known(&id) {
                 Ok(known) => self.act_on(command, args, known).await,
@@ -105,12 +106,12 @@ impl Mail {
                             }
                         }
                     }
-                    done.push(json!(id));
+                    done.push(id);
                 }
-                Err(error) => failed.push(json!({ "id": id, "code": error.code, "message": error.message })),
+                Err(error) => failed.push(BatchFailure::of(&id, &error)),
             }
         }
-        Ok(json!({ "done": done, "failed": failed }))
+        Ok(answers::json(&BatchResult { done, failed }))
     }
 
     async fn act_on(self: &Arc<Self>, command: &str, args: &Arguments, known: Known) -> Result<Outcome, EngineError> {

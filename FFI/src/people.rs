@@ -1,18 +1,7 @@
 //! The people compose completes addresses to (`contacts.search`).
-use serde::Deserialize;
 use serde_json::json;
 
-use crate::{MailError, Mailstream, call};
-
-/// Someone from the accounts' Google and Outlook directories or recent correspondents.
-#[derive(Clone, Debug, Deserialize, uniffi::Record)]
-pub struct Person {
-    pub name: Option<String>,
-    pub email: String,
-    #[serde(skip)]
-    #[uniffi(default)]
-    pub avatar: crate::Avatar,
-}
+use crate::{MailError, Mailstream, Person, call};
 
 #[uniffi::export]
 impl Mailstream {

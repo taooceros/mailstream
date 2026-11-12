@@ -9,7 +9,8 @@ use serde_json::{Value, json};
 
 use super::{CalendarStore, editable};
 use crate::EngineError;
-use crate::calendar_api::{Calendar, CalendarEvent, EventFields};
+use crate::answers;
+use crate::calendar_api::{CalendarEvent, CalendarInfo, EventFields};
 use crate::commands::Arguments;
 use crate::model::unix_seconds;
 
@@ -20,7 +21,7 @@ fn provider(error: crate::api::ApiError) -> EngineError {
 impl CalendarStore {
     /// The calendar `args` name (the account's own one by default) and, for a change or a
     /// deletion, its event `id`, as last fetched.
-    fn target(&self, account: &str, command: &str, args: &Arguments) -> Result<(Calendar, Option<CalendarEvent>), EngineError> {
+    fn target(&self, account: &str, command: &str, args: &Arguments) -> Result<(CalendarInfo, Option<CalendarEvent>), EngineError> {
         let state = self.state();
         let copy = state.accounts.get(account).and_then(|entry| entry.copy.as_ref()).ok_or_else(|| {
             EngineError::new("no_calendar", format!("{account}'s calendars have not been fetched yet; try again shortly."))
@@ -105,8 +106,7 @@ impl CalendarStore {
             }
             _ => unreachable!("a change has its event"),
         };
-        let mut answer = saved.json(account, Some(&calendar));
-        answer["editable"] = json!(editable(&record, Some(&calendar), &saved));
+        let answer = answers::json(&saved.item(account, Some(&calendar), editable(&record, Some(&calendar), &saved)));
         self.changed(account, move |copy| {
             copy.events.retain(|kept| !(kept.calendar == saved.calendar && kept.id == saved.id));
             let at = copy.events.partition_point(|kept| kept.start < saved.start);

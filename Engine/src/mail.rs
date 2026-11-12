@@ -17,6 +17,7 @@ use futures::FutureExt;
 use serde_json::{Map, Value, json};
 
 use crate::accounts::Accounts;
+use crate::answers;
 use crate::api::{Api, ApiError, Priority};
 use crate::backend::{Backend, Endpoints};
 use crate::cache::{CachedListing, MailCache};
@@ -33,6 +34,7 @@ use crate::{EngineError, Events, threader};
 
 mod actions;
 mod autoread;
+pub use autoread::AutoReadReason;
 mod contacts;
 mod sending;
 mod tagsync;
@@ -336,16 +338,16 @@ impl Mail {
     }
 
     /// `status`'s accounts: the mail store's, and whether their mailboxes have loaded.
-    pub(crate) fn account_statuses(&self) -> Vec<Value> {
+    pub(crate) fn account_statuses(&self) -> Vec<answers::AccountStatus> {
         let state = self.state();
         state
             .accounts
             .iter()
-            .map(|account| {
-                json!({
-                    "id": account.name, "label": account.label, "provider": account.provider.as_str(),
-                    "mailboxesLoaded": state.mailboxes.get(&account.name).is_some_and(|list| !list.is_empty()),
-                })
+            .map(|account| answers::AccountStatus {
+                id: account.name.clone(),
+                label: account.label.clone(),
+                provider: account.provider,
+                mailboxes_loaded: state.mailboxes.get(&account.name).is_some_and(|list| !list.is_empty()),
             })
             .collect()
     }
@@ -1079,19 +1081,20 @@ impl Mail {
         let state = self.state();
         let mut out = Map::new();
         for name in names {
-            let boxes: Vec<Value> = state
+            let boxes: Vec<answers::Mailbox> = state
                 .mailboxes
                 .get(&name)
                 .into_iter()
                 .flatten()
-                .map(|mailbox| {
-                    json!({
-                        "id": mailbox.id, "name": mailbox.display_name(), "role": mailbox.role.as_str(),
-                        "unread": mailbox.unread, "total": mailbox.total,
-                    })
+                .map(|mailbox| answers::Mailbox {
+                    id: mailbox.id.clone(),
+                    name: mailbox.display_name().into(),
+                    role: mailbox.role,
+                    unread: mailbox.unread,
+                    total: mailbox.total,
                 })
                 .collect();
-            out.insert(name, Value::Array(boxes));
+            out.insert(name, answers::json(&boxes));
         }
         Ok(Value::Object(out))
     }
@@ -1185,7 +1188,7 @@ impl Mail {
         if listing.primary.is_empty() && !listing.failures.is_empty() {
             return Err(EngineError::new("provider", listing.failures.join("; ")));
         }
-        let summaries: Vec<Value> = {
+        let conversations: Vec<answers::Conversation> = {
             let mut state = self.state();
             for conversation in &listing.conversations {
                 remember(&mut state, conversation, &listing.primary);
@@ -1203,14 +1206,19 @@ impl Mail {
             })
             .collect();
         self.contents.prefetch(prefetch);
-        let mut answer = json!({ "conversations": summaries, "failures": listing.failures });
-        if query.is_none() {
-            answer["next"] = json!(listing.next.map(|cursor| cursor.text()));
+        let mut answer = answers::json(&answers::Listing {
+            conversations,
+            failures: listing.failures,
+            next: listing.next.map(|cursor| cursor.text()),
+        });
+        // Searches have no pages.
+        if query.is_some() {
+            answer.as_object_mut().expect("a listing is an object").remove("next");
         }
         Ok(answer)
     }
 
-    fn summary(&self, state: &State, conversation: &Conversation) -> Value {
+    fn summary(&self, state: &State, conversation: &Conversation) -> answers::Conversation {
         let own = Self::own_addresses(state);
         let incoming = conversation.latest_incoming(&own).unwrap_or_else(|| conversation.latest());
         let mut seen = HashSet::new();
@@ -1221,27 +1229,32 @@ impl Mail {
             .filter(|address| seen.insert(address.normalized_email()))
             .map(|address| if own.contains(&address.normalized_email()) { "me".into() } else { address.display_name() })
             .collect();
-        let mut roles: Vec<&str> = conversation.messages.iter().map(|message| message.role.as_str()).collect();
-        roles.sort();
+        let mut roles: Vec<MailboxRole> = conversation.messages.iter().map(|message| message.role).collect();
+        roles.sort_by_key(|role| role.as_str());
         roles.dedup();
         let tag = self.tag(conversation);
-        json!({
-            "id": conversation.id,
-            "account": conversation.account,
-            "subject": conversation.subject,
-            "date": conversation.latest_date.map(iso8601),
-            "from": incoming.envelope.from.first().map(Address::text),
-            "participants": participants,
-            "messageCount": conversation.messages.len(),
-            "unread": conversation.is_unread,
-            "starred": conversation.is_flagged,
-            "hasAttachment": conversation.has_attachment,
-            "mailboxes": roles,
-            "snippet": self.contents.snippet(&conversation.latest().message_ref()),
-            "category": tag.as_ref().map(|tag| tag.category),
-            "waiting": tag.as_ref().is_some_and(|tag| tag.to_respond),
-            "labels": tag.map(|tag| tag.labels).unwrap_or_default(),
-        })
+        answers::Conversation {
+            id: conversation.id.clone(),
+            account: conversation.account.clone(),
+            subject: conversation.subject.clone(),
+            date: conversation.latest_date.map(iso8601),
+            from: incoming.envelope.from.first().cloned(),
+            participants,
+            message_count: conversation.messages.len() as u32,
+            unread: conversation.is_unread,
+            starred: conversation.is_flagged,
+            has_attachment: conversation.has_attachment,
+            mailboxes: roles,
+            snippet: self.contents.snippet(&conversation.latest().message_ref()),
+            category: tag.as_ref().map(|tag| tag.category),
+            waiting: tag.as_ref().is_some_and(|tag| tag.to_respond),
+            labels: tag.map(|tag| tag.labels).unwrap_or_default(),
+            tag: String::new(),
+            title: String::new(),
+            when: String::new(),
+            section: String::new(),
+            avatar: Default::default(),
+        }
     }
 
     /// A conversation handed out before, or one of the default list's.
@@ -1301,7 +1314,7 @@ impl Mail {
             self.contents.load(&reference, backend).await
         }))
         .await;
-        let mut out = {
+        let summary = {
             let state = self.state();
             self.summary(&state, conversation)
         };
@@ -1311,6 +1324,7 @@ impl Mail {
             .zip(bodies)
             .map(|(message, body)| self.message_json(message, body, max_chars, html))
             .collect();
+        let mut out = answers::json(&summary);
         out["messages"] = Value::Array(messages);
         Ok(out)
     }
@@ -1323,13 +1337,29 @@ impl Mail {
         html: bool,
     ) -> Value {
         let envelope = &message.envelope;
-        let texts = |list: &[Address]| list.iter().map(Address::text).collect::<Vec<_>>();
-        let mut item = json!({
-            "id": envelope.id, "mailbox": message.mailbox(), "role": message.role.as_str(),
-            "from": texts(&envelope.from), "to": texts(&envelope.to),
-            "date": envelope.date.map(iso8601), "subject": envelope.subject,
-            "unread": !envelope.is_seen(), "starred": envelope.is_flagged(),
-        });
+        let mut item = answers::Message {
+            id: envelope.id.clone(),
+            mailbox: message.mailbox().into(),
+            role: message.role,
+            from: envelope.from.clone(),
+            to: envelope.to.clone(),
+            cc: Vec::new(),
+            date: envelope.date.map(iso8601),
+            subject: envelope.subject.clone(),
+            unread: !envelope.is_seen(),
+            starred: envelope.is_flagged(),
+            text: None,
+            truncated: false,
+            attachments: Vec::new(),
+            html: None,
+            error: None,
+            invitation: None,
+            when: String::new(),
+            time: String::new(),
+            avatar: Default::default(),
+            divider: String::new(),
+            continued: false,
+        };
         match body {
             Ok(content) => {
                 let text = content
@@ -1340,34 +1370,40 @@ impl Mail {
                     .unwrap_or_default();
                 let (shown, truncated) = crate::text::prefix_characters(&text, max_chars);
                 let reference = message.message_ref();
-                item["cc"] = json!(texts(&content.cc));
-                item["text"] = json!(shown);
-                item["truncated"] = json!(truncated);
+                item.cc = content.cc.clone();
+                item.text = Some(shown.into());
+                item.truncated = truncated;
                 if html && let Some(body) = &content.html {
                     // Inline parts point at the reader's `mscid:` scheme; other clients read the cached files.
-                    item["html"] = json!(
-                        body.replace(&MailCache::part_url_base(&reference), &self.cache.message_directory_url(&reference))
+                    item.html = Some(
+                        body.replace(&MailCache::part_url_base(&reference), &self.cache.message_directory_url(&reference)),
                     );
                 }
-                let attachments: Vec<Value> = content
+                item.attachments = content
                     .attachments
                     .iter()
                     .filter(|attachment| !attachment.inline)
-                    .map(|attachment| {
-                        json!({
-                            "filename": attachment.filename, "mime": attachment.mime, "size": attachment.size,
-                            "path": self.cache.attachment_path(&attachment.stored_name, &reference).to_string_lossy(),
-                        })
+                    .map(|attachment| answers::Attachment {
+                        filename: attachment.filename.clone(),
+                        mime: attachment.mime.clone(),
+                        size: attachment.size,
+                        path: self.cache.attachment_path(&attachment.stored_name, &reference).to_string_lossy().into(),
                     })
                     .collect();
-                item["attachments"] = Value::Array(attachments);
-                if let Some(invitation) = self.invitation_of(&content, &reference) {
-                    item["invitation"] = invitation.json();
-                }
+                item.invitation = self.invitation_of(&content, &reference).as_ref().map(crate::ics::Invitation::answer);
+                answers::json(&item)
             }
-            Err(message) => item["error"] = json!(message),
+            Err(message) => {
+                item.error = Some(message);
+                // A body that did not load has none of its fields.
+                let mut json = answers::json(&item);
+                let fields = json.as_object_mut().expect("a message is an object");
+                for field in ["cc", "truncated", "attachments"] {
+                    fields.remove(field);
+                }
+                json
+            }
         }
-        item
     }
 
     /// The invitation message `message` of conversation `id` carries, and the account it came to.

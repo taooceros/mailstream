@@ -16,8 +16,8 @@ use pulldown_cmark::{Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd
 use regex::Regex;
 
 /// How a run of text is drawn.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Style {
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct ChatStyle {
     pub bold: bool,
     pub italic: bool,
     pub strike: bool,
@@ -28,31 +28,32 @@ pub struct Style {
     pub link: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Span {
+/// A run of a message's text and how it is drawn.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ChatSpan {
     pub text: String,
-    pub style: Style,
+    pub style: ChatStyle,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlockKind {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ChatBlockKind {
     Paragraph,
     /// 1 to 6.
-    Heading(u8),
+    Heading { level: u8 },
     /// A fenced or indented block: one span, its text as written.
     Code,
     Rule,
-    /// Its [`Block::rows`], the header row first.
+    /// Its [`ChatBlock::rows`], the header row first.
     Table,
 }
 
-/// One block of a message, in order.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Block {
-    pub kind: BlockKind,
-    pub spans: Vec<Span>,
+/// One block of a message, in order: blocks are drawn one below the other.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ChatBlock {
+    pub kind: ChatBlockKind,
+    pub spans: Vec<ChatSpan>,
     /// A table's rows of cells.
-    pub rows: Vec<Vec<Vec<Span>>>,
+    pub rows: Vec<Vec<Vec<ChatSpan>>>,
     /// How many quotes it sits in.
     pub quote: u32,
     /// How many lists it sits in.
@@ -64,8 +65,8 @@ pub struct Block {
     pub tight: bool,
 }
 
-impl Block {
-    fn new(kind: BlockKind) -> Self {
+impl ChatBlock {
+    fn new(kind: ChatBlockKind) -> Self {
         Self { kind, spans: Vec::new(), rows: Vec::new(), quote: 0, indent: 0, marker: None, tight: false }
     }
 }
@@ -78,7 +79,7 @@ static TOKEN: LazyLock<Regex> =
 
 /// `markup` laid out; `name` gives the name a mention shows for a `users/…` id or an address
 /// (`users/all` reads as "all").
-pub fn parse(markup: &str, name: &dyn Fn(&str) -> Option<String>) -> Vec<Block> {
+pub fn parse(markup: &str, name: &dyn Fn(&str) -> Option<String>) -> Vec<ChatBlock> {
     let mut builder = Builder::new(name);
     for event in Parser::new_ext(markup, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH) {
         builder.event(event);
@@ -104,9 +105,9 @@ pub fn plain(markup: &str) -> String {
 
 struct Builder<'a> {
     name: &'a dyn Fn(&str) -> Option<String>,
-    blocks: Vec<Block>,
+    blocks: Vec<ChatBlock>,
     /// The open paragraph, heading or code block.
-    current: Option<Block>,
+    current: Option<ChatBlock>,
     quote: u32,
     /// Each open list's next number; `None` for bullets.
     lists: Vec<Option<u64>>,
@@ -127,9 +128,9 @@ struct Builder<'a> {
 
 #[derive(Default)]
 struct Table {
-    rows: Vec<Vec<Vec<Span>>>,
-    row: Vec<Vec<Span>>,
-    cell: Option<Vec<Span>>,
+    rows: Vec<Vec<Vec<ChatSpan>>>,
+    row: Vec<Vec<ChatSpan>>,
+    cell: Option<Vec<ChatSpan>>,
 }
 
 impl<'a> Builder<'a> {
@@ -157,7 +158,7 @@ impl<'a> Builder<'a> {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
             Event::Text(text) => match &mut self.current {
-                Some(block) if block.kind == BlockKind::Code => block.spans[0].text.push_str(&text),
+                Some(block) if block.kind == ChatBlockKind::Code => block.spans[0].text.push_str(&text),
                 _ => match self.label.take() {
                     Some(label) => self.pending.push_str(&label),
                     None => self.pending.push_str(&text),
@@ -165,7 +166,7 @@ impl<'a> Builder<'a> {
             },
             Event::Code(code) => {
                 self.flush();
-                let style = Style { code: true, ..self.style() };
+                let style = ChatStyle { code: true, ..self.style() };
                 self.push(code.into_string(), style);
             }
             Event::InlineHtml(html) | Event::Html(html) => {
@@ -176,7 +177,7 @@ impl<'a> Builder<'a> {
             Event::HardBreak => self.pending.push('\n'),
             Event::Rule => {
                 self.close();
-                self.open(BlockKind::Rule, false);
+                self.open(ChatBlockKind::Rule, false);
                 self.close();
             }
             Event::TaskListMarker(done) => self.pending.push_str(if done { "☑ " } else { "☐ " }),
@@ -188,17 +189,17 @@ impl<'a> Builder<'a> {
         match tag {
             Tag::Paragraph => {
                 self.close();
-                self.open(BlockKind::Paragraph, false);
+                self.open(ChatBlockKind::Paragraph, false);
             }
             Tag::Heading { level, .. } => {
                 self.close();
-                self.open(BlockKind::Heading(heading(level)), false);
+                self.open(ChatBlockKind::Heading { level: heading(level) }, false);
             }
             Tag::CodeBlock(_) => {
                 self.close();
-                self.open(BlockKind::Code, false);
+                self.open(ChatBlockKind::Code, false);
                 if let Some(block) = &mut self.current {
-                    block.spans.push(Span { text: String::new(), style: Style { code: true, ..Style::default() } });
+                    block.spans.push(ChatSpan { text: String::new(), style: ChatStyle { code: true, ..ChatStyle::default() } });
                 }
             }
             Tag::BlockQuote(_) => {
@@ -292,7 +293,7 @@ impl<'a> Builder<'a> {
             }
             TagEnd::Table => {
                 if let Some(table) = self.table.take() {
-                    let mut block = self.block(BlockKind::Table, false);
+                    let mut block = self.block(ChatBlockKind::Table, false);
                     block.rows = table.rows;
                     self.blocks.push(block);
                 }
@@ -322,8 +323,8 @@ impl<'a> Builder<'a> {
         change(self);
     }
 
-    fn style(&self) -> Style {
-        Style {
+    fn style(&self) -> ChatStyle {
+        ChatStyle {
             bold: self.bold > 0,
             italic: self.italic > 0,
             strike: self.strike > 0,
@@ -333,8 +334,8 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn block(&mut self, kind: BlockKind, tight: bool) -> Block {
-        let mut block = Block::new(kind);
+    fn block(&mut self, kind: ChatBlockKind, tight: bool) -> ChatBlock {
+        let mut block = ChatBlock::new(kind);
         block.quote = self.quote;
         block.indent = self.lists.len() as u32;
         block.marker = self.marker.take();
@@ -342,7 +343,7 @@ impl<'a> Builder<'a> {
         block
     }
 
-    fn open(&mut self, kind: BlockKind, tight: bool) {
+    fn open(&mut self, kind: ChatBlockKind, tight: bool) {
         self.current = Some(self.block(kind, tight));
     }
 
@@ -350,7 +351,7 @@ impl<'a> Builder<'a> {
     fn close(&mut self) {
         self.flush();
         let Some(mut block) = self.current.take() else { return };
-        if matches!(block.kind, BlockKind::Paragraph | BlockKind::Heading(_)) {
+        if matches!(block.kind, ChatBlockKind::Paragraph | ChatBlockKind::Heading { .. }) {
             trim_end(&mut block.spans);
             if let Some(first) = block.spans.first_mut() {
                 let trimmed = first.text.trim_start().len();
@@ -367,25 +368,25 @@ impl<'a> Builder<'a> {
 
     /// Where text goes now: the open table cell, else the open block, else a paragraph opened for
     /// it (a tight list item's text comes without one).
-    fn spans(&mut self) -> Option<&mut Vec<Span>> {
+    fn spans(&mut self) -> Option<&mut Vec<ChatSpan>> {
         if let Some(table) = &mut self.table {
             return table.cell.as_mut();
         }
         self.current.as_mut().map(|block| &mut block.spans)
     }
 
-    fn push(&mut self, text: String, style: Style) {
+    fn push(&mut self, text: String, style: ChatStyle) {
         if text.is_empty() {
             return;
         }
         if self.table.is_none() && self.current.is_none() {
             let tight = !self.lists.is_empty();
-            self.open(BlockKind::Paragraph, tight);
+            self.open(ChatBlockKind::Paragraph, tight);
         }
         let Some(spans) = self.spans() else { return };
         match spans.last_mut() {
             Some(last) if last.style == style => last.text.push_str(&text),
-            _ => spans.push(Span { text, style }),
+            _ => spans.push(ChatSpan { text, style }),
         }
     }
 
@@ -403,7 +404,7 @@ impl<'a> Builder<'a> {
             match (token.get(1), token.get(3)) {
                 (Some(url), _) => {
                     let label = token.get(2).map(|label| label.as_str()).filter(|label| !label.is_empty());
-                    let linked = Style { link: Some(url.as_str().into()), ..style.clone() };
+                    let linked = ChatStyle { link: Some(url.as_str().into()), ..style.clone() };
                     self.push(label.unwrap_or(url.as_str()).into(), linked);
                 }
                 (None, Some(user)) => self.mention(user.as_str()),
@@ -414,7 +415,7 @@ impl<'a> Builder<'a> {
         self.text(&text[at..], &style);
     }
 
-    fn text(&mut self, text: &str, style: &Style) {
+    fn text(&mut self, text: &str, style: &ChatStyle) {
         if style.link.is_some() {
             self.push(text.to_string(), style.clone());
             return;
@@ -422,7 +423,7 @@ impl<'a> Builder<'a> {
         let mut at = 0;
         for link in LinkFinder::new().kinds(&[LinkKind::Url]).links(text) {
             self.push(text[at..link.start()].to_string(), style.clone());
-            self.push(link.as_str().to_string(), Style { link: Some(link.as_str().to_string()), ..style.clone() });
+            self.push(link.as_str().to_string(), ChatStyle { link: Some(link.as_str().to_string()), ..style.clone() });
             at = link.end();
         }
         self.push(text[at..].to_string(), style.clone());
@@ -438,7 +439,7 @@ impl<'a> Builder<'a> {
             match (tag.get(1).map(|kind| kind.as_str()), tag.get(2)) {
                 (Some("email"), Some(email)) => {
                     let name = (self.name)(email.as_str()).unwrap_or_else(|| email.as_str().to_string());
-                    self.push(format!("@{name}"), Style { mention: true, ..Style::default() });
+                    self.push(format!("@{name}"), ChatStyle { mention: true, ..ChatStyle::default() });
                 }
                 (Some(_), Some(user)) => self.mention(user.as_str()),
                 _ => {}
@@ -450,7 +451,7 @@ impl<'a> Builder<'a> {
 
     fn mention(&mut self, user: &str) {
         let name = if user == "users/all" { Some("all".to_string()) } else { (self.name)(user) };
-        self.push(format!("@{}", name.unwrap_or_else(|| "someone".into())), Style { mention: true, ..Style::default() });
+        self.push(format!("@{}", name.unwrap_or_else(|| "someone".into())), ChatStyle { mention: true, ..ChatStyle::default() });
     }
 }
 
@@ -466,7 +467,7 @@ fn heading(level: HeadingLevel) -> u8 {
 }
 
 /// Without the spaces and line breaks that end a paragraph.
-fn trim_end(spans: &mut Vec<Span>) {
+fn trim_end(spans: &mut Vec<ChatSpan>) {
     while let Some(last) = spans.last_mut() {
         let kept = last.text.trim_end().len();
         last.text.truncate(kept);
@@ -485,7 +486,7 @@ mod tests {
         (id == "users/1").then(|| "Brent".into())
     }
 
-    fn texts(block: &Block) -> Vec<(&str, Style)> {
+    fn texts(block: &ChatBlock) -> Vec<(&str, ChatStyle)> {
         block.spans.iter().map(|span| (span.text.as_str(), span.style.clone())).collect()
     }
 
@@ -497,28 +498,28 @@ mod tests {
             &names,
         );
         assert_eq!(blocks.len(), 1);
-        let bold = Style { bold: true, ..Style::default() };
-        let link = |url: &str| Style { link: Some(url.into()), ..Style::default() };
-        let mention = Style { mention: true, ..Style::default() };
+        let bold = ChatStyle { bold: true, ..ChatStyle::default() };
+        let link = |url: &str| ChatStyle { link: Some(url.into()), ..ChatStyle::default() };
+        let mention = ChatStyle { mention: true, ..ChatStyle::default() };
         assert_eq!(
             texts(&blocks[0]),
             [
                 ("bold", bold),
-                (" and ", Style::default()),
-                ("it", Style { italic: true, ..Style::default() }),
-                (" ", Style::default()),
-                ("gone", Style { strike: true, ..Style::default() }),
-                (" ", Style::default()),
-                ("x", Style { code: true, ..Style::default() }),
-                (" ", Style::default()),
+                (" and ", ChatStyle::default()),
+                ("it", ChatStyle { italic: true, ..ChatStyle::default() }),
+                (" ", ChatStyle::default()),
+                ("gone", ChatStyle { strike: true, ..ChatStyle::default() }),
+                (" ", ChatStyle::default()),
+                ("x", ChatStyle { code: true, ..ChatStyle::default() }),
+                (" ", ChatStyle::default()),
                 ("site", link("https://a.example/b")),
-                (" ", Style::default()),
+                (" ", ChatStyle::default()),
                 ("@Brent", mention.clone()),
-                (" ", Style::default()),
+                (" ", ChatStyle::default()),
                 ("@someone", mention),
-                (" ", Style::default()),
+                (" ", ChatStyle::default()),
                 ("https://c.example/d", link("https://c.example/d")),
-                (".", Style::default()),
+                (".", ChatStyle::default()),
             ]
         );
     }
@@ -526,7 +527,7 @@ mod tests {
     #[test]
     fn escapes_and_wrapped_lines_read_as_text() {
         let blocks = parse("thanks\\! give me \\~5min \\*not bold\\*\nsnake_case_name and 2 * 3 * 4", &names);
-        assert_eq!(texts(&blocks[0]), [("thanks! give me ~5min *not bold* snake_case_name and 2 * 3 * 4", Style::default())]);
+        assert_eq!(texts(&blocks[0]), [("thanks! give me ~5min *not bold* snake_case_name and 2 * 3 * 4", ChatStyle::default())]);
         let blocks = parse("line one\\\nline two", &names);
         assert_eq!(blocks[0].spans[0].text, "line one\nline two");
     }
@@ -534,21 +535,21 @@ mod tests {
     #[test]
     fn lays_out_blocks() {
         let blocks = parse("# Title\n\n> quoted\n\n- a\n- b\n  1. c\n\n```\nlet a = 1;\n```\n\n---\n\n| x | y |\n|---|---|\n| 1 | 2 |", &names);
-        let shape: Vec<(BlockKind, u32, u32, Option<&str>, bool)> = blocks
+        let shape: Vec<(ChatBlockKind, u32, u32, Option<&str>, bool)> = blocks
             .iter()
             .map(|block| (block.kind, block.quote, block.indent, block.marker.as_deref(), block.tight))
             .collect();
         assert_eq!(
             shape,
             [
-                (BlockKind::Heading(1), 0, 0, None, false),
-                (BlockKind::Paragraph, 1, 0, None, false),
-                (BlockKind::Paragraph, 0, 1, Some("•"), true),
-                (BlockKind::Paragraph, 0, 1, Some("•"), true),
-                (BlockKind::Paragraph, 0, 2, Some("1."), true),
-                (BlockKind::Code, 0, 0, None, false),
-                (BlockKind::Rule, 0, 0, None, false),
-                (BlockKind::Table, 0, 0, None, false),
+                (ChatBlockKind::Heading { level: 1 }, 0, 0, None, false),
+                (ChatBlockKind::Paragraph, 1, 0, None, false),
+                (ChatBlockKind::Paragraph, 0, 1, Some("•"), true),
+                (ChatBlockKind::Paragraph, 0, 1, Some("•"), true),
+                (ChatBlockKind::Paragraph, 0, 2, Some("1."), true),
+                (ChatBlockKind::Code, 0, 0, None, false),
+                (ChatBlockKind::Rule, 0, 0, None, false),
+                (ChatBlockKind::Table, 0, 0, None, false),
             ]
         );
         assert_eq!(blocks[5].spans[0].text, "let a = 1;");

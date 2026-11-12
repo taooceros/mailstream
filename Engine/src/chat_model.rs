@@ -4,8 +4,8 @@
 //! the commands show of them: rows with their date labels and previews, and message text without
 //! its markup ([`crate::chat_markup`]).
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{Value, json};
 
+use crate::answers;
 use crate::chat_markup;
 pub use crate::display::DateLabels;
 use crate::model::{DISTANT_PAST, Date, iso8601};
@@ -77,11 +77,16 @@ impl ChatUser {
     }
 
     /// As commands answer a user.
-    pub fn json(&self) -> Value {
-        json!({
-            "id": self.name, "name": self.label(), "email": self.email, "avatarKey": self.avatar_key(),
-            "avatarUrl": self.avatar_url, "bot": self.bot,
-        })
+    pub fn answer(&self) -> answers::ChatUser {
+        answers::ChatUser {
+            id: self.name.clone(),
+            name: self.label(),
+            email: self.email.clone(),
+            avatar_key: self.avatar_key(),
+            avatar_url: self.avatar_url.clone(),
+            bot: self.bot,
+            avatar: Default::default(),
+        }
     }
 }
 
@@ -128,21 +133,38 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     /// As `chat.messages` answers one.
-    pub fn json(&self) -> Value {
-        json!({
-            "id": self.name, "sender": self.sender.json(), "created": iso8601(self.created),
-            "edited": self.edited.map(iso8601), "text": chat_markup::plain(&self.text), "markup": self.text,
-            "thread": self.thread, "threadReply": self.thread_reply, "mine": self.mine, "card": self.card,
-            "attachments": self.attachments.iter().map(|attachment| json!({
-                "name": attachment.name, "url": attachment.url,
-                "contentType": attachment.content_type.as_deref().filter(|kind| !kind.is_empty()),
-                "resource": attachment.resource,
-            })).collect::<Vec<_>>(),
-        })
+    pub fn answer(&self) -> answers::ChatMessage {
+        answers::ChatMessage {
+            id: self.name.clone(),
+            sender: self.sender.answer(),
+            created: Some(iso8601(self.created)),
+            edited: self.edited.map(iso8601),
+            text: chat_markup::plain(&self.text),
+            markup: self.text.clone(),
+            thread: self.thread.clone(),
+            thread_reply: self.thread_reply,
+            mine: self.mine,
+            card: self.card,
+            attachments: self
+                .attachments
+                .iter()
+                .map(|attachment| answers::ChatAttachment {
+                    name: attachment.name.clone(),
+                    url: attachment.url.clone(),
+                    content_type: attachment.content_type.clone().filter(|kind| !kind.is_empty()),
+                    resource: attachment.resource.clone(),
+                })
+                .collect(),
+            body: Vec::new(),
+            time: String::new(),
+            divider: String::new(),
+            continued: false,
+        }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a space is: a direct message, a group chat, a named space, or a direct message with an app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum ChatSpaceKind {
     Dm,
     Group,
@@ -244,73 +266,44 @@ pub struct ChatMessagePage {
 
 // MARK: - Rows
 
-/// What one space's list row shows.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ChatRow {
-    pub key: ChatSpaceKey,
-    pub kind: ChatSpaceKind,
-    pub title: String,
-    /// "Brent: see you" / "You: thanks".
-    pub preview: String,
-    pub date: String,
-    /// Date group header, as in mail lists.
-    pub section: String,
-    pub activity: Option<Date>,
-    pub unread: bool,
-    pub attachment: bool,
-    pub avatar_name: String,
-    /// The person's lowercased address, else their Chat user id; empty when the row shows no one.
-    pub avatar_key: String,
-    pub avatar_url: Option<String>,
-    pub avatar_color_key: String,
-}
-
-impl ChatRow {
-    pub fn new(space: &ChatSpace, account: &str, labels: &DateLabels) -> Self {
-        let title = if space.title.is_empty() {
-            space.members.iter().map(ChatUser::label).collect::<Vec<_>>().join(", ")
-        } else {
-            space.title.clone()
-        };
-        let activity = space.activity();
-        let (date, section) = labels.labels(activity);
-        let latest = space.latest.as_ref();
-        let incoming = latest.filter(|message| !message.mine).map(|message| &message.sender);
-        let person = match space.kind {
-            ChatSpaceKind::Dm | ChatSpaceKind::Bot => space.members.first().or(incoming),
-            ChatSpaceKind::Group => incoming.or(space.members.first()),
-            ChatSpaceKind::Space => incoming,
-        };
-        let (avatar_key, avatar_url, avatar_color_key, avatar_name) = match person {
-            Some(person) => (person.avatar_key(), person.avatar_url.clone(), person.avatar_key(), person.label()),
-            None => (String::new(), None, space.name.clone(), title.clone()),
-        };
-        Self {
-            key: ChatSpaceKey::new(account, &space.name),
-            kind: space.kind,
-            preview: latest.map(preview).unwrap_or_default(),
-            title,
-            date,
-            section,
-            activity,
-            unread: space.unread > 0,
-            attachment: latest.is_some_and(|message| !message.attachments.is_empty()),
-            avatar_name,
-            avatar_key,
-            avatar_url,
-            avatar_color_key,
-        }
-    }
-
-    /// As `chat.spaces` answers it.
-    pub fn json(&self) -> Value {
-        json!({
-            "account": self.key.account, "space": self.key.space, "kind": self.kind.as_str(), "title": self.title,
-            "preview": self.preview, "date": self.date, "section": self.section, "activity": self.activity.map(iso8601),
-            "unread": self.unread, "attachment": self.attachment, "avatarKey": self.avatar_key,
-            "avatarName": self.avatar_name, "avatarColorKey": self.avatar_color_key, "avatarUrl": self.avatar_url,
-        })
-    }
+/// What one space's list row shows (`chat.spaces`), with when it was last active.
+pub fn row(space: &ChatSpace, account: &str, labels: &DateLabels) -> (Option<Date>, answers::ChatSpace) {
+    let title = if space.title.is_empty() {
+        space.members.iter().map(ChatUser::label).collect::<Vec<_>>().join(", ")
+    } else {
+        space.title.clone()
+    };
+    let activity = space.activity();
+    let (date, section) = labels.labels(activity);
+    let latest = space.latest.as_ref();
+    let incoming = latest.filter(|message| !message.mine).map(|message| &message.sender);
+    let person = match space.kind {
+        ChatSpaceKind::Dm | ChatSpaceKind::Bot => space.members.first().or(incoming),
+        ChatSpaceKind::Group => incoming.or(space.members.first()),
+        ChatSpaceKind::Space => incoming,
+    };
+    let (avatar_key, avatar_url, avatar_color_key, avatar_name) = match person {
+        Some(person) => (person.avatar_key(), person.avatar_url.clone(), person.avatar_key(), person.label()),
+        None => (String::new(), None, space.name.clone(), title.clone()),
+    };
+    let row = answers::ChatSpace {
+        account: account.into(),
+        space: space.name.clone(),
+        kind: space.kind,
+        preview: latest.map(preview).unwrap_or_default(),
+        title,
+        date,
+        section,
+        activity: activity.map(iso8601),
+        unread: space.unread > 0,
+        attachment: latest.is_some_and(|message| !message.attachments.is_empty()),
+        avatar_key,
+        avatar_name,
+        avatar_color_key,
+        avatar_url,
+        avatar: Default::default(),
+    };
+    (activity, row)
 }
 
 /// A message as a row's preview.

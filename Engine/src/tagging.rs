@@ -22,6 +22,7 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::answers::{self, BatchFailure, TagResult, Tagged};
 use crate::cache::MailCache;
 use crate::commands::Arguments;
 use crate::content::Contents;
@@ -33,7 +34,7 @@ use crate::tagsync::{self, Push, Step};
 use crate::{EngineError, Events};
 
 /// Smart Inbox bucket assigned by the AI tagger.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, uniffi::Enum)]
 #[serde(rename_all = "lowercase")]
 pub enum Category {
     /// Written by a person to the user; stays in the main list.
@@ -748,13 +749,13 @@ impl Tagging {
                         .map_err(|error| error.message)
                         .and_then(|conversation| self.edit(&conversation, category, waiting, labels.as_deref()));
                     match edited {
-                        Ok(tag) => done.push(json!({
-                            "id": id, "category": tag.category, "waiting": tag.to_respond, "labels": tag.labels,
-                        })),
-                        Err(message) => failed.push(json!({ "id": id, "message": message })),
+                        Ok(tag) => {
+                            done.push(Tagged { id, category: tag.category, waiting: tag.to_respond, labels: tag.labels })
+                        }
+                        Err(message) => failed.push(BatchFailure { id, code: None, message }),
                     }
                 }
-                Ok(json!({ "done": done, "failed": failed }))
+                Ok(answers::json(&TagResult { done, failed }))
             }
             "mail.retag" => {
                 if !self.is_enabled() {

@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::Mail;
+use crate::answers::{self, Sent};
 use crate::cache::SCHEME;
 use crate::commands::Arguments;
 use crate::mime::OutgoingMessage;
@@ -154,6 +155,13 @@ fn emails(list: &[Address]) -> String {
     list.iter().map(|address| address.email.as_str()).collect::<Vec<_>>().join(", ")
 }
 
+/// What `mail.send` and `mail.reply` answer: what was sent, with `"sent": true`.
+fn sent(sent: Sent) -> Value {
+    let mut answer = answers::json(&sent);
+    answer["sent"] = json!(true);
+    answer
+}
+
 fn texts(list: &[Address]) -> Vec<String> {
     list.iter().map(Address::text).collect()
 }
@@ -189,7 +197,7 @@ impl Mail {
         }
         let message = self.outgoing(&from, None, to.clone(), cc, bcc, subject.clone(), body, None, attachments).await;
         self.deliver(&message, &from).await?;
-        Ok(json!({ "sent": true, "from": from, "to": texts(&to), "subject": subject }))
+        Ok(sent(Sent { from, to: texts(&to), subject }))
     }
 
     pub(super) async fn reply_command(self: &Arc<Self>, args: &Arguments) -> Result<Value, EngineError> {
@@ -250,7 +258,7 @@ impl Mail {
             )
             .await;
         self.deliver(&message, &account).await?;
-        Ok(json!({ "sent": true, "from": account, "to": texts(&recipients), "subject": plan.subject }))
+        Ok(sent(Sent { from: account, to: texts(&recipients), subject: plan.subject }))
     }
 
     async fn reply_plan(self: &Arc<Self>, source: &MailMessage, all: bool) -> Result<ReplyPlan, EngineError> {

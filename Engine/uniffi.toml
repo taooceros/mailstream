@@ -1,0 +1,4 @@
+# The engine's records are generated into the same Dart package as the FFI crate's bindings
+# (`FFI/uniffi.toml`), loading the same library.
+[bindings.dart]
+package_name = "mailstream"

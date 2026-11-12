@@ -7,7 +7,10 @@
 //! JSON object, answered with the same result values and error codes as the Swift engine. It
 //! reads and writes the same files and Keychain item, so either engine picks up what the other
 //! wrote.
+uniffi::setup_scaffolding!();
+
 mod accounts;
+pub mod answers;
 pub mod api;
 mod assembly;
 pub mod avatars;
@@ -76,7 +79,7 @@ use std::sync::{Arc, Mutex};
 use notify::{EventKind, RecursiveMode, Watcher};
 use serde_json::{Map, Value, json};
 
-use crate::accounts::Accounts;
+use crate::accounts::{AccountRecord, Accounts};
 use crate::commands::{Arguments, Handler};
 use crate::keychain::Keychain;
 use crate::oauth::OAuth;
@@ -488,7 +491,9 @@ impl Core {
                 };
                 Ok(self.mail.search_contacts(args, people).await)
             }
-            "accounts.list" => Ok(json!(self.accounts.list().iter().map(|record| record.json()).collect::<Vec<_>>())),
+            "accounts.list" => {
+                Ok(answers::json(&self.accounts.list().iter().map(AccountRecord::answer).collect::<Vec<_>>()))
+            }
             "accounts.rename" => {
                 let record = self.record(args)?;
                 let renamed = self
@@ -499,16 +504,17 @@ impl Core {
                     self.events.emit("accounts");
                     self.mail.accounts_changed();
                 }
-                Ok(renamed.map_or(Value::Null, |record| record.json()))
+                Ok(answers::json(&renamed.as_ref().map(AccountRecord::answer)))
             }
             "accounts.client" => {
                 let client = self
                     .tokens
                     .suggested_client(provider(args)?)
                     .map_err(|error| EngineError::failed(error.to_string()))?;
-                Ok(client.map_or(Value::Null, |client| {
-                    json!({ "id": client.id, "hasSecret": client.secret.is_some_and(|secret| !secret.is_empty()) })
-                }))
+                Ok(answers::json(&client.map(|client| answers::OAuthClientInfo {
+                    has_secret: client.secret.is_some_and(|secret| !secret.is_empty()),
+                    id: client.id,
+                })))
             }
             "accounts.add" => self.add_account(args).await,
             "accounts.remove" => {
@@ -543,19 +549,23 @@ impl Core {
     /// (`ControlService.status`).
     fn status(&self) -> Value {
         let tagging = self.mail.tagging();
-        json!({
-            "version": bundle::short_version().unwrap_or_else(|| "dev".into()),
-            "pid": std::process::id(),
-            "settingsFile": self.settings.file().path().display().to_string(),
-            "settingsIssues": self.settings.issues(),
-            "accounts": self.mail.account_statuses(),
-            "sync": {
-                "loading": self.mail.is_loading(),
-                "lastRefresh": self.mail.last_refresh().map(model::iso8601),
-                "lastError": self.mail.problem(),
-                "pushConnected": self.push.is_connected(),
+        answers::json(&answers::Status {
+            version: bundle::short_version().unwrap_or_else(|| "dev".into()),
+            pid: std::process::id(),
+            settings_file: self.settings.file().path().display().to_string(),
+            settings_issues: self.settings.issues(),
+            accounts: self.mail.account_statuses(),
+            sync: answers::SyncStatus {
+                loading: self.mail.is_loading(),
+                last_refresh: self.mail.last_refresh().map(model::iso8601),
+                last_error: self.mail.problem(),
+                push_connected: self.push.is_connected(),
             },
-            "aiTagging": { "enabled": tagging.is_enabled(), "status": tagging.status(), "failed": tagging.failed() },
+            ai_tagging: answers::TaggingStatus {
+                enabled: tagging.is_enabled(),
+                status: tagging.status(),
+                failed: tagging.failed(),
+            },
         })
     }
 
@@ -599,7 +609,7 @@ impl Core {
         self.push.check();
         self.chat.accounts_changed();
         self.calendar.accounts_changed();
-        Ok(record.json())
+        Ok(answers::json(&record.answer()))
     }
 }
 

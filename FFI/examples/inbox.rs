@@ -31,7 +31,8 @@ fn main() {
             Ok(listing) => {
                 for conversation in &listing.conversations {
                     let mark = if conversation.unread { "●" } else { " " };
-                    println!("{mark} {:<28.28}  {:.60}", conversation.from.as_deref().unwrap_or(""), conversation.subject);
+                    let from = conversation.from.as_ref().map(|from| from.text()).unwrap_or_default();
+                    println!("{mark} {from:<28.28}  {:.60}", conversation.subject);
                 }
                 if !listing.failures.is_empty() {
                     println!("failures: {:?}", listing.failures);
@@ -64,8 +65,8 @@ fn show(engine: &Mailstream, first: &mailstream::Conversation, next: Option<&str
     }
     let previews = block_on(engine.previews(vec![first.id.clone()]));
     println!("preview: {:?}", previews.map(|map| map.into_values().next().flatten()));
-    if let Some(address) = first.from.as_deref().and_then(|from| from.rsplit('<').next()).map(|a| a.trim_end_matches('>')) {
-        println!("avatar: {:?}", block_on(engine.avatars(vec![address.into()], vec![])));
+    if let Some(from) = &first.from {
+        println!("avatar: {:?}", block_on(engine.avatars(vec![from.email.clone()], vec![])));
     }
     if let Some(cursor) = next {
         let page = block_on(engine.list(ListQuery { limit: 10, cursor: Some(cursor.into()), ..ListQuery::default() }));
