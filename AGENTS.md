@@ -268,7 +268,13 @@ The code agent:
    accounts or personal mail, like the fixtures `Flutter/README.md` lists), driven with computer
    helpers; no sending mail, nothing destructive. It takes every screenshot or recording the
    change needs, UI states in light and dark (launching the executable with
-   `-AppleInterfaceStyle Dark` shows it dark), and attaches them to the issue.
+   `-AppleInterfaceStyle Dark` shows it dark), and attaches them to the issue. On Linux it runs
+   the app only in a private Hyprland desktop of its own, `python3 scripts/vhypr.py start <name>
+   [--dark]` (the script's header has every verb: `run`, `shot`, `click`, `drag`, `scroll`,
+   `type`, `key`, `appearance`, `stop`), never on the user's screen, and stops it when done.
+   The app there gets an empty data folder of its own. Never start another compositor (sway,
+   cage, weston) on the GPU: a headless sway hung it twice on 11-11, resetting the GPU and
+   crashing the user's session.
 2. Lands its `ms-<n>` bookmark on live `main` with `python3 scripts/land.py MS-<n>` ([Version
    control](#version-control-jj)), which keeps other agents' changes.
 3. Picks the targets: `flutter` (`Mailstream Flutter.app`) by default; `native`
