@@ -44,8 +44,8 @@ mod webview;
 
 use gpui::component::input::{Copy, Cut, Paste, SelectAll};
 use gpui::{
-    App, AppContext, Bounds, Menu, MenuItem, OsAction, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
-    point, px, size,
+    App, AppContext, Bounds, Menu, MenuItem, OsAction, Styled, TitlebarOptions, WindowBounds, WindowDecorations,
+    WindowOptions, point, px, size,
 };
 
 use crate::state::{
@@ -92,11 +92,21 @@ fn main() {
             // doesn't, the toolbar moves the window); desktop files and window rules match the id.
             window_decorations: Some(WindowDecorations::Server),
             app_id: Some(APP_ID.into()),
+            window_background: design::window_background(),
             ..Default::default()
         };
-        // In gpui-kit's root, which hosts the kit's tooltips, menus and popovers over the app.
-        let (window, app) =
-            gpui::open_window(options, cx, |window, cx| cx.new(|cx| MailApp::new(window, cx))).expect("the window opens");
+        // In gpui-kit's root, which hosts the kit's tooltips, menus and popovers over the app; its
+        // surface left clear (the kit paints its theme's background there), so the window's blur
+        // shows where the app paints nothing.
+        let mut app = None;
+        let window = cx
+            .open_window(options, |window, cx| {
+                let view = cx.new(|cx| MailApp::new(window, cx));
+                app = Some(view.clone());
+                cx.new(|cx| gpui::base::Root::new(view, window, cx).bg(gpui::transparent_black()))
+            })
+            .expect("the window opens");
+        let app = app.expect("the window built its view");
         // Renames, sign-outs, added accounts and setting changes reload accounts and the list.
         let reload = app.downgrade();
         settings::init(

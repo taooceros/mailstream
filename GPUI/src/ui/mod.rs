@@ -157,7 +157,8 @@ impl Render for MailApp {
             .font_family(design::ui_font())
             .text_size(px(text::BODY))
             .text_color(p.text)
-            .bg(p.window)
+            // The window behind the islands: over the Mac's blur a wash, elsewhere opaque.
+            .bg(design::window_fill(p))
             // Painted first: pages no longer painted are closed (Blitz); native web views placed
             // last frame are hidden until painted again (the Mac's WebView).
             .child({

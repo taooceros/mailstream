@@ -214,7 +214,7 @@ impl MailApp {
         let (read_icon, read_tip) =
             if conversation.unread { (Icon::MarkRead, "Mark as Read") } else { (Icon::MarkUnread, "Mark as Unread") };
         let (star_icon, star_tip, star_color) =
-            if conversation.starred { (Icon::Starred, "Unstar", p.star) } else { (Icon::Star, "Star", p.muted) };
+            if conversation.starred { (Icon::Starred, "Unstar", p.star) } else { (Icon::Star, "Star", p.glyph) };
         div().absolute().right(px(space::S8)).top_0().bottom_0().flex().items_center().child(
             raised_capsule(p)
                 .when(conversation.waiting, |d| {
@@ -228,7 +228,7 @@ impl MailApp {
                     ))
                 })
                 .when(conversation.can_archive() || restoring, |d| {
-                    d.child(icon_button("row-file", file_icon, file_tip, true, p.muted).on_click(cx.listener(
+                    d.child(icon_button("row-file", file_icon, file_tip, true, p.glyph).on_click(cx.listener(
                         move |this, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             let Some(c) = this.conversation(&file) else { return };
@@ -240,7 +240,7 @@ impl MailApp {
                         },
                     )))
                 })
-                .child(icon_button("row-trash", Icon::Delete, "Move to Trash", true, p.muted).on_click(cx.listener(
+                .child(icon_button("row-trash", Icon::Delete, "Move to Trash", true, p.glyph).on_click(cx.listener(
                     move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         if let Some(c) = this.conversation(&trash) {
@@ -248,7 +248,7 @@ impl MailApp {
                         }
                     },
                 )))
-                .child(icon_button("row-read", read_icon, read_tip, true, p.muted).on_click(cx.listener(
+                .child(icon_button("row-read", read_icon, read_tip, true, p.glyph).on_click(cx.listener(
                     move |this, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
                         if let Some(c) = this.conversation(&read) {

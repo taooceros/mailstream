@@ -1492,7 +1492,7 @@ impl Settings {
                         .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).truncate().child(detail)),
                 )
                 .child(
-                    icon_button(("auto-read", index), Icon::MarkUnread, "Mark Unread", true, p.muted)
+                    icon_button(("auto-read", index), Icon::MarkUnread, "Mark Unread", true, p.glyph)
                         .on_click(cx.listener(move |this, _, _, cx| this.undo_auto_read(vec![id.clone()], cx))),
                 )
                 .into_any_element()

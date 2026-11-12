@@ -1264,12 +1264,12 @@ impl Render for ReplyBox {
                     .pb(px(8.))
                     .child(status_line(&self.status, p).unwrap_or_else(|| div().flex_1()))
                     .child(
-                        icon_button("reply-attach", Icon::Attachment, ATTACH_TIP, !sending, p.muted).on_click(
+                        icon_button("reply-attach", Icon::Attachment, ATTACH_TIP, !sending, p.glyph).on_click(
                             cx.listener(|this, _: &ClickEvent, window, cx| this.pick_files(&Attach, window, cx)),
                         ),
                     )
                     .child(
-                        icon_button("reply-move", Icon::Dock, MOVE_TIP, !sending, p.muted)
+                        icon_button("reply-move", Icon::Dock, MOVE_TIP, !sending, p.glyph)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.move_to_column(&MoveToColumn, window, cx)
                             })),

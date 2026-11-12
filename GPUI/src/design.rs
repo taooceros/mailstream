@@ -7,11 +7,12 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use gpui::{App, BoxShadow, Hsla, WindowAppearance, point, px, rgba};
+use gpui::{App, BoxShadow, Hsla, WindowAppearance, WindowBackgroundAppearance, point, px, rgba};
 
 pub struct Palette {
     pub dark: bool,
-    /// The window behind the islands, where the sidebar sits.
+    /// The window behind the islands, where the sidebar sits, where nothing shows through it; over
+    /// the Mac's blur only a wash of it ([`window_fill`]).
     pub window: Hsla,
     /// Islands (the conversation), sheets, fields, menus.
     pub background: Hsla,
@@ -21,6 +22,10 @@ pub struct Palette {
     pub text: Hsla,
     /// The secondary label: small print, counts, dates.
     pub muted: Hsla,
+    /// Glyphs on toolbar capsules and icon buttons, a pill's label and a segmented control's
+    /// choices: a step between the label and the secondary label, so controls don't read gray on
+    /// gray (MS-241).
+    pub glyph: Hsla,
     /// Placeholders and disabled glyphs.
     pub faint: Hsla,
     /// Field and control outlines.
@@ -47,9 +52,13 @@ pub struct Palette {
     pub toast: Hsla,
     pub on_toast: Hsla,
     pub star: Hsla,
+    /// A card resting on the tray (the calendar's events, Up Next): white in light mode, a step
+    /// above the tray and the islands in dark (Flutter's `MailColors.card`).
+    pub card: Hsla,
     /// A hairline around cards resting on the tray (a half-lifted row).
     pub card_border: Hsla,
-    /// The opaque face of a toolbar capsule floating over content, inside its rim.
+    /// The opaque face of a toolbar capsule floating over content, inside its rim, on the resting
+    /// card's shadow.
     pub capsule: Hsla,
     pub capsule_rim: Hsla,
     /// The capsule floating over a row (its hover actions): lit from above, top to bottom.
@@ -94,11 +103,12 @@ fn shadow(color: u32, y: f32, blur: f32) -> BoxShadow {
 
 static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
     dark: false,
-    window: argb(0xFFE4E5EA),
+    window: argb(0xFFECEEF2),
     background: argb(0xFFFFFFFF),
     tray: argb(0xFFF5F6FA),
     text: argb(0xFF1D1D1F),
     muted: argb(0xFF6E6E73),
+    glyph: argb(0xFF48484E),
     faint: argb(0x401D1D1F),
     border: argb(0xFFC7C7CC),
     line: argb(0xFFE5E5EA),
@@ -117,8 +127,9 @@ static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
     toast: argb(0xFF2C2C2E),
     on_toast: argb(0xFFF5F5F7),
     star: argb(0xFFFFB800),
+    card: argb(0xFFFFFFFF),
     card_border: argb(0x14000000),
-    capsule: argb(0xFFF5F5F7),
+    capsule: argb(0xFFFFFFFF),
     capsule_rim: argb(0x14000000),
     raised_capsule: [argb(0xFFFFFFFF), argb(0xFFF4F4F6)],
     raised_capsule_rim: argb(0x1A000000),
@@ -138,11 +149,12 @@ static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
 
 static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
     dark: true,
-    window: argb(0xFF2A2A2D),
+    window: argb(0xFF121214),
     background: argb(0xFF1E1E1E),
     tray: argb(0xFF18181A),
     text: argb(0xFFF5F5F7),
     muted: argb(0xFF98989D),
+    glyph: argb(0xFFD1D1D6),
     faint: argb(0x40F5F5F7),
     border: argb(0xFF545458),
     line: argb(0xFF38383A),
@@ -161,6 +173,7 @@ static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
     toast: argb(0xFFE5E5EA),
     on_toast: argb(0xFF1D1D1F),
     star: argb(0xFFFFB800),
+    card: argb(0xFF232327),
     card_border: argb(0x1AFFFFFF),
     capsule: argb(0xFF2C2C2E),
     capsule_rim: argb(0x1FFFFFFF),
@@ -184,6 +197,27 @@ pub fn palette(appearance: WindowAppearance) -> &'static Palette {
     match appearance {
         WindowAppearance::Dark | WindowAppearance::VibrantDark => &DARK,
         WindowAppearance::Light | WindowAppearance::VibrantLight => &LIGHT,
+    }
+}
+
+/// What the window behind the islands is, the one place that chooses it (MS-241): on the Mac
+/// the system's blur of the desktop shows through the sidebar and between the islands (Flutter's
+/// window glass); elsewhere the window is opaque.
+pub fn window_background() -> WindowBackgroundAppearance {
+    if cfg!(target_os = "macos") { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Opaque }
+}
+
+/// How much of [`Palette::window`] lies over the Mac's blur: gpui's blur is the desktop alone,
+/// untinted, so without a wash of the appearance's own color a light desktop would sit under the
+/// dark mode's white sidebar text.
+pub const WINDOW_WASH: f32 = 0.78;
+
+/// What the app paints behind the islands: [`Palette::window`] where the window is opaque, a
+/// [`WINDOW_WASH`] of it over a blur ([`window_background`]).
+pub fn window_fill(p: &Palette) -> Hsla {
+    match window_background() {
+        WindowBackgroundAppearance::Opaque => p.window,
+        _ => tint(p.window, WINDOW_WASH),
     }
 }
 
@@ -211,7 +245,11 @@ pub fn sync_kit_theme(appearance: WindowAppearance, cx: &mut App) {
         // Toasts rise from the bottom of the window (`controls::toast`).
         theme.notification.margins.bottom = px(space::S24);
         let c = &mut theme.colors;
-        c.background = p.background;
+        // The kit's own surfaces under the app's are the islands' background, but the kit also
+        // raises a segmented control's chosen choice on it: the raised card, the same white in
+        // light mode and a step above the tray (not under it) in dark (MS-241). Windows paint
+        // their own surface (`main.rs`, `settings.rs`), so nothing else of the app shows it.
+        c.background = p.raised_card;
         c.foreground = p.text;
         c.muted = p.fill;
         c.muted_foreground = p.muted;
@@ -230,10 +268,10 @@ pub fn sync_kit_theme(appearance: WindowAppearance, cx: &mut App) {
         c.link_active = p.accent;
         c.switch = p.border;
         c.switch_thumb = gpui::white();
-        // A segmented control's track is the quiet fill; its choices the secondary label, the
-        // chosen one (and the one under the pointer) the text.
+        // A segmented control's track is the quiet fill; its choices the glyph tone, the chosen
+        // one (and the one under the pointer) the text.
         c.tab_bar_segmented = p.chip;
-        c.tab_foreground = p.muted;
+        c.tab_foreground = p.glyph;
         c.tab_active_foreground = p.text;
         (c.primary, c.primary_hover, c.primary_active, c.primary_foreground) =
             (p.accent, hovered(p.accent), pressed(p.accent), p.on_accent);
@@ -493,8 +531,10 @@ pub mod calendar {
     pub const LOAD_WIDTH: f32 = 24.0;
     pub const LOAD_OPACITY: f32 = 0.55;
     pub const FULL_DAY_MINUTES: f32 = 8.0 * 60.0;
-    /// Past events fade, declined ones further.
+    /// Past events fade, declined ones further; a past card on the timeline keeps its title and
+    /// its face at `PAST_EMPHASIS` of an upcoming one's, so it reads rather than grays out (MS-241).
     pub const PAST_OPACITY: f32 = 0.48;
+    pub const PAST_EMPHASIS: f32 = 0.72;
     pub const DECLINED_OPACITY: f32 = 0.40;
     /// A calendar's dot, this far toward the card under it.
     pub const DOT_SOFTEN: f32 = 0.2;
@@ -511,9 +551,10 @@ pub mod calendar {
     pub const CONFLICT_GAP: f32 = 2.0;
     /// An all-day bar's face: its calendar's color at this over the card.
     pub const ALL_DAY_TINT: f32 = 0.18;
-    /// An unanswered invitation's card: its calendar's color at this over the card, in a dashed
-    /// border.
-    pub const INVITED_TINT: f32 = 0.08;
+    /// An unanswered invitation's card: the clean card, hatched at 45° in its calendar's color at
+    /// `HATCH_OPACITY` every `HATCH_SPACING`, in a dashed border (Flutter's `_InvitedPainter`).
+    pub const HATCH_OPACITY: f32 = 0.07;
+    pub const HATCH_SPACING: f32 = 6.0;
     /// The time line: across today's column `NOW_LINE` thick, across the other days dashed
     /// (`DASH` long, as far apart) at `NOW_TRAIL_OPACITY`; its time on a `NOW_PILL` in the gutter.
     pub const NOW_TRAIL_OPACITY: f32 = 0.5;

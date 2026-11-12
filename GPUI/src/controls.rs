@@ -167,7 +167,7 @@ pub fn popover(p: &Palette) -> Div {
 }
 
 /// Toolbar buttons grouped on a capsule floating over content (`GlassCapsule`): an opaque face
-/// inside a hairline rim.
+/// inside a hairline rim, on a resting card's shadow so it stands off the tray (MS-241).
 pub fn capsule(p: &Palette) -> Div {
     div()
         .flex_shrink_0()
@@ -179,6 +179,7 @@ pub fn capsule(p: &Palette) -> Div {
         .bg(p.capsule)
         .border(px(stroke::HAIRLINE))
         .border_color(p.capsule_rim)
+        .shadow(p.card_shadow.clone())
 }
 
 /// The capsule floating over a row (its hover actions, `RaisedCapsule`): lit from above, a hairline
@@ -286,7 +287,7 @@ pub fn tag(label: impl Into<SharedString>, color: Option<Hsla>, p: &Palette) -> 
 }
 
 /// A pill naming a thing (`Pill`): an attachment, a recipient, an account; `leading` (a glyph or a
-/// mark) before its label, fully round on the quiet fill.
+/// mark) before its label in the glyph tone, fully round on the quiet fill.
 pub fn pill(label: impl Into<SharedString>, leading: Option<AnyElement>, p: &Palette) -> Div {
     div()
         .flex_shrink_0()
@@ -300,19 +301,28 @@ pub fn pill(label: impl Into<SharedString>, leading: Option<AnyElement>, p: &Pal
         .bg(p.chip)
         .text_size(px(text::FOOTNOTE))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(p.muted)
+        .text_color(p.glyph)
         .children(leading)
         .child(label.into())
 }
 
 /// A segmented control (`MailSegmented`): gpui-kit's small segmented [`TabBar`] of [`segment`]s on
-/// the quiet fill (the kit theme's `tab_bar_segmented`), the `chosen` one raised on the page's
-/// surface, which slides to the next one chosen; none raised without a choice.
-pub fn segmented(id: impl Into<ElementId>, chosen: Option<usize>) -> TabBar {
-    TabBar::new(id).segmented().small().flex_shrink_0().when_some(chosen, |bar, ix| bar.selected_index(ix))
+/// the quiet fill (the kit theme's `tab_bar_segmented`), the `chosen` one raised on the raised card,
+/// which slides to the next one chosen. Without a choice (an invitation not yet answered) the
+/// whole control is raised instead, a white bar of buttons rather than gray on gray (MS-241).
+pub fn segmented(id: impl Into<ElementId>, chosen: Option<usize>, p: &Palette) -> TabBar {
+    let bar = TabBar::new(id).segmented().small().flex_shrink_0();
+    match chosen {
+        Some(ix) => bar.selected_index(ix),
+        None => bar
+            .bg(p.raised_card)
+            .border(px(stroke::HAIRLINE))
+            .border_color(p.card_border)
+            .shadow(p.raised_shadow.clone()),
+    }
 }
 
-/// One choice of a [`segmented`] control: `label` in the footnote type, in the secondary label (the
+/// One choice of a [`segmented`] control: `label` in the footnote type, in the glyph tone (the
 /// text once chosen, or `color`), after `glyph` (a glyph and its color) when there is one. Chain
 /// `.on_click`; its press never reaches the row or title bar under it.
 pub fn segment(label: impl Into<SharedString>, glyph: Option<(Icon, Hsla)>, color: Option<Hsla>) -> Tab {

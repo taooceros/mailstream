@@ -160,6 +160,7 @@ impl MailApp {
                             segmented(
                                 ElementId::Name(format!("invitation:{}", message.id).into()),
                                 ANSWERS.iter().position(|(value, _)| chosen == Some(*value)),
+                                p,
                             )
                             .children(answers),
                         ),

@@ -114,11 +114,11 @@ impl CalendarPane {
                     .child(
                         capsule(p)
                             .child(
-                                icon_button("calendar-new", Icon::AddDraft, "New event", self.can_create(), p.muted)
+                                icon_button("calendar-new", Icon::AddDraft, "New event", self.can_create(), p.glyph)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.create_event(None, window, cx))),
                             )
                             .child(
-                                icon_button("calendar-refresh", Icon::Refresh, "Refresh", self.has_calendars(), p.muted)
+                                icon_button("calendar-refresh", Icon::Refresh, "Refresh", self.has_calendars(), p.glyph)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
                             ),
                     ),
@@ -129,7 +129,7 @@ impl CalendarPane {
                     .flex()
                     .items_center()
                     .gap(px(space::S8))
-                    .child(segmented("calendar-views", views.iter().position(|(view, ..)| *view == self.view)).children(
+                    .child(segmented("calendar-views", views.iter().position(|(view, ..)| *view == self.view), p).children(
                         views.map(|(view, label, key)| {
                             let tip: SharedString = format!("{label} ({key})").into();
                             segment(label, None, None)
@@ -142,16 +142,16 @@ impl CalendarPane {
                         capsule(p)
                             .when(paged, |d| {
                                 d.child(
-                                    icon_button("calendar-previous", Icon::Back, format!("Previous {unit} (←)"), true, p.muted)
+                                    icon_button("calendar-previous", Icon::Back, format!("Previous {unit} (←)"), true, p.glyph)
                                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.page(-1, cx))),
                                 )
                             })
-                            .child(icon_button("calendar-today", Icon::Today, "Today (T)", true, p.muted).on_click(
+                            .child(icon_button("calendar-today", Icon::Today, "Today (T)", true, p.glyph).on_click(
                                 cx.listener(|this, _: &ClickEvent, window, cx| this.today(&Today, window, cx)),
                             ))
                             .when(paged, |d| {
                                 d.child(
-                                    icon_button("calendar-next", Icon::Disclosure, format!("Next {unit} (→)"), true, p.muted)
+                                    icon_button("calendar-next", Icon::Disclosure, format!("Next {unit} (→)"), true, p.glyph)
                                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.page(1, cx))),
                                 )
                             }),
@@ -213,7 +213,7 @@ impl CalendarPane {
                         .items_center()
                         .gap(px(space::S8))
                         .rounded(px(metrics::CARD_RADIUS))
-                        .bg(p.background)
+                        .bg(p.card)
                         .border(px(stroke::HAIRLINE))
                         .border_color(p.card_border)
                         .shadow(p.card_shadow.clone())
@@ -357,7 +357,7 @@ impl CalendarPane {
             Some(self.reply_switch(index, reply, "row", p, cx).into_any_element())
         } else {
             let guests = model::others(item);
-            (!guests.is_empty()).then(|| guest_avatars(&guests, 3, p.background, p, cx).into_any_element())
+            (!guests.is_empty()).then(|| guest_avatars(&guests, 3, p.card, p, cx).into_any_element())
         };
         let glyph = if item.location.is_some() {
             Some(Icon::Location)
@@ -438,7 +438,7 @@ impl CalendarPane {
         let key = &self.events[index].key;
         let id = format!("reply:{place}:{}:{}:{}", key.account, key.calendar, key.id);
         let chosen = model::REPLIES.iter().position(|(value, _)| reply.chosen == Some(*value));
-        segmented(ElementId::Name(id.into()), chosen).children(model::REPLIES.map(|(value, label)| {
+        segmented(ElementId::Name(id.into()), chosen, p).children(model::REPLIES.map(|(value, label)| {
             let tint = if value == "declined" { p.danger } else { p.accent };
             let chosen = reply.chosen == Some(value);
             let glyph = if reply.sending == Some(value) {
@@ -464,7 +464,7 @@ impl CalendarPane {
 
 /// A calendar's dot: its color a little toward the card under it.
 pub(super) fn dot_color(color: Hsla, p: &Palette) -> Hsla {
-    color.blend(design::tint(p.background, metrics::DOT_SOFTEN))
+    color.blend(design::tint(p.card, metrics::DOT_SOFTEN))
 }
 
 /// Guests as overlapping avatars, each ringed in `ring` (the surface under them): the first

@@ -1631,7 +1631,7 @@ impl ChatPane {
         }
         let header = self
             .header(p)
-            .child(icon_button("chat-back", Icon::Back, "Back", true, p.muted).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
+            .child(icon_button("chat-back", Icon::Back, "Back", true, p.glyph).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
             .child(
                 div()
                     .flex_1()
@@ -1966,7 +1966,7 @@ impl ChatPane {
                 .text_size(px(text::FOOTNOTE))
                 .text_color(p.muted)
                 .child(format!("↳ Replying in thread to {who}"))
-                .child(icon_button("chat-unthread", Icon::Close, "Reply in the space", true, p.muted).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                .child(icon_button("chat-unthread", Icon::Close, "Reply in the space", true, p.glyph).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.reply_thread = None;
                     cx.notify();
                 })))
@@ -2130,7 +2130,7 @@ impl ChatPane {
             .flex_col()
             .child(
                 self.header(p)
-                    .child(icon_button("chat-form-back", Icon::Back, "Back", true, p.muted).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
+                    .child(icon_button("chat-form-back", Icon::Back, "Back", true, p.glyph).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
                     .child(div().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::SEMIBOLD).child("New Chat")),
             )
             .child(

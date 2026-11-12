@@ -69,7 +69,7 @@ impl MailApp {
                     .justify_end()
                     .px(px(space::S8))
                     .child(
-                        icon_button("hide-sidebar", Icon::Sidebar, "Hide Sidebar", true, p.muted)
+                        icon_button("hide-sidebar", Icon::Sidebar, "Hide Sidebar", true, p.glyph)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.toggle_sidebar(&ToggleSidebar, window, cx)
                             })),
@@ -143,7 +143,7 @@ impl MailApp {
             .items_center()
             .child(
                 title_bar("rail-title", window, cx).w_full().pt(px(layout::RAIL_TOP)).pb(px(space::S8)).flex().justify_center().child(
-                    icon_button("show-sidebar", Icon::Sidebar, "Show Sidebar", true, p.muted)
+                    icon_button("show-sidebar", Icon::Sidebar, "Show Sidebar", true, p.glyph)
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx))),
                 ),
             )

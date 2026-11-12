@@ -67,7 +67,7 @@ impl CalendarPane {
             .items_center()
             .gap(px(space::S8))
             .child(capsule(p).child(
-                icon_button("calendar-close", close_icon, close_tip, true, p.muted)
+                icon_button("calendar-close", close_icon, close_tip, true, p.glyph)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_event(cx))),
             ))
             .child(div().flex_1())
@@ -76,11 +76,11 @@ impl CalendarPane {
                 d.child(
                     capsule(p)
                         .child(
-                            icon_button("calendar-edit", Icon::Compose, "Edit", true, p.muted)
+                            icon_button("calendar-edit", Icon::Compose, "Edit", true, p.glyph)
                                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.edit_event(&edit, window, cx))),
                         )
                         .child(
-                            icon_button("calendar-delete", Icon::Delete, "Delete", true, p.muted)
+                            icon_button("calendar-delete", Icon::Delete, "Delete", true, p.glyph)
                                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.confirm_delete(&delete, window, cx))),
                         ),
                 )
@@ -88,7 +88,7 @@ impl CalendarPane {
             .when_some(event.item.link.clone(), |d, link| {
                 let tip = if microsoft { "Open in Outlook" } else { "Open in Google Calendar" };
                 d.child(capsule(p).child(
-                    icon_button("calendar-link", Icon::OpenInWindow, tip, true, p.muted)
+                    icon_button("calendar-link", Icon::OpenInWindow, tip, true, p.glyph)
                         .on_click(move |_, _, cx| cx.open_url(&link)),
                 ))
             })

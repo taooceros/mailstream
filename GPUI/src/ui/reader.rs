@@ -268,7 +268,7 @@ impl MailApp {
             .text_size(px(text::FOOTNOTE))
             .text_color(p.muted)
             .child("Renderer:")
-            .child(segmented("renderer", Renderer::ALL.iter().position(|renderer| *renderer == self.renderer)).children(segments));
+            .child(segmented("renderer", Renderer::ALL.iter().position(|renderer| *renderer == self.renderer), p).children(segments));
         Some(switch.into_any_element())
     }
 
@@ -374,10 +374,10 @@ impl MailApp {
             .when(!message.attachments.is_empty(), |d| d.child(div().pt(px(space::S8)).child(attachments(message, p))));
         let actions = raised_capsule(p)
             .flex()
-            .child(icon_button("log-reply", Icon::Reply, "Reply", true, p.muted).on_click(
+            .child(icon_button("log-reply", Icon::Reply, "Reply", true, p.glyph).on_click(
                 cx.listener(|this, _: &ClickEvent, window, cx| this.reply(&Reply, window, cx)),
             ))
-            .child(icon_button("log-reply-all", Icon::ReplyAll, "Reply All", true, p.muted).on_click(
+            .child(icon_button("log-reply-all", Icon::ReplyAll, "Reply All", true, p.glyph).on_click(
                 cx.listener(|this, _: &ClickEvent, window, cx| this.reply_all(&ReplyAll, window, cx)),
             ));
         // The gap above belongs to the message, so the buttons floating over it keep it hovered.

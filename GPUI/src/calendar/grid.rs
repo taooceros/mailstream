@@ -14,8 +14,8 @@ use chrono::{DateTime, Days, Local, NaiveDate, Timelike};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, ClickEvent, Context, DispatchPhase, Div, ElementId, FontWeight, HighlightStyle, Hsla, InteractiveElement,
-    IntoElement, ParentElement, ScrollEvent, StatefulInteractiveElement, Styled, StyledText, Window, canvas, div,
-    linear_color_stop, linear_gradient, point, px, relative,
+    IntoElement, ParentElement, PathBuilder, ScrollEvent, StatefulInteractiveElement, Styled, StyledText, Window, canvas,
+    div, linear_color_stop, linear_gradient, point, px, relative,
 };
 
 use super::agenda::{dot_color, guest_avatars};
@@ -659,7 +659,8 @@ impl CalendarPane {
         let selected = self.opened.as_ref() == Some(&event.key);
         let color = self.event_color(event);
         let fit = fit(placement.bottom - placement.top);
-        let ink = design::tint(p.text, fade);
+        // A past card's title stays readable; its details and dot fade further.
+        let ink = design::tint(p.text, if look == Look::Past { metrics::PAST_EMPHASIS } else { fade });
         let soft = design::tint(p.muted, fade);
         let meeting = if flat { None } else { item.meeting_url.clone() };
         let dot = || mark_dot(design::tint(dot_color(color, p), fade));
@@ -732,7 +733,7 @@ impl CalendarPane {
             let foot = fit == Fit::Full && width >= 50. && (meeting.is_some() || !guests.is_empty());
             let room = height - 7. - 14. - if foot { metrics::AVATAR + 2. } else { 0. };
             let lines = ((room / 15.).floor() as usize).clamp(1, 3);
-            let face = if selected { p.lifted_card[1] } else { p.background };
+            let face = if selected { p.lifted_card[1] } else { p.card };
             div()
                 .relative()
                 .size_full()
@@ -818,17 +819,19 @@ impl CalendarPane {
             let card = card.hover(move |s| s.shadow(raised.clone()));
             match look {
                 Look::Invited => card
-                    .bg(p.background.blend(design::tint(color, metrics::INVITED_TINT)))
+                    .relative()
+                    .bg(p.card)
                     .border_1()
                     .border_dashed()
-                    .border_color(dot_color(color, p)),
+                    .border_color(dot_color(color, p))
+                    .child(hatch(design::tint(color, metrics::HATCH_OPACITY))),
                 Look::Past => card
-                    .bg(p.tray.blend(design::tint(p.background, fade)))
+                    .bg(p.tray.blend(design::tint(p.card, metrics::PAST_EMPHASIS)))
                     .border(px(stroke::HAIRLINE))
                     .border_color(p.card_border),
                 Look::Declined => card.bg(p.tray.blend(p.hover)),
                 Look::Upcoming => card
-                    .bg(p.background)
+                    .bg(p.card)
                     .border(px(stroke::HAIRLINE))
                     .border_color(p.card_border)
                     .shadow(p.card_shadow.clone()),
@@ -858,7 +861,7 @@ impl CalendarPane {
                 let fade = if past { metrics::PAST_OPACITY } else { 1. };
                 let color = self.event_color(event);
                 let selected = self.opened.as_ref() == Some(&event.key);
-                let base = if past { p.tray } else { p.background };
+                let base = if past { p.tray } else { p.card };
                 let face: Hsla = base.blend(design::tint(color, metrics::ALL_DAY_TINT * fade));
                 let before = event.start.date_naive() < first_day;
                 let after = placed.last == page.days.len() - 1 && event.last_day() > last_day;
@@ -894,7 +897,7 @@ impl CalendarPane {
                             .truncate()
                             .text_size(px(text::FOOTNOTE))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(design::tint(p.text, fade))
+                            .text_color(design::tint(p.text, if past { metrics::PAST_EMPHASIS } else { 1. }))
                             .child(title),
                     );
                 // Over its days in the row, a point in from their lines.
@@ -1084,4 +1087,27 @@ mod tests {
         });
         assert_eq!(shown(&pane, cx).0, week);
     }
+}
+
+/// An unanswered invitation's hatch (Flutter's `_InvitedPainter`): 1 pt lines at 45° in `color`,
+/// `HATCH_SPACING` apart, over the whole card under it (which clips them to itself).
+fn hatch(color: Hsla) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let (width, height) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+            let mut lines = PathBuilder::stroke(px(1.));
+            let mut x = -height;
+            while x < width {
+                lines.move_to(bounds.origin + point(px(x), px(height)));
+                lines.line_to(bounds.origin + point(px(x + height), px(0.)));
+                x += metrics::HATCH_SPACING;
+            }
+            if let Ok(path) = lines.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
 }
