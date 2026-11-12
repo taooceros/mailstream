@@ -415,11 +415,11 @@ impl ComposeColumn {
             .gap(px(space::S8))
             .child(
                 capsule(p)
-                    .child(icon_button("compose-close", Icon::Close, "Close Draft (⌘W)", !sending, p.muted, p).on_click(
+                    .child(icon_button("compose-close", Icon::Close, "Close Draft (⌘W)", !sending, p.muted).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.close_tab(this.active, window, cx)),
                     ))
                     .child(
-                        icon_button("compose-minimize", Icon::Minimize, "Minimize", true, p.muted, p)
+                        icon_button("compose-minimize", Icon::Minimize, "Minimize", true, p.muted)
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.minimize(cx))),
                     ),
             )
@@ -437,15 +437,15 @@ impl ComposeColumn {
                     .when(self.tabs.len() == 1, |d| d.child(new_draft_button("compose-new", p, cx)))
                     .when(!self.floating, |d| {
                         d.child(
-                            icon_button("compose-swap", Icon::Swap, swap_tip, true, p.muted, p)
+                            icon_button("compose-swap", Icon::Swap, swap_tip, true, p.muted)
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_swapped(cx))),
                         )
                     })
                     .child(
-                        icon_button("compose-float", float_glyph, float_tip, true, p.muted, p)
+                        icon_button("compose-float", float_glyph, float_tip, true, p.muted)
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_floating(cx))),
                     )
-                    .child(icon_button("compose-attach", Icon::Attachment, ATTACH_TIP, !sending, p.muted, p).on_click(
+                    .child(icon_button("compose-attach", Icon::Attachment, ATTACH_TIP, !sending, p.muted).on_click(
                         move |_, window, cx| attach_draft.update(cx, |draft, cx| draft.pick_files(&Attach, window, cx)),
                     )),
             )
@@ -492,7 +492,7 @@ impl ComposeColumn {
 
 /// "+": a new message.
 fn new_draft_button(id: &'static str, p: &'static Palette, cx: &mut Context<ComposeColumn>) -> impl IntoElement {
-    icon_button(id, Icon::AddDraft, "New Message (⌘N)", true, p.muted, p)
+    icon_button(id, Icon::AddDraft, "New Message (⌘N)", true, p.muted)
         .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(ColumnEvent::NewDraft)))
 }
 

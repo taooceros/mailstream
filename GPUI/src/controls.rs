@@ -1,15 +1,20 @@
 //! The app's shared controls, after Flutter's `controls.dart`, `glass.dart` and `common.dart`
-//! (MS-189–193, MS-200), drawn from the tokens in `design.rs` and used by every view: buttons,
-//! icon buttons and their tooltips, the capsules toolbar buttons sit on, islands, the title bars
-//! that move the window, popovers, tags, pills, marks, the lifted card of a selected row, notices,
-//! toasts, switches, notes, the list's group titles and the search field's frame. A view composes
-//! these rather than restyling one.
+//! (MS-189–193, MS-200), drawn from the tokens in `design.rs` and used by every view. Buttons, icon
+//! buttons, their tooltips and switches are gpui-kit's components in the kit theme
+//! `design::sync_kit_theme` sets (MS-226); the rest is the app's own, where the kit has none: the
+//! capsules toolbar buttons sit on, islands, the title bars that move the window, popovers, tags,
+//! pills, marks, the lifted card of a selected row, notices, toasts, notes, the list's group titles
+//! and the search field's frame. A view composes these rather than restyling one.
 
+use gpui::component::button::{Button, ButtonVariants};
+use gpui::component::switch::Switch;
+use gpui::component::tooltip::Tooltip;
+use gpui::component::Disableable;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, Context, DispatchPhase, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
-    MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Window, canvas, div, linear_color_stop, linear_gradient, px,
+    AnyElement, AnyView, App, DispatchPhase, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
+    MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString, Stateful,
+    Styled, Window, canvas, div, linear_color_stop, linear_gradient, px,
 };
 
 use crate::design::{
@@ -19,13 +24,14 @@ use crate::design::{
 use crate::icons::{Icon, icon};
 
 /// What a button does: `Primary` is the one action a place leads to (the accent), `Secondary`
-/// the others, `Destructive` one that deletes or discards, `Plain` a quiet text action.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// the others, `Destructive` one that deletes or discards, `Plain` a quiet text action in its color
+/// (the accent; red for one that removes, the secondary label for a minor one).
+#[derive(Clone, Copy, PartialEq)]
 pub enum ButtonKind {
     Primary,
     Secondary,
     Destructive,
-    Plain,
+    Plain(Hsla),
 }
 
 /// A control's height: `Small` inside rows and cards, `Regular` in forms, bars and composers.
@@ -58,15 +64,10 @@ impl ControlSize {
     }
 }
 
-/// The black (white in dark mode) a filled face darkens toward under the pointer.
-fn shade(p: &Palette, amount: f32) -> Hsla {
-    let base = if p.dark { gpui::white() } else { gpui::black() };
-    design::tint(base, amount)
-}
-
-/// A button (`MailButton`): `label` on its kind's face, `Radii.control` corners; filled faces
-/// darken under the pointer, quiet ones take the wash. Its click never moves the window. Chain
-/// `.on_click`; a disabled one (`enabled` false) is dimmed and inert.
+/// A button (`MailButton`): gpui-kit's [`Button`] in the kit theme `design::sync_kit_theme` sets, with
+/// `label` on its kind's face, `Radii.control` corners; filled faces darken under the pointer, quiet
+/// ones take the wash. Its click never moves the window. Chain `.on_click`; a disabled one
+/// (`enabled` false) is dimmed and inert.
 pub fn button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -74,7 +75,7 @@ pub fn button(
     size: ControlSize,
     enabled: bool,
     p: &Palette,
-) -> Stateful<Div> {
+) -> Button {
     icon_label_button(id, None, label, kind, size, enabled, p)
 }
 
@@ -87,87 +88,66 @@ pub fn icon_label_button(
     size: ControlSize,
     enabled: bool,
     p: &Palette,
-) -> Stateful<Div> {
+) -> Button {
     let filled = matches!(kind, ButtonKind::Primary | ButtonKind::Destructive);
-    let face = match kind {
-        ButtonKind::Primary => p.accent,
-        ButtonKind::Destructive => p.danger,
-        ButtonKind::Secondary => p.fill,
-        ButtonKind::Plain => gpui::transparent_black(),
+    let (face, ink) = match kind {
+        ButtonKind::Primary => (p.accent, p.on_accent),
+        ButtonKind::Destructive => (p.danger, p.on_accent),
+        ButtonKind::Secondary => (p.fill, p.text),
+        ButtonKind::Plain(ink) => (gpui::transparent_black(), ink),
     };
-    let ink = match kind {
-        ButtonKind::Primary | ButtonKind::Destructive => p.on_accent,
-        ButtonKind::Secondary => p.text,
-        ButtonKind::Plain => p.accent,
+    let button = Button::new(id);
+    let button = match kind {
+        ButtonKind::Primary => button.primary(),
+        ButtonKind::Destructive => button.danger(),
+        ButtonKind::Secondary => button.secondary().border(px(stroke::HAIRLINE)).border_color(p.card_border),
+        ButtonKind::Plain(_) => button.ghost(),
     };
-    let (hovered, pressed) = if filled {
-        (face.blend(shade(p, 0.08)), face.blend(shade(p, 0.16)))
-    } else {
-        (face.blend(p.hover), face.blend(p.pressed))
-    };
-    div()
-        .id(id)
-        .flex_shrink_0()
+    kit_button(button, enabled)
         .h(px(size.height()))
         .px(px(size.padding()))
-        .flex()
-        .items_center()
-        .gap(px(space::S6))
         .rounded(px(radius::CONTROL))
-        .bg(face)
-        .when(kind == ButtonKind::Secondary, |d| d.border(px(stroke::HAIRLINE)).border_color(p.card_border))
-        .text_size(px(size.font()))
-        .font_weight(if filled { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
-        .text_color(ink)
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .when(enabled, |d| d.cursor_pointer().hover(move |s| s.bg(hovered)).active(move |s| s.bg(pressed)))
-        .when(!enabled, |d| d.opacity(0.4))
-        .children(glyph.map(|glyph| icon(glyph, if size == ControlSize::Small { icon_size::INLINE } else { 14. }, ink)))
-        .child(label.into())
+        // Disabled, the face stays and the whole button dims.
+        .when(!enabled, |b| b.bg(face).opacity(0.4))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S6))
+                .text_size(px(size.font()))
+                .font_weight(if filled { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+                .text_color(ink)
+                .children(glyph.map(|glyph| icon(glyph, if size == ControlSize::Small { icon_size::INLINE } else { 14. }, ink)))
+                .child(label.into()),
+        )
 }
 
-/// A round icon button (`MailIconButton`): the glyph in `color` (usually the secondary label), a
-/// wash under the pointer, a tooltip naming it; a disabled one is faint and takes no clicks.
-pub fn icon_button(
-    id: impl Into<ElementId>,
-    glyph: Icon,
-    tip: impl Into<SharedString>,
-    enabled: bool,
-    color: Hsla,
-    p: &'static Palette,
-) -> Stateful<Div> {
-    let tip = tip.into();
-    div()
-        .id(id)
-        .flex_shrink_0()
+/// A round icon button (`MailIconButton`): a quiet gpui-kit [`Button`] with the glyph in `color`
+/// (usually the secondary label), the wash under the pointer and the kit's tooltip naming it; a
+/// disabled one is faint and takes no clicks.
+pub fn icon_button(id: impl Into<ElementId>, glyph: Icon, tip: impl Into<SharedString>, enabled: bool, color: Hsla) -> Button {
+    kit_button(Button::new(id).ghost().tooltip(tip), enabled)
         .size(px(icon_size::BUTTON))
-        .flex()
-        .items_center()
-        .justify_center()
+        .p_0()
         .rounded_full()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(p.hover)).active(|s| s.bg(p.pressed)))
-        .tooltip(move |_, cx| cx.new(|_| Tooltip { text: tip.clone(), p }).into())
         .child(icon(glyph, icon_size::TOOLBAR, if enabled { color } else { design::tint(color, 0.35) }))
 }
 
-/// A tooltip: small print on a popover.
-pub struct Tooltip {
-    pub text: SharedString,
-    pub p: &'static Palette,
+/// What every button of the app shares on top of the kit's: out of the Tab order (the app's
+/// buttons are clicked, as before the kit), a pointing hand while it can be clicked, and a press
+/// that never reaches the title bar under it, so it can't move the window.
+fn kit_button(button: Button, enabled: bool) -> Button {
+    button
+        .tab_stop(false)
+        .disabled(!enabled)
+        .when(enabled, |b| b.cursor_pointer())
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
-impl Render for Tooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        popover(self.p)
-            .font_family(design::ui_font())
-            .px(px(space::S8))
-            .py(px(space::S4))
-            .rounded(px(radius::SMALL))
-            .text_size(px(text::CAPTION))
-            .text_color(self.p.text)
-            .child(self.text.clone())
-    }
+/// A tooltip naming what is under the pointer: gpui-kit's, for GPUI's `.tooltip(…)`.
+pub fn tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView {
+    let text = text.into();
+    move |window, cx| Tooltip::new(text.clone()).build(window, cx)
 }
 
 /// A popover's panel (menus, tooltips, completions): the background in a hairline, rounded as a
@@ -576,20 +556,10 @@ pub fn toast(message: SharedString, error: bool, p: &Palette) -> Div {
         .child(message)
 }
 
-/// An on/off switch (`MailSwitch`): a capsule track, the accent when on, a white knob at its end.
-pub fn switch(on: bool, p: &Palette) -> Div {
-    const WIDTH: f32 = 32.;
-    const HEIGHT: f32 = 18.;
-    div()
-        .flex_shrink_0()
-        .w(px(WIDTH))
-        .h(px(HEIGHT))
-        .p(px(space::S2))
-        .rounded_full()
-        .bg(if on { p.accent } else { p.border })
-        .flex()
-        .when(on, |d| d.justify_end())
-        .child(div().size(px(HEIGHT - 4.)).rounded_full().bg(gpui::white()).shadow(p.card_shadow.clone()))
+/// An on/off switch (`MailSwitch`): gpui-kit's [`Switch`], the accent when on, out of the Tab order
+/// like the app's buttons. Chain `.on_click`.
+pub fn switch(id: impl Into<ElementId>, on: bool) -> Switch {
+    Switch::new(id).checked(on).tab_stop(false)
 }
 
 /// A note centered in an empty view.

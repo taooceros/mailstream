@@ -424,7 +424,11 @@ impl MailApp {
         let compose = cx.new(|_| ComposeColumn::new());
         let subscriptions = vec![
             cx.subscribe_in(&search, window, Self::on_search_event),
-            cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
+            // The kit's components follow the appearance with the app (`design::sync_kit_theme`).
+            cx.observe_window_appearance(window, |_, window, cx| {
+                crate::design::sync_kit_theme(window.appearance(), cx);
+                cx.notify()
+            }),
             // Chat accounts and unread counts feed the sidebar.
             cx.observe(&chat, |_, _, cx| cx.notify()),
             cx.subscribe(&calendar, |this, _, toast: &CalendarToast, cx| this.show_toast(toast.0.clone(), cx)),

@@ -8,7 +8,7 @@
 use chrono::{DateTime, Local, NaiveDate};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, AppContext, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
+    AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
     ListOffset, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, list, px,
 };
 use mailstream::CalendarPerson;
@@ -18,8 +18,8 @@ use super::model::{self, ReplyState};
 use super::{CalendarPane, Entry, Refresh, Today, View};
 use crate::avatars;
 use crate::controls::{
-    ButtonKind, ControlSize, Tone, Tooltip, button, capsule, icon_button, icon_label_button, island, list_row, mark_dot,
-    notice, segment, segmented, tag, title_bar,
+    ButtonKind, ControlSize, Tone, button, capsule, icon_button, icon_label_button, island, list_row, mark_dot,
+    notice, segment, segmented, tag, title_bar, tooltip,
 };
 use crate::design::{self, Palette, calendar as metrics, icon as icon_size, layout, list as rows, space, stroke, text};
 use crate::icons::{Icon, icon};
@@ -111,7 +111,7 @@ impl CalendarPane {
                             .child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(subtitle)),
                     )
                     .child(capsule(p).child(
-                        icon_button("calendar-refresh", Icon::Refresh, "Refresh", self.has_calendars(), p.muted, p)
+                        icon_button("calendar-refresh", Icon::Refresh, "Refresh", self.has_calendars(), p.muted)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
                     )),
             )
@@ -124,7 +124,7 @@ impl CalendarPane {
                     .child(segmented(p).h(px(26.)).children(views.map(|(view, label, key)| {
                         let tip: SharedString = format!("{label} ({key})").into();
                         segment(ElementId::Name(format!("view:{label}").into()), label, self.view == view, p)
-                            .tooltip(move |_, cx| cx.new(|_| Tooltip { text: tip.clone(), p }).into())
+                            .tooltip(tooltip(tip))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_view(view, cx)))
                     })))
                     .child(div().flex_1())
@@ -132,16 +132,16 @@ impl CalendarPane {
                         capsule(p)
                             .when(paged, |d| {
                                 d.child(
-                                    icon_button("calendar-previous", Icon::Back, format!("Previous {unit} (←)"), true, p.muted, p)
+                                    icon_button("calendar-previous", Icon::Back, format!("Previous {unit} (←)"), true, p.muted)
                                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.page(-1, cx))),
                                 )
                             })
-                            .child(icon_button("calendar-today", Icon::Today, "Today (T)", true, p.muted, p).on_click(
+                            .child(icon_button("calendar-today", Icon::Today, "Today (T)", true, p.muted).on_click(
                                 cx.listener(|this, _: &ClickEvent, window, cx| this.today(&Today, window, cx)),
                             ))
                             .when(paged, |d| {
                                 d.child(
-                                    icon_button("calendar-next", Icon::Disclosure, format!("Next {unit} (→)"), true, p.muted, p)
+                                    icon_button("calendar-next", Icon::Disclosure, format!("Next {unit} (→)"), true, p.muted)
                                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.page(1, cx))),
                                 )
                             }),

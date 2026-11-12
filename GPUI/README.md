@@ -28,6 +28,14 @@ Anything else a render reads (a `Cell`, a thread-local, the time) needs `cx.noti
 `window.refresh()` when it changes; Blitz's pages refresh the window as their tiles arrive.
 `GPUI_VIEW_RETENTION=0` draws every frame from scratch, to tell a stale view from a bug.
 
+The controls are gpui-kit's components where the kit has one (MS-226): buttons and icon buttons
+(`controls::button`, `icon_button`), their tooltips (`controls::tooltip`) and switches. `main.rs`
+calls `gpui::init` and opens every window with `gpui::open_window`, whose root hosts the kit's
+tooltips, menus and popovers over the app; `design::sync_kit_theme` puts the palette into the kit's
+theme (colors, `radius::CONTROL` corners, the UI font, `text::BODY` as the rem) at launch and on
+every change of appearance, so the components keep MS-200's look in both. The app's buttons and
+switches stay out of the Tab order, as before the kit.
+
 Always start it through `run.sh`. On macOS the engine reads the sign-ins from the Keychain item
 that macOS pins to Mailstream's signature (identifier `dev.mailstream.Mailstream`, the Apple
 Development team). `run.sh` signs the binary with `scripts/sign.sh` and refuses to start it unless
@@ -91,7 +99,7 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 | `src/state/nav.rs`, `src/state/actions.rs` | Navigation (sources, bundles, the reader, refresh) and optimistic actions (archive, trash, restore, star, read, waiting, tags) that roll back on failure |
 | `src/state/invitations.rs` | Meeting invitations in the reader (MS-210): each card asks the account's calendar for the event and the answer (`calendar_invitation`, again on every `Calendar` event) and answers there (`calendar_respond`) |
 | `src/ui/` | The window as islands (`mod.rs`): the sidebar tree and the rail that stands in for it (`sidebar.rs`), the list's title row and the conversation's floating toolbar (`toolbar.rs`), the lazy conversation list of two-line rows with Smart Inbox bundles pinned at its top and its "Waiting on you" group (`list.rs`), the reader's message cards with the reply card (`reader.rs`) and a meeting invitation's card with Accept / Tentative / Decline (`invitation.rs`), the context menu (`menu.rs`) |
-| `src/controls.rs` | The shared controls every view composes (Flutter's `controls.dart`, `glass.dart`, `common.dart`): buttons, icon buttons and tooltips, capsules, islands, the title bars that move the window, popovers, tags, pills, segmented controls, marks, list rows and their lifted card, notices, toasts, switches |
+| `src/controls.rs` | The shared controls every view composes (Flutter's `controls.dart`, `glass.dart`, `common.dart`): buttons, icon buttons, tooltips and switches (gpui-kit's, see above), capsules, islands, the title bars that move the window, popovers, tags, pills, segmented controls, marks, list rows and their lifted card, notices, toasts |
 | `src/webview.rs` | macOS, the reader's WebView renderer: HTML bodies in native `WKWebView`s laid over the reader: placed and clipped each frame, sized to their page, page scripts off, links opened in the browser, wheel events handed back to the reader |
 | `src/blitz_body.rs` | HTML bodies drawn by Blitz on the engine's pages thread (the default renderer everywhere), shown as tiles near the viewport, quoted history as a page of its own; links open in the browser, a drag selects and ⌘C (Ctrl+C) copies, inline parts go in as `data:` URLs |
 | `src/swipe.rs` | Two-finger back swipe over the bundle and reader layers, following the system's swipe-between-pages setting |

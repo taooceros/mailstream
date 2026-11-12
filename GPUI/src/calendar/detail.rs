@@ -6,7 +6,7 @@
 use chrono::Local;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, AppContext, ClickEvent, Context, Div, ElementId, FontWeight, InteractiveElement, IntoElement,
+    AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, InteractiveElement, IntoElement,
     ParentElement, StatefulInteractiveElement, Styled, Window, div, px, relative,
 };
 use mailstream::CalendarPerson;
@@ -16,7 +16,8 @@ use super::agenda::{dot_color, guest_address};
 use super::model;
 use crate::avatars;
 use crate::controls::{
-    ButtonKind, ControlSize, Tooltip, capsule, hairline, icon_button, icon_label_button, island, mark_dot, pill, title_bar,
+    ButtonKind, ControlSize, capsule, hairline, icon_button, icon_label_button, island, mark_dot, pill, title_bar,
+    tooltip,
 };
 use crate::design::{Palette, calendar as metrics, icon as icon_size, layout, radius, space, text};
 use crate::format;
@@ -66,14 +67,14 @@ impl CalendarPane {
             .items_center()
             .gap(px(space::S8))
             .child(capsule(p).child(
-                icon_button("calendar-close", close_icon, close_tip, true, p.muted, p)
+                icon_button("calendar-close", close_icon, close_tip, true, p.muted)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_event(cx))),
             ))
             .child(div().flex_1())
             .when_some(event.item.link.clone(), |d, link| {
                 let tip = if microsoft { "Open in Outlook" } else { "Open in Google Calendar" };
                 d.child(capsule(p).child(
-                    icon_button("calendar-link", Icon::OpenInWindow, tip, true, p.muted, p)
+                    icon_button("calendar-link", Icon::OpenInWindow, tip, true, p.muted)
                         .on_click(move |_, _, cx| cx.open_url(&link)),
                 ))
             })
@@ -247,7 +248,6 @@ fn guest_card(person: &CalendarPerson, organizer: bool, p: &'static Palette, cx:
                 }),
         )
         .when_some(email, |d, email| {
-            let email = gpui::SharedString::from(email);
-            d.tooltip(move |_, cx| cx.new(|_| Tooltip { text: email.clone(), p }).into())
+            d.tooltip(tooltip(email))
         })
 }

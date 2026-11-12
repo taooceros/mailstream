@@ -54,6 +54,9 @@ use crate::state::{
 
 fn main() {
     gpui::application().with_assets(icons::Assets).run(|cx: &mut App| {
+        // gpui-kit's components, in the app's palette (`design::sync_kit_theme`).
+        gpui::init(cx);
+        design::sync_kit_theme(cx.window_appearance(), cx);
         #[cfg(target_os = "macos")]
         set_dock_icon();
         // The engine paints from the cache and syncs while the window opens.
@@ -92,21 +95,23 @@ fn main() {
             app_id: Some(APP_ID.into()),
             ..Default::default()
         };
-        let window = cx
-            .open_window(options, |window, cx| cx.new(|cx| MailApp::new(window, cx)))
-            .expect("the window opens");
+        // In gpui-kit's root, which hosts the kit's tooltips, menus and popovers over the app.
+        let (window, app) =
+            gpui::open_window(options, cx, |window, cx| cx.new(|cx| MailApp::new(window, cx))).expect("the window opens");
         // Renames, sign-outs, added accounts and setting changes reload accounts and the list.
+        let reload = app.downgrade();
         settings::init(
             move |cx| {
-                window.update(cx, |app, _, cx| app.retry(cx)).ok();
+                reload.update(cx, |app, cx| app.retry(cx)).ok();
             },
             cx,
         );
         window
-            .update(cx, |app, window, cx| {
-                window.focus(&app.focus, cx);
+            .update(cx, |_, window, cx| {
+                let (focus, bench) = app.read_with(cx, |app, _| (app.focus.clone(), app.bench.is_some()));
+                window.focus(&focus, cx);
                 // A measurement runs beside the user's work without taking the foreground.
-                if app.bench.is_none() {
+                if !bench {
                     cx.activate(true);
                 }
             })

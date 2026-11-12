@@ -100,14 +100,21 @@ pub fn icon(icon: Icon, size: f32, color: Hsla) -> Svg {
     svg().path(icon.path()).flex_shrink_0().size(px(size)).text_color(color)
 }
 
+/// The app's icons, then gpui-kit's (the glyphs its components draw).
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        Ok(Icon::ALL.iter().find(|(name, _)| *name == path).map(|(_, bytes)| Cow::Borrowed(*bytes)))
+        match Icon::ALL.iter().find(|(name, _)| *name == path) {
+            Some((_, bytes)) => Ok(Some(Cow::Borrowed(*bytes))),
+            None => gpui::assets::Assets.load(path),
+        }
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        Ok(Icon::ALL.iter().filter(|(name, _)| name.starts_with(path)).map(|(name, _)| (*name).into()).collect())
+        let mut names: Vec<SharedString> =
+            Icon::ALL.iter().filter(|(name, _)| name.starts_with(path)).map(|(name, _)| (*name).into()).collect();
+        names.extend(gpui::assets::Assets.list(path)?);
+        Ok(names)
     }
 }

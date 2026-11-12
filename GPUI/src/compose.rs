@@ -14,11 +14,12 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AppContext, ClickEvent, Context, Div, ElementId, Entity, EntityInputHandler, EventEmitter, ExternalPaths,
     FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement, Render,
-    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, Subscription, Window, actions, deferred,
+    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, actions, deferred,
     div, px, relative,
 };
 use crate::avatars;
 use crate::controls::{ButtonKind, ControlSize, button, icon_button, popover};
+use gpui::component::button::Button;
 use crate::design::{self, Palette, compose as metrics, editor, radius, space, text};
 use crate::engine::engine;
 use crate::icons::Icon;
@@ -194,7 +195,7 @@ fn forward_subject(subject: &str) -> SharedString {
 }
 
 /// The accent Send button with its shortcut; dimmed and inert while sending.
-fn send_button(id: &'static str, sending: bool, p: &Palette) -> Stateful<Div> {
+fn send_button(id: &'static str, sending: bool, p: &Palette) -> Button {
     button(id, if sending { "Sending…" } else { "Send" }, ButtonKind::Primary, ControlSize::Regular, !sending, p).when(
         !sending,
         |b| {
@@ -967,7 +968,7 @@ impl Render for Compose {
                     .child(self.render_from(p, cx))
                     .child(self.render_recipients(Field::To, window, p, cx))
                     .child(self.render_recipients(Field::Cc, window, p, cx).when(!self.show_bcc, |row| {
-                        row.child(button("show-bcc", "Bcc", ButtonKind::Plain, ControlSize::Small, true, p).on_click(cx.listener(
+                        row.child(button("show-bcc", "Bcc", ButtonKind::Plain(p.accent), ControlSize::Small, true, p).on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
                                 this.show_bcc = true;
                                 window.focus(&this.bcc.focus_handle(cx), cx);
@@ -1285,12 +1286,12 @@ impl Render for ReplyBox {
                     .pb(px(8.))
                     .child(status_line(&self.status, p).unwrap_or_else(|| div().flex_1()))
                     .child(
-                        icon_button("reply-attach", Icon::Attachment, ATTACH_TIP, !sending, p.muted, p).on_click(
+                        icon_button("reply-attach", Icon::Attachment, ATTACH_TIP, !sending, p.muted).on_click(
                             cx.listener(|this, _: &ClickEvent, window, cx| this.pick_files(&Attach, window, cx)),
                         ),
                     )
                     .child(
-                        icon_button("reply-move", Icon::Dock, MOVE_TIP, !sending, p.muted, p)
+                        icon_button("reply-move", Icon::Dock, MOVE_TIP, !sending, p.muted)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.move_to_column(&MoveToColumn, window, cx)
                             })),

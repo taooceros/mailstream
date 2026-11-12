@@ -3,9 +3,9 @@
 //! labels or folders. Expansion is remembered by node key.
 
 use super::*;
-use gpui::{AppContext, Transformation, radians};
+use gpui::{Transformation, radians};
 
-use crate::controls::Tooltip;
+use crate::controls::tooltip;
 
 use crate::model::{Account, Mailbox};
 use crate::settings::ShowSettings;
@@ -69,7 +69,7 @@ impl MailApp {
                     .justify_end()
                     .px(px(space::S8))
                     .child(
-                        icon_button("hide-sidebar", Icon::Sidebar, "Hide Sidebar", true, p.muted, p)
+                        icon_button("hide-sidebar", Icon::Sidebar, "Hide Sidebar", true, p.muted)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.toggle_sidebar(&ToggleSidebar, window, cx)
                             })),
@@ -143,7 +143,7 @@ impl MailApp {
             .items_center()
             .child(
                 title_bar("rail-title", window, cx).w_full().pt(px(layout::RAIL_TOP)).pb(px(space::S8)).flex().justify_center().child(
-                    icon_button("show-sidebar", Icon::Sidebar, "Show Sidebar", true, p.muted, p)
+                    icon_button("show-sidebar", Icon::Sidebar, "Show Sidebar", true, p.muted)
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx))),
                 ),
             )
@@ -369,7 +369,7 @@ impl MailApp {
 
         destination(node.key.clone(), node.depth, selected, p)
             .when_some(node.tooltip, |d, tip| {
-                d.tooltip(move |_, cx| cx.new(|_| Tooltip { text: tip.clone(), p }).into())
+                d.tooltip(tooltip(tip))
             })
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| match &source {
                 Some(Pick::Mail(source)) => this.select(source.clone(), window, cx),

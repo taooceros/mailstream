@@ -4,10 +4,10 @@
 //! bodies load, until it is scrolled (MS-70).
 
 use chrono::{DateTime, Local};
-use gpui::{AppContext as _, ScrollDelta};
+use gpui::ScrollDelta;
 
 use super::*;
-use crate::controls::Tooltip;
+use crate::controls::tooltip;
 use crate::design::reader as metrics_reader;
 
 impl MailApp {
@@ -306,7 +306,7 @@ impl MailApp {
             .font_weight(FontWeight::BOLD)
             .text_color(p.muted)
             .child("•••")
-            .tooltip(move |_, cx| cx.new(|_| Tooltip { text: tip.clone(), p }).into())
+            .tooltip(tooltip(tip))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_quotes(&id, cx)));
         div()
@@ -374,10 +374,10 @@ impl MailApp {
             .when(!message.attachments.is_empty(), |d| d.child(div().pt(px(space::S8)).child(attachments(message, p))));
         let actions = raised_capsule(p)
             .flex()
-            .child(icon_button("log-reply", Icon::Reply, "Reply", true, p.muted, p).on_click(
+            .child(icon_button("log-reply", Icon::Reply, "Reply", true, p.muted).on_click(
                 cx.listener(|this, _: &ClickEvent, window, cx| this.reply(&Reply, window, cx)),
             ))
-            .child(icon_button("log-reply-all", Icon::ReplyAll, "Reply All", true, p.muted, p).on_click(
+            .child(icon_button("log-reply-all", Icon::ReplyAll, "Reply All", true, p.muted).on_click(
                 cx.listener(|this, _: &ClickEvent, window, cx| this.reply_all(&ReplyAll, window, cx)),
             ));
         // The gap above belongs to the message, so the buttons floating over it keep it hovered.

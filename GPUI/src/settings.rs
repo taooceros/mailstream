@@ -16,9 +16,9 @@ use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, Bounds, Context, Div, ElementId, Entity, Focusable, FontWeight, Global,
+    AnyElement, AnyWindowHandle, App, AppContext, Bounds, Context, Div, ElementId, Entity, Focusable, FontWeight, Global,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, StatefulInteractiveElement,
-    Styled, Subscription, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, actions, div, px, size,
+    Styled, Subscription, TitlebarOptions, Window, WeakEntity, WindowBounds, WindowOptions, actions, div, px, size,
 };
 use mailstream::{AutoReadLog, Change, Event, EventListener, OAuthClientInfo, SettingEntry, SettingValue};
 
@@ -61,14 +61,17 @@ pub fn open_settings(on_changed: impl Fn(&mut App) + 'static, cx: &mut App) {
         window_min_size: Some(size(px(metrics::WIDTH), px(360.))),
         ..Default::default()
     };
-    let Ok(handle) = cx.open_window(options, |window, cx| cx.new(|cx| Settings::new(on_changed, window, cx))) else {
+    let Ok((window, settings)) =
+        gpui::open_window(options, cx, |window, cx| cx.new(|cx| Settings::new(on_changed, window, cx)))
+    else {
         return;
     };
-    cx.set_global(OpenSettings(handle));
-    handle.update(cx, |_, window, _| window.activate_window()).ok();
+    cx.set_global(OpenSettings(window, settings.downgrade()));
+    window.update(cx, |_, window, _| window.activate_window()).ok();
 }
 
-struct OpenSettings(WindowHandle<Settings>);
+/// The open Settings window (in gpui-kit's root) and its view.
+struct OpenSettings(AnyWindowHandle, WeakEntity<Settings>);
 
 impl Global for OpenSettings {}
 
@@ -84,9 +87,9 @@ fn follow_engine(cx: &mut App) {
             while let Ok(event) = events.try_recv() {
                 batch.push(event);
             }
-            let open = cx.update(|cx| cx.try_global::<OpenSettings>().map(|open| open.0));
-            if let Some(handle) = open {
-                handle.update(cx, |settings, _, cx| settings.follow_engine(&batch, cx)).ok();
+            let open = cx.update(|cx| cx.try_global::<OpenSettings>().map(|open| open.1.clone()));
+            if let Some(settings) = open {
+                settings.update(cx, |settings, cx| settings.follow_engine(&batch, cx)).ok();
             }
         }
     })
@@ -324,7 +327,10 @@ impl Settings {
             attempt: 0,
             retag_started: false,
             note: None,
-            _appearance: cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
+            _appearance: cx.observe_window_appearance(window, |_, window, cx| {
+                design::sync_kit_theme(window.appearance(), cx);
+                cx.notify()
+            }),
         };
         this.load_accounts(cx);
         this.load_status(cx);
@@ -1025,12 +1031,11 @@ impl Settings {
                 .flex()
                 .gap(px(4.))
                 .child(
-                    button(("rename", index), "Rename", ButtonKind::Plain, ControlSize::Small, true, p)
+                    button(("rename", index), "Rename", ButtonKind::Plain(p.accent), ControlSize::Small, true, p)
                         .on_click(cx.listener(move |this, _, window, cx| this.start_rename(&account, window, cx))),
                 )
                 .child(
-                    button(("remove", index), "Remove…", ButtonKind::Plain, ControlSize::Small, idle, p)
-                        .text_color(p.danger)
+                    button(("remove", index), "Remove…", ButtonKind::Plain(p.danger), ControlSize::Small, idle, p)
                         .when(idle, |b| {
                             b.on_click(cx.listener(move |this, _, _, cx| {
                                 this.cancel_rename(cx);
@@ -1175,13 +1180,10 @@ impl Settings {
             SettingValue::Flag { enabled } => {
                 let (on, key) = (*enabled, key.clone());
                 Some(
-                    div()
-                        .id(ElementId::Name(format!("switch-{key}").into()))
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                    switch(ElementId::Name(format!("switch-{key}").into()), on)
+                        .on_click(cx.listener(move |this, _: &bool, _, cx| {
                             this.write(key.clone(), Some(SettingValue::Flag { enabled: !on }), cx)
                         }))
-                        .child(switch(on, p))
                         .into_any_element(),
                 )
             }
@@ -1217,7 +1219,7 @@ impl Settings {
         let reset_key = key.clone();
         let reset = div().w(px(52.)).flex_shrink_0().flex().justify_end().when(entry.changed, |d| {
             d.child(
-                button(ElementId::Name(format!("reset-{key}").into()), "Reset", ButtonKind::Plain, ControlSize::Small, true, p)
+                button(ElementId::Name(format!("reset-{key}").into()), "Reset", ButtonKind::Plain(p.accent), ControlSize::Small, true, p)
                     .on_click(cx.listener(move |this, _, _, cx| this.write(reset_key.clone(), None, cx))),
             )
         });
@@ -1359,15 +1361,11 @@ impl Settings {
                     .items_center()
                     .gap(px(12.))
                     .child(div().flex_1().min_w_0().truncate().child(label))
-                    .child(
-                        div()
-                            .id(ElementId::Name(format!("sync-{address}").into()))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.write(SYNC_ACCOUNTS.into(), Some(SettingValue::Addresses { addresses: next.clone() }), cx)
-                            }))
-                            .child(switch(on, p)),
-                    )
+                    .child(switch(ElementId::Name(format!("sync-{address}").into()), on).on_click(cx.listener(
+                        move |this, _: &bool, _, cx| {
+                            this.write(SYNC_ACCOUNTS.into(), Some(SettingValue::Addresses { addresses: next.clone() }), cx)
+                        },
+                    )))
             }))
             .children(self.render_error(SYNC_ACCOUNTS, p))
             .into_any_element()
@@ -1497,7 +1495,7 @@ impl Settings {
                         .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).truncate().child(detail)),
                 )
                 .child(
-                    icon_button(("auto-read", index), Icon::MarkUnread, "Mark Unread", true, p.muted, p)
+                    icon_button(("auto-read", index), Icon::MarkUnread, "Mark Unread", true, p.muted)
                         .on_click(cx.listener(move |this, _, _, cx| this.undo_auto_read(vec![id.clone()], cx))),
                 )
                 .into_any_element()

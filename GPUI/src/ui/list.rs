@@ -218,7 +218,7 @@ impl MailApp {
         div().absolute().right(px(space::S8)).top_0().bottom_0().flex().items_center().child(
             raised_capsule(p)
                 .when(conversation.waiting, |d| {
-                    d.child(icon_button("row-resolve", Icon::Resolve, "Resolve (D)", true, p.waiting, p).on_click(
+                    d.child(icon_button("row-resolve", Icon::Resolve, "Resolve (D)", true, p.waiting).on_click(
                         cx.listener(move |this, _: &ClickEvent, _, cx| {
                             cx.stop_propagation();
                             if let Some(c) = this.conversation(&resolve) {
@@ -228,7 +228,7 @@ impl MailApp {
                     ))
                 })
                 .when(conversation.can_archive() || restoring, |d| {
-                    d.child(icon_button("row-file", file_icon, file_tip, true, p.muted, p).on_click(cx.listener(
+                    d.child(icon_button("row-file", file_icon, file_tip, true, p.muted).on_click(cx.listener(
                         move |this, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             let Some(c) = this.conversation(&file) else { return };
@@ -240,7 +240,7 @@ impl MailApp {
                         },
                     )))
                 })
-                .child(icon_button("row-trash", Icon::Delete, "Move to Trash", true, p.muted, p).on_click(cx.listener(
+                .child(icon_button("row-trash", Icon::Delete, "Move to Trash", true, p.muted).on_click(cx.listener(
                     move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         if let Some(c) = this.conversation(&trash) {
@@ -248,7 +248,7 @@ impl MailApp {
                         }
                     },
                 )))
-                .child(icon_button("row-read", read_icon, read_tip, true, p.muted, p).on_click(cx.listener(
+                .child(icon_button("row-read", read_icon, read_tip, true, p.muted).on_click(cx.listener(
                     move |this, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
                         if let Some(c) = this.conversation(&read) {
@@ -256,7 +256,7 @@ impl MailApp {
                         }
                     },
                 )))
-                .child(icon_button("row-star", star_icon, star_tip, true, star_color, p).on_click(cx.listener(
+                .child(icon_button("row-star", star_icon, star_tip, true, star_color).on_click(cx.listener(
                     move |this, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
                         if let Some(c) = this.conversation(&star) {

@@ -40,7 +40,7 @@ impl MailApp {
             .items_center()
             .gap(px(space::S10))
             .when(can_go_back, |d| {
-                d.child(capsule(p).child(icon_button("back", Icon::Back, "Back (Esc)", true, p.muted, p).on_click(
+                d.child(capsule(p).child(icon_button("back", Icon::Back, "Back (Esc)", true, p.muted).on_click(
                     cx.listener(|this, _: &ClickEvent, window, cx| this.back(&Back, window, cx)),
                 )))
             })
@@ -65,10 +65,10 @@ impl MailApp {
             .child(
                 capsule(p)
                     .child(
-                        icon_button("refresh", Icon::Refresh, "Get New Mail", true, p.muted, p)
+                        icon_button("refresh", Icon::Refresh, "Get New Mail", true, p.muted)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
                     )
-                    .child(icon_button("compose", Icon::Compose, "New Message", true, p.muted, p).on_click(
+                    .child(icon_button("compose", Icon::Compose, "New Message", true, p.muted).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.new_message(&NewMessage, window, cx)),
                     )),
             )
@@ -119,26 +119,26 @@ impl MailApp {
             .items_center()
             .gap(px(space::S8))
             .child(capsule(p).child(
-                icon_button("close", close_icon, close_tip, true, p.muted, p)
+                icon_button("close", close_icon, close_tip, true, p.muted)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.back(&Back, window, cx))),
             ))
             .child(div().flex_1())
             .child(
                 capsule(p)
                     .when(conversation.waiting, |d| {
-                        d.child(icon_button("resolve", Icon::Resolve, "Resolve (D)", true, p.waiting, p).on_click(
+                        d.child(icon_button("resolve", Icon::Resolve, "Resolve (D)", true, p.waiting).on_click(
                             cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_waiting(&ToggleWaiting, window, cx)),
                         ))
                     })
                     .child(if restoring {
-                        icon_button("restore", Icon::Restore, "Move to Inbox", true, p.muted, p)
+                        icon_button("restore", Icon::Restore, "Move to Inbox", true, p.muted)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.restore(&Restore, window, cx)))
                     } else {
-                        icon_button("archive", Icon::Archive, "Archive (E)", can_archive, p.muted, p)
+                        icon_button("archive", Icon::Archive, "Archive (E)", can_archive, p.muted)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.archive(&Archive, window, cx)))
                     })
                     .child(
-                        icon_button("trash", Icon::Delete, "Move to Trash", true, p.muted, p)
+                        icon_button("trash", Icon::Delete, "Move to Trash", true, p.muted)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.trash(&Trash, window, cx))),
                     )
                     .child(
@@ -148,7 +148,6 @@ impl MailApp {
                             if unread { "Mark as Read (U)" } else { "Mark as Unread (U)" },
                             true,
                             p.muted,
-                            p,
                         )
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_read(&ToggleRead, window, cx))),
                     )
@@ -159,7 +158,6 @@ impl MailApp {
                             if starred { "Unstar (S)" } else { "Star (S)" },
                             true,
                             if starred { p.star } else { p.muted },
-                            p,
                         )
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.star(&Star, window, cx))),
                     ),
@@ -167,15 +165,15 @@ impl MailApp {
             .child(
                 capsule(p)
                     .child(
-                        icon_button("reply", Icon::Reply, "Reply (R)", true, p.muted, p)
+                        icon_button("reply", Icon::Reply, "Reply (R)", true, p.muted)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.reply(&Reply, window, cx))),
                     )
                     .child(
-                        icon_button("reply-all", Icon::ReplyAll, "Reply All (A)", true, p.muted, p)
+                        icon_button("reply-all", Icon::ReplyAll, "Reply All (A)", true, p.muted)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.reply_all(&ReplyAll, window, cx))),
                     )
                     .child(
-                        icon_button("forward", Icon::Forward, "Forward (F)", true, p.muted, p)
+                        icon_button("forward", Icon::Forward, "Forward (F)", true, p.muted)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.forward(&Forward, window, cx))),
                     ),
             )

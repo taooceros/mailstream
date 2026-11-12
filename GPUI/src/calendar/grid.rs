@@ -946,6 +946,11 @@ mod tests {
     /// The calendar's week view of this week in a window 1400 wide, with an hour on its Saturday
     /// (`saturday`) and today.
     fn week_view(cx: &mut TestAppContext) -> (Entity<CalendarPane>, &mut VisualTestContext) {
+        // The pane draws gpui-kit's buttons, which read the kit's theme.
+        cx.update(|cx| {
+            gpui::init(cx);
+            crate::design::sync_kit_theme(gpui::WindowAppearance::Light, cx);
+        });
         let (pane, cx) = cx.add_window_view(|window, cx| CalendarPane::new(window, cx));
         cx.simulate_resize(size(px(1400.), px(900.)));
         let today = Local::now().date_naive();

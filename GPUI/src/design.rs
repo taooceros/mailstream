@@ -7,7 +7,7 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use gpui::{BoxShadow, Hsla, WindowAppearance, point, px, rgba};
+use gpui::{App, BoxShadow, Hsla, WindowAppearance, point, px, rgba};
 
 pub struct Palette {
     pub dark: bool,
@@ -188,6 +188,64 @@ pub fn palette(appearance: WindowAppearance) -> &'static Palette {
         WindowAppearance::Dark | WindowAppearance::VibrantDark => &DARK,
         WindowAppearance::Light | WindowAppearance::VibrantLight => &LIGHT,
     }
+}
+
+/// gpui-kit's theme in this palette (MS-226): the kit's components (buttons, switches, text fields,
+/// tooltips) take their colors, corners and type from it. Run at launch and whenever the appearance
+/// changes; it redraws every window. The rem is `text::BODY`, so the kit's type scale sits on the
+/// app's: its base size is the body text and its small print the caption.
+pub fn sync_kit_theme(appearance: WindowAppearance, cx: &mut App) {
+    use gpui::component::{Theme, ThemeMode};
+    let p = palette(appearance);
+    let mode = if p.dark { ThemeMode::Dark } else { ThemeMode::Light };
+    if Theme::global(cx).mode != mode {
+        Theme::change(mode, None, cx);
+    }
+    // A filled face darkens toward black (white in dark mode) under the pointer and pressed.
+    let shade = if p.dark { gpui::white() } else { gpui::black() };
+    let hovered = |face: Hsla| face.blend(tint(shade, 0.08));
+    let pressed = |face: Hsla| face.blend(tint(shade, 0.16));
+    Theme::update(cx, |theme| {
+        theme.font_family = ui_font().into();
+        theme.font_size = px(text::BODY);
+        theme.radius = px(radius::CONTROL);
+        theme.radius_lg = px(radius::CARD);
+        theme.shadow = false;
+        let c = &mut theme.colors;
+        c.background = p.background;
+        c.foreground = p.text;
+        c.muted = p.fill;
+        c.muted_foreground = p.muted;
+        c.border = p.line;
+        c.input = p.border;
+        c.ring = p.accent;
+        c.caret = p.accent;
+        c.selection = tint(p.accent, editor::SELECTION_ALPHA);
+        c.popover = p.background;
+        c.popover_foreground = p.text;
+        // The wash under the pointer; the kit draws a quiet button's at half of it in dark mode.
+        c.accent = if p.dark { tint(p.hover, 2.) } else { p.hover };
+        c.accent_foreground = p.text;
+        c.link = p.accent;
+        c.link_hover = p.accent;
+        c.link_active = p.accent;
+        c.switch = p.border;
+        c.switch_thumb = gpui::white();
+        (c.primary, c.primary_hover, c.primary_active, c.primary_foreground) =
+            (p.accent, hovered(p.accent), pressed(p.accent), p.on_accent);
+        (c.danger, c.danger_hover, c.danger_active, c.danger_foreground) =
+            (p.danger, hovered(p.danger), pressed(p.danger), p.on_accent);
+        (c.secondary, c.secondary_hover, c.secondary_active, c.secondary_foreground) =
+            (p.fill, p.fill.blend(p.hover), p.fill.blend(p.pressed), p.text);
+        (c.button_primary, c.button_primary_hover, c.button_primary_active, c.button_primary_foreground) =
+            (c.primary, c.primary_hover, c.primary_active, c.primary_foreground);
+        (c.button_danger, c.button_danger_hover, c.button_danger_active, c.button_danger_foreground) =
+            (c.danger, c.danger_hover, c.danger_active, c.danger_foreground);
+        (c.button_secondary, c.button_secondary_hover, c.button_secondary_active, c.button_secondary_foreground) =
+            (c.secondary, c.secondary_hover, c.secondary_active, c.secondary_foreground);
+        // A quiet (ghost) button: the wash under the pointer is `accent`, pressed this.
+        c.button_active = p.pressed;
+    });
 }
 
 /// `color` at `alpha` of its own opacity: a tag's or a notice's wash of its hue.

@@ -1627,7 +1627,7 @@ impl ChatPane {
         }
         let header = self
             .header(p)
-            .child(icon_button("chat-back", Icon::Back, "Back", true, p.muted, p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
+            .child(icon_button("chat-back", Icon::Back, "Back", true, p.muted).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
             .child(
                 div()
                     .flex_1()
@@ -1785,7 +1785,7 @@ impl ChatPane {
                             .child(button(ElementId::Name(format!("retry:{}", message.id).into()), "Retry", ButtonKind::Secondary, ControlSize::Small, true, p).on_click(
                                 cx.listener(move |this, _: &ClickEvent, window, cx| this.retry(&retry_key, &retry_id, window, cx)),
                             ))
-                            .child(button(ElementId::Name(format!("discard:{}", message.id).into()), "Delete", ButtonKind::Plain, ControlSize::Small, true, p).on_click(
+                            .child(button(ElementId::Name(format!("discard:{}", message.id).into()), "Delete", ButtonKind::Plain(p.accent), ControlSize::Small, true, p).on_click(
                                 cx.listener(move |this, _: &ClickEvent, _, cx| this.discard(&discard_key, &discard_id, cx)),
                             )),
                     )
@@ -1807,7 +1807,7 @@ impl ChatPane {
                 .border_1()
                 .border_color(p.line)
                 .bg(p.background)
-                .child(button(ElementId::Name(format!("reply:{}", message.id).into()), "Reply in Thread", ButtonKind::Plain, ControlSize::Small, true, p).on_click(
+                .child(button(ElementId::Name(format!("reply:{}", message.id).into()), "Reply in Thread", ButtonKind::Plain(p.accent), ControlSize::Small, true, p).on_click(
                     cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.reply_thread = Some((thread.clone(), who.clone()));
                         window.focus(&this.composer.focus_handle(cx), cx);
@@ -1863,8 +1863,7 @@ impl ChatPane {
                 .flex()
                 .justify_center()
                 .child(
-                    button("chat-earlier", if log.loading_earlier { "Loading…" } else { "Load earlier messages" }, ButtonKind::Plain, ControlSize::Small, true, p)
-                        .text_color(p.muted)
+                    button("chat-earlier", if log.loading_earlier { "Loading…" } else { "Load earlier messages" }, ButtonKind::Plain(p.muted), ControlSize::Small, true, p)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.load_earlier(&key, cx))),
                 )
                 .into_any_element()
@@ -1963,7 +1962,7 @@ impl ChatPane {
                 .text_size(px(text::FOOTNOTE))
                 .text_color(p.muted)
                 .child(format!("↳ Replying in thread to {who}"))
-                .child(icon_button("chat-unthread", Icon::Close, "Reply in the space", true, p.muted, p).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                .child(icon_button("chat-unthread", Icon::Close, "Reply in the space", true, p.muted).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.reply_thread = None;
                     cx.notify();
                 })))
@@ -2125,7 +2124,7 @@ impl ChatPane {
             .flex_col()
             .child(
                 self.header(p)
-                    .child(icon_button("chat-form-back", Icon::Back, "Back", true, p.muted, p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
+                    .child(icon_button("chat-form-back", Icon::Back, "Back", true, p.muted).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
                     .child(div().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::SEMIBOLD).child("New Chat")),
             )
             .child(
