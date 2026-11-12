@@ -221,6 +221,9 @@ static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
 });
 
 pub fn palette(appearance: WindowAppearance) -> &'static Palette {
+    // The screenshot mode's window can't be told its appearance, so it is taken here (`shots.rs`).
+    #[cfg(feature = "shots")]
+    let appearance = crate::shots::appearance().unwrap_or(appearance);
     match appearance {
         WindowAppearance::Dark | WindowAppearance::VibrantDark => &DARK,
         WindowAppearance::Light | WindowAppearance::VibrantLight => &LIGHT,
@@ -247,6 +250,11 @@ pub enum WindowMaterial {
 }
 
 pub fn window_material() -> WindowMaterial {
+    // A headless screenshot has no desktop behind the window to show through it (`shots.rs`).
+    #[cfg(feature = "shots")]
+    if crate::shots::appearance().is_some() {
+        return WindowMaterial::Opaque;
+    }
     #[cfg(target_os = "macos")]
     {
         if crate::glass::available() { WindowMaterial::Glass } else { WindowMaterial::Blur }

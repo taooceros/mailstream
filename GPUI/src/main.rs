@@ -40,6 +40,9 @@ mod swipe;
 mod ui;
 #[cfg(target_os = "macos")]
 mod updater;
+// Screenshots of the window drawn headless over synthetic mail (MS-243, `--shots`).
+#[cfg(feature = "shots")]
+mod shots;
 // HTML bodies: the engine's Blitz pages drawn by GPUI everywhere; on the Mac the reader can switch
 // to native `WKWebView`s instead (`state::Renderer`).
 mod blitz_body;
@@ -48,8 +51,8 @@ mod webview;
 
 use gpui::component::input::{Copy, Cut, Paste, SelectAll};
 use gpui::{
-    App, AppContext, Bounds, Menu, MenuItem, OsAction, Styled, TitlebarOptions, WindowBounds, WindowDecorations,
-    WindowOptions, point, px, size,
+    App, AppContext, Bounds, Entity, Menu, MenuItem, OsAction, Pixels, Styled, TitlebarOptions, WindowBounds,
+    WindowDecorations, WindowHandle, WindowOptions, point, px, size,
 };
 
 use crate::state::{
@@ -58,23 +61,17 @@ use crate::state::{
 };
 
 fn main() {
+    // `--shots`: screenshots of the window drawn headless, without a display (`shots.rs`).
+    #[cfg(feature = "shots")]
+    if let Some(shots) = shots::Shots::from_args() {
+        return shots.run();
+    }
     gpui::application().with_assets(icons::Assets).run(|cx: &mut App| {
-        // gpui-kit's components, in the app's palette (`design::sync_kit_theme`).
-        gpui::init(cx);
         #[cfg(target_os = "macos")]
         appearance_from_arguments();
-        design::sync_kit_theme(cx.window_appearance(), cx);
+        init(cx);
         #[cfg(target_os = "macos")]
         set_dock_icon();
-        // The engine paints from the cache and syncs while the window opens.
-        engine::engine();
-        avatars::init(cx);
-        chat::bind_keys(cx);
-        calendar::bind_keys(cx);
-        compose::bind_keys(cx);
-        state::bind_keys(cx);
-        blitz_body::bind_keys(cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(menus());
         #[cfg(target_os = "macos")]
         updater::start();
@@ -88,50 +85,16 @@ fn main() {
         // Linux: whether the desktop blurs behind the window picks its material (`blur.rs`).
         #[cfg(target_os = "linux")]
         let blur = blur::init();
-        let bounds = Bounds::centered(None, size(px(1240.), px(800.)), cx);
-        let mut options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Mailstream".into()),
-                appears_transparent: true,
-                traffic_light_position: Some(point(px(16.), px(19.))),
-            }),
-            window_min_size: Some(size(px(760.), px(420.))),
-            // Linux: the compositor draws the frame and title bar where it offers to (where it
-            // doesn't, the toolbar moves the window); desktop files and window rules match the id.
-            window_decorations: Some(WindowDecorations::Server),
-            app_id: Some(APP_ID.into()),
-            window_background: design::window_background(),
-            ..Default::default()
-        };
+        let mut options = window_options(Bounds::centered(None, size(px(1240.), px(800.)), cx));
         // GPUI Fast draws a window that isn't the key window at about 30 fps unless input is
         // arriving. The measurement runs in the background on purpose and scrolls by itself, so
         // it lifts that limit to see what the window does at the display's rate.
         if bench::requested() {
             options.inactive_frame_interval = None;
         }
-        // In gpui-kit's root, which hosts the kit's tooltips, menus and popovers over the app; its
-        // surface left clear (the kit paints its theme's background there), so the window's glass
-        // (or blur) shows where the app paints nothing.
-        let mut app = None;
-        let window = cx
-            .open_window(options, |window, cx| {
-                let view = cx.new(|cx| MailApp::new(window, cx));
-                app = Some(view.clone());
-                cx.new(|cx| gpui::base::Root::new(view, window, cx).bg(gpui::transparent_black()))
-            })
-            .expect("the window opens");
-        let app = app.expect("the window built its view");
+        let (window, app) = open_window(options, cx);
         #[cfg(target_os = "linux")]
         blur::follow(blur, window.into(), cx);
-        // Renames, sign-outs, added accounts and setting changes reload accounts and the list.
-        let reload = app.downgrade();
-        settings::init(
-            move |cx| {
-                reload.update(cx, |app, cx| app.retry(cx)).ok();
-            },
-            cx,
-        );
         window
             .update(cx, |_, window, cx| {
                 #[cfg(target_os = "macos")]
@@ -147,6 +110,64 @@ fn main() {
             })
             .ok();
     });
+}
+
+/// What every launch sets up before its window, the screenshot mode's too: gpui-kit's components
+/// in the app's palette (`design::sync_kit_theme`), the engine, which paints from the cache and
+/// syncs while the window opens, the avatars and the key bindings.
+fn init(cx: &mut App) {
+    gpui::init(cx);
+    design::sync_kit_theme(cx.window_appearance(), cx);
+    engine::engine();
+    avatars::init(cx);
+    chat::bind_keys(cx);
+    calendar::bind_keys(cx);
+    compose::bind_keys(cx);
+    state::bind_keys(cx);
+    blitz_body::bind_keys(cx);
+    cx.on_action(|_: &Quit, cx| cx.quit());
+}
+
+fn window_options(bounds: Bounds<Pixels>) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitlebarOptions {
+            title: Some("Mailstream".into()),
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(16.), px(19.))),
+        }),
+        window_min_size: Some(size(px(760.), px(420.))),
+        // Linux: the compositor draws the frame and title bar where it offers to (where it
+        // doesn't, the toolbar moves the window); desktop files and window rules match the id.
+        window_decorations: Some(WindowDecorations::Server),
+        app_id: Some(APP_ID.into()),
+        window_background: design::window_background(),
+        ..Default::default()
+    }
+}
+
+/// Opens the mail window. It sits in gpui-kit's root, which hosts the kit's tooltips, menus and
+/// popovers over the app; its surface left clear (the kit paints its theme's background there), so
+/// the window's glass (or blur) shows where the app paints nothing.
+fn open_window(options: WindowOptions, cx: &mut App) -> (WindowHandle<gpui::base::Root>, Entity<MailApp>) {
+    let mut app = None;
+    let window = cx
+        .open_window(options, |window, cx| {
+            let view = cx.new(|cx| MailApp::new(window, cx));
+            app = Some(view.clone());
+            cx.new(|cx| gpui::base::Root::new(view, window, cx).bg(gpui::transparent_black()))
+        })
+        .expect("the window opens");
+    let app = app.expect("the window built its view");
+    // Renames, sign-outs, added accounts and setting changes reload accounts and the list.
+    let reload = app.downgrade();
+    settings::init(
+        move |cx| {
+            reload.update(cx, |app, cx| app.retry(cx)).ok();
+        },
+        cx,
+    );
+    (window, app)
 }
 
 /// The window's application id on Linux (Wayland `app_id`, X11 `WM_CLASS`).
