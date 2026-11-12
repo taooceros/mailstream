@@ -35,8 +35,11 @@ libc = "0.2, <0.2.190"
 
 # Stylo (Blitz's CSS engine) 0.22's derives leave an error type to inference that GPUI's build
 # makes ambiguous; `vendor/stylo_derive` is 0.22.0 with that one type spelled out (`to_css.rs`).
+# `vendor/gpui` is gpui 0.2.2 with smooth wheel steps and kinetic touchpad scrolling on Wayland
+# (MS-208, `src/platform/linux/wayland/scroll_motion.rs` and its use in `client.rs`).
 [patch.crates-io]
 stylo_derive = { path = "vendor/stylo_derive" }
+gpui = { path = "vendor/gpui" }
 
 [profile.dev.package."*"]
 opt-level = 2

@@ -39,6 +39,13 @@ Linux differs from the Mac in:
   with the button held (a click or tap there never does, MS-206); rows and controls never move it.
   The type is the desktop's sans-serif family (fontconfig). The back swipe takes the scroll as
   the compositor turns it for the person's scrolling direction.
+- Scrolling (Wayland): gpui itself applies a wheel notch as one jump of three lines and stops a
+  touchpad scroll dead when the fingers lift (on the Mac, macOS sends the trackpad's momentum
+  itself). Both platforms build gpui from `vendor/gpui`: 0.2.2 with one Wayland-only patch
+  (MS-208, `src/platform/linux/wayland/scroll_motion.rs`). Wheel notches ease in over about
+  150 ms, and touchpad scrolls arrive as `Started`, `Moved`, `Ended` and then a fling that
+  decelerates at the Mac's rate; a click, the pointer leaving or fingers resting on the touchpad
+  stops it. X11 is unchanged.
 - Engine events reach the window through `Mailstream::subscribe_any_thread`: `subscribe` posts
   to GLib's main loop there, which GPUI doesn't run.
 
