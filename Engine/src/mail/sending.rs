@@ -194,8 +194,20 @@ impl Mail {
 
     pub(super) async fn reply_command(self: &Arc<Self>, args: &Arguments) -> Result<Value, EngineError> {
         let conversation = self.lookup(&args.required("id")?)?;
-        let source =
-            conversation.messages.iter().rev().find(|message| message.role != MailboxRole::Drafts).unwrap_or_else(|| conversation.latest()).clone();
+        let source = match args.string("message") {
+            Some(id) => conversation
+                .messages
+                .iter()
+                .find(|message| message.envelope.id == id)
+                .ok_or_else(|| EngineError::usage(format!("Message {id} is not in the conversation.")))?,
+            None => conversation
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role != MailboxRole::Drafts)
+                .unwrap_or_else(|| conversation.latest()),
+        }
+        .clone();
         let mut plan = self.reply_plan(&source, args.bool("all")).await?;
         if args.list("to").is_some() {
             plan.to = addresses(args, "to")?;

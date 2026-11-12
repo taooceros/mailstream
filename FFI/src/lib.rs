@@ -35,7 +35,7 @@ mod swift;
 pub use html_page::{HtmlPage, HtmlPart, HtmlSize, HtmlTile};
 pub use display::{
     Avatar, ChatBlock, ChatBlockKind, ChatRun, ChatRunEntry, ChatSpan, ChatTableCell, ChatTableRow, Recipients, SubjectParts,
-    avatar, chat_body, chat_runs, day_divider, forward_body, forward_subject, list_date, list_section, message_date,
+    avatar, chat_body, chat_runs, day_divider, forward_body, forward_subject, full_date, list_date, list_section, message_date,
     message_time, parse_recipients, reply_subject, split_recipients, split_subject,
 };
 pub use mail_html::{
@@ -374,6 +374,9 @@ pub struct ReplyOverrides {
     pub subject: Option<String>,
     /// Full paths of files to attach; source attachments are not forwarded automatically.
     pub attachments: Option<Vec<String>>,
+    /// The id of the conversation's message to answer (`Message::id`); `None` answers its latest.
+    #[uniffi(default = None)]
+    pub message: Option<String>,
 }
 
 /// What was sent: the account it went from, its recipients (`Name <address>`; replies include
@@ -921,6 +924,7 @@ impl Mailstream {
             args["bcc"] = json!(edits.bcc);
             args["subject"] = json!(edits.subject);
             args["attachments"] = json!(edits.attachments);
+            args["message"] = json!(edits.message);
         }
         call("mail.reply", args).await
     }

@@ -64,16 +64,36 @@ impl MailApp {
         self.list()?.conversations.iter().find(|c| &c.id == id).cloned()
     }
 
+    /// The user's addresses, lowercased: the accounts'.
+    pub fn own_addresses(&self) -> HashSet<String> {
+        self.accounts.iter().map(|account| account.id.to_lowercase()).collect()
+    }
+
+    /// Message `id` of the loaded thread `conversation`.
+    fn loaded_message(&self, conversation: &SharedString, id: &SharedString) -> Option<&Message> {
+        match self.threads.get(conversation).map(|t| &t.state) {
+            Some(ThreadState::Loaded(messages)) => messages.iter().find(|message| &message.id == id),
+            _ => None,
+        }
+    }
+
     pub fn reply(&mut self, _: &Reply, window: &mut Window, cx: &mut Context<Self>) {
-        self.start_reply(false, window, cx);
+        self.start_reply(false, None, window, cx);
     }
 
     pub fn reply_all(&mut self, _: &ReplyAll, window: &mut Window, cx: &mut Context<Self>) {
-        self.start_reply(true, window, cx);
+        self.start_reply(true, None, window, cx);
     }
 
-    /// Opens the conversation in the reader, if it is not, with a reply box under its messages.
-    fn start_reply(&mut self, all: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// A reply (to everyone, with `all`) to message `message` of the open conversation, rather
+    /// than its latest: the chat log's hover buttons.
+    pub fn reply_to_message(&mut self, message: SharedString, all: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_reply(all, Some(message), window, cx);
+    }
+
+    /// Opens the conversation in the reader, if it is not, with a reply box under its messages:
+    /// a reply to `message`, else to its latest.
+    fn start_reply(&mut self, all: bool, message: Option<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(conversation) = self.take_target(window, cx) else { return };
         if self.reader().is_none_or(|open| open.id != conversation.id) {
             self.activate(&conversation.id, window, cx);
@@ -82,12 +102,18 @@ impl MailApp {
             return;
         }
         // The same reply already open keeps what was written.
-        if let Some(draft) = self.reply.as_ref().filter(|d| d.conversation == conversation.id && d.all == all) {
+        if let Some(draft) =
+            self.reply.as_ref().filter(|d| d.conversation == conversation.id && d.all == all && d.message == message)
+        {
             draft.view.update(cx, |reply, cx| reply.focus(window, cx));
             return;
         }
         // Who it goes to is the app's to decide; the box names them for the user.
-        let preview: SharedString = if all {
+        let chosen = message.as_ref().and_then(|message| self.loaded_message(&conversation.id, message));
+        let preview: SharedString = if let Some(chosen) = chosen {
+            let (to, cc) = chosen.reply_recipients(&self.own_addresses(), all);
+            to.iter().chain(&cc).map(|address| address.display_name()).collect::<Vec<_>>().join(", ").into()
+        } else if all {
             let people: Vec<&str> =
                 conversation.participants.iter().map(|p| p.as_ref()).filter(|p| *p != "me").collect();
             if people.is_empty() { conversation.sender.clone() } else { people.join(", ").into() }
@@ -95,7 +121,8 @@ impl MailApp {
             conversation.sender.clone()
         };
         let id = conversation.id.clone();
-        let view = cx.new(|cx| ReplyBox::new(id.clone(), all, preview, window, cx));
+        let view = cx.new(|cx| ReplyBox::new(id.clone(), message.clone(), all, preview, window, cx));
+        let target = message.clone();
         let replied = id.clone();
         let subscription = cx.subscribe_in(&view, window, move |this, _, event: &ReplyEvent, window, cx| {
             this.reply = None;
@@ -107,12 +134,12 @@ impl MailApp {
                 }
                 ReplyEvent::Discarded => {}
                 ReplyEvent::Moved { body, attachments } => {
-                    this.move_reply(&replied, all, body.clone(), attachments.clone(), window, cx);
+                    this.move_reply(&replied, target.clone(), all, body.clone(), attachments.clone(), window, cx);
                 }
             }
             cx.notify();
         });
-        self.reply = Some(super::ReplyDraft { conversation: id, all, view, _subscription: subscription });
+        self.reply = Some(super::ReplyDraft { conversation: id, message, all, view, _subscription: subscription });
         // The box opens under the last message: the reader holds its end while it is written.
         self.reader_pin = ReaderPin::End;
         cx.notify();
@@ -128,11 +155,13 @@ impl MailApp {
         self.load_list(self.key(), true, cx);
     }
 
-    /// Moves the inline reply to the compose column, where its recipients and subject can
-    /// change; it still goes out with `mail.reply`, keeping the thread.
+    /// Moves the inline reply (to `message`, else the latest) to the compose column, where its
+    /// recipients and subject can change; it still goes out with `mail.reply`, keeping the thread.
+    #[allow(clippy::too_many_arguments)]
     fn move_reply(
         &mut self,
         id: &SharedString,
+        message: Option<SharedString>,
         all: bool,
         body: String,
         attachments: Vec<std::path::PathBuf>,
@@ -141,16 +170,20 @@ impl MailApp {
     ) {
         let conversation = self.conversation(id).or_else(|| self.reader().filter(|c| &c.id == id).cloned());
         let Some(conversation) = conversation else { return };
-        let own: HashSet<String> = self.accounts.iter().map(|account| account.id.to_lowercase()).collect();
+        let own = self.own_addresses();
         let (to, cc) = match self.threads.get(id).map(|t| &t.state) {
-            Some(ThreadState::Loaded(messages)) => {
-                messages.last().map(|last| last.reply_recipients(&own, all)).unwrap_or_default()
-            }
+            Some(ThreadState::Loaded(messages)) => messages
+                .iter()
+                .find(|m| Some(&m.id) == message.as_ref())
+                .or(messages.last())
+                .map(|source| source.reply_recipients(&own, all))
+                .unwrap_or_default(),
             _ => Default::default(),
         };
         let subject = mailstream::reply_subject(conversation.subject.to_string());
         let moved = MovedReply {
             conversation: id.clone(),
+            message,
             all,
             from: conversation.account.clone(),
             to,
@@ -167,7 +200,7 @@ impl MailApp {
         let Some(conversation) = self.take_target(window, cx) else { return };
         let id = conversation.id.clone();
         if self.threads.get(&id).is_some_and(|t| matches!(t.state, ThreadState::Loaded(_))) {
-            self.forward_loaded(&id, cx);
+            self.forward_loaded(&id, None, cx);
         } else {
             // The draft opens once the messages it quotes arrive.
             self.forward_pending = Some(id);
@@ -175,14 +208,20 @@ impl MailApp {
         }
     }
 
-    /// Opens a forward of the conversation's newest message, whose thread is loaded, as the window
-    /// draws next.
-    pub(super) fn forward_loaded(&mut self, id: &SharedString, cx: &mut Context<Self>) {
+    /// A forward of message `message` of the open conversation: the chat log's hover button.
+    pub fn forward_message(&mut self, message: SharedString, cx: &mut Context<Self>) {
+        let Some(id) = self.reader().map(|open| open.id.clone()) else { return };
+        self.forward_loaded(&id, Some(&message), cx);
+    }
+
+    /// Opens a forward of the conversation's message `message`, else its newest, whose thread is
+    /// loaded, as the window draws next.
+    pub(super) fn forward_loaded(&mut self, id: &SharedString, message: Option<&SharedString>, cx: &mut Context<Self>) {
         let conversation = self.conversation(id).or_else(|| self.reader().filter(|c| &c.id == id).cloned());
         let Some(conversation) = conversation else { return };
         let Some(ThreadState::Loaded(messages)) = self.threads.get(id).map(|t| &t.state) else { return };
-        let Some(last) = messages.last() else { return };
-        let quoted = last.forwarded(&conversation.subject).into();
+        let Some(source) = messages.iter().find(|m| Some(&m.id) == message).or(messages.last()) else { return };
+        let quoted = source.forwarded(&conversation.subject).into();
         let mode = ComposeMode::Forward { from: conversation.account.clone(), subject: conversation.subject.clone(), quoted };
         let accounts = self.accounts.clone();
         self.compose.update(cx, |column, cx| column.queue(mode, accounts, cx));
@@ -405,6 +444,31 @@ impl MailApp {
 
     /// Shows `text` in a toast over the bottom of the window (`controls::toast`), in place of the
     /// one shown. Pushed once this update is over: the window can't be reached from inside it.
+    /// Saves a copy of a message's attachment (the engine's file at `path`) where the user picks,
+    /// offering their Downloads folder.
+    pub fn save_attachment(&mut self, path: SharedString, name: SharedString, cx: &mut Context<Self>) {
+        let downloads = std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join("Downloads")).unwrap_or_default();
+        let answer = cx.prompt_for_new_path(&downloads, Some(name.as_ref()));
+        cx.spawn(async move |this, cx| {
+            let target = match answer.await {
+                Ok(Ok(Some(target))) => target,
+                // Cancelled.
+                Ok(Ok(None)) | Err(_) => return,
+                Ok(Err(error)) => {
+                    let text = format!("Could not ask where to save {name}: {error}");
+                    this.update(cx, |this, cx| this.show_toast(text, cx)).ok();
+                    return;
+                }
+            };
+            let source = path.to_string();
+            let copied = cx.background_executor().spawn(async move { std::fs::copy(source, target) }).await;
+            if let Err(error) = copied {
+                this.update(cx, |this, cx| this.show_toast(format!("Could not save {name}: {error}"), cx)).ok();
+            }
+        })
+        .detach();
+    }
+
     pub fn show_toast(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         let text = text.into();
         let window = self.window;

@@ -168,7 +168,7 @@ struct Attachment {
 impl From<mailstream::ChatAttachment> for Attachment {
     fn from(attachment: mailstream::ChatAttachment) -> Self {
         let (kind, label) =
-            attachment_kind(&attachment.name, attachment.content_type.as_deref().unwrap_or_default(), attachment.url.as_deref());
+            AttachmentKind::of(&attachment.name, attachment.content_type.as_deref().unwrap_or_default(), attachment.url.as_deref());
         Attachment {
             name: attachment.name.into(),
             url: attachment.url.map(Into::into),
@@ -183,27 +183,6 @@ impl Attachment {
     /// An uploaded picture shows in the log; everything else (videos too) is a tile.
     fn inline(&self) -> bool {
         self.kind == AttachmentKind::Image && self.resource.is_some()
-    }
-}
-
-/// A file's kind and its tile's label, from its type, else its name and link (Flutter's
-/// `_AttachmentTile._kind`).
-fn attachment_kind(name: &str, content_type: &str, url: Option<&str>) -> (AttachmentKind, SharedString) {
-    let extension = name.rsplit_once('.').map(|(_, extension)| extension.to_lowercase()).unwrap_or_default();
-    if content_type.starts_with("video/") {
-        (AttachmentKind::Video, "Video".into())
-    } else if content_type.starts_with("image/") {
-        (AttachmentKind::Image, "Image".into())
-    } else if content_type.starts_with("audio/") {
-        (AttachmentKind::Audio, "Audio".into())
-    } else if content_type == "application/pdf" || extension == "pdf" {
-        (AttachmentKind::Pdf, "PDF".into())
-    } else if url.is_some_and(|url| url.contains("drive.google.com")) {
-        (AttachmentKind::Document, "Google Drive".into())
-    } else if extension.is_empty() {
-        (AttachmentKind::File, "File".into())
-    } else {
-        (AttachmentKind::File, extension.to_uppercase().into())
     }
 }
 
@@ -2273,21 +2252,3 @@ mod fixture {
     }
 }
 
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn attachments_take_their_kind_from_type_name_and_link() {
-        let kind = |name, content_type, url| attachment_kind(name, content_type, url);
-        assert_eq!(kind("clip.mov", "video/quicktime", None), (AttachmentKind::Video, "Video".into()));
-        assert_eq!(kind("a.png", "image/png", None), (AttachmentKind::Image, "Image".into()));
-        assert_eq!(kind("song", "audio/mpeg", None), (AttachmentKind::Audio, "Audio".into()));
-        assert_eq!(kind("Report.PDF", "", None), (AttachmentKind::Pdf, "PDF".into()));
-        let drive = Some("https://drive.google.com/file/d/1");
-        assert_eq!(kind("Plan", "", drive), (AttachmentKind::Document, "Google Drive".into()));
-        assert_eq!(kind("notes.txt", "text/plain", None), (AttachmentKind::File, "TXT".into()));
-        assert_eq!(kind("notes", "", None), (AttachmentKind::File, "File".into()));
-    }
-}

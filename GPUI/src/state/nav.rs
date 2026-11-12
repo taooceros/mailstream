@@ -457,6 +457,15 @@ impl MailApp {
         cx.notify();
     }
 
+    /// Opens or closes a message's full headers.
+    pub fn toggle_headers(&mut self, message: &SharedString, cx: &mut Context<Self>) {
+        self.reader_pin = ReaderPin::Free;
+        if !self.headers_open.remove(message) {
+            self.headers_open.insert(message.clone());
+        }
+        cx.notify();
+    }
+
     /// Closes the open conversation, Chat's open space or new-chat form, or the calendar's open
     /// event (⌘W, MS-69); nothing else.
     pub fn close(&mut self, _: &Close, window: &mut Window, cx: &mut Context<Self>) {

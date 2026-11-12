@@ -158,7 +158,7 @@ impl ComposeColumn {
         let subscriptions = [
             cx.subscribe_in(&draft, window, |this, draft, event: &DraftEvent, window, cx| match event {
                 DraftEvent::Sent => {
-                    let reply = draft.read(cx).reply.as_ref().map(|(conversation, _)| conversation.clone());
+                    let reply = draft.read(cx).reply.as_ref().map(|(conversation, ..)| conversation.clone());
                     this.remove(draft.entity_id(), window, cx);
                     cx.emit(ColumnEvent::Sent { reply });
                 }

@@ -7,7 +7,7 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use gpui::{App, BoxShadow, Hsla, WindowAppearance, WindowBackgroundAppearance, point, px, rgba};
+use gpui::{App, BoxShadow, Hsla, SharedString, WindowAppearance, WindowBackgroundAppearance, point, px, rgba};
 
 pub struct Palette {
     pub dark: bool,
@@ -427,6 +427,12 @@ pub mod reader {
     pub const OPEN_GAP: f32 = 8.0;
     /// The room around an HTML body on its sheet, in dark mode.
     pub const SHEET_PADDING: f32 = 16.0;
+    /// The labels' column of a message's full headers (From, To, Cc, Date).
+    pub const HEADER_LABEL: f32 = 36.0;
+    /// An attachment's tile (Mail's): its width range, and its kind's mark or thumbnail.
+    pub const ATTACHMENT_MIN_WIDTH: f32 = 200.0;
+    pub const ATTACHMENT_MAX_WIDTH: f32 = 300.0;
+    pub const ATTACHMENT_MARK: f32 = 34.0;
 }
 
 /// Corner radii: `SMALL` for inline marks, `CONTROL` for buttons and controls, `CARD` for cards,
@@ -745,6 +751,29 @@ pub enum AttachmentKind {
     File,
 }
 
+impl AttachmentKind {
+    /// A file's kind and its tile's label, from its type, else its name and link (Flutter's
+    /// `_AttachmentTile._kind`): a chat's attachments and a mail's alike.
+    pub fn of(name: &str, content_type: &str, url: Option<&str>) -> (AttachmentKind, SharedString) {
+        let extension = name.rsplit_once('.').map(|(_, extension)| extension.to_lowercase()).unwrap_or_default();
+        if content_type.starts_with("video/") {
+            (AttachmentKind::Video, "Video".into())
+        } else if content_type.starts_with("image/") {
+            (AttachmentKind::Image, "Image".into())
+        } else if content_type.starts_with("audio/") {
+            (AttachmentKind::Audio, "Audio".into())
+        } else if content_type == "application/pdf" || extension == "pdf" {
+            (AttachmentKind::Pdf, "PDF".into())
+        } else if url.is_some_and(|url| url.contains("drive.google.com")) {
+            (AttachmentKind::Document, "Google Drive".into())
+        } else if extension.is_empty() {
+            (AttachmentKind::File, "File".into())
+        } else {
+            (AttachmentKind::File, extension.to_uppercase().into())
+        }
+    }
+}
+
 /// Attachments' colors by kind (MS-191), light and dark, after the system hues the rest of the
 /// app uses: pictures purple, videos pink, audio orange, PDFs red, documents (a Drive file) blue,
 /// any other file gray.
@@ -763,6 +792,19 @@ pub fn attachment_color(kind: AttachmentKind, dark: bool) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachments_take_their_kind_from_type_name_and_link() {
+        let kind = AttachmentKind::of;
+        assert_eq!(kind("clip.mov", "video/quicktime", None), (AttachmentKind::Video, "Video".into()));
+        assert_eq!(kind("a.png", "image/png", None), (AttachmentKind::Image, "Image".into()));
+        assert_eq!(kind("song", "audio/mpeg", None), (AttachmentKind::Audio, "Audio".into()));
+        assert_eq!(kind("Report.PDF", "", None), (AttachmentKind::Pdf, "PDF".into()));
+        let drive = Some("https://drive.google.com/file/d/1");
+        assert_eq!(kind("Plan", "", drive), (AttachmentKind::Document, "Google Drive".into()));
+        assert_eq!(kind("notes.txt", "text/plain", None), (AttachmentKind::File, "TXT".into()));
+        assert_eq!(kind("notes", "", None), (AttachmentKind::File, "File".into()));
+    }
 
     #[test]
     fn house_curve_runs_from_rest_to_rest_and_lands_softly() {

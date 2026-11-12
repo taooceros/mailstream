@@ -373,6 +373,8 @@ pub struct MailApp {
     pub unfolded: HashSet<SharedString>,
     /// Messages whose quoted history the user opened.
     pub quotes_open: HashSet<SharedString>,
+    /// Messages whose full headers the user opened from their recipient line.
+    pub headers_open: HashSet<SharedString>,
     /// Meeting invitations' cards, by message.
     pub invitations: HashMap<SharedString, InvitationCard>,
     pub reader_pin: ReaderPin,
@@ -447,6 +449,8 @@ pub struct MailApp {
 pub struct ReplyDraft {
     pub all: bool,
     pub conversation: SharedString,
+    /// The message it answers; the conversation's latest when `None`.
+    pub message: Option<SharedString>,
     pub view: Entity<ReplyBox>,
     _subscription: Subscription,
 }
@@ -489,6 +493,7 @@ impl MailApp {
             threads: HashMap::new(),
             unfolded: HashSet::new(),
             quotes_open: HashSet::new(),
+            headers_open: HashSet::new(),
             invitations: HashMap::new(),
             reader_pin: ReaderPin::Free,
             reader_top: ReaderTop::Top,
@@ -882,6 +887,7 @@ impl MailApp {
             }
         }
         let arg = id.to_string();
+        let own = self.own_addresses();
         self.background(
             cx,
             async move {
@@ -891,7 +897,7 @@ impl MailApp {
                     .into_iter()
                     .map(|message| {
                         let mut message = Message::from(message);
-                        message.prepare();
+                        message.prepare(&own);
                         message
                     })
                     .collect();
@@ -916,7 +922,7 @@ impl MailApp {
                 }
                 if this.forward_pending.as_ref() == Some(&id) {
                     this.forward_pending = None;
-                    this.forward_loaded(&id, cx);
+                    this.forward_loaded(&id, None, cx);
                 }
                 cx.notify();
             },

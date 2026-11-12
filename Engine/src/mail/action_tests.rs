@@ -212,6 +212,11 @@ fn changes_trashes_and_sends_gmail_mail() {
     assert_eq!(error.message, "Would send \"Re: Lunch?\" from me@gmail.com to ann@x.com, 0 attachments. Re-run with --yes.");
     let error = call(&engine, "mail.reply", json!({ "id": id, "body": "x", "to": [], "yes": true })).unwrap_err();
     assert_eq!(error.message, "A reply needs at least one recipient.");
+    // A reply can answer a message the conversation holds other than its latest.
+    let error = call(&engine, "mail.reply", json!({ "id": id, "message": "nope", "body": "x", "yes": true })).unwrap_err();
+    assert_eq!((error.code.as_str(), error.message.as_str()), ("usage", "Message nope is not in the conversation."));
+    let error = call(&engine, "mail.reply", json!({ "id": id, "message": "s0", "body": "See you" })).unwrap_err();
+    assert_eq!(error.message, "Would send \"Re: Lunch?\" from me@gmail.com to ann@x.com, 0 attachments. Re-run with --yes.");
     let answer = call(&engine, "mail.reply", json!({ "id": id, "body": "See you", "yes": true })).unwrap();
     assert_eq!(answer, json!({ "sent": true, "from": "me@gmail.com", "to": ["Ann <ann@x.com>"], "subject": "Re: Lunch?" }));
     let body = changes(&changed)[0].text();

@@ -25,9 +25,8 @@ use gpui::{
 use crate::avatars;
 use crate::compose::{ComposeColumn, ResizeColumn};
 use crate::controls::{
-    ButtonKind, ControlSize, Tone, capsule, centered_note, field_frame, hairline, icon_avatar, icon_button,
-    icon_label_button, island, list_row, mark_dot, notice, pill, raised_capsule, row_layout, section_header, tag,
-    title_bar,
+    Tone, capsule, centered_note, field_frame, hairline, icon_avatar, icon_button, island, list_row, mark_dot, notice,
+    pill, raised_capsule, row_layout, section_header, tag, title_bar,
 };
 #[cfg(target_os = "macos")]
 use crate::controls::{segment, segmented};

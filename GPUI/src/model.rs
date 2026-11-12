@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use chrono::{DateTime, Utc};
 use gpui::SharedString;
 
+use crate::design::AttachmentKind;
 use crate::format;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -368,8 +369,41 @@ impl From<mailstream::Listing> for Listing {
 #[derive(Clone, Debug)]
 pub struct Attachment {
     pub filename: SharedString,
-    pub size: u64,
+    pub mime: SharedString,
     pub path: SharedString,
+    /// Its kind, for its mark's color and whether a picture of it shows (`AttachmentKind::of`).
+    pub kind: AttachmentKind,
+    /// Its tile's second line: its size and type ("1.2 MB · PDF").
+    pub detail: SharedString,
+    /// Its mark's label: up to four letters of its extension ("PDF", "ZIP"), else of its type.
+    pub mark: SharedString,
+}
+
+impl From<mailstream::Attachment> for Attachment {
+    fn from(a: mailstream::Attachment) -> Self {
+        let size = u64::try_from(a.size).unwrap_or(0);
+        let (kind, label) = AttachmentKind::of(&a.filename, &a.mime, None);
+        let extension = a.filename.rsplit_once('.').map(|(_, extension)| extension).unwrap_or_default();
+        let mark = if extension.is_empty() { label.as_ref() } else { extension };
+        Attachment {
+            mark: mark.chars().take(4).collect::<String>().to_uppercase().into(),
+            detail: format!("{} · {label}", format::file_size(size)).into(),
+            filename: a.filename.into(),
+            mime: a.mime.into(),
+            path: a.path.into(),
+            kind,
+        }
+    }
+}
+
+impl Attachment {
+    /// A calendar file (`invite.ics`), which a message's invitation card already shows.
+    fn calendar(&self) -> bool {
+        let mime = self.mime.to_ascii_lowercase();
+        mime.starts_with("text/calendar")
+            || mime == "application/ics"
+            || self.filename.to_ascii_lowercase().ends_with(".ics")
+    }
 }
 
 /// One message of a thread.
@@ -381,6 +415,7 @@ pub struct Message {
     pub cc: Vec<Address>,
     pub date: Option<DateTime<Utc>>,
     pub unread: bool,
+    pub starred: bool,
     /// Plain text, or the HTML body as text (the engine derives it when the mail has no plain
     /// part); `None` when the body could not load.
     pub text: Option<SharedString>,
@@ -402,8 +437,13 @@ pub struct Message {
     pub divider: SharedString,
     /// The first line of the body, for a folded message.
     pub preview: SharedString,
-    /// `to` and `cc`, joined.
+    /// `to` and `cc` by name, the user as "me": "to me, Maya Lin · cc Platform Architecture".
     pub recipients: SharedString,
+    /// The full headers the recipient line opens to: From, To, Cc (`Name <address>`) and Date.
+    pub headers: Vec<(&'static str, SharedString)>,
+    /// In a chat log, the message continues the run of the one above it: the same sender, the
+    /// same day, within the hour (`Message::divide`).
+    pub continued: bool,
     /// The text body as the reader shows it: what was written, its `>` quotes in place as runs of
     /// their own (`format::runs`), and the quoted history and signature folded behind a toggle
     /// (`format::fold`).
@@ -420,18 +460,11 @@ impl From<mailstream::Message> for Message {
             cc: addresses(m.cc),
             date: date(m.date),
             unread: m.unread,
+            starred: m.starred,
             text: m.text.map(Into::into),
             html: m.html.map(Into::into),
             truncated: m.truncated,
-            attachments: m
-                .attachments
-                .into_iter()
-                .map(|a| Attachment {
-                    filename: a.filename.into(),
-                    size: u64::try_from(a.size).unwrap_or(0),
-                    path: a.path.into(),
-                })
-                .collect(),
+            attachments: m.attachments.into_iter().map(Attachment::from).collect(),
             error: m.error.map(Into::into),
             invitation: m.invitation,
             when: m.when.into(),
@@ -440,6 +473,8 @@ impl From<mailstream::Message> for Message {
             divider: SharedString::default(),
             preview: SharedString::default(),
             recipients: SharedString::default(),
+            headers: Vec::new(),
+            continued: false,
             shown: Vec::new(),
             quoted: None,
         }
@@ -447,7 +482,8 @@ impl From<mailstream::Message> for Message {
 }
 
 impl Message {
-    pub fn prepare(&mut self) {
+    /// Fills the display strings; `own` holds the user's addresses, lowercased, shown as "me".
+    pub fn prepare(&mut self, own: &HashSet<String>) {
         if let Some(text) = &self.text {
             let (shown, quoted) = format::fold(text);
             self.shown = format::runs(&shown);
@@ -456,20 +492,36 @@ impl Message {
             self.preview = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("").to_owned().into();
             self.text = Some(text.into());
         }
+        // The invitation card stands for its calendar file.
+        if self.invitation.is_some() {
+            self.attachments.retain(|attachment| !attachment.calendar());
+        }
         let mut recipients = String::new();
-        for (label, list) in [("To", &self.to), ("Cc", &self.cc)] {
+        for (label, list) in [("to", &self.to), ("cc", &self.cc)] {
             if list.is_empty() {
                 continue;
             }
             if !recipients.is_empty() {
-                recipients.push_str("   ");
+                recipients.push_str(" · ");
             }
             recipients.push_str(label);
             recipients.push(' ');
-            let names: Vec<_> = list.iter().map(|a| a.display_name()).collect();
+            let names: Vec<_> = list
+                .iter()
+                .map(|a| if own.contains(&a.email.to_lowercase()) { "me".into() } else { a.display_name() })
+                .collect();
             recipients.push_str(&names.join(", "));
         }
         self.recipients = recipients.into();
+        let list = |addresses: &[Address]| addresses.iter().map(Address::header_form).collect::<Vec<_>>().join(", ");
+        self.headers = [("From", &self.from), ("To", &self.to), ("Cc", &self.cc)]
+            .into_iter()
+            .filter(|(_, addresses)| !addresses.is_empty())
+            .map(|(label, addresses)| (label, list(addresses).into()))
+            .collect();
+        if let Some(date) = self.date {
+            self.headers.push(("Date", mailstream::full_date(Some(date.to_rfc3339())).into()));
+        }
     }
 
     /// The HTML body the reader draws instead of the text: whenever the message has one, in the
@@ -480,18 +532,20 @@ impl Message {
         self.html.as_ref().filter(|html| !html.trim().is_empty())
     }
 
-    /// Places the day dividers of `messages`, oldest first, as a chat log shows them.
+    /// Places the day dividers of `messages`, oldest first, as a chat log shows them, and marks
+    /// those continuing the run above them: the same sender, the same day, within the hour.
     pub fn divide(messages: &mut [Message]) {
         let entries = messages
             .iter()
             .map(|message| mailstream::ChatRunEntry {
-                sender: message.sender().email.to_string(),
+                sender: message.sender().email.to_lowercase(),
                 date: message.date.map(|date| date.to_rfc3339()),
                 opens_run: false,
             })
             .collect();
         for (message, run) in messages.iter_mut().zip(mailstream::chat_runs(entries)) {
             message.divider = run.divider.into();
+            message.continued = run.continued;
         }
     }
 
@@ -559,8 +613,66 @@ mod tests {
         }))
         .unwrap();
         let mut message = Message::from(message);
-        message.prepare();
+        message.prepare(&HashSet::new());
         message
+    }
+
+    /// A message of a chat log from `from` at `at` (RFC 3339), to the user and Maya.
+    fn sent(from: &str, at: &str) -> Message {
+        let message: mailstream::Message = serde_json::from_value(serde_json::json!({
+            "id": at, "mailbox": "INBOX", "role": "inbox", "from": [from],
+            "to": ["Reader Test <reader@example.com>", "Maya Lin <maya@example.com>"], "cc": ["QA <qa@example.com>"],
+            "date": at, "subject": "Plan", "unread": false, "starred": false, "text": "Hi",
+            "attachments": [
+                { "filename": "invite.ics", "mime": "text/calendar", "size": 900, "path": "/tmp/invite.ics" },
+                { "filename": "plan.pdf", "mime": "application/pdf", "size": 1_200_000, "path": "/tmp/plan.pdf" },
+            ],
+        }))
+        .unwrap();
+        let mut message = Message::from(message);
+        message.prepare(&HashSet::from(["reader@example.com".to_owned()]));
+        message
+    }
+
+    #[test]
+    fn the_user_reads_as_me_and_the_headers_name_everyone() {
+        let message = sent("Alex Rivera <alex@example.com>", "2026-11-12T09:04:00Z");
+        assert_eq!(message.recipients.as_ref(), "to me, Maya Lin · cc QA");
+        let headers: Vec<_> = message.headers.iter().map(|(label, value)| (*label, value.as_ref())).collect();
+        assert_eq!(headers[..3], [
+            ("From", "Alex Rivera <alex@example.com>"),
+            ("To", "Reader Test <reader@example.com>, Maya Lin <maya@example.com>"),
+            ("Cc", "QA <qa@example.com>"),
+        ]);
+        assert_eq!(headers[3].0, "Date");
+        let pdf = &message.attachments[1];
+        assert_eq!((pdf.mark.as_ref(), pdf.kind), ("PDF", AttachmentKind::Pdf));
+        assert!(pdf.detail.ends_with(" · PDF"), "{}", pdf.detail);
+    }
+
+    #[test]
+    fn an_invitation_stands_for_its_calendar_file() {
+        let plain = sent("Alex Rivera <alex@example.com>", "2026-11-12T09:04:00Z");
+        assert_eq!(plain.attachments.len(), 2);
+        let mut invited = plain.clone();
+        invited.invitation = Some(serde_json::from_value(serde_json::json!({ "method": "REQUEST", "uid": "u1", "title": "Sync", "start": "2026-11-13T10:00:00Z", "end": "2026-11-13T10:30:00Z" })).unwrap());
+        invited.prepare(&HashSet::new());
+        let names: Vec<_> = invited.attachments.iter().map(|a| a.filename.as_ref()).collect();
+        assert_eq!(names, ["plan.pdf"]);
+    }
+
+    #[test]
+    fn a_senders_messages_within_the_hour_join_one_run() {
+        let mut log = [
+            sent("Alex Rivera <alex@example.com>", "2026-11-12T12:16:00+00:00"),
+            sent("Alex <ALEX@example.com>", "2026-11-12T12:18:00+00:00"),
+            sent("Alex Rivera <alex@example.com>", "2026-11-12T13:30:00+00:00"),
+            sent("Jordan Lee <jordan@example.com>", "2026-11-12T13:31:00+00:00"),
+            sent("Alex Rivera <alex@example.com>", "2026-11-12T13:32:00+00:00"),
+        ];
+        Message::divide(&mut log);
+        let runs: Vec<bool> = log.iter().map(|message| message.continued).collect();
+        assert_eq!(runs, [false, true, false, false, false]);
     }
 
     #[test]

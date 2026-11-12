@@ -4,11 +4,11 @@
 //! of its first unread message, else its last, held there while bodies load until it is scrolled
 //! (MS-70, MS-255). The toolbar above shows how far it is scrolled (`ReaderTop`).
 
-use gpui::{ScrollDelta, point};
+use gpui::{ObjectFit, ScrollDelta, StyledImage, img, point};
 
 use super::*;
 use crate::controls::tooltip;
-use crate::design::reader as metrics_reader;
+use crate::design::{AttachmentKind, marks, reader as metrics_reader};
 use crate::state::{ReaderPin, ReaderTop};
 
 impl MailApp {
@@ -199,7 +199,8 @@ impl MailApp {
             .pr(px(space::S8))
             .py(px(space::S12))
             .flex()
-            .items_center()
+            // Full headers open run down from the avatar.
+            .map(|d| if open && self.headers_open.contains(&message.id) { d.items_start() } else { d.items_center() })
             .gap(px(space::S16))
             .when(!last, |d| {
                 d.cursor_pointer()
@@ -220,6 +221,7 @@ impl MailApp {
                             .gap(px(space::S8))
                             .items_baseline()
                             .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).child(sender.display_name()))
+                            .children(message.unread.then(|| unread_mark(p)))
                             .when(open && sender.name.is_some(), |d| {
                                 d.child(
                                     div()
@@ -234,17 +236,17 @@ impl MailApp {
                                 d.child(div().flex_1().min_w_0().truncate().text_color(p.muted).child(message.preview.clone()))
                             }),
                     )
-                    .when(open, |d| {
-                        d.child(
-                            div()
-                                .truncate()
-                                .text_size(px(text::CAPTION))
-                                .text_color(p.muted)
-                                .child(message.recipients.clone()),
-                        )
-                    }),
+                    .when(open, |d| d.children(self.render_recipients(message, p, cx))),
             )
-            .child(div().flex_shrink_0().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(message.when.clone()));
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S6))
+                    .children(message.starred.then(|| icon(Icon::Starred, icon_size::INLINE, p.star)))
+                    .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(message.when.clone())),
+            );
         let card = div()
             .flex()
             .flex_col()
@@ -274,8 +276,101 @@ impl MailApp {
             .when_some(message.error.as_ref(), |d, error| {
                 d.child(inset().child(notice(Tone::Error, None, error.clone(), false, p)))
             })
-            .when(!message.attachments.is_empty(), |d| d.child(inset().child(attachments(message, p))))
+            .when(!message.attachments.is_empty(), |d| d.child(inset().child(self.render_attachments(message, p, cx))))
             .into_any_element()
+    }
+
+    /// Who a message went to, the user as "me", on one line; a click opens its full headers
+    /// (From, To, Cc with their addresses, and the date) in its place, and another closes them.
+    fn render_recipients(&self, message: &Message, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if message.recipients.is_empty() {
+            return None;
+        }
+        let id = message.id.clone();
+        let open = self.headers_open.contains(&id);
+        let line = div()
+            .id(ElementId::Name(format!("recipients:{id}").into()))
+            .min_w_0()
+            .text_size(px(text::CAPTION))
+            .text_color(p.muted)
+            .cursor_pointer()
+            .tooltip(tooltip(if open { "Hide details" } else { "Show details" }))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_headers(&id, cx)));
+        if !open {
+            return Some(line.truncate().hover(|s| s.text_color(p.text)).child(message.recipients.clone()).into_any_element());
+        }
+        let rows = message.headers.iter().map(|(label, value)| {
+            div()
+                .flex()
+                .gap(px(space::S8))
+                .child(div().flex_shrink_0().w(px(metrics_reader::HEADER_LABEL)).text_right().text_color(p.faint).child(*label))
+                .child(div().flex_1().min_w_0().child(value.clone()))
+        });
+        Some(line.py(px(space::S2)).flex().flex_col().gap(px(space::S2)).children(rows).into_any_element())
+    }
+
+    /// A message's attachments as tiles of two lines (Mail's): a mark in the file kind's color, or
+    /// a picture's thumbnail, beside its name over its size and type, and a button that saves a
+    /// copy. A click on the tile opens the file in the system's app.
+    fn render_attachments(&self, message: &Message, p: &'static Palette, cx: &mut Context<Self>) -> Div {
+        div().flex().flex_wrap().gap(px(space::S8)).children(message.attachments.iter().enumerate().map(|(index, attachment)| {
+            let here = !attachment.path.is_empty();
+            let color = design::attachment_color(attachment.kind, p.dark);
+            let thumbnail = (here && attachment.kind == AttachmentKind::Image)
+                .then(|| img(std::path::PathBuf::from(attachment.path.as_ref())).size_full().object_fit(ObjectFit::Cover));
+            let mark = div()
+                .flex_shrink_0()
+                .size(px(metrics_reader::ATTACHMENT_MARK))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::CONTROL))
+                .overflow_hidden()
+                .bg(color.opacity(design::avatar::TINT))
+                .text_size(px(text::TAG))
+                .font_weight(FontWeight::BOLD)
+                .text_color(color)
+                .map(|d| match thumbnail {
+                    Some(thumbnail) => d.child(thumbnail),
+                    None => d.child(attachment.mark.clone()),
+                });
+            let (open, save, name) = (attachment.path.clone(), attachment.path.clone(), attachment.filename.clone());
+            div()
+                .id(ElementId::Name(format!("attachment:{}:{index}", message.id).into()))
+                .min_w(px(metrics_reader::ATTACHMENT_MIN_WIDTH))
+                .max_w(px(metrics_reader::ATTACHMENT_MAX_WIDTH))
+                .pl(px(space::S6))
+                .pr(px(space::S4))
+                .py(px(space::S6))
+                .flex()
+                .items_center()
+                .gap(px(space::S10))
+                .rounded(px(radius::CARD))
+                .border(px(stroke::HAIRLINE))
+                .border_color(p.line)
+                .when(!here, |d| d.opacity(design::chat::DIMMED))
+                .when(here, |d| {
+                    d.cursor_pointer().hover(|s| s.bg(p.hover)).on_click(move |_, _, cx| {
+                        cx.open_with_system(std::path::Path::new(open.as_ref()));
+                    })
+                })
+                .tooltip(tooltip(attachment.filename.clone()))
+                .child(mark)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().truncate().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).child(attachment.filename.clone()))
+                        .child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(attachment.detail.clone())),
+                )
+                .child(
+                    icon_button(ElementId::Name(format!("attachment-save:{}:{index}", message.id).into()), Icon::Download, "Save…", here, p.glyph)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.save_attachment(save.clone(), name.clone(), cx))),
+                )
+        }))
     }
 
     /// A message's body: its HTML when it has one (`Message::html_body`), else its text with its
@@ -403,9 +498,11 @@ impl MailApp {
     }
 
     /// A conversation between people as a chat log: a divider per day, each message under its
-    /// sender's avatar, name and time, standing on its own with its sign-off (MS-73). The message
-    /// under the pointer takes a faint wash, its reply buttons floating on its top edge. Returns
-    /// its rows, each message's with its id, for the reader to scroll.
+    /// sender's avatar, name, time and recipients, standing on its own with its sign-off (MS-73);
+    /// a sender's next message within the hour joins theirs, its time in the avatar's column on
+    /// hover (`Message::group`). The message under the pointer takes a faint wash, its reply and
+    /// forward buttons floating on its top edge. Returns its rows, each message's with its id, for
+    /// the reader to scroll.
     fn render_chat_log(
         &self,
         messages: &[Message],
@@ -413,53 +510,82 @@ impl MailApp {
         cx: &mut Context<Self>,
     ) -> Vec<(Option<SharedString>, AnyElement)> {
         let mut rows = Vec::with_capacity(messages.len() * 2);
+        let mut previous: Option<&Message> = None;
         for message in messages {
             if !message.divider.is_empty() {
                 rows.push((None, day_divider(message.divider.clone(), p).into_any_element()));
             }
-            rows.push((Some(message.id.clone()), self.render_log_message(message, p, cx)));
+            // A message joining a run names its recipients only when they changed.
+            let recipients = !message.continued || previous.is_none_or(|before| before.recipients != message.recipients);
+            previous = Some(message);
+            rows.push((Some(message.id.clone()), self.render_log_message(message, recipients, p, cx)));
         }
         rows
     }
 
-    fn render_log_message(&self, message: &Message, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_log_message(&self, message: &Message, recipients: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let id = message.id.clone();
         let hovered = self.hovered_message.as_ref() == Some(&id);
+        let continued = message.continued;
         let sender = message.sender();
-        let photo = avatars::avatar(&sender.email, &message.avatar, metrics::AVATAR, p, cx);
+        let gutter = if continued {
+            // The time shows on hover, and while the message is unread, in the accent.
+            let color = if message.unread { p.accent } else if hovered { p.muted } else { gpui::transparent_black() };
+            div()
+                .pt(px(space::S2))
+                .text_size(px(text::TAG))
+                .text_color(color)
+                .when(message.unread, |d| d.font_weight(FontWeight::SEMIBOLD))
+                .child(message.time.clone())
+                .into_any_element()
+        } else {
+            avatars::avatar(&sender.email, &message.avatar, metrics::AVATAR, p, cx).into_any_element()
+        };
+        let head = (!continued).then(|| {
+            div()
+                .pb(px(space::S4))
+                .flex()
+                .items_baseline()
+                .gap(px(space::S8))
+                .min_w_0()
+                .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).child(sender.display_name()))
+                .children(message.unread.then(|| unread_mark(p)))
+                .child(div().flex_shrink_0().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(message.time.clone()))
+                .children(message.starred.then(|| icon(Icon::Starred, icon_size::INLINE, p.star).self_center()))
+        });
         let column = div()
             .flex_1()
             .min_w_0()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .pb(px(space::S4))
-                    .flex()
-                    .items_baseline()
-                    .gap(px(space::S8))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(sender.display_name()))
-                    .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(message.time.clone())),
-            )
+            .children(head)
+            .when(recipients, |d| d.children(self.render_recipients(message, p, cx).map(|line| div().pb(px(space::S4)).child(line))))
             .children(message.error.as_ref().map(|error| notice(Tone::Error, None, error.clone(), false, p)))
             .children(message.invitation.as_ref().map(|invitation| {
                 div().pb(px(space::S8)).child(self.render_invitation(message, invitation, p, cx))
             }))
             .children(self.render_body(message, p, cx))
-            .when(!message.attachments.is_empty(), |d| d.child(div().pt(px(space::S8)).child(attachments(message, p))));
+            .when(!message.attachments.is_empty(), |d| {
+                d.child(div().pt(px(space::S8)).child(self.render_attachments(message, p, cx)))
+            });
+        // The buttons answer the message under the pointer, not the conversation's latest.
+        let (reply, reply_all, forward) = (id.clone(), id.clone(), id.clone());
         let actions = raised_capsule(p)
             .flex()
-            .child(icon_button("log-reply", Icon::Reply, "Reply", true, p.glyph).on_click(
-                cx.listener(|this, _: &ClickEvent, window, cx| this.reply(&Reply, window, cx)),
-            ))
-            .child(icon_button("log-reply-all", Icon::ReplyAll, "Reply All", true, p.glyph).on_click(
-                cx.listener(|this, _: &ClickEvent, window, cx| this.reply_all(&ReplyAll, window, cx)),
-            ));
+            .child(icon_button("log-reply", Icon::Reply, "Reply", true, p.glyph).on_click(cx.listener(
+                move |this, _: &ClickEvent, window, cx| this.reply_to_message(reply.clone(), false, window, cx),
+            )))
+            .child(icon_button("log-reply-all", Icon::ReplyAll, "Reply All", true, p.glyph).on_click(cx.listener(
+                move |this, _: &ClickEvent, window, cx| this.reply_to_message(reply_all.clone(), true, window, cx),
+            )))
+            .child(icon_button("log-forward", Icon::Forward, "Forward", true, p.glyph).on_click(cx.listener(
+                move |this, _: &ClickEvent, _, cx| this.forward_message(forward.clone(), cx),
+            )));
         // The gap above belongs to the message, so the buttons floating over it keep it hovered.
         div()
             .id(ElementId::Name(format!("log:{id}").into()))
             .relative()
-            .pt(px(space::S12))
+            .pt(px(if continued { space::S2 } else { space::S12 }))
             .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
                 if *hovering {
                     this.hovered_message = Some(id.clone());
@@ -477,7 +603,7 @@ impl MailApp {
                     .py(px(space::S6))
                     .flex()
                     .items_start()
-                    .child(div().w(px(metrics_reader::LOG_GUTTER)).flex_shrink_0().child(photo))
+                    .child(div().w(px(metrics_reader::LOG_GUTTER)).flex_shrink_0().child(gutter))
                     .child(column)
                     // The wash lies over the message, so its HTML (white, as Blitz paints it)
                     // takes it too.
@@ -488,25 +614,9 @@ impl MailApp {
     }
 }
 
-/// A message's attachments, each a button that opens it in the system's app.
-fn attachments(message: &Message, p: &'static Palette) -> Div {
-    div().flex().flex_wrap().gap(px(space::S8)).children(message.attachments.iter().enumerate().map(|(index, attachment)| {
-        let path = attachment.path.clone();
-        icon_label_button(
-            ElementId::Name(format!("attachment:{}:{index}", message.id).into()),
-            Some(Icon::Attachment),
-            format!("{}  ·  {}", attachment.filename, format::file_size(attachment.size)),
-            ButtonKind::Secondary,
-            ControlSize::Regular,
-            true,
-            p,
-        )
-        .on_click(move |_, _, cx| {
-            if !path.is_empty() {
-                cx.open_with_system(std::path::Path::new(path.as_ref()));
-            }
-        })
-    }))
+/// The accent dot beside an unread message's sender.
+fn unread_mark(p: &Palette) -> Div {
+    div().flex_shrink_0().self_center().size(px(marks::DOT)).rounded_full().bg(p.accent)
 }
 
 /// A line across the log with the day in it.

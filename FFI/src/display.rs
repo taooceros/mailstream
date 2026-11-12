@@ -185,6 +185,12 @@ pub fn message_time(date: Option<String>) -> String {
     local(date.as_deref()).map(|date| display::time(&date)).unwrap_or_default()
 }
 
+/// A message's full date, as its headers show it: "Mon, Nov 2, 2026 at 11:41 AM".
+#[uniffi::export]
+pub fn full_date(date: Option<String>) -> String {
+    local(date.as_deref()).map(|date| display::full(&date)).unwrap_or_default()
+}
+
 /// A log's day divider: Today, Yesterday, "Wednesday, November 11", "November 11, 2025".
 #[uniffi::export]
 pub fn day_divider(date: Option<String>) -> String {

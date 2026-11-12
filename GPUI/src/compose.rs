@@ -79,6 +79,8 @@ pub enum ComposeMode {
 /// A reply the reader moved to the compose column.
 pub struct MovedReply {
     pub conversation: SharedString,
+    /// The message it answers; the conversation's latest when `None`.
+    pub message: Option<SharedString>,
     pub all: bool,
     pub from: SharedString,
     pub to: Vec<Address>,
@@ -202,9 +204,9 @@ struct Compose {
     from: Option<SharedString>,
     /// A forward and a reply keep the account it came to.
     from_locked: bool,
-    /// The conversation a moved reply answers, and whether it answers everyone: sent with
-    /// `mail.reply`, which keeps the thread and quotes the original.
-    reply: Option<(SharedString, bool)>,
+    /// The conversation a moved reply answers, the message in it (else its latest), and whether
+    /// it answers everyone: sent with `mail.reply`, which keeps the thread and quotes the original.
+    reply: Option<(SharedString, Option<SharedString>, bool)>,
     picking_from: bool,
     to: Entity<InputState>,
     cc: Entity<InputState>,
@@ -263,7 +265,7 @@ impl Compose {
                 text = moved.body;
                 // Files that went missing since are left out.
                 let _ = attachments.add(moved.attachments);
-                reply = Some((moved.conversation, moved.all));
+                reply = Some((moved.conversation, moved.message, moved.all));
                 (Some(moved.from), true, moved.subject, SharedString::default())
             }
         };
@@ -649,7 +651,7 @@ impl Compose {
         let attachments = self.attachments.paths();
         let request = match self.reply.clone() {
             // Fields left as they opened keep the engine's reply plan.
-            Some((conversation, all)) => {
+            Some((conversation, message, all)) => {
                 let changed = |input: &Entity<InputState>, initial: &str| input.read(cx).value().trim() != initial;
                 let overrides = mailstream::ReplyOverrides {
                     to: changed(&self.to, &self.initial_to).then_some(to),
@@ -657,6 +659,7 @@ impl Compose {
                     bcc: (!bcc.is_empty()).then_some(bcc),
                     subject: (subject != self.initial_subject.as_ref()).then_some(subject),
                     attachments: (!attachments.is_empty()).then_some(attachments),
+                    message: message.map(Into::into),
                 };
                 Outgoing::Reply { id: conversation.to_string(), body, all, overrides }
             }
@@ -989,10 +992,11 @@ pub enum ReplyEvent {
     Moved { body: String, attachments: Vec<PathBuf> },
 }
 
-/// The reader's reply card: a mail reply (or reply all) to a conversation's latest message, with
-/// files picked, dropped or pasted on it.
+/// The reader's reply card: a mail reply (or reply all) to a conversation's latest message, or
+/// the one the reader picked, with files picked, dropped or pasted on it.
 pub struct ReplyBox {
     conversation_id: SharedString,
+    message: Option<SharedString>,
     all: bool,
     recipients: SharedString,
     text: Entity<TextareaState>,
@@ -1008,6 +1012,7 @@ impl ReplyBox {
     /// `recipients_preview` is who the reply goes to, as the reader shows it.
     pub fn new(
         conversation_id: SharedString,
+        message: Option<SharedString>,
         all: bool,
         recipients_preview: SharedString,
         window: &mut Window,
@@ -1028,6 +1033,7 @@ impl ReplyBox {
         });
         Self {
             conversation_id,
+            message,
             all,
             recipients: recipients_preview,
             text,
@@ -1053,12 +1059,13 @@ impl ReplyBox {
             return;
         }
         let (id, all) = (self.conversation_id.to_string(), self.all);
-        let overrides = (!self.attachments.is_empty()).then(|| mailstream::ReplyOverrides {
+        let overrides = (!self.attachments.is_empty() || self.message.is_some()).then(|| mailstream::ReplyOverrides {
             to: None,
             cc: None,
             bcc: None,
             subject: None,
-            attachments: Some(self.attachments.paths()),
+            attachments: (!self.attachments.is_empty()).then(|| self.attachments.paths()),
+            message: self.message.as_ref().map(ToString::to_string),
         });
         self.status = Status::Sending;
         cx.notify();

@@ -34,6 +34,7 @@ icons! {
     Compose => "edit_square",
     Delete => "delete",
     Disclosure => "chevron_right",
+    Download => "download",
     Draft => "draft",
     Dock => "right_panel_open",
     Float => "picture_in_picture",
