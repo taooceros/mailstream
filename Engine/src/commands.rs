@@ -73,7 +73,7 @@ pub enum Handler {
     Core,
     /// The mail store (`mail::Mail::run`).
     Mail,
-    /// AI tagging (`tagging::Tagging::run`).
+    /// AI tagging (`tagging::Tagging`, through `mail::Mail::tagging_command`, which keeps `mail.tag`'s undo).
     Tagging,
     /// Sender pictures (`avatars::Avatars::command`).
     Avatars,
@@ -443,6 +443,12 @@ pub const COMMANDS: &[Spec] = &[
         Handler::Mail,
         "Marks conversations auto-read marked read unread again; without --ids, those of its latest pass. Auto-read leaves them alone until a new message arrives.",
         &[Argument::new("ids", Kind::List, "Conversation ids from `mail autoread`.")],
+    ),
+    Spec::new(
+        "mail.undo",
+        Handler::Mail,
+        "Takes back the latest action on mail this run (read, unread, star, archive, trash, restore, a tag correction) as one step, on the server too: moved mail goes back where it was listed, flags and tags return to what they were. --step takes back an earlier one; actions answer theirs as `undo`.",
+        &[Argument::new("step", Kind::Int, "The step an action answered as `undo`; the latest when left out.")],
     ),
     Spec::new(
         "mail.send",

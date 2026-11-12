@@ -117,8 +117,14 @@ fn tags_the_inbox_with_omp_and_shares_corrections() {
     let tag = |args: Value| call(&engine, "mail.tag", args);
     assert_eq!(
         tag(json!({ "ids": [id(5)], "waiting": "true" })).unwrap(),
-        json!({ "done": [{ "id": id(5), "category": "notification", "waiting": true, "labels": [] }], "failed": [] })
+        json!({ "done": [{ "id": id(5), "category": "notification", "waiting": true, "labels": [] }], "failed": [], "undo": 1 })
     );
+    // Undo puts the tag back as it was.
+    let undone = call(&engine, "mail.undo", json!({})).unwrap();
+    assert_eq!(undone, json!({ "step": 1, "action": "tag", "done": [id(5)], "failed": [] }));
+    assert_eq!(list(&engine, json!({}))[5]["waiting"], json!(false));
+    assert_eq!(call(&engine, "mail.undo", json!({})).unwrap_err().code, "nothing");
+    tag(json!({ "ids": [id(5)], "waiting": true })).unwrap();
     // The FFI sends a boolean; the command line sends `true|false`.
     assert_eq!(tag(json!({ "ids": [id(5)], "waiting": false })).unwrap()["done"][0]["waiting"], json!(false));
     assert_eq!(tag(json!({ "ids": [id(5)], "waiting": true })).unwrap()["done"][0]["waiting"], json!(true));

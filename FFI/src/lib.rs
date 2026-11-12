@@ -486,6 +486,10 @@ commands! {
     /// then leaves them alone until a new message arrives.
     fn undo_auto_read(ids: Option<Vec<String>>) -> BatchResult = "mail.autoread.undo" { "ids": ids };
 
+    /// Takes back step `step` (an action's `undo`), else the latest action on mail, on the server
+    /// too; `nothing` when none is left.
+    fn undo(step: Option<u64>) -> Undone = "mail.undo" { "step": step };
+
     /// Sends `draft` as a new plain-text message with its attachments. Sends at once: `confirm` is the person's
     /// go-ahead; without it the engine only answers what it would send (`confirm`).
     fn send(draft: Draft, confirm: bool) -> Sent = "mail.send" {

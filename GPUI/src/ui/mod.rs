@@ -125,6 +125,7 @@ impl Render for MailApp {
             .on_action(cx.listener(Self::star))
             .on_action(cx.listener(Self::toggle_read))
             .on_action(cx.listener(Self::toggle_waiting))
+            .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::refresh))
             .on_action(cx.listener(Self::toggle_sidebar))

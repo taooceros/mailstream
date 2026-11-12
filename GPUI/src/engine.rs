@@ -16,10 +16,12 @@ pub fn engine() -> &'static Mailstream {
     &ENGINE
 }
 
-/// An action over conversation ids; a failure for any of them is the action's failure.
-pub fn all_done(result: Result<BatchResult, MailError>) -> Result<(), MailError> {
-    match result?.failed.into_iter().next() {
-        None => Ok(()),
+/// An action over conversation ids; a failure for any of them is the action's failure. Answers the
+/// step `mail.undo` takes it back with, when it changed anything.
+pub fn all_done(result: Result<BatchResult, MailError>) -> Result<Option<u64>, MailError> {
+    let result = result?;
+    match result.failed.into_iter().next() {
+        None => Ok(result.undo),
         Some(failure) => {
             Err(MailError::Failed { code: failure.code.unwrap_or_else(|| "failed".into()), message: failure.message })
         }

@@ -469,10 +469,7 @@ impl Core {
             }
             Handler::Core => self.run(command, &args).await,
             Handler::Mail => self.mail.run(command, &args).await,
-            Handler::Tagging => {
-                let mail = &self.mail;
-                mail.tagging().run(command, &args, |id| mail.lookup(id))
-            }
+            Handler::Tagging => self.mail.tagging_command(command, &args),
             Handler::Avatars => self.avatars.command(&args).await,
             Handler::Chat => self.chat.run(command, &args).await,
             Handler::Calendar => self.calendar.run(command, &args).await,

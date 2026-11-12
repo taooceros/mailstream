@@ -57,6 +57,8 @@ pub struct Palette {
     /// Notices floating over the window.
     pub toast: Hsla,
     pub on_toast: Hsla,
+    /// A toast's button (Undo): the other appearance's accent, as the toast is that appearance's.
+    pub toast_action: Hsla,
     pub star: Hsla,
     /// A card resting on the tray (the calendar's events, Up Next): white in light mode, a step
     /// above the tray and the islands in dark (Flutter's `MailColors.card`).
@@ -150,6 +152,7 @@ static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
     on_red_fill: argb(0xFFB3261E),
     toast: argb(0xFF332B26),
     on_toast: argb(0xFFF8F2EA),
+    toast_action: argb(0xFF0A84FF),
     star: argb(0xFFFFB800),
     card: argb(0xFFFFFDF9),
     page: argb(0xFFFFFFFF),
@@ -200,6 +203,7 @@ static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
     on_red_fill: argb(0xFFFFB4AB),
     toast: argb(0xFFEFE7DD),
     on_toast: argb(0xFF2B2420),
+    toast_action: argb(0xFF007AFF),
     star: argb(0xFFFFB800),
     card: argb(0xFF2A2420),
     page: argb(0xFFFFFFFF),

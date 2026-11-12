@@ -157,9 +157,18 @@ fn gmail_inbox_lists_the_users_replies_and_the_conversations_they_started() {
     let sent = call(&engine, "mail.list", json!({ "cached": true, "mailbox": "sent", "account": "me@gmail.com" })).unwrap();
     assert_eq!(conversation(&sent, "me@gmail.com|s2@x")["started"], false);
 
-    // Archive takes the kickoff out of the inbox with nothing to move at Gmail.
+    // Archive takes the kickoff out of the inbox with nothing to move at Gmail. Undo lists it
+    // again without asking Gmail anything; archived again, it stays out.
     let archived = call(&engine, "mail.archive", json!({ "ids": ["me@gmail.com|s2@x"] })).unwrap();
-    assert_eq!(archived, json!({ "done": ["me@gmail.com|s2@x"], "failed": [] }));
+    assert_eq!(archived, json!({ "done": ["me@gmail.com|s2@x"], "failed": [], "undo": 1 }));
+    let listing = call(&engine, "mail.list", json!({ "cached": true })).unwrap();
+    assert_eq!(ids(&listing), ["me@gmail.com|i1@x", "me@gmail.com|i2@x"]);
+    let undone = call(&engine, "mail.undo", json!({ "step": 1 })).unwrap();
+    assert_eq!(undone, json!({ "step": 1, "action": "archive", "done": ["me@gmail.com|s2@x"], "failed": [] }));
+    let listing = call(&engine, "mail.list", json!({ "cached": true })).unwrap();
+    assert!(ids(&listing).contains(&"me@gmail.com|s2@x".to_string()), "{listing}");
+    let archived = call(&engine, "mail.archive", json!({ "ids": ["me@gmail.com|s2@x"] })).unwrap();
+    assert_eq!(archived["undo"], 2);
     let listing = call(&engine, "mail.list", json!({ "cached": true })).unwrap();
     assert_eq!(ids(&listing), ["me@gmail.com|i1@x", "me@gmail.com|i2@x"]);
     std::thread::sleep(Duration::from_millis(1500));

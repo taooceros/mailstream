@@ -39,6 +39,7 @@ mod contacts;
 mod sending;
 mod started;
 mod tagsync;
+mod undo;
 #[cfg(test)]
 mod action_tests;
 #[cfg(test)]
@@ -47,6 +48,8 @@ mod autoread_tests;
 mod interop_tests;
 #[cfg(test)]
 mod started_tests;
+#[cfg(test)]
+mod undo_tests;
 
 pub const PAGE_SIZE: usize = 50;
 /// Page fetches one listing request may make past the mail already kept, so a rare filter
@@ -176,6 +179,8 @@ pub struct Mail {
     contacts: contacts::ContactsLoad,
     /// Marking stale notifications and newsletters read (`autoRead.*`).
     auto_read: autoread::AutoRead,
+    /// The steps `mail.undo` can take back.
+    undo: undo::Undo,
 }
 
 impl Mail {
@@ -211,6 +216,7 @@ impl Mail {
             tagging,
             contacts: contacts::ContactsLoad::default(),
             auto_read: autoread::AutoRead::new(),
+            undo: undo::Undo::default(),
         }
     }
 
@@ -1080,6 +1086,7 @@ impl Mail {
             "mail.previews" => self.previews(args).await,
             "mail.read" | "mail.star" | "mail.archive" | "mail.trash" | "mail.restore" => self.act(command, args).await,
             "mail.autoread" | "mail.autoread.undo" => self.auto_read_command(command, args).await,
+            "mail.undo" => self.undo_command(args).await,
             "mail.send" => self.send_command(args).await,
             "mail.reply" => self.reply_command(args).await,
             _ => unreachable!("{command} is a mail command"),

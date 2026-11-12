@@ -15,14 +15,14 @@
 //! server as Gmail labels or Outlook categories (`tagsync`): a conversation the server already
 //! tags takes that tag and is not sent to the model, and tags made here go there.
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::answers::{self, BatchFailure, TagResult, Tagged};
+use crate::answers::{BatchFailure, TagResult, Tagged};
 use crate::cache::MailCache;
 use crate::commands::Arguments;
 use crate::content::Contents;
@@ -645,7 +645,7 @@ impl Tagging {
         waiting: Option<bool>,
         labels: Option<&[String]>,
     ) -> Result<ConversationTag, String> {
-        let mut state = self.state();
+        let state = self.state();
         if !state.enabled {
             return Err(OFF_MESSAGE.into());
         }
@@ -686,6 +686,35 @@ impl Tagging {
         if existing.as_ref() != Some(&tag) {
             tag.synced = false;
         }
+        self.store(state, conversation, key, tag.clone());
+        tag.to_respond = tag.is_waiting(now());
+        Ok(tag)
+    }
+
+    /// The tag kept for the conversation, its waiting flag as stored (not lapsed).
+    fn stored(&self, conversation: &Conversation) -> Option<ConversationTag> {
+        self.state().tags.get(&key(conversation)).cloned()
+    }
+
+    /// Puts back `before`, a tag a correction replaced (`mail.undo`, MS-280); for an account that
+    /// syncs, it goes to the server again in a pass that follows.
+    pub fn put_back(self: &Arc<Self>, conversation: &Conversation, mut before: ConversationTag) -> Result<(), String> {
+        let state = self.state();
+        if !state.enabled {
+            return Err(OFF_MESSAGE.into());
+        }
+        let key = key(conversation);
+        if state.tags.get(&key) == Some(&before) {
+            return Ok(());
+        }
+        before.synced = false;
+        self.store(state, conversation, key, before);
+        Ok(())
+    }
+
+    /// Keeps a tag made here (a correction or its undo), tells the front ends, and sends it to
+    /// the server when the account syncs and it is not there yet.
+    fn store(self: &Arc<Self>, mut state: MutexGuard<'_, State>, conversation: &Conversation, key: String, tag: ConversationTag) {
         state.tags.insert(key.clone(), tag.clone());
         state.attempted.insert(key.clone());
         self.save(&mut state, HashMap::from([(key, tag.clone())]));
@@ -694,8 +723,6 @@ impl Tagging {
         if !tag.synced && self.sync_accounts().contains(&conversation.account.to_lowercase()) {
             self.request();
         }
-        tag.to_respond = tag.is_waiting(now());
-        Ok(tag)
     }
 
     /// Forgets every tag and tags the list again, ignoring any failure backoff.
@@ -723,40 +750,49 @@ impl Tagging {
 
     // MARK: - Commands
 
-    /// `mail.tag` and `mail.retag`; `lookup` finds a conversation by the id a listing gave.
-    pub(crate) fn run(
+    /// `mail.tag`; `lookup` finds a conversation by the id a listing gave. Answers with the
+    /// conversations whose tag changed and the tag each had before, for undo.
+    pub(crate) fn tag_command(
         self: &Arc<Self>,
-        command: &str,
         args: &Arguments,
         lookup: impl Fn(&str) -> Result<Conversation, EngineError>,
-    ) -> Result<Value, EngineError> {
-        match command {
-            "mail.tag" => {
-                let category = match args.string("category") {
-                    Some(name) => Some(
-                        Category::named(&name).ok_or_else(|| EngineError::usage(format!("Unknown category {name}.")))?,
-                    ),
-                    None => None,
-                };
-                let waiting = args.flag("waiting");
-                let labels = args.list("labels");
-                if category.is_none() && waiting.is_none() && labels.is_none() {
-                    return Err(EngineError::usage("Give --category, --waiting or --labels."));
-                }
-                let (mut done, mut failed) = (Vec::new(), Vec::new());
-                for id in args.list("ids").unwrap_or_default() {
-                    let edited = lookup(&id)
-                        .map_err(|error| error.message)
-                        .and_then(|conversation| self.edit(&conversation, category, waiting, labels.as_deref()));
-                    match edited {
-                        Ok(tag) => {
-                            done.push(Tagged { id, category: tag.category, waiting: tag.to_respond, labels: tag.labels })
-                        }
-                        Err(message) => failed.push(BatchFailure { id, code: None, message }),
-                    }
-                }
-                Ok(answers::json(&TagResult { done, failed }))
+    ) -> Result<(TagResult, Vec<(Conversation, ConversationTag)>), EngineError> {
+        let category = match args.string("category") {
+            Some(name) => {
+                Some(Category::named(&name).ok_or_else(|| EngineError::usage(format!("Unknown category {name}.")))?)
             }
+            None => None,
+        };
+        let waiting = args.flag("waiting");
+        let labels = args.list("labels");
+        if category.is_none() && waiting.is_none() && labels.is_none() {
+            return Err(EngineError::usage("Give --category, --waiting or --labels."));
+        }
+        let (mut done, mut failed, mut replaced) = (Vec::new(), Vec::new(), Vec::new());
+        for id in args.list("ids").unwrap_or_default() {
+            let edited = lookup(&id).map_err(|error| error.message).and_then(|conversation| {
+                let before = self.stored(&conversation);
+                let tag = self.edit(&conversation, category, waiting, labels.as_deref())?;
+                Ok((conversation, before, tag))
+            });
+            match edited {
+                Ok((conversation, before, tag)) => {
+                    if let Some(before) = before
+                        && self.stored(&conversation).as_ref() != Some(&before)
+                    {
+                        replaced.push((conversation, before));
+                    }
+                    done.push(Tagged { id, category: tag.category, waiting: tag.to_respond, labels: tag.labels })
+                }
+                Err(message) => failed.push(BatchFailure { id, code: None, message }),
+            }
+        }
+        Ok((TagResult { done, failed, undo: None }, replaced))
+    }
+
+    /// `mail.retag`.
+    pub(crate) fn run(self: &Arc<Self>, command: &str) -> Result<Value, EngineError> {
+        match command {
             "mail.retag" => {
                 if !self.is_enabled() {
                     return Err(EngineError::new("disabled", OFF_MESSAGE));

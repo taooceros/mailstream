@@ -68,6 +68,10 @@ impl Started {
     }
 }
 
+/// What was known of the threads archive marked, before it did (`Mail::archive_started`).
+#[derive(Clone, Debug)]
+pub(super) struct Marked(Vec<(ThreadKey, Option<(Status, Date)>)>);
+
 /// The thread of a conversation of the user's own sent mail alone, the first of which answers
 /// nothing.
 pub(super) fn started_key(conversation: &Conversation) -> Option<ThreadKey> {
@@ -170,13 +174,34 @@ impl Mail {
     }
 
     /// Archive: the user's own mail left of `conversation` (its threads) no longer lists in the
-    /// inbox as a conversation they started.
-    pub(super) fn archive_started(&self, conversation: &Conversation) {
+    /// inbox as a conversation they started. Answers what was known of those threads before, for
+    /// undo (`unarchive_started`).
+    pub(super) fn archive_started(&self, conversation: &Conversation) -> Marked {
         let mut state = self.state();
+        let mut before = Vec::new();
         for message in &conversation.messages {
             if let Some(thread) = &message.envelope.thread {
-                state.started.threads.insert((message.account().to_string(), thread.clone()), (Status::Archived, now()));
+                let key = (message.account().to_string(), thread.clone());
+                let known = state.started.threads.insert(key.clone(), (Status::Archived, now()));
+                if !before.iter().any(|(marked, _)| *marked == key) {
+                    before.push((key, known));
+                }
             }
+        }
+        self.save_started(&state);
+        drop(state);
+        self.conversations_changed();
+        Marked(before)
+    }
+
+    /// Undoes `archive_started`: the threads it marked are known as they were before.
+    pub(super) fn unarchive_started(&self, marked: &Marked) {
+        let mut state = self.state();
+        for (key, known) in &marked.0 {
+            match known {
+                Some(known) => state.started.threads.insert(key.clone(), *known),
+                None => state.started.threads.remove(key),
+            };
         }
         self.save_started(&state);
         drop(state);

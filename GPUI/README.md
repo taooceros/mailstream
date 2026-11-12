@@ -33,7 +33,7 @@ The controls are gpui-kit's components where the kit has one (MS-226): buttons a
 segmented controls (`controls::segmented` / `segment`: the kit's small segmented `TabBar`), tags
 (`controls::tag`: the kit's `Tag` without its rim), toasts (`controls::toast`: a kit notification
 at the bottom center, pushed by `MailApp::show_toast`, replacing the one shown, gone after the
-kit's 5 s) and the row's right-click menu (`ui/menu.rs`: a kit `PopupMenu` built as it opens, its
+kit's 5 s; `controls::toast_with_action` adds a button, the Undo that follows each action on mail) and the row's right-click menu (`ui/menu.rs`: a kit `PopupMenu` built as it opens, its
 entries drawn in the app's row; arrows, Return and Escape are the kit's). Notices stay the app's
 own: the kit's alert can hold neither a button nor a click. `main.rs` calls `gpui::init` and opens
 every window with `gpui::open_window`, whose root hosts the kit's tooltips, menus, popovers and
@@ -170,7 +170,8 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 
 Keys (⌘ is Ctrl on Linux): ↑/↓ or J/K move (in the reader they page through conversations),
 Return or Space opens, Esc or ⌘[ goes back, E or ⌃⌘A archives, ⌫ trashes, S or ⇧⌘L stars, U or
-⇧⌘U toggles read, D or ⇧⌘D toggles waiting on you, R or ⌘R replies, A or ⇧⌘R replies to all, F
+⇧⌘U toggles read, D or ⇧⌘D toggles waiting on you, ⌘Z undoes the latest of these (MS-280: the
+engine takes it back, on the server too; the toast after each offers Undo), R or ⌘R replies, A or ⇧⌘R replies to all, F
 or ⇧⌘F forwards, ⌘N writes a new message (a new chat in Chat), ⌘W closes the open conversation (or
 Chat's open space or New Chat form, or the calendar's open event), / or ⌘F searches, ⇧⌘N
 refreshes, ⌃⌘S toggles the sidebar, ⌘, opens Settings. In the calendar ↑/↓ or J/K open the next or

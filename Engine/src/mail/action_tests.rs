@@ -12,19 +12,19 @@ use crate::mail_tests::{BASE_MS, encode, gmail_batch, gmail_full, gmail_metadata
 use crate::testkit::{FakeRequest, FakeServer, Reply, call, cleanup, engine_for, token_reply, wait_until};
 
 /// The requests that change mail, as the server got them.
-type Changes = Arc<Mutex<Vec<FakeRequest>>>;
+pub(super) type Changes = Arc<Mutex<Vec<FakeRequest>>>;
 
-fn changes(changes: &Changes) -> Vec<FakeRequest> {
+pub(super) fn changes(changes: &Changes) -> Vec<FakeRequest> {
     std::mem::take(&mut *changes.lock().unwrap())
 }
 
-fn json_body(request: &FakeRequest) -> Value {
+pub(super) fn json_body(request: &FakeRequest) -> Value {
     serde_json::from_slice(&request.body).unwrap()
 }
 
 /// The fake Gmail of `mail_tests` with two messages in the trash, answering label changes,
 /// trashing, deleting and sending. A label change touching `i04` is refused.
-fn gmail_server(changed: Changes) -> FakeServer {
+pub(super) fn gmail_server(changed: Changes) -> FakeServer {
     let mut metadata = gmail_metadata();
     for (id, minutes) in [("t1", 10), ("t2", 20)] {
         metadata.insert(
@@ -87,7 +87,7 @@ fn gmail_server(changed: Changes) -> FakeServer {
     })
 }
 
-fn conversation<'a>(listing: &'a Value, id: &str) -> &'a Value {
+pub(super) fn conversation<'a>(listing: &'a Value, id: &str) -> &'a Value {
     listing["conversations"].as_array().unwrap().iter().find(|c| c["id"] == id).unwrap_or_else(|| panic!("{id} in {listing}"))
 }
 
@@ -104,7 +104,7 @@ fn changes_trashes_and_sends_gmail_mail() {
 
     // Read: the unread message loses UNREAD; the list and the inbox count follow at once.
     let read = call(&engine, "mail.read", json!({ "ids": [lunch] })).unwrap();
-    assert_eq!(read, json!({ "done": [lunch], "failed": [] }));
+    assert_eq!(read, json!({ "done": [lunch], "failed": [], "undo": 1 }));
     let sent = changes(&changed);
     assert_eq!(sent.len(), 1);
     assert!(sent[0].path.ends_with("/messages/batchModify"));

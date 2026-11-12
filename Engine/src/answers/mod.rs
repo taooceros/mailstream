@@ -256,11 +256,14 @@ impl BatchFailure {
     }
 }
 
-/// An action over several conversations: the ids it was done for and those it failed for.
+/// An action over several conversations: the ids it was done for and those it failed for, and for
+/// an action on mail the step `mail.undo` takes it back with, when it changed anything.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
 pub struct BatchResult {
     pub done: Vec<String>,
     pub failed: Vec<BatchFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo: Option<u64>,
 }
 
 /// `Name <address>` text for [`Address`] fields: `serde(with = "address_text")`, and its

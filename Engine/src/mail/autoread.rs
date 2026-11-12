@@ -357,7 +357,7 @@ impl Mail {
             self.cache.save_auto_read(&saved);
             self.events.emit_soon("autoRead");
         }
-        Ok(answers::json(&BatchResult { done, failed }))
+        Ok(answers::json(&BatchResult { done, failed, undo: None }))
     }
 }
 

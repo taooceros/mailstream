@@ -214,6 +214,34 @@ pub struct Tagged {
 pub struct TagResult {
     pub done: Vec<Tagged>,
     pub failed: Vec<BatchFailure>,
+    /// The step `mail.undo` takes the correction back with, when it changed anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo: Option<u64>,
+}
+
+/// What a step `mail.undo` takes back had done.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "lowercase")]
+pub enum UndoAction {
+    Read,
+    Unread,
+    Star,
+    Unstar,
+    Archive,
+    Trash,
+    Restore,
+    /// A correction of the AI tag (`mail.tag`).
+    Tag,
+}
+
+/// A step `mail.undo` took back: which one, what it had done, and the conversations it was taken
+/// back for and those the provider refused.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
+pub struct Undone {
+    pub step: u64,
+    pub action: UndoAction,
+    pub done: Vec<String>,
+    pub failed: Vec<BatchFailure>,
 }
 
 /// A conversation auto-read marked read and nobody undid.

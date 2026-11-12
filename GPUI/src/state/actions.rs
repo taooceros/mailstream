@@ -1,11 +1,14 @@
-//! Actions on conversations: optimistic, rolled back when the engine refuses them; replying,
-//! forwarding and writing new mail.
+//! Actions on conversations: optimistic, rolled back when the engine refuses them, and once done
+//! offered for undo in a toast (the engine takes them back, MS-280); replying, forwarding and
+//! writing new mail.
 
 use super::*;
 use crate::compose::{ColumnEvent, ComposeColumn, ComposeMode, MovedReply, ReplyEvent};
 use crate::engine::{self, BatchResult};
 use crate::{controls, design};
 use gpui::component::WindowExt;
+use gpui::component::notification::Notification;
+use mailstream::{UndoAction, Undone};
 
 /// What takes a conversation out of the list.
 #[derive(Clone, Copy)]
@@ -22,6 +25,15 @@ impl Removal {
             Removal::Archive => "archive",
             Removal::Trash => "move it to the Trash",
             Removal::Restore => "move it to the Inbox",
+        }
+    }
+
+    /// What the toast offering undo says was done.
+    fn done(self) -> &'static str {
+        match self {
+            Removal::Archive => "Archived",
+            Removal::Trash => "Moved to the Trash",
+            Removal::Restore => "Moved to the Inbox",
         }
     }
 
@@ -312,13 +324,13 @@ impl MailApp {
             async move {
                 let result = engine().tag(ids, None, Some(waiting), None).await?;
                 match result.failed.into_iter().next() {
-                    None => Ok(()),
-                    Some(failure) => Err(failure.message),
+                    None => Ok(result.undo),
+                    Some(failure) => Err(MailError::Failed { code: "failed".into(), message: failure.message }),
                 }
-                .map_err(|message| MailError::Failed { code: "failed".into(), message })
             },
-            move |this, result, cx| {
-                if let Err(error) = result {
+            move |this, result, cx| match result {
+                Ok(step) => this.offer_undo(if waiting { "Marked as waiting on you" } else { "Resolved" }, step, cx),
+                Err(error) => {
                     this.patch(&id, |c| c.waiting = !waiting);
                     this.rebuild_items();
                     this.show_toast(format!("Couldn't update “Waiting on you”: {error}"), cx);
@@ -374,7 +386,10 @@ impl MailApp {
             async move { engine::all_done(removal.run(ids).await) },
             move |this, result, cx| {
                 this.removing.remove(&id);
-                let Err(error) = result else { return };
+                let error = match result {
+                    Ok(step) => return this.offer_undo(removal.done(), step, cx),
+                    Err(error) => error,
+                };
                 for (key, at, conversation) in removed {
                     let list = this.lists.entry(key).or_default();
                     if !list.conversations.iter().any(|c| c.id == conversation.id) {
@@ -417,8 +432,9 @@ impl MailApp {
         self.background(
             cx,
             async move { engine::all_done(engine().set_starred(ids, starred).await) },
-            move |this, result, cx| {
-                if let Err(error) = result {
+            move |this, result, cx| match result {
+                Ok(step) => this.offer_undo(if starred { "Starred" } else { "Unstarred" }, step, cx),
+                Err(error) => {
                     this.patch(&id, |c| c.starred = !starred);
                     this.show_toast(format!("Couldn't update the star: {error}"), cx);
                 }
@@ -434,8 +450,9 @@ impl MailApp {
         self.background(
             cx,
             async move { engine::all_done(engine().set_read(ids, !unread).await) },
-            move |this, result, cx| {
-                if let Err(error) = result {
+            move |this, result, cx| match result {
+                Ok(step) => this.offer_undo(if unread { "Marked as unread" } else { "Marked as read" }, step, cx),
+                Err(error) => {
                     this.patch(&id, |c| c.unread = !unread);
                     this.show_toast(format!("Couldn't mark it {}: {error}", if unread { "unread" } else { "read" }), cx);
                 }
@@ -443,8 +460,6 @@ impl MailApp {
         );
     }
 
-    /// Shows `text` in a toast over the bottom of the window (`controls::toast`), in place of the
-    /// one shown. Pushed once this update is over: the window can't be reached from inside it.
     /// Saves a copy of a message's attachment (the engine's file at `path`) where the user picks,
     /// offering their Downloads folder.
     pub fn save_attachment(&mut self, path: SharedString, name: SharedString, cx: &mut Context<Self>) {
@@ -470,21 +485,91 @@ impl MailApp {
         .detach();
     }
 
+    /// Shows `text` in a toast over the bottom of the window (`controls::toast`), in place of the
+    /// one shown.
     pub fn show_toast(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         let text = text.into();
+        self.push_toast(cx, move |p| controls::toast(text, p));
+    }
+
+    /// Says what an action did in a toast with an Undo button that takes back `step`, the
+    /// engine's step for it (none when it changed nothing: no toast then). A later action's toast
+    /// takes its place; ⌘Z takes back the latest step meanwhile and after.
+    fn offer_undo(&mut self, text: &'static str, step: Option<u64>, cx: &mut Context<Self>) {
+        let Some(step) = step else { return };
+        let app = cx.entity().downgrade();
+        self.push_toast(cx, move |p| {
+            let undo = move |_: &mut Window, cx: &mut App| {
+                app.update(cx, |app, cx| app.take_back(Some(step), cx)).ok();
+            };
+            controls::toast_with_action(text.into(), "Undo", undo, p)
+        });
+    }
+
+    /// Pushes the toast `make` builds in the window's palette, once this update is over: the
+    /// window can't be reached from inside it.
+    fn push_toast(&mut self, cx: &mut Context<Self>, make: impl FnOnce(&'static design::Palette) -> Notification + 'static) {
         let window = self.window;
         cx.defer(move |cx| {
             window
                 .update(cx, |_, window, cx| {
                     let p = design::palette(window.appearance());
-                    window.push_notification(controls::toast(text, p), cx);
+                    window.push_notification(make(p), cx);
                 })
                 .ok();
         });
     }
 
+    /// ⌘Z: takes back the latest action on mail.
+    pub fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        self.take_back(None, cx);
+    }
+
+    /// Has the engine take back step `step`, else the latest; the lists follow its change events.
+    /// A conversation back in the list is highlighted again, as it was when it left.
+    fn take_back(&mut self, step: Option<u64>, cx: &mut Context<Self>) {
+        self.background(
+            cx,
+            async move { engine().undo(step).await },
+            |this, result: Result<Undone, MailError>, cx| match result {
+                Ok(undone) => match undone.failed.into_iter().next() {
+                    None => {
+                        if matches!(undone.action, UndoAction::Archive | UndoAction::Trash | UndoAction::Restore)
+                            && let Some(id) = undone.done.into_iter().next()
+                        {
+                            if this.open_bundle().is_some() {
+                                this.bundle_highlight = Some(id);
+                            } else {
+                                this.highlight = Some(id);
+                            }
+                            cx.notify();
+                        }
+                        this.show_toast(format!("{} undone", undo_title(undone.action)), cx);
+                    }
+                    Some(failure) => this.show_toast(format!("Couldn't undo: {}", failure.message), cx),
+                },
+                Err(error) if error.code() == "nothing" => this.show_toast("Nothing to undo", cx),
+                Err(error) => this.show_toast(format!("Couldn't undo: {error}"), cx),
+            },
+        );
+    }
+
     pub fn retry(&mut self, cx: &mut Context<Self>) {
         self.load_mailboxes(cx);
         self.load_list(self.key(), true, cx);
+    }
+}
+
+/// How the toast after an undo names what was taken back.
+fn undo_title(action: UndoAction) -> &'static str {
+    match action {
+        UndoAction::Read => "Mark as Read",
+        UndoAction::Unread => "Mark as Unread",
+        UndoAction::Star => "Star",
+        UndoAction::Unstar => "Unstar",
+        UndoAction::Archive => "Archive",
+        UndoAction::Trash => "Move to Trash",
+        UndoAction::Restore => "Move to Inbox",
+        UndoAction::Tag => "Tag change",
     }
 }

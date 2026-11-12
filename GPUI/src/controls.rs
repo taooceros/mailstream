@@ -562,11 +562,13 @@ pub fn notice(tone: Tone, title: Option<SharedString>, message: impl Into<Shared
     )
 }
 
+/// What every toast is, so a new one takes the place of the one shown.
+struct AppToast;
+
 /// A toast over the bottom of the window (`MailToast`): gpui-kit's notification in the toast's face
 /// (dark in light mode, light in dark), rounded as a pane, its message in the body text. A new one
 /// takes the place of the one shown; it leaves by itself after the kit's few seconds.
 pub fn toast(message: SharedString, p: &Palette) -> Notification {
-    struct AppToast;
     Notification::new()
         .id::<AppToast>()
         .placement(Anchor::BottomCenter)
@@ -577,6 +579,31 @@ pub fn toast(message: SharedString, p: &Palette) -> Notification {
         .rounded(px(radius::PANE))
         .px(px(space::S16))
         .py(px(space::S10))
+}
+
+/// A [`toast`] with a quiet button after its message (Undo, MS-280) in the `toast_action` color: a
+/// click runs `on_click` and closes the toast, which otherwise leaves as any toast does.
+pub fn toast_with_action(
+    message: SharedString,
+    label: impl Into<SharedString>,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+    p: &'static Palette,
+) -> Notification {
+    let label = label.into();
+    let on_click = std::rc::Rc::new(on_click);
+    toast(message, p)
+        .action(move |_, _, cx| {
+            let toast = cx.entity().downgrade();
+            let on_click = on_click.clone();
+            button("toast-action", label.clone(), ButtonKind::Plain(p.toast_action), ControlSize::Small, true, p).on_click(
+                move |_, window, cx| {
+                    on_click(window, cx);
+                    toast.update(cx, |toast, cx| toast.dismiss(window, cx)).ok();
+                },
+            )
+        })
+        // The kit keeps a toast with a button up until it is closed; this one leaves by itself.
+        .autohide(true)
 }
 
 /// An on/off switch (`MailSwitch`): gpui-kit's [`Switch`], the accent when on, out of the Tab order
