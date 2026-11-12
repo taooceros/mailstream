@@ -10,8 +10,8 @@
 #   view back and forth, eight times with a two-finger swipe, then eight times as ← and → do
 #   (both need BENCH_HOME, whose seed holds events from ten days back to two weeks ahead,
 #   fresh for 5 minutes after seeding).
-#   MAILSTREAM_READER_RENDERER (Flutter, Mac) opens the reader in blitz (default) or webKit,
-#   e.g. BENCH_SCENARIO=reader-swipe MAILSTREAM_READER_RENDERER=webKit.
+#   MAILSTREAM_READER_RENDERER (Mac: Flutter and GPUI) opens the reader in blitz (default) or
+#   webKit, e.g. BENCH_SCENARIO=reader-swipe MAILSTREAM_READER_RENDERER=webKit.
 #   Build the release first: Flutter/README.md, or CONFIG=release GPUI/run.sh.
 #   BENCH_HZ (120) is the display's refresh rate. Each run first waits up to 2 minutes for the
 #   1-minute load average to fall below BENCH_MAX_LOAD (4): builds in other workspaces skew

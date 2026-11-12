@@ -9,11 +9,14 @@ gpui = "0.2.2"
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 unicode-segmentation = "1"
-mailstream = { path = "../FFI", default-features = false }
+# HTML bodies are drawn by the engine's Blitz pages (`blitz_body.rs`) on every platform.
+mailstream = { path = "../FFI", default-features = false, features = ["blitz"] }
 futures = "0.3"
 url = "2"
+image = { version = "0.25", default-features = false }
+base64 = "0.22"
 
-# The HTML reader's WKWebViews and the Dock icon.
+# The Mac reader's other renderer, WKWebViews (`webview.rs`), and the Dock icon.
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-handle = "0.6"
 objc2 = "0.6"
@@ -22,11 +25,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView", "NSResponder", "NSWorkspace", "NSEvent", "NSApplication", "NSImage", "NSMenu", "NSMenuItem"] }
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "objc2-core-foundation", "block2", "WKWebView", "WKWebViewConfiguration", "WKPreferences", "WKWebpagePreferences", "WKNavigationDelegate", "WKNavigationAction", "WKNavigation", "WKWebsiteDataStore", "WKUIDelegate", "WKWindowFeatures", "WKFrameInfo"] }
 
-# Elsewhere the HTML reader draws bodies with the engine's Blitz pages (`blitz_body.rs`).
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-mailstream = { path = "../FFI", default-features = false, features = ["blitz"] }
-image = { version = "0.25", default-features = false }
-base64 = "0.22"
 # GPUI's font-kit loads fontconfig with dlopen, which turns the shared fontconfig-sys's functions
 # into a loaded table; Blitz's font lookup (fontique) must take them from there too.
 fontique = { version = "0.12", default-features = false, features = ["fontconfig-dlopen"] }

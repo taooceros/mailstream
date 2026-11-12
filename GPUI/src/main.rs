@@ -19,8 +19,10 @@ mod textarea;
 mod ui;
 #[cfg(target_os = "macos")]
 mod updater;
-// HTML bodies: native `WKWebView`s on the Mac, the engine's Blitz pages drawn by GPUI elsewhere.
-#[cfg_attr(not(target_os = "macos"), path = "blitz_body.rs")]
+// HTML bodies: the engine's Blitz pages drawn by GPUI everywhere; on the Mac the reader can switch
+// to native `WKWebView`s instead (`state::Renderer`).
+mod blitz_body;
+#[cfg(target_os = "macos")]
 mod webview;
 
 use gpui::{
@@ -46,8 +48,7 @@ fn main() {
         textarea::bind_keys(cx);
         compose::bind_keys(cx);
         state::bind_keys(cx);
-        #[cfg(not(target_os = "macos"))]
-        webview::bind_keys(cx);
+        blitz_body::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(menus());
         #[cfg(target_os = "macos")]

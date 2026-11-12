@@ -26,13 +26,20 @@ ad hoc signature) makes macOS ask for the Keychain, and "Always Allow" there re-
 that one build, so the app and every other host get asked again. Linux keeps the sign-ins in a
 file only the user reads (`~/.local/share/Mailstream`), so nothing is signed there.
 
+HTML bodies are drawn by Blitz, the engine's renderer (`src/blitz_body.rs`, as in Flutter's
+reader), on every platform: the build turns on the FFI crate's `blitz` feature, with one
+adjustment for GPUI's dependency graph: `vendor/stylo_derive` is Stylo's derive crate 0.22.0 with
+one error type spelled out (`to_css.rs`), which GPUI's `log` features make ambiguous. On the Mac
+the reader's header has a "Renderer: Blitz / WebView (original)" switch (`state::Renderer`, after
+Flutter's MS-138/MS-166): every launch starts in Blitz, the switch holds for that run only, the
+open messages and quotes stay as they were, and only the chosen renderer holds pages. The
+WebView (`src/webview.rs`, native `WKWebView`s) shows the mail whole, quotes unfolded.
+`MAILSTREAM_READER_RENDERER=webKit` starts in the WebView, for `scripts/bench.sh`.
+
 Linux differs from the Mac in:
-- HTML bodies: Blitz, the engine's renderer (`src/blitz_body.rs`, as in Flutter's reader), drawn
-  by GPUI, instead of `WKWebView`s. The build turns on the FFI crate's `blitz` feature there, with
-  two adjustments for GPUI's dependency graph: fontique takes fontconfig through `dlopen` as
-  GPUI's font-kit does, and `vendor/stylo_derive` is Stylo's derive crate 0.22.0 with one error
-  type spelled out (`to_css.rs`), which GPUI's `log` features make ambiguous. libc stays below
-  0.2.190, which dropped the `ENOATTR` GPUI's tar reader (xattr 0.2) names.
+- HTML bodies: Blitz only (no WebView switch). fontique takes fontconfig through `dlopen` as
+  GPUI's font-kit does, and libc stays below 0.2.190, which dropped the `ENOATTR` GPUI's tar
+  reader (xattr 0.2) names.
 - Shortcuts: ⌘ is Ctrl (`secondary-` bindings), except the Mac's text navigation (⌘←, Emacs keys).
 - The window: the compositor draws its frame where it offers to; elsewhere dragging the window
   between the islands or their title rows moves it once the pointer has travelled a few points
@@ -73,9 +80,9 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 | `src/state.rs` | `MailApp`: selection, lists served from memory for 90 s and reloaded on change events, paging, search, previews, layers over the list, key bindings |
 | `src/state/nav.rs`, `src/state/actions.rs` | Navigation (sources, bundles, the reader, refresh) and optimistic actions (archive, trash, restore, star, read, waiting, tags) that roll back on failure |
 | `src/ui/` | The window as islands (`mod.rs`): the sidebar tree and the rail that stands in for it (`sidebar.rs`), the list's title row and the conversation's floating toolbar (`toolbar.rs`), the lazy conversation list of two-line rows with Smart Inbox bundles pinned at its top and its "Waiting on you" group (`list.rs`), the reader's message cards with the reply card (`reader.rs`), the context menu (`menu.rs`) |
-| `src/controls.rs` | The shared controls every view composes (Flutter's `controls.dart`, `glass.dart`, `common.dart`): buttons, icon buttons and tooltips, capsules, islands, the title bars that move the window, popovers, tags, pills, marks, list rows and their lifted card, notices, toasts, switches |
-| `src/webview.rs` | macOS: HTML bodies in native `WKWebView`s laid over the reader: placed and clipped each frame, sized to their page, page scripts off, links opened in the browser, wheel events handed back to the reader |
-| `src/blitz_body.rs` | Linux: HTML bodies drawn by Blitz on the engine's pages thread, shown as tiles near the viewport; links open in the browser, a drag selects and Ctrl+C copies, inline parts go in as `data:` URLs |
+| `src/controls.rs` | The shared controls every view composes (Flutter's `controls.dart`, `glass.dart`, `common.dart`): buttons, icon buttons and tooltips, capsules, islands, the title bars that move the window, popovers, tags, pills, segmented controls, marks, list rows and their lifted card, notices, toasts, switches |
+| `src/webview.rs` | macOS, the reader's WebView renderer: HTML bodies in native `WKWebView`s laid over the reader: placed and clipped each frame, sized to their page, page scripts off, links opened in the browser, wheel events handed back to the reader |
+| `src/blitz_body.rs` | HTML bodies drawn by Blitz on the engine's pages thread (the default renderer everywhere), shown as tiles near the viewport, quoted history as a page of its own; links open in the browser, a drag selects and ⌘C (Ctrl+C) copies, inline parts go in as `data:` URLs |
 | `src/swipe.rs` | Two-finger back swipe over the bundle and reader layers, following the system's swipe-between-pages setting |
 | `src/chat.rs` | `ChatPane`: Google Chat spaces (older pages load near the list's end, `chat_more`), a space's log (bottom-aligned, runs and day dividers, markup and links, uploaded pictures shown in it once `chat_attachment` downloads them, other files and videos as tiles in their kind's color that open in the system's default app), sending, earlier pages, threads, New Chat completing the account's Chat partners (`chat_people`) before contacts; the engine keeps the open space (`chat_open`) and the pane re-reads the list and the space on its `Chat`/`ChatMessages` events. `MAILSTREAM_CHAT_FIXTURE=<file.json>` shows a synthetic chat without an account (the module's `fixture` says what the file holds) |
 | `src/compose.rs` | The New Message and Forward windows (From picker, recipient completion, discard confirmation) and the reader's reply card |

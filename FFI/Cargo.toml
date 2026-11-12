@@ -54,9 +54,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 glib-sys = "0.21"
 
 [features]
-# The Blitz HTML pages (html_page.rs) the Flutter reader draws with. On by default (the dylib
-# ffi.py builds); GPUI leaves it off: it doesn't draw with Blitz, and stylo fails to compile in
-# GPUI's dependency graph.
+# The Blitz HTML pages (html_page.rs) the Flutter and GPUI readers draw with. On by default (the
+# dylib ffi.py builds); GPUI turns it on itself (it takes no default features).
 default = ["blitz"]
 blitz = ["dep:blitz-dom", "dep:blitz-html", "dep:blitz-paint", "dep:blitz-traits", "dep:html5ever", "dep:anyrender", "dep:anyrender_vello_cpu", "dep:peniko", "dep:parley", "dep:style", "dep:sha2", "dep:data-url", "dep:tokio"]
 # MAILSTREAM_ENGINE=swift runs the Swift engine (libMailstreamKit.dylib, which `swift build

@@ -96,7 +96,8 @@ impl MailApp {
                                 .children(account)
                                 .when(conversation.message_count > 1, |d| {
                                     d.child(pill(format!("{} messages", conversation.message_count), None, p))
-                                }),
+                                })
+                                .children(self.render_renderer_switch(p, cx)),
                         )
                         .child(div().mt(px(space::S24)).flex().flex_col().gap(px(space::S12)).child(body))
                         .when_some(self.reply.as_ref().filter(|r| r.conversation == conversation.id), |d, reply| {
@@ -226,24 +227,50 @@ impl MailApp {
     }
 
     /// An HTML body. Blitz draws what the mail wrote, and its quoted history (a page of its own)
-    /// once the toggle opens it; the Mac's web view shows the mail whole.
+    /// once the toggle opens it; the Mac's web view, when chosen, shows the mail whole. Only the
+    /// chosen renderer holds pages: the other's close at the next frame (`begin_frame`).
     fn render_html(&self, message: &Message, html: SharedString, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let id = message.id.clone();
         #[cfg(target_os = "macos")]
-        {
-            let _ = (p, cx);
-            html_body(message.id.clone(), html)
+        if self.renderer == Renderer::WebKit {
+            return web_body(id, html);
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let id = message.id.clone();
-            let main = html_body(id.clone(), html.clone(), webview::HtmlPart::Main);
-            if webview::quoted(&id) != Some(true) {
-                return main;
-            }
-            let open = self.quotes_open.contains(&id);
-            let quoted = html_body(format!("{id}#quoted").into(), html, webview::HtmlPart::Quoted);
-            div().flex().flex_col().child(main).child(self.render_fold(&id, open, quoted, p, cx)).into_any_element()
+        let main = blitz_html(id.clone(), html.clone(), blitz_body::HtmlPart::Main);
+        if blitz_body::quoted(&id) != Some(true) {
+            return main;
         }
+        let open = self.quotes_open.contains(&id);
+        let quoted = blitz_html(format!("{id}#quoted").into(), html, blitz_body::HtmlPart::Quoted);
+        div().flex().flex_col().child(main).child(self.render_fold(&id, open, quoted, p, cx)).into_any_element()
+    }
+
+    /// The switch beside the pills, labelled with the renderer in use (Flutter's
+    /// `ReaderRendererSwitch`): the Mac only. The open messages and quotes stay as they were.
+    #[cfg(target_os = "macos")]
+    fn render_renderer_switch(&self, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let segments = Renderer::ALL.map(|renderer| {
+            segment(ElementId::Name(format!("renderer:{renderer:?}").into()), renderer.title(), renderer == self.renderer, p)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    if this.renderer != renderer {
+                        this.renderer = renderer;
+                        cx.notify();
+                    }
+                }))
+        });
+        let switch = div()
+            .flex()
+            .items_center()
+            .gap(px(space::S6))
+            .text_size(px(text::FOOTNOTE))
+            .text_color(p.muted)
+            .child("Renderer:")
+            .child(segmented(p).children(segments));
+        Some(switch.into_any_element())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn render_renderer_switch(&self, _: &'static Palette, _: &mut Context<Self>) -> Option<AnyElement> {
+        None
     }
 
     /// Folded content behind a small "more" toggle (Flutter's `_Fold`), with a rule at its left
@@ -414,21 +441,22 @@ fn day_divider(label: String, p: &Palette) -> Div {
         .child(rule())
 }
 
-/// An HTML body: a placeholder the native web view is laid over (the Mac) or Blitz's tiles of
-/// `part` of it are drawn in (elsewhere), as tall as its page once that is measured.
-#[cfg(target_os = "macos")]
-fn html_body(id: SharedString, html: SharedString) -> AnyElement {
-    let height = webview::height(&id).unwrap_or(40.);
-    let body = canvas(|_, _, _| {}, move |bounds, _, window, _| webview::paint(&id, &html, bounds, window));
+/// Blitz's tiles of `part` of an HTML body, drawn in a placeholder as tall as its page once that
+/// is laid out.
+fn blitz_html(key: SharedString, html: SharedString, part: blitz_body::HtmlPart) -> AnyElement {
+    let height = blitz_body::height(&key).unwrap_or(40.);
+    let body = canvas(
+        |bounds, window, _| blitz_body::prepaint(bounds, window),
+        move |bounds, hitbox, window, cx| blitz_body::paint(&key, &html, part, bounds, hitbox, window, cx),
+    );
     body.w_full().h(px(height)).into_any_element()
 }
 
-#[cfg(not(target_os = "macos"))]
-fn html_body(key: SharedString, html: SharedString, part: webview::HtmlPart) -> AnyElement {
-    let height = webview::height(&key).unwrap_or(40.);
-    let body = canvas(
-        |bounds, window, _| webview::prepaint(bounds, window),
-        move |bounds, hitbox, window, cx| webview::paint(&key, &html, part, bounds, hitbox, window, cx),
-    );
+/// The Mac's WebView renderer: a placeholder the native web view of the whole body is laid over,
+/// as tall as its page once that is measured.
+#[cfg(target_os = "macos")]
+fn web_body(id: SharedString, html: SharedString) -> AnyElement {
+    let height = webview::height(&id).unwrap_or(40.);
+    let body = canvas(|_, _, _| {}, move |bounds, _, window, _| webview::paint(&id, &html, bounds, window));
     body.w_full().h(px(height)).into_any_element()
 }

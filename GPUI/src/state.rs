@@ -296,6 +296,37 @@ pub struct ContextMenu {
     pub focus: FocusHandle,
 }
 
+/// What draws an HTML body in the reader on the Mac, in the switch's order (Flutter's
+/// `ReaderRenderer`): Blitz on every launch, switched only by hand for this run;
+/// `MAILSTREAM_READER_RENDERER` (`blitz` or `webKit`) picks the first one, for the bench.
+/// Elsewhere Blitz is the only renderer.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Renderer {
+    Blitz,
+    WebKit,
+}
+
+#[cfg(target_os = "macos")]
+impl Renderer {
+    pub const ALL: [Renderer; 2] = [Renderer::Blitz, Renderer::WebKit];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Renderer::Blitz => "Blitz",
+            Renderer::WebKit => "WebView (original)",
+        }
+    }
+
+    /// The one `name` names, case aside; Blitz when unset or unknown.
+    pub fn from_name(name: Option<&str>) -> Renderer {
+        match name {
+            Some(name) if name.eq_ignore_ascii_case("webKit") => Renderer::WebKit,
+            _ => Renderer::Blitz,
+        }
+    }
+}
+
 pub struct MailApp {
     pub focus: FocusHandle,
     pub search: Entity<TextInput>,
@@ -346,6 +377,9 @@ pub struct MailApp {
     /// width for a layer over it, the room the conversation takes beside the list.
     pub content_width: f32,
     pub context_menu: Option<ContextMenu>,
+    /// The reader's renderer, for this run (the Mac).
+    #[cfg(target_os = "macos")]
+    pub renderer: Renderer,
     /// Google Chat, shown instead of the mail list while `chat_view` is set.
     pub chat: Entity<ChatPane>,
     /// The chat account in view (None: every account), while Chat is selected.
@@ -410,6 +444,8 @@ impl MailApp {
             slide_layer: None,
             content_width: 0.0,
             context_menu: None,
+            #[cfg(target_os = "macos")]
+            renderer: Renderer::from_name(std::env::var("MAILSTREAM_READER_RENDERER").ok().as_deref()),
             chat,
             chat_view: None,
             reply: None,

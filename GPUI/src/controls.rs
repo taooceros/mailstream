@@ -321,6 +321,30 @@ pub fn pill(label: impl Into<SharedString>, leading: Option<AnyElement>, p: &Pal
         .child(label.into())
 }
 
+/// The track of a segmented control: [`segment`]s side by side on the quiet fill, fully round.
+pub fn segmented(p: &Palette) -> Div {
+    div().flex_shrink_0().h(px(22.)).p(px(2.)).flex().items_center().rounded_full().bg(p.chip)
+}
+
+/// One choice of a [`segmented`] control: the chosen one raised on the page's surface, the others
+/// quiet, washed under the pointer. Chain `.on_click`; its click never moves the window.
+pub fn segment(id: impl Into<ElementId>, label: impl Into<SharedString>, chosen: bool, p: &Palette) -> Stateful<Div> {
+    let hovered = p.hover;
+    div()
+        .id(id)
+        .h_full()
+        .px(px(space::S8))
+        .flex()
+        .items_center()
+        .rounded_full()
+        .text_size(px(text::FOOTNOTE))
+        .font_weight(FontWeight::MEDIUM)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .when(chosen, |d| d.bg(p.background).border(px(stroke::HAIRLINE)).border_color(p.card_border).text_color(p.text))
+        .when(!chosen, |d| d.text_color(p.muted).cursor_pointer().hover(move |s| s.bg(hovered)))
+        .child(label.into())
+}
+
 /// An account or a topic: a dot of its color, the one mark for them (MS-190).
 pub fn mark_dot(color: Hsla) -> Div {
     div().flex_shrink_0().size(px(marks::DOT)).rounded_full().bg(color)

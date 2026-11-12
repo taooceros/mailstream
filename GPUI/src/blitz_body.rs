@@ -1,5 +1,5 @@
-//! HTML mail bodies drawn by Blitz, the engine's renderer (`FFI/src/html_page.rs`), where there
-//! is no `WKWebView` to lay over the window (Linux; the Mac's is `webview.rs`, same calls).
+//! HTML mail bodies drawn by Blitz, the engine's renderer (`FFI/src/html_page.rs`): the reader's
+//! default everywhere (the Mac can switch to `webview.rs`'s native `WKWebView`s, same calls).
 //!
 //! A page lives on the engine's pages thread: parsing, layout and drawing never touch this one,
 //! which only asks for its height and for tiles, strips [`TILE`] points tall of RGBA pixels, for
@@ -554,12 +554,16 @@ fn inline_images(html: &str) -> String {
 }
 
 /// The engine's inline-part cache (`cache_directory()` in `Engine/src/lib.rs`, after the `dirs`
-/// crate): `$XDG_CACHE_HOME`, else `~/.cache`.
+/// crate): `~/Library/Caches` on the Mac; elsewhere `$XDG_CACHE_HOME`, else `~/.cache`.
 fn inline_cache() -> Option<PathBuf> {
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    #[cfg(target_os = "macos")]
+    let caches = home()?.join("Library").join("Caches");
+    #[cfg(not(target_os = "macos"))]
     let caches = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))?;
+        .or_else(|| home().map(|home| home.join(".cache")))?;
     Some(caches.join("dev.mailstream.Mailstream").join("messages-v2"))
 }
 

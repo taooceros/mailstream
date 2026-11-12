@@ -25,6 +25,8 @@ use crate::controls::{
     icon_label_button, island, list_row, mark_dot, notice, pill, popover, raised_capsule, row_layout, section_header,
     tag, title_bar, toast,
 };
+#[cfg(target_os = "macos")]
+use crate::controls::{segment, segmented};
 use crate::design::{self, Palette, icon as icon_size, layout, list as metrics, radius, space, stroke, text};
 use crate::format;
 use crate::icons::{Icon, icon};
@@ -33,6 +35,10 @@ use crate::state::{
     Archive, Back, CONTEXT, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh, Removal, Reply,
     ReplyAll, Restore, Source, Star, ThreadState, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
 };
+#[cfg(target_os = "macos")]
+use crate::state::Renderer;
+use crate::blitz_body;
+#[cfg(target_os = "macos")]
 use crate::webview;
 
 impl Render for MailApp {
@@ -87,17 +93,18 @@ impl Render for MailApp {
             .text_size(px(text::BODY))
             .text_color(p.text)
             .bg(p.window)
-            // Painted first: native web views placed last frame are hidden until painted again
-            // (the Mac); pages no longer painted are closed (Blitz, elsewhere).
+            // Painted first: pages no longer painted are closed (Blitz); native web views placed
+            // last frame are hidden until painted again (the Mac's WebView).
             .child({
                 #[cfg(target_os = "macos")]
-                let begin = {
-                    let covered = self.context_menu.is_some();
-                    canvas(|_, _, _| {}, move |_, _, _, _| webview::begin_frame(covered))
-                };
-                #[cfg(not(target_os = "macos"))]
-                let begin = canvas(|_, _, _| {}, |_, _, window, _| webview::begin_frame(window));
-                begin.absolute().size_0()
+                let covered = self.context_menu.is_some();
+                canvas(|_, _, _| {}, move |_, _, window, _| {
+                    blitz_body::begin_frame(window);
+                    #[cfg(target_os = "macos")]
+                    webview::begin_frame(covered);
+                })
+                .absolute()
+                .size_0()
             })
             // The window between the islands moves it, as a title bar does.
             .child(title_bar("window", window, cx).absolute().size_full())
