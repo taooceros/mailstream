@@ -57,6 +57,9 @@ from ffi import ENV  # noqa: E402
 
 READY = 60  # seconds for the window to open
 STEP = 30  # seconds a command may take beyond its waits and shots (8 s each at most)
+# The Mac's interim limit on compiles (one at a time across agents, 11-12): cargo goes through it
+# where it is installed.
+SLOT = [str(p) for p in [Path.home() / ".local/bin/build-slot"] if p.exists()]
 
 
 def fail(message):
@@ -76,14 +79,14 @@ def commands(args):
 
 
 def build(release):
-    command = ["cargo", "build", "--features", "shots"] + (["--release"] if release else [])
+    command = SLOT + ["cargo", "build", "--features", "shots"] + (["--release"] if release else [])
     print("building:", " ".join(command), flush=True)
     subprocess.run(command, cwd=ROOT / "GPUI", check=True, env=ENV)
 
 
 def seed(home):
     print(f"seeding {home}", flush=True)
-    subprocess.run(["cargo", "run", "-q", "--example", "shots_home", "--", str(home)],
+    subprocess.run(SLOT + ["cargo", "run", "-q", "--example", "shots_home", "--", str(home)],
                    cwd=ROOT / "Engine", check=True, env=ENV, stdout=subprocess.DEVNULL)
 
 
