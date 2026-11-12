@@ -43,21 +43,6 @@ const CHAT_SCOPE: &str = "https://www.googleapis.com/auth/chat.messages.readonly
 /// The scope that lets an account start direct messages and group chats (`spaces.setup`).
 const CREATE_SCOPE: &str = "https://www.googleapis.com/auth/chat.spaces.create";
 
-/// The commands this store answers.
-pub const COMMANDS: &[&str] = &[
-    "chat.spaces",
-    "chat.more",
-    "chat.refresh",
-    "chat.open",
-    "chat.close",
-    "chat.messages",
-    "chat.earlier",
-    "chat.send",
-    "chat.people",
-    "chat.start",
-    "chat.attachment",
-];
-
 struct Listing {
     list: ChatSpaceList,
     /// `limit` of the next poll; `chat.more` raises it.

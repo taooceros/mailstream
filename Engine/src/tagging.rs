@@ -737,7 +737,7 @@ impl Tagging {
                     ),
                     None => None,
                 };
-                let waiting = args.string("waiting").map(|waiting| waiting == "true");
+                let waiting = args.flag("waiting");
                 let labels = args.list("labels");
                 if category.is_none() && waiting.is_none() && labels.is_none() {
                     return Err(EngineError::usage("Give --category, --waiting or --labels."));

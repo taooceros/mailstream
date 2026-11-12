@@ -152,7 +152,7 @@ fn parse(words: &[String], spec: &Spec) -> Result<Map<String, Value>, EngineErro
                 spec.name()
             )));
         };
-        if argument.kind == Kind::Bool {
+        if argument.kind == Kind::Bool && !argument.valued {
             let value = match inline {
                 Some(inline) => convert(inline, argument)?,
                 None => Value::Bool(!negated),
