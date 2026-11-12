@@ -26,7 +26,7 @@ use mailstream::{Change, Event, EventListener, ListQuery};
 use crate::bench::Bench;
 use crate::calendar::{CalendarPane, CalendarToast};
 use crate::chat::ChatPane;
-use crate::compose::ReplyBox;
+use crate::compose::{ComposeColumn, ReplyBox};
 use crate::engine::{MailError, engine};
 use crate::format;
 use crate::input::{InputEvent, TextInput};
@@ -64,9 +64,9 @@ actions!(
 pub const CONTEXT: &str = "Mail";
 
 pub fn bind_keys(cx: &mut App) {
-    // Single keys act on the list, never while a text field has focus or in Chat or the
-    // calendar, which have their own.
-    let list = Some("Mail && !TextInput && !TextArea && !Chat && !Calendar");
+    // Single keys act on the list, never while a text field has focus, in Chat or the calendar
+    // (which have their own), or in a draft.
+    let list = Some("Mail && !TextInput && !TextArea && !Chat && !Calendar && !Compose");
     let window = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("j", Next, list),
@@ -375,6 +375,11 @@ pub struct MailApp {
     /// Sidebar nodes the user opened, by key.
     pub expanded: HashSet<SharedString>,
     pub sidebar_open: bool,
+    /// The docked compose column folds the sidebar to the rail this frame: the window is narrower
+    /// than `compose::SIDEBAR_WIDTH`.
+    pub sidebar_folded: bool,
+    /// The user opened the sidebar while the column folded it.
+    pub sidebar_beside_compose: bool,
     pub swipe: BackSwipe,
     pub slide: Slide,
     /// The top layer `slide` belongs to; a different top layer rests.
@@ -395,6 +400,8 @@ pub struct MailApp {
     pub calendar_view: bool,
     /// The inline reply under a conversation in the reader.
     pub reply: Option<ReplyDraft>,
+    /// The drafts being written, in a column of the window.
+    pub compose: Entity<ComposeColumn>,
     /// A conversation to forward once its messages arrive.
     forward_pending: Option<SharedString>,
     /// The frame measurement, when the environment asks for one (`bench.rs`).
@@ -414,12 +421,16 @@ impl MailApp {
         let search = cx.new(|cx| TextInput::new("Search", cx));
         let chat = cx.new(|cx| ChatPane::new(window, cx));
         let calendar = cx.new(|cx| CalendarPane::new(window, cx));
+        let compose = cx.new(|_| ComposeColumn::new());
         let subscriptions = vec![
             cx.subscribe_in(&search, window, Self::on_search_event),
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
             // Chat accounts and unread counts feed the sidebar.
             cx.observe(&chat, |_, _, cx| cx.notify()),
             cx.subscribe(&calendar, |this, _, toast: &CalendarToast, cx| this.show_toast(toast.0.clone(), cx)),
+            // The column's placement and width lay the window out.
+            cx.observe(&compose, |_, _, cx| cx.notify()),
+            cx.subscribe_in(&compose, window, Self::on_compose_event),
         ];
         let mut this = Self {
             focus: cx.focus_handle(),
@@ -451,6 +462,8 @@ impl MailApp {
             reader_scroll: ScrollHandle::new(),
             expanded: ["unified:inbox", "chat", "section:accounts"].into_iter().map(SharedString::from).collect(),
             sidebar_open: true,
+            sidebar_folded: false,
+            sidebar_beside_compose: false,
             swipe: BackSwipe::default(),
             slide: Slide::Rest,
             slide_layer: None,
@@ -463,6 +476,7 @@ impl MailApp {
             calendar,
             calendar_view: false,
             reply: None,
+            compose,
             forward_pending: None,
             bench: Bench::from_env(cx),
             _subscriptions: subscriptions,

@@ -23,6 +23,7 @@ macro_rules! icons {
 
 icons! {
     Add => "add_circle",
+    AddDraft => "add",
     Archive => "archive",
     Attachment => "attach_file",
     Back => "chevron_left",
@@ -34,6 +35,8 @@ icons! {
     Delete => "delete",
     Disclosure => "chevron_right",
     Draft => "draft",
+    Dock => "right_panel_open",
+    Float => "picture_in_picture",
     Folder => "folder",
     Forward => "forward",
     Inbox => "inbox",
@@ -43,6 +46,7 @@ icons! {
     Notification => "notifications_fill",
     People => "group_fill",
     OpenInWindow => "open_in_new",
+    Minimize => "minimize",
     MarkRead => "mark_email_read",
     MarkUnread => "mark_email_unread",
     Person => "person",
@@ -55,6 +59,7 @@ icons! {
     Sent => "send",
     Sidebar => "left_panel_close",
     Spam => "report",
+    Swap => "swap_horiz",
     Important => "priority_high",
     Star => "star",
     Starred => "star_fill",

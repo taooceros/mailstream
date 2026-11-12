@@ -1,33 +1,36 @@
-//! Writing mail: the compose window (a new message, a forward or a reply moved out of the reader,
-//! with every field editable) and the reader's inline reply (`mail.reply`). Clicking Send is the
-//! confirmation the engine asks for, so both pass `confirm`. Recipients complete from
-//! `contacts.search` when the running app offers it. Both carry attachments (`attachments.rs`).
+//! Writing mail: the drafts of the compose column (`column.rs`; a new message, a forward or a
+//! reply moved out of the reader, with every field editable) and the reader's inline reply
+//! (`mail.reply`). Clicking Send is the confirmation the engine asks for, so both pass `confirm`.
+//! Recipients complete from `contacts.search` when the running app offers it. Both carry
+//! attachments (`attachments.rs`).
 
 mod attachments;
+mod column;
 
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, AppContext, Bounds, ClickEvent, Context, Div, ElementId, Entity, EntityInputHandler, EventEmitter,
-    ExternalPaths, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding, MouseButton,
-    ParentElement, Render, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, deferred, div, point, px, relative, size,
+    App, AppContext, ClickEvent, Context, Div, ElementId, Entity, EntityInputHandler, EventEmitter, ExternalPaths,
+    FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement, Render,
+    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, Subscription, Window, actions, deferred,
+    div, px, relative,
 };
 use crate::avatars;
-use crate::controls::{ButtonKind, ControlSize, button, icon_button, popover, title_bar};
-use crate::design::{self, Palette, compose as metrics, editor, layout, radius, space, text};
+use crate::controls::{ButtonKind, ControlSize, button, icon_button, popover};
+use crate::design::{self, Palette, compose as metrics, editor, radius, space, text};
 use crate::engine::engine;
 use crate::icons::Icon;
 use crate::input::{InputEvent, TextInput};
 use crate::model::{Account, Address};
 use crate::textarea::{TextArea, TextAreaEvent};
 use attachments::{Attachments, Remove};
+pub use column::{ColumnEvent, ComposeColumn, ResizeColumn};
 
 actions!(
     compose,
-    [Send, Cancel, Close, FocusNext, FocusPrevious, SuggestionNext, SuggestionPrevious, Attach, OpenInWindow]
+    [Send, Cancel, Close, FocusNext, FocusPrevious, SuggestionNext, SuggestionPrevious, Attach, MoveToColumn]
 );
 
 const CONTEXT: &str = "Compose";
@@ -37,7 +40,7 @@ const REPLY_CONTEXT: &str = "ReplyBox";
 const COMPOSE_DROP: &str = "compose-drop";
 const REPLY_DROP: &str = "reply-drop";
 const ATTACH_TIP: &str = "Attach Files (⇧⌘A), or drop or paste them here";
-const OPEN_IN_WINDOW_TIP: &str = "Change Recipients or Subject in a Window (⇧⌘O)";
+const MOVE_TIP: &str = "Move to the Compose Column to Change Recipients or Subject (⇧⌘O)";
 
 pub fn bind_keys(cx: &mut App) {
     let window = Some(CONTEXT);
@@ -52,20 +55,20 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", SuggestionPrevious, Some(RECIPIENTS)),
         KeyBinding::new("escape", Cancel, Some(REPLY_CONTEXT)),
         KeyBinding::new("secondary-shift-a", Attach, Some(REPLY_CONTEXT)),
-        KeyBinding::new("secondary-shift-o", OpenInWindow, Some(REPLY_CONTEXT)),
+        KeyBinding::new("secondary-shift-o", MoveToColumn, Some(REPLY_CONTEXT)),
     ]);
 }
 
-/// What the compose window starts as. A forward's `subject` is the original's; `quoted` is the
-/// original as text, put under the caret. A reply moved out of the reader keeps its text and
-/// files; its `to` and `cc` are who the engine will send it to, unless they are edited.
+/// What a draft starts as. A forward's `subject` is the original's; `quoted` is the original as
+/// text, put under the caret. A reply moved out of the reader keeps its text and files; its `to`
+/// and `cc` are who the engine will send it to, unless they are edited.
 pub enum ComposeMode {
     New { from: Option<SharedString> },
     Forward { from: SharedString, subject: SharedString, quoted: SharedString },
     Reply(MovedReply),
 }
 
-/// A reply the reader moved to the compose window.
+/// A reply the reader moved to the compose column.
 pub struct MovedReply {
     pub conversation: SharedString,
     pub all: bool,
@@ -75,36 +78,6 @@ pub struct MovedReply {
     pub subject: SharedString,
     pub body: String,
     pub attachments: Vec<PathBuf>,
-}
-
-/// Opens a compose window. `accounts` fill the From menu; a forward's or reply's sender is fixed.
-pub fn open_compose(mode: ComposeMode, accounts: Vec<Account>, cx: &mut App) {
-    let title: SharedString = match &mode {
-        ComposeMode::New { .. } => "New Message".into(),
-        ComposeMode::Forward { .. } => "Forward".into(),
-        ComposeMode::Reply(reply) => (if reply.all { "Reply All" } else { "Reply" }).into(),
-    };
-    let bounds = Bounds::centered(None, size(px(metrics::WINDOW_WIDTH), px(metrics::WINDOW_HEIGHT)), cx);
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitlebarOptions {
-            title: Some(title.clone()),
-            appears_transparent: true,
-            traffic_light_position: Some(point(px(metrics::TRAFFIC_LIGHT_X), px(metrics::TRAFFIC_LIGHT_Y))),
-        }),
-        window_min_size: Some(size(px(metrics::MIN_WIDTH), px(metrics::MIN_HEIGHT))),
-        ..Default::default()
-    };
-    let Ok(handle) = cx.open_window(options, |window, cx| cx.new(|cx| Compose::new(title, mode, accounts, window, cx)))
-    else {
-        return;
-    };
-    handle
-        .update(cx, |compose, window, cx| {
-            compose.focus_first(window, cx);
-            cx.activate(true);
-        })
-        .ok();
 }
 
 /// One person `contacts.search` offers.
@@ -245,11 +218,25 @@ fn status_line(status: &Status, p: &Palette) -> Option<Div> {
     Some(div().flex_1().min_w_0().text_size(px(text::FOOTNOTE)).text_color(color).child(note))
 }
 
-// MARK: - Compose window
+// MARK: - A draft
 
+/// What a draft tells its column.
+enum DraftEvent {
+    Sent,
+    /// Sent, discarded, or closed with nothing written.
+    Closed,
+    /// Escape over a written draft: the keyboard goes back to the list and the conversation.
+    Unfocus,
+}
+
+/// One message in the compose column, one tab: kept, with its fields, files and sending state,
+/// until it is sent or discarded, through mailbox and conversation changes and while the column
+/// is minimized.
 struct Compose {
     focus: FocusHandle,
+    /// "New Message", "Forward", "Reply" or "Reply All", and the tab's glyph for it.
     title: SharedString,
+    glyph: Icon,
     accounts: Vec<Account>,
     from: Option<SharedString>,
     /// A forward and a reply keep the account it came to.
@@ -265,7 +252,7 @@ struct Compose {
     subject: Entity<TextInput>,
     body: Entity<TextArea>,
     body_scroll: ScrollHandle,
-    /// What the window opened with, to tell an edited draft from an untouched one, and a reply's
+    /// What the draft opened with, to tell an edited draft from an untouched one, and a reply's
     /// recipients the engine planned from the ones the user changed.
     initial_to: String,
     initial_cc: String,
@@ -285,13 +272,13 @@ struct Compose {
 }
 
 impl Compose {
-    fn new(
-        title: SharedString,
-        mode: ComposeMode,
-        accounts: Vec<Account>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(mode: ComposeMode, accounts: Vec<Account>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (title, glyph): (SharedString, Icon) = match &mode {
+            ComposeMode::New { .. } => ("New Message".into(), Icon::Compose),
+            ComposeMode::Forward { .. } => ("Forward".into(), Icon::Forward),
+            ComposeMode::Reply(reply) if reply.all => ("Reply All".into(), Icon::ReplyAll),
+            ComposeMode::Reply(_) => ("Reply".into(), Icon::Reply),
+        };
         let to = cx.new(|cx| TextInput::new("", cx));
         let cc = cx.new(|cx| TextInput::new("", cx));
         let bcc = cx.new(|cx| TextInput::new("", cx));
@@ -362,14 +349,10 @@ impl Compose {
             TextAreaEvent::Changed => this.edited(cx),
         }));
 
-        let this = cx.entity().downgrade();
-        window.on_window_should_close(cx, move |window, cx| {
-            this.update(cx, |this, cx| this.should_close(window, cx)).unwrap_or(true)
-        });
-
         Self {
             focus: cx.focus_handle(),
             title,
+            glyph,
             accounts,
             from,
             from_locked,
@@ -445,11 +428,12 @@ impl Compose {
         self.move_focus(-1, window, cx);
     }
 
+    /// Clears a failed Send's note; the column follows the subject and To for the tab's title.
     fn edited(&mut self, cx: &mut Context<Self>) {
         if matches!(self.status, Status::Failed(_)) {
             self.status = Status::Idle;
-            cx.notify();
         }
+        cx.notify();
     }
 
     /// Whether closing would lose something the user wrote.
@@ -461,6 +445,20 @@ impl Compose {
             || *self.subject.read(cx).text() != self.initial_subject
             || self.body.read(cx).text() != self.initial_body.as_ref()
             || !self.attachments.is_empty()
+    }
+
+    /// The tab's name: the subject, else who it goes to, else what it is.
+    fn tab_title(&self, cx: &App) -> SharedString {
+        let subject = self.subject.read(cx).text().trim();
+        if !subject.is_empty() {
+            return subject.to_owned().into();
+        }
+        let to = self.to.read(cx).text().trim();
+        if to.is_empty() { self.title.clone() } else { format!("To: {to}").into() }
+    }
+
+    fn sending(&self) -> bool {
+        matches!(self.status, Status::Sending)
     }
 
     // MARK: Attachments
@@ -509,42 +507,39 @@ impl Compose {
     }
 
     /// Closes at once when nothing would be lost; otherwise asks in the confirm bar.
-    fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.should_close(window, cx) {
-            window.remove_window();
+    fn request_close(&mut self, cx: &mut Context<Self>) {
+        if self.sending() {
+            return;
         }
-    }
-
-    fn should_close(&mut self, _: &mut Window, cx: &mut Context<Self>) -> bool {
-        if matches!(self.status, Status::Sending) {
-            return false;
+        if self.has_draft(cx) {
+            self.confirming_discard = true;
+            cx.notify();
+        } else {
+            cx.emit(DraftEvent::Closed);
         }
-        if !self.has_draft(cx) {
-            return true;
-        }
-        self.confirming_discard = true;
-        cx.notify();
-        false
     }
 
     fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         self.escape(window, cx);
     }
 
-    /// Escape closes what floats first (completion, the From menu, the confirm bar), then the window.
-    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Escape closes what floats first (completion, the From menu, the confirm bar), then a draft
+    /// with nothing written; a written one stays, and the keyboard goes back to the mail.
+    fn escape(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if self.suggestions.is_some() || self.picking_from || self.confirming_discard {
             self.suggestions = None;
             self.picking_from = false;
             self.confirming_discard = false;
             cx.notify();
+        } else if self.has_draft(cx) || self.sending() {
+            cx.emit(DraftEvent::Unfocus);
         } else {
-            self.request_close(window, cx);
+            cx.emit(DraftEvent::Closed);
         }
     }
 
-    fn close(&mut self, _: &Close, window: &mut Window, cx: &mut Context<Self>) {
-        self.request_close(window, cx);
+    fn close(&mut self, _: &Close, _: &mut Window, cx: &mut Context<Self>) {
+        self.request_close(cx);
     }
 
     // MARK: Completion
@@ -724,10 +719,10 @@ impl Compose {
                     }
                 })
                 .await;
-            this.update_in(cx, |this, window, cx| match answer {
+            this.update(cx, |this, cx| match answer {
                 Ok(_) => {
                     this.status = Status::Idle;
-                    window.remove_window();
+                    cx.emit(DraftEvent::Sent);
                 }
                 Err(error) => this.fail(error.to_string(), cx),
             })
@@ -737,35 +732,6 @@ impl Compose {
     }
 
     // MARK: Rendering
-
-    fn render_title_bar(&self, window: &mut Window, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let sending = matches!(self.status, Status::Sending);
-        title_bar("compose-title", window, cx)
-            .flex_shrink_0()
-            .h(px(layout::HEADER_HEIGHT))
-            .pl(px(metrics::TITLE_INSET))
-            .pr(px(metrics::MARGIN))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(text::PANE_TITLE))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(self.title.clone()),
-            )
-            .child(
-                icon_button("compose-attach", Icon::Attachment, ATTACH_TIP, !sending, p.muted, p)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.pick_files(&Attach, window, cx))),
-            )
-            .child(
-                send_button("compose-send", sending, p)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.send(window, cx))),
-            )
-    }
 
     /// One header line over a hairline: a right-aligned label, then the field.
     fn header_row(&self, label: Option<&'static str>, invalid: bool, p: &Palette) -> Div {
@@ -944,10 +910,12 @@ impl Compose {
             ))
             .child(
                 button("discard", "Discard", ButtonKind::Destructive, ControlSize::Regular, true, p)
-                    .on_click(cx.listener(|_, _: &ClickEvent, window, _| window.remove_window())),
+                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(DraftEvent::Closed))),
             )
     }
 }
+
+impl EventEmitter<DraftEvent> for Compose {}
 
 /// A floating menu under a header field.
 fn menu(p: &Palette) -> Div {
@@ -990,8 +958,6 @@ impl Render for Compose {
             .font_family(design::ui_font())
             .text_size(px(text::BODY))
             .text_color(p.text)
-            .bg(p.background)
-            .child(self.render_title_bar(window, p, cx))
             .child(
                 div()
                     .flex_shrink_0()
@@ -1074,7 +1040,7 @@ impl Render for Compose {
 pub enum ReplyEvent {
     Sent,
     Discarded,
-    /// Moved to the compose window to change its recipients or subject, with what it holds.
+    /// Moved to the compose column to change its recipients or subject, with what it holds.
     Moved { body: String, attachments: Vec<PathBuf> },
 }
 
@@ -1187,8 +1153,8 @@ impl ReplyBox {
         }
     }
 
-    /// Hands the reply to the compose window, where its recipients and subject can change.
-    fn open_in_window(&mut self, _: &OpenInWindow, _: &mut Window, cx: &mut Context<Self>) {
+    /// Hands the reply to the compose column, where its recipients and subject can change.
+    fn move_to_column(&mut self, _: &MoveToColumn, _: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.status, Status::Sending) {
             return;
         }
@@ -1256,7 +1222,7 @@ impl Render for ReplyBox {
             .key_context(REPLY_CONTEXT)
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::pick_files))
-            .on_action(cx.listener(Self::open_in_window))
+            .on_action(cx.listener(Self::move_to_column))
             .capture_action(cx.listener(|this, _: &crate::textarea::Paste, _, cx| this.paste(cx)))
             .group(REPLY_DROP)
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
@@ -1324,9 +1290,9 @@ impl Render for ReplyBox {
                         ),
                     )
                     .child(
-                        icon_button("reply-window", Icon::OpenInWindow, OPEN_IN_WINDOW_TIP, !sending, p.muted, p)
+                        icon_button("reply-move", Icon::Dock, MOVE_TIP, !sending, p.muted, p)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.open_in_window(&OpenInWindow, window, cx)
+                                this.move_to_column(&MoveToColumn, window, cx)
                             })),
                     )
                     .child(

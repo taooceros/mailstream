@@ -87,7 +87,7 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 | `src/swipe.rs` | Two-finger back swipe over the bundle and reader layers, following the system's swipe-between-pages setting |
 | `src/chat.rs` | `ChatPane`: Google Chat spaces (older pages load near the list's end, `chat_more`), a space's log (bottom-aligned, runs and day dividers, markup and links, uploaded pictures shown in it once `chat_attachment` downloads them, other files and videos as tiles in their kind's color that open in the system's default app), sending, earlier pages, threads, New Chat completing the account's Chat partners (`chat_people`) before contacts; the engine keeps the open space (`chat_open`) and the pane re-reads the list and the space on its `Chat`/`ChatMessages` events. `MAILSTREAM_CHAT_FIXTURE=<file.json>` shows a synthetic chat without an account (the module's `fixture` says what the file holds) |
 | `src/calendar.rs`, `src/calendar/` | `CalendarPane` (MS-211): every account's events from `calendar_events` (a week back on, read again on the engine's `Calendar` event), shown instead of the mail list while Calendar is selected. `agenda.rs`: the list island (this week's days on a strip with their booked hours, the meeting about to start with Join, notices for accounts to sign in again or whose fetch failed, the days from today with their events; Going / Maybe / Decline on unanswered invitations, through `calendar_respond`); `detail.rs`: the open event beside it (over it in a narrow window) with its answer, Join, guests and notes; `model.rs`: the agenda's days, the Up Next meeting, how a day's timed events sit side by side and the hours they book |
-| `src/compose.rs` | The New Message and Forward windows (From picker, recipient completion, discard confirmation) and the reader's reply card |
+| `src/compose.rs`, `src/compose/` | The drafts (From picker, recipient completion, attachments, discard confirmation) in the compose column (`column.rs`: tabs, docked, swapped, floating or minimized), and the reader's reply card |
 | `src/settings.rs` | Settings as Flutter's (`settings.dart`, MS-214): accounts (sign in with your own OAuth client, prefilled with the last one; rename, remove), every setting of settings.json in Flutter's groups through the engine (`settings`, `set_setting`, `reset_setting`; re-read on its `Settings` event, the file's problems on top; the `flutter.*` keys stay out), tag sync per mail account, what auto-read marked read with undo, re-tagging, engine status |
 | `src/avatars.rs` | Contact photos from `mail.avatars`, cached in memory; initials otherwise |
 | `src/design.rs` | Flutter's style tokens (`Flutter/lib/ui/design.dart`): both palettes with their elevations, the type, radii, spacing, strokes, motion, list, mark, avatar, tag and notice metrics, avatar/topic/account/attachment colors |
@@ -102,8 +102,10 @@ Return or Space opens, Esc or ⌘[ goes back, E or ⌃⌘A archives, ⌫ trashes
 or ⇧⌘F forwards, ⌘N writes a new message (a new chat in Chat), ⌘W closes the open conversation (or
 Chat's open space or New Chat form, or the calendar's open event), / or ⌘F searches, ⇧⌘N
 refreshes, ⌃⌘S toggles the sidebar, ⌘, opens Settings. In the calendar ↑/↓ or J/K open the next or
-previous event and ⌘R refreshes it. In a draft ⌘Return sends and Esc closes (asking first
-when something was written). Right-click a conversation for the same commands.
+previous event and ⌘R refreshes it. In a draft ⌘Return sends, ⌘W closes it (asking first when
+something was written), Esc closes one with nothing written or hands the keyboard back to the
+list and conversation, and ⇧⌘A attaches files; in the reply card ⇧⌘O moves the reply to the
+compose column. Right-click a conversation for the same commands.
 
 The window follows Flutter's (MS-200): the sidebar sits on the window (a rail of the unified
 mailboxes while it is hidden), and the list and the conversation are rounded islands floating on
@@ -111,6 +113,18 @@ it. From 1000 pt wide the conversation opens beside the list, which narrows as i
 narrower windows slide it over the list. A bundle slides over the rows within the list's island.
 The list stays mounted beneath them, so going back (Esc or a two-finger swipe) reveals the live
 list without reloading it. Opening a conversation shows its header at once; bodies arrive after.
+
+Writing mail happens in a compose column, as in Flutter (MS-61, MS-66), so other mail can be read
+beside it: ⌘N, the list's pencil, F (forward) and the reply card's "move to the compose column"
+button open it at the window's trailing edge, the sidebar folding to the rail below 1440 pt
+(⌃⌘S opens it anyway). Dragging the gap beside it moves that edge alone; the list and the
+conversation stay side by side while 700 pt remain for them and slide over each other below that.
+Its title bar closes the draft, minimizes it to a capsule in the bottom-right corner, swaps it to
+the other side of the conversation (between it and the list), or floats it over the window
+(dragged by its title, sized from its top-left corner). Each draft is a tab; they stay in memory,
+through mailbox and conversation changes, until sent or discarded. A reply moved there still goes
+out with `mail.reply`, keeping its thread; its To, Cc, Bcc and Subject are editable, and fields
+left as they opened keep the engine's reply plan.
 
 Limits:
 - Deleting from the Trash for good is left to the app.

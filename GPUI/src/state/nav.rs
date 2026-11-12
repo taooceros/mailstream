@@ -271,8 +271,20 @@ impl MailApp {
         cx.notify();
     }
 
+    /// Whether the sidebar shows, rather than the rail.
+    pub fn sidebar_shown(&self) -> bool {
+        self.sidebar_open && (!self.sidebar_folded || self.sidebar_beside_compose)
+    }
+
+    /// Opened while the docked compose column folds it, the sidebar stays beside the column.
     pub fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_open = !self.sidebar_open;
+        if self.sidebar_shown() {
+            self.sidebar_open = false;
+            self.sidebar_beside_compose = false;
+        } else {
+            self.sidebar_open = true;
+            self.sidebar_beside_compose = self.sidebar_folded;
+        }
         cx.notify();
     }
 

@@ -576,19 +576,39 @@ pub mod editor {
     pub const LEADING: f32 = 1.55;
 }
 
-/// The compose window and the reader's inline reply.
+/// The compose column (Flutter's `ComposePane`), its drafts and the reader's inline reply.
 pub mod compose {
     use std::time::Duration;
 
-    pub const WINDOW_WIDTH: f32 = 640.0;
-    pub const WINDOW_HEIGHT: f32 = 560.0;
-    pub const MIN_WIDTH: f32 = 480.0;
-    pub const MIN_HEIGHT: f32 = 360.0;
-    /// Where the traffic lights sit in the window's title bar row.
-    pub const TRAFFIC_LIGHT_X: f32 = 16.0;
-    pub const TRAFFIC_LIGHT_Y: f32 = 19.0;
-    /// The title's start, clear of the traffic lights.
-    pub const TITLE_INSET: f32 = 84.0;
+    /// The docked column: as it opens, the narrowest and the widest it is dragged to.
+    pub const COLUMN_WIDTH: f32 = 440.0;
+    pub const MIN_COLUMN: f32 = 340.0;
+    pub const MAX_COLUMN: f32 = 760.0;
+    /// The room the column always leaves the list and the conversation, and the room they need to
+    /// stay side by side beside it (below, the conversation slides over the list).
+    pub const MIN_MAIL: f32 = 360.0;
+    pub const TWO_PANE_MAIL: f32 = 700.0;
+    /// While the column is docked the sidebar shows only from this window width, a rail below.
+    pub const SIDEBAR_WIDTH: f32 = 1440.0;
+    /// The grip in the gap beside the docked column, under the pointer.
+    pub const GRIP_WIDTH: f32 = 3.0;
+    pub const GRIP_HEIGHT: f32 = 36.0;
+    /// The floating draft: its size as it first floats, the smallest and largest it is sized to,
+    /// and its distance from the window's edges.
+    pub const FLOAT_WIDTH: f32 = 500.0;
+    pub const FLOAT_HEIGHT: f32 = 560.0;
+    pub const MIN_FLOAT: f32 = 380.0;
+    pub const MAX_FLOAT: f32 = 760.0;
+    pub const FLOAT_MARGIN: f32 = 16.0;
+    /// The floating draft's top-left corner, which sizes it.
+    pub const FLOAT_HANDLE: f32 = 14.0;
+    /// The tab row over several drafts: its height, a tab's widest title, its glyphs.
+    pub const TAB_ROW: f32 = 36.0;
+    pub const TAB_TITLE: f32 = 140.0;
+    pub const TAB_GLYPH: f32 = 12.0;
+    pub const TAB_CLOSE: f32 = 16.0;
+    /// The minimized draft's capsule in the window's bottom-right corner: its widest title.
+    pub const CAPSULE_TITLE: f32 = 220.0;
     /// Leading inset of the header's labels and the body's text.
     pub const MARGIN: f32 = 20.0;
     /// The header's right-aligned `To:` labels.

@@ -44,7 +44,7 @@ impl Attachments {
         self.files.iter().map(|file| file.path.to_string_lossy().into_owned()).collect()
     }
 
-    /// Hands the files over (a reply moving to the compose window).
+    /// Hands the files over (a reply moving to the compose column).
     pub fn take(&mut self) -> Vec<PathBuf> {
         self.files.drain(..).map(|file| file.path).collect()
     }

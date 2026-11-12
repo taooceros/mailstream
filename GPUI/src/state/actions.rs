@@ -2,7 +2,7 @@
 //! forwarding and writing new mail.
 
 use super::*;
-use crate::compose::{self, ComposeMode, MovedReply, ReplyEvent};
+use crate::compose::{ColumnEvent, ComposeColumn, ComposeMode, MovedReply, ReplyEvent};
 use crate::engine::{self, BatchResult};
 
 /// What takes a conversation out of the list.
@@ -101,17 +101,11 @@ impl MailApp {
             match event {
                 ReplyEvent::Sent => {
                     this.show_toast("Sent", cx);
-                    // The thread grows by the reply: read it again (showing it meanwhile), and the
-                    // lists with it.
-                    if let Some(open) = this.reader().cloned() {
-                        this.reader_pinned = true;
-                        this.load_thread(&open, true, cx);
-                    }
-                    this.load_list(this.key(), true, cx);
+                    this.reload_replied(&replied, cx);
                 }
                 ReplyEvent::Discarded => {}
                 ReplyEvent::Moved { body, attachments } => {
-                    this.move_reply(&replied, all, body.clone(), attachments.clone(), cx);
+                    this.move_reply(&replied, all, body.clone(), attachments.clone(), window, cx);
                 }
             }
             cx.notify();
@@ -121,14 +115,25 @@ impl MailApp {
         cx.notify();
     }
 
-    /// Opens the inline reply in the compose window, where its recipients and subject can change;
-    /// it still goes out with `mail.reply`, keeping the thread.
+    /// The thread grows by a reply: read it again (showing it meanwhile) if it is open, and the
+    /// lists with it.
+    fn reload_replied(&mut self, id: &SharedString, cx: &mut Context<Self>) {
+        if let Some(open) = self.reader().filter(|open| &open.id == id).cloned() {
+            self.reader_pinned = true;
+            self.load_thread(&open, true, cx);
+        }
+        self.load_list(self.key(), true, cx);
+    }
+
+    /// Moves the inline reply to the compose column, where its recipients and subject can
+    /// change; it still goes out with `mail.reply`, keeping the thread.
     fn move_reply(
         &mut self,
         id: &SharedString,
         all: bool,
         body: String,
         attachments: Vec<std::path::PathBuf>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let conversation = self.conversation(id).or_else(|| self.reader().filter(|c| &c.id == id).cloned());
@@ -153,7 +158,8 @@ impl MailApp {
             body,
             attachments,
         };
-        compose::open_compose(ComposeMode::Reply(moved), self.accounts.clone(), cx);
+        let accounts = self.accounts.clone();
+        self.compose.update(cx, |column, cx| column.open(ComposeMode::Reply(moved), accounts, window, cx));
     }
 
     pub fn forward(&mut self, _: &Forward, window: &mut Window, cx: &mut Context<Self>) {
@@ -162,33 +168,52 @@ impl MailApp {
         if self.threads.get(&id).is_some_and(|t| matches!(t.state, ThreadState::Loaded(_))) {
             self.forward_loaded(&id, cx);
         } else {
-            // The compose window opens once the messages it quotes arrive.
+            // The draft opens once the messages it quotes arrive.
             self.forward_pending = Some(id);
             self.load_thread(&conversation, false, cx);
         }
     }
 
-    /// Opens a forward of the conversation's newest message, whose thread is loaded.
+    /// Opens a forward of the conversation's newest message, whose thread is loaded, as the window
+    /// draws next.
     pub(super) fn forward_loaded(&mut self, id: &SharedString, cx: &mut Context<Self>) {
         let conversation = self.conversation(id).or_else(|| self.reader().filter(|c| &c.id == id).cloned());
         let Some(conversation) = conversation else { return };
         let Some(ThreadState::Loaded(messages)) = self.threads.get(id).map(|t| &t.state) else { return };
         let Some(last) = messages.last() else { return };
         let quoted = last.forwarded(&conversation.subject).into();
-        compose::open_compose(
-            ComposeMode::Forward { from: conversation.account.clone(), subject: conversation.subject.clone(), quoted },
-            self.accounts.clone(),
-            cx,
-        );
+        let mode = ComposeMode::Forward { from: conversation.account.clone(), subject: conversation.subject.clone(), quoted };
+        let accounts = self.accounts.clone();
+        self.compose.update(cx, |column, cx| column.queue(mode, accounts, cx));
     }
 
     /// A new message, from the account whose mailbox is shown.
-    pub fn new_message(&mut self, _: &NewMessage, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn new_message(&mut self, _: &NewMessage, window: &mut Window, cx: &mut Context<Self>) {
         let from = match &self.source {
             Source::Mailbox { account, .. } => Some(account.clone()),
             Source::Unified(_) => None,
         };
-        compose::open_compose(ComposeMode::New { from }, self.accounts.clone(), cx);
+        let accounts = self.accounts.clone();
+        self.compose.update(cx, |column, cx| column.new_message(from, accounts, window, cx));
+    }
+
+    pub(super) fn on_compose_event(
+        &mut self,
+        _: &Entity<ComposeColumn>,
+        event: &ColumnEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ColumnEvent::Sent { reply } => {
+                self.show_toast("Sent", cx);
+                if let Some(id) = reply {
+                    self.reload_replied(id, cx);
+                }
+            }
+            ColumnEvent::Unfocus => window.focus(&self.focus),
+            ColumnEvent::NewDraft => self.new_message(&NewMessage, window, cx),
+        }
     }
 
     /// Shows Chat and its New Chat form.
