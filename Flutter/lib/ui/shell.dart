@@ -5,6 +5,7 @@ import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart' hide Sidebar;
+import 'package:mailstream/mailstream.dart' as engine;
 
 import '../backend/models.dart';
 import '../bench.dart';
@@ -205,7 +206,7 @@ class _MailShellState extends State<MailShell> {
   bool get _editing => FocusManager.instance.primaryFocus?.context?.findAncestorWidgetOfExactType<EditableText>() != null;
 
   /// The highlighted conversation, else the open one.
-  Conversation? get _target {
+  engine.Conversation? get _target {
     if (state.opened != null) return state.opened;
     for (final item in _activeItems) {
       if (item is RowItem && item.conversation.id == _activeHighlight.id) return item.conversation;
@@ -244,7 +245,7 @@ class _MailShellState extends State<MailShell> {
 
   /// After the conversation leaves the list, the highlight moves to its neighbor, which opens
   /// in its place when the conversation was open beside the list.
-  void _act(void Function(Conversation) action) {
+  void _act(void Function(engine.Conversation) action) {
     final target = _target;
     if (target == null) return;
     final reading = state.opened != null;
@@ -384,7 +385,7 @@ class _MailShellState extends State<MailShell> {
     if (bundle != null) return '${state.bundleItems(bundle).length} conversations';
     final unread = state.conversations.where((c) => c.unread).length;
     final account = switch (state.selection) {
-      MailboxSelection(:final mailbox) => state.account(mailbox.account)?.title,
+      MailboxSelection(account: final id) => state.account(id)?.title,
       UnifiedSelection() => null,
     };
     return [?account, if (unread > 0) '$unread unread'].join(' · ');
@@ -744,7 +745,7 @@ class _MailShellState extends State<MailShell> {
 
   /// The conversation's island: the message scrolls under its toolbar, capsules floating over the
   /// top of it.
-  Widget _detailPane(BuildContext context, Conversation opened) => DetailPane(
+  Widget _detailPane(BuildContext context, engine.Conversation opened) => DetailPane(
     content: AnimatedSwitcher(
       duration: Motion.medium,
       switchInCurve: Motion.curve,
@@ -763,7 +764,7 @@ class _MailShellState extends State<MailShell> {
     toolbar: _readerToolbar(context, opened),
   );
 
-  Widget _readerToolbar(BuildContext context, Conversation opened) {
+  Widget _readerToolbar(BuildContext context, engine.Conversation opened) {
     final colors = context.colors;
     return DetailToolbar(
       leading: CloseCapsule(twoPane: _twoPane, onPressed: _back),

@@ -155,11 +155,11 @@ class _Renderer {
                 TableRow(
                   decoration: BoxDecoration(color: r == 0 ? colors.fill : null),
                   children: [
-                    for (final cell in row.cells)
+                    for (final cell in row)
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                         child: Text.rich(
-                          TextSpan(children: _spans(cell.spans)),
+                          TextSpan(children: _spans(cell)),
                           style: r == 0 ? style.copyWith(fontWeight: FontWeight.w600) : style,
                         ),
                       ),
@@ -177,18 +177,19 @@ class _Renderer {
   List<InlineSpan> _spans(List<engine.ChatSpan> spans) => [for (final span in spans) _span(span)];
 
   InlineSpan _span(engine.ChatSpan span) {
-    final url = span.link;
+    final look = span.style;
+    final url = look.link;
     final recognizer = url == null ? null : open(url);
-    if (span.code) {
+    if (look.code) {
       // Thin spaces in the code's fill pad it at both ends, like a chip.
       return TextSpan(text: '\u2009${span.text}\u2009', style: url == null ? code : code.merge(link), recognizer: recognizer);
     }
     var style = const TextStyle();
-    if (span.mention) style = style.merge(mention);
+    if (look.mention) style = style.merge(mention);
     if (url != null) style = style.merge(link);
-    if (span.bold) style = style.copyWith(fontWeight: FontWeight.w600);
-    if (span.italic) style = style.copyWith(fontStyle: FontStyle.italic);
-    if (span.strike) style = style.copyWith(decoration: TextDecoration.lineThrough);
+    if (look.bold) style = style.copyWith(fontWeight: FontWeight.w600);
+    if (look.italic) style = style.copyWith(fontStyle: FontStyle.italic);
+    if (look.strike) style = style.copyWith(decoration: TextDecoration.lineThrough);
     return TextSpan(text: span.text, style: style, recognizer: recognizer);
   }
 }

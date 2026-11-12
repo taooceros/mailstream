@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
+import 'package:mailstream/mailstream.dart' as engine;
 
 import '../backend/models.dart';
 import '../bench.dart';
@@ -25,23 +26,23 @@ final class SectionItem extends ListItem {
 
 final class RowItem extends ListItem {
   const RowItem(this.conversation);
-  final Conversation conversation;
+  final engine.Conversation conversation;
 }
 
 final class BundleItem extends ListItem {
   const BundleItem(this.category, this.conversations);
-  final MailCategory category;
+  final engine.Category category;
 
   /// Newest first.
-  final List<Conversation> conversations;
+  final List<engine.Conversation> conversations;
 }
 
 /// The list's lines for `conversations`. In the Smart Inbox (`bundles`) service mail folds into
 /// bundles pinned above the rest, newest bundle first, and what waits on the user's reply or
 /// action follows under its own "Waiting on you" header, as in the native app. Headers group the
 /// remaining rows by date.
-List<ListItem> listItems(List<Conversation> conversations, {required bool bundles, required bool sections}) {
-  final grouped = <MailCategory, List<Conversation>>{};
+List<ListItem> listItems(List<engine.Conversation> conversations, {required bool bundles, required bool sections}) {
+  final grouped = <engine.Category, List<engine.Conversation>>{};
   final pinned = <ListItem>[];
   final waiting = <ListItem>[];
   final out = <ListItem>[];
@@ -91,6 +92,9 @@ class ListHighlight extends ChangeNotifier {
 }
 
 const waitingTitle = 'Waiting on you';
+
+/// The sender of a row the engine names none for.
+final _nobody = engine.Address(email: '?');
 
 String itemId(ListItem item) => switch (item) {
   RowItem(:final conversation) => conversation.id,
@@ -433,7 +437,7 @@ class ConversationRow extends StatefulWidget {
     required this.onTap,
   });
 
-  final Conversation conversation;
+  final engine.Conversation conversation;
   final MailState state;
   final ListHighlight highlight;
   final ListHighlight hover;
@@ -476,10 +480,10 @@ class _ConversationRowState extends State<ConversationRow> {
     final state = widget.state;
     final colors = context.colors;
     final text = context.text;
-    final person = c.from ?? const Address(email: '?');
+    final person = c.from ?? _nobody;
     final topic = c.labels.firstOrNull;
     final senders = c.participants.isEmpty ? person.displayName : c.participants.join(', ');
-    final archivable = state.selection.role == MailboxRole.inbox || c.mailboxes.contains(MailboxRole.inbox);
+    final archivable = state.selection.role == engine.MailboxRole.inbox || c.mailboxes.contains(engine.MailboxRole.inbox);
     final snippet = (c.snippet ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
     final strong = c.unread ? FontWeight.w700 : FontWeight.w600;
 
@@ -539,7 +543,7 @@ class _ConversationRowState extends State<ConversationRow> {
           children: [
             _RowLayout(
               unread: c.unread,
-              avatar: PersonAvatar(address: person, photo: state.avatar(person.email)),
+              avatar: PersonAvatar(address: person, avatar: c.fromAvatar, photo: state.avatar(person.email)),
               title: Row(
                 children: [
                   Flexible(

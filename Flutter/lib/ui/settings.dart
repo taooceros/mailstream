@@ -288,7 +288,7 @@ class _SyncAccountsRowState extends State<_SyncAccountsRow> {
     final rows = [
       ...accounts,
       for (final address in listed)
-        if (!accounts.any((a) => a.address == address)) (address: address, title: address, provider: ''),
+        if (!accounts.any((a) => a.address == address)) (address: address, title: address, provider: null),
     ];
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
@@ -313,8 +313,11 @@ class _SyncAccountsRowState extends State<_SyncAccountsRow> {
                     child: Text(
                       [
                         row.title,
-                        if (row.provider.isNotEmpty) row.provider == 'google' ? 'Gmail labels' : 'Outlook categories',
-                        if (row.provider.isEmpty) 'not signed in',
+                        switch (row.provider) {
+                          engine.Provider.google => 'Gmail labels',
+                          engine.Provider.microsoft => 'Outlook categories',
+                          null => 'not signed in',
+                        },
                       ].join('  ·  '),
                       style: text.body,
                       overflow: TextOverflow.ellipsis,
@@ -390,8 +393,8 @@ class _AutoReadLog extends StatelessWidget {
               ),
               subtitle: Text(
                 [
-                  entry.category == 'newsletter' ? 'Newsletter' : 'Notification',
-                  entry.reason == 'superseded' ? 'a newer one from the same sender arrived' : 'unread too long',
+                  entry.category == engine.Category.newsletter ? 'Newsletter' : 'Notification',
+                  entry.reason == engine.AutoReadReason.superseded ? 'a newer one from the same sender arrived' : 'unread too long',
                   ?_markedAt(entry.at),
                 ].join('  ·  '),
                 style: text.subheadline.copyWith(color: colors.secondaryLabel),
@@ -426,14 +429,17 @@ class _Accounts extends StatefulWidget {
 
 class _AccountsState extends State<_Accounts> {
   /// The provider being signed in to, while the browser is open.
-  String? _signingIn;
+  engine.Provider? _signingIn;
   ({String text, bool error})? _status;
 
   MailState get state => widget.state;
 
-  static String _providerName(String provider) => provider == 'google' ? 'Google' : 'Microsoft';
+  static String _providerName(engine.Provider provider) => switch (provider) {
+    engine.Provider.google => 'Google',
+    engine.Provider.microsoft => 'Microsoft',
+  };
 
-  Future<void> _add(String provider) async {
+  Future<void> _add(engine.Provider provider) async {
     final suggested = await state.suggestedClient(provider);
     if (!mounted) return;
     final client = await showSheet<({String id, String? secret})>(
@@ -454,12 +460,12 @@ class _AccountsState extends State<_Accounts> {
     if (mounted) setState(() => _signingIn = null);
   }
 
-  Future<void> _rename(Account account) async {
+  Future<void> _rename(engine.Account account) async {
     final label = await showSheet<String>(context, (context) => _RenameDialog(account: account));
     if (label != null && label != account.label) await state.renameAccount(account.id, label);
   }
 
-  Future<void> _remove(Account account) async {
+  Future<void> _remove(engine.Account account) async {
     final confirmed = await confirmAction(
       context,
       title: 'Remove ${account.title}?',
@@ -489,7 +495,7 @@ class _AccountsState extends State<_Accounts> {
           ),
         for (final account in state.accounts)
           _Row(
-            leading: PersonAvatar(address: Address(name: account.title, email: account.id), photo: state.avatarFor(account.id), size: 32),
+            leading: PersonAvatar(address: engine.Address(name: account.title, email: account.id), photo: state.avatarFor(account.id), size: 32),
             title: Text(account.title),
             subtitle: Text(
               [
@@ -525,7 +531,7 @@ class _AccountsState extends State<_Accounts> {
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
           child: Row(
             children: [
-              for (final provider in ['google', 'microsoft']) ...[
+              for (final provider in engine.Provider.values) ...[
                 MailButton(
                   label: '${_providerName(provider)} Account…',
                   onPressed: _signingIn == null ? () => _add(provider) : null,
@@ -557,7 +563,7 @@ class _AccountsState extends State<_Accounts> {
 class _ClientDialog extends StatefulWidget {
   const _ClientDialog({required this.provider, required this.suggested});
 
-  final String provider;
+  final engine.Provider provider;
   final engine.OAuthClientInfo? suggested;
 
   @override
@@ -570,7 +576,7 @@ class _ClientDialogState extends State<_ClientDialog> {
   late final _focusSecret = _id.text.isNotEmpty;
   String? _error;
 
-  bool get _google => widget.provider == 'google';
+  bool get _google => widget.provider == engine.Provider.google;
 
   /// The id in the field is the suggested client's, whose secret the engine keeps.
   bool get _savedSecret {
@@ -687,7 +693,7 @@ class _ClientDialogState extends State<_ClientDialog> {
 class _RenameDialog extends StatefulWidget {
   const _RenameDialog({required this.account});
 
-  final Account account;
+  final engine.Account account;
 
   @override
   State<_RenameDialog> createState() => _RenameDialogState();

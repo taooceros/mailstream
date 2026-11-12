@@ -34,6 +34,7 @@ engine.CalendarItem item(
   notesCut: false,
   link: null,
   series: null,
+  mine: false,
   editable: false,
 );
 
@@ -43,7 +44,7 @@ engine.CalendarPerson person(String name, String? response) =>
 engine.CalendarAccount account({bool granted = true, bool writable = true}) => engine.CalendarAccount(
   id: 'me@example.test',
   label: 'Me',
-  provider: 'google',
+  provider: engine.Provider.google,
   granted: granted,
   writable: writable,
   loading: false,

@@ -5,6 +5,7 @@ import 'package:flutter/cupertino.dart'
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
+import 'package:mailstream/mailstream.dart' as engine;
 
 import '../backend/models.dart';
 import '../platform.dart';
@@ -17,10 +18,23 @@ import 'design.dart';
 /// [MailColors.avatarHue] on an [AvatarMetrics.tint] wash of it. Given a [ring] (the surface under
 /// avatars that overlap), it is ringed in it and its wash laid on it, so none shows through.
 class PersonAvatar extends StatelessWidget {
-  const PersonAvatar({super.key, required this.address, this.photo, this.photoUrl, this.icon, this.ring, this.size = ListMetrics.avatarSize});
+  const PersonAvatar({
+    super.key,
+    required this.address,
+    this.avatar,
+    this.photo,
+    this.photoUrl,
+    this.icon,
+    this.ring,
+    this.size = ListMetrics.avatarSize,
+  });
 
-  /// Who: the engine's avatar for them gives the letter and the hue ([avatarOf]).
-  final Address address;
+  /// Who: the engine's avatar for them gives the letter and the hue.
+  final engine.Address address;
+
+  /// Their initial and color slot where there is no picture, when the engine's answer carried
+  /// it; else [avatarOf] asks the engine once.
+  final engine.Avatar? avatar;
 
   /// The picture's file, when the app has one.
   final String? photo;
@@ -35,7 +49,7 @@ class PersonAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final avatar = avatarOf(address);
+    final avatar = this.avatar ?? avatarOf(address);
     final hue = context.colors.avatarHue(avatar.slot);
     final ring = this.ring;
     final wash = hue.withValues(alpha: AvatarMetrics.tint);
@@ -519,33 +533,33 @@ class WindowDragArea extends StatelessWidget {
 }
 
 /// SF Symbols' mailbox glyphs, as Mail's sidebar shows them.
-IconData roleIcon(MailboxRole role) => switch (role) {
-  MailboxRole.inbox => CupertinoIcons.tray,
-  MailboxRole.starred => CupertinoIcons.star,
-  MailboxRole.important => CupertinoIcons.exclamationmark_circle,
-  MailboxRole.sent => CupertinoIcons.paperplane,
-  MailboxRole.drafts => CupertinoIcons.doc,
-  MailboxRole.archive => CupertinoIcons.archivebox,
-  MailboxRole.all => CupertinoIcons.envelope,
-  MailboxRole.junk => CupertinoIcons.xmark_octagon,
-  MailboxRole.trash => CupertinoIcons.trash,
-  MailboxRole.other => CupertinoIcons.folder,
+IconData roleIcon(engine.MailboxRole role) => switch (role) {
+  engine.MailboxRole.inbox => CupertinoIcons.tray,
+  engine.MailboxRole.starred => CupertinoIcons.star,
+  engine.MailboxRole.important => CupertinoIcons.exclamationmark_circle,
+  engine.MailboxRole.sent => CupertinoIcons.paperplane,
+  engine.MailboxRole.drafts => CupertinoIcons.doc,
+  engine.MailboxRole.archive => CupertinoIcons.archivebox,
+  engine.MailboxRole.all => CupertinoIcons.envelope,
+  engine.MailboxRole.junk => CupertinoIcons.xmark_octagon,
+  engine.MailboxRole.trash => CupertinoIcons.trash,
+  engine.MailboxRole.other => CupertinoIcons.folder,
 };
 
-IconData categoryIcon(MailCategory category) => switch (category) {
-  MailCategory.people => CupertinoIcons.person_2_fill,
-  MailCategory.notification => CupertinoIcons.bell_fill,
-  MailCategory.newsletter => CupertinoIcons.news_solid,
-  MailCategory.invitation => CupertinoIcons.calendar,
+IconData categoryIcon(engine.Category category) => switch (category) {
+  engine.Category.people => CupertinoIcons.person_2_fill,
+  engine.Category.notification => CupertinoIcons.bell_fill,
+  engine.Category.newsletter => CupertinoIcons.news_solid,
+  engine.Category.invitation => CupertinoIcons.calendar,
 };
 
 /// A bundle's colors: a white glyph on a system color, as Mail marks its categories.
-({Color background, Color foreground}) categoryColors(MailCategory category, MailColors colors) => (
+({Color background, Color foreground}) categoryColors(engine.Category category, MailColors colors) => (
   background: switch (category) {
-    MailCategory.people => colors.accent,
-    MailCategory.notification => const Color(0xFF5AC8FA),
-    MailCategory.newsletter => const Color(0xFFFF2D55),
-    MailCategory.invitation => const Color(0xFFFF9500),
+    engine.Category.people => colors.accent,
+    engine.Category.notification => const Color(0xFF5AC8FA),
+    engine.Category.newsletter => const Color(0xFFFF2D55),
+    engine.Category.invitation => const Color(0xFFFF9500),
   },
   foreground: MacosColors.white,
 );

@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mailstream/mailstream.dart' as engine;
-import 'package:mailstream_ui/backend/models.dart';
 import 'package:mailstream_ui/state/mail_state.dart';
 
 class RecordingEngine implements engine.Mailstream {
@@ -37,22 +36,23 @@ class RecordingEngine implements engine.Mailstream {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-const source = Conversation(
+final source = engine.Conversation(
   id: 'thread',
   account: 'self@example.invalid',
   subject: 'original',
   date: null,
-  from: Address(email: 'sender@example.invalid'),
+  from: engine.Address(email: 'sender@example.invalid'),
   participants: [],
   messageCount: 1,
   unread: false,
   starred: false,
   hasAttachment: false,
-  mailboxes: {},
+  mailboxes: [],
   snippet: null,
   category: null,
   waiting: false,
   labels: [],
+  avatar: engine.Avatar(initial: 'S', slot: 0),
 );
 
 engine.Draft outgoing(ComposeDraft draft) => engine.Draft(

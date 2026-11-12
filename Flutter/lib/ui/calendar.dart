@@ -998,7 +998,7 @@ class CalendarEventPane extends StatelessWidget {
           if (event.link != null)
             GlassCapsule(
               child: ToolButton(
-                tooltip: provider == 'microsoft' ? 'Open in Outlook' : 'Open in Google Calendar',
+                tooltip: provider == engine.Provider.microsoft ? 'Open in Outlook' : 'Open in Google Calendar',
                 icon: CupertinoIcons.arrow_up_right_square,
                 onPressed: () => state.openExternal(event.link!),
               ),

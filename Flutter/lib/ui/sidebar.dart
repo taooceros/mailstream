@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
+import 'package:mailstream/mailstream.dart' as engine;
 
 import '../backend/models.dart';
 import '../platform.dart';
@@ -25,7 +26,7 @@ class Sidebar extends StatefulWidget {
 
   static const width = 232.0;
   static const unifiedRoles = [
-    MailboxRole.inbox, MailboxRole.starred, MailboxRole.drafts, MailboxRole.sent, MailboxRole.archive, MailboxRole.junk, MailboxRole.trash,
+    engine.MailboxRole.inbox, engine.MailboxRole.starred, engine.MailboxRole.drafts, engine.MailboxRole.sent, engine.MailboxRole.archive, engine.MailboxRole.junk, engine.MailboxRole.trash,
   ];
 
   @override
@@ -46,7 +47,7 @@ class _SidebarState extends State<Sidebar> {
       final boxes = state.unified(role);
       if (boxes.isEmpty) continue;
       final selection = UnifiedSelection(role);
-      final expandable = role == MailboxRole.inbox && boxes.length > 1;
+      final expandable = role == engine.MailboxRole.inbox && boxes.length > 1;
       final selected = state.mailInView && state.selection == selection;
       rows.add(_Destination(
         leading: Icon(roleIcon(role)),
@@ -63,9 +64,9 @@ class _SidebarState extends State<Sidebar> {
             indent: true,
             leading: _AccountDot(color: _accountColor(box.account)),
             label: state.account(box.account)?.title ?? box.account,
-            badge: box.unread ?? 0,
-            selected: state.mailInView && state.selection == MailboxSelection(box),
-            onTap: () => state.select(MailboxSelection(box)),
+            badge: box.mailbox.unread ?? 0,
+            selected: state.mailInView && state.selection == box,
+            onTap: () => state.select(box),
           ));
         }
       }
@@ -100,15 +101,15 @@ class _SidebarState extends State<Sidebar> {
         onTap: toggle,
       ));
       if (!open) continue;
-      for (final box in state.mailboxes[account.id] ?? const <Mailbox>[]) {
-        final selected = state.mailInView && state.selection == MailboxSelection(box);
+      for (final box in state.mailboxes[account.id] ?? const <engine.Mailbox>[]) {
+        final selected = state.mailInView && state.selection == MailboxSelection(account.id, box);
         rows.add(_Destination(
           indent: true,
           leading: Icon(roleIcon(box.role)),
           label: box.name,
           badge: _badge(box.role) ? (box.unread ?? 0) : 0,
           selected: selected,
-          onTap: () => state.select(MailboxSelection(box)),
+          onTap: () => state.select(MailboxSelection(account.id, box)),
         ));
       }
     }
@@ -142,11 +143,11 @@ class _SidebarState extends State<Sidebar> {
     );
   }
 
-  static bool _badge(MailboxRole role) => badgeRole(role);
+  static bool _badge(engine.MailboxRole role) => badgeRole(role);
 }
 
-bool badgeRole(MailboxRole role) =>
-    const {MailboxRole.inbox, MailboxRole.other, MailboxRole.important, MailboxRole.starred, MailboxRole.drafts}.contains(role);
+bool badgeRole(engine.MailboxRole role) =>
+    const {engine.MailboxRole.inbox, engine.MailboxRole.other, engine.MailboxRole.important, engine.MailboxRole.starred, engine.MailboxRole.drafts}.contains(role);
 
 /// A sidebar section's title: small, bold, secondary, as the Mac's sidebars head their groups.
 class _SectionHeader extends StatelessWidget {

@@ -1,6 +1,7 @@
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
+import 'package:mailstream/mailstream.dart' as engine;
 
 import '../backend/models.dart';
 import '../platform.dart';
@@ -12,7 +13,7 @@ import 'design.dart';
 class Suggestion {
   const Suggestion(this.address, {this.photoUrl});
 
-  final Address address;
+  final engine.Address address;
   final String? photoUrl;
 }
 

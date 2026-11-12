@@ -2,7 +2,6 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:macos_ui/macos_ui.dart';
 import 'package:mailstream/mailstream.dart' as engine;
-import 'package:mailstream_ui/backend/models.dart';
 import 'package:mailstream_ui/state/mail_state.dart';
 import 'package:mailstream_ui/ui/design.dart';
 import 'package:mailstream_ui/ui/reader.dart';
@@ -28,7 +27,7 @@ void main() {
   ];
 
   /// Prefetches [c] and answers its body request, as resting on its row does.
-  Future<ThreadEntry> prefetched(WidgetTester tester, Conversation c) async {
+  Future<ThreadEntry> prefetched(WidgetTester tester, engine.Conversation c) async {
     final entry = state.prefetch(c);
     final index = mail.requests.lastIndexWhere((r) => r.id == c.id);
     if (!mail.requests[index].answer.isCompleted) mail.answer(index, mail.rows.firstWhere((r) => r.id == c.id));

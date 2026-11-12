@@ -30,13 +30,13 @@ class AutoReadDemoMail extends ReaderMail {
 
   static const _passes = [
     [
-      ('Acme Store', 'Last chance: 40% off everything', 'newsletter', 'superseded'),
-      ('Parcel Tracking', 'Your package was delivered', 'notification', 'age'),
-      ('Example Bank', 'Your statement is ready', 'notification', 'age'),
+      ('Acme Store', 'Last chance: 40% off everything', engine.Category.newsletter, engine.AutoReadReason.superseded),
+      ('Parcel Tracking', 'Your package was delivered', engine.Category.notification, engine.AutoReadReason.age),
+      ('Example Bank', 'Your statement is ready', engine.Category.notification, engine.AutoReadReason.age),
     ],
     [
-      ('Weekly Digest', 'This week in synthetic news', 'newsletter', 'age'),
-      ('CI Robot', 'Build #4182 passed', 'notification', 'age'),
+      ('Weekly Digest', 'This week in synthetic news', engine.Category.newsletter, engine.AutoReadReason.age),
+      ('CI Robot', 'Build #4182 passed', engine.Category.notification, engine.AutoReadReason.age),
     ],
   ];
 

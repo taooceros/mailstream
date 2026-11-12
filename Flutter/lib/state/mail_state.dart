@@ -21,7 +21,7 @@ sealed class Selection {
   const Selection();
 
   String get key;
-  MailboxRole get role;
+  engine.MailboxRole get role;
 
   /// The engine's listing of it; `cached` reads what the engine holds without fetching.
   engine.ListQuery query({required int limit, String? cursor, bool cached = false});
@@ -31,7 +31,7 @@ final class UnifiedSelection extends Selection {
   const UnifiedSelection(this.role);
 
   @override
-  final MailboxRole role;
+  final engine.MailboxRole role;
 
   @override
   String get key => 'unified:${role.name}';
@@ -48,19 +48,21 @@ final class UnifiedSelection extends Selection {
 }
 
 final class MailboxSelection extends Selection {
-  const MailboxSelection(this.mailbox);
+  const MailboxSelection(this.account, this.mailbox);
 
-  final Mailbox mailbox;
+  /// The account [mailbox] is in; the engine's mailboxes come keyed by it.
+  final String account;
+  final engine.Mailbox mailbox;
 
   @override
-  MailboxRole get role => mailbox.role;
+  engine.MailboxRole get role => mailbox.role;
 
   @override
-  String get key => 'mailbox:${mailbox.account}:${mailbox.id}';
+  String get key => 'mailbox:$account:${mailbox.id}';
 
   @override
   engine.ListQuery query({required int limit, String? cursor, bool cached = false}) =>
-      engine.ListQuery(mailboxes: [mailbox.id], account: mailbox.account, limit: limit, cursor: cursor, cached: cached);
+      engine.ListQuery(mailboxes: [mailbox.id], account: account, limit: limit, cursor: cursor, cached: cached);
 
   @override
   bool operator ==(Object other) => other is MailboxSelection && other.key == key;
@@ -71,7 +73,7 @@ final class MailboxSelection extends Selection {
 
 /// One fetched list and how fresh it is.
 class ListEntry {
-  List<Conversation> items = const [];
+  List<engine.Conversation> items = const [];
   DateTime? fetchedAt;
   bool loading = false;
   String? error;
@@ -88,9 +90,9 @@ class ListEntry {
 class ThreadEntry extends ChangeNotifier {
   ThreadEntry(this.conversation, {this.messages});
 
-  final Conversation conversation;
-  late final Future<List<MessageDetail>> future;
-  List<MessageDetail>? messages;
+  final engine.Conversation conversation;
+  late final Future<List<engine.Message>> future;
+  List<engine.Message>? messages;
   String? error;
 
   /// Set once `mail show` answered, with messages or an error.
@@ -151,7 +153,7 @@ class ComposeDraft {
 
   /// The conversation a reply answers. The engine preserves threading and quoting; fields that
   /// have not been edited keep its reply plan rather than replacing it with a local preview.
-  final Conversation? replyTo;
+  final engine.Conversation? replyTo;
   final bool replyAll;
   String? from;
   String to;
@@ -201,7 +203,7 @@ String describe(Object error) => error is engine.FailedMailException ? error.mes
 
 /// The toast for one auto-read pass: "Marked 2 notifications and 1 newsletter read as stale".
 String autoReadSummary(List<engine.AutoReadEntry> entries) {
-  final notifications = entries.where((e) => e.category == 'notification').length;
+  final notifications = entries.where((e) => e.category == engine.Category.notification).length;
   final newsletters = entries.length - notifications;
   String count(int n, String noun) => n == 1 ? '1 $noun' : '$n ${noun}s';
   final parts = [if (notifications > 0) count(notifications, 'notification'), if (newsletters > 0) count(newsletters, 'newsletter')];
@@ -225,13 +227,13 @@ class MailState extends ChangeNotifier {
   /// page folds into bundles, so short ones load one after another near the list's end.
   static const pageSize = 200;
 
-  List<Account> accounts = const [];
+  List<engine.Account> accounts = const [];
 
   /// Set once the engine answered the account list, so an empty [accounts] means none signed in.
   bool accountsLoaded = false;
 
-  Map<String, List<Mailbox>> mailboxes = const {};
-  Selection selection = const UnifiedSelection(MailboxRole.inbox);
+  Map<String, List<engine.Mailbox>> mailboxes = const {};
+  Selection selection = const UnifiedSelection(engine.MailboxRole.inbox);
 
   /// Google Chat, which the window shows instead of mail while `chat.active`.
   late final ChatState chat = ChatState(mail, report: _report);
@@ -255,10 +257,10 @@ class MailState extends ChangeNotifier {
   bool get mailInView => !chat.active && !calendar.active;
 
   /// Set while the Smart Inbox bundle of that category lies over the list.
-  MailCategory? openBundle;
+  engine.Category? openBundle;
 
   /// The conversation in the reader.
-  Conversation? opened;
+  engine.Conversation? opened;
 
   String? searchQuery;
   final ListEntry _search = ListEntry();
@@ -378,11 +380,8 @@ class MailState extends ChangeNotifier {
   /// The accounts, then their mailboxes. The accounts show even when the mailboxes fail.
   Future<void> reloadAccounts() async {
     try {
-      accounts = (await mail.accounts()).map(Account.of).toList();
-      final boxes = await mail.mailboxes(account: null);
-      mailboxes = {
-        for (final MapEntry(key: account, value: boxes) in boxes.entries) account: [for (final box in boxes) Mailbox.of(account, box)],
-      };
+      accounts = await mail.accounts();
+      mailboxes = await mail.mailboxes(account: null);
       accountsLoaded = true;
     } on engine.MailException catch (error) {
       _report(describe(error));
@@ -403,17 +402,20 @@ class MailState extends ChangeNotifier {
 
   int accountIndex(String account) => accounts.indexWhere((a) => a.id == account).clamp(0, 1 << 20);
 
-  Account? account(String id) => accounts.where((a) => a.id == id).firstOrNull;
+  engine.Account? account(String id) => accounts.where((a) => a.id == id).firstOrNull;
 
-  Mailbox? mailbox(String account, MailboxRole role) =>
+  engine.Mailbox? mailbox(String account, engine.MailboxRole role) =>
       mailboxes[account]?.where((b) => b.role == role).firstOrNull ??
-      (role == MailboxRole.archive ? mailboxes[account]?.where((b) => b.role == MailboxRole.all).firstOrNull : null);
+      (role == engine.MailboxRole.archive ? mailboxes[account]?.where((b) => b.role == engine.MailboxRole.all).firstOrNull : null);
 
   /// Each account's mailbox for `role`, in sidebar order.
-  List<Mailbox> unified(MailboxRole role) => [for (final a in accounts) ?mailbox(a.id, role)];
+  List<MailboxSelection> unified(engine.MailboxRole role) => [
+    for (final a in accounts)
+      if (mailbox(a.id, role) case final box?) MailboxSelection(a.id, box),
+  ];
 
   int unreadCount(Selection selection) => switch (selection) {
-    UnifiedSelection(:final role) => unified(role).fold(0, (sum, b) => sum + (b.unread ?? 0)),
+    UnifiedSelection(:final role) => unified(role).fold(0, (sum, b) => sum + (b.mailbox.unread ?? 0)),
     MailboxSelection(:final mailbox) => mailbox.unread ?? 0,
   };
 
@@ -430,7 +432,7 @@ class MailState extends ChangeNotifier {
   bool get canLoadMore => searchQuery == null && _current.next != null;
 
   /// The conversations in view, before the Smart Inbox folds bundles.
-  List<Conversation> get conversations {
+  List<engine.Conversation> get conversations {
     final query = searchQuery;
     if (query == null) return _current.items;
     if (_search.fetchedAt != null) return _search.items;
@@ -442,16 +444,16 @@ class MailState extends ChangeNotifier {
       for (final entry in _lists.values)
         for (final c in entry.items)
           if (words.every((w) => _haystack(c).contains(w)) && seen.add(c.id)) c,
-    ]..sort((a, b) => (b.date ?? DateTime(0)).compareTo(a.date ?? DateTime(0)));
+    ]..sort((a, b) => (b.dateTime ?? DateTime(0)).compareTo(a.dateTime ?? DateTime(0)));
   }
 
-  static String _haystack(Conversation c) =>
+  static String _haystack(engine.Conversation c) =>
       '${c.subject} ${c.participants.join(' ')} ${c.from?.email ?? ''} ${c.snippet ?? ''}'.toLowerCase();
 
   /// The Smart Inbox folds service mail into bundles in the inbox, outside search.
-  bool get bundlesEnabled => searchQuery == null && selection.role == MailboxRole.inbox;
+  bool get bundlesEnabled => searchQuery == null && selection.role == engine.MailboxRole.inbox;
 
-  List<Conversation> bundleItems(MailCategory category) => conversations.where((c) => c.bundle == category).toList();
+  List<engine.Conversation> bundleItems(engine.Category category) => conversations.where((c) => c.bundle == category).toList();
 
   void select(Selection next) {
     chat.hide();
@@ -471,7 +473,7 @@ class MailState extends ChangeNotifier {
     if (!fresh) _fetch(next);
   }
 
-  static List<Conversation> _decode(engine.Listing listing) => listing.conversations.map(Conversation.of).toList();
+  static List<engine.Conversation> _decode(engine.Listing listing) => listing.conversations;
 
   /// The first page. A refresh keeps the older pages already loaded below it: their cursor still
   /// points past them. `quiet` (a change the engine reported) shows no progress, reads what the
@@ -493,10 +495,10 @@ class MailState extends ChangeNotifier {
       final known = {for (final c in entry.items) c.id: c};
       final page = [for (final c in _decode(listing)) _keep(known[c.id], c)];
       final ids = {for (final c in page) c.id};
-      final oldest = page.lastOrNull?.date;
+      final oldest = page.lastOrNull?.dateTime;
       final kept = oldest == null
-          ? const <Conversation>[]
-          : entry.items.where((c) => !ids.contains(c.id) && c.date != null && c.date!.isBefore(oldest)).toList();
+          ? const <engine.Conversation>[]
+          : entry.items.where((c) => !ids.contains(c.id) && (c.dateTime?.isBefore(oldest) ?? false)).toList();
       final items = [...page, ...kept];
       final next = kept.isEmpty ? listing.next : entry.next;
       final error = listing.failures.isEmpty ? null : listing.failures.join('\n');
@@ -525,13 +527,13 @@ class MailState extends ChangeNotifier {
 
   /// `fresh`, with the preview `old` has when the listing lacks one; `old` itself when that
   /// shows the same, so the row keeps its instance.
-  static Conversation _keep(Conversation? old, Conversation fresh) {
+  static engine.Conversation _keep(engine.Conversation? old, engine.Conversation fresh) {
     if (old == null) return fresh;
     final filled = fresh.snippet == null && old.snippet != null ? fresh.copyWith(snippet: old.snippet) : fresh;
     return old.sameAs(filled) ? old : filled;
   }
 
-  static bool _sameRows(List<Conversation> a, List<Conversation> b) {
+  static bool _sameRows(List<engine.Conversation> a, List<engine.Conversation> b) {
     if (a.length != b.length) return false;
     for (var i = 0; i < a.length; i++) {
       if (!identical(a[i], b[i])) return false;
@@ -572,7 +574,7 @@ class MailState extends ChangeNotifier {
 
   /// Previews of conversations listed without one: the engine loads their latest messages.
   /// Ids asked for while a request runs go together in the next one.
-  void _loadPreviews(List<Conversation> conversations) {
+  void _loadPreviews(List<engine.Conversation> conversations) {
     for (final c in conversations) {
       if ((c.snippet == null || c.snippet!.isEmpty) && _previewRequested.add(c.id)) _previewQueue.add(c.id);
     }
@@ -588,7 +590,7 @@ class MailState extends ChangeNotifier {
       final previews = await mail.previews(ids: ids);
       final changes = {
         for (final MapEntry(key: id, value: snippet) in previews.entries)
-          if (snippet != null && snippet.isNotEmpty) id: (Conversation c) => c.copyWith(snippet: snippet),
+          if (snippet != null && snippet.isNotEmpty) id: (engine.Conversation c) => c.copyWith(snippet: snippet),
       };
       // A bundle's row shows no previews: ones only for conversations folded into a closed
       // bundle are kept without rebuilding the window (pages loaded near the list's end often
@@ -606,11 +608,11 @@ class MailState extends ChangeNotifier {
 
   /// Whether `c` sits folded in a closed Smart Inbox bundle, which shows none of its preview or
   /// sender picture.
-  bool _folded(Conversation c) => bundlesEnabled && c.bundle != null && c.bundle != openBundle;
+  bool _folded(engine.Conversation c) => bundlesEnabled && c.bundle != null && c.bundle != openBundle;
 
   /// Pictures of the senders `conversations` show, from the engine's avatar cache (it looks up
   /// the ones it has not cached yet).
-  void _loadAvatars(List<Conversation> conversations) {
+  void _loadAvatars(List<engine.Conversation> conversations) {
     final shown = {
       for (final c in conversations)
         if (c.from != null && !_folded(c)) c.from!.email.toLowerCase(),
@@ -622,7 +624,7 @@ class MailState extends ChangeNotifier {
     }
     _queueAvatars([
       for (final c in conversations)
-        if (c.from != null) (c.from!.email, c.category != null && c.category != MailCategory.people),
+        if (c.from != null) (c.from!.email, c.category != null && c.category != engine.Category.people),
     ]);
   }
 
@@ -723,12 +725,12 @@ class MailState extends ChangeNotifier {
 
   // MARK: - Bundles and reader
 
-  void showBundle(MailCategory? category) {
+  void showBundle(engine.Category? category) {
     openBundle = category;
     notifyListeners();
   }
 
-  void open(Conversation conversation) {
+  void open(engine.Conversation conversation) {
     opened = conversation;
     final entry = thread(conversation);
     if (entry.error != null) _loadThread(conversation, previous: entry.messages);
@@ -749,7 +751,7 @@ class MailState extends ChangeNotifier {
 
   /// A listing refreshes the selected summary and invalidates only bodies whose message set
   /// changed. Flags, tags and previews do not refetch otherwise valid content.
-  bool _updateReader(List<Conversation> page) {
+  bool _updateReader(List<engine.Conversation> page) {
     var changed = false;
     for (final c in page) {
       final cached = _threads[c.id];
@@ -769,13 +771,13 @@ class MailState extends ChangeNotifier {
 
   /// Resting on a row loads its bodies. Valid entries survive navigation and unrelated changes,
   /// until [keptThreads] newer ones push them out.
-  ThreadEntry thread(Conversation conversation) {
+  ThreadEntry thread(engine.Conversation conversation) {
     final cached = _threads.remove(conversation.id);
     if (cached == null) return _loadThread(conversation);
     return _threads[conversation.id] = cached;
   }
 
-  ThreadEntry _loadThread(Conversation conversation, {List<MessageDetail>? previous}) {
+  ThreadEntry _loadThread(engine.Conversation conversation, {List<engine.Message>? previous}) {
     final id = conversation.id;
     final entry = ThreadEntry(conversation, messages: previous);
     _threads.remove(id);
@@ -784,7 +786,7 @@ class MailState extends ChangeNotifier {
     entry.future = () async {
       try {
         final thread = await mail.show_(id: id, maxChars: 400000, html: true);
-        final messages = thread.messages.map(MessageDetail.of).toList();
+        final messages = thread.messages;
         // A newer revision may have started while this body was loading.
         if (!_disposed && identical(_threads[id], entry)) {
           entry.messages = messages;
@@ -816,16 +818,16 @@ class MailState extends ChangeNotifier {
     });
   }
 
-  ThreadEntry prefetch(Conversation conversation) => thread(conversation);
+  ThreadEntry prefetch(engine.Conversation conversation) => thread(conversation);
 
   // MARK: - Actions
 
   /// Every list's copy of `id`, replaced; the reader's too.
-  void _patch(String id, Conversation Function(Conversation) change) => _patchAll({id: change});
+  void _patch(String id, engine.Conversation Function(engine.Conversation) change) => _patchAll({id: change});
 
   /// Each changed conversation replaced in every list and the reader, in one pass and one rebuild
   /// (none with `rebuild: false`, for changes the window does not show).
-  void _patchAll(Map<String, Conversation Function(Conversation)> changes, {bool rebuild = true}) {
+  void _patchAll(Map<String, engine.Conversation Function(engine.Conversation)> changes, {bool rebuild = true}) {
     if (changes.isEmpty) return;
     for (final entry in [..._lists.values, _search]) {
       if (!entry.items.any((c) => changes.containsKey(c.id))) continue;
@@ -837,7 +839,7 @@ class MailState extends ChangeNotifier {
 
   /// Takes `id` out of every list; returns a function that puts it back where it was.
   VoidCallback _remove(String id) {
-    final removed = <ListEntry, (int, Conversation)>{};
+    final removed = <ListEntry, (int, engine.Conversation)>{};
     for (final entry in [..._lists.values, _search]) {
       final index = entry.items.indexWhere((c) => c.id == id);
       if (index < 0) continue;
@@ -857,7 +859,7 @@ class MailState extends ChangeNotifier {
 
   /// Runs an action on one conversation; a failure puts the window back with `undo`.
   Future<void> _command(
-    Conversation c,
+    engine.Conversation c,
     Future<List<engine.BatchFailure>> Function(List<String> ids) action,
     VoidCallback undo,
     String verb,
@@ -874,13 +876,13 @@ class MailState extends ChangeNotifier {
     }
   }
 
-  void archive(Conversation c) => _command(c, (ids) async => (await mail.archive(ids: ids)).failed, _remove(c.id), 'archive');
+  void archive(engine.Conversation c) => _command(c, (ids) async => (await mail.archive(ids: ids)).failed, _remove(c.id), 'archive');
 
   /// Moves to the trash; conversations already there stay, as deleting for good needs a confirmation.
-  void trash(Conversation c) =>
+  void trash(engine.Conversation c) =>
       _command(c, (ids) async => (await mail.trash(ids: ids, confirm: false)).failed, _remove(c.id), 'move to the trash');
 
-  void setRead(Conversation c, {required bool read}) {
+  void setRead(engine.Conversation c, {required bool read}) {
     _patch(c.id, (x) => x.copyWith(unread: !read));
     _command(
       c,
@@ -890,7 +892,7 @@ class MailState extends ChangeNotifier {
     );
   }
 
-  void setStarred(Conversation c, {required bool starred}) {
+  void setStarred(engine.Conversation c, {required bool starred}) {
     _patch(c.id, (x) => x.copyWith(starred: starred));
     _command(
       c,
@@ -902,7 +904,7 @@ class MailState extends ChangeNotifier {
 
   /// Resolves "Waiting on you" (`waiting: false`: the user has dealt with it) or puts the
   /// conversation back on it.
-  void setWaiting(Conversation c, {required bool waiting}) {
+  void setWaiting(engine.Conversation c, {required bool waiting}) {
     _patch(c.id, (x) => x.copyWith(waiting: waiting));
     _command(
       c,
@@ -914,7 +916,7 @@ class MailState extends ChangeNotifier {
 
   /// Sends a plain-text reply; the engine plans the recipients and quotes the original. The Send
   /// button is the person's confirmation.
-  Future<bool> reply(Conversation c, String body, {required bool all}) async {
+  Future<bool> reply(engine.Conversation c, String body, {required bool all}) async {
     try {
       _sentToast(await mail.reply(id: c.id, body: body, all: all, overrides: null, confirm: true));
       return true;
@@ -966,16 +968,16 @@ class MailState extends ChangeNotifier {
   /// People whose name, a word of it, or address starts with `query`, best first (`contacts.search`:
   /// the accounts' Google and Outlook directories and recent correspondents), for completing
   /// recipients; none when the engine cannot say.
-  Future<List<Address>> searchContacts(String query, {int limit = 8}) async {
+  Future<List<engine.Address>> searchContacts(String query, {int limit = 8}) async {
     try {
       final people = await mail.searchContacts(query: query, limit: limit);
-      return [for (final person in people) Address(name: person.name, email: person.email)];
+      return [for (final person in people) engine.Address(name: person.name, email: person.email)];
     } on engine.MailException {
       return const [];
     }
   }
 
-  void _sentToast(engine.Sent sent) => showToast('Sent to ${sent.to.map((a) => Address.parse(a).displayName).join(', ')}');
+  void _sentToast(engine.Sent sent) => showToast('Sent to ${sent.to.map((a) => parseAddress(a).displayName).join(', ')}');
 
   /// Opens a file in its app, or a link in the browser: `open` on the Mac, the runner's shell
   /// elsewhere.
@@ -1156,9 +1158,9 @@ class MailState extends ChangeNotifier {
 
   /// The OAuth client a sign-in with `provider` uses unless given another (the one used last,
   /// else the build's), for the sign-in sheet to show; null when there is none.
-  Future<engine.OAuthClientInfo?> suggestedClient(String provider) async {
+  Future<engine.OAuthClientInfo?> suggestedClient(engine.Provider provider) async {
     try {
-      return await mail.suggestedClient(provider: provider);
+      return await mail.suggestedClient(provider: provider.name);
     } on engine.MailException {
       return null;
     }
@@ -1166,10 +1168,10 @@ class MailState extends ChangeNotifier {
 
   /// Browser sign-in; throws the engine's reason when it fails or times out. A null secret with
   /// the suggested client's id signs in with that client's saved secret.
-  Future<Account> addAccount(String provider, {String? clientId, String? clientSecret}) async {
-    final record = await mail.addAccount(provider: provider, clientId: clientId, clientSecret: clientSecret);
+  Future<engine.Account> addAccount(engine.Provider provider, {String? clientId, String? clientSecret}) async {
+    final record = await mail.addAccount(provider: provider.name, clientId: clientId, clientSecret: clientSecret);
     await reloadAccounts();
-    return Account.of(record);
+    return record;
   }
 
   // MARK: - Toasts
@@ -1202,7 +1204,7 @@ class MailState extends ChangeNotifier {
   ComposeDraft? get activeCompose => composes.isEmpty ? null : composes[activeComposeIndex.clamp(0, composes.length - 1)];
 
   String? get preferredComposeAccount => switch (selection) {
-    MailboxSelection(:final mailbox) => mailbox.account,
+    MailboxSelection(:final account) => account,
     UnifiedSelection() => accounts.firstOrNull?.id,
   };
 
@@ -1221,7 +1223,7 @@ class MailState extends ChangeNotifier {
   /// Adds a draft tab and shows it.
   void compose({
     ComposeKind kind = ComposeKind.newMessage,
-    Conversation? replyTo,
+    engine.Conversation? replyTo,
     bool replyAll = false,
     String? from,
     String to = '',

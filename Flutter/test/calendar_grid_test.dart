@@ -64,6 +64,7 @@ engine.CalendarItem meeting(String title, DateTime start, int minutes, String? r
       notesCut: false,
       link: null,
       series: null,
+      mine: false,
       editable: false,
     );
 

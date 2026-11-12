@@ -467,7 +467,7 @@ class _EventEditorState extends State<EventEditor> {
                       Padding(
                         padding: const EdgeInsets.only(top: 4),
                         child: Text(
-                          'The description is longer than shown here; change it in ${provider == 'microsoft' ? 'Outlook' : 'Google Calendar'}.',
+                          'The description is longer than shown here; change it in ${provider == engine.Provider.microsoft ? 'Outlook' : 'Google Calendar'}.',
                           style: text.footnote.copyWith(color: colors.secondaryLabel),
                         ),
                       ),
@@ -483,7 +483,7 @@ class _EventEditorState extends State<EventEditor> {
                       if (event?.series != null) 'Only this occurrence changes.',
                       if (!_allDay && widget.state.calendar.timeZone.isNotEmpty) 'Times in ${widget.state.calendar.timeZone}.',
                       if (guestsHear)
-                        '${provider == 'microsoft' ? 'Outlook' : 'Google Calendar'} emails the '
+                        '${provider == engine.Provider.microsoft ? 'Outlook' : 'Google Calendar'} emails the '
                             '${event == null ? 'invitation' : 'change'} to the guests.',
                     ].join(' '),
                     style: text.footnote.copyWith(color: colors.secondaryLabel),

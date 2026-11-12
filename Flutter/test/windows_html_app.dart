@@ -47,10 +47,10 @@ class WindowsHtmlMail extends ReaderMail {
       engine.Message(
         id: '$id-html',
         mailbox: 'INBOX',
-        role: 'inbox',
+        role: engine.MailboxRole.inbox,
         avatar: engine.avatar(name: 'Example Weekly', key: 'news@example.test'),
-        from: ['Example Weekly <news@example.test>'],
-        to: ['reader@example.test'],
+        from: [engine.Address(name: 'Example Weekly', email: 'news@example.test')],
+        to: [engine.Address(email: 'reader@example.test')],
         cc: [],
         date: '2026-11-08T09:00:00Z',
         subject: 'HTML body on Windows',

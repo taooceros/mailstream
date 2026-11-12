@@ -8,7 +8,7 @@ import 'package:mailstream_ui/ui/settings.dart';
 
 import 'reader_fixture.dart';
 
-engine.AutoReadEntry entry(String id, String category, int batch, {String reason = 'age'}) => engine.AutoReadEntry(
+engine.AutoReadEntry entry(String id, engine.Category category, int batch, {engine.AutoReadReason reason = engine.AutoReadReason.age}) => engine.AutoReadEntry(
   id: id,
   account: 'reader@example.test',
   sender: 'Sender $id',
@@ -43,7 +43,7 @@ class AutoReadMail extends ReaderMail {
 
 void main() {
   testWidgets('a new auto-read pass toasts once with Undo; passes from before the launch stay quiet', (tester) async {
-    final mail = ReaderMail()..autoRead = engine.AutoReadLog(enabled: true, days: 3, entries: [entry('old', 'notification', 1)]);
+    final mail = ReaderMail()..autoRead = engine.AutoReadLog(enabled: true, days: 3, entries: [entry('old', engine.Category.notification, 1)]);
     final state = MailState(mail);
     addTearDown(state.dispose);
     await state.start();
@@ -54,7 +54,7 @@ void main() {
     mail.autoRead = engine.AutoReadLog(
       enabled: true,
       days: 3,
-      entries: [entry('n2', 'newsletter', 2, reason: 'superseded'), entry('a1', 'notification', 2), entry('old', 'notification', 1)],
+      entries: [entry('n2', engine.Category.newsletter, 2, reason: engine.AutoReadReason.superseded), entry('a1', engine.Category.notification, 2), entry('old', engine.Category.notification, 1)],
     );
     mail.changed(engine.AutoReadEvent());
     await tester.pump();
@@ -76,8 +76,8 @@ void main() {
   });
 
   test('the toast counts each kind', () {
-    expect(autoReadSummary([entry('a', 'notification', 1)]), 'Marked 1 notification read as stale');
-    expect(autoReadSummary([entry('a', 'newsletter', 1), entry('b', 'newsletter', 1)]), 'Marked 2 newsletters read as stale');
+    expect(autoReadSummary([entry('a', engine.Category.notification, 1)]), 'Marked 1 notification read as stale');
+    expect(autoReadSummary([entry('a', engine.Category.newsletter, 1), entry('b', engine.Category.newsletter, 1)]), 'Marked 2 newsletters read as stale');
   });
 
   testWidgets('Settings lists what auto-read marked, each with Mark Unread', (tester) async {
@@ -85,7 +85,7 @@ void main() {
       ..autoRead = engine.AutoReadLog(
         enabled: true,
         days: 3,
-        entries: [entry('n2', 'newsletter', 2, reason: 'superseded'), entry('a1', 'notification', 2)],
+        entries: [entry('n2', engine.Category.newsletter, 2, reason: engine.AutoReadReason.superseded), entry('a1', engine.Category.notification, 2)],
       );
     final state = MailState(mail);
     addTearDown(state.dispose);

@@ -8,7 +8,6 @@ import 'package:macos_ui/macos_ui.dart';
 import 'package:mailstream/mailstream.dart' as engine;
 import 'package:video_player/video_player.dart';
 
-import '../backend/models.dart';
 import '../platform.dart';
 import '../state/chat_state.dart';
 import '../state/mail_state.dart';
@@ -50,7 +49,8 @@ class ChatAvatar extends StatelessWidget {
     final email = avatarKey.contains('@') ? avatarKey : '';
     if (email.isNotEmpty) state.requestAvatars([(email, false)]);
     return PersonAvatar(
-      address: Address(name: name, email: avatarKey, avatar: avatar),
+      address: engine.Address(name: name, email: avatarKey),
+      avatar: avatar,
       photo: email.isEmpty ? null : state.avatar(email),
       photoUrl: url,
       size: size,
@@ -241,9 +241,10 @@ class _ChatRowState extends State<_ChatRow> {
             child: Row(children: [
               // Unread as in the mail list: a dot before the avatar; the date stays gray.
               UnreadDot(unread: space.unread),
-              space.kind == 'space' && space.avatarKey.isEmpty
+              space.kind == engine.ChatSpaceKind.space && space.avatarKey.isEmpty
                   ? PersonAvatar(
-                      address: Address(name: space.avatarName, email: space.space, avatar: space.avatar),
+                      address: engine.Address(name: space.avatarName, email: space.space),
+                      avatar: space.avatar,
                       icon: CupertinoIcons.person_3_fill,
                     )
                   : ChatAvatar(state: widget.state, avatarKey: space.avatarKey.isEmpty ? space.space : space.avatarKey,
@@ -1034,10 +1035,10 @@ class _NewChatDialogState extends State<_NewChatDialog> {
         if (person.email case final email?
             when !_people.contains(email.toLowerCase()) &&
                 (query.isEmpty || person.name.toLowerCase().contains(query) || email.toLowerCase().contains(query)))
-          Suggestion(Address(name: person.name, email: email), photoUrl: person.avatarUrl),
+          Suggestion(engine.Address(name: person.name, email: email), photoUrl: person.avatarUrl),
     ];
     final seen = {..._people, for (final p in partners) p.address.email.toLowerCase()};
-    final contacts = query.isEmpty ? const <Address>[] : await widget.state.searchContacts(query);
+    final contacts = query.isEmpty ? const <engine.Address>[] : await widget.state.searchContacts(query);
     final people = [
       ...partners,
       for (final person in contacts)

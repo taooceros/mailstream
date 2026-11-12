@@ -41,6 +41,7 @@ class InvitationMail extends ReaderMail {
       notesCut: false,
       link: null,
       series: null,
+      mine: false,
       editable: false,
     ),
     calendar: 'reader@example.test',

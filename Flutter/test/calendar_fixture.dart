@@ -71,6 +71,7 @@ class CalendarMail extends ReaderMail {
       notesCut: false,
       link: null,
       series: null,
+      mine: response == 'organizer',
       editable: response == 'organizer',
     );
   }
@@ -115,7 +116,7 @@ class CalendarMail extends ReaderMail {
     ];
   }
 
-  static engine.CalendarAccount _account(String id, String label, String provider, List<engine.CalendarInfo> calendars) =>
+  static engine.CalendarAccount _account(String id, String label, engine.Provider provider, List<engine.CalendarInfo> calendars) =>
       engine.CalendarAccount(
         id: id,
         label: label,
@@ -131,11 +132,11 @@ class CalendarMail extends ReaderMail {
   @override
   Future<engine.CalendarAgenda> calendarEvents({required String? from, required int days}) async => engine.CalendarAgenda(
     accounts: [
-      _account(me, 'Work', 'google', [
+      _account(me, 'Work', engine.Provider.google, [
         engine.CalendarInfo(id: 'work', name: 'Work', color: '#4285f4', primary: true, writable: true),
         engine.CalendarInfo(id: 'personal', name: 'Personal', color: '#33b679', primary: false, writable: true),
       ]),
-      _account(team, 'Team', 'microsoft', [engine.CalendarInfo(id: 'team', name: 'Team', color: '#e67c73', primary: true, writable: true)]),
+      _account(team, 'Team', engine.Provider.microsoft, [engine.CalendarInfo(id: 'team', name: 'Team', color: '#e67c73', primary: true, writable: true)]),
     ],
     loading: false,
     events: events,
@@ -181,6 +182,7 @@ class CalendarMail extends ReaderMail {
     notesCut: e.notesCut,
     link: e.link,
     series: e.series,
+    mine: e.mine,
     editable: e.editable,
   );
 }

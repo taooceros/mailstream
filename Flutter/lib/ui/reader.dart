@@ -10,7 +10,6 @@ import '../backend/models.dart';
 import '../platform.dart';
 import '../state/mail_state.dart';
 import 'common.dart';
-import 'compose.dart';
 import 'controls.dart';
 import 'design.dart';
 import 'format.dart';
@@ -27,7 +26,7 @@ class Reader extends StatefulWidget {
   const Reader({super.key, required this.state, required this.conversation, this.topInset = 0});
 
   final MailState state;
-  final Conversation conversation;
+  final engine.Conversation conversation;
 
   /// Height of the toolbar floating over the top, which the message scrolls under.
   final double topInset;
@@ -35,15 +34,15 @@ class Reader extends StatefulWidget {
   static const column = 760.0;
 
   /// Conversations between people with more than one message read as a chat log.
-  static bool chat(Conversation c) => c.messageCount > 1 && (c.category == null || c.category == MailCategory.people);
+  static bool chat(engine.Conversation c) => c.messageCount > 1 && (c.category == null || c.category == engine.Category.people);
 
   /// The latest and unread messages open; the rest are one-line previews.
-  static bool opensExpanded(List<MessageDetail> messages, int index) =>
+  static bool opensExpanded(List<engine.Message> messages, int index) =>
       index == messages.length - 1 || messages[index].unread;
 
   /// Loads [c]'s messages ahead of opening it (a pointer resting on its row, a keyboard step),
   /// so opening it draws the bodies at once.
-  static void prefetch(MailState state, Conversation c) => state.prefetch(c);
+  static void prefetch(MailState state, engine.Conversation c) => state.prefetch(c);
 
   @override
   State<Reader> createState() => ReaderState();
@@ -59,7 +58,7 @@ class ReaderState extends State<Reader> {
   /// A thread opens at its end, the latest message above the reply bar.
   late final _pin = EndPin(_scroll);
 
-  Conversation get c => widget.conversation;
+  engine.Conversation get c => widget.conversation;
 
   bool get _chat => Reader.chat(c);
 
@@ -88,13 +87,13 @@ class ReaderState extends State<Reader> {
   /// (as the native app's), the caret above it.
   void forward() {
     final messages = widget.state.thread(c).messages;
-    final latest = messages?.lastWhere((m) => m.role != MailboxRole.drafts, orElse: () => messages.last);
+    final latest = messages?.lastWhere((m) => m.role != engine.MailboxRole.drafts, orElse: () => messages.last);
     final from = latest != null && latest.from.isNotEmpty ? latest.from : [?c.from];
     final body = engine.forwardBody(
-      from: from.map(formatRecipient).toList(),
-      to: latest?.to.map(formatRecipient).toList() ?? const [],
-      cc: latest?.cc.map(formatRecipient).toList() ?? const [],
-      date: (latest?.date ?? c.date)?.toUtc().toIso8601String(),
+      from: from,
+      to: latest?.to ?? const [],
+      cc: latest?.cc ?? const [],
+      date: latest?.date ?? c.date,
       subject: c.subject,
       text: latest?.text ?? '',
     );
@@ -192,7 +191,7 @@ class ReaderState extends State<Reader> {
                           key: _composer,
                           state: widget.state,
                           conversation: c,
-                          latest: messages?.lastWhere((m) => m.role != MailboxRole.drafts, orElse: () => messages.last),
+                          latest: messages?.lastWhere((m) => m.role != engine.MailboxRole.drafts, orElse: () => messages.last),
                           all: _replyAll,
                           onAll: (all) => setState(() => _replyAll = all),
                           onClose: () => setState(() => _composing = false),
@@ -235,7 +234,7 @@ class _Header extends StatelessWidget {
   const _Header({required this.state, required this.conversation});
 
   final MailState state;
-  final Conversation conversation;
+  final engine.Conversation conversation;
 
   @override
   Widget build(BuildContext context) {
@@ -264,7 +263,7 @@ class _Header extends StatelessWidget {
             if (c.tag.isNotEmpty) MarkChip(label: c.tag),
             for (final label in c.labels) MarkChip(label: label, mark: topicColor(label, context.brightness)),
             if (account != null) MarkChip(label: account.title, mark: accountColor(state.accountIndex(account.id))),
-            for (final role in c.mailboxes.where((r) => r != MailboxRole.inbox && r != MailboxRole.other)) MarkChip(label: role.title),
+            for (final role in c.mailboxes.where((r) => r != engine.MailboxRole.inbox && r != engine.MailboxRole.other)) MarkChip(label: role.title),
             if (c.messageCount > 1) MarkChip(label: '${c.messageCount} messages'),
             const ReaderRendererSwitch(),
           ],
@@ -286,8 +285,8 @@ class _MessageCard extends StatelessWidget {
     required this.onReply,
   });
 
-  final Conversation conversation;
-  final MessageDetail message;
+  final engine.Conversation conversation;
+  final engine.Message message;
   final MailState state;
   final bool expanded;
   final VoidCallback onToggle;
@@ -323,7 +322,7 @@ class _MessageCard extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
                 child: Row(
                   children: [
-                    PersonAvatar(address: sender, photo: state.avatar(sender.email)),
+                    PersonAvatar(address: sender, avatar: m.senderAvatar, photo: state.avatar(sender.email)),
                     const SizedBox(width: 16),
                     Expanded(
                       child: expanded
@@ -389,7 +388,7 @@ class _MessageCard extends StatelessWidget {
     );
   }
 
-  static String _preview(MessageDetail m) {
+  static String _preview(engine.Message m) {
     final text = (m.text ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
     return text.length > 200 ? text.substring(0, 200) : text;
   }
@@ -398,12 +397,12 @@ class _MessageCard extends StatelessWidget {
 class _AttachmentChip extends StatelessWidget {
   const _AttachmentChip({required this.attachment, required this.onOpen});
 
-  final AttachmentInfo attachment;
+  final engine.Attachment attachment;
   final VoidCallback onOpen;
 
   @override
   Widget build(BuildContext context) =>
-      MailButton(label: '${attachment.filename}  ·  ${fileSize(attachment.size)}', icon: CupertinoIcons.paperclip, onPressed: onOpen);
+      MailButton(label: '${attachment.name}  ·  ${fileSize(attachment.size)}', icon: CupertinoIcons.paperclip, onPressed: onOpen);
 }
 
 /// A body: HTML mail flush with the message, as in Mail.app (`.mail-frame` in the native reader);
@@ -412,8 +411,8 @@ class _AttachmentChip extends StatelessWidget {
 class _Body extends StatelessWidget {
   const _Body({required this.conversation, required this.message, required this.onOpenLink});
 
-  final Conversation conversation;
-  final MessageDetail message;
+  final engine.Conversation conversation;
+  final engine.Message message;
   final ValueChanged<String> onOpenLink;
 
   @override
@@ -793,8 +792,8 @@ class _ChatLog extends StatefulWidget {
     required this.topInset,
   });
 
-  final Conversation conversation;
-  final List<MessageDetail> messages;
+  final engine.Conversation conversation;
+  final List<engine.Message> messages;
   final MailState state;
   final void Function({bool all}) onReply;
 
@@ -859,8 +858,8 @@ class _ChatMessage extends StatefulWidget {
     required this.topInset,
   });
 
-  final Conversation conversation;
-  final MessageDetail message;
+  final engine.Conversation conversation;
+  final engine.Message message;
   final MailState state;
   final void Function({bool all}) onReply;
 
@@ -977,7 +976,7 @@ class _ChatMessageState extends State<_ChatMessage> {
               children: [
                 SizedBox(
                   width: 56,
-                  child: Align(alignment: Alignment.topLeft, child: PersonAvatar(address: m.sender, photo: widget.state.avatar(m.sender.email))),
+                  child: Align(alignment: Alignment.topLeft, child: PersonAvatar(address: m.sender, avatar: m.senderAvatar, photo: widget.state.avatar(m.sender.email))),
                 ),
                 Expanded(
                   child: Column(
@@ -1050,8 +1049,8 @@ class _Composer extends StatefulWidget {
   });
 
   final MailState state;
-  final Conversation conversation;
-  final MessageDetail? latest;
+  final engine.Conversation conversation;
+  final engine.Message? latest;
   final bool all;
   final ValueChanged<bool> onAll;
   final VoidCallback onClose;

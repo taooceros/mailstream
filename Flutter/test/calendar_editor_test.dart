@@ -35,6 +35,7 @@ engine.CalendarItem planning() => engine.CalendarItem(
   notesCut: false,
   link: null,
   series: null,
+  mine: true,
   editable: true,
 );
 
@@ -50,7 +51,7 @@ class EditorMail extends ReaderMail {
       engine.CalendarAccount(
         id: me,
         label: 'Personal',
-        provider: 'google',
+        provider: engine.Provider.google,
         granted: true,
         writable: true,
         loading: false,

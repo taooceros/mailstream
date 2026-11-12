@@ -16,12 +16,12 @@ class ReaderMail extends FakeMailstream {
 
   @override
   Future<List<engine.Account>> accounts() async => [
-    engine.Account(id: 'reader@example.test', label: 'Reader regression', provider: 'google', services: ['mail']),
+    engine.Account(id: 'reader@example.test', label: 'Reader regression', provider: engine.Provider.google, services: ['mail']),
   ];
 
   @override
   Future<Map<String, List<engine.Mailbox>>> mailboxes({required String? account}) async => {
-    'reader@example.test': [engine.Mailbox(id: 'INBOX', name: 'Inbox', role: 'inbox', total: 2, unread: 0)],
+    'reader@example.test': [engine.Mailbox(id: 'INBOX', name: 'Inbox', role: engine.MailboxRole.inbox, total: 2, unread: 0)],
   };
 
   @override
@@ -106,15 +106,15 @@ engine.Conversation conversation(String id, {int count = 1, int? minute, bool st
   subject: id == 'a' ? 'Live reader update' : 'Another conversation',
   date: DateTime.utc(2026, 11, 6, 12, minute ?? count).toIso8601String(),
   avatar: engine.avatar(name: 'Alex', key: 'alex@example.test'),
-  from: 'Alex <alex@example.test>',
+  from: engine.Address(name: 'Alex', email: 'alex@example.test'),
   participants: ['Alex'],
   messageCount: count,
   unread: false,
   starred: starred,
   hasAttachment: false,
-  mailboxes: ['inbox'],
+  mailboxes: [engine.MailboxRole.inbox],
   snippet: 'Synthetic message $count',
-  category: 'people',
+  category: engine.Category.people,
   waiting: false,
   labels: [],
 );
@@ -122,10 +122,10 @@ engine.Conversation conversation(String id, {int count = 1, int? minute, bool st
 engine.Message message(String id, int number) => engine.Message(
   id: '$id-$number',
   mailbox: 'INBOX',
-  role: 'inbox',
+  role: engine.MailboxRole.inbox,
   avatar: engine.avatar(name: 'Alex', key: 'alex@example.test'),
-  from: ['Alex <alex@example.test>'],
-  to: ['reader@example.test'],
+  from: [engine.Address(name: 'Alex', email: 'alex@example.test')],
+  to: [engine.Address(email: 'reader@example.test')],
   cc: [],
   date: DateTime.utc(2026, 11, 6, 12, number).toIso8601String(),
   subject: id == 'a' ? 'Live reader update' : 'Another conversation',

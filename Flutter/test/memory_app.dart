@@ -64,7 +64,7 @@ Future<void> report(String label) async {
     final counts = <String, String>{};
     for (final member in (profile['members'] as List).cast<Map<String, Object?>>()) {
       final name = (member['class'] as Map<String, Object?>)['name'];
-      if (name case 'ThreadEntry' || 'MessageDetail') counts['$name'] = '${member['instancesCurrent']}';
+      if (name case 'ThreadEntry' || 'Message') counts['$name'] = '${member['instancesCurrent']}';
       if (name == '_OneByteString' || name == '_TwoByteString') counts['$name'] = mb(member['bytesCurrent']);
     }
     stdout.writeln('memory $label: heap ${mb(usage['heapUsage'])} $counts');
@@ -86,7 +86,7 @@ class MemoryMail extends ReaderMail {
           id: m.id,
           mailbox: m.mailbox,
           role: m.role,
-          avatar: engine.avatar(name: m.from.first, key: m.from.first),
+          avatar: engine.avatar(name: m.from.first.name ?? m.from.first.email, key: m.from.first.email),
           from: m.from,
           to: m.to,
           cc: m.cc,

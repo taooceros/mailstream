@@ -1,30 +1,31 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:macos_ui/macos_ui.dart';
-import 'package:mailstream_ui/backend/models.dart';
+import 'package:mailstream/mailstream.dart' as engine;
 import 'package:mailstream_ui/ui/conversation_list.dart';
 
-Conversation _mail(String id, String sender, {required int minute, bool unread = false}) => Conversation(
+engine.Conversation _mail(String id, String sender, {required int minute, bool unread = false}) => engine.Conversation(
   id: id,
   account: 'reader@example.test',
   subject: 'Subject $id',
-  date: DateTime.utc(2026, 11, 6, 12, minute),
-  from: Address(name: sender, email: '${sender.toLowerCase()}@example.test'),
+  date: DateTime.utc(2026, 11, 6, 12, minute).toIso8601String(),
+  from: engine.Address(name: sender, email: '${sender.toLowerCase()}@example.test'),
   participants: [sender],
   messageCount: 1,
   unread: unread,
   starred: false,
   hasAttachment: false,
-  mailboxes: const {MailboxRole.inbox},
+  mailboxes: const [engine.MailboxRole.inbox],
   snippet: null,
-  category: MailCategory.notification,
+  category: engine.Category.notification,
   waiting: false,
   labels: const [],
   title: 'Subject $id',
+  avatar: engine.Avatar(initial: sender[0], slot: 0),
 );
 
 void main() {
-  Future<String> summary(WidgetTester tester, List<Conversation> newestFirst) async {
+  Future<String> summary(WidgetTester tester, List<engine.Conversation> newestFirst) async {
     await tester.pumpWidget(
       MacosTheme(
         data: MacosThemeData.light(),
@@ -35,7 +36,7 @@ void main() {
             child: SizedBox(
               width: 2000,
               child: BundleRow(
-                bundle: BundleItem(MailCategory.notification, newestFirst),
+                bundle: BundleItem(engine.Category.notification, newestFirst),
                 highlight: ListHighlight(),
                 hover: ListHighlight(),
                 next: null,

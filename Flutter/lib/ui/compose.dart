@@ -36,7 +36,7 @@ enum _Field {
 }
 
 /// [person] as a recipient: `Name <address>`, the name quoted when it holds a separator.
-String formatRecipient(Address person) {
+String formatRecipient(engine.Address person) {
   final name = person.name?.replaceAll('"', '').trim();
   if (name == null || name.isEmpty || name == person.email) return person.email;
   return RegExp(r'[,;<>@()\[\]:\\.]').hasMatch(name) ? '"$name" <${person.email}>' : '$name <${person.email}>';
@@ -707,7 +707,7 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
     final chosen = {
       for (final field in _Field.values)
         for (final part in engine.splitRecipients(text: _fields[field]!.text))
-          if (part.trim().isNotEmpty && part.trim() != typed) Address.parse(part).email.toLowerCase(),
+          if (part.trim().isNotEmpty && part.trim() != typed) parseAddress(part).email.toLowerCase(),
     };
     return [
       for (final person in people)
@@ -716,7 +716,7 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
   }
 
   /// Puts [person] in place of the address being typed in [field], ready for the next one.
-  void _complete(_Field field, Address person) {
+  void _complete(_Field field, engine.Address person) {
     final controller = _fields[field]!;
     final typing = engine.splitRecipients(text: controller.text).last;
     final before = controller.text.substring(0, controller.text.length - typing.length);

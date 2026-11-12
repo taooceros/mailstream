@@ -11,7 +11,6 @@ import 'package:macos_ui/macos_ui.dart';
 
 import 'package:mailstream/mailstream.dart' as engine;
 
-import '../backend/models.dart' show Address;
 import '../bench.dart';
 import '../state/calendar_state.dart';
 import 'calendar.dart';
@@ -1417,7 +1416,7 @@ class _AllDayBar extends StatelessWidget {
 }
 
 /// A guest as the [Address] of their [PersonAvatar].
-Address guestAddress(engine.CalendarPerson person) => Address(name: person.name, email: person.email ?? '');
+engine.Address guestAddress(engine.CalendarPerson person) => engine.Address(name: person.name, email: person.email ?? '');
 
 /// An event's guests, the account itself left out, as overlapping [PersonAvatar]s ([photoOf]
 /// gives their pictures): the first [max], then +N for the rest.

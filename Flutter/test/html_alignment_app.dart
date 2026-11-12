@@ -29,10 +29,10 @@ class AlignmentMail extends ReaderMail {
       engine.Message(
         id: '$id-alignment',
         mailbox: 'INBOX',
-        role: 'inbox',
+        role: engine.MailboxRole.inbox,
         avatar: engine.avatar(name: 'Alex', key: 'alex@example.test'),
-        from: ['Alex <alex@example.test>'],
-        to: ['reader@example.test'],
+        from: [engine.Address(name: 'Alex', email: 'alex@example.test')],
+        to: [engine.Address(email: 'reader@example.test')],
         cc: [],
         date: '2026-11-06T12:00:00Z',
         subject: 'Complete left-edge content',

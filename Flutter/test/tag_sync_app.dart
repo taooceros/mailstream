@@ -32,8 +32,8 @@ class TagSyncMail extends ReaderMail {
 
   @override
   Future<List<engine.Account>> accounts() async => [
-    engine.Account(id: 'Work@example.test', label: 'Work', provider: 'google', services: ['mail', 'chat']),
-    engine.Account(id: 'home@example.test', label: 'Home', provider: 'microsoft', services: ['mail']),
+    engine.Account(id: 'Work@example.test', label: 'Work', provider: engine.Provider.google, services: ['mail', 'chat']),
+    engine.Account(id: 'home@example.test', label: 'Home', provider: engine.Provider.microsoft, services: ['mail']),
   ];
 
   engine.SettingEntry get _entry => engine.SettingEntry(
