@@ -61,6 +61,10 @@ ad hoc signature) makes macOS ask for the Keychain, and "Always Allow" there re-
 that one build, so the app and every other host get asked again. Linux keeps the sign-ins in a
 file only the user reads (`~/.local/share/Mailstream`), so nothing is signed there.
 
+On the Mac, `-AppleInterfaceStyle Dark` (or `Light`) after the executable shows the app in that
+appearance without changing the system's, for screenshots: AppKit ignores that argument for an
+app's appearance, so `main.rs` applies it; a launch without it follows the system.
+
 HTML bodies are drawn by Blitz, the engine's renderer (`src/blitz_body.rs`, as in Flutter's
 reader), on every platform: the build turns on the FFI crate's `blitz` feature, with one
 adjustment for GPUI's dependency graph: `vendor/stylo_derive` is Stylo's derive crate 0.22.0 with
@@ -129,7 +133,7 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 | `src/glass.rs` | macOS 26: the window's Liquid Glass (`NSGlassEffectView`) under the transparent GPUI view, as Flutter's window, in the palette's warm `glass_tint` for the appearance (MS-242) |
 | `src/icons.rs`, `src/format.rs` | Material Symbols glyphs; dates and sizes |
 | `src/input.rs` | `field` / `area`: gpui-kit's one-line and multi-line text fields in the surrounding text style (see above) |
-| `src/bench.rs` | The frame measurement `scripts/bench.sh gpui` runs (`MAILSTREAM_BENCH=scroll`): the list scrolls itself and every frame's start and render-to-paint time is logged |
+| `src/bench.rs` | The frame measurement `scripts/bench.sh gpui` runs (`MAILSTREAM_BENCH=scroll`): the list scrolls itself and every frame's start and render-to-paint time is logged. The window runs in the background, so it opens without GPUI Fast's limit of about 30 fps for a window that isn't key |
 | `src/updater.rs` | Mac only: starts Sparkle from the bundle's Frameworks and adds the two update items to the application menu |
 
 Keys (⌘ is Ctrl on Linux): ↑/↓ or J/K move (in the reader they page through conversations),

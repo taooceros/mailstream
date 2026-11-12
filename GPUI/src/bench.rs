@@ -29,10 +29,15 @@ pub struct Bench {
     frames: Rc<RefCell<Vec<(f64, f64)>>>,
 }
 
+/// Whether the environment asks for the measurement (`MAILSTREAM_BENCH=scroll`).
+pub fn requested() -> bool {
+    std::env::var("MAILSTREAM_BENCH").is_ok_and(|scenario| scenario == "scroll")
+}
+
 impl Bench {
     /// The measurement the environment asks for, waking the window once the app has settled.
     pub fn from_env(cx: &mut Context<MailApp>) -> Option<Self> {
-        if std::env::var("MAILSTREAM_BENCH").ok()? != "scroll" {
+        if !requested() {
             return None;
         }
         let out = PathBuf::from(std::env::var_os("MAILSTREAM_BENCH_OUT")?);

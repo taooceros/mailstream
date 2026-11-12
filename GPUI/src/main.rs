@@ -59,6 +59,8 @@ fn main() {
     gpui::application().with_assets(icons::Assets).run(|cx: &mut App| {
         // gpui-kit's components, in the app's palette (`design::sync_kit_theme`).
         gpui::init(cx);
+        #[cfg(target_os = "macos")]
+        appearance_from_arguments();
         design::sync_kit_theme(cx.window_appearance(), cx);
         #[cfg(target_os = "macos")]
         set_dock_icon();
@@ -82,7 +84,7 @@ fn main() {
         .detach();
 
         let bounds = Bounds::centered(None, size(px(1240.), px(800.)), cx);
-        let options = WindowOptions {
+        let mut options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
                 title: Some("Mailstream".into()),
@@ -97,6 +99,12 @@ fn main() {
             window_background: design::window_background(),
             ..Default::default()
         };
+        // GPUI Fast draws a window that isn't the key window at about 30 fps unless input is
+        // arriving. The measurement runs in the background on purpose and scrolls by itself, so
+        // it lifts that limit to see what the window does at the display's rate.
+        if bench::requested() {
+            options.inactive_frame_interval = None;
+        }
         // In gpui-kit's root, which hosts the kit's tooltips, menus and popovers over the app; its
         // surface left clear (the kit paints its theme's background there), so the window's glass
         // (or blur) shows where the app paints nothing.
@@ -153,6 +161,24 @@ fn set_dock_icon() {
     if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
         unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
     }
+}
+
+/// `-AppleInterfaceStyle Dark` (or `Light`) on the command line shows the app in that appearance
+/// without changing the system's setting, for screenshots (AGENTS.md, Release delivery). AppKit
+/// leaves an app's appearance to the system's even with that argument, so it is applied here;
+/// only the command line's value counts, so a normal launch keeps following the system.
+#[cfg(target_os = "macos")]
+fn appearance_from_arguments() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication};
+    use objc2_foundation::{NSArgumentDomain, NSString, NSUserDefaults, ns_string};
+
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let arguments = NSUserDefaults::standardUserDefaults().volatileDomainForName(unsafe { NSArgumentDomain });
+    let Some(style) = arguments.objectForKey(ns_string!("AppleInterfaceStyle")) else { return };
+    let dark = style.downcast_ref::<NSString>().is_some_and(|style| style.to_string() == "Dark");
+    let name = unsafe { if dark { NSAppearanceNameDarkAqua } else { NSAppearanceNameAqua } };
+    NSApplication::sharedApplication(mtm).setAppearance(NSAppearance::appearanceNamed(name).as_deref());
 }
 
 /// The menu bar (`AppDelegate.buildMenu`). Items dispatch to the focused window's handlers, so
