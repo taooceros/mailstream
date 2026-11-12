@@ -209,7 +209,7 @@ environment, which admits `main` only and holds `MAILSTREAM_SIGNING_P12`,
    the versioned zip, signed `appcast.xml`, and a byte-length/SHA-256/revision/channel manifest.
 5. `python3 scripts/publish-update.py publish /that/directory` refuses a build that is not
    newer than every published one, uploads the immutable versioned zip first, then replaces
-   the appcast, checks the uploaded appcast byte for byte, and deletes all but the newest five
+   the appcast, checks the uploaded appcast byte for byte, and deletes all but the newest two
    archives (a client that already fetched an earlier feed can still finish its download).
    The `updates` release is a GitHub **prerelease**; direct asset URLs do not depend on GitHub
    treating it as the latest stable release, and Sparkle's item channel controls client

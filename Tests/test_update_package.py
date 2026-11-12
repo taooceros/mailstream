@@ -119,6 +119,11 @@ class PublishTests(unittest.TestCase):
         mixed = names + [f"Mailstream-GPUI-{n}.zip" for n in (2, 3)]
         self.assertEqual(publish.stale_archives(mixed, 1, gpui), ["Mailstream-GPUI-2.zip"])
         self.assertNotIn("Mailstream-GPUI-2.zip", publish.stale_archives(mixed, 5, flutter))
+        # The release keeps the two newest builds of each app (MS-251); appcasts are never pruned.
+        release = ["appcast.xml", "appcast-gpui.xml"] + [f"Mailstream-{app}-{n}.zip" for app in ("Flutter", "GPUI") for n in range(1, 6)]
+        self.assertEqual(publish.KEEP, 2)
+        self.assertEqual(publish.stale_archives(release, publish.KEEP, flutter), [f"Mailstream-Flutter-{n}.zip" for n in (1, 2, 3)])
+        self.assertEqual(publish.stale_archives(release, publish.KEEP, gpui), [f"Mailstream-GPUI-{n}.zip" for n in (1, 2, 3)])
 
 
 if __name__ == "__main__":

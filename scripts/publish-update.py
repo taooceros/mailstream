@@ -35,7 +35,7 @@ class Product:
 
 
 # Archives a client may still be downloading from an earlier feed.
-KEEP = 5
+KEEP = 2
 
 
 def gh(*args):
