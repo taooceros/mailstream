@@ -45,17 +45,17 @@ const MOVE_TIP: &str = "Move to the Compose Column to Change Recipients or Subje
 pub fn bind_keys(cx: &mut App) {
     let window = Some(CONTEXT);
     cx.bind_keys([
-        KeyBinding::new("secondary-enter", Send, window),
+        KeyBinding::new(secondary!("enter"), Send, window),
         KeyBinding::new("escape", Cancel, window),
-        KeyBinding::new("secondary-w", Close, window),
+        KeyBinding::new(secondary!("w"), Close, window),
         KeyBinding::new("tab", FocusNext, window),
         KeyBinding::new("shift-tab", FocusPrevious, window),
-        KeyBinding::new("secondary-shift-a", Attach, window),
+        KeyBinding::new(secondary!("shift-a"), Attach, window),
         KeyBinding::new("down", SuggestionNext, Some(RECIPIENTS)),
         KeyBinding::new("up", SuggestionPrevious, Some(RECIPIENTS)),
         KeyBinding::new("escape", Cancel, Some(REPLY_CONTEXT)),
-        KeyBinding::new("secondary-shift-a", Attach, Some(REPLY_CONTEXT)),
-        KeyBinding::new("secondary-shift-o", MoveToColumn, Some(REPLY_CONTEXT)),
+        KeyBinding::new(secondary!("shift-a"), Attach, Some(REPLY_CONTEXT)),
+        KeyBinding::new(secondary!("shift-o"), MoveToColumn, Some(REPLY_CONTEXT)),
     ]);
 }
 
@@ -403,7 +403,7 @@ impl Compose {
     fn focus_first(&self, window: &mut Window, cx: &mut Context<Self>) {
         let handle =
             if self.to.read(cx).text().is_empty() { self.to.focus_handle(cx) } else { self.body.focus_handle(cx) };
-        window.focus(&handle);
+        window.focus(&handle, cx);
     }
 
     fn move_focus(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -414,7 +414,7 @@ impl Compose {
             None => 0,
         };
         self.suggestions = None;
-        window.focus(&order[next]);
+        window.focus(&order[next], cx);
         cx.notify();
     }
 
@@ -643,7 +643,7 @@ impl Compose {
             input.replace_text_in_range(None, &text, window, cx);
         });
         self.suggestions = None;
-        window.focus(&input.focus_handle(cx));
+        window.focus(&input.focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -684,7 +684,7 @@ impl Compose {
         let [to, cc, bcc]: [Vec<String>; 3] = lists.try_into().expect("three recipient lists");
         if to.is_empty() {
             self.invalid.push(Field::To);
-            window.focus(&self.to.focus_handle(cx));
+            window.focus(&self.to.focus_handle(cx), cx);
             return self.fail("Add at least one recipient.", cx);
         }
         let subject = self.subject.read(cx).text().trim().to_string();
@@ -904,7 +904,7 @@ impl Compose {
             .child(button("keep", "Keep Editing", ButtonKind::Secondary, ControlSize::Regular, true, p).on_click(
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.confirming_discard = false;
-                    window.focus(&this.body.focus_handle(cx));
+                    window.focus(&this.body.focus_handle(cx), cx);
                     cx.notify();
                 }),
             ))
@@ -970,7 +970,7 @@ impl Render for Compose {
                         row.child(button("show-bcc", "Bcc", ButtonKind::Plain, ControlSize::Small, true, p).on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
                                 this.show_bcc = true;
-                                window.focus(&this.bcc.focus_handle(cx));
+                                window.focus(&this.bcc.focus_handle(cx), cx);
                                 cx.notify();
                             },
                         )))
@@ -1005,7 +1005,7 @@ impl Render for Compose {
                     .cursor_text()
                     // The window's own focus would otherwise take the click (`prevent_default` keeps it).
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        window.focus(&body.focus_handle(cx));
+                        window.focus(&body.focus_handle(cx), cx);
                         window.prevent_default();
                     })
                     .child(
@@ -1076,7 +1076,7 @@ impl ReplyBox {
             text
         });
         let focus = text.focus_handle(cx);
-        window.focus(&focus);
+        window.focus(&focus, cx);
         let subscription = cx.subscribe_in(&text, window, |this, _, event: &TextAreaEvent, window, cx| match event {
             TextAreaEvent::Submit => this.send(window, cx),
             TextAreaEvent::Changed => {
@@ -1099,8 +1099,8 @@ impl ReplyBox {
         }
     }
 
-    pub fn focus(&self, window: &mut Window) {
-        window.focus(&self.focus);
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        window.focus(&self.focus, cx);
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1262,8 +1262,8 @@ impl Render for ReplyBox {
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .cursor_text()
-                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                        window.focus(&focus);
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        window.focus(&focus, cx);
                         window.prevent_default();
                     })
                     .px(px(metrics::REPLY_PADDING))

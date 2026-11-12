@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A private Hyprland desktop for testing the Linux front ends without the user's screen (MS-204).
 
-Usage: python3 scripts/vhypr.py start NAME [--size WxH] [--scale S] [--dark]
+Usage: python3 scripts/vhypr.py start NAME [--size WxH] [--scale S] [--hz HZ] [--dark]
        python3 scripts/vhypr.py run NAME -- COMMAND [ARG...]
        python3 scripts/vhypr.py shot NAME FILE [--class CLASS]
        python3 scripts/vhypr.py clients NAME
@@ -18,10 +18,10 @@ Usage: python3 scripts/vhypr.py start NAME [--size WxH] [--scale S] [--dark]
 
 `start` runs a second Hyprland nested in the user's session, with its own window on the user's
 desktop turned off (output WAYLAND-1 disabled) and one headless output VHYPR-1 of WxH logical
-pixels (default 1600x1000) at scale S (default 1) instead. The user sees nothing of it. Hyprland
-can't run on the headless backend alone: aquamarine takes its buffer allocator from a DRM or
-Wayland backend, the user's session holds the seat, and other compositors (weston, sway, cage)
-offer too old an xdg_wm_base (5; Hyprland 0.57 needs 6) to nest it in.
+pixels (default 1600x1000) at scale S (default 1) and HZ (default 60) instead. The user sees
+nothing of it. Hyprland can't run on the headless backend alone: aquamarine takes its buffer
+allocator from a DRM or Wayland backend, the user's session holds the seat, and other compositors
+(weston, sway, cage) offer too old an xdg_wm_base (5; Hyprland 0.57 needs 6) to nest it in.
 
 Everything in it is separate from the user's session:
 - `run` starts COMMAND detached inside it (Wayland only: DISPLAY unset, GDK_BACKEND=wayland),
@@ -159,7 +159,7 @@ def parent_socket():
 
 
 CONFIG = """hl.monitor({{ output = "WAYLAND-1", disabled = true }})
-hl.monitor({{ output = "", mode = "{size}@60", position = "0x0", scale = {scale} }})
+hl.monitor({{ output = "", mode = "{size}@{hz}", position = "0x0", scale = {scale} }})
 hl.config({{
     general = {{ gaps_in = 0, gaps_out = 0, border_size = 0 }},
     decoration = {{ rounding = 0, blur = {{ enabled = false }}, shadow = {{ enabled = false }} }},
@@ -187,7 +187,7 @@ def start(args):
         Path(path).mkdir(parents=True)
     tools = {key: nix_build(installable) for key, installable in TOOLS.items()}
     tools["python"] = nix_build("--impure", "--expr", PYTHON)
-    info = {"tools": tools, "apps": [], "size": args.size, "scale": args.scale}
+    info = {"tools": tools, "apps": [], "size": args.size, "scale": args.scale, "hz": args.hz}
     (here / "color-scheme").write_text("dark\n" if args.dark else "light\n")
 
     bus = here / "bus"
@@ -210,7 +210,7 @@ def start(args):
     info["portal"] = portal.pid
 
     config = here / "hyprland.lua"
-    config.write_text(CONFIG.format(size=args.size, scale=args.scale))
+    config.write_text(CONFIG.format(size=args.size, scale=args.scale, hz=args.hz))
     # LIBSEAT_BACKEND=seatd (absent here) keeps it off the GPU's DRM device, which the user's
     # session holds: libseat's fallback would open /dev/dri/card* directly.
     env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE")}
@@ -243,7 +243,7 @@ def start(args):
         stop_all(name, info, keep=True)
         fail(f"the headless output did not come up ({created.stdout.strip()} {created.stderr.strip()}); "
              f"Hyprland's log: {here / 'hyprland.log'}")
-    print(f"desktop {name}: {args.size} at scale {args.scale}, {'dark' if args.dark else 'light'}; "
+    print(f"desktop {name}: {args.size}@{args.hz} at scale {args.scale}, {'dark' if args.dark else 'light'}; "
           f"stop it with: python3 scripts/vhypr.py stop {name}")
     print_env(info, name)
 
@@ -525,6 +525,7 @@ def main():
     p.add_argument("name")
     p.add_argument("--size", default="1600x1000")
     p.add_argument("--scale", default="1")
+    p.add_argument("--hz", default="60")
     p.add_argument("--dark", action="store_true")
     p.set_defaults(fn=start)
     p = verbs.add_parser("run")

@@ -133,6 +133,7 @@ pub fn pasted(cx: &App) -> Option<Result<Vec<PathBuf>, String>> {
     match item.entries().first()? {
         ClipboardEntry::String(copied) => copied_files(copied.text()).map(Ok),
         ClipboardEntry::Image(image) => Some(save_image(image).map(|path| vec![path])),
+        ClipboardEntry::ExternalPaths(paths) => Some(Ok(paths.paths().to_vec())),
     }
 }
 

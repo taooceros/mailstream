@@ -49,14 +49,14 @@ pub fn bind_keys(cx: &mut App) {
     let pane = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("escape", Back, list),
-        KeyBinding::new("secondary-[", Back, pane),
+        KeyBinding::new(secondary!("["), Back, pane),
         KeyBinding::new("j", Next, list),
         KeyBinding::new("down", Next, list),
         KeyBinding::new("k", Previous, list),
         KeyBinding::new("up", Previous, list),
         KeyBinding::new("enter", Open, list),
-        KeyBinding::new("secondary-n", NewChat, pane),
-        KeyBinding::new("secondary-r", Refresh, pane),
+        KeyBinding::new(secondary!("n"), NewChat, pane),
+        KeyBinding::new(secondary!("r"), Refresh, pane),
     ]);
 }
 
@@ -812,7 +812,7 @@ impl ChatPane {
         self.view = View::Spaces;
         self.reply_thread = None;
         self.rebuild_visible();
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         // Selecting Chat fetches every account's spaces now, as the native app does.
         self.refresh(&Refresh, window, cx);
         cx.notify();
@@ -999,7 +999,7 @@ impl ChatPane {
         // keeps the space current and marks it read while it stays open.
         let (account, space) = (key.account.to_string(), key.space.to_string());
         self.load_thread(&key, async move { engine().chat_open(account, space).await }, cx);
-        window.focus(&self.composer.focus_handle(cx));
+        window.focus(&self.composer.focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -1007,7 +1007,7 @@ impl ChatPane {
         self.leave_space(cx);
         self.view = View::Spaces;
         self.reply_thread = None;
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 
@@ -1273,7 +1273,7 @@ impl ChatPane {
         self.form = NewChatForm { account, ..Default::default() };
         self.view = View::NewChat;
         self.people_input.update(cx, |input, cx| input.clear(cx));
-        window.focus(&self.people_input.focus_handle(cx));
+        window.focus(&self.people_input.focus_handle(cx), cx);
         self.load_partners(cx);
         cx.notify();
     }
@@ -1382,7 +1382,7 @@ impl ChatPane {
         self.form.generation += 1;
         self.form.contacts.clear();
         self.people_input.update(cx, |input, cx| input.clear(cx));
-        window.focus(&self.people_input.focus_handle(cx));
+        window.focus(&self.people_input.focus_handle(cx), cx);
         self.suggest(cx);
     }
 
@@ -1564,7 +1564,7 @@ impl ChatPane {
                     range.map(|position| this.render_row(position, p, cx)).collect::<Vec<_>>()
                 }),
             )
-            .track_scroll(self.scroll.clone())
+            .track_scroll(&self.scroll)
             .flex_1()
             .px(px(rows::INSET))
             .py(px(6.))
@@ -1810,7 +1810,7 @@ impl ChatPane {
                 .child(button(ElementId::Name(format!("reply:{}", message.id).into()), "Reply in Thread", ButtonKind::Plain, ControlSize::Small, true, p).on_click(
                     cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.reply_thread = Some((thread.clone(), who.clone()));
-                        window.focus(&this.composer.focus_handle(cx));
+                        window.focus(&this.composer.focus_handle(cx), cx);
                         cx.notify();
                     }),
                 ))
@@ -1986,7 +1986,7 @@ impl ChatPane {
                         .bg(p.chip)
                         .text_size(px(text::READING))
                         .cursor_text()
-                        .on_click(move |_, window, cx| window.focus(&composer.focus_handle(cx)))
+                        .on_click(move |_, window, cx| window.focus(&composer.focus_handle(cx), cx))
                         .child(self.composer.clone())
                         .child(div().flex_shrink_0().text_size(px(text::CAPTION)).text_color(p.faint).child("↩")),
                 )
@@ -2054,7 +2054,7 @@ impl ChatPane {
             .rounded(px(radius::CARD))
             .bg(p.chip)
             .cursor_text()
-            .on_click(move |_, window, cx| window.focus(&people_input.focus_handle(cx)))
+            .on_click(move |_, window, cx| window.focus(&people_input.focus_handle(cx), cx))
             .children(form.people.iter().enumerate().map(|(index, person)| {
                 let email = person.email.clone();
                 div()

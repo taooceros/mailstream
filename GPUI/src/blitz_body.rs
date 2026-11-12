@@ -41,7 +41,7 @@ actions!(mail_body, [CopyBody]);
 /// ⌘C (Ctrl+C) copies the selection of a body. Text fields bind it in their own context, which
 /// wins while one has focus.
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([gpui::KeyBinding::new("secondary-c", CopyBody, None)]);
+    cx.bind_keys([gpui::KeyBinding::new(secondary!("c"), CopyBody, None)]);
     cx.on_action(|_: &CopyBody, cx| copy_selection(cx));
 }
 
@@ -185,7 +185,7 @@ pub fn paint(
         entry.over_link
     });
     for (bounds, image) in images {
-        window.paint_image(bounds, Corners::default(), image, 0, false).ok();
+        window.paint_image(bounds, bounds, Corners::default(), image, 0, false).ok();
     }
     if over_link {
         window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
@@ -515,7 +515,7 @@ fn copy_selection(cx: &mut App) {
     let Some(page) = page else { return };
     cx.spawn(async move |cx| {
         if let Some(text) = page.selected_text().await {
-            cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(text))).ok();
+            cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(text)));
         }
     })
     .detach();

@@ -62,7 +62,7 @@ impl Bench {
         cx: &mut Context<MailApp>,
     ) -> Option<AnyElement> {
         let now = Instant::now();
-        let max = f32::from(list.max_offset_for_scrollbar().height);
+        let max = f32::from(list.max_offset_for_scrollbar().y);
         let started = match self.started {
             Some(started) => started,
             None if now - self.launched >= SETTLE && max > 0. => *self.started.insert(now),

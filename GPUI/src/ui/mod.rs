@@ -19,7 +19,7 @@ use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, CursorStyle, Div, DispatchPhase, DragMoveEvent, ElementId, EmptyView,
     Focusable,
     FontWeight, InteractiveElement, IntoElement, MouseButton, NavigationDirection, ParentElement, Render,
-    ScrollWheelEvent, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, canvas, div, px, relative,
+    ScrollEvent, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, canvas, div, px, relative,
 };
 
 use crate::avatars;
@@ -281,7 +281,7 @@ impl MailApp {
         let swipe = canvas(
             |_, _, _| (),
             move |bounds, _, window, _| {
-                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx: &mut App| {
+                window.on_mouse_event(move |event: &ScrollEvent, phase, _, cx: &mut App| {
                     if phase != DispatchPhase::Capture || !bounds.contains(&event.position) {
                         return;
                     }

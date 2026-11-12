@@ -1,7 +1,10 @@
 # Mailstream GPUI front end
 
-A [GPUI](https://gpui.rs) (Zed's GPU UI framework, crate `gpui` 0.2) window for Mailstream, on
-macOS and Linux (Wayland or X11). The
+A [GPUI](https://gpui.rs) (Zed's GPU UI framework) window for Mailstream, on macOS and Linux
+(Wayland or X11). GPUI comes through [gpui-kit](https://gpui-kit.com) 0.9 with its `gpui-fast`
+feature (MS-226): GPUI Fast, longbridge's retained-mode GPUI that follows Zed's. `Cargo.toml` names
+the kit `gpui`, so the code says `gpui::…`; `secondary!("k")` (in `main.rs`) spells a binding's
+⌘/Ctrl, as GPUI Fast's `KeyBinding::new` no longer reads `secondary-`. The
 engine (accounts, OAuth, sync, push, the Turso cache, threading, AI tagging, Google Chat) runs in
 this process: the app links the Rust engine (`../Engine`) through the crate in `../FFI` and calls
 its typed async methods (`Mailstream::conversations`, `show`, `tag`, `chat_messages`, `reply`, …).
@@ -17,6 +20,13 @@ devenv shell -- GPUI/run.sh  # Linux (NixOS): the shell has the libraries GPUI l
 ```
 
 The engine works on its own threads; only its change events reach the window's main thread.
+
+GPUI Fast draws a view from the last frame while nothing it read changed: entities, globals, list
+and scroll state, the pointer and modifier keys are tracked
+([retained mode](https://github.com/longbridge/gpui-fast/blob/main/docs/retained-mode.md)).
+Anything else a render reads (a `Cell`, a thread-local, the time) needs `cx.notify()` or
+`window.refresh()` when it changes; Blitz's pages refresh the window as their tiles arrive.
+`GPUI_VIEW_RETENTION=0` draws every frame from scratch, to tell a stale view from a bug.
 
 Always start it through `run.sh`. On macOS the engine reads the sign-ins from the Keychain item
 that macOS pins to Mailstream's signature (identifier `dev.mailstream.Mailstream`, the Apple
@@ -37,22 +47,22 @@ WebView (`src/webview.rs`, native `WKWebView`s) shows the mail whole, quotes unf
 `MAILSTREAM_READER_RENDERER=webKit` starts in the WebView, for `scripts/bench.sh`.
 
 Linux differs from the Mac in:
-- HTML bodies: Blitz only (no WebView switch). fontique takes fontconfig through `dlopen` as
-  GPUI's font-kit does, and libc stays below 0.2.190, which dropped the `ENOATTR` GPUI's tar
-  reader (xattr 0.2) names.
-- Shortcuts: ⌘ is Ctrl (`secondary-` bindings), except the Mac's text navigation (⌘←, Emacs keys).
+- HTML bodies: Blitz only (no WebView switch). fontique takes fontconfig through `dlopen`, which
+  GPUI's font-kit then shares.
+- Shortcuts: ⌘ is Ctrl (`secondary!` bindings), except the Mac's text navigation (⌘←, Emacs keys).
 - The window: the compositor draws its frame where it offers to; elsewhere dragging the window
   between the islands or their title rows moves it once the pointer has travelled a few points
   with the button held (a click or tap there never does, MS-206); rows and controls never move it.
   The type is the desktop's sans-serif family (fontconfig). The back swipe takes the scroll as
   the compositor turns it for the person's scrolling direction.
-- Scrolling (Wayland): gpui itself applies a wheel notch as one jump of three lines and stops a
-  touchpad scroll dead when the fingers lift (on the Mac, macOS sends the trackpad's momentum
-  itself). Both platforms build gpui from `vendor/gpui`: 0.2.2 with one Wayland-only patch
-  (MS-208, `src/platform/linux/wayland/scroll_motion.rs`). Wheel notches ease in over about
-  150 ms, and touchpad scrolls arrive as `Started`, `Moved`, `Ended` and then a fling that
-  decelerates as Firefox's flings do (0.998 per ms); a click, the pointer leaving or fingers
-  resting on the touchpad stops it. X11 is unchanged.
+- Scrolling (Wayland): GPUI applies a wheel notch as one jump of three lines and stops a touchpad
+  scroll dead when the fingers lift (on the Mac, macOS sends the trackpad's momentum itself).
+  `vendor/gpui-fast-linux` is GPUI Fast's Linux platform 0.1.14 with one Wayland-only patch
+  (MS-208, carried over in MS-226: `src/linux/wayland/scroll_motion.rs` and the "Mailstream
+  patch" parts of `client.rs`). Wheel notches ease in over about 150 ms, and touchpad scrolls
+  arrive as `Started`, `Moved`, `Ended` and then a fling that decelerates as Firefox's flings do
+  (0.998 per ms); a click, the pointer leaving or fingers resting on the touchpad stops it. X11
+  is unchanged. Moving to a newer GPUI Fast means vendoring its Linux crate again with the patch.
 - Engine events reach the window through `Mailstream::subscribe_any_thread`: `subscribe` posts
   to GLib's main loop there, which GPUI doesn't run.
 

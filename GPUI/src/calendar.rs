@@ -65,8 +65,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("w", ShowWeek, list),
         KeyBinding::new("t", Today, list),
         KeyBinding::new("escape", Back, list),
-        KeyBinding::new("secondary-[", Back, pane),
-        KeyBinding::new("secondary-r", Refresh, pane),
+        KeyBinding::new(secondary!("["), Back, pane),
+        KeyBinding::new(secondary!("r"), Refresh, pane),
     ]);
 }
 
@@ -220,7 +220,7 @@ impl CalendarPane {
     /// The calendar comes into view, from what the engine holds (it fetches what got old itself).
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.active = true;
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         self.reload(cx);
         cx.notify();
     }

@@ -34,7 +34,7 @@ actions!(settings, [ShowSettings]);
 /// Binds cmd-, to `ShowSettings`, which opens the window with `on_changed` (see `open_settings`),
 /// and hands the engine's change events to the window while it is open.
 pub fn init(on_changed: impl Fn(&mut App) + 'static, cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("secondary-,", ShowSettings, None)]);
+    cx.bind_keys([KeyBinding::new(secondary!(","), ShowSettings, None)]);
     let on_changed = Rc::new(on_changed);
     cx.on_action(move |_: &ShowSettings, cx| {
         let on_changed = on_changed.clone();
@@ -85,7 +85,7 @@ fn follow_engine(cx: &mut App) {
                 batch.push(event);
             }
             let open = cx.update(|cx| cx.try_global::<OpenSettings>().map(|open| open.0));
-            if let Ok(Some(handle)) = open {
+            if let Some(handle) = open {
                 handle.update(cx, |settings, _, cx| settings.follow_engine(&batch, cx)).ok();
             }
         }
@@ -516,7 +516,7 @@ impl Settings {
                     InputEvent::Submit => this.commit_field(&submitted, cx),
                     InputEvent::Cancel => {
                         this.revert_field(&submitted, cx);
-                        window.blur();
+                        window.blur(cx);
                     }
                     InputEvent::Changed => {}
                 }
@@ -620,7 +620,7 @@ impl Settings {
         let input = cx.new(|cx| TextInput::new(account.id.clone(), cx));
         input.update(cx, |input, cx| input.set_text(account.label.clone(), cx));
         let subscription = cx.subscribe_in(&input, window, Self::on_rename_event);
-        window.focus(&input.read(cx).focus_handle(cx));
+        window.focus(&input.read(cx).focus_handle(cx), cx);
         self.confirming = None;
         self.renaming = Some(Rename { id: account.id.clone(), input, _subscription: subscription });
         cx.notify();
@@ -734,7 +734,7 @@ impl Settings {
             input
         });
         let focus = if suggested.is_some() { &secret } else { &id };
-        window.focus(&focus.focus_handle(cx));
+        window.focus(&focus.focus_handle(cx), cx);
         let on_event = |this: &mut Self, _: &Entity<TextInput>, event: &InputEvent, _: &mut Window, cx: &mut Context<Self>| {
             match event {
                 InputEvent::Submit => this.submit_client(cx),

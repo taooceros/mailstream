@@ -99,11 +99,9 @@ fn photo(email: &SharedString, cx: &mut App) -> Option<Arc<Path>> {
         avatars.asking = true;
         // Runs after this frame, so everything it draws goes out in one request.
         cx.spawn(async move |cx| {
-            while let Ok(Some(emails)) = cx.update(next_batch) {
+            while let Some(emails) = cx.update(next_batch) {
                 let (emails, answer) = cx.background_executor().spawn(ask(emails)).await;
-                if cx.update(|cx| settle(emails, answer, cx)).is_err() {
-                    break;
-                }
+                cx.update(|cx| settle(emails, answer, cx));
             }
         })
         .detach();
@@ -164,7 +162,7 @@ fn settle(emails: Vec<SharedString>, answer: Result<Vec<Option<Arc<Path>>>, Mail
             // Redraw once the first of them is due, so the rows still showing them ask again.
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(soonest).await;
-                cx.update(|cx| cx.refresh_windows()).ok();
+                cx.update(|cx| cx.refresh_windows());
             })
             .detach();
         }

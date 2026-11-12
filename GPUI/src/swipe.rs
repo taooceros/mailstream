@@ -6,7 +6,7 @@
 use std::process::Command;
 use std::time::Instant;
 
-use gpui::{ScrollDelta, ScrollWheelEvent, TouchPhase};
+use gpui::{ScrollDelta, ScrollEvent, TouchPhase};
 
 pub enum Step {
     /// Not a back swipe: deliver the event as usual.
@@ -17,6 +17,8 @@ pub enum Step {
     Drag(f32),
     /// Fingers lifted; `velocity` in points per second, positive to the right.
     Release { offset: f32, velocity: f32 },
+    /// The system took the gesture: the page returns from `offset` to where it was.
+    Cancel(f32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -99,7 +101,7 @@ impl Default for BackSwipe {
 
 impl BackSwipe {
     /// `can_start`: whether a gesture beginning with this event may become a back swipe.
-    pub fn feed(&mut self, event: &ScrollWheelEvent, can_start: bool) -> Step {
+    pub fn feed(&mut self, event: &ScrollEvent, can_start: bool) -> Step {
         // Mouse wheels scroll by lines; only trackpads send pixel deltas.
         let ScrollDelta::Pixels(delta) = event.delta else { return Step::Pass };
         let (raw_dx, dy) = (f32::from(delta.x), f32::from(delta.y));
@@ -118,6 +120,11 @@ impl BackSwipe {
                 self.last = now;
                 // `Started` also stands for "may begin", which carries no movement.
                 return Step::Pass;
+            }
+            TouchPhase::Cancelled => {
+                let tracking = self.state == State::Tracking;
+                self.state = State::Idle;
+                return if tracking { Step::Cancel(self.offset) } else { Step::Pass };
             }
             // gpui reports momentum as `Moved` with no touch: after `Ended` they are the flick.
             TouchPhase::Moved | TouchPhase::Ended => {}

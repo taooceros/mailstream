@@ -59,11 +59,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-down", SelectDocumentEnd, context),
         KeyBinding::new("shift-home", SelectDocumentStart, context),
         KeyBinding::new("shift-end", SelectDocumentEnd, context),
-        KeyBinding::new("secondary-a", SelectAll, context),
-        KeyBinding::new("secondary-c", Copy, context),
-        KeyBinding::new("secondary-x", Cut, context),
-        KeyBinding::new("secondary-v", Paste, context),
-        KeyBinding::new("secondary-enter", Submit, context),
+        KeyBinding::new(secondary!("a"), SelectAll, context),
+        KeyBinding::new(secondary!("c"), Copy, context),
+        KeyBinding::new(secondary!("x"), Cut, context),
+        KeyBinding::new(secondary!("v"), Paste, context),
+        KeyBinding::new(secondary!("enter"), Submit, context),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, context),
     ]);
     // The Mac's text fields also take Emacs' line keys; elsewhere Ctrl+A selects all.
@@ -498,7 +498,7 @@ impl TextArea {
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         let offset = self.clamp(self.offset_for_mouse(event.position));
         match event.click_count {
             2 => {

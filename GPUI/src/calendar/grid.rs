@@ -14,7 +14,7 @@ use chrono::{DateTime, Days, Local, NaiveDate, Timelike};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, ClickEvent, Context, DispatchPhase, Div, ElementId, FontWeight, HighlightStyle, Hsla, InteractiveElement,
-    IntoElement, ParentElement, ScrollWheelEvent, StatefulInteractiveElement, Styled, StyledText, Window, canvas, div,
+    IntoElement, ParentElement, ScrollEvent, StatefulInteractiveElement, Styled, StyledText, Window, canvas, div,
     linear_color_stop, linear_gradient, point, px, relative,
 };
 
@@ -211,7 +211,7 @@ impl CalendarPane {
     }
 
     /// A scroll event over the grid, in the capture phase: true when the page swipe took it.
-    fn feed_swipe(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) -> bool {
+    fn feed_swipe(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) -> bool {
         let width = self.page_width.get().max(1.);
         match self.swipe.feed(event, self.view != View::Agenda) {
             Step::Pass => false,
@@ -233,6 +233,11 @@ impl CalendarPane {
                     offset
                 };
                 self.pan = Pan::Settle { from, start: Instant::now() };
+                cx.notify();
+                true
+            }
+            Step::Cancel(offset) => {
+                self.pan = Pan::Settle { from: offset, start: Instant::now() };
                 cx.notify();
                 true
             }
@@ -478,7 +483,7 @@ impl CalendarPane {
         let swipe = canvas(
             |_, _, _| (),
             move |bounds, _, window, _| {
-                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx: &mut App| {
+                window.on_mouse_event(move |event: &ScrollEvent, phase, _, cx: &mut App| {
                     if phase != DispatchPhase::Capture || !bounds.contains(&event.position) {
                         return;
                     }
@@ -750,7 +755,7 @@ impl CalendarPane {
                             .when_some(meeting.clone().filter(|_| guests.is_empty() || width >= 70.), |d, url| {
                                 d.child(
                                     div()
-                                        .flex_shrink()
+                                        .flex_shrink_1()
                                         .min_w_0()
                                         .h(px(16.))
                                         .px(px(space::S6))
@@ -931,8 +936,8 @@ impl CalendarPane {
 mod tests {
     use chrono::{Days, Local, NaiveDate};
     use gpui::{
-        Bounds, Entity, Modifiers, Pixels, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
-        point, px, size,
+        Bounds, Entity, Modifiers, Pixels, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
+        VisualTestContext, point, px, size,
     };
 
     use super::super::model::{self, tests::timed};
@@ -964,12 +969,13 @@ mod tests {
     /// A scroll over the timeline as gpui's Wayland client sends a touchpad's: `Started` with no
     /// movement as the fingers land, `Moved` in points as they move, `Ended` with none as they
     /// lift, then the fling as `Moved` again.
-    fn touchpad(at: gpui::Point<Pixels>, phase: TouchPhase, dx: f32, dy: f32) -> ScrollWheelEvent {
-        ScrollWheelEvent {
+    fn touchpad(at: gpui::Point<Pixels>, phase: TouchPhase, dx: f32, dy: f32) -> ScrollEvent {
+        ScrollEvent {
             position: at,
             delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
             modifiers: Modifiers::default(),
             touch_phase: phase,
+            source: ScrollSource::Pointer,
         }
     }
 
@@ -1043,11 +1049,12 @@ mod tests {
         assert!(pane.read_with(cx, |pane, _| pane.timeline.offset().y) < scrolled, "the hours scrolled");
 
         // A mouse wheel's sideways step is no swipe.
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: at,
             delta: ScrollDelta::Lines(point(-3., 0.)),
             modifiers: Modifiers::default(),
             touch_phase: TouchPhase::Moved,
+            source: ScrollSource::Pointer,
         });
         assert_eq!(shown(&pane, cx).0, week);
     }

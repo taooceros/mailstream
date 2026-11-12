@@ -1,6 +1,21 @@
 //! Mailstream's GPUI front end, on macOS and Linux. The Rust engine runs in this process through
 //! the `mailstream` crate in `FFI/`. See README.md.
 
+/// A `secondary-` keystroke: ⌘ on the Mac, Ctrl elsewhere. gpui-fast's `KeyBinding::new` takes
+/// explicit modifiers only, so the bindings name the platform's at compile time.
+#[cfg(target_os = "macos")]
+macro_rules! secondary {
+    ($keys:literal) => {
+        concat!("cmd-", $keys)
+    };
+}
+#[cfg(not(target_os = "macos"))]
+macro_rules! secondary {
+    ($keys:literal) => {
+        concat!("ctrl-", $keys)
+    };
+}
+
 mod avatars;
 mod bench;
 mod calendar;
@@ -27,8 +42,8 @@ mod blitz_body;
 mod webview;
 
 use gpui::{
-    App, AppContext, Application, Bounds, Menu, MenuItem, OsAction, TitlebarOptions, WindowBounds, WindowDecorations,
-    WindowOptions, point, px, size,
+    App, AppContext, Bounds, Menu, MenuItem, OsAction, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
+    point, px, size,
 };
 
 use crate::input::{Copy, Cut, Paste, SelectAll};
@@ -38,7 +53,7 @@ use crate::state::{
 };
 
 fn main() {
-    Application::new().with_assets(icons::Assets).run(|cx: &mut App| {
+    gpui::application().with_assets(icons::Assets).run(|cx: &mut App| {
         #[cfg(target_os = "macos")]
         set_dock_icon();
         // The engine paints from the cache and syncs while the window opens.
@@ -55,7 +70,7 @@ fn main() {
         cx.set_menus(menus());
         #[cfg(target_os = "macos")]
         updater::start();
-        cx.on_window_closed(|cx| {
+        cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
             }
@@ -89,7 +104,7 @@ fn main() {
         );
         window
             .update(cx, |app, window, cx| {
-                window.focus(&app.focus);
+                window.focus(&app.focus, cx);
                 // A measurement runs beside the user's work without taking the foreground.
                 if app.bench.is_none() {
                     cx.activate(true);
@@ -124,55 +139,40 @@ fn set_dock_icon() {
 /// they show the shortcuts bound in `state::bind_keys`.
 fn menus() -> Vec<Menu> {
     vec![
-        Menu {
-            name: "Mailstream".into(),
-            items: vec![
-                MenuItem::action("Settings…", settings::ShowSettings),
-                MenuItem::separator(),
-                MenuItem::action("Quit Mailstream", Quit),
-            ],
-        },
-        Menu {
-            name: "File".into(),
-            items: vec![MenuItem::action("New Message", NewMessage), MenuItem::action("New Chat", NewChat)],
-        },
-        Menu {
-            name: "Edit".into(),
-            items: vec![
-                MenuItem::os_action("Cut", Cut, OsAction::Cut),
-                MenuItem::os_action("Copy", Copy, OsAction::Copy),
-                MenuItem::os_action("Paste", Paste, OsAction::Paste),
-                MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
-                MenuItem::separator(),
-                MenuItem::action("Find", FocusSearch),
-            ],
-        },
-        Menu {
-            name: "View".into(),
-            items: vec![
-                MenuItem::action("Toggle Sidebar", ToggleSidebar),
-                MenuItem::action("Back", Back),
-                MenuItem::separator(),
-                MenuItem::action("Get New Mail", Refresh),
-                MenuItem::action("Re-tag All Mail", Retag),
-            ],
-        },
-        Menu {
-            name: "Message".into(),
-            items: vec![
-                MenuItem::action("Reply", Reply),
-                MenuItem::action("Reply All", ReplyAll),
-                MenuItem::action("Forward", Forward),
-                MenuItem::separator(),
-                MenuItem::action("Mark as Read/Unread", ToggleRead),
-                MenuItem::action("Star/Unstar", Star),
-                MenuItem::action("Waiting on You", ToggleWaiting),
-                MenuItem::separator(),
-                MenuItem::action("Archive", Archive),
-                MenuItem::action("Move to Inbox", Restore),
-                MenuItem::action("Move to Trash", Trash),
-            ],
-        },
-        Menu { name: "Window".into(), items: vec![] },
+        Menu::new("Mailstream").items([
+            MenuItem::action("Settings…", settings::ShowSettings),
+            MenuItem::separator(),
+            MenuItem::action("Quit Mailstream", Quit),
+        ]),
+        Menu::new("File").items([MenuItem::action("New Message", NewMessage), MenuItem::action("New Chat", NewChat)]),
+        Menu::new("Edit").items([
+            MenuItem::os_action("Cut", Cut, OsAction::Cut),
+            MenuItem::os_action("Copy", Copy, OsAction::Copy),
+            MenuItem::os_action("Paste", Paste, OsAction::Paste),
+            MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
+            MenuItem::separator(),
+            MenuItem::action("Find", FocusSearch),
+        ]),
+        Menu::new("View").items([
+            MenuItem::action("Toggle Sidebar", ToggleSidebar),
+            MenuItem::action("Back", Back),
+            MenuItem::separator(),
+            MenuItem::action("Get New Mail", Refresh),
+            MenuItem::action("Re-tag All Mail", Retag),
+        ]),
+        Menu::new("Message").items([
+            MenuItem::action("Reply", Reply),
+            MenuItem::action("Reply All", ReplyAll),
+            MenuItem::action("Forward", Forward),
+            MenuItem::separator(),
+            MenuItem::action("Mark as Read/Unread", ToggleRead),
+            MenuItem::action("Star/Unstar", Star),
+            MenuItem::action("Waiting on You", ToggleWaiting),
+            MenuItem::separator(),
+            MenuItem::action("Archive", Archive),
+            MenuItem::action("Move to Inbox", Restore),
+            MenuItem::action("Move to Trash", Trash),
+        ]),
+        Menu::new("Window"),
     ]
 }

@@ -44,7 +44,7 @@ impl MailApp {
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.reader_scroll)
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, _| {
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, _, _| {
                 let vertical = match event.delta {
                     ScrollDelta::Pixels(delta) => delta.y != px(0.),
                     ScrollDelta::Lines(delta) => delta.y != 0.,

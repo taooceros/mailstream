@@ -5,7 +5,10 @@ edition = "2024"
 publish = false
 
 [dependencies]
-gpui = "0.2.2"
+# GPUI through gpui-kit (MS-226): its `gpui-fast` feature builds on GPUI Fast, longbridge's retained-mode
+# gpui that follows Zed's. The crate is named `gpui` here so GPUI's macros (`gpui::…` paths) and
+# `use gpui::…` resolve through the kit, which re-exports all of GPUI.
+gpui = { package = "gpui-kit", version = "0.9.1", features = ["gpui-fast"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 unicode-segmentation = "1"
@@ -19,7 +22,7 @@ base64 = "0.22"
 # Tests that draw views in a test window and feed them input as the platform would (the
 # calendar's two-finger paging, MS-212).
 [dev-dependencies]
-gpui = { version = "0.2.2", features = ["test-support"] }
+gpui = { package = "gpui-kit", version = "0.9.1", features = ["gpui-fast", "test-support"] }
 
 # The Mac reader's other renderer, WKWebViews (`webview.rs`), and the Dock icon.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -31,19 +34,18 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "objc2-core-foundation", "block2", "WKWebView", "WKWebViewConfiguration", "WKPreferences", "WKWebpagePreferences", "WKNavigationDelegate", "WKNavigationAction", "WKNavigation", "WKWebsiteDataStore", "WKUIDelegate", "WKWindowFeatures", "WKFrameInfo"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-# GPUI's font-kit loads fontconfig with dlopen, which turns the shared fontconfig-sys's functions
-# into a loaded table; Blitz's font lookup (fontique) must take them from there too.
+# Blitz's font lookup (fontique) and GPUI's font-kit share fontconfig-sys; with `dlopen` its
+# functions become a loaded table, which both then read.
 fontique = { version = "0.12", default-features = false, features = ["fontconfig-dlopen"] }
-# libc 0.2.190 dropped Linux's ENOATTR, which xattr 0.2 (GPUI's HTTP client's tar reader) names.
-libc = "0.2, <0.2.190"
 
 # Stylo (Blitz's CSS engine) 0.22's derives leave an error type to inference that GPUI's build
 # makes ambiguous; `vendor/stylo_derive` is 0.22.0 with that one type spelled out (`to_css.rs`).
-# `vendor/gpui` is gpui 0.2.2 with smooth wheel steps and kinetic touchpad scrolling on Wayland
-# (MS-208, `src/platform/linux/wayland/scroll_motion.rs` and its use in `client.rs`).
+# `vendor/gpui-fast-linux` is GPUI Fast's Linux platform 0.1.14 with smooth wheel steps and kinetic
+# touchpad scrolling on Wayland (MS-208, `src/linux/wayland/scroll_motion.rs` and its use in
+# `client.rs`, marked "Mailstream patch").
 [patch.crates-io]
 stylo_derive = { path = "vendor/stylo_derive" }
-gpui = { path = "vendor/gpui" }
+gpui-fast-linux = { path = "vendor/gpui-fast-linux" }
 
 [profile.dev.package."*"]
 opt-level = 2

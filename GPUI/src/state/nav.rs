@@ -3,7 +3,7 @@
 use super::*;
 use crate::design::{self, motion};
 use crate::swipe::{self, Step};
-use gpui::ScrollWheelEvent;
+use gpui::ScrollEvent;
 
 impl MailApp {
     /// Mail is in view: neither Chat nor the calendar is.
@@ -33,7 +33,7 @@ impl MailApp {
         }
         self.rebuild_items();
         self.load_list(self.key(), false, cx);
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 
@@ -78,12 +78,12 @@ impl MailApp {
                     self.rebuild_items();
                     self.load_list(self.key(), false, cx);
                 }
-                window.focus(&self.focus);
+                window.focus(&self.focus, cx);
             }
             InputEvent::Cancel => {
                 search.update(cx, |search, cx| search.clear(cx));
                 self.end_search(cx);
-                window.focus(&self.focus);
+                window.focus(&self.focus, cx);
             }
             InputEvent::Changed => {
                 if search.read(cx).text().is_empty() && self.query.is_some() {
@@ -106,7 +106,7 @@ impl MailApp {
 
     pub fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
         let focus = self.search.focus_handle(cx);
-        window.focus(&focus);
+        window.focus(&focus, cx);
         self.search.update(cx, |search, cx| search.select_everything(cx));
     }
 
@@ -243,7 +243,7 @@ impl MailApp {
     }
 
     /// A scroll event in the content area, in the capture phase: true when the back swipe took it.
-    pub fn feed_swipe(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) -> bool {
+    pub fn feed_swipe(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) -> bool {
         let can_start = !self.live_layers().is_empty() && self.context_menu.is_none();
         match self.swipe.feed(event, can_start) {
             Step::Pass => false,
@@ -258,6 +258,11 @@ impl MailApp {
             Step::Release { offset, velocity } => {
                 let (back, to) = swipe::settle(offset, velocity, self.content_width);
                 self.slide = Slide::Settle { from: offset, to, start: Instant::now(), back };
+                cx.notify();
+                true
+            }
+            Step::Cancel(offset) => {
+                self.slide = Slide::Settle { from: offset, to: 0.0, start: Instant::now(), back: false };
                 cx.notify();
                 true
             }
@@ -296,7 +301,7 @@ impl MailApp {
         cx: &mut Context<Self>,
     ) {
         let focus = cx.focus_handle();
-        window.focus(&focus);
+        window.focus(&focus, cx);
         self.context_menu = Some(ContextMenu { id, position, focus });
         cx.notify();
     }
@@ -307,7 +312,7 @@ impl MailApp {
 
     pub fn dismiss_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.context_menu.take().is_some() {
-            window.focus(&self.focus);
+            window.focus(&self.focus, cx);
             cx.notify();
         }
     }
@@ -366,7 +371,7 @@ impl MailApp {
 
     fn open_row(&mut self, id: &SharedString, animate: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_closing();
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         if let Some(category) = id.strip_prefix("bundle:") {
             let Some(category) = self.items.iter().find_map(|item| match item {
                 Item::Bundle(bundle) if bundle.category.key() == category => Some(bundle.category),
@@ -423,7 +428,7 @@ impl MailApp {
             self.search.update(cx, |search, cx| search.clear(cx));
             self.end_search(cx);
         }
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 

@@ -7,7 +7,7 @@ use std::ops::Range;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextAlign, TextRun,
     UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -33,10 +33,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", Right, context),
         KeyBinding::new("shift-left", SelectLeft, context),
         KeyBinding::new("shift-right", SelectRight, context),
-        KeyBinding::new("secondary-a", SelectAll, context),
-        KeyBinding::new("secondary-v", Paste, context),
-        KeyBinding::new("secondary-c", Copy, context),
-        KeyBinding::new("secondary-x", Cut, context),
+        KeyBinding::new(secondary!("a"), SelectAll, context),
+        KeyBinding::new(secondary!("v"), Paste, context),
+        KeyBinding::new(secondary!("c"), Copy, context),
+        KeyBinding::new(secondary!("x"), Cut, context),
         KeyBinding::new("home", Home, context),
         KeyBinding::new("cmd-left", Home, context),
         KeyBinding::new("end", End, context),
@@ -557,7 +557,7 @@ impl Element for TextElement {
             window.paint_quad(selection)
         }
         let Some(line) = prepaint.line.take() else { return };
-        line.paint(bounds.origin, window.line_height(), window, cx).ok();
+        line.paint(bounds.origin, window.line_height(), TextAlign::Left, None, window, cx).ok();
 
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()

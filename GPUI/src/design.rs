@@ -90,7 +90,7 @@ fn argb(value: u32) -> Hsla {
 }
 
 fn shadow(color: u32, y: f32, blur: f32) -> BoxShadow {
-    BoxShadow { color: argb(color), offset: point(px(0.), px(y)), blur_radius: px(blur), spread_radius: px(0.) }
+    BoxShadow { color: argb(color), offset: point(px(0.), px(y)), blur_radius: px(blur), spread_radius: px(0.), inset: false }
 }
 
 static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {

@@ -81,7 +81,7 @@ impl MailApp {
         }
         // The same reply already open keeps what was written.
         if let Some(draft) = self.reply.as_ref().filter(|d| d.conversation == conversation.id && d.all == all) {
-            draft.view.read(cx).focus(window);
+            draft.view.update(cx, |reply, cx| reply.focus(window, cx));
             return;
         }
         // Who it goes to is the app's to decide; the box names them for the user.
@@ -97,7 +97,7 @@ impl MailApp {
         let replied = id.clone();
         let subscription = cx.subscribe_in(&view, window, move |this, _, event: &ReplyEvent, window, cx| {
             this.reply = None;
-            window.focus(&this.focus);
+            window.focus(&this.focus, cx);
             match event {
                 ReplyEvent::Sent => {
                     this.show_toast("Sent", cx);
@@ -211,7 +211,7 @@ impl MailApp {
                     self.reload_replied(id, cx);
                 }
             }
-            ColumnEvent::Unfocus => window.focus(&self.focus),
+            ColumnEvent::Unfocus => window.focus(&self.focus, cx),
             ColumnEvent::NewDraft => self.new_message(&NewMessage, window, cx),
         }
     }
@@ -324,7 +324,7 @@ impl MailApp {
         self.removing.insert(id.clone());
         self.rebuild_items();
         self.refresh_layers(cx);
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         cx.notify();
 
         let ids = vec![id.to_string()];
