@@ -44,8 +44,8 @@ Linux differs from the Mac in:
   itself). Both platforms build gpui from `vendor/gpui`: 0.2.2 with one Wayland-only patch
   (MS-208, `src/platform/linux/wayland/scroll_motion.rs`). Wheel notches ease in over about
   150 ms, and touchpad scrolls arrive as `Started`, `Moved`, `Ended` and then a fling that
-  decelerates at the Mac's rate; a click, the pointer leaving or fingers resting on the touchpad
-  stops it. X11 is unchanged.
+  decelerates as Firefox's flings do (0.998 per ms); a click, the pointer leaving or fingers
+  resting on the touchpad stops it. X11 is unchanged.
 - Engine events reach the window through `Mailstream::subscribe_any_thread`: `subscribe` posts
   to GLib's main loop there, which GPUI doesn't run.
 

@@ -4,7 +4,7 @@
 //! one step of lines, and a touchpad stream simply ends with `axis_stop` when the fingers lift.
 //! Upstream gpui applies both as they come, so a wheel jumps three lines at once and a flick stops
 //! dead. This spreads each wheel step over a short ease-out and, after a flick, keeps the content
-//! moving with the release velocity under the same deceleration as the Mac's (0.998 per ms), so
+//! moving with the release velocity, slowing by 0.998 per ms (Firefox's `apz.fling_friction`), so
 //! scroll views see what AppKit gives them on macOS: `Started`, `Moved` with the fingers, `Ended`
 //! on lift, then momentum as `Moved`.
 //!
@@ -23,7 +23,7 @@ pub(super) const TICK: Duration = Duration::from_micros(8_333);
 const WHEEL_TAU: f32 = 0.04;
 /// Below this many lines left (about a pixel), a wheel step finishes.
 const WHEEL_DONE: f32 = 0.05;
-/// Fling deceleration time constant: the Mac's normal rate, 0.998 per millisecond.
+/// Fling deceleration time constant: 0.998 per millisecond, Firefox's default fling friction.
 const FLING_TAU: f32 = 0.4995;
 /// Release speeds below this (pixels per second) don't fling.
 const FLING_START: f32 = 150.0;
