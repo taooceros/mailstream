@@ -24,16 +24,6 @@ use crate::{EngineError, Events};
 mod edit;
 mod invitation;
 
-/// The commands this store answers.
-pub const COMMANDS: &[&str] = &[
-    "calendar.events",
-    "calendar.refresh",
-    "calendar.invitation",
-    "calendar.respond",
-    "calendar.create",
-    "calendar.update",
-    "calendar.delete",
-];
 /// How long a fetched copy serves before the timer fetches it again.
 const FRESH: f64 = 5.0 * 60.0;
 /// How often the timer looks for copies that got old.
@@ -304,7 +294,7 @@ impl CalendarStore {
                 self.fetch_due(|name| only.as_deref().is_none_or(|only| only == name));
                 Ok(json!({ "started": true }))
             }
-            _ => unreachable!("{command} is in the command table"),
+            _ => unreachable!("{command} is a calendar command"),
         }
     }
 

@@ -262,9 +262,11 @@ it is handed over; it is not moved mid-way.
   executable only calls `MailstreamApp.main()`. GPUI and Flutter run the Rust engine (`Engine/`)
   through the UniFFI crate in `FFI/`, which `scripts/ffi.py` builds; the Swift engine stays only
   for Mailstream.app until MS-120. New commands go in the Rust engine's command table
-  (`Engine/src/commands.rs`) and the Swift `CommandSpec`/`ControlService` while both exist, then
-  get a typed method in `FFI/src/lib.rs`; GPUI uses that crate directly, Flutter through the
-  Dart binding `ffi.py` generates (`Flutter/README.md`).
+  (`Engine/src/commands.rs`, naming the `Handler` that answers them, whose `run` gets the arm)
+  and the Swift `CommandSpec`/`ControlService` while both exist, then get a typed method in
+  `FFI/src/lib.rs`: one entry in its `commands!` list, which the build checks against the table.
+  GPUI uses that crate directly, Flutter through the Dart binding `ffi.py` generates
+  (`Flutter/README.md`).
 - The engine keeps the state every front end shares (the open chat space and its history, as for
   the native reader); front ends re-read it on the engine's change events.
 - Test only what you changed: build, then exercise the parts your change touches (the view, flow

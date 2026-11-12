@@ -71,7 +71,7 @@ use notify::{EventKind, RecursiveMode, Watcher};
 use serde_json::{Map, Value, json};
 
 use crate::accounts::Accounts;
-use crate::commands::Arguments;
+use crate::commands::{Arguments, Handler};
 use crate::keychain::Keychain;
 use crate::oauth::OAuth;
 pub use crate::oauth::{BuiltInClients, OAuthClient, OAuthConfig, Provider};
@@ -444,43 +444,42 @@ impl Core {
             _ => Map::new(),
         };
         let args = Arguments::new(spec, &values)?;
-        if command.starts_with("config.") {
-            // The settings in effect follow at once rather than when the watcher next reads the file.
-            let result = self.settings.run(command, &values)?;
-            if self.settings.reload() {
-                self.events.emit("settings");
+        match spec.handler {
+            Handler::Settings => {
+                // The settings in effect follow at once rather than when the watcher next reads the file.
+                let result = self.settings.run(command, &values)?;
+                if self.settings.reload() {
+                    self.events.emit("settings");
+                }
+                Ok(result)
             }
-            return Ok(result);
-        }
-        match command {
-            "mailboxes" | "mail.list" | "mail.search" | "mail.show" | "mail.previews" | "mail.read" | "mail.star"
-            | "mail.archive" | "mail.trash" | "mail.restore" | "mail.autoread" | "mail.autoread.undo" | "mail.send"
-            | "mail.reply" => {
-                return self.mail.run(command, &args).await;
-            }
-            "refresh" => Ok(self.polling.refresh()),
-            command if chat::COMMANDS.contains(&command) => {
-                return self.chat.run(command, &args).await;
-            }
-            command if calendar::COMMANDS.contains(&command) => {
-                return self.calendar.run(command, &args).await;
-            }
-            "mail.tag" | "mail.retag" => {
+            Handler::Core => self.run(command, &args).await,
+            Handler::Mail => self.mail.run(command, &args).await,
+            Handler::Tagging => {
                 let mail = &self.mail;
                 mail.tagging().run(command, &args, |id| mail.lookup(id))
             }
+            Handler::Avatars => self.avatars.command(&args).await,
+            Handler::Chat => self.chat.run(command, &args).await,
+            Handler::Calendar => self.calendar.run(command, &args).await,
+        }
+    }
+
+    /// The commands the table gives [`Handler::Core`].
+    async fn run(&self, command: &str, args: &Arguments) -> Result<Value, EngineError> {
+        match command {
             "status" => Ok(self.status()),
-            "mail.avatars" => self.avatars.command(&args).await,
+            "refresh" => Ok(self.polling.refresh()),
             "contacts.search" => {
                 let avatars = self.avatars.clone();
                 let people = async move {
                     avatars.people().await.into_iter().map(|person| (person.name, person.emails)).collect()
                 };
-                Ok(self.mail.search_contacts(&args, people).await)
+                Ok(self.mail.search_contacts(args, people).await)
             }
             "accounts.list" => Ok(json!(self.accounts.list().iter().map(|record| record.json()).collect::<Vec<_>>())),
             "accounts.rename" => {
-                let record = self.record(&args)?;
+                let record = self.record(args)?;
                 let renamed = self
                     .accounts
                     .rename(&record.id, &args.string("label").unwrap_or_default())
@@ -494,15 +493,15 @@ impl Core {
             "accounts.client" => {
                 let client = self
                     .tokens
-                    .suggested_client(provider(&args)?)
+                    .suggested_client(provider(args)?)
                     .map_err(|error| EngineError::failed(error.to_string()))?;
                 Ok(client.map_or(Value::Null, |client| {
                     json!({ "id": client.id, "hasSecret": client.secret.is_some_and(|secret| !secret.is_empty()) })
                 }))
             }
-            "accounts.add" => self.add_account(&args).await,
+            "accounts.add" => self.add_account(args).await,
             "accounts.remove" => {
-                let record = self.record(&args)?;
+                let record = self.record(args)?;
                 if !args.bool("yes") {
                     return Err(EngineError::new(
                         "confirm",
@@ -525,7 +524,7 @@ impl Core {
                 self.tokens.forget(&record.id);
                 Ok(json!({ "removed": record.id }))
             }
-            _ => unreachable!("{command} is in the command table"),
+            _ => unreachable!("{command} is a core command"),
         }
     }
 

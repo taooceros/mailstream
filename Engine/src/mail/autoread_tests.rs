@@ -111,7 +111,7 @@ fn marks_stale_notifications_and_newsletters_read_and_undoes() {
         ("a3", "notification", false),
     ] {
         let answer =
-            call(&engine, "mail.tag", json!({ "ids": [id(message)], "category": category, "waiting": waiting.to_string() })).unwrap();
+            call(&engine, "mail.tag", json!({ "ids": [id(message)], "category": category, "waiting": waiting })).unwrap();
         assert_eq!(answer["failed"], json!([]), "{message}");
     }
     // Off by default: nothing is marked.

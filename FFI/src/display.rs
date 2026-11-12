@@ -10,7 +10,7 @@ use mailstream_engine::display::{self, DateLabels, Forwarded, RunEntry};
 use mailstream_engine::model::Address;
 use mailstream_engine::text::{self, Subject};
 
-use crate::{ChatMessage, ChatSpace, ChatSpaces, ChatThread, ChatUser, Conversation, Message, Person, Thread};
+use crate::{ChatMessage, ChatPeople, ChatSpace, ChatSpaces, ChatThread, ChatUser, Conversation, Message, Person, Thread};
 
 /// A person's avatar where there is no picture: their initial, in the color of `slot` (the
 /// front end's avatar palette holds [`display::AVATAR_SLOTS`] colors).
@@ -328,6 +328,14 @@ impl Thread {
 impl ChatUser {
     pub fn dress(&mut self) {
         self.avatar = display::Avatar::new(&self.name, &self.avatar_key).into();
+    }
+}
+
+impl ChatPeople {
+    pub fn dress(&mut self) {
+        for person in &mut self.people {
+            person.dress();
+        }
     }
 }
 

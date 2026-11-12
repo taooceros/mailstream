@@ -894,68 +894,6 @@ impl Mailstream {
         Arc::new(Self {})
     }
 
-    pub async fn status(&self) -> Result<Status, MailError> {
-        call("status", json!({})).await
-    }
-
-    pub async fn accounts(&self) -> Result<Vec<Account>, MailError> {
-        call("accounts.list", json!({})).await
-    }
-
-    /// Changes the label an account shows; empty shows the address. `None` when the account went
-    /// away meanwhile.
-    pub async fn rename_account(&self, account: String, label: String) -> Result<Option<Account>, MailError> {
-        call("accounts.rename", json!({ "account": account, "label": label })).await
-    }
-
-    /// The OAuth client a sign-in with `provider` uses unless given another: the one used last,
-    /// else the build's; `None` when there is neither. Its secret stays in the engine.
-    pub async fn suggested_client(&self, provider: String) -> Result<Option<OAuthClientInfo>, MailError> {
-        call("accounts.client", json!({ "provider": provider })).await
-    }
-
-    /// Signs in a new account through the browser and waits (up to 5 minutes) for the person to
-    /// finish. Without `client_id` it uses [`Mailstream::suggested_client`]; Google needs a
-    /// secret, which for that client's id the engine supplies when `client_secret` is `None`.
-    pub async fn add_account(
-        &self,
-        provider: String,
-        client_id: Option<String>,
-        client_secret: Option<String>,
-    ) -> Result<Account, MailError> {
-        call(
-            "accounts.add",
-            json!({ "provider": provider, "client-id": client_id, "client-secret": client_secret }),
-        )
-        .await
-    }
-
-    /// Signs the account out and deletes its saved sign-in; mail on the server stays. `confirm`
-    /// is the person's go-ahead.
-    pub async fn remove_account(&self, account: String, confirm: bool) -> Result<(), MailError> {
-        call::<Value>("accounts.remove", json!({ "account": account, "yes": confirm })).await.map(drop)
-    }
-
-    /// Every setting in settings.json, with defaults for those it does not set.
-    pub async fn settings(&self) -> Result<Settings, MailError> {
-        call("config.list", json!({})).await
-    }
-
-    /// Writes one setting; the engine applies it at once and sends [`Event::Settings`].
-    pub async fn set_setting(&self, key: String, value: SettingValue) -> Result<SettingEntry, MailError> {
-        call("config.set", json!({ "key": key, "value": value.typed() })).await
-    }
-
-    /// Puts a setting back to its default.
-    pub async fn reset_setting(&self, key: String) -> Result<SettingEntry, MailError> {
-        call("config.reset", json!({ "key": key })).await
-    }
-
-    /// Each account's mailboxes, by account id; only `account`'s when given.
-    pub async fn mailboxes(&self, account: Option<String>) -> Result<HashMap<String, Vec<Mailbox>>, MailError> {
-        call("mailboxes", json!({ "account": account })).await
-    }
-
     /// Conversations newest first, fetched from the providers.
     pub async fn list(&self, query: ListQuery) -> Result<Listing, MailError> {
         let mut args = json!({
@@ -969,99 +907,6 @@ impl Mailstream {
         let mut listing: Listing = call("mail.list", args).await?;
         listing.dress();
         Ok(listing)
-    }
-
-    /// The providers' own search over every mailbox but trash and junk.
-    pub async fn search(&self, query: String, account: Option<String>, limit: u32) -> Result<Listing, MailError> {
-        let mut listing: Listing = call("mail.search", json!({ "query": query, "account": account, "limit": limit })).await?;
-        listing.dress();
-        Ok(listing)
-    }
-
-    /// A conversation from a listing, with text bodies of at most `max_chars` characters and,
-    /// with `html`, the HTML bodies.
-    pub async fn show(&self, id: String, max_chars: u32, html: bool) -> Result<Thread, MailError> {
-        let mut thread: Thread = call("mail.show", json!({ "id": id, "max-chars": max_chars, "html": html })).await?;
-        thread.dress();
-        Ok(thread)
-    }
-
-    /// The preview line of each conversation's latest message by id, loading those not loaded yet.
-    pub async fn previews(&self, ids: Vec<String>) -> Result<HashMap<String, Option<String>>, MailError> {
-        call("mail.previews", json!({ "ids": ids })).await
-    }
-
-    /// Each sender's picture as a `file:` URL of a PNG in the cache, by lowercased address; nil
-    /// when there is none. `automated` names the addresses a site icon may stand in for.
-    pub async fn avatars(
-        &self,
-        addresses: Vec<String>,
-        automated: Vec<String>,
-    ) -> Result<HashMap<String, Option<String>>, MailError> {
-        call("mail.avatars", json!({ "addresses": addresses, "automated": automated })).await
-    }
-
-    pub async fn set_read(&self, ids: Vec<String>, read: bool) -> Result<BatchResult, MailError> {
-        call("mail.read", json!({ "ids": ids, "unread": !read })).await
-    }
-
-    pub async fn set_starred(&self, ids: Vec<String>, starred: bool) -> Result<BatchResult, MailError> {
-        call("mail.star", json!({ "ids": ids, "off": !starred })).await
-    }
-
-    pub async fn archive(&self, ids: Vec<String>) -> Result<BatchResult, MailError> {
-        call("mail.archive", json!({ "ids": ids })).await
-    }
-
-    /// Conversations already in the trash are deleted for good, which needs `confirm`.
-    pub async fn trash(&self, ids: Vec<String>, confirm: bool) -> Result<BatchResult, MailError> {
-        call("mail.trash", json!({ "ids": ids, "yes": confirm })).await
-    }
-
-    pub async fn restore(&self, ids: Vec<String>) -> Result<BatchResult, MailError> {
-        call("mail.restore", json!({ "ids": ids })).await
-    }
-
-    /// Corrects the AI tag; each of `category`, `waiting` and `labels` (at most two) changes
-    /// only when given.
-    pub async fn tag(
-        &self,
-        ids: Vec<String>,
-        category: Option<String>,
-        waiting: Option<bool>,
-        labels: Option<Vec<String>>,
-    ) -> Result<TagResult, MailError> {
-        let waiting = waiting.map(|waiting| if waiting { "true" } else { "false" });
-        call("mail.tag", json!({ "ids": ids, "category": category, "waiting": waiting, "labels": labels })).await
-    }
-
-    /// Forgets every AI tag and tags the current list again; `disabled` while tagging is off.
-    pub async fn retag(&self) -> Result<(), MailError> {
-        call::<Value>("mail.retag", json!({})).await.map(drop)
-    }
-
-    /// What auto-read marked read and nobody undid, newest first.
-    pub async fn auto_read_log(&self) -> Result<AutoReadLog, MailError> {
-        call("mail.autoread", json!({})).await
-    }
-
-    /// Marks auto-read conversations unread again: `ids`, else those of its latest pass. Auto-read
-    /// then leaves them alone until a new message arrives.
-    pub async fn undo_auto_read(&self, ids: Option<Vec<String>>) -> Result<BatchResult, MailError> {
-        call("mail.autoread.undo", json!({ "ids": ids })).await
-    }
-
-    /// Sends `draft` as a new plain-text message with its attachments. Sends at once: `confirm` is the person's
-    /// go-ahead; without it the engine only answers what it would send (`confirm`).
-    pub async fn send(&self, draft: Draft, confirm: bool) -> Result<Sent, MailError> {
-        call(
-            "mail.send",
-            json!({
-                "from": draft.from, "to": draft.to, "cc": draft.cc, "bcc": draft.bcc,
-                "subject": draft.subject, "body": draft.body, "attachments": draft.attachments, "yes": confirm,
-            }),
-        )
-        .await
     }
 
     /// Replies with the original thread headers and quote. Missing overrides keep the reply plan.
@@ -1080,123 +925,12 @@ impl Mailstream {
         call("mail.reply", args).await
     }
 
-    /// Fetches new mail and counts now.
-    pub async fn refresh(&self) -> Result<(), MailError> {
-        call::<Value>("refresh", json!({})).await.map(drop)
-    }
-
-    /// Google Chat accounts and their spaces, from what the engine has loaded.
-    pub async fn chat_spaces(&self, account: Option<String>) -> Result<ChatSpaces, MailError> {
-        let mut spaces: ChatSpaces = call("chat.spaces", json!({ "account": account })).await?;
-        spaces.dress();
-        Ok(spaces)
-    }
-
-    /// Loads another page of older spaces; [`Event::Chat`] follows.
-    pub async fn chat_more(&self, account: Option<String>) -> Result<(), MailError> {
-        call::<Value>("chat.more", json!({ "account": account })).await.map(drop)
-    }
-
-    /// Fetches every chat account's spaces now.
-    pub async fn chat_refresh(&self) -> Result<(), MailError> {
-        call::<Value>("chat.refresh", json!({})).await.map(drop)
-    }
-
-    /// Opens a space: its cached messages now, the newest from Google after
-    /// ([`Event::ChatMessages`]), kept current and read while it stays open.
-    pub async fn chat_open(&self, account: String, space: String) -> Result<ChatThread, MailError> {
-        chat_thread("chat.open", json!({ "account": account, "space": space })).await
-    }
-
-    pub async fn chat_close(&self) -> Result<(), MailError> {
-        call::<Value>("chat.close", json!({})).await.map(drop)
-    }
-
-    /// What is loaded of a space's history.
-    pub async fn chat_messages(&self, account: String, space: String) -> Result<ChatThread, MailError> {
-        chat_thread("chat.messages", json!({ "account": account, "space": space })).await
-    }
-
-    /// Loads the page before the oldest loaded message.
-    pub async fn chat_earlier(&self, account: String, space: String) -> Result<ChatThread, MailError> {
-        chat_thread("chat.earlier", json!({ "account": account, "space": space })).await
-    }
-
-    /// Sends `text` (shown pending at once) and returns once Google took it. `confirm` is the
-    /// person's go-ahead.
-    pub async fn chat_send(
-        &self,
-        account: String,
-        space: String,
-        text: String,
-        thread: Option<String>,
-        confirm: bool,
-    ) -> Result<(), MailError> {
-        call::<Value>(
-            "chat.send",
-            json!({ "account": account, "space": space, "text": text, "thread": thread, "yes": confirm }),
-        )
-        .await
-        .map(drop)
-    }
-
-    /// People `account` chats with, most recently active first.
-    pub async fn chat_people(&self, account: String) -> Result<ChatPeople, MailError> {
-        let mut people: ChatPeople = call("chat.people", json!({ "account": account })).await?;
-        for person in &mut people.people {
-            person.dress();
-        }
-        Ok(people)
-    }
-
-    /// The direct message with one person or the group chat with several, found or started.
-    pub async fn chat_start(&self, account: String, people: Vec<String>) -> Result<ChatSpaceRef, MailError> {
-        call("chat.start", json!({ "account": account, "people": people })).await
-    }
-
     /// An uploaded attachment (its `resource`) as a file in the cache, downloaded the first time;
     /// kept under `name`, so its extension says what it is. Answers the file's path.
     pub async fn chat_attachment(&self, account: String, resource: String, name: String) -> Result<String, MailError> {
         let file: FilePath =
             call("chat.attachment", json!({ "account": account, "resource": resource, "name": name })).await?;
         Ok(file.path)
-    }
-
-    /// Every account and the events of `days` days from `from` (`2026-11-08`; today when
-    /// `None`), from what the engine last fetched (every five minutes); [`Event::Calendar`]
-    /// follows each fetch.
-    pub async fn calendar_events(&self, from: Option<String>, days: u32) -> Result<CalendarAgenda, MailError> {
-        call("calendar.events", json!({ "from": from, "days": days })).await
-    }
-
-    /// Fetches every calendar account's events now.
-    pub async fn calendar_refresh(&self) -> Result<(), MailError> {
-        call::<Value>("calendar.refresh", json!({})).await.map(drop)
-    }
-
-    /// The invitation `message` of conversation `id` carries and the event it names in the
-    /// account's calendar, with the account's answer; [`Event::Calendar`] follows changes.
-    pub async fn calendar_invitation(&self, id: String, message: String) -> Result<InvitationStatus, MailError> {
-        call("calendar.invitation", json!({ "id": id, "message": message })).await
-    }
-
-    /// Answers an invitation (`accepted`, `tentative` or `declined`) through the calendar, which
-    /// tells the organizer: `event` and `calendar` are [`InvitationStatus::target`] and
-    /// [`InvitationStatus::calendar`]. `confirm` is the person's go-ahead.
-    pub async fn calendar_respond(
-        &self,
-        account: String,
-        calendar: Option<String>,
-        event: String,
-        response: String,
-        confirm: bool,
-    ) -> Result<(), MailError> {
-        call::<Value>(
-            "calendar.respond",
-            json!({ "account": account, "calendar": calendar, "event": event, "response": response, "yes": confirm }),
-        )
-        .await
-        .map(drop)
     }
 
     /// Adds an event to `calendar` of `account` (its own calendar when `None`) and invites the
@@ -1229,14 +963,6 @@ impl Mailstream {
         call("calendar.update", args).await
     }
 
-    /// Deletes an [`CalendarItem::editable`] event, telling its guests it is cancelled.
-    /// `confirm` is the person's go-ahead.
-    pub async fn calendar_delete(&self, account: String, calendar: String, id: String, confirm: bool) -> Result<(), MailError> {
-        call::<Value>("calendar.delete", json!({ "account": account, "calendar": calendar, "id": id, "yes": confirm }))
-            .await
-            .map(drop)
-    }
-
     /// Calls `listener` on the main thread for every change from now on, while the process runs.
     pub fn subscribe(&self, listener: Arc<dyn EventListener>) {
         #[cfg(feature = "swift-engine")]
@@ -1251,6 +977,263 @@ impl Mailstream {
         });
     }
 }
+
+/// Typed methods that each send one engine command, written `fn method(parameters) -> Answer =
+/// "command" { "argument": value, … };`: without `-> Answer` when the method drops the answer,
+/// with `dressed` before the `;` when the answer's display fields are filled in (`display.rs`).
+/// The command and its arguments are checked against the engine's command table
+/// (`mailstream_engine::commands::takes`) when this crate compiles. Methods whose arguments need
+/// more than one expression each are written out in the `impl` above.
+macro_rules! commands {
+    ($(
+        $(#[$doc:meta])*
+        fn $method:ident($($parameter:ident: $type:ty),* $(,)?) $(-> $answer:ty)? = $command:literal {
+            $($argument:literal: $value:expr),* $(,)?
+        } $($dressed:ident)?;
+    )*) => {
+        $(command! {
+            $(#[$doc])* fn $method($($parameter: $type),*) $(-> $answer)? = $command { $($argument: $value),* } $($dressed)?
+        })*
+    };
+}
+
+/// One method of [`commands!`], in an exported `impl` block of its own.
+macro_rules! command {
+    (
+        $(#[$doc:meta])* fn $method:ident($($parameter:ident: $type:ty),*) -> $answer:ty = $command:literal {
+            $($argument:literal: $value:expr),*
+        } dressed
+    ) => {
+        #[uniffi::export]
+        impl Mailstream {
+            $(#[$doc])*
+            pub async fn $method(&self, $($parameter: $type),*) -> Result<$answer, MailError> {
+                checked!($command, $($argument),*);
+                let mut answer: $answer = call($command, json!({ $($argument: $value),* })).await?;
+                answer.dress();
+                Ok(answer)
+            }
+        }
+    };
+    (
+        $(#[$doc:meta])* fn $method:ident($($parameter:ident: $type:ty),*) -> $answer:ty = $command:literal {
+            $($argument:literal: $value:expr),*
+        }
+    ) => {
+        #[uniffi::export]
+        impl Mailstream {
+            $(#[$doc])*
+            pub async fn $method(&self, $($parameter: $type),*) -> Result<$answer, MailError> {
+                checked!($command, $($argument),*);
+                call($command, json!({ $($argument: $value),* })).await
+            }
+        }
+    };
+    (
+        $(#[$doc:meta])* fn $method:ident($($parameter:ident: $type:ty),*) = $command:literal {
+            $($argument:literal: $value:expr),*
+        }
+    ) => {
+        #[uniffi::export]
+        impl Mailstream {
+            $(#[$doc])*
+            pub async fn $method(&self, $($parameter: $type),*) -> Result<(), MailError> {
+                checked!($command, $($argument),*);
+                call::<Value>($command, json!({ $($argument: $value),* })).await.map(drop)
+            }
+        }
+    };
+}
+
+/// Fails the build when the engine's command table has no `command` taking these arguments.
+macro_rules! checked {
+    ($command:literal, $($argument:literal),*) => {
+        const _: () = assert!(
+            mailstream_engine::commands::takes($command, &[$($argument),*]),
+            concat!("The engine's command table has no ", $command, " taking these arguments."),
+        );
+    };
+}
+
+commands! {
+    fn status() -> Status = "status" {};
+
+    fn accounts() -> Vec<Account> = "accounts.list" {};
+
+    /// Changes the label an account shows; empty shows the address. `None` when the account went
+    /// away meanwhile.
+    fn rename_account(account: String, label: String) -> Option<Account> = "accounts.rename" {
+        "account": account, "label": label
+    };
+
+    /// The OAuth client a sign-in with `provider` uses unless given another: the one used last,
+    /// else the build's; `None` when there is neither. Its secret stays in the engine.
+    fn suggested_client(provider: String) -> Option<OAuthClientInfo> = "accounts.client" { "provider": provider };
+
+    /// Signs in a new account through the browser and waits (up to 5 minutes) for the person to
+    /// finish. Without `client_id` it uses [`Mailstream::suggested_client`]; Google needs a
+    /// secret, which for that client's id the engine supplies when `client_secret` is `None`.
+    fn add_account(provider: String, client_id: Option<String>, client_secret: Option<String>) -> Account = "accounts.add" {
+        "provider": provider, "client-id": client_id, "client-secret": client_secret
+    };
+
+    /// Signs the account out and deletes its saved sign-in; mail on the server stays. `confirm`
+    /// is the person's go-ahead.
+    fn remove_account(account: String, confirm: bool) = "accounts.remove" { "account": account, "yes": confirm };
+
+    /// Every setting in settings.json, with defaults for those it does not set.
+    fn settings() -> Settings = "config.list" {};
+
+    /// Writes one setting; the engine applies it at once and sends [`Event::Settings`].
+    fn set_setting(key: String, value: SettingValue) -> SettingEntry = "config.set" {
+        "key": key, "value": value.typed()
+    };
+
+    /// Puts a setting back to its default.
+    fn reset_setting(key: String) -> SettingEntry = "config.reset" { "key": key };
+
+    /// Each account's mailboxes, by account id; only `account`'s when given.
+    fn mailboxes(account: Option<String>) -> HashMap<String, Vec<Mailbox>> = "mailboxes" { "account": account };
+
+    /// The providers' own search over every mailbox but trash and junk.
+    fn search(query: String, account: Option<String>, limit: u32) -> Listing = "mail.search" {
+        "query": query, "account": account, "limit": limit
+    } dressed;
+
+    /// A conversation from a listing, with text bodies of at most `max_chars` characters and,
+    /// with `html`, the HTML bodies.
+    fn show(id: String, max_chars: u32, html: bool) -> Thread = "mail.show" {
+        "id": id, "max-chars": max_chars, "html": html
+    } dressed;
+
+    /// The preview line of each conversation's latest message by id, loading those not loaded yet.
+    fn previews(ids: Vec<String>) -> HashMap<String, Option<String>> = "mail.previews" { "ids": ids };
+
+    /// Each sender's picture as a `file:` URL of a PNG in the cache, by lowercased address; nil
+    /// when there is none. `automated` names the addresses a site icon may stand in for.
+    fn avatars(addresses: Vec<String>, automated: Vec<String>) -> HashMap<String, Option<String>> = "mail.avatars" {
+        "addresses": addresses, "automated": automated
+    };
+
+    fn set_read(ids: Vec<String>, read: bool) -> BatchResult = "mail.read" { "ids": ids, "unread": !read };
+
+    fn set_starred(ids: Vec<String>, starred: bool) -> BatchResult = "mail.star" { "ids": ids, "off": !starred };
+
+    fn archive(ids: Vec<String>) -> BatchResult = "mail.archive" { "ids": ids };
+
+    /// Conversations already in the trash are deleted for good, which needs `confirm`.
+    fn trash(ids: Vec<String>, confirm: bool) -> BatchResult = "mail.trash" { "ids": ids, "yes": confirm };
+
+    fn restore(ids: Vec<String>) -> BatchResult = "mail.restore" { "ids": ids };
+
+    /// Corrects the AI tag; each of `category`, `waiting` and `labels` (at most two) changes
+    /// only when given.
+    fn tag(
+        ids: Vec<String>,
+        category: Option<String>,
+        waiting: Option<bool>,
+        labels: Option<Vec<String>>,
+    ) -> TagResult = "mail.tag" {
+        "ids": ids, "category": category, "waiting": waiting, "labels": labels
+    };
+
+    /// Forgets every AI tag and tags the current list again; `disabled` while tagging is off.
+    fn retag() = "mail.retag" {};
+
+    /// What auto-read marked read and nobody undid, newest first.
+    fn auto_read_log() -> AutoReadLog = "mail.autoread" {};
+
+    /// Marks auto-read conversations unread again: `ids`, else those of its latest pass. Auto-read
+    /// then leaves them alone until a new message arrives.
+    fn undo_auto_read(ids: Option<Vec<String>>) -> BatchResult = "mail.autoread.undo" { "ids": ids };
+
+    /// Sends `draft` as a new plain-text message with its attachments. Sends at once: `confirm` is the person's
+    /// go-ahead; without it the engine only answers what it would send (`confirm`).
+    fn send(draft: Draft, confirm: bool) -> Sent = "mail.send" {
+        "from": draft.from, "to": draft.to, "cc": draft.cc, "bcc": draft.bcc,
+        "subject": draft.subject, "body": draft.body, "attachments": draft.attachments, "yes": confirm
+    };
+
+    /// Fetches new mail and counts now.
+    fn refresh() = "refresh" {};
+
+    /// Google Chat accounts and their spaces, from what the engine has loaded.
+    fn chat_spaces(account: Option<String>) -> ChatSpaces = "chat.spaces" { "account": account } dressed;
+
+    /// Loads another page of older spaces; [`Event::Chat`] follows.
+    fn chat_more(account: Option<String>) = "chat.more" { "account": account };
+
+    /// Fetches every chat account's spaces now.
+    fn chat_refresh() = "chat.refresh" {};
+
+    /// Opens a space: its cached messages now, the newest from Google after
+    /// ([`Event::ChatMessages`]), kept current and read while it stays open.
+    fn chat_open(account: String, space: String) -> ChatThread = "chat.open" {
+        "account": account, "space": space
+    } dressed;
+
+    fn chat_close() = "chat.close" {};
+
+    /// What is loaded of a space's history.
+    fn chat_messages(account: String, space: String) -> ChatThread = "chat.messages" {
+        "account": account, "space": space
+    } dressed;
+
+    /// Loads the page before the oldest loaded message.
+    fn chat_earlier(account: String, space: String) -> ChatThread = "chat.earlier" {
+        "account": account, "space": space
+    } dressed;
+
+    /// Sends `text` (shown pending at once) and returns once Google took it. `confirm` is the
+    /// person's go-ahead.
+    fn chat_send(account: String, space: String, text: String, thread: Option<String>, confirm: bool) = "chat.send" {
+        "account": account, "space": space, "text": text, "thread": thread, "yes": confirm
+    };
+
+    /// People `account` chats with, most recently active first.
+    fn chat_people(account: String) -> ChatPeople = "chat.people" { "account": account } dressed;
+
+    /// The direct message with one person or the group chat with several, found or started.
+    fn chat_start(account: String, people: Vec<String>) -> ChatSpaceRef = "chat.start" {
+        "account": account, "people": people
+    };
+
+    /// Every account and the events of `days` days from `from` (`2026-11-08`; today when
+    /// `None`), from what the engine last fetched (every five minutes); [`Event::Calendar`]
+    /// follows each fetch.
+    fn calendar_events(from: Option<String>, days: u32) -> CalendarAgenda = "calendar.events" {
+        "from": from, "days": days
+    };
+
+    /// Fetches every calendar account's events now.
+    fn calendar_refresh() = "calendar.refresh" {};
+
+    /// The invitation `message` of conversation `id` carries and the event it names in the
+    /// account's calendar, with the account's answer; [`Event::Calendar`] follows changes.
+    fn calendar_invitation(id: String, message: String) -> InvitationStatus = "calendar.invitation" {
+        "id": id, "message": message
+    };
+
+    /// Answers an invitation (`accepted`, `tentative` or `declined`) through the calendar, which
+    /// tells the organizer: `event` and `calendar` are [`InvitationStatus::target`] and
+    /// [`InvitationStatus::calendar`]. `confirm` is the person's go-ahead.
+    fn calendar_respond(
+        account: String,
+        calendar: Option<String>,
+        event: String,
+        response: String,
+        confirm: bool,
+    ) = "calendar.respond" {
+        "account": account, "calendar": calendar, "event": event, "response": response, "yes": confirm
+    };
+
+    /// Deletes an [`CalendarItem::editable`] event, telling its guests it is cancelled.
+    /// `confirm` is the person's go-ahead.
+    fn calendar_delete(account: String, calendar: String, id: String, confirm: bool) = "calendar.delete" {
+        "account": account, "calendar": calendar, "id": id, "yes": confirm
+    };
+}
+
 
 /// For Rust hosts that link this crate directly (GPUI) and run an event loop of their own.
 impl Mailstream {
@@ -1313,13 +1296,6 @@ pub async fn call<T: DeserializeOwned>(command: &str, args: Value) -> Result<T, 
     let result = ENGINE.call(command, args).await?;
     serde_json::from_value(result)
         .map_err(|error| MailError::new("decode", format!("Unexpected result of {command}: {error}")))
-}
-
-/// A chat command answering a space's history, its display filled in.
-async fn chat_thread(command: &str, args: Value) -> Result<ChatThread, MailError> {
-    let mut thread: ChatThread = call(command, args).await?;
-    thread.dress();
-    Ok(thread)
 }
 
 /// `calendar.create` and `calendar.update`'s arguments for `draft`; `null` ones are left out.

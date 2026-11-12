@@ -1,8 +1,10 @@
 //! The command table and argument checks: the one table both the `mailstream` command line
 //! (parsing, help, `mailstream commands`) and the engine (the control socket and FFI requests)
-//! read, so they cannot drift. It matches the Swift engine's `CommandSpec` and `Arguments`
-//! (`Sources/MailstreamKit/Control/Commands.swift`, `ControlService.swift`) command for command,
-//! which Mailstream.app keeps until it moves to this engine (MS-120).
+//! read, so they cannot drift. Each entry names the part of the engine that answers it
+//! ([`Handler`]), which the engine routes the request to; the FFI's typed methods are checked
+//! against it when they compile ([`takes`]). It matches the Swift engine's `CommandSpec` and
+//! `Arguments` (`Sources/MailstreamKit/Control/Commands.swift`, `ControlService.swift`) command
+//! for command, which Mailstream.app keeps until it moves to this engine (MS-120).
 use serde_json::{Map, Value, json};
 
 use crate::EngineError;
@@ -62,11 +64,31 @@ impl Argument {
     }
 }
 
+/// The part of the engine that answers a command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Handler {
+    /// settings.json itself (`settings::Settings::run`), so the command line needs no running app.
+    Settings,
+    /// The engine's own state: status, refresh, accounts, contact search (`Core::run` in `lib.rs`).
+    Core,
+    /// The mail store (`mail::Mail::run`).
+    Mail,
+    /// AI tagging (`tagging::Tagging::run`).
+    Tagging,
+    /// Sender pictures (`avatars::Avatars::command`).
+    Avatars,
+    /// Google Chat (`chat::Chat::run`).
+    Chat,
+    /// Calendars (`calendar::CalendarStore::run`).
+    Calendar,
+}
+
 /// One command.
 #[derive(Debug)]
 pub struct Spec {
     /// The request's `command`: `mail.list`.
     pub id: &'static str,
+    pub handler: Handler,
     pub summary: &'static str,
     pub arguments: &'static [Argument],
     /// Has effects Mailstream cannot undo (sending, signing out): the request must carry `yes: true`.
@@ -74,8 +96,8 @@ pub struct Spec {
 }
 
 impl Spec {
-    const fn new(id: &'static str, summary: &'static str, arguments: &'static [Argument]) -> Self {
-        Self { id, summary, arguments, confirm: false }
+    const fn new(id: &'static str, handler: Handler, summary: &'static str, arguments: &'static [Argument]) -> Self {
+        Self { id, handler, summary, arguments, confirm: false }
     }
 
     const fn confirmed(self) -> Self {
@@ -89,7 +111,7 @@ impl Spec {
 
     /// Runs on settings.json itself, so the command line needs no running app for it.
     pub fn local(&self) -> bool {
-        self.id.starts_with("config.")
+        self.handler == Handler::Settings
     }
 
     /// Usage text for one command.
@@ -210,15 +232,22 @@ const EVENT_NOTES: Argument = Argument::new("notes", Kind::String, "Description,
 
 /// Every command, in the order help lists them.
 pub const COMMANDS: &[Spec] = &[
-    Spec::new("status", "The app's state: version, accounts, sync, push, AI tagging, settings problems.", &[]),
-    Spec::new("config.list", "Every setting with its value, default, type and description.", &[]),
+    Spec::new(
+        "status",
+        Handler::Core,
+        "The app's state: version, accounts, sync, push, AI tagging, settings problems.",
+        &[],
+    ),
+    Spec::new("config.list", Handler::Settings, "Every setting with its value, default, type and description.", &[]),
     Spec::new(
         "config.get",
+        Handler::Settings,
         "One setting.",
         &[Argument::new("key", Kind::String, "Setting key, e.g. sync.pollSeconds.").positional()],
     ),
     Spec::new(
         "config.set",
+        Handler::Settings,
         "Changes a setting; the running app applies it at once.",
         &[
             SETTING_KEY,
@@ -230,9 +259,10 @@ pub const COMMANDS: &[Spec] = &[
             .positional(),
         ],
     ),
-    Spec::new("config.reset", "Puts a setting back to its default.", &[SETTING_KEY]),
+    Spec::new("config.reset", Handler::Settings, "Puts a setting back to its default.", &[SETTING_KEY]),
     Spec::new(
         "config.add",
+        Handler::Settings,
         "Adds values to a list setting.",
         &[
             Argument::new("key", Kind::String, "List setting key, e.g. remoteContent.trustedSenders.").positional(),
@@ -241,27 +271,31 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new(
         "config.remove",
+        Handler::Settings,
         "Removes values from a list setting.",
         &[
             Argument::new("key", Kind::String, "List setting key.").positional(),
             Argument::new("values", Kind::List, "Values to remove.").positional().variadic(),
         ],
     ),
-    Spec::new("config.schema", "JSON Schema of settings.json.", &[]),
-    Spec::new("config.path", "Where settings.json lives; editing it directly works too.", &[]),
-    Spec::new("accounts.list", "Signed-in accounts: address, label, provider, services.", &[]),
+    Spec::new("config.schema", Handler::Settings, "JSON Schema of settings.json.", &[]),
+    Spec::new("config.path", Handler::Settings, "Where settings.json lives; editing it directly works too.", &[]),
+    Spec::new("accounts.list", Handler::Core, "Signed-in accounts: address, label, provider, services.", &[]),
     Spec::new(
         "accounts.rename",
+        Handler::Core,
         "Changes the label an account shows in the sidebar; empty shows the address.",
         &[ACCOUNT_ADDRESS, Argument::new("label", Kind::String, "New label.").positional()],
     ),
     Spec::new(
         "accounts.client",
+        Handler::Core,
         "The OAuth client a sign-in uses unless told otherwise: the one used last for the provider, else the build's. Its id, and whether a secret is saved with it (the secret itself stays in the Keychain).",
         &[PROVIDER],
     ),
     Spec::new(
         "accounts.add",
+        Handler::Core,
         "Signs in a new account through the browser and waits (up to 5 minutes) for the person to finish.",
         &[
             PROVIDER,
@@ -279,13 +313,15 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new(
         "accounts.remove",
+        Handler::Core,
         "Signs an account out and deletes its saved sign-in. Mail on the server is untouched.",
         &[ACCOUNT_ADDRESS, YES],
     )
     .confirmed(),
-    Spec::new("mailboxes", "Each account's mailboxes with role, id and counts.", &[ACCOUNT]),
+    Spec::new("mailboxes", Handler::Mail, "Each account's mailboxes with role, id and counts.", &[ACCOUNT]),
     Spec::new(
         "mail.list",
+        Handler::Mail,
         "Conversations in mailboxes, newest first, with AI category and waiting-on-you flag. The answer's `next`, when there is more, passed as --cursor gives the following page.",
         &[
             MAILBOX,
@@ -309,6 +345,7 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new(
         "mail.search",
+        Handler::Mail,
         "Searches every mailbox but trash and junk with the providers' own search (subject, people, body; Gmail operators such as from: work), newest first.",
         &[
             Argument::new("query", Kind::String, "Free text, or the provider's search syntax.").positional(),
@@ -318,6 +355,7 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new(
         "mail.show",
+        Handler::Mail,
         "A conversation's messages with headers, text bodies and attachments.",
         &[
             CONVERSATION_ID,
@@ -331,11 +369,13 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new(
         "mail.previews",
+        Handler::Mail,
         "The preview line of each conversation's latest message, loading the messages that have none yet.",
         &[CONVERSATION_IDS],
     ),
     Spec::new(
         "mail.avatars",
+        Handler::Avatars,
         "Each sender's picture as a PNG file in the cache (contact photo, BIMI logo, Gravatar or, for automated senders, the site icon), looking up those not cached yet; null when there is none.",
         &[
             Argument::new("addresses", Kind::List, "Sender addresses.").positional().variadic(),
@@ -348,31 +388,37 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new(
         "mail.read",
+        Handler::Mail,
         "Marks conversations read (or with --unread, unread).",
         &[CONVERSATION_IDS, Argument::new("unread", Kind::Bool, "Mark unread instead.")],
     ),
     Spec::new(
         "mail.star",
+        Handler::Mail,
         "Stars conversations (or with --off, unstars them).",
         &[CONVERSATION_IDS, Argument::new("off", Kind::Bool, "Remove the star instead.")],
     ),
     Spec::new(
         "mail.archive",
+        Handler::Mail,
         "Moves conversations out of the inbox (or the mailbox they were listed from) into Archive / All Mail.",
         &[CONVERSATION_IDS],
     ),
     Spec::new(
         "mail.trash",
+        Handler::Mail,
         "Moves conversations to the trash. Messages already in the trash are deleted for good, which needs --yes.",
         &[CONVERSATION_IDS, YES],
     ),
     Spec::new(
         "mail.restore",
+        Handler::Mail,
         "Moves conversations' messages in the trash or junk back to the inbox.",
         &[CONVERSATION_IDS],
     ),
     Spec::new(
         "mail.tag",
+        Handler::Tagging,
         "Corrects the AI tag: category, waiting-on-you, topic labels.",
         &[
             CONVERSATION_IDS,
@@ -385,19 +431,22 @@ pub const COMMANDS: &[Spec] = &[
             Argument::new("labels", Kind::List, "Topic labels (at most two)."),
         ],
     ),
-    Spec::new("mail.retag", "Forgets every AI tag and tags the current list again.", &[]),
+    Spec::new("mail.retag", Handler::Tagging, "Forgets every AI tag and tags the current list again.", &[]),
     Spec::new(
         "mail.autoread",
+        Handler::Mail,
         "What auto-read (autoRead.enabled) marked read and has not been undone, newest first: each conversation's id, sender, subject, AI category, why it was stale (age or superseded by a newer newsletter) and the pass (batch) that read it.",
         &[],
     ),
     Spec::new(
         "mail.autoread.undo",
+        Handler::Mail,
         "Marks conversations auto-read marked read unread again; without --ids, those of its latest pass. Auto-read leaves them alone until a new message arrives.",
         &[Argument::new("ids", Kind::List, "Conversation ids from `mail autoread`.")],
     ),
     Spec::new(
         "mail.send",
+        Handler::Mail,
         "Sends a new plain-text message, with files attached if given.",
         &[
             Argument::new("from", Kind::String, "Sending account (its address).").required(),
@@ -413,6 +462,7 @@ pub const COMMANDS: &[Spec] = &[
     .confirmed(),
     Spec::new(
         "mail.reply",
+        Handler::Mail,
         "Replies to a conversation's latest message, quoting it like the app does.",
         &[
             CONVERSATION_ID,
@@ -427,9 +477,10 @@ pub const COMMANDS: &[Spec] = &[
         ],
     )
     .confirmed(),
-    Spec::new("refresh", "Fetches new mail and counts for the list on screen now.", &[]),
+    Spec::new("refresh", Handler::Core, "Fetches new mail and counts for the list on screen now.", &[]),
     Spec::new(
         "contacts.search",
+        Handler::Core,
         "People whose name or address starts with the query, best first, as compose completes them: the accounts' Google and Outlook directories and recent correspondents.",
         &[
             Argument::new("query", Kind::String, "The start of a name, a word of it, or an address.").positional(),
@@ -438,29 +489,39 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new(
         "chat.spaces",
+        Handler::Chat,
         "Google Chat: the chat accounts and their spaces (direct messages, group chats, spaces) as the list shows them, most recently active first, from what the app has loaded.",
         &[ACCOUNT],
     ),
-    Spec::new("chat.more", "Loads another page of older spaces for one chat account, or all of them.", &[ACCOUNT]),
-    Spec::new("chat.refresh", "Fetches every chat account's spaces now.", &[]),
+    Spec::new(
+        "chat.more",
+        Handler::Chat,
+        "Loads another page of older spaces for one chat account, or all of them.",
+        &[ACCOUNT],
+    ),
+    Spec::new("chat.refresh", Handler::Chat, "Fetches every chat account's spaces now.", &[]),
     Spec::new(
         "chat.open",
+        Handler::Chat,
         "Opens a space as the reader does: its cached messages at once, the newest from Google after, kept current and read while it stays open. Answers what is loaded now.",
         &[CHAT_ACCOUNT, CHAT_SPACE],
     ),
-    Spec::new("chat.close", "Closes the open space: it is no longer kept current.", &[]),
+    Spec::new("chat.close", Handler::Chat, "Closes the open space: it is no longer kept current.", &[]),
     Spec::new(
         "chat.messages",
+        Handler::Chat,
         "A space's loaded messages, oldest first, with those being sent from here.",
         &[CHAT_ACCOUNT, CHAT_SPACE],
     ),
     Spec::new(
         "chat.earlier",
+        Handler::Chat,
         "Loads the page of messages before the oldest loaded one.",
         &[CHAT_ACCOUNT, CHAT_SPACE],
     ),
     Spec::new(
         "chat.send",
+        Handler::Chat,
         "Sends a plain-text message to a space and waits for Google to take it.",
         &[
             CHAT_ACCOUNT,
@@ -473,11 +534,13 @@ pub const COMMANDS: &[Spec] = &[
     .confirmed(),
     Spec::new(
         "chat.people",
+        Handler::Chat,
         "People a chat account talks with, most recently active first, and whether it may start new conversations.",
         &[ACCOUNT_ADDRESS],
     ),
     Spec::new(
         "chat.start",
+        Handler::Chat,
         "Finds or starts the direct message with one person, or the group chat with several, and answers its space.",
         &[
             ACCOUNT_ADDRESS,
@@ -486,6 +549,7 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new(
         "chat.attachment",
+        Handler::Chat,
         "Downloads a file uploaded to a chat message (its `resource` from `chat messages`) into the cache once and answers its path.",
         &[
             CHAT_ACCOUNT,
@@ -495,6 +559,7 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new(
         "calendar.events",
+        Handler::Calendar,
         "Calendars: every account with its calendars (or that it must sign in again to grant calendar access), and the events from its calendars on the days asked for, earliest first, as last fetched (every five minutes), with the days fetched (`synced`: a week back to 60 days on); other days hold no events.",
         &[
             ACCOUNT,
@@ -502,9 +567,15 @@ pub const COMMANDS: &[Spec] = &[
             Argument::new("days", Kind::Int, "How many days from it (1-366).").default(60),
         ],
     ),
-    Spec::new("calendar.refresh", "Fetches every calendar account's events now, or one account's.", &[ACCOUNT]),
+    Spec::new(
+        "calendar.refresh",
+        Handler::Calendar,
+        "Fetches every calendar account's events now, or one account's.",
+        &[ACCOUNT],
+    ),
     Spec::new(
         "calendar.invitation",
+        Handler::Calendar,
         "The meeting invitation a message carries (an .ics part, an Outlook meeting request), whether its account may read and change its calendar, and the event it names there with the account's answer; `target` and `calendar` are what `calendar respond` takes.",
         &[
             CONVERSATION_ID,
@@ -513,6 +584,7 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new(
         "calendar.respond",
+        Handler::Calendar,
         "Answers a meeting invitation through the account's calendar (Google Calendar, Outlook), which tells the organizer; no reply is mailed.",
         &[
             ACCOUNT_ADDRESS,
@@ -524,6 +596,7 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new(
         "calendar.create",
+        Handler::Calendar,
         "Adds an event to one of an account's calendars and invites its guests; answers the event as `calendar events` lists it.",
         &[
             ACCOUNT_ADDRESS,
@@ -540,6 +613,7 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new(
         "calendar.update",
+        Handler::Calendar,
         "Changes an event the account organizes: only the fields given change, and its guests are told. One occurrence of a recurring event changes alone.",
         &[
             ACCOUNT_ADDRESS,
@@ -557,6 +631,7 @@ pub const COMMANDS: &[Spec] = &[
     ),
     Spec::new(
         "calendar.delete",
+        Handler::Calendar,
         "Deletes an event the account organizes (one occurrence of a recurring one); its guests are told it is cancelled.",
         &[ACCOUNT_ADDRESS, EVENT_CALENDAR, EVENT_ID, YES],
     ),
@@ -584,6 +659,47 @@ Google Chat spaces are addressed by their account and the `space` that `chat spa
 /// The command with request id `id`.
 pub fn named(id: &str) -> Option<&'static Spec> {
     COMMANDS.iter().find(|spec| spec.id == id)
+}
+
+/// Whether the table has command `id` and it takes every one of `arguments`. A `const fn`, so
+/// the FFI's generated methods check the command and arguments they send when they compile.
+pub const fn takes(id: &str, arguments: &[&str]) -> bool {
+    let mut index = 0;
+    while index < COMMANDS.len() {
+        let spec = &COMMANDS[index];
+        if same(spec.id, id) {
+            let mut given = 0;
+            while given < arguments.len() {
+                let mut known = 0;
+                while known < spec.arguments.len() && !same(spec.arguments[known].name, arguments[given]) {
+                    known += 1;
+                }
+                if known == spec.arguments.len() {
+                    return false;
+                }
+                given += 1;
+            }
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+/// `a == b`, which `const fn`s cannot write for `str` yet.
+const fn same(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < a.len() {
+        if a[index] != b[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 /// The spec of `command`, or the error the request answers.
@@ -647,6 +763,11 @@ impl Arguments {
         self.values.get(name).and_then(Value::as_bool).unwrap_or_else(|| self.string(name).as_deref() == Some("true"))
     }
 
+    /// `true`/`false`, as a boolean or as text, when the request gives it.
+    pub fn flag(&self, name: &str) -> Option<bool> {
+        self.values.contains_key(name).then(|| self.bool(name))
+    }
+
     /// A number, or text holding one.
     pub fn int(&self, name: &str) -> Option<i64> {
         let value = self.values.get(name)?;
@@ -691,5 +812,14 @@ mod tests {
         assert_eq!((defaults.int("limit"), defaults.list("mailbox")), (Some(25), Some(vec!["inbox".into(), "sent".into()])));
         assert_eq!(args("mail.show", json!({ "id": "x", "max-chars": "40" })).unwrap().int("max-chars"), Some(40));
         assert_eq!(spec("mail.nope").err().unwrap().code, "unknown_command");
+    }
+
+    #[test]
+    fn takes_knows_the_commands_and_their_arguments() {
+        const { assert!(takes("mail.tag", &["ids", "waiting", "labels"])) };
+        assert!(takes("status", &[]));
+        assert!(!takes("mail.tag", &["wait"]));
+        assert!(!takes("mail.nope", &[]));
+        assert!(!takes("mail", &[]));
     }
 }

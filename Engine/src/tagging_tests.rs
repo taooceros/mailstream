@@ -119,6 +119,9 @@ fn tags_the_inbox_with_omp_and_shares_corrections() {
         tag(json!({ "ids": [id(5)], "waiting": "true" })).unwrap(),
         json!({ "done": [{ "id": id(5), "category": "notification", "waiting": true, "labels": [] }], "failed": [] })
     );
+    // The FFI sends a boolean; the command line sends `true|false`.
+    assert_eq!(tag(json!({ "ids": [id(5)], "waiting": false })).unwrap()["done"][0]["waiting"], json!(false));
+    assert_eq!(tag(json!({ "ids": [id(5)], "waiting": true })).unwrap()["done"][0]["waiting"], json!(true));
     assert_eq!(tag(json!({ "ids": id(5), "category": "newsletter" })).unwrap()["done"][0]["waiting"], json!(false));
     let answer = tag(json!({ "ids": [id(5), "nope", id(2)], "waiting": true })).unwrap();
     assert_eq!(answer["done"], json!([]));
