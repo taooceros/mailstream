@@ -341,6 +341,12 @@ impl Conversation {
     pub fn can_mark_waiting(&self) -> bool {
         self.category.is_some_and(|c| c != Category::Newsletter)
     }
+
+    /// A conversation between people reads as a chat log (Flutter's `Reader.chat`, MS-73): more
+    /// than one message, and tagged People or not tagged at all.
+    pub fn chat_log(&self) -> bool {
+        self.message_count > 1 && self.category.is_none_or(|c| c == Category::People)
+    }
 }
 
 pub struct Listing {
@@ -388,6 +394,12 @@ pub struct Message {
     pub preview: SharedString,
     /// `to` and `cc`, joined.
     pub recipients: SharedString,
+    /// The text body as the reader shows it: what was written, and the quoted history and
+    /// signature folded behind a toggle (`format::fold`).
+    pub shown: SharedString,
+    pub quoted: Option<SharedString>,
+    /// The time of day, for the chat log.
+    pub time: SharedString,
 }
 
 impl From<mailstream::Message> for Message {
@@ -415,6 +427,9 @@ impl From<mailstream::Message> for Message {
             when: SharedString::default(),
             preview: SharedString::default(),
             recipients: SharedString::default(),
+            shown: SharedString::default(),
+            quoted: None,
+            time: SharedString::default(),
         }
     }
 }
@@ -422,7 +437,11 @@ impl From<mailstream::Message> for Message {
 impl Message {
     pub fn prepare(&mut self, now: DateTime<Local>) {
         self.when = format::message_date(self.date, now).into();
+        self.time = format::message_time(self.date).into();
         if let Some(text) = &self.text {
+            let (shown, quoted) = format::fold(text);
+            self.shown = shown.into();
+            self.quoted = quoted.map(Into::into);
             let text = format::body(text);
             self.preview = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("").to_owned().into();
             self.text = Some(text.into());

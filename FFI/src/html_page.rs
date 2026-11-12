@@ -125,6 +125,17 @@ pub struct HtmlTile {
     pub pixels: Vec<u8>,
 }
 
+/// Which part of a mail a page shows. Quoted history (the Gmail, Outlook, Thunderbird and Apple
+/// Mail markup Flutter's `splitMailHtml` cuts out) folds behind a toggle in GPUI's reader: its
+/// `Main` page leaves the quotes out, and a `Quoted` page of the same HTML shows only them when the
+/// toggle opens. Mail that is nothing but quotes stays whole in its `Main` page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum HtmlPart {
+    Whole,
+    Main,
+    Quoted,
+}
+
 /// One mail body. Calls queue on the pages' thread and answer in order; [`HtmlPage::close`] (or
 /// dropping the page) frees it.
 #[derive(uniffi::Object)]
@@ -137,7 +148,21 @@ impl HtmlPage {
     /// Starts parsing `html` on the pages' thread; returns at once.
     #[uniffi::constructor]
     pub fn new(html: String) -> Arc<Self> {
-        Self::open(html, RESOURCES.clone())
+        Self::open(html, HtmlPart::Whole, RESOURCES.clone())
+    }
+
+    /// A page of one [`HtmlPart`] of `html`, parsed on the pages' thread; returns at once.
+    #[uniffi::constructor]
+    pub fn part(html: String, part: HtmlPart) -> Arc<Self> {
+        Self::open(html, part, RESOURCES.clone())
+    }
+
+    /// Whether the mail has quoted history this page's part left out (`Main`) or shows
+    /// (`Quoted`); false for mail that is nothing but quotes. `None` once closed.
+    pub async fn quoted(&self) -> Option<bool> {
+        let (reply, answer) = oneshot::channel();
+        send(Job::Quoted { id: self.id, reply });
+        answer.await.ok().flatten()
     }
 
     /// Lays the page out `width` points wide for `scale` pixels per point (unless it already
@@ -215,17 +240,17 @@ impl Drop for HtmlPage {
 }
 
 impl HtmlPage {
-    /// A page reading its remote resources from `resources`.
-    fn open(html: String, resources: Arc<Resources>) -> Arc<Self> {
+    /// A page of `part` of `html` reading its remote resources from `resources`.
+    fn open(html: String, part: HtmlPart, resources: Arc<Resources>) -> Arc<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        send(Job::Open { id, html, resources });
+        send(Job::Open { id, html, part, resources });
         Arc::new(Self { id })
     }
 }
 
 enum Job {
-    Open { id: u64, html: String, resources: Arc<Resources> },
+    Open { id: u64, html: String, part: HtmlPart, resources: Arc<Resources> },
     Close { id: u64 },
     Layout { id: u64, width: f64, scale: f64, reply: oneshot::Sender<Option<HtmlSize>> },
     Tile { id: u64, width: f64, scale: f64, top: f64, height: f64, reply: oneshot::Sender<Option<HtmlTile>> },
@@ -234,6 +259,7 @@ enum Job {
     ClearSelection { id: u64, reply: oneshot::Sender<bool> },
     SelectedText { id: u64, reply: oneshot::Sender<Option<String>> },
     Text { id: u64, reply: oneshot::Sender<Option<String>> },
+    Quoted { id: u64, reply: oneshot::Sender<Option<bool>> },
     Changed { id: u64, version: i64, reply: oneshot::Sender<i64> },
     /// A resource arrived for the page: it lays out again once the queue is empty.
     Arrived { id: u64 },
@@ -252,6 +278,7 @@ impl Job {
             | Job::ClearSelection { id, .. }
             | Job::SelectedText { id, .. }
             | Job::Text { id, .. }
+            | Job::Quoted { id, .. }
             | Job::Changed { id, .. }
             | Job::Arrived { id } => id,
         }
@@ -315,6 +342,8 @@ struct Page {
     height: f64,
     version: i64,
     waiting: Vec<oneshot::Sender<i64>>,
+    /// Whether the mail has quoted history (see [`HtmlPage::quoted`]).
+    quoted: bool,
 }
 
 impl Pages {
@@ -364,8 +393,8 @@ impl Pages {
 
     fn handle(&mut self, job: Job) {
         match job {
-            Job::Open { id, html, resources } => {
-                let page = Page::open(id, &html, &self.fonts, resources);
+            Job::Open { id, html, part, resources } => {
+                let page = Page::open(id, &html, part, &self.fonts, resources);
                 self.pages.insert(id, page);
             }
             Job::Close { id } => {
@@ -404,6 +433,9 @@ impl Pages {
             }
             Job::Text { id, reply } => {
                 let _ = reply.send(self.pages.get(&id).map(|page| page.text()));
+            }
+            Job::Quoted { id, reply } => {
+                let _ = reply.send(self.pages.get(&id).map(|page| page.quoted));
             }
             Job::Changed { id, version, reply } => {
                 if let Some(page) = self.pages.get_mut(&id) {
@@ -476,13 +508,14 @@ fn document(html: &str, net: Arc<dyn NetProvider>, shell: Arc<PageShell>, fonts:
 }
 
 impl Page {
-    fn open(id: u64, html: &str, fonts: &FontContext, resources: Arc<Resources>) -> Self {
+    fn open(id: u64, html: &str, part: HtmlPart, fonts: &FontContext, resources: Arc<Resources>) -> Self {
         let shell = Arc::new(PageShell { id, quiet: AtomicBool::new(false) });
         let gate = Arc::new(Gate::new(resources));
         let mut doc = document(html, gate.clone(), shell.clone(), fonts);
+        let quoted = cut_quotes(doc.as_mut(), part);
         let allowed = sanitize(doc.as_mut());
         gate.open(allowed);
-        Self { doc, shell, gate, width: 0.0, scale: 0.0, zoom: 1.0, height: 0.0, version: 0, waiting: Vec::new() }
+        Self { doc, shell, gate, width: 0.0, scale: 0.0, zoom: 1.0, height: 0.0, version: 0, waiting: Vec::new(), quoted }
     }
 
     fn lay_out(&mut self, width: f64, scale: f64) {
@@ -603,6 +636,61 @@ impl Page {
         self.shell.quiet.store(false, Ordering::Relaxed);
         selected
     }
+}
+
+/// Whether `node` starts quoted history, as Flutter's `splitMailHtml` finds it: Gmail's and
+/// Thunderbird's quote containers, Outlook's reply header and Apple Mail's cited blockquote.
+fn is_quote(node: &blitz_dom::Node) -> bool {
+    let Some(element) = node.element_data() else { return false };
+    let classes = element.attr(local_name!("class")).unwrap_or_default();
+    classes.split_ascii_whitespace().any(|class| matches!(class, "gmail_quote" | "gmail_quote_container" | "moz-cite-prefix"))
+        || matches!(element.attr(local_name!("id")), Some("divRplyFwdMsg" | "appendonsend"))
+        || (element.name.local == local_name!("blockquote")
+            && element.attr(local_name!("type")).is_some_and(|kind| kind.eq_ignore_ascii_case("cite")))
+}
+
+/// Leaves `part` of the body: `Main` without its quoted history, `Quoted` only that (moved to the
+/// body, in order, under the mail's own head), `Whole` all of it. Mail whose body is nothing but
+/// quotes (no text or image outside them) has none to fold and stays whole. Whether it has some.
+fn cut_quotes(doc: &mut BaseDocument, part: HtmlPart) -> bool {
+    let Some(body) = doc.query_selector("body").ok().flatten() else { return false };
+    let mut quotes = Vec::new();
+    // Outside the quotes: whether there is text, or an image.
+    let (mut text, mut image) = (false, false);
+    let mut stack = vec![body];
+    while let Some(id) = stack.pop() {
+        let Some(node) = doc.get_node(id) else { continue };
+        if id != body && is_quote(node) {
+            quotes.push(id);
+            continue;
+        }
+        text |= node.text_data().is_some_and(|data| !data.content.trim().is_empty());
+        image |= node.data.is_element_with_tag_name(&local_name!("img"));
+        // In document order once popped.
+        stack.extend(node.children.iter().rev().copied());
+    }
+    if quotes.is_empty() || !(text || image) {
+        return false;
+    }
+    let mut mutator = doc.mutate();
+    match part {
+        HtmlPart::Whole => {}
+        HtmlPart::Main => {
+            for id in quotes {
+                mutator.remove_and_drop_node(id);
+            }
+        }
+        HtmlPart::Quoted => {
+            let rest = mutator.child_ids(body);
+            mutator.append_children(body, &quotes);
+            for id in rest {
+                if !quotes.contains(&id) {
+                    mutator.remove_and_drop_node(id);
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Wraps each run of a table's, row group's or row's children that are no table part (cells a
@@ -1288,7 +1376,11 @@ mod tests {
     use super::*;
 
     fn page(html: &str) -> Page {
-        Page::open(0, html, &Pages::new().fonts, offline())
+        part(html, HtmlPart::Whole)
+    }
+
+    fn part(html: &str, part: HtmlPart) -> Page {
+        Page::open(0, html, part, &Pages::new().fonts, offline())
     }
 
     /// A web of the files a test gives, recording what is asked; a file can be held back until
@@ -1391,6 +1483,33 @@ mod tests {
     }
 
     #[test]
+    fn quoted_history_folds_into_a_page_of_its_own() {
+        // Blocks apart by a line each, as mail writes them: the page's text joins text nodes as
+        // they come.
+        let mail = concat!(
+            "<div dir=\"ltr\"><p>New reply</p></div>\n",
+            "<div class=\"gmail_quote gmail_quote_container\"><div class=\"gmail_attr\">On Mon, Dan wrote:</div>\n",
+            "<blockquote class=\"gmail_quote\">Earlier text</blockquote></div>\n",
+            "<div><blockquote type=\"cite\">Apple quote</blockquote>\n<p>Sign-off</p></div>",
+        );
+        let main = part(mail, HtmlPart::Main);
+        assert!(main.quoted);
+        assert_eq!(main.text(), "New reply Sign-off");
+        let quoted = part(mail, HtmlPart::Quoted);
+        assert!(quoted.quoted);
+        // The quotes in order, nothing else (moved side by side, their text runs together).
+        let text = quoted.text();
+        assert!(text.starts_with("On Mon, Dan wrote: Earlier text") && text.ends_with("Apple quote"), "{text}");
+        assert!(!text.contains("New reply") && !text.contains("Sign-off"), "{text}");
+        assert_eq!(part(mail, HtmlPart::Whole).text(), "New reply On Mon, Dan wrote: Earlier text Apple quote Sign-off");
+        // Mail that is nothing but quotes (a bare forward) stays whole; plain mail has none.
+        let forward = part("<div id=\"divRplyFwdMsg\">From: Dan</div>\n<blockquote type=\"cite\">All of it</blockquote>", HtmlPart::Main);
+        assert!(!forward.quoted);
+        assert_eq!(forward.text(), "From: Dan All of it");
+        assert!(!part("<p>Plain</p>\n<blockquote>Not a cite</blockquote>", HtmlPart::Main).quoted);
+    }
+
+    #[test]
     fn mail_that_looks_like_xhtml_is_read_as_html() {
         // A Linear notification, as the reader's preparation writes it back: its XHTML doctype
         // first, then HTML that isn't well-formed XML (a `<link>` without its `/>`). Blitz's own
@@ -1456,6 +1575,7 @@ mod tests {
                 r#"<iframe src="https://example.com/frame"></iframe><iframe srcdoc="<p>inner</p>"></iframe>"#,
                 r#"<object data="https://example.com/o"></object><p>Kept</p></body></html>"#,
             ),
+            HtmlPart::Whole,
             &Pages::new().fonts,
             resources(web.clone(), LATE),
         );
@@ -1692,7 +1812,7 @@ mod tests {
         let head = format!(
             r#"<link rel="stylesheet" href="{SHEET}"><link rel="stylesheet" href="http://fonts.test/plain.css"><link rel="stylesheet" href="//fonts.test/relative.css">"#
         );
-        let page = HtmlPage::open(mono_mail(&head), resources.clone());
+        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, resources.clone());
         let (system, mono) = in_time(async move {
             // The font is held back: the page lays out in the system font meanwhile.
             let system = page.layout(400.0, 1.0).await.unwrap().height;
@@ -1708,7 +1828,7 @@ mod tests {
             "no Cyrillic file for Latin text, no second-level import, no `http:` or `//` sheet"
         );
         // Open again: everything from the cache, nothing asked.
-        let page = HtmlPage::open(mono_mail(&head), resources);
+        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, resources);
         let again = in_time(async move { height_when(&page, |height| height > system * 1.5).await });
         assert_eq!(again, mono);
         assert_eq!(web.asked().len(), asked.len());
@@ -1724,7 +1844,7 @@ mod tests {
         // Every font is late once the page has been laid out.
         let first = resources(web.clone(), Duration::ZERO);
         let head = format!(r#"<link rel="stylesheet" href="{SHEET}">"#);
-        let page = HtmlPage::open(mono_mail(&head), first.clone());
+        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, first.clone());
         let (page, system) = in_time(async move {
             let system = page.layout(400.0, 1.0).await.unwrap().height;
             release.send(()).unwrap();
@@ -1740,7 +1860,7 @@ mod tests {
         // The next run of the app reads the sheet and the font from the disk cache in time.
         let offline = Arc::new(FakeWeb::default());
         let next = Arc::new(Resources { web: offline.clone(), cache: ResourceCache::new(first.cache.folder.clone(), CACHE_CAP), late: LATE });
-        let page = HtmlPage::open(mono_mail(&head), next);
+        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, next);
         in_time(async move { height_when(&page, |height| height > system * 1.5).await });
         assert!(offline.asked().is_empty(), "{:?}", offline.asked());
     }
@@ -1752,14 +1872,14 @@ mod tests {
         web.file(SHEET, mono_sheet());
         web.file(MONO, monaco());
         let release = web.hold(MONO);
-        let reader = HtmlPage::open(mono_mail(&format!(r#"<link rel="stylesheet" href="{SHEET}">"#)), resources(web, LATE));
+        let reader = HtmlPage::open(mono_mail(&format!(r#"<link rel="stylesheet" href="{SHEET}">"#)), HtmlPart::Whole, resources(web, LATE));
         let (system, mono, other) = in_time(async move {
             let system = reader.layout(400.0, 1.0).await.unwrap().height;
             release.send(()).unwrap();
             let mono = height_when(&reader, |height| height > system * 1.5).await;
             // A mail naming the same family, opened after the font arrived for the first one:
             // all pages used to share one collection, so it got the font too.
-            let other = HtmlPage::open(mono_mail(""), offline());
+            let other = HtmlPage::open(mono_mail(""), HtmlPart::Whole, offline());
             let other = other.layout(400.0, 1.0).await.unwrap().height;
             (system, mono, other)
         });
@@ -1851,7 +1971,7 @@ mod tests {
         let web: Arc<dyn Web> = Arc::new(Counted(log.clone()));
         let open = |resources: Arc<Resources>| {
             let start = Instant::now();
-            let page = HtmlPage::open(mail.clone(), resources);
+            let page = HtmlPage::open(mail.clone(), HtmlPart::Whole, resources);
             let (page, painted) = in_time(async move {
                 let size = page.layout(600.0, 2.0).await.unwrap();
                 page.tile(600.0, 2.0, 0.0, 512.0).await.unwrap();
@@ -1896,7 +2016,7 @@ mod tests {
         let mut paints: Vec<Duration> = (0..20)
             .map(|_| {
                 let start = Instant::now();
-                let page = HtmlPage::open(mail.clone(), offline());
+                let page = HtmlPage::open(mail.clone(), HtmlPart::Whole, offline());
                 in_time(async move {
                     page.layout(600.0, 2.0).await.unwrap();
                     page.tile(600.0, 2.0, 0.0, 512.0).await.unwrap();

@@ -51,6 +51,26 @@ pub fn message_date(date: Option<DateTime<Utc>>, now: DateTime<Local>) -> String
     }
 }
 
+/// A message's time of day, for the reader's chat log.
+pub fn message_time(date: Option<DateTime<Utc>>) -> String {
+    date.map(local).map(|date| date.format("%-I:%M %p").to_string()).unwrap_or_default()
+}
+
+/// A day divider's label in a log (`ReaderPage.dayDivider`, Flutter's `dayDivider`).
+pub fn day_divider(date: DateTime<Local>, now: DateTime<Local>) -> String {
+    let day = date.date_naive();
+    let today = now.date_naive();
+    if day == today {
+        "Today".into()
+    } else if Some(day) == today.checked_sub_days(Days::new(1)) {
+        "Yesterday".into()
+    } else if date.year() == now.year() {
+        date.format("%A, %B %-d").to_string()
+    } else {
+        date.format("%B %-d, %Y").to_string()
+    }
+}
+
 const REPLY_PREFIXES: [&str; 11] = ["re", "fwd", "fw", "aw", "wg", "sv", "vs", "antw", "回复", "答复", "转发"];
 
 /// The length of a reply or forward prefix (`Re:`, `Fwd[2]:`, `回复：`) at the start of `s`.
@@ -137,6 +157,59 @@ pub fn body(text: &str) -> String {
     out
 }
 
+/// A text body as the reader shows it (Flutter's `FoldedText`): what was written, and the quoted
+/// history and signature that fold behind a toggle, if any. Lines lose the indentation and empty
+/// cells text taken from HTML layouts keeps, runs of blank lines go, and hard-wrapped lines (a long
+/// line stopping mid-sentence before one running on in lower case) join, so they reflow.
+pub fn fold(text: &str) -> (String, Option<String>) {
+    let mut lines: Vec<String> = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() && lines.last().is_none_or(|last| last.is_empty()) {
+            continue;
+        }
+        if let Some(last) = lines.last_mut()
+            && wrapped(last, line)
+        {
+            last.push(' ');
+            last.push_str(line);
+            continue;
+        }
+        lines.push(line.to_owned());
+    }
+    let cut = lines.iter().skip(1).position(|line| folds(line)).map_or(lines.len(), |i| i + 1);
+    let join = |part: &[String]| part.join("\n").trim().to_owned();
+    let folded = join(&lines[cut..]);
+    (join(&lines[..cut]), (!folded.is_empty()).then_some(folded))
+}
+
+/// Whether `line` was hard-wrapped before `next`.
+fn wrapped(line: &str, next: &str) -> bool {
+    line.chars().count() >= 50
+        && !line.starts_with('>')
+        && !line.ends_with(['.', '!', '?', ':', ';', ')', '>'])
+        && next.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '(')
+}
+
+/// Whether quoted history or a signature starts at `line` (trimmed).
+fn folds(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    let length = line.chars().count();
+    (line.starts_with("On ") && line.ends_with("wrote:") && (13..=250).contains(&length))
+        || (line.starts_with('在') && (line.ends_with("写道:") || line.ends_with("写道：")) && length >= 5)
+        || (line.starts_with("--") && {
+            let inner = lower.trim_start_matches('-').trim_start();
+            ["original message", "forwarded message"]
+                .iter()
+                .any(|title| inner.strip_prefix(title).is_some_and(|rest| rest.trim_start().starts_with("--")))
+        })
+        || (length >= 10 && line.chars().all(|c| c == '_'))
+        || line.starts_with('>')
+        || line == "--"
+        || lower.starts_with("sent from my ")
+        || lower.starts_with("get outlook for ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +222,31 @@ mod tests {
         assert_eq!(split_subject("[only]"), (String::new(), "[only]".into()));
         assert_eq!(split_subject("Reply all"), (String::new(), "Reply all".into()));
         assert_eq!(split_subject("  "), (String::new(), "(no subject)".into()));
+    }
+
+    #[test]
+    fn quoted_history_and_signatures_fold() {
+        let reply = "Sounds good, see you then.\n\nOn Mon, Nov 10, 2026 at 9:00 AM Dan <dan@example.org> wrote:\n> Lunch?\n> Dan";
+        assert_eq!(
+            fold(reply),
+            ("Sounds good, see you then.".into(), Some("On Mon, Nov 10, 2026 at 9:00 AM Dan <dan@example.org> wrote:\n> Lunch?\n> Dan".into()))
+        );
+        assert_eq!(fold("好的\n在 2026年11月10日 写道：\n原文").1.as_deref(), Some("在 2026年11月10日 写道：\n原文"));
+        assert_eq!(fold("Hi\n-----Original Message-----\nFrom: x").1.as_deref(), Some("-----Original Message-----\nFrom: x"));
+        assert_eq!(fold("Thanks\n-- \nPriya").1.as_deref(), Some("--\nPriya"));
+        assert_eq!(fold("Thanks\nSent from my iPhone").1.as_deref(), Some("Sent from my iPhone"));
+        // The first line never folds, so a body is never only a toggle; mail without quotes keeps
+        // everything.
+        assert_eq!(fold("> all quote\n> more"), ("> all quote".into(), Some("> more".into())));
+        assert_eq!(fold("  Indented\n\n\n\nGap  "), ("Indented\n\nGap".into(), None));
+    }
+
+    #[test]
+    fn hard_wrapped_lines_join() {
+        let wrapped = "This line was wrapped by the sender's mail program at about\nseventy-two columns, as plain text mail often is.\nNext sentence.";
+        assert_eq!(
+            fold(wrapped).0,
+            "This line was wrapped by the sender's mail program at about seventy-two columns, as plain text mail often is.\nNext sentence."
+        );
     }
 }

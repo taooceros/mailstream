@@ -37,6 +37,7 @@ actions!(
         Previous,
         Open,
         Back,
+        Close,
         Archive,
         Trash,
         Restore,
@@ -72,6 +73,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("space", Open, list),
         KeyBinding::new("escape", Back, list),
         KeyBinding::new("secondary-[", Back, window),
+        KeyBinding::new("secondary-w", Close, window),
         KeyBinding::new("e", Archive, list),
         KeyBinding::new("ctrl-cmd-a", Archive, window),
         KeyBinding::new("backspace", Trash, list),
@@ -266,6 +268,8 @@ pub struct ThreadEntry {
     pub state: ThreadState,
     /// The conversation's message count when loaded: a newer count means a newer thread.
     count: u32,
+    /// The latest request for it; older answers are dropped.
+    request: u64,
 }
 
 pub struct Toast {
@@ -310,6 +314,14 @@ pub struct MailApp {
     pub threads: HashMap<SharedString, ThreadEntry>,
     /// Folded messages the user opened.
     pub unfolded: HashSet<SharedString>,
+    /// Messages whose quoted history the user opened.
+    pub quotes_open: HashSet<SharedString>,
+    /// The open conversation stays scrolled to its end (its latest message) while bodies load and
+    /// grow, until the reader scrolls it or opens a fold (Flutter's `EndPin`, MS-70).
+    pub reader_pinned: bool,
+    /// The chat log's message under the pointer, which shows its reply buttons.
+    pub hovered_message: Option<SharedString>,
+    thread_requests: u64,
     /// Conversations being archived or trashed: refreshes that still list them leave them out.
     removing: HashSet<SharedString>,
     /// A previews request is out; `previews_again` asks once more when it lands.
@@ -378,6 +390,10 @@ impl MailApp {
             layers: Vec::new(),
             threads: HashMap::new(),
             unfolded: HashSet::new(),
+            quotes_open: HashSet::new(),
+            reader_pinned: false,
+            hovered_message: None,
+            thread_requests: 0,
             removing: HashSet::new(),
             previews_asking: false,
             previews_again: false,
@@ -572,7 +588,7 @@ impl MailApp {
         }
         if key == self.key() {
             self.rebuild_items();
-            self.refresh_layers();
+            self.refresh_layers(cx);
         }
         self.load_previews(&key, cx);
         if again {
@@ -682,8 +698,9 @@ impl MailApp {
         });
     }
 
-    /// Drops a bundle layer whose bundle is gone, and keeps open readers' conversations current.
-    fn refresh_layers(&mut self) {
+    /// Drops a bundle layer whose bundle is gone, and keeps open readers' conversations current:
+    /// one with new messages reads its thread again, showing the old one until it arrives (MS-79).
+    fn refresh_layers(&mut self, cx: &mut Context<Self>) {
         let bundles: HashSet<Category> = self
             .items
             .iter()
@@ -697,14 +714,14 @@ impl MailApp {
             .list()
             .map(|list| list.conversations.iter().map(|c| (&c.id, c)).collect())
             .unwrap_or_default();
-        let mut stale_threads = Vec::new();
+        let mut stale = Vec::new();
         for layer in &mut layers {
             if let Layer::Reader(conversation) = layer
                 && let Some(fresh) = current.get(&conversation.id)
             {
                 **conversation = (*fresh).clone();
                 if self.threads.get(&fresh.id).is_some_and(|t| t.count != fresh.message_count) {
-                    stale_threads.push(fresh.id.clone());
+                    stale.push((*fresh).clone());
                 }
             }
         }
@@ -713,20 +730,35 @@ impl MailApp {
             layers.truncate(gone);
         }
         self.layers = layers;
-        for id in stale_threads {
-            self.threads.remove(&id);
+        for conversation in stale {
+            self.load_thread(&conversation, true, cx);
         }
     }
 
-    pub(crate) fn load_thread(&mut self, conversation: &Conversation, cx: &mut Context<Self>) {
-        if let Some(thread) = self.threads.get(&conversation.id)
-            && thread.count == conversation.message_count
-            && !matches!(thread.state, ThreadState::Failed(_))
-        {
-            return;
-        }
+    /// Reads the conversation's messages, unless they are loaded for its message count; `again`
+    /// reads them anyway. A thread on screen stays until the new one arrives, and stays if that
+    /// fails.
+    pub(crate) fn load_thread(&mut self, conversation: &Conversation, again: bool, cx: &mut Context<Self>) {
+        self.thread_requests += 1;
+        let request = self.thread_requests;
         let id = conversation.id.clone();
-        self.threads.insert(id.clone(), ThreadEntry { state: ThreadState::Loading, count: conversation.message_count });
+        match self.threads.get_mut(&id) {
+            Some(thread)
+                if !again
+                    && thread.count == conversation.message_count
+                    && !matches!(thread.state, ThreadState::Failed(_)) =>
+            {
+                return;
+            }
+            Some(thread) if matches!(thread.state, ThreadState::Loaded(_)) => {
+                thread.count = conversation.message_count;
+                thread.request = request;
+            }
+            _ => {
+                let entry = ThreadEntry { state: ThreadState::Loading, count: conversation.message_count, request };
+                self.threads.insert(id.clone(), entry);
+            }
+        }
         let arg = id.to_string();
         self.background(
             cx,
@@ -746,11 +778,12 @@ impl MailApp {
                 )
             },
             move |this, result, cx| {
-                let Some(thread) = this.threads.get_mut(&id) else { return };
-                thread.state = match result {
-                    Ok(messages) => ThreadState::Loaded(messages.into()),
-                    Err(error) => ThreadState::Failed(error.to_string().into()),
-                };
+                let Some(thread) = this.threads.get_mut(&id).filter(|thread| thread.request == request) else { return };
+                match result {
+                    Ok(messages) => thread.state = ThreadState::Loaded(messages.into()),
+                    Err(_) if matches!(thread.state, ThreadState::Loaded(_)) => {}
+                    Err(error) => thread.state = ThreadState::Failed(error.to_string().into()),
+                }
                 if this.forward_pending.as_ref() == Some(&id) {
                     this.forward_pending = None;
                     this.forward_loaded(&id, cx);

@@ -220,6 +220,18 @@ pub mod text {
     pub const DISPLAY: f32 = 22.0;
 }
 
+/// The reader's mail as a chat log (Flutter's `_ChatLog`) and its folded quotes (`_Fold`).
+pub mod reader {
+    /// The column the sender's avatar sits in.
+    pub const LOG_GUTTER: f32 = 56.0;
+    /// The "more" toggle that opens quoted history.
+    pub const FOLD_WIDTH: f32 = 32.0;
+    pub const FOLD_HEIGHT: f32 = 18.0;
+    /// The rule left of opened quoted history, and the gap after it.
+    pub const QUOTE_RULE: f32 = 2.0;
+    pub const QUOTE_INDENT: f32 = 12.0;
+}
+
 /// Corner radii: `SMALL` for inline marks, `CONTROL` for buttons and controls, `CARD` for cards,
 /// banners and lifted rows, `PANE` for the islands and message cards; capsules are fully round.
 pub mod radius {

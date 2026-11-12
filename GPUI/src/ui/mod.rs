@@ -55,6 +55,7 @@ impl Render for MailApp {
             .on_action(cx.listener(Self::previous))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::back))
+            .on_action(cx.listener(Self::close))
             .on_action(cx.listener(Self::archive))
             .on_action(cx.listener(Self::trash))
             .on_action(cx.listener(Self::restore))

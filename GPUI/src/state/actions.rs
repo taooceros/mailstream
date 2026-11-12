@@ -98,10 +98,11 @@ impl MailApp {
             window.focus(&this.focus);
             if matches!(event, ReplyEvent::Sent) {
                 this.show_toast("Sent", cx);
-                // The thread grows by the reply: read it again, and the lists with it.
-                this.threads.remove(&this.reader().map(|c| c.id.clone()).unwrap_or_default());
+                // The thread grows by the reply: read it again (showing it meanwhile), and the
+                // lists with it.
                 if let Some(open) = this.reader().cloned() {
-                    this.load_thread(&open, cx);
+                    this.reader_pinned = true;
+                    this.load_thread(&open, true, cx);
                 }
                 this.load_list(this.key(), true, cx);
             }
@@ -120,7 +121,7 @@ impl MailApp {
         } else {
             // The compose window opens once the messages it quotes arrive.
             self.forward_pending = Some(id);
-            self.load_thread(&conversation, cx);
+            self.load_thread(&conversation, false, cx);
         }
     }
 
@@ -254,7 +255,7 @@ impl MailApp {
         self.layers.retain(|layer| !matches!(layer, Layer::Reader(c) if c.id == id));
         self.removing.insert(id.clone());
         self.rebuild_items();
-        self.refresh_layers();
+        self.refresh_layers(cx);
         window.focus(&self.focus);
         cx.notify();
 

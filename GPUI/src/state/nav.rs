@@ -356,7 +356,9 @@ impl MailApp {
             self.highlight = Some(id.clone());
         }
         self.reader_scroll = ScrollHandle::new();
-        self.load_thread(&conversation, cx);
+        self.reader_pinned = true;
+        self.hovered_message = None;
+        self.load_thread(&conversation, false, cx);
         let unread = conversation.unread;
         // A conversation open beside the list gives way to this one in place.
         let replacing = matches!(self.layers.last(), Some(Layer::Reader(_)));
@@ -390,10 +392,27 @@ impl MailApp {
     }
 
     pub fn toggle_fold(&mut self, message: &SharedString, cx: &mut Context<Self>) {
+        self.reader_pinned = false;
         if !self.unfolded.remove(message) {
             self.unfolded.insert(message.clone());
         }
         cx.notify();
+    }
+
+    /// Opens or closes a message's quoted history.
+    pub fn toggle_quotes(&mut self, message: &SharedString, cx: &mut Context<Self>) {
+        self.reader_pinned = false;
+        if !self.quotes_open.remove(message) {
+            self.quotes_open.insert(message.clone());
+        }
+        cx.notify();
+    }
+
+    /// Closes the open conversation (⌘W, MS-69); nothing else.
+    pub fn close(&mut self, _: &Close, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat_view.is_none() && self.reader().is_some() {
+            self.back(&Back, window, cx);
+        }
     }
 }
 

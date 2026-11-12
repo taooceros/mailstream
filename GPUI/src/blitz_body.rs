@@ -24,6 +24,7 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, SharedString, Window, actions, point,
     px, size,
 };
+pub use mailstream::HtmlPart;
 use mailstream::{HtmlPage, HtmlTile};
 
 /// Tiles are this many points tall.
@@ -87,6 +88,8 @@ struct Entry {
     pending_selection: Option<(Point<f32>, Point<f32>)>,
     selecting: bool,
     selected: bool,
+    /// Whether the mail has quoted history its part leaves out or shows, once the page says.
+    quoted: Option<bool>,
 }
 
 impl Drop for Entry {
@@ -113,6 +116,11 @@ pub fn height(key: &SharedString) -> Option<f32> {
     PAGES.with_borrow(|pages| pages.entries.get(key).and_then(|entry| entry.layout).map(|layout| layout.height))
 }
 
+/// Whether the body shown under `key` has quoted history (see [`HtmlPart`]), once its page says.
+pub fn quoted(key: &SharedString) -> Option<bool> {
+    PAGES.with_borrow(|pages| pages.entries.get(key).and_then(|entry| entry.quoted))
+}
+
 /// Starts a frame of the window: closes the pages not painted last frame and frees the tiles no
 /// longer shown.
 pub fn begin_frame(window: &mut Window) {
@@ -137,8 +145,17 @@ pub fn prepaint(bounds: Bounds<Pixels>, window: &mut Window) -> Hitbox {
     window.insert_hitbox(bounds, HitboxBehavior::Normal)
 }
 
-/// Draws `html` under `key` at `bounds`, clipped to the current content mask.
-pub fn paint(key: &SharedString, html: &SharedString, bounds: Bounds<Pixels>, hitbox: Hitbox, window: &mut Window, cx: &mut App) {
+/// Draws `part` of `html` under `key` at `bounds`, clipped to the current content mask.
+#[allow(clippy::too_many_arguments)]
+pub fn paint(
+    key: &SharedString,
+    html: &SharedString,
+    part: HtmlPart,
+    bounds: Bounds<Pixels>,
+    hitbox: Hitbox,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let width = f32::from(bounds.size.width);
     let scale = window.scale_factor();
     let visible = bounds.intersect(&window.content_mask().bounds);
@@ -147,7 +164,7 @@ pub fn paint(key: &SharedString, html: &SharedString, bounds: Bounds<Pixels>, hi
     let over_link = PAGES.with_borrow_mut(|pages| {
         let Pages { entries, retired } = pages;
         let entry = entries.entry(key.clone()).or_insert_with(|| {
-            open(key, html, window, cx);
+            open(key, html, part, window, cx);
             Entry::default()
         });
         entry.painted = true;
@@ -177,12 +194,12 @@ pub fn paint(key: &SharedString, html: &SharedString, bounds: Bounds<Pixels>, hi
 }
 
 /// Reads the body's inline images off this thread, then opens its page.
-fn open(key: &SharedString, html: &SharedString, window: &Window, cx: &App) {
+fn open(key: &SharedString, html: &SharedString, part: HtmlPart, window: &Window, cx: &App) {
     let (key, html) = (key.clone(), html.clone());
     let prepared = cx.background_executor().spawn(async move { inline_images(&html) });
     window
         .spawn(cx, async move |cx| {
-            let page = HtmlPage::new(prepared.await);
+            let page = HtmlPage::part(prepared.await, part);
             let opened = PAGES.with_borrow_mut(|pages| match pages.entries.get_mut(&key) {
                 Some(entry) => {
                     entry.page = Some(page.clone());
@@ -195,6 +212,13 @@ fn open(key: &SharedString, html: &SharedString, window: &Window, cx: &App) {
                 return;
             }
             cx.update(|window, _| window.refresh()).ok();
+            if part != HtmlPart::Whole {
+                let quoted = page.quoted().await;
+                if with_page(&key, &page, |entry| entry.quoted = quoted).is_none() {
+                    return;
+                }
+                cx.update(|window, _| window.refresh()).ok();
+            }
             // Late content (a remote image, a web font) changes the page: lay it out again.
             let mut version = 0;
             while let Some(changed) = page.changed(version).await {

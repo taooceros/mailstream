@@ -30,7 +30,7 @@ mod people;
 mod swift;
 
 #[cfg(feature = "blitz")]
-pub use html_page::{HtmlPage, HtmlSize, HtmlTile};
+pub use html_page::{HtmlPage, HtmlPart, HtmlSize, HtmlTile};
 pub use people::Person;
 
 /// A failed request: the engine's stable `code` (`unknown_account`, `provider`, `confirm`, …)
