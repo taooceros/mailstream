@@ -4,7 +4,8 @@
 # by itself, logs every frame and quits; scripts/frame-stats.swift then summarizes the logs.
 # Usage: scripts/bench.sh flutter|gpui [RUNS]
 #   BENCH_SCENARIO picks the scenario (MAILSTREAM_BENCH): scroll (default; every front end)
-#   scrolls the conversation list; reader-swipe (Flutter) opens conversations and swipes each
+#   scrolls the conversation list; pages (GPUI) slides the inbox's first bundle over the list and
+#   back off every 1.2 s (MS-289); reader-swipe (Flutter) opens conversations and swipes each
 #   reader away with two fingers; calendar-week (Flutter) opens the calendar's week view and
 #   scrolls its timeline from top to bottom and back; calendar-page (Flutter) pages that week
 #   view back and forth, eight times with a two-finger swipe, then eight times as ← and → do
@@ -37,7 +38,7 @@ case $FRONTEND in
     ;;
 esac
 case $FRONTEND/$SCENARIO in
-  */scroll | flutter/reader-swipe | flutter/calendar-week | flutter/calendar-page) ;;
+  */scroll | gpui/pages | flutter/reader-swipe | flutter/calendar-week | flutter/calendar-page) ;;
   *)
     echo "error: no $SCENARIO scenario in $FRONTEND" >&2
     exit 2

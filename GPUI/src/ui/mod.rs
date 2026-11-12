@@ -24,6 +24,7 @@ use gpui::{
 use mailstream::{Category, Conversation, MailboxRole};
 
 use crate::avatars;
+use crate::bench::{Bench, Turn};
 use crate::compose::{ComposeColumn, ResizeColumn};
 use crate::controls::{
     Tone, capsule, centered_note, field_frame, hairline, icon_avatar, icon_button, island, list_row, mark_dot, notice,
@@ -54,6 +55,20 @@ impl Render for MailApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = design::palette(window.appearance());
         let bench_end = self.bench.as_mut().and_then(|bench| bench.frame(&self.list_scroll, window, cx));
+        // `MAILSTREAM_BENCH=pages`: the inbox's first bundle slides in and back off (MS-289).
+        match self.bench.as_mut().and_then(Bench::take_turn) {
+            Some(Turn::Open) => {
+                let bundle = self.items.iter().find_map(|item| match item {
+                    Item::Bundle(bundle) => Some(format!("bundle:{}", bundle.category.as_str())),
+                    _ => None,
+                });
+                if let Some(id) = bundle {
+                    self.activate(&id, window, cx);
+                }
+            }
+            Some(Turn::Back) => self.back(&Back, window, cx),
+            None => {}
+        }
         // Drafts asked for with no window at hand open now, before the column is laid out.
         if self.compose.read(cx).has_pending() {
             self.compose.update(cx, |column, cx| column.open_pending(window, cx));
