@@ -99,6 +99,19 @@ struct GmailMessage {
     payload: Option<Part>,
 }
 
+/// A thread's messages' labels (`threads.get`, `format=minimal`).
+#[derive(Deserialize)]
+struct ThreadLabels {
+    #[serde(default)]
+    messages: Vec<LabelsOnly>,
+}
+
+#[derive(Deserialize)]
+struct LabelsOnly {
+    #[serde(rename = "labelIds", default)]
+    label_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct Part {
     #[serde(rename = "mimeType")]
@@ -266,6 +279,19 @@ impl Gmail {
         let url = self.endpoints.url("messages", &[("q", query), ("maxResults", &size), ("fields", LIST_FIELDS)]);
         let (ids, _) = self.listing(url, Priority::Interactive).await?;
         self.cache.hits(&ids, Priority::Interactive).await
+    }
+
+    /// The threads among `threads` holding a message under none of the labels `own` (the user's
+    /// Sent and Drafts): someone answered them. Threads gone since are left out.
+    pub async fn answered(&self, threads: &[String], own: &[String]) -> Result<HashSet<String>, ApiError> {
+        let query = "format=minimal&fields=messages(labelIds)";
+        let found: HashMap<String, ThreadLabels> =
+            batch_get(&self.api, &self.endpoints, "threads", threads, query, 10, Priority::Background).await?;
+        Ok(found
+            .into_iter()
+            .filter(|(_, thread)| thread.messages.iter().any(|message| !message.label_ids.iter().any(|label| own.contains(label))))
+            .map(|(id, _)| id)
+            .collect())
     }
 
     /// Lists message ids, bringing cached labels up to date meanwhile.

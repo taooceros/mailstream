@@ -113,7 +113,8 @@ impl MailApp {
         let preview: SharedString = if let Some(chosen) = chosen {
             let (to, cc) = chosen.reply_recipients(&self.own_addresses(), all);
             to.iter().chain(&cc).map(|address| address.display_name()).collect::<Vec<_>>().join(", ").into()
-        } else if all {
+        } else if all || conversation.from_me {
+            // Answering their own latest message goes to its recipients, not to them.
             let people: Vec<&str> =
                 conversation.participants.iter().map(String::as_str).filter(|p| *p != "me").collect();
             if people.is_empty() { conversation.sender_name() } else { people.join(", ").into() }

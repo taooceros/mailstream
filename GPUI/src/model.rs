@@ -109,7 +109,8 @@ impl MailboxExt for Mailbox {
 }
 
 pub trait ConversationExt {
-    /// Whom the row names: the latest incoming message's sender, else the first participant.
+    /// Whom the row names: the latest message's sender (`me` when the user wrote it), else the
+    /// first participant.
     fn sender_name(&self) -> SharedString;
     /// Everyone in it, for the row's first line; the sender when the engine names no one.
     fn senders(&self) -> SharedString;
@@ -121,6 +122,9 @@ pub trait ConversationExt {
 
 impl ConversationExt for Conversation {
     fn sender_name(&self) -> SharedString {
+        if self.from_me {
+            return "me".into();
+        }
         match &self.from {
             Some(from) => from.display_name().into(),
             None => self.participants.first().map_or_else(|| "(unknown)".into(), |name| name.clone().into()),

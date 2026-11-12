@@ -3,8 +3,9 @@
 //! `In-Reply-To` links, and the normalized subject for replies whose parent was not loaded.
 //!
 //! `primary` messages decide which conversations exist (the listed mailbox); `context` messages
-//! (the account's inbox and sent mail) only join conversations a primary message started, so a
-//! conversation shows both sides of an exchange.
+//! (the account's inbox and sent mail) join conversations a primary message is in, so a
+//! conversation shows both sides of an exchange, and make one of their own only where `admit`
+//! takes it (the inbox's conversations the user started, `mail::started`).
 use std::collections::{HashMap, HashSet};
 
 use crate::model::{Conversation, DISTANT_PAST, MailMessage};
@@ -12,7 +13,11 @@ use crate::text::Subject;
 
 const SUBJECT_WINDOW: f64 = 45.0 * 24.0 * 3600.0;
 
-pub fn conversations(primary: Vec<MailMessage>, context: Vec<MailMessage>) -> Vec<Conversation> {
+pub fn conversations(
+    primary: Vec<MailMessage>,
+    context: Vec<MailMessage>,
+    admit: &dyn Fn(&Conversation) -> bool,
+) -> Vec<Conversation> {
     let mut seen: HashSet<(&str, &str, &str)> = HashSet::new();
     let mut chosen: Vec<(usize, bool)> = Vec::with_capacity(primary.len() + context.len());
     let all: Vec<(&MailMessage, bool)> =
@@ -101,9 +106,7 @@ pub fn conversations(primary: Vec<MailMessage>, context: Vec<MailMessage>) -> Ve
     }
     let mut out: Vec<Conversation> = Vec::with_capacity(groups.len());
     for mut members in groups.into_values() {
-        if !members.iter().any(|index| is_primary[*index]) {
-            continue;
-        }
+        let listed = members.iter().any(|index| is_primary[*index]);
         // Collapse copies of one message living in several mailboxes (Gmail labels share the
         // provider id), preferring the primary copy.
         members.sort_by_key(|index| !is_primary[*index]);
@@ -121,7 +124,10 @@ pub fn conversations(primary: Vec<MailMessage>, context: Vec<MailMessage>) -> Ve
             }
             unique.push(messages[index].clone());
         }
-        out.push(Conversation::thread(unique));
+        let conversation = Conversation::thread(unique);
+        if listed || admit(&conversation) {
+            out.push(conversation);
+        }
     }
     sort_newest_first(&mut out);
     out
@@ -228,13 +234,18 @@ mod tests {
             message("SENT", "b", "Re: Plans for Friday", "me@x.com", 200.0, |e| e.in_reply_to = vec!["a@x".into()]),
             message("SENT", "z", "Other", "me@x.com", 500.0, |_| {}),
         ];
-        let threads = conversations(primary, context);
+        let threads = conversations(primary.clone(), context.clone(), &|_| false);
         assert_eq!(threads.len(), 2);
         assert_eq!(threads[0].id, "me@x.com|d@x");
         assert_eq!(threads[1].id, "me@x.com|a@x");
         let ids: Vec<&str> = threads[1].messages.iter().map(MailMessage::id).collect();
         assert_eq!(ids, ["a", "b", "c"]);
         assert_eq!(threads[1].latest_date, Some(300.0));
+
+        // Context mail of its own joins only where `admit` takes it.
+        let admitted = conversations(primary, context, &|thread| thread.messages[0].id() == "z");
+        let ids: Vec<&str> = admitted.iter().map(|thread| thread.id.as_str()).collect();
+        assert_eq!(ids, ["me@x.com|z@x", "me@x.com|d@x", "me@x.com|a@x"]);
     }
 
     #[test]

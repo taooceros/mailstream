@@ -82,6 +82,8 @@ extension ConversationView on engine.Conversation {
       date == other.date &&
       from?.email == other.from?.email &&
       from?.name == other.from?.name &&
+      fromMe == other.fromMe &&
+      started == other.started &&
       listEquals(participants, other.participants) &&
       messageCount == other.messageCount &&
       unread == other.unread &&
@@ -102,6 +104,7 @@ extension ConversationView on engine.Conversation {
     subject: subject,
     date: date,
     from: from,
+    fromMe: fromMe,
     participants: participants,
     messageCount: messageCount,
     unread: unread ?? this.unread,
@@ -112,6 +115,7 @@ extension ConversationView on engine.Conversation {
     category: category,
     waiting: waiting ?? this.waiting,
     labels: labels,
+    started: started,
     tag: tag,
     title: title,
     when: when,

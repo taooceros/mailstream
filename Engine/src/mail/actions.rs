@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::{Known, Mail};
+use super::{Known, Mail, started};
 use crate::answers::{self, BatchFailure, BatchResult};
 use crate::api::ApiError;
 use crate::backend::{Backend, Flag};
@@ -254,7 +254,13 @@ impl Mail {
     }
 
     /// Moves the messages listed from `primary` that sit in an inbox-like mailbox to the archive.
+    /// The user's own sent mail left behind doesn't list in the inbox as a conversation they
+    /// started, and one that is nothing but that leaves the inbox with nothing to move.
     async fn archive(self: &Arc<Self>, conversation: &Conversation, primary: &HashSet<MailboxKey>) -> Result<(), EngineError> {
+        if started::started_key(conversation).is_some() {
+            self.archive_started(conversation);
+            return Ok(());
+        }
         let Some(target) = self.archive_mailbox(&conversation.account) else {
             return Err(EngineError::failed(format!("{} has no archive mailbox.", conversation.account)));
         };
@@ -273,7 +279,9 @@ impl Mail {
         if targets.is_empty() {
             return Err(EngineError::failed(format!("Nothing in {} is in a mailbox Archive moves from.", conversation.id)));
         }
-        self.move_messages(targets, &target).await
+        self.move_messages(targets, &target).await?;
+        self.archive_started(conversation);
+        Ok(())
     }
 
     /// Moves the conversation to the trash; messages already there are deleted for good.

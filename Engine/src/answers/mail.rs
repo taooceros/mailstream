@@ -26,9 +26,12 @@ pub struct Conversation {
     pub subject: String,
     /// ISO 8601, of the latest message.
     pub date: Option<String>,
-    /// The latest incoming message's sender.
+    /// The latest message's sender, the user's own address when they wrote it.
     #[serde(with = "address_text::optional")]
     pub from: Option<Address>,
+    /// The user wrote the latest message: lists name its sender `me`.
+    #[serde(default)]
+    pub from_me: bool,
     /// Senders' names, `me` for the user's own addresses.
     pub participants: Vec<String>,
     pub message_count: u32,
@@ -43,6 +46,10 @@ pub struct Conversation {
     /// Waits on the user's reply or action.
     pub waiting: bool,
     pub labels: Vec<String>,
+    /// In the inbox only as a conversation the user started that nobody has answered yet (their
+    /// sent mail alone): Archive takes it out of the inbox.
+    #[serde(default)]
+    pub started: bool,
     /// The subject as lists show it: leading `[list]` tags (empty when none) apart from the title,
     /// which drops reply and forward prefixes.
     #[serde(skip)]
@@ -70,11 +77,13 @@ impl Conversation {
         self.category.filter(|category| *category != Category::People && !self.waiting)
     }
 
-    /// Something sits in an inbox-like mailbox (`MailStore.canArchive`).
+    /// Something sits in an inbox-like mailbox (`MailStore.canArchive`), or it is in the inbox
+    /// as a conversation the user started.
     pub fn can_archive(&self) -> bool {
-        self.mailboxes.iter().any(|role| {
-            !matches!(role, MailboxRole::Sent | MailboxRole::All | MailboxRole::Archive | MailboxRole::Trash | MailboxRole::Drafts)
-        })
+        self.started
+            || self.mailboxes.iter().any(|role| {
+                !matches!(role, MailboxRole::Sent | MailboxRole::All | MailboxRole::Archive | MailboxRole::Trash | MailboxRole::Drafts)
+            })
     }
 
     /// Something sits in the trash or junk (`MailStore.canRestore`).

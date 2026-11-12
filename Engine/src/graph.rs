@@ -9,6 +9,7 @@ use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::api::{self, Api, ApiError, GraphPage, Priority, Request};
@@ -208,6 +209,13 @@ fn envelope(message: Message) -> Envelope {
     }
 }
 
+/// The folder a message is in.
+#[derive(Deserialize)]
+struct Located {
+    #[serde(rename = "parentFolderId")]
+    parent_folder_id: Option<String>,
+}
+
 impl Graph {
     pub fn new(api: Arc<Api>, root: Arc<str>) -> Self {
         Self { api, root, well_known: Mutex::new(HashMap::new()) }
@@ -395,6 +403,44 @@ impl Graph {
             b.envelope.date.unwrap_or(DISTANT_PAST).total_cmp(&a.envelope.date.unwrap_or(DISTANT_PAST))
         });
         Ok(hits)
+    }
+
+    /// The conversations among `threads` holding a message in none of the folders `own` (the
+    /// user's Sent Items and Drafts): someone answered them. One `$batch` sub-request each.
+    pub async fn answered(&self, threads: &[String], own: &[String]) -> Result<HashSet<String>, ApiError> {
+        let send = |pending: Vec<(usize, String)>| async move {
+            let requests: Vec<Value> = pending
+                .iter()
+                .map(|(number, thread)| {
+                    let filter = format!("conversationId eq '{}'", thread.replace('\'', "''"));
+                    let query = api::form_encoded([("$filter", filter.as_str()), ("$select", "parentFolderId"), ("$top", "50")]);
+                    json!({
+                        "id": number.to_string(), "method": "GET", "url": format!("/me/messages?{query}"),
+                        "headers": { "Prefer": IMMUTABLE_IDS },
+                    })
+                })
+                .collect();
+            let payload = serde_json::to_vec(&json!({ "requests": requests })).expect("batch encodes");
+            let request = Request::post(self.url("$batch", &[]), "application/json", payload).header("Prefer", IMMUTABLE_IDS);
+            let answer: Value = self.api.decode(request, Priority::Background, 0).await?;
+            Ok(api::json_parts(&answer))
+        };
+        let mut answered = HashSet::new();
+        self.api
+            .batch(threads.to_vec(), 20, "Microsoft Graph", true, send, |thread, part| {
+                if !(200..300).contains(&part.status) {
+                    return Err(ApiError::from_body(part.status, &part.body));
+                }
+                let page: GraphPage<Located> =
+                    serde_json::from_slice(&part.body).map_err(|error| ApiError::new(0, format!("Microsoft Graph: {error}")))?;
+                let elsewhere = |message: &Located| message.parent_folder_id.as_ref().is_none_or(|folder| !own.contains(folder));
+                if page.value.iter().any(elsewhere) {
+                    answered.insert(thread);
+                }
+                Ok(())
+            })
+            .await?;
+        Ok(answered)
     }
 
     pub async fn content(

@@ -37,6 +37,7 @@ mod autoread;
 pub use autoread::AutoReadReason;
 mod contacts;
 mod sending;
+mod started;
 mod tagsync;
 #[cfg(test)]
 mod action_tests;
@@ -44,6 +45,8 @@ mod action_tests;
 mod autoread_tests;
 #[cfg(test)]
 mod interop_tests;
+#[cfg(test)]
+mod started_tests;
 
 pub const PAGE_SIZE: usize = 50;
 /// Page fetches one listing request may make past the mail already kept, so a rare filter
@@ -104,6 +107,8 @@ struct State {
     connected: bool,
     /// Accounts push reported a change of, waiting out the coalescing delay.
     account_refreshes: HashSet<String>,
+    /// The conversations the user started that the inbox lists.
+    started: started::Started,
 }
 
 type CacheRead = Shared<BoxFuture<'static, ()>>;
@@ -115,6 +120,8 @@ struct AgentListing {
     primary: HashSet<MailboxKey>,
     failures: Vec<String>,
     next: Option<Cursor>,
+    /// Conversations the user started that the provider is to be asked about.
+    due: Vec<started::ThreadKey>,
 }
 
 /// The position after a conversation in a newest-first listing: its date and id, written
@@ -249,6 +256,7 @@ impl Mail {
             }
         });
         self.tagging.restore().await;
+        self.restore_started().await;
         let cached = self.cache.load_accounts().await.unwrap_or_default();
         let restored = self.signed_in_accounts(&cached);
         {
@@ -891,13 +899,15 @@ impl Mail {
         envelopes.iter().map(|envelope| MailMessage { key: shared.clone(), envelope: envelope.clone(), role }).collect()
     }
 
-    /// Threads `fetched` (the listed mailboxes) with `context`'s loaded mail.
+    /// Threads `fetched` (the listed mailboxes) with `context`'s loaded mail. `inboxes` (every
+    /// listed mailbox is an inbox) adds the conversations the user started and folds one
+    /// sender's repeats.
     fn threads(
         state: &State,
         fetched: &[(MailboxKey, Vec<Arc<Envelope>>)],
         context: &[MailboxKey],
         failures: Vec<String>,
-        merge_repeats: bool,
+        inboxes: bool,
     ) -> AgentListing {
         let mut primary_keys: Vec<&(MailboxKey, Vec<Arc<Envelope>>)> = fetched.iter().collect();
         primary_keys.sort_by(|a, b| a.0.cmp(&b.0));
@@ -905,20 +915,26 @@ impl Mail {
             primary_keys.iter().flat_map(|(key, envelopes)| Self::messages(state, key, envelopes)).collect();
         let context: Vec<MailMessage> =
             context.iter().flat_map(|key| Self::messages(state, key, &Self::loaded_envelopes(state, key))).collect();
-        let threaded = threader::conversations(primary, context);
-        let conversations = if merge_repeats { threader::merge_repeats(threaded) } else { threaded };
+        let due = std::cell::RefCell::new(Vec::new());
+        // Inboxes also list the conversations the user started.
+        let admit = |conversation: &Conversation| {
+            inboxes && started::started_key(conversation).is_some_and(|key| state.started.lists(&key, &mut due.borrow_mut()))
+        };
+        let threaded = threader::conversations(primary, context, &admit);
+        let conversations = if inboxes { threader::merge_repeats(threaded) } else { threaded };
         AgentListing {
             conversations,
             primary: fetched.iter().map(|(key, _)| key.clone()).collect(),
             failures,
             next: None,
+            due: due.into_inner(),
         }
     }
 
     /// One page of `keys`' conversations that pass `include`, newest first. The first page
     /// fetches the providers' first pages unless `cached`; later pages fetch further pages until
     /// the page is complete: every mailbox with more mail has been listed back past the page's
-    /// oldest conversation.
+    /// oldest conversation, Sent too for inboxes, which list the conversations the user started.
     async fn agent_listing(
         self: &Arc<Self>,
         keys: &[MailboxKey],
@@ -948,9 +964,13 @@ impl Mail {
         failures.sort();
         let mut round = 0;
         loop {
-            let short = {
+            let step = {
                 let state = self.state();
                 let inboxes = !keys.is_empty() && keys.iter().all(|key| Self::role(&state, key) == MailboxRole::Inbox);
+                let paged: Vec<&MailboxKey> = keys
+                    .iter()
+                    .chain(context.iter().filter(|key| inboxes && Self::role(&state, key) == MailboxRole::Sent))
+                    .collect();
                 let fetched: Vec<(MailboxKey, Vec<Arc<Envelope>>)> =
                     keys.iter().map(|key| (key.clone(), Self::loaded_envelopes(&state, key))).collect();
                 let listed = Self::threads(&state, &fetched, &context, failures.clone(), inboxes);
@@ -961,8 +981,9 @@ impl Mail {
                 // The page's oldest date when the page is full; a short page needs every
                 // mailbox exhausted.
                 let floor = (start + limit <= matching.len()).then(|| matching[end - 1].latest_date.unwrap_or(DISTANT_PAST));
-                let short: Vec<MailboxKey> = keys
+                let short: Vec<MailboxKey> = paged
                     .iter()
+                    .copied()
                     .filter(|key| {
                         if !Self::has_next_page(&state, key) {
                             return false;
@@ -979,14 +1000,23 @@ impl Mail {
                     .collect();
                 if short.is_empty() || round == AGENT_PAGE_ROUNDS {
                     let page: Vec<Conversation> = matching[start..end].to_vec();
-                    let more = matching.len() > end || keys.iter().any(|key| Self::has_next_page(&state, key));
+                    let more = matching.len() > end || paged.iter().any(|key| Self::has_next_page(&state, key));
                     let next = if more { page.last().map(Cursor::after) } else { None };
-                    return AgentListing { conversations: page, next, ..listed };
+                    Ok(AgentListing { conversations: page, next, ..listed })
+                } else {
+                    Err(short)
                 }
-                short
             };
-            self.fetch_next_pages(&short).await;
-            round += 1;
+            match step {
+                Ok(mut listing) => {
+                    self.check_started(std::mem::take(&mut listing.due));
+                    return listing;
+                }
+                Err(short) => {
+                    self.fetch_next_pages(&short).await;
+                    round += 1;
+                }
+            }
         }
     }
 
@@ -1193,7 +1223,7 @@ impl Mail {
             for conversation in &listing.conversations {
                 remember(&mut state, conversation, &listing.primary);
             }
-            listing.conversations.iter().map(|conversation| self.summary(&state, conversation)).collect()
+            listing.conversations.iter().map(|conversation| self.summary(&state, conversation, &listing.primary)).collect()
         };
         // Previews missing now load in the background; `mail.previews` waits for them.
         let prefetch = listing
@@ -1218,9 +1248,10 @@ impl Mail {
         Ok(answer)
     }
 
-    fn summary(&self, state: &State, conversation: &Conversation) -> answers::Conversation {
+    /// `conversation` as lists show it, listed from the mailboxes `primary`.
+    fn summary(&self, state: &State, conversation: &Conversation, primary: &HashSet<MailboxKey>) -> answers::Conversation {
         let own = Self::own_addresses(state);
-        let incoming = conversation.latest_incoming(&own).unwrap_or_else(|| conversation.latest());
+        let latest = conversation.latest();
         let mut seen = HashSet::new();
         let participants: Vec<String> = conversation
             .messages
@@ -1238,7 +1269,8 @@ impl Mail {
             account: conversation.account.clone(),
             subject: conversation.subject.clone(),
             date: conversation.latest_date.map(iso8601),
-            from: incoming.envelope.from.first().cloned(),
+            from: latest.envelope.from.first().cloned(),
+            from_me: latest.is_from_user(&own),
             participants,
             message_count: conversation.messages.len() as u32,
             unread: conversation.is_unread,
@@ -1249,6 +1281,7 @@ impl Mail {
             category: tag.as_ref().map(|tag| tag.category),
             waiting: tag.as_ref().is_some_and(|tag| tag.to_respond),
             labels: tag.map(|tag| tag.labels).unwrap_or_default(),
+            started: started::is_started(conversation, primary),
             tag: String::new(),
             title: String::new(),
             when: String::new(),
@@ -1305,7 +1338,8 @@ impl Mail {
     }
 
     async fn show(self: &Arc<Self>, args: &Arguments) -> Result<Value, EngineError> {
-        let conversation = &self.lookup(&args.required("id")?)?;
+        let known = self.known(&args.required("id")?)?;
+        let conversation = &known.conversation;
         let max_chars = args.int("max-chars").unwrap_or(20_000).max(0) as usize;
         let html = args.bool("html");
         let bodies = futures::future::join_all(conversation.messages.iter().map(|message| async move {
@@ -1316,7 +1350,7 @@ impl Mail {
         .await;
         let summary = {
             let state = self.state();
-            self.summary(&state, conversation)
+            self.summary(&state, conversation, &known.primary)
         };
         let messages: Vec<Value> = conversation
             .messages

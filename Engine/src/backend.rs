@@ -1,6 +1,7 @@
 //! One signed-in account's mail server: Gmail or Microsoft Graph, as the Swift engine's
 //! `MailBackend` (`Sources/MailstreamKit/Backend/MailBackend.swift`) reads them. Mailbox and
 //! message ids are the provider's own and are what listings and mail.db store.
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -98,6 +99,15 @@ impl Backend {
         match self {
             Self::Gmail(gmail) => gmail.search(query, page_size).await,
             Self::Graph(graph) => graph.search(query, page_size).await,
+        }
+    }
+
+    /// The threads among `threads` (Gmail's threads, Outlook's conversations) holding a message
+    /// outside the mailboxes `own` (the user's Sent and Drafts): someone answered them.
+    pub async fn answered(&self, threads: &[String], own: &[String]) -> Result<HashSet<String>, ApiError> {
+        match self {
+            Self::Gmail(gmail) => gmail.answered(threads, own).await,
+            Self::Graph(graph) => graph.answered(threads, own).await,
         }
     }
 

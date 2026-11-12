@@ -11,9 +11,11 @@
 //!   (unread, starred, waiting on you); a five-message group chat by mail with two messages from
 //!   one person two minutes apart; a meeting invitation (with its event in the calendar); a long
 //!   HTML report with a table; mail with Office attachments; a Chinese mail (the CJK fallback
-//!   font); a text mail with a long quoted history; newsletters and notifications, which the
-//!   list folds into bundles. Every conversation carries its AI tag, so nothing is tagged
-//!   during a run.
+//!   font) Sam answered last, so its row shows Sam's reply as from "me"; a text mail with a long
+//!   quoted history; newsletters and notifications, which the list folds into bundles. Every
+//!   conversation with mail in the inbox carries its AI tag, so nothing is tagged during a run.
+//! - Conversations Sam started that nobody answered yet, which list in the inbox from Sent alone:
+//!   the newest of all in Gmail, and one in Outlook.
 //! - Chat: a direct message, a group and a space, the group's recent messages.
 //! - The calendars: this week's meetings around today, the design review among them; it and
 //!   Sprint planning (which Sam organizes, so it can be edited) carry a place, notes with links,
@@ -330,9 +332,29 @@ fn mail() -> Vec<(Mail, Option<Value>)> {
 
     let mut chinese = Mail::new(GMAIL, "dinner", XIAOMING, "周末聚餐");
     chinese.minutes_ago = 180.;
-    chinese.unread = true;
     chinese.text = Some("Sam 你好，\n\n这周六晚上大家一起吃个饭吧？地点在老地方，六点半。能来的话回我一下。\n\n小明".into());
-    all.push((chinese, tag("people", &["Social"], true)));
+    all.push((chinese, None));
+    // Sam answered last: the row shows the reply, from "me", at its time.
+    let mut dinner_reply = Mail::sent(GMAIL, "dinner-2", "Re: 周末聚餐");
+    dinner_reply.thread = "dinner";
+    dinner_reply.to = vec![XIAOMING];
+    dinner_reply.reply_to = Some("dinner");
+    dinner_reply.minutes_ago = 12.;
+    dinner_reply.text = Some("好呀，我六点半到，带一瓶酒过去。\n\nSam".into());
+    all.push((dinner_reply, tag("people", &["Social"], false)));
+
+    // Conversations Sam started that nobody has answered: in the inbox from Sent alone.
+    let mut proposal = Mail::sent(GMAIL, "tokens", "Proposal: one set of design tokens");
+    proposal.to = vec![MORGAN, DEVON];
+    proposal.minutes_ago = 6.;
+    proposal.text = Some(
+        "Morgan, Devon,\n\nThe app and the site each keep their own colors and type sizes. I'd like us to move \
+         both onto one set of design tokens before the launch. Rough plan:\n\n- one file of tokens, generated \
+         for both\n- the site switches first, the app in the next release\n\nCan we talk it through on \
+         Thursday?\n\nSam"
+            .into(),
+    );
+    all.push((proposal, None));
 
     let mut quoted = Mail::new(GMAIL, "rate-limits", CHRIS, "Re: Question about the API rate limits");
     quoted.minutes_ago = 2. * 24. * 60. + 200.;
@@ -390,6 +412,11 @@ fn mail() -> Vec<(Mail, Option<Value>)> {
     offsite.minutes_ago = 2_000.;
     offsite.text = Some("Hotel is booked for the 14th to the 16th. Bus leaves the office at 8:00 sharp.".into());
     all.push((offsite, tag("people", &["Travel"], false)));
+    let mut vendors = Mail::sent(OUTLOOK, "vendors", "Vendor shortlist for Q1");
+    vendors.to = vec![DANA];
+    vendors.minutes_ago = 320.;
+    vendors.text = Some("Dana,\n\nHere are the three vendors I'd shortlist for Q1, with their quotes. Could you check them against the budget?\n\nSam".into());
+    all.push((vendors, None));
     let mut renew = Mail::new(OUTLOOK, "renew", ("Microsoft", "no-reply@microsoft.example"), "Your Microsoft 365 subscription renews soon");
     renew.minutes_ago = 3_000.;
     renew.text = Some("Your subscription renews on the 1st. No action is needed.".into());

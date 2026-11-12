@@ -354,6 +354,17 @@ impl MailCache {
         self.write(value, Table::State, "autoRead".into());
     }
 
+    // MARK: Conversations the user started
+
+    /// What the inbox knows of the conversations the user started (`mail::started`).
+    pub async fn load_started_threads<T: DeserializeOwned>(&self) -> Option<T> {
+        self.read(Table::State, "startedThreads").await
+    }
+
+    pub fn save_started_threads<T: Serialize>(&self, value: &T) {
+        self.write(value, Table::State, "startedThreads".into());
+    }
+
     // MARK: Tags
 
     pub async fn load_tags(&self) -> HashMap<String, ConversationTag> {

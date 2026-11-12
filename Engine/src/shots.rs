@@ -9,7 +9,9 @@
 //! sending, Graph's message changes in `$batch` and `sendMail`), so marking read, starring,
 //! archiving and sending succeed and show what follows them. It holds no mail: every read is
 //! refused with a 400, which the engine treats as a failed refresh and keeps what the data folder
-//! has, so nothing it shows is replaced. Calendar and Chat changes are refused too.
+//! has, so nothing it shows is replaced. The one read it answers is whether conversations the
+//! user started were answered (Gmail's threads, Graph's messages of a conversation, in batches):
+//! never, so they list in the inbox. Calendar and Chat changes are refused too.
 use std::path::Path;
 use std::sync::{LazyLock, Mutex, OnceLock};
 
@@ -70,6 +72,7 @@ fn answer(request: &FakeRequest) -> Reply {
         ("POST", _) if path.starts_with("/gmail/v1/users/me/messages/") => Reply::json(json!({})),
         ("POST", "/v1.0/me/sendMail") => Reply::bytes(202, Vec::new()),
         ("POST", "/v1.0/$batch") => graph_batch(request, &mut lines),
+        ("POST", "/batch/gmail/v1") => gmail_batch(request, &mut lines),
         _ => refused(),
     };
     let mut log = LOG.lock().expect("log lock");
@@ -78,7 +81,29 @@ fn answer(request: &FakeRequest) -> Reply {
     reply
 }
 
-/// Graph's `$batch`: changes to messages succeed, anything else is refused.
+/// Gmail's batch: a thread holds nothing but the user's mail; any other read is refused.
+fn gmail_batch(request: &FakeRequest, lines: &mut Vec<String>) -> Reply {
+    let text = String::from_utf8_lossy(&request.body);
+    let mut parts = String::new();
+    let mut number = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Content-ID: <m") {
+            number = rest.trim_end_matches('>').parse::<usize>().ok();
+        }
+        let (Some(target), Some(number)) = (line.strip_prefix("GET "), number) else { continue };
+        let (status, body) =
+            if target.contains("/threads/") { ("200 OK", json!({ "messages": [] })) } else { ("400 Bad Request", refusal()) };
+        lines.push(format!("  {status} GET {target}"));
+        parts.push_str(&format!(
+            "--shots\r\nContent-Type: application/http\r\nContent-ID: <response-m{number}>\r\n\r\nHTTP/1.1 {status}\r\nContent-Type: application/json\r\n\r\n{body}\r\n"
+        ));
+    }
+    parts.push_str("--shots--\r\n");
+    Reply::bytes(200, parts.into_bytes()).header("Content-Type", "multipart/mixed; boundary=shots")
+}
+
+/// Graph's `$batch`: changes to messages succeed, and a conversation's messages are none;
+/// anything else is refused.
 fn graph_batch(request: &FakeRequest, lines: &mut Vec<String>) -> Reply {
     let Ok(batch) = serde_json::from_slice::<Value>(&request.body) else { return refused() };
     let responses: Vec<Value> = batch["requests"]
@@ -88,7 +113,14 @@ fn graph_batch(request: &FakeRequest, lines: &mut Vec<String>) -> Reply {
         .map(|sub| {
             let (method, url) = (sub["method"].as_str().unwrap_or_default(), sub["url"].as_str().unwrap_or_default());
             let change = method != "GET" && url.starts_with("/me/messages/");
-            let (status, body) = if change { (200, json!({})) } else { (400, refusal()) };
+            let conversation = method == "GET" && url.starts_with("/me/messages?");
+            let (status, body) = if change {
+                (200, json!({}))
+            } else if conversation {
+                (200, json!({ "value": [] }))
+            } else {
+                (400, refusal())
+            };
             lines.push(format!("  {status} {method} {url}"));
             json!({ "id": sub["id"], "status": status, "body": body })
         })

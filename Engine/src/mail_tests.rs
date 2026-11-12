@@ -214,7 +214,8 @@ fn lists_shows_and_searches_gmail_and_serves_the_cache_without_asking_again() {
     assert_eq!(lunch["subject"], "Lunch?");
     assert_eq!(lunch["messageCount"], 2);
     assert_eq!(lunch["participants"], json!(["Ann", "me"]));
-    assert_eq!(lunch["from"], "Ann <ann@x.com>");
+    // The user's reply is the latest message.
+    assert_eq!((lunch["from"].clone(), lunch["fromMe"].clone()), (json!("me@gmail.com"), json!(true)));
     assert_eq!(lunch["mailboxes"], json!(["inbox", "sent"]));
     assert_eq!((lunch["unread"].clone(), lunch["hasAttachment"].clone()), (json!(true), json!(true)));
     assert_eq!(lunch["date"], crate::model::iso8601(crate::model::date_from_unix((BASE_MS + 60_000) as f64 / 1000.0)));
