@@ -44,6 +44,8 @@ impl FontKey {
 struct LoadedFontKey {
     database_id: cosmic_text::fontdb::ID,
     font: FontKey,
+    /// Mailstream patch (MS-205): a variable face is loaded once per weight asked of it.
+    weight: Weight,
 }
 
 struct CosmicTextSystemState {
@@ -209,7 +211,10 @@ impl PlatformTextSystem for CosmicTextSystem {
 
         let ix = find_best_match(font, candidates, &state)?;
 
-        Ok(candidates[ix])
+        // Mailstream patch (MS-205): a variable face matched for another weight is loaded at
+        // the requested one, so Noto Sans's single variable file draws bold as bold.
+        let font_id = candidates[ix];
+        state.at_requested_weight(font_id, &key, Weight(font.weight.0.round() as u16))
     }
 
     fn prewarm_fonts(&self, font_ids: &[FontId]) {
@@ -307,7 +312,9 @@ impl CosmicTextSystemState {
             primary_family_name: first_family.0.clone().into(),
             stretch: face.stretch,
             style: face.style,
-            weight: face.weight,
+            // Mailstream patch (MS-205): the weight this `FontId` was loaded at, which for a
+            // variable face is the requested one, not the default instance's.
+            weight: loaded_font.weight,
             features: loaded_font.features.clone(),
             fallback_chain: Arc::clone(&loaded_font.user_fallback_chain),
         })
@@ -404,6 +411,7 @@ impl CosmicTextSystemState {
             let key = LoadedFontKey {
                 database_id,
                 font: loaded_font_key.clone(),
+                weight,
             };
             if let Some(&font_id) = self.loaded_font_ids_by_key.get(&key) {
                 self.loaded_fonts[font_id.0].user_fallback_chain = Arc::clone(&user_fallback_chain);
@@ -451,6 +459,58 @@ impl CosmicTextSystemState {
         }
 
         Ok(loaded_font_ids)
+    }
+
+    /// Mailstream patch (MS-205): `font_id` at `weight` when its face is variable along `wght`
+    /// (one face, every weight), as its own `FontId` keeping the family's features and
+    /// fallbacks; any other face as it is.
+    fn at_requested_weight(
+        &mut self,
+        font_id: FontId,
+        key: &FontKey,
+        weight: Weight,
+    ) -> Result<FontId> {
+        let loaded_font = &self.loaded_fonts[font_id.0];
+        let font_ref = loaded_font.font.as_swash();
+        let Some(axis) = font_ref
+            .variations()
+            .find_by_tag(swash::Tag::from_be_bytes(*b"wght"))
+        else {
+            return Ok(font_id);
+        };
+        let weight = Weight(
+            f32::from(weight.0).clamp(axis.min_value(), axis.max_value()).round() as u16,
+        );
+        if weight == loaded_font.weight {
+            return Ok(font_id);
+        }
+        let database_id = loaded_font.font.id();
+        let features = loaded_font.features.clone();
+        let is_known_emoji_font = loaded_font.is_known_emoji_font;
+        let user_fallback_chain = Arc::clone(&loaded_font.user_fallback_chain);
+        let key = LoadedFontKey {
+            database_id,
+            font: key.clone(),
+            weight,
+        };
+        if let Some(&weighted_id) = self.loaded_font_ids_by_key.get(&key) {
+            self.loaded_fonts[weighted_id.0].user_fallback_chain = user_fallback_chain;
+            return Ok(weighted_id);
+        }
+        let font = self
+            .font_system
+            .get_font(database_id, weight)
+            .context("Could not load font")?;
+        let weighted_id = FontId(self.loaded_fonts.len());
+        self.loaded_fonts.push(LoadedFont {
+            font,
+            features,
+            is_known_emoji_font,
+            user_fallback_chain,
+            weight,
+        });
+        self.loaded_font_ids_by_key.insert(key, weighted_id);
+        Ok(weighted_id)
     }
 
     fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {

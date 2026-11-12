@@ -527,7 +527,7 @@ fn write_chat(cache: &MailCache) {
     let group = "spaces/design-team";
     let log = [
         (1, 75., "Morning! Mockups for the new reader are in the Figma file."),
-        (2, 72., "Looks great. Can we try the *larger* avatars?"),
+        (2, 72., "Looks great. Can we try the **larger** avatars, *maybe* 48 px?"),
         (0, 70., "Agreed, and the quote fold could be lighter."),
         (3, 64., "I'll update the tokens: <https://example.com/tokens|design tokens>"),
         (1, 12., "Updated. Review at 3?"),
