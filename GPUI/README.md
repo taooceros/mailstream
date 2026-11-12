@@ -42,6 +42,22 @@ Linux differs from the Mac in:
 - Engine events reach the window through `Mailstream::subscribe_any_thread`: `subscribe` posts
   to GLib's main loop there, which GPUI doesn't run.
 
+On the Mac `Mailstream GPUI.app` updates itself as Mailstream Flutter does (MS-219; the
+Application updates section of `Flutter/README.md` has the details both share). `scripts/gpui-bundle.sh`
+bundles the release binary with the Apple Intelligence tagger, Sparkle 2.10.1 (fetched once into
+`build/` and checked against its pinned SHA-256) and an Info.plist naming the feed
+`https://github.com/taooceros/mailstream/releases/download/updates/appcast-gpui.xml`, the
+approved public key and the `prerelease` channel; `src/updater.rs` loads Sparkle at launch and adds
+**Check for Updates…** and **Automatically Check for Updates** to the application menu. It checks
+hourly, downloads and verifies in the background, and installs on quit. Outside a bundle (`run.sh`,
+`cargo run`) there is no updater. Every push to `main` touching GPUI or the engine runs
+`.github/workflows/publish-gpui-update.yml`: build, `gpui-bundle.sh` with the next build number
+(`scripts/publish-update.py next-version gpui`), sign, `prepare-update.py`, then publish its own
+feed and `Mailstream-GPUI-N.zip` archives in the shared `updates` release. A local
+`scripts/install.sh gpui` builds number 1, so the next published build replaces it. Like
+Flutter's, the bundle carries no OAuth clients or push settings: the engine reads them from
+`config.json` in the support directory, which `install.sh` writes.
+
 | Path | Role |
 | --- | --- |
 | `run.sh` | Builds the app with the engine; on macOS signs it and checks the signature; starts it |
@@ -62,6 +78,7 @@ Linux differs from the Mac in:
 | `src/icons.rs`, `src/format.rs` | Material Symbols glyphs; dates and sizes |
 | `src/input.rs`, `src/textarea.rs` | Single-line field (IME, selection, clipboard) adapted from gpui's input example, and the multi-line editor for bodies |
 | `src/bench.rs` | The frame measurement `scripts/bench.sh gpui` runs (`MAILSTREAM_BENCH=scroll`): the list scrolls itself and every frame's start and render-to-paint time is logged |
+| `src/updater.rs` | Mac only: starts Sparkle from the bundle's Frameworks and adds the two update items to the application menu |
 
 Keys (⌘ is Ctrl on Linux): ↑/↓ or J/K move (in the reader they page through conversations),
 Return or Space opens, Esc or ⌘[ goes back, E or ⌃⌘A archives, ⌫ trashes, S or ⇧⌘L stars, U or

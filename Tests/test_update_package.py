@@ -26,6 +26,12 @@ class UpdatePackageTests(unittest.TestCase):
 
     def test_production_configuration(self):
         self.assertEqual(package.validate_info(self.info), "2")
+        gpui = dict(self.info, CFBundleIdentifier="dev.mailstream.MailstreamGPUI",
+                    SUFeedURL=package.FEED_ROOT + "appcast-gpui.xml")
+        self.assertEqual(package.validate_info(gpui), "2")
+        # Each app only accepts its own feed.
+        with self.assertRaises(ValueError):
+            package.validate_info(dict(gpui, SUFeedURL=package.FEED_ROOT + "appcast.xml"))
 
     def test_unconfigured_or_insecure_channel_is_rejected(self):
         for key, value in [("SUPublicEDKey", ""), ("SUPublicEDKey", "not a key"),
@@ -35,7 +41,8 @@ class UpdatePackageTests(unittest.TestCase):
                            ("MSUpdateChannel", "unknown"),
                            ("SUFeedURL", "http://example.com/feed.xml"),
                            ("SUFeedURL", package.FEED_ROOT.replace("updates", "nightly") + "appcast.xml"),
-                           ("CFBundleIdentifier", "dev.mailstream.MailstreamGPUI"),
+                           ("SUFeedURL", package.FEED_ROOT + "appcast-gpui.xml"),
+                           ("CFBundleIdentifier", "dev.mailstream.Mailstream"),
                            ("CFBundleVersion", "revision-sha")]:
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 package.validate_info(self.info | {key: value})
@@ -104,9 +111,14 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(publish.published_versions(self.FEED), ["7"])
 
     def test_keeps_newest_archives_only(self):
+        flutter, gpui = publish.PRODUCTS["flutter"], publish.PRODUCTS["gpui"]
         names = ["appcast.xml"] + [f"Mailstream-Flutter-{n}.zip" for n in (4, 10, 9, 5, 7, 8, 6)]
-        self.assertEqual(publish.stale_archives(names, 5), ["Mailstream-Flutter-4.zip", "Mailstream-Flutter-5.zip"])
-        self.assertEqual(publish.stale_archives(names[:3], 5), [])
+        self.assertEqual(publish.stale_archives(names, 5, flutter), ["Mailstream-Flutter-4.zip", "Mailstream-Flutter-5.zip"])
+        self.assertEqual(publish.stale_archives(names[:3], 5, flutter), [])
+        # Each app prunes only its own archives.
+        mixed = names + [f"Mailstream-GPUI-{n}.zip" for n in (2, 3)]
+        self.assertEqual(publish.stale_archives(mixed, 1, gpui), ["Mailstream-GPUI-2.zip"])
+        self.assertNotIn("Mailstream-GPUI-2.zip", publish.stale_archives(mixed, 5, flutter))
 
 
 if __name__ == "__main__":

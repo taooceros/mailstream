@@ -76,7 +76,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          build=$(python3 scripts/publish-update.py next-version)
+          build=$(python3 scripts/publish-update.py next-version flutter)
           echo "BUILD_NUMBER=$build" >> "$GITHUB_ENV"
       - name: Build release
         run: |

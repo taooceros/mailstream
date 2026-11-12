@@ -187,7 +187,7 @@ environment, which admits `main` only and holds `MAILSTREAM_SIGNING_P12`,
    canonical feed is
    `https://github.com/taooceros/mailstream/releases/download/updates/appcast.xml`;
    its xcconfig spelling escapes `//` as `/$()/` so it is not parsed as a comment.
-2. `python3 scripts/publish-update.py next-version` picks the build number: one past both the
+2. `python3 scripts/publish-update.py next-version flutter` picks the build number: one past both the
    newest published build and `pubspec.yaml`'s (what `scripts/install.sh` builds locally).
    Sparkle compares `CFBundleVersion`, not a commit SHA, so every update gets a larger one
    and a local install is replaced by the next published build.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare (never publish) a Sparkle update from an already signed Flutter app."""
+"""Prepare (never publish) a Sparkle update from an already signed Flutter or GPUI app."""
 import argparse
 import base64
 import hashlib
@@ -16,6 +16,12 @@ FEED_ROOT = "https://github.com/taooceros/mailstream/releases/download/updates/"
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 TEAM = "K7HG6KZNNP"
 IDENTIFIER = "dev.mailstream.Mailstream"
+# Each app published in the `updates` release, by bundle identifier: its archives' name and its
+# own feed (scripts/publish-update.py takes the same table).
+PRODUCTS = {
+    "dev.mailstream.MailstreamFlutter": ("Mailstream-Flutter", "appcast.xml"),
+    "dev.mailstream.MailstreamGPUI": ("Mailstream-GPUI", "appcast-gpui.xml"),
+}
 
 
 def run(*args):
@@ -30,8 +36,11 @@ def validate_info(info):
         valid_key = False
     if not valid_key:
         raise ValueError("app needs a real SUPublicEDKey; no signing keys are created by this tool")
-    if info.get("SUFeedURL") != FEED_ROOT + "appcast.xml":
-        raise ValueError("app must use the separate Mailstream updates feed, never ad-hoc nightly")
+    product = PRODUCTS.get(info.get("CFBundleIdentifier"))
+    if product is None:
+        raise ValueError("only the Flutter and GPUI apps are distributed by this channel")
+    if info.get("SUFeedURL") != FEED_ROOT + product[1]:
+        raise ValueError("app must use its own feed in the Mailstream updates release, never ad-hoc nightly")
     if info.get("SUVerifyUpdateBeforeExtraction") is not True:
         raise ValueError("archive verification before extraction is required")
     if info.get("SURequireSignedFeed") is not True or info.get("SUSignedFeedFailureExpirationInterval") != 0:
@@ -41,8 +50,6 @@ def validate_info(info):
     version = info.get("CFBundleVersion", "")
     if not re.fullmatch(r"[1-9][0-9]{0,3}(?:\.[0-9]{1,2}){0,2}", version):
         raise ValueError("CFBundleVersion must be incremented for every release (up to 4.2.2 digits)")
-    if info.get("CFBundleIdentifier") != "dev.mailstream.MailstreamFlutter":
-        raise ValueError("only the Flutter app is distributed by this channel")
     return version
 
 
@@ -69,6 +76,7 @@ def validate_feed(feed, archive, version, channel):
 def prepare(app, output, tools, key_file):
     info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
     version = validate_info(info)
+    prefix, feed_name = PRODUCTS[info["CFBundleIdentifier"]]
     run("codesign", "--verify", "--deep", "--strict", str(app))
     signature = subprocess.run(["codesign", "-d", "-v", str(app)],
                                check=True, text=True, capture_output=True).stderr
@@ -81,7 +89,7 @@ def prepare(app, output, tools, key_file):
     try:
         with tempfile.TemporaryDirectory(prefix="mailstream-update-") as staging:
             staging = Path(staging)
-            archive = staging / f"Mailstream-Flutter-{version}.zip"
+            archive = staging / f"{prefix}-{version}.zip"
             run("ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(app), str(archive))
             args = [str(tools / "generate_appcast"), "--maximum-deltas", "0",
                     "--download-url-prefix", FEED_ROOT]
@@ -90,7 +98,8 @@ def prepare(app, output, tools, key_file):
             if key_file:
                 args += ["--ed-key-file", str(key_file)]
             run(*args, str(staging))
-            feed = staging / "appcast.xml"
+            # generate_appcast names the feed after the app's SUFeedURL, which validate_info checked.
+            feed = staging / feed_name
             ed_signature = validate_feed(feed, archive, version, info["MSUpdateChannel"])
             # Verify against the PUBLIC key embedded in the app, not just the signing key.
             run("swift", str(Path(__file__).with_name("verify-update.swift")),
@@ -108,10 +117,10 @@ def prepare(app, output, tools, key_file):
                         "bytes": archive.stat().st_size,
                         "sha256": digest.hexdigest(),
                         "channel": info["MSUpdateChannel"],
-                        "feedURL": FEED_ROOT + "appcast.xml", "published": False}
+                        "feedURL": FEED_ROOT + feed_name, "published": False}
             # Move only the validated final artifacts, never keys, cache, apps or extra files.
             archive.rename(output / archive.name)
-            feed.rename(output / "appcast.xml")
+            feed.rename(output / feed_name)
             (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     except BaseException:
         for child in output.iterdir():

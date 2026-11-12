@@ -51,33 +51,17 @@ for frontend in "$@"; do
       name='Mailstream GPUI'
       executable=mailstream-gpui
       (cd GPUI && cargo build --release)
+      ./scripts/gpui-bundle.sh
       app="build/$name.app"
-      mkdir -p "$app/Contents/MacOS"
-      cp GPUI/target/release/mailstream-gpui "$app/Contents/MacOS/"
-      python3 scripts/apple-tagger.py "$app/Contents/MacOS/mailstream-apple-tagger"
-      cat > "$app/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>CFBundleName</key><string>Mailstream GPUI</string>
-  <key>CFBundleExecutable</key><string>mailstream-gpui</string>
-  <key>CFBundleIdentifier</key><string>dev.mailstream.MailstreamGPUI</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>LSMinimumSystemVersion</key><string>26.0</string>
-  <key>NSHighResolutionCapable</key><true/>
-</dict></plist>
-PLIST
       ;;
   esac
   # An interrupted flutter build can exit 0 and leave a bundle without its executable.
   [ -x "$app/Contents/MacOS/$executable" ] || fail "$app has no executable $executable; build failed"
   # The engine reads OAuth clients and push settings from the host's Info.plist; bundle.sh
-  # already added them to Mailstream.app. Mailstream Flutter reads them from the support
-  # directory's config.json instead, as the public signed updates it installs from CI must.
+  # already added them to Mailstream.app. Mailstream Flutter and GPUI read them from the support
+  # directory's config.json instead, as the public signed updates they install from CI must.
   case "$frontend" in
-    flutter) ./scripts/app-config.sh "$HOME/Library/Application Support/Mailstream/config.json" ;;
-    gpui) ./scripts/app-config.sh "$app/Contents/Info.plist" ;;
+    flutter|gpui) ./scripts/app-config.sh "$HOME/Library/Application Support/Mailstream/config.json" ;;
   esac
   /usr/libexec/PlistBuddy -c "Add :MSInstalledRevision string $revision" "$app/Contents/Info.plist"
   ./scripts/sign.sh "$app"

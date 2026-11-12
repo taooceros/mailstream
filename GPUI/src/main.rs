@@ -17,6 +17,8 @@ mod state;
 mod swipe;
 mod textarea;
 mod ui;
+#[cfg(target_os = "macos")]
+mod updater;
 // HTML bodies: native `WKWebView`s on the Mac, the engine's Blitz pages drawn by GPUI elsewhere.
 #[cfg_attr(not(target_os = "macos"), path = "blitz_body.rs")]
 mod webview;
@@ -48,6 +50,8 @@ fn main() {
         webview::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(menus());
+        #[cfg(target_os = "macos")]
+        updater::start();
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();

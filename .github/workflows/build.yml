@@ -84,6 +84,43 @@ jobs:
       - name: App bundle and disk image
         run: |
           APP="build/dmg/Mailstream GPUI.app"
+          ./scripts/gpui-bundle.sh "$APP"
+          ./scripts/sign.sh "$APP"
+          ln -s /Applications build/dmg/Applications
+          hdiutil create -volname Mailstream -srcfolder build/dmg -fs HFS+ -format UDZO -ov Mailstream.dmg
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Mailstream-${{ github.sha }}
+          path: Mailstream.dmg
+          retention-days: 14
+
+  # The GPUI and Flutter front ends, from the same commit, so the prerelease carries all three apps.
+  gpui:
+    if: github.event_name != 'pull_request'
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            GPUI/target
+          key: gpui-cargo-${{ runner.os }}-${{ hashFiles('GPUI/Cargo.lock', 'FFI/Cargo.toml', 'Engine/Cargo.toml') }}
+          restore-keys: gpui-cargo-${{ runner.os }}-
+
+      - name: GPUI (release)
+        run: cd GPUI && cargo build --release
+
+      # An app bundle: the binary links the engine. Signed ad hoc, like the other two.
+      - name: App bundle and disk image
+        run: |
+          APP="build/dmg/Mailstream GPUI.app"
           mkdir -p "$APP/Contents/MacOS"
           cp GPUI/target/release/mailstream-gpui "$APP/Contents/MacOS/"
           cat > "$APP/Contents/Info.plist" <<'PLIST'
