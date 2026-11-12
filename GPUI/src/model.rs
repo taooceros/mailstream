@@ -384,8 +384,10 @@ pub struct Message {
     pub cc: Vec<Address>,
     pub date: Option<DateTime<Utc>>,
     pub unread: bool,
+    /// Plain text, or the HTML body as text (the engine derives it when the mail has no plain
+    /// part); `None` when the body could not load.
     pub text: Option<SharedString>,
-    /// The HTML body, when the message has one; the reader shows it in a web view.
+    /// The HTML body, when the message has one; the reader draws it rather than the text.
     pub html: Option<SharedString>,
     pub truncated: bool,
     pub attachments: Vec<Attachment>,
@@ -467,6 +469,14 @@ impl Message {
         self.recipients = recipients.into();
     }
 
+    /// The HTML body the reader draws instead of the text: whenever the message has one, in the
+    /// message cards and the chat log alike (MS-244). The text is no sign of a plain mail: the
+    /// engine derives it from the HTML when the mail has no plain part, and GitHub's
+    /// notifications carry both.
+    pub fn html_body(&self) -> Option<&SharedString> {
+        self.html.as_ref().filter(|html| !html.trim().is_empty())
+    }
+
     pub fn sender(&self) -> Address {
         self.from.first().cloned().unwrap_or(Address { name: None, email: "(unknown)".into() })
     }
@@ -516,6 +526,39 @@ impl Message {
             header.push(format!("Cc: {}", list(&self.cc)));
         }
         format!("{}\n\n{}", header.join("\n"), self.text.as_ref().map_or("", |text| text.as_ref()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A message as the engine's `show` gives it.
+    fn shown(text: &str, html: Option<&str>) -> Message {
+        let message: mailstream::Message = serde_json::from_value(serde_json::json!({
+            "id": "m1", "mailbox": "INBOX", "role": "inbox", "from": ["Jack251970 <notifications@github.com>"],
+            "to": ["Flow-Launcher/Flow.Launcher <Flow.Launcher@noreply.github.com>"], "date": "2026-11-12T09:04:00Z",
+            "subject": "Re: [Flow-Launcher/Flow.Launcher] new issue (Issue #4754)", "unread": true, "starred": false,
+            "text": text, "html": html,
+        }))
+        .unwrap();
+        let mut message = Message::from(message);
+        message.prepare(Local::now());
+        message
+    }
+
+    #[test]
+    fn github_notifications_show_their_html() {
+        let html = "<p></p>\n<b>Aarush-githubuser</b> created an issue <a href=\"https://github.com/Flow-Launcher/Flow.Launcher/issues/4754\">(Flow-Launcher/Flow.Launcher#4754)</a>";
+        // multipart/alternative: GitHub's text part beside its HTML.
+        let both = shown("Aarush-githubuser created an issue (Flow-Launcher/Flow.Launcher#4754)", Some(html));
+        assert_eq!(both.html_body().map(|html| html.as_ref()), Some(html));
+        // HTML only (as Outlook hands it out): the engine's text is the HTML's.
+        let only = shown(" \nAarush-githubuser  created an issue  (Flow-Launcher/Flow.Launcher#4754)", Some(html));
+        assert_eq!(only.html_body().map(|html| html.as_ref()), Some(html));
+        // Plain mail, or an HTML body with nothing in it, reads as text.
+        assert_eq!(shown("Lunch at noon?", None).html_body(), None);
+        assert_eq!(shown("Lunch at noon?", Some(" \n")).html_body(), None);
     }
 }
 

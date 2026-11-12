@@ -190,8 +190,8 @@ impl MailApp {
             div().px(px(space::S16)).pb(px(space::S12)).child(self.render_invitation(message, invitation, p, cx))
         });
         card.children(invitation)
-            .children(self.render_body(message, false, p, cx).map(|body| inset().child(body)))
-            .when(message.truncated && message.html.is_none(), |d| {
+            .children(self.render_body(message, p, cx).map(|body| inset().child(body)))
+            .when(message.truncated && message.html_body().is_none(), |d| {
                 d.child(
                     inset()
                         .text_size(px(text::FOOTNOTE))
@@ -206,12 +206,10 @@ impl MailApp {
             .into_any_element()
     }
 
-    /// A message's body: its HTML (in a chat log, only when it has no text), else its text; either
+    /// A message's body: its HTML when it has one (`Message::html_body`), else its text; either
     /// way with its quoted history folded.
-    fn render_body(&self, message: &Message, chat: bool, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let html = message.html.as_ref().filter(|html| !html.trim().is_empty());
-        let has_text = message.text.as_ref().is_some_and(|text| !text.trim().is_empty());
-        if let Some(html) = html.filter(|_| !(chat && has_text)) {
+    fn render_body(&self, message: &Message, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if let Some(html) = message.html_body() {
             return Some(self.render_html(message, html.clone(), p, cx));
         }
         message.text.as_ref()?;
@@ -375,7 +373,7 @@ impl MailApp {
             .children(message.invitation.as_ref().map(|invitation| {
                 div().pb(px(space::S8)).child(self.render_invitation(message, invitation, p, cx))
             }))
-            .children(self.render_body(message, true, p, cx))
+            .children(self.render_body(message, p, cx))
             .when(!message.attachments.is_empty(), |d| d.child(div().pt(px(space::S8)).child(attachments(message, p))));
         let actions = raised_capsule(p)
             .flex()
