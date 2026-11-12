@@ -131,16 +131,6 @@ def install(frontend, built, revision, ld_library_path, shell):
             f'export LD_LIBRARY_PATH="{ld_library_path}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"\n'
             f'exec "{executable}" "$@"\n')
         launcher.chmod(0o755)
-    else:
-        # The build hook records libmailstream.so's absolute path in the checkout; the bundle has
-        # its own copy in lib/.
-        assets = staging / "lib/native_assets.json"
-        if assets.exists():
-            text = assets.read_text()
-            start = text.find('"absolute","') + len('"absolute","')
-            end = text.find('"', start)
-            if start >= len('"absolute","') and end > start:
-                assets.write_text(text[:start] + str(folder / "lib/libmailstream.so") + text[end:])
     stop(executable)
     PREVIOUS.mkdir(parents=True, exist_ok=True)
     previous = PREVIOUS / f"previous-{folder.name}"
