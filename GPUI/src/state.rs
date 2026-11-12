@@ -3,9 +3,11 @@
 //! back when the engine refuses them. Rendering is in `ui`.
 
 mod actions;
+mod invitations;
 mod nav;
 
 pub use actions::Removal;
+pub use invitations::InvitationCard;
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -347,6 +349,8 @@ pub struct MailApp {
     pub unfolded: HashSet<SharedString>,
     /// Messages whose quoted history the user opened.
     pub quotes_open: HashSet<SharedString>,
+    /// Meeting invitations' cards, by message.
+    pub invitations: HashMap<SharedString, InvitationCard>,
     /// The open conversation stays scrolled to its end (its latest message) while bodies load and
     /// grow, until the reader scrolls it or opens a fold (Flutter's `EndPin`, MS-70).
     pub reader_pinned: bool,
@@ -425,6 +429,7 @@ impl MailApp {
             threads: HashMap::new(),
             unfolded: HashSet::new(),
             quotes_open: HashSet::new(),
+            invitations: HashMap::new(),
             reader_pinned: false,
             hovered_message: None,
             thread_requests: 0,
@@ -502,6 +507,9 @@ impl MailApp {
                     let (chat, messages) = (batch.contains(&Event::Chat), batch.contains(&Event::ChatMessages));
                     if chat || messages {
                         this.chat.update(cx, |pane, cx| pane.follow_engine(chat, messages, cx));
+                    }
+                    if batch.contains(&Event::Calendar) {
+                        this.calendar_changed(cx);
                     }
                     let mailboxes = batch.iter().any(|e| matches!(e, Event::Accounts | Event::Mailboxes));
                     if mailboxes {
@@ -815,10 +823,18 @@ impl MailApp {
             },
             move |this, result, cx| {
                 let Some(thread) = this.threads.get_mut(&id).filter(|thread| thread.request == request) else { return };
+                let mut loaded = None;
                 match result {
-                    Ok(messages) => thread.state = ThreadState::Loaded(messages.into()),
+                    Ok(messages) => {
+                        let messages: Rc<[Message]> = messages.into();
+                        thread.state = ThreadState::Loaded(messages.clone());
+                        loaded = Some(messages);
+                    }
                     Err(_) if matches!(thread.state, ThreadState::Loaded(_)) => {}
                     Err(error) => thread.state = ThreadState::Failed(error.to_string().into()),
+                }
+                if let Some(messages) = loaded {
+                    this.read_invitations(&id, &messages, cx);
                 }
                 if this.forward_pending.as_ref() == Some(&id) {
                     this.forward_pending = None;

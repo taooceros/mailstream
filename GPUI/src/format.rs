@@ -71,6 +71,30 @@ pub fn day_divider(date: DateTime<Local>, now: DateTime<Local>) -> String {
     }
 }
 
+/// When a meeting is, as an invitation's card says it (Flutter's `InvitationCard._when`): its day
+/// and times, or the days of an all-day one. `start` and `end` are RFC 3339; `days` are an
+/// all-day meeting's first day and the day after its last (`2026-11-08`).
+pub fn meeting_when(all_day: bool, days: (Option<&str>, Option<&str>), start: &str, end: &str, now: DateTime<Local>) -> String {
+    let day = |date: NaiveDate| {
+        date.format(if date.year() == now.year() { "%A, %B %-d" } else { "%A, %B %-d, %Y" }).to_string()
+    };
+    if all_day
+        && let (Some(first), Some(after)) = days
+        && let (Ok(first), Ok(after)) = (first.parse::<NaiveDate>(), after.parse::<NaiveDate>())
+    {
+        let last = after.pred_opt().unwrap_or(after);
+        return if last <= first { format!("{} · All day", day(first)) } else { format!("{} – {}", day(first), day(last)) };
+    }
+    let parse = |date: &str| DateTime::parse_from_rfc3339(date).ok().map(|date| date.with_timezone(&Local));
+    let (Some(start), Some(end)) = (parse(start), parse(end)) else { return String::new() };
+    let time = |date: DateTime<Local>| date.format("%-I:%M %p").to_string();
+    if start.date_naive() == end.date_naive() {
+        format!("{} · {} – {}", day(start.date_naive()), time(start), time(end))
+    } else {
+        format!("{}, {} – {}, {}", day(start.date_naive()), time(start), day(end.date_naive()), time(end))
+    }
+}
+
 const REPLY_PREFIXES: [&str; 11] = ["re", "fwd", "fw", "aw", "wg", "sv", "vs", "antw", "回复", "答复", "转发"];
 
 /// The length of a reply or forward prefix (`Re:`, `Fwd[2]:`, `回复：`) at the start of `s`.
@@ -222,6 +246,27 @@ mod tests {
         assert_eq!(split_subject("[only]"), (String::new(), "[only]".into()));
         assert_eq!(split_subject("Reply all"), (String::new(), "Reply all".into()));
         assert_eq!(split_subject("  "), (String::new(), "(no subject)".into()));
+    }
+
+    #[test]
+    fn meetings_read_as_their_day_and_times() {
+        use chrono::TimeZone;
+        let now = Local.with_ymd_and_hms(2026, 11, 11, 9, 0, 0).unwrap();
+        let days = (Some("2026-11-20"), Some("2026-11-21"));
+        assert_eq!(meeting_when(true, days, "", "", now), "Friday, November 20 · All day");
+        let days = (Some("2026-11-20"), Some("2026-11-23"));
+        assert_eq!(meeting_when(true, days, "", "", now), "Friday, November 20 – Sunday, November 22");
+        let at = |day, hour| Local.with_ymd_and_hms(2026, 11, day, hour, 0, 0).unwrap().to_rfc3339();
+        assert_eq!(meeting_when(false, (None, None), &at(13, 15), &at(13, 16), now), "Friday, November 13 · 3:00 PM – 4:00 PM");
+        assert_eq!(
+            meeting_when(false, (None, None), &at(13, 22), &at(14, 1), now),
+            "Friday, November 13, 10:00 PM – Saturday, November 14, 1:00 AM"
+        );
+        let last_year = Local.with_ymd_and_hms(2025, 1, 1, 9, 0, 0).unwrap();
+        assert_eq!(
+            meeting_when(false, (None, None), &at(13, 15), &at(13, 16), last_year),
+            "Friday, November 13, 2026 · 3:00 PM – 4:00 PM"
+        );
     }
 
     #[test]

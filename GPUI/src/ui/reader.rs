@@ -186,7 +186,11 @@ impl MailApp {
             return card.into_any_element();
         }
         let inset = || div().px(px(space::S16)).pb(px(space::S16));
-        card.children(self.render_body(message, false, p, cx).map(|body| inset().child(body)))
+        let invitation = message.invitation.as_ref().map(|invitation| {
+            div().px(px(space::S16)).pb(px(space::S12)).child(self.render_invitation(message, invitation, p, cx))
+        });
+        card.children(invitation)
+            .children(self.render_body(message, false, p, cx).map(|body| inset().child(body)))
             .when(message.truncated && message.html.is_none(), |d| {
                 d.child(
                     inset()
@@ -363,6 +367,9 @@ impl MailApp {
                     .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(message.time.clone())),
             )
             .children(message.error.as_ref().map(|error| notice(Tone::Error, None, error.clone(), false, p)))
+            .children(message.invitation.as_ref().map(|invitation| {
+                div().pb(px(space::S8)).child(self.render_invitation(message, invitation, p, cx))
+            }))
             .children(self.render_body(message, true, p, cx))
             .when(!message.attachments.is_empty(), |d| d.child(div().pt(px(space::S8)).child(attachments(message, p))));
         let actions = raised_capsule(p)

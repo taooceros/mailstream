@@ -5,6 +5,7 @@
 //! within the list's island. The list stays mounted under its layers, so a back swipe uncovers
 //! the live list.
 
+mod invitation;
 mod list;
 mod menu;
 mod reader;

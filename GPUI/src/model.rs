@@ -388,6 +388,8 @@ pub struct Message {
     pub truncated: bool,
     pub attachments: Vec<Attachment>,
     pub error: Option<SharedString>,
+    /// The meeting invitation it carries; the reader's card asks the calendar about it.
+    pub invitation: Option<mailstream::MeetingInvitation>,
 
     pub when: SharedString,
     /// The first line of the body, for a folded message.
@@ -424,6 +426,7 @@ impl From<mailstream::Message> for Message {
                 })
                 .collect(),
             error: m.error.map(Into::into),
+            invitation: m.invitation,
             when: SharedString::default(),
             preview: SharedString::default(),
             recipients: SharedString::default(),
