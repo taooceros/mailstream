@@ -15,3 +15,7 @@ Flutter/.dart_tool/
 .devenv.flake.nix
 devenv.local.nix
 .direnv/
+
+# Python bytecode caches (scripts/ run with python3; MS-222)
+__pycache__/
+*.pyc
