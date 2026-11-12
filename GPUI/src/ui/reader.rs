@@ -4,7 +4,7 @@
 //! of its first unread message, else its last, held there while bodies load until it is scrolled
 //! (MS-70, MS-255). The toolbar above shows how far it is scrolled (`ReaderTop`).
 
-use gpui::{Hsla, ObjectFit, Rgba, ScrollDelta, StyledImage, img, point};
+use gpui::{FocusHandle, Hsla, ObjectFit, Rgba, ScrollDelta, StyledImage, img, point};
 
 use super::*;
 use crate::controls::tooltip;
@@ -413,11 +413,11 @@ impl MailApp {
             }
             return div().flex().flex_col().child(body).child(self.render_fold(&id, open, div(), p, cx)).into_any_element();
         }
-        let main = blitz_html(id.clone(), html.clone(), blitz_body::HtmlPart::Main, p);
+        let main = blitz_html(id.clone(), html.clone(), blitz_body::HtmlPart::Main, p, &self.focus);
         if blitz_body::quoted(&id) != Some(true) {
             return main;
         }
-        let quoted = blitz_html(format!("{id}#quoted").into(), html, blitz_body::HtmlPart::Quoted, p);
+        let quoted = blitz_html(format!("{id}#quoted").into(), html, blitz_body::HtmlPart::Quoted, p, &self.focus);
         div().flex().flex_col().child(main).child(self.render_fold(&id, open, quoted, p, cx)).into_any_element()
     }
 
@@ -655,13 +655,21 @@ fn text_runs(runs: &[format::Run], p: &'static Palette) -> Div {
 /// is laid out. The mail sits on the reader's surface, its colours moved to it in dark mode
 /// (MS-267); mail that can't move is drawn on paper, which dark mode shows as a sheet with room
 /// around the mail and rounded corners, so it never meets the dark surface edge to edge (MS-256).
-fn blitz_html(key: SharedString, html: SharedString, part: blitz_body::HtmlPart, p: &Palette) -> AnyElement {
+/// A press in it gives the window's `focus` the keys (`blitz_body::paint`).
+fn blitz_html(
+    key: SharedString,
+    html: SharedString,
+    part: blitz_body::HtmlPart,
+    p: &Palette,
+    focus: &FocusHandle,
+) -> AnyElement {
     let height = blitz_body::height(&key).unwrap_or(40.);
     let paper = p.dark && blitz_body::paper(&key);
     let theme = html_theme(p);
+    let focus = focus.clone();
     let body = canvas(
         |bounds, window, _| blitz_body::prepaint(bounds, window),
-        move |bounds, hitbox, window, cx| blitz_body::paint(&key, &html, part, theme, bounds, hitbox, window, cx),
+        move |bounds, hitbox, window, cx| blitz_body::paint(&key, &html, part, theme, bounds, hitbox, &focus, window, cx),
     );
     let body = body.w_full().h(px(height)).into_any_element();
     if !paper {

@@ -50,8 +50,10 @@ subscribe to the kit's `InputEvent::Change` and `PressEnter`; Esc reaches them a
 `Escape` action, caught with `on_action` on an element around the field. The fields' key context
 is `Input`: single-key bindings say `!Input`, and keys a draft takes inside its fields (Tab, ⌘↩)
 are bound in `Compose > Input` / `ReplyBox > Input` after the kit's own bindings, which they then
-beat. Placeholders take the kit's `muted_foreground` (MS-200's `muted`), and a right click in a
-field opens the kit's Cut / Copy / Paste / Select All menu.
+beat. A binding with no context ranks as deep as the focused element, so one bound after the kit's
+takes a field's keys from it: ⌘C on a mail body is bound in `Mail && !Input`, and a press in a
+body takes focus from a field (MS-231). Placeholders take the kit's `muted_foreground` (MS-200's
+`muted`), and a right click in a field opens the kit's Cut / Copy / Paste / Select All menu.
 
 Always start it through `run.sh`. On macOS the engine reads the sign-ins from the Keychain item
 that macOS pins to Mailstream's signature (identifier `dev.mailstream.Mailstream`, the Apple

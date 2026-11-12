@@ -42,6 +42,10 @@ Everything in it is separate from the user's session:
   pointer (zwlr_virtual_pointer_v1, X Y in logical pixels of VHYPR-1, origin top left), `type`
   and `key` through wtype (virtual keyboard; any Unicode text). A COMBO is an xkb key name
   with optional modifiers: `Return`, `ctrl+k`, `ctrl+shift+Tab`, `alt+Left`, `super+q`.
+- The desktop has a clipboard of its own: `key NAME ctrl+c` and `ctrl+v` copy to it and paste
+  from it as a keyboard does (GTK and GPUI checked, MS-231). Read or set it with wl-paste and
+  wl-copy given the desktop's WAYLAND_DISPLAY (`env NAME`): `WAYLAND_DISPLAY=wayland-N wl-paste`.
+  Never a bare wl-paste or wl-copy: those reach the user's clipboard.
 - `shot` saves a PNG of the whole output, or of the window whose class is CLASS (grim).
   Windows tile with no gaps, borders or rounding; one window fills the output.
 - Window blur (Hyprland's `decoration:blur`) is off unless `--blur` turns it on, to see a

@@ -7,7 +7,8 @@
 //! is as tall as its page, so the reader scrolls over it as over text. As in Flutter's Blitz reader
 //! (`Flutter/lib/ui/blitz_body.dart`): a click opens the link under it in the browser when the
 //! engine's `is_mail_link` allows (http, https and mailto), a drag selects text and ⌘C (Ctrl+C)
-//! copies it, and late content (a remote image, a web font) lays the page out again. The page
+//! copies it (a press in a body takes keyboard focus from a text field, as in a browser), and late
+//! content (a remote image, a web font) lays the page out again. The page
 //! takes the mail as the engine gave it; the rules every reader shares (quotes, inline images,
 //! style, the mail's colours on the reader's surface) are the engine's (`FFI/src/mail_html.rs`).
 //! Tiles are transparent where the mail paints nothing, so the surface under the body shows; a
@@ -21,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Corners, CursorStyle, DispatchPhase, Hitbox, HitboxBehavior, MouseButton,
+    App, Bounds, ClipboardItem, Corners, CursorStyle, DispatchPhase, FocusHandle, Hitbox, HitboxBehavior, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, SharedString, Window, actions, point,
     px, size,
 };
@@ -36,10 +37,12 @@ const AHEAD: usize = 1;
 
 actions!(mail_body, [CopyBody]);
 
-/// ⌘C (Ctrl+C) copies the selection of a body. Text fields bind it in their own context, which
-/// wins while one has focus.
+/// ⌘C (Ctrl+C) copies the selection of a body while no text field has focus; a focused field's
+/// own Copy (gpui-kit's, in its `Input` context) takes the keys. Without a context this binding
+/// would outrank the field's: GPUI ranks a context-free binding at the focus's own depth, and this
+/// one is bound after gpui-kit's, so Ctrl+C in a field copied nothing (MS-231).
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([gpui::KeyBinding::new(secondary!("c"), CopyBody, None)]);
+    cx.bind_keys([gpui::KeyBinding::new(secondary!("c"), CopyBody, Some("Mail && !Input"))]);
     cx.on_action(|_: &CopyBody, cx| copy_selection(cx));
 }
 
@@ -155,7 +158,8 @@ pub fn prepaint(bounds: Bounds<Pixels>, window: &mut Window) -> Hitbox {
 }
 
 /// Draws `part` of `html` under `key` at `bounds` on the surface `theme` describes, clipped to the
-/// current content mask.
+/// current content mask; a press in it moves keyboard focus to `focus` (the window's, out of any
+/// text field).
 #[allow(clippy::too_many_arguments)]
 pub fn paint(
     key: &SharedString,
@@ -164,6 +168,7 @@ pub fn paint(
     theme: HtmlTheme,
     bounds: Bounds<Pixels>,
     hitbox: Hitbox,
+    focus: &FocusHandle,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -207,7 +212,7 @@ pub fn paint(
     if over_link {
         window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
     }
-    listen(key, bounds, hitbox, window);
+    listen(key, bounds, hitbox, focus.clone(), window);
 }
 
 /// Opens the body's page, which parses on the engine's pages thread.
@@ -393,8 +398,8 @@ fn render_image(tile: HtmlTile) -> Arc<RenderImage> {
     Arc::new(RenderImage::new([image::Frame::new(buffer)]))
 }
 
-/// The pointer: links under it, clicks on them, drags that select.
-fn listen(key: &SharedString, bounds: Bounds<Pixels>, hitbox: Hitbox, window: &mut Window) {
+/// The pointer: links under it, clicks on them, drags that select; a press takes focus.
+fn listen(key: &SharedString, bounds: Bounds<Pixels>, hitbox: Hitbox, focus: FocusHandle, window: &mut Window) {
     let local = move |position: Point<Pixels>| {
         point(f32::from(position.x - bounds.origin.x), f32::from(position.y - bounds.origin.y))
     };
@@ -441,6 +446,8 @@ fn listen(key: &SharedString, bounds: Bounds<Pixels>, hitbox: Hitbox, window: &m
         if phase != DispatchPhase::Bubble || event.button != MouseButton::Left || !down_hitbox.is_hovered(window) {
             return;
         }
+        // Off a text field, so ⌘C reaches the body's `CopyBody` (`bind_keys`).
+        window.focus(&focus, cx);
         let at = local(event.position);
         let cleared = PAGES.with_borrow_mut(|pages| {
             // One selection in the window: a press in any body ends the others'.
@@ -551,4 +558,42 @@ fn copy_selection(cx: &mut App) {
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::component::input::{Input, InputState};
+    use gpui::{
+        AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Styled, TestAppContext,
+        Window, div,
+    };
+
+    /// A text field in the main window's key context, where the search box sits.
+    struct Host(Entity<InputState>);
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().key_context(crate::state::CONTEXT).size_full().child(Input::new(&self.0))
+        }
+    }
+
+    /// ⌘C (Ctrl+C) in a focused text field copies the field's selection: `CopyBody` leaves it the
+    /// keys (MS-231).
+    #[gpui::test]
+    fn copy_in_a_text_field_copies_the_field(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui::init(cx);
+            crate::design::sync_kit_theme(gpui::WindowAppearance::Light, cx);
+            super::bind_keys(cx);
+        });
+        let (host, cx) =
+            cx.add_window_view(|window, cx| Host(cx.new(|cx| InputState::new(window, cx).default_value("in the field"))));
+        let field = host.read_with(cx, |host, _| host.0.clone());
+        field.update_in(cx, |field, window, cx| field.focus(window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes(secondary!("a"));
+        cx.simulate_keystrokes(secondary!("c"));
+        cx.run_until_parked();
+        assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("in the field"));
+    }
 }
