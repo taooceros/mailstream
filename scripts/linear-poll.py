@@ -36,7 +36,7 @@ only, so the same script runs on macOS and Windows.
   {"kind": "comment", "id", "issue", "issueId", "title", "state", "createdAt", "author", "body"}: a
     comment posted on any team issue in the last 7 days, each once, by a workspace member (not an
     app, a guest or a GitHub sync) or by another machine's omp app (one of PEERS, comma-separated
-    app names, default `omp,windows-omp`); title and state are its issue's. The caller routes it
+    app names, default `omp,windows-omp,linux-omp`); title and state are its issue's. The caller routes it
     to the issue's subagent or starts one.
   {"kind": "stale", "id", "identifier", "title", "agent", "claimedAt"}: an In Progress issue labelled
     `claimed` whose owner, the agent named in its latest start comment
@@ -49,12 +49,13 @@ only, so the same script runs on macOS and Windows.
 Machines: the poller covers the teams in TEAMS (comma-separated ids, default Mailstream `MS` and
 `WIN`). Issues of a team in HOST_TEAMS (comma-separated `KEY=host`, default `WIN=windows`) belong
 to that host's poller whatever their labels; in other teams, issues labelled with one of
-HOST_LABELS (comma-separated, default `windows`) belong to the poller started with that
-HOST_LABEL; every other issue to the poller without one (the Mac).
+HOST_LABELS (comma-separated, default `windows,linux`) belong to the poller started with that
+HOST_LABEL (Windows with `windows`, Linux with `linux`); every other issue to the poller without
+one (the Mac).
 Each poller claims, resumes, reports stale and routes comments only for its own issues, except
-that a comment naming a machine's app (`@windows-omp`) goes to that machine alone, whatever the
-issue: that is how the user and the other machine address it. Another machine's app reaches it
-only that way.
+that a comment naming a machine's app (`@windows-omp`, `@linux-omp`) goes to that machine alone,
+whatever the issue: that is how the user and the other machines address it. Another machine's
+app reaches it only that way.
 Token: the Mac reads omp's from the keychain and renews it with RENEW. A machine without
 `security` sets LINEAR_TOKEN_FILE (the OAuth token JSON) and LINEAR_CREDENTIALS (a file with the
 OAuth app's client id on line 1 and secret on line 2); renewal fetches a client_credentials token
@@ -109,8 +110,8 @@ HOST_TEAMS = dict(pair.split("=", 1) for pair in os.environ.get("HOST_TEAMS", "W
 LABEL = os.environ.get("LABEL", "omp")
 CLAIMED = os.environ.get("CLAIMED", "claimed")
 HOST_LABEL = os.environ.get("HOST_LABEL", "")
-HOST_LABELS = os.environ.get("HOST_LABELS", "windows").split(",")
-PEERS = os.environ.get("PEERS", "omp,windows-omp").split(",")
+HOST_LABELS = os.environ.get("HOST_LABELS", "windows,linux").split(",")
+PEERS = os.environ.get("PEERS", "omp,windows-omp,linux-omp").split(",")
 RENEW = Path.home() / ".pi/agent/extensions/linear/renew-omp-token.sh"
 TOKEN_FILE = os.environ.get("LINEAR_TOKEN_FILE", "")
 CREDENTIALS = os.environ.get("LINEAR_CREDENTIALS", "")

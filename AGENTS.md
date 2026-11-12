@@ -63,20 +63,21 @@ Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` 
 
 ## Work tracking: Linear
 
-Team `MS` (the Mailstream app: code in this repo, both machines), split into projects by effort;
+Team `MS` (the Mailstream app: code in this repo, every machine), split into projects by effort;
 issue IDs look like `MS-12`. Team `WIN` holds the Windows machine's own chores (its setup and
 tools, nothing in this repo); every `WIN` issue goes to the Windows poller. Use omp's Linear tools.
 The issue, not the session, is the record other sessions read.
 
-On the Windows machine (`WIN` issues and `MS` issues labelled `windows`) there are no Linear
-tools or keychain. Linear
-is reached as the OAuth app `windows-omp`: its client id (line 1) and secret (line 2) are in
+Three machines poll: the Mac (Linear app `omp`), Windows (`windows-omp`; `WIN` issues and `MS`
+issues labelled `windows`) and Linux (NixOS, `linux-omp`; `MS` issues labelled `linux`).
+On Windows and Linux there are no omp Linear tools or keychain. Linear
+is reached as the machine's OAuth app: its client id (line 1) and secret (line 2) are in
 `~/.config/linear/credentials`, and the access token in `~/.config/linear/token.json`. Call
 `https://api.linear.app/graphql` with `Authorization: Bearer <access_token>`. On an
 `AUTHENTICATION_ERROR` (tokens last ~30 days) fetch a new one with
 `curl https://api.linear.app/oauth/token -d grant_type=client_credentials -d client_id=… -d
 client_secret=… -d scope=read,write` into `token.json`; `linear-poll.py` does this itself. Never
-print or commit either file. The app can't create labels; ask the user for new ones.
+print or commit either file. The apps can't create labels; ask the user for new ones.
 
 ### Writing
 
@@ -101,6 +102,8 @@ hashes stay as they are.
   to it).
 - File your own issues in Backlog; only the user starts them (moving one to Todo or adding `omp`).
   Problems found outside the current change get their own Backlog issue; don't fix them in passing.
+- An issue filed on Windows or Linux for that machine to do carries its machine label (`windows`,
+  `linux`) from the start, added by the agent that files it.
 
 ### Working an issue
 
@@ -155,9 +158,9 @@ the script re-reads it each pass. The script's header says what it claims and ho
 picks the agent. Each time before it starts the script again, the session runs `python3
 scripts/warm-build.py` in the default checkout ([Building](#building)).
 `python3 scripts/linear-omp.py MS-12` opens one issue in a new Tern tab instead. The scripts are
-Python (standard library only) so both machines run the same ones; on Windows the command is
+Python (standard library only) so every machine runs the same ones; on Windows the command is
 `python`, and the poller also needs `HOST_LABEL=windows LINEAR_TOKEN_FILE=~/.config/linear/token.json
-LINEAR_CREDENTIALS=~/.config/linear/credentials`.
+LINEAR_CREDENTIALS=~/.config/linear/credentials`; on Linux the same with `HOST_LABEL=linux`.
 
 Subagents start from the repo's agent definitions in `.omp/agents`, which carry what every
 hand-out repeats: open a checkout of their own named after their agent id, give tools absolute
@@ -200,12 +203,13 @@ none by then), empties RUNNING_FILE, opens
 ~/.local/state/linear-poll/session.md, then start the poller."` and stops (it does not start
 the script again). The new session reads `session.md`, starts the queued issues and the script.
 
-The Mac (app `omp`) and the Windows machine (app `windows-omp`) talk only through Linear. New
-work for the other machine is an issue (a sub-issue when it serves one) labelled `omp`, plus
-`windows` for Windows (or in team `WIN` when it is a chore on that machine, not repo work): its
-poller claims it whoever created it. A comment naming a machine's app
-reaches that machine alone on any issue, from the user or the other machine; agents write the
-name in backticks (`` `@omp` ``), since Linear rejects an app's @-mention of an app.
+The Mac (app `omp`), the Windows machine (app `windows-omp`) and the Linux machine (app
+`linux-omp`) talk only through Linear. New work for another machine is an issue (a sub-issue
+when it serves one) labelled `omp`, plus `windows` or `linux` (or in team `WIN` when it is a
+chore on the Windows machine, not repo work): its poller claims it whoever created it. A comment
+naming a machine's app reaches that machine alone on any issue, from the user or another
+machine; agents write the name in backticks (`` `@omp` ``), since Linear rejects an app's
+@-mention of an app.
 
 ## Building
 
