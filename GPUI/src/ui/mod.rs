@@ -27,7 +27,7 @@ use crate::avatars;
 use crate::compose::{ComposeColumn, ResizeColumn};
 use crate::controls::{
     Tone, capsule, centered_note, field_frame, hairline, icon_avatar, icon_button, island, list_row, mark_dot, notice,
-    own_presses, pill, raised_capsule, row_layout, section_header, tag, title_bar,
+    own_presses, pill, raised_capsule, row_layout, scrim, section_header, tag, title_bar,
 };
 #[cfg(target_os = "macos")]
 use crate::controls::{segment, segmented};
@@ -268,34 +268,53 @@ impl MailApp {
         let travel = if two_pane && reader_on_top { mail - split_list } else { mail };
         let offset = self.top_offset(travel, window);
         let top = self.layers.len().saturating_sub(1);
+        // What the top layer covers sits back and darkens under it, as the pages' motion says, and
+        // comes forward as it slides off (MS-289); a conversation beside the list covers nothing.
+        let (beneath, dim) = if self.layers.is_empty() || (two_pane && reader_on_top) {
+            (0., 0.)
+        } else {
+            design::motion::page().beneath(1. - offset.abs() / travel.max(1.), travel, p.dark)
+        };
 
         let mut bundles: Vec<AnyElement> = Vec::new();
         let mut reader: Option<(AnyElement, f32)> = None;
         for (index, layer) in self.layers.iter().enumerate() {
-            let shift = if index == top { offset } else { 0. };
+            let shift = if index == top {
+                offset
+            } else if reader_on_top {
+                0.
+            } else {
+                beneath
+            };
             match layer {
-                Layer::Bundle(category) => bundles.push(
-                    div()
-                        .id(ElementId::Name(layer.id()))
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .w_full()
-                        .left(px(shift))
-                        .bg(p.tray)
-                        .rounded_b(px(radius::PANE))
-                        .shadow(p.page_shadow.clone())
-                        // The page keeps the keyboard; clicks never reach the list beneath.
-                        .occlude()
-                        .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer.id(), cx))
-                        .child(self.render_bundle(*category, p, cx))
-                        .into_any_element(),
-                ),
+                Layer::Bundle(category) => {
+                    if index == top && dim > 0. {
+                        bundles.push(scrim(dim, 0.).into_any_element());
+                    }
+                    bundles.push(
+                        div()
+                            .id(ElementId::Name(layer.id()))
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .w_full()
+                            .left(px(shift))
+                            .bg(p.tray)
+                            .rounded_b(px(radius::PANE))
+                            .shadow(p.page_shadow.clone())
+                            // The page keeps the keyboard; clicks never reach the list beneath.
+                            .occlude()
+                            .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer.id(), cx))
+                            .child(self.render_bundle(*category, p, cx))
+                            .into_any_element(),
+                    )
+                }
                 Layer::Reader(conversation) => {
                     reader = Some((self.render_detail(conversation, layer.id(), two_pane, p, window, cx), shift));
                 }
             }
         }
+        let rows_shift = if reader_on_top { 0. } else { beneath };
 
         // Two-finger back swipe: scroll events are seen in the capture phase, before the lists
         // and the reader scroll with them, so a horizontal swipe is never eaten by a scroll view.
@@ -304,7 +323,7 @@ impl MailApp {
         let swipe = swipe::scroll_capture(cx.entity(), Self::feed_swipe).absolute().size_full();
         let (drag_under, drag_over) = swipe::mouse_capture(cx.entity(), Self::feed_drag);
 
-        let list = self.render_list_island(bundles, p, window, cx);
+        let list = self.render_list_island(bundles, rows_shift, p, window, cx);
         let content = div().relative().size_full().child(swipe).child(drag_under.absolute().size_0());
         let content = match reader {
             // Beside the list, which narrows as the conversation slides in from the window's edge;
@@ -348,9 +367,11 @@ impl MailApp {
                             .child(detail),
                     )
             }
-            // Over the list's island.
+            // Over the list's island, which sits back under it.
             Some((detail, shift)) => content
-                .child(list.size_full())
+                .when(beneath != 0., |content| content.overflow_hidden())
+                .child(div().absolute().top_0().bottom_0().w_full().left(px(beneath)).child(list.size_full()))
+                .when(dim > 0., |content| content.child(scrim(dim, radius::PANE)))
                 .child(div().absolute().top_0().bottom_0().w_full().left(px(shift)).child(detail)),
             None => content.child(list.size_full()),
         };
@@ -375,10 +396,12 @@ impl MailApp {
     }
 
     /// The list's island: its title row and search field over the rows, an open bundle sliding
-    /// over the rows on a page of its own.
+    /// over the rows on a page of its own. The rows sit `rows_shift` right of their place (left,
+    /// under a bundle).
     fn render_list_island(
         &self,
         bundles: Vec<AnyElement>,
+        rows_shift: f32,
         p: &'static Palette,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -412,7 +435,7 @@ impl MailApp {
                     .min_h_0()
                     .relative()
                     .overflow_hidden()
-                    .child(self.render_list(p, cx))
+                    .child(div().absolute().top_0().bottom_0().w_full().left(px(rows_shift)).child(self.render_list(p, cx)))
                     .children(bundles),
             )
     }

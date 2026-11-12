@@ -19,7 +19,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     Anchor, AnyElement, AnyView, App, DispatchPhase, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
     MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString, Stateful,
-    Styled, Window, canvas, div, linear_color_stop, linear_gradient, px,
+    Styled, Window, canvas, div, hsla, linear_color_stop, linear_gradient, px,
 };
 
 use crate::design::{
@@ -209,6 +209,12 @@ pub fn island(color: Hsla, p: &Palette) -> Div {
         .border(px(stroke::HAIRLINE))
         .border_color(p.island_rim)
         .shadow(p.island_shadow.clone())
+}
+
+/// The black over what a page covers as it slides (`design::motion::PageMotion::beneath`, MS-289),
+/// `alpha` deep, its corners `corners` round.
+pub fn scrim(alpha: f32, corners: f32) -> Div {
+    div().absolute().top_0().left_0().size_full().rounded(px(corners)).bg(hsla(0., 0., 0., alpha))
 }
 
 /// How far the pointer travels with the button held before a press on a title bar moves the

@@ -27,7 +27,7 @@ use super::{CalendarPane, View};
 use crate::avatars;
 use crate::controls::{
     ButtonKind, ControlSize, capsule, hairline, icon_button, icon_label_button, island, mark_dot, own_presses, pill,
-    popover, title_bar, tooltip,
+    popover, scrim, title_bar, tooltip,
 };
 use crate::design::{self, Palette, calendar as metrics, icon as icon_size, layout, radius, space, text};
 use crate::format;
@@ -148,37 +148,48 @@ impl CalendarPane {
                     icon_label_button("calendar-page-back", Some(Icon::Back), back, ButtonKind::Plain(p.text), ControlSize::Regular, true, p)
                         .debug_selector(|| "calendar-page-back".into())
                         .tooltip(format!("Back to {back} (Esc)"))
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_page(cx))),
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.slide_off(cx))),
                 ),
             )
             .child(div().flex_1())
             .when_some(self.edit_buttons(index, p, cx), |d, buttons| d.child(capsule(p).children(buttons)))
             .when_some(self.link_button(index, p), |d, link| d.child(capsule(p).child(link)));
+        // What the page covers darkens under it and brightens as it slides off (MS-289); the window
+        // beneath stays where it is.
+        let width = self.close_width.get().max(1.);
+        let (_, dim) = design::motion::page().beneath(1. - shift.abs() / width, width, p.dark);
+        let page = div()
+            .id("calendar-page")
+            .debug_selector(|| "calendar-page".into())
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w_full()
+            .left(px(shift))
+            // Nothing under it takes the pointer.
+            .occlude()
+            .on_mouse_down(MouseButton::Left, Self::press_listener(true, cx))
+            .p(px(layout::GAP))
+            .bg(design::window_fill(p))
+            .font_family(design::ui_font())
+            .text_size(px(text::BODY))
+            .text_color(p.text)
+            .children(under)
+            .child(
+                island(p.background, p)
+                    .size_full()
+                    .child(self.render_page_event(index, f32::from(window.viewport_size().width), p, cx))
+                    .child(toolbar),
+            )
+            .children(over);
         Some(
             div()
-                .id("calendar-page")
-                .debug_selector(|| "calendar-page".into())
                 .absolute()
                 .top_0()
-                .bottom_0()
-                .w_full()
-                .left(px(shift))
-                // Nothing under it takes the pointer.
-                .occlude()
-                .on_mouse_down(MouseButton::Left, Self::press_listener(true, cx))
-                .p(px(layout::GAP))
-                .bg(design::window_fill(p))
-                .font_family(design::ui_font())
-                .text_size(px(text::BODY))
-                .text_color(p.text)
-                .children(under)
-                .child(
-                    island(p.background, p)
-                        .size_full()
-                        .child(self.render_page_event(index, f32::from(window.viewport_size().width), p, cx))
-                        .child(toolbar),
-                )
-                .children(over)
+                .left_0()
+                .size_full()
+                .when(dim > 0., |d| d.child(scrim(dim, 0.)))
+                .child(page)
                 .into_any_element(),
         )
     }
@@ -310,7 +321,7 @@ impl CalendarPane {
             .gap(px(space::S8))
             .child(capsule(p).child(
                 icon_button("calendar-close", close_icon, close_tip, true, p.glyph)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_event(cx))),
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.slide_off(cx))),
             ))
             .child(div().flex_1())
             .when_some(self.edit_buttons(index, p, cx), |d, buttons| d.child(capsule(p).children(buttons)))

@@ -311,7 +311,7 @@ impl MailApp {
 
     /// An open bundle: its rows on a page of the tray sliding over the list's.
     pub(super) fn render_bundle(&self, category: Category, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let Some(bundle) = self.open_bundle_members().filter(|b| b.category == category) else {
+        let Some(bundle) = self.bundle_members(category) else {
             return centered_note("Nothing here any more", p).into_any_element();
         };
         let count = bundle.members.len();

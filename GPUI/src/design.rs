@@ -517,13 +517,104 @@ pub mod stroke {
     pub const RIM: f32 = 1.0;
 }
 
-/// Animation durations and the curve.
+/// Animation durations, the curve and the pages' motion.
 pub mod motion {
+    use std::sync::LazyLock;
+
     use super::Duration;
-    /// A page sliding in over the list or beside it, and back out.
+    /// A page sliding in over the list or beside it, and back out, on the house curve.
     pub const ENTER: Duration = Duration::from_millis(400);
     /// The calendar's days paging one page on (← and →).
     pub const PAGE: Duration = Duration::from_millis(180);
+
+    /// A critically damped spring (no overshoot): `response` is its period in seconds, about how
+    /// long a move takes to look finished; a larger one moves more slowly.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Spring {
+        pub response: f32,
+    }
+
+    /// How every page laid over the list moves (MS-289): the reader, a bundle, the calendar's
+    /// event pane and its page, opening, closing and after a drag or swipe is let go.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct PageMotion {
+        pub name: &'static str,
+        /// None: the house curve over `ENTER`, whatever the speed of the release.
+        pub spring: Option<Spring>,
+        /// How far left of its place what lies beneath sits while the page covers it, as a share
+        /// of the page's width (iOS's push: about 0.3); it comes back as the page slides off.
+        pub parallax: f32,
+        /// The black over what lies beneath while the page covers it, light and dark; it lifts
+        /// as the page slides off.
+        pub dim: (f32, f32),
+    }
+
+    /// The motion as it was before MS-289: the house curve over 400 ms.
+    pub const CURVE: PageMotion = PageMotion { name: "current", spring: None, parallax: 0., dim: (0., 0.) };
+    /// A: the spring, starting at the speed of the release.
+    pub const SPRING: PageMotion =
+        PageMotion { name: "A", spring: Some(Spring { response: 0.38 }), parallax: 0., dim: (0., 0.) };
+    /// B: A, and what lies beneath slides in from the left and brightens as the page leaves.
+    pub const LAYERED: PageMotion =
+        PageMotion { name: "B", spring: Some(Spring { response: 0.38 }), parallax: 0.3, dim: (0.1, 0.3) };
+    /// C: a shorter spring.
+    pub const BRISK: PageMotion =
+        PageMotion { name: "C", spring: Some(Spring { response: 0.26 }), parallax: 0., dim: (0., 0.) };
+
+    /// The pages' motion: while the person picks one (MS-289), `MAILSTREAM_MOTION=a|b|c` chooses
+    /// a candidate; otherwise the current one.
+    pub fn page() -> &'static PageMotion {
+        static CHOSEN: LazyLock<PageMotion> =
+            LazyLock::new(|| match std::env::var("MAILSTREAM_MOTION").unwrap_or_default().to_ascii_lowercase().as_str() {
+                "a" => SPRING,
+                "b" => LAYERED,
+                "c" => BRISK,
+                _ => CURVE,
+            });
+        &CHOSEN
+    }
+
+    /// A move this close to its end has arrived (points, points per second).
+    const REST_DISTANCE: f32 = 0.5;
+    const REST_SPEED: f32 = 10.;
+
+    impl PageMotion {
+        /// Where a page moving from `from` to `to`, leaving at `velocity` points per second, is
+        /// `elapsed` seconds on, and whether it has arrived. It never passes `to`: a spring
+        /// thrown hard at it stops there.
+        pub fn at(&self, from: f32, to: f32, velocity: f32, elapsed: f32) -> (f32, bool) {
+            let Some(spring) = self.spring else {
+                let progress = (elapsed / ENTER.as_secs_f32()).min(1.);
+                return (from + (to - from) * super::house_curve(progress), progress >= 1.);
+            };
+            // x(t) = (x0 + (v0 + ω·x0)·t)·e^(−ω·t), the critically damped spring from x0 at v0.
+            let omega = std::f32::consts::TAU / spring.response;
+            let (x0, v0, t) = (from - to, velocity, elapsed.max(0.));
+            let decay = (-omega * t).exp();
+            let x = (x0 + (v0 + omega * x0) * t) * decay;
+            let v = (v0 - omega * (v0 + omega * x0) * t) * decay;
+            let arrived = x * x0 <= 0. || (x.abs() < REST_DISTANCE && v.abs() < REST_SPEED);
+            if arrived { (to, true) } else { (to + x, false) }
+        }
+
+        /// The longest a move takes, from anywhere to anywhere on the window.
+        #[cfg(test)]
+        pub fn longest(&self) -> Duration {
+            match self.spring {
+                // (1 + ωt)·e^(−ωt) falls under 1/2000 (half a point of 1000) by ωt = 10.
+                Some(spring) => Duration::from_secs_f32(10. * spring.response / std::f32::consts::TAU),
+                None => ENTER,
+            }
+        }
+
+        /// What lies beneath a page `covered` (1: the page in its place, 0: off) sits: how far
+        /// left of its place, for a page `width` wide, and the black over it in `dark` or light.
+        pub fn beneath(&self, covered: f32, width: f32, dark: bool) -> (f32, f32) {
+            let covered = covered.clamp(0., 1.);
+            let dim = if dark { self.dim.1 } else { self.dim.0 };
+            (-self.parallax * width * covered, dim * covered)
+        }
+    }
 }
 
 /// The conversation list's rows: Mail's two lines.
@@ -876,6 +967,28 @@ mod tests {
         assert!((house_curve(1.0) - 1.0).abs() < 1e-4);
         // Quick start: most of the move is done in the first third.
         assert!(house_curve(0.33) > 0.8);
+    }
+
+    #[test]
+    fn springs_start_at_the_release_speed_and_settle_without_passing_their_end() {
+        let motion = motion::SPRING;
+        // Released 300 pt in at 1200 pt/s toward a close at 900: the first millisecond moves at
+        // about the release's speed, not the curve's leap.
+        let (early, _) = motion.at(300., 900., 1200., 0.001);
+        assert!((early - 300. - 1.2).abs() < 0.2, "{early}");
+        // Thrown hard back at 0, it stops there rather than crossing to the other side.
+        let mut t = 0.;
+        while t < 1. {
+            let (offset, arrived) = motion.at(200., 0., -6000., t);
+            assert!(offset >= 0., "{offset} at {t}");
+            if arrived {
+                break;
+            }
+            t += 1. / 120.;
+        }
+        // Every spring arrives within about twice its period.
+        let (offset, arrived) = motion::BRISK.at(0., 1000., 0., 2. * 0.26);
+        assert!(arrived && offset == 1000.);
     }
 }
 

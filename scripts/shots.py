@@ -34,6 +34,11 @@ are window points from its top left (a PNG's pixels halved: shots are drawn at 2
                                that provider's requests from now on: answered as usual, never
                                (each times out after the engine's 30 s) or with a 503, for an
                                account that can't connect; `key secondary-shift-n` asks again
+    freeze                     stop the pages' clock: a page opened, closed or let go from now on
+                               stays where it starts (MS-289)
+    film NAME COUNT [FPS]      move that clock on 1/FPS s (default 60) a frame, saving COUNT
+                               frames NAME-000 on: a motion frame by frame, whatever drawing costs
+    thaw                       run the pages' clock in real time again
 
 The window opens at --size (default 1240x800, the app's) with the inbox loaded. Each input lets
 0.6 s pass. Shot first, then click: open `NAME-light.png` to find where things are.

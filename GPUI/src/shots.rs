@@ -33,6 +33,11 @@
 //!                            from now on that provider's requests are answered as usual, never
 //!                            (each times out after the engine's 30 s) or with a 503: an account
 //!                            that can't connect (MS-278); `key secondary-shift-n` asks again
+//! freeze                     stop the pages' clock (`swipe.rs`, MS-289): a page opened, closed
+//!                            or let go from now on stays where it starts, until `film`
+//! film NAME COUNT [FPS]      move the stopped clock on 1/FPS s (default 60) a frame and save
+//!                            COUNT frames, DIR/NAME-000-light.png on, the first where it stands
+//! thaw                       run the pages' clock in real time again
 //! ```
 //!
 //! Every input command then lets `SETTLE` pass. The window opens at `--size` (default 1240×800,
@@ -47,7 +52,7 @@
 //! print dialogs, opening links, drag and drop from outside, the touchpad's momentum.
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use gpui::test::TestWindowExt;
@@ -71,6 +76,14 @@ static APPEARANCE: OnceLock<WindowAppearance> = OnceLock::new();
 /// The appearance the screenshot mode draws, while it runs (`design::palette`).
 pub fn appearance() -> Option<WindowAppearance> {
     APPEARANCE.get().copied()
+}
+
+/// The pages' clock while a script films them (`freeze` to `thaw`); None: real time.
+static FILM: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// The pages' clock while a script films them (`swipe.rs`).
+pub fn film_clock() -> Option<Instant> {
+    *FILM.lock().expect("the film clock")
 }
 
 pub struct Shots {
@@ -251,6 +264,9 @@ enum Command {
     /// The other window (`true`) or the main one.
     Window(bool),
     Provider(mailstream_engine::Provider, mailstream_engine::shots::Outage),
+    Freeze,
+    Film(String, usize, f32),
+    Thaw,
 }
 
 impl Command {
@@ -313,6 +329,12 @@ impl Command {
                     _ => return Err("provider: google or microsoft, then answer, hang or fail".into()),
                 };
                 Command::Provider(provider, outage)
+            }
+            "freeze" => Command::Freeze,
+            "thaw" => Command::Thaw,
+            "film" if !words.is_empty() && !words[0].contains(['/', '\\']) => {
+                let fps = if words.len() > 2 { number(2)? } else { 60. };
+                Command::Film(words[0].into(), number(1)? as usize, fps)
             }
             _ => return Err(format!("unknown command: {line}")),
         })
@@ -380,6 +402,15 @@ impl Run {
         self.event(MouseMoveEvent { position, pressed_button, modifiers: Modifiers::default() });
     }
 
+    /// Saves what the window shows now as DIR/NAME-<appearance>.png.
+    fn save(&mut self, name: &str) -> Result<(), String> {
+        let image = self.cx.capture_screenshot(self.window).map_err(|error| format!("capture: {error}"))?;
+        let file = self.out.join(format!("{name}-{}.png", self.appearance));
+        image.save(&file).map_err(|error| format!("{}: {error}", file.display()))?;
+        println!("{}", file.display());
+        Ok(())
+    }
+
     fn command(&mut self, command: Command) -> Result<(), String> {
         match command {
             Command::Wait(time) => return {
@@ -392,10 +423,30 @@ impl Run {
             }
             Command::Shot(name) => {
                 self.pass(FRAME);
-                let image = self.cx.capture_screenshot(self.window).map_err(|error| format!("capture: {error}"))?;
-                let file = self.out.join(format!("{name}-{}.png", self.appearance));
-                image.save(&file).map_err(|error| format!("{}: {error}", file.display()))?;
-                println!("{}", file.display());
+                return self.save(&name);
+            }
+            Command::Freeze => {
+                *FILM.lock().expect("the film clock") = Some(Instant::now());
+                return Ok(());
+            }
+            Command::Thaw => {
+                *FILM.lock().expect("the film clock") = None;
+                return Ok(());
+            }
+            Command::Film(name, count, fps) => {
+                let mut clock = FILM.lock().expect("the film clock").ok_or("film: freeze the clock first")?;
+                for frame in 0..count {
+                    if frame > 0 {
+                        clock += Duration::from_secs_f32(1. / fps);
+                        *FILM.lock().expect("the film clock") = Some(clock);
+                    }
+                    self.cx.run_until_parked();
+                    self.on_window(|window, cx| {
+                        window.simulate_next_frame(cx);
+                        window.draw(cx).clear(cx);
+                    });
+                    self.save(&format!("{name}-{frame:03}"))?;
+                }
                 return Ok(());
             }
             Command::Click(position, button, count) => {

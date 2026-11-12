@@ -28,7 +28,7 @@ use gpui::{
 };
 
 use crate::controls::WINDOW_MOVE_SLOP;
-use crate::design::{self, motion};
+use crate::design::motion;
 
 pub enum Step {
     /// Not a back swipe: deliver the event as usual.
@@ -293,38 +293,55 @@ pub enum Slide {
     Opening(Instant),
     /// Under the pointer, `offset` points to the right.
     Drag(f32),
-    /// Released (or sent back by a key): from `from` to `to`; `back` closes the page on arrival.
-    Settle { from: f32, to: f32, start: Instant, back: bool },
+    /// Released (or sent back by a key): from `from` to `to`, leaving at `velocity` points per
+    /// second to the right; `back` closes the page on arrival.
+    Settle { from: f32, to: f32, velocity: f32, start: Instant, back: bool },
 }
 
 impl Slide {
+    /// A page sliding in from the right now.
+    pub fn opening() -> Self {
+        Slide::Opening(now())
+    }
+
+    /// A page at `from` sliding to `to` now, from rest; `back` closes it on arrival.
+    pub fn settle(from: f32, to: f32, back: bool) -> Self {
+        Slide::Settle { from, to, velocity: 0., start: now(), back }
+    }
+
+    /// Where a page `width` wide sits now, and whether its motion has arrived.
+    fn place(&self, width: f32) -> (f32, bool) {
+        let motion = motion::page();
+        match *self {
+            Slide::Rest => (0., true),
+            Slide::Drag(offset) => (offset, true),
+            Slide::Opening(start) => motion.at(width, 0., 0., since(start)),
+            Slide::Settle { from, to, velocity, start, .. } => motion.at(from, to, velocity, since(start)),
+        }
+    }
+
     /// How far right of its place a page `width` wide sits now, without advancing anything.
     pub fn offset(&self, width: f32) -> f32 {
-        match *self {
-            Slide::Rest => 0.0,
-            Slide::Drag(offset) => offset,
-            Slide::Opening(start) => (1.0 - design::house_curve(progress(start))) * width,
-            Slide::Settle { from, to, start, .. } => from + (to - from) * design::house_curve(progress(start)),
-        }
+        self.place(width).0
     }
 
     /// Where a page `width` wide sits, called while drawing it: asks for the next frame while it
     /// moves and comes to rest on arrival. None once it has slid off: the page closes.
     pub fn advance(&mut self, width: f32, window: &mut Window) -> Option<f32> {
-        let offset = self.offset(width);
+        let (offset, arrived) = self.place(width);
+        if !arrived {
+            window.request_animation_frame();
+            return Some(offset);
+        }
         match *self {
             Slide::Rest | Slide::Drag(_) => Some(offset),
-            Slide::Opening(start) | Slide::Settle { start, .. } if progress(start) < 1.0 => {
-                window.request_animation_frame();
-                Some(offset)
-            }
             Slide::Settle { back, .. } => {
                 *self = Slide::Rest;
-                (!back).then_some(0.0)
+                (!back).then_some(0.)
             }
             Slide::Opening(_) => {
                 *self = Slide::Rest;
-                Some(0.0)
+                Some(0.)
             }
         }
     }
@@ -337,17 +354,27 @@ impl Slide {
             Step::Drag(offset) => Slide::Drag(offset),
             Step::Release { offset, velocity } => {
                 let (back, to) = settle(offset, velocity, width);
-                Slide::Settle { from: offset, to, start: Instant::now(), back }
+                Slide::Settle { from: offset, to, velocity, start: now(), back }
             }
-            Step::Cancel(offset) => Slide::Settle { from: offset, to: 0.0, start: Instant::now(), back: false },
+            Step::Cancel(offset) => Slide::settle(offset, 0., false),
         };
         true
     }
 }
 
-/// How far through the standard slide a motion that began at `start` is, 0 to 1.
-fn progress(start: Instant) -> f32 {
-    (start.elapsed().as_secs_f32() / motion::ENTER.as_secs_f32()).min(1.0)
+/// Now, for the slides: in the screenshot mode the clock a script films them by while it does
+/// (`shots.rs`, `freeze`), so each frame shows the moment it stands for.
+fn now() -> Instant {
+    #[cfg(feature = "shots")]
+    if let Some(now) = crate::shots::film_clock() {
+        return now;
+    }
+    Instant::now()
+}
+
+/// Seconds since `start` by the slides' clock.
+fn since(start: Instant) -> f32 {
+    now().saturating_duration_since(start).as_secs_f32()
 }
 
 /// Where released fingers send a page `width` wide: past a third of the width, or flicked

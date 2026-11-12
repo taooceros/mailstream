@@ -1281,6 +1281,7 @@ mod tests {
         assert!(matches!(shown(&pane, cx), (day, Pan::Rest) if day == week));
 
         key(cx, "escape");
+        slide_done(&pane, cx);
         assert!(cx.debug_bounds("calendar-page").is_none(), "Esc went back");
         assert_eq!(opened(&pane, cx).as_deref(), Some("saturday"), "to the event's popover, as it was");
         bounds(cx, "calendar-popover");
@@ -1296,12 +1297,15 @@ mod tests {
         click_on(cx, "card:today");
         bounds(cx, "calendar-popover");
         key(cx, "enter");
+        slide_done(&pane, cx);
         bounds(cx, "calendar-page");
         click_on(cx, "calendar-page-back");
+        slide_done(&pane, cx);
         assert!(cx.debug_bounds("calendar-page").is_none(), "Back went back");
         assert_eq!(opened(&pane, cx).as_deref(), Some("today"));
 
         click_on(cx, "calendar-expand");
+        slide_done(&pane, cx);
         bounds(cx, "calendar-page");
         assert!(cx.debug_bounds("calendar-popover").is_none());
         // ↓ takes the page to the week's next event.
@@ -1309,6 +1313,7 @@ mod tests {
         assert_eq!(opened(&pane, cx).as_deref(), Some("saturday"));
         bounds(cx, "calendar-page");
         key(cx, "escape");
+        slide_done(&pane, cx);
         assert!(cx.debug_bounds("calendar-page").is_none());
         assert_eq!(opened(&pane, cx).as_deref(), Some("saturday"));
     }
@@ -1323,6 +1328,7 @@ mod tests {
         key(cx, "enter");
         bounds(cx, "calendar-page");
         key(cx, "escape");
+        slide_done(&pane, cx);
         assert!(cx.debug_bounds("calendar-page").is_none());
         assert_eq!(opened(&pane, cx).as_deref(), Some("today"), "back to the pane");
         double_click_on(cx, "card:today");
@@ -1346,7 +1352,7 @@ mod tests {
 
     /// The frames once a slide has had its time.
     fn slide_done(pane: &Entity<CalendarPane>, cx: &mut VisualTestContext) {
-        std::thread::sleep(crate::design::motion::ENTER + std::time::Duration::from_millis(50));
+        std::thread::sleep(crate::design::motion::page().longest() + std::time::Duration::from_millis(50));
         pane.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
     }
@@ -1360,6 +1366,7 @@ mod tests {
         let (pane, cx) = week_view(cx);
         key(cx, "d");
         click_on(cx, "card:today");
+        slide_done(&pane, cx);
         let detail = bounds(cx, "calendar-detail");
         // On the event's head, under its toolbar.
         let at = point(detail.center().x, detail.top() + px(120.));
@@ -1387,6 +1394,7 @@ mod tests {
 
         // Two fingers do the same.
         click_on(cx, "card:today");
+        slide_done(&pane, cx);
         let at = bounds(cx, "calendar-detail").center();
         cx.simulate_event(touchpad(at, TouchPhase::Started, 0., 0.));
         for _ in 0..12 {
@@ -1403,6 +1411,7 @@ mod tests {
         key(cx, "d");
         click_on(cx, "card:today");
         key(cx, "enter");
+        slide_done(&pane, cx);
         let page = bounds(cx, "calendar-page");
         // The title row, between its Back and its buttons.
         let at = point(page.center().x, page.top() + px(30.));

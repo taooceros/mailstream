@@ -162,7 +162,11 @@ impl MailApp {
 
     /// The bundle lying over the list.
     pub fn open_bundle_members(&self) -> Option<Rc<Bundle>> {
-        let category = self.open_bundle()?;
+        self.bundle_members(self.open_bundle()?)
+    }
+
+    /// `category`'s bundle in the list, also while its page slides off (MS-289).
+    pub fn bundle_members(&self, category: Category) -> Option<Rc<Bundle>> {
         self.items.iter().find_map(|item| match item {
             Item::Bundle(bundle) if bundle.category == category => Some(bundle.clone()),
             _ => None,
@@ -191,7 +195,7 @@ impl MailApp {
     fn push_layer(&mut self, layer: Layer, animate: bool) {
         self.finish_closing();
         self.slide_layer = Some(layer.id());
-        self.slide = if animate { Slide::Opening(Instant::now()) } else { Slide::Rest };
+        self.slide = if animate { Slide::opening() } else { Slide::Rest };
         self.layers.push(layer);
     }
 
@@ -419,7 +423,7 @@ impl MailApp {
                 // The top layer slides off to the right, like a swipe that went all the way.
                 let from = self.current_offset();
                 self.slide_layer = Some(top.id());
-                self.slide = Slide::Settle { from, to: self.content_width, start: Instant::now(), back: true };
+                self.slide = Slide::settle(from, self.content_width, true);
             }
         } else if self.query.is_some() {
             self.search.update(cx, |search, cx| search.clean(window, cx));

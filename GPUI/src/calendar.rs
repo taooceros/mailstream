@@ -413,11 +413,42 @@ impl CalendarPane {
     pub fn open(&mut self, key: EventKey, cx: &mut Context<Self>) {
         self.refocus = false;
         if self.opened.as_ref() != Some(&key) {
+            // A pane that wasn't open slides in, as the reader does; another event replaces the
+            // open one where it is.
+            if self.opened.is_none() && self.view != View::Week {
+                self.slide_in((key.clone(), false));
+            }
             self.opened = Some(key);
             self.detail_scroll = ScrollHandle::new();
             self.page_scroll = ScrollHandle::new();
             cx.notify();
         }
+    }
+
+    /// `surface` (`top_surface`) slides in from the right from now. Its width is measured as it
+    /// is first drawn; until then it is taken as the window's, off it.
+    fn slide_in(&mut self, surface: (EventKey, bool)) {
+        self.close_surface = Some(surface);
+        self.close = Slide::opening();
+        self.close_width.set(0.);
+    }
+
+    /// The top surface slides off to the right and closes when it arrives, like a drag that went
+    /// all the way (Esc, the back and close buttons); at once before it was ever drawn.
+    fn slide_off(&mut self, cx: &mut Context<Self>) {
+        let Some(top) = self.top_surface() else { return };
+        if matches!(self.close, Slide::Settle { back: true, .. }) && self.close_surface.as_ref() == Some(&top) {
+            return;
+        }
+        let width = self.close_width.get();
+        if width <= 0. {
+            if top.1 { self.close_page(cx) } else { self.close_event(cx) }
+            return;
+        }
+        let from = if self.close_surface.as_ref() == Some(&top) { self.close.offset(width) } else { 0. };
+        self.close_surface = Some(top);
+        self.close = Slide::settle(from, width, true);
+        cx.notify();
     }
 
     /// A click on an event (`event`): a double click opens its page, one opens it.
@@ -434,6 +465,9 @@ impl CalendarPane {
             self.page = true;
             self.refocus = true;
             self.page_scroll = ScrollHandle::new();
+            if let Some(key) = self.opened.clone() {
+                self.slide_in((key, true));
+            }
             cx.notify();
         }
     }
@@ -503,7 +537,7 @@ impl CalendarPane {
     }
 
     /// Where the page (`page`) or the pane sits, called while drawing it: the top surface follows
-    /// its drag and closes once it has slid off; the pane under the page rests.
+    /// its drag, slides in and off, and closes once it has slid off; the pane under the page rests.
     fn close_offset(&mut self, page: bool, window: &mut Window, cx: &mut Context<Self>) -> f32 {
         let top = self.top_surface();
         if top.as_ref().is_none_or(|(_, on_top)| *on_top != page) {
@@ -513,7 +547,12 @@ impl CalendarPane {
             self.close_surface = top;
             self.close = Slide::Rest;
         }
-        self.close.advance(self.close_width.get(), window).unwrap_or_else(|| {
+        // Not measured yet (`slide_in`): the window's width, which starts it off the window.
+        let width = match self.close_width.get() {
+            width if width > 0. => width,
+            _ => f32::from(window.viewport_size().width),
+        };
+        self.close.advance(width, window).unwrap_or_else(|| {
             if page { self.close_page(cx) } else { self.close_event(cx) }
             0.
         })
@@ -681,10 +720,10 @@ impl CalendarPane {
         cx.notify();
     }
 
-    /// Esc and ⌘[: the page back to its view, else the open event closed.
+    /// Esc and ⌘[: the page slides back off its view, else the open event slides off.
     fn back(&mut self, _: &Back, _: &mut Window, cx: &mut Context<Self>) {
-        if self.page {
-            self.close_page(cx);
+        if self.opened.is_some() && self.top_surface().is_some() {
+            self.slide_off(cx);
         } else if self.opened.is_some() {
             self.close_event(cx);
         } else {
@@ -744,6 +783,14 @@ impl Render for CalendarPane {
                 .child(div().absolute().top_0().bottom_0().w_full().left(px(shift)).child(self.render_detail(index, two_pane, p, window, cx)))
                 .children(over)
         });
+        // What the pane covers in a narrow window sits back and darkens under it, as the pages'
+        // motion says, and comes forward as the pane slides off (MS-289).
+        let width = self.close_width.get().max(1.);
+        let (beneath, dim) = if self.pane_covers && !self.page {
+            design::motion::page().beneath(1. - shift.abs() / width, width, p.dark)
+        } else {
+            (0., 0.)
+        };
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -784,8 +831,12 @@ impl Render for CalendarPane {
                             .child(split::list_handle("calendar-split").right(px(-layout::GAP / 2.))),
                     )
                     .child(div().flex_1().min_w(px(layout::MIN_DETAIL)).h_full().child(detail)),
-                // Over the list.
-                Some(detail) => d.child(list.size_full()).child(detail.absolute()),
+                // Over the list, which sits back under it.
+                Some(detail) => d
+                    .when(beneath != 0., |d| d.overflow_hidden())
+                    .child(list.size_full().left(px(beneath)))
+                    .when(dim > 0., |d| d.child(crate::controls::scrim(dim, design::radius::PANE)))
+                    .child(detail.absolute()),
                 None => d.child(list.size_full()),
             })
     }
