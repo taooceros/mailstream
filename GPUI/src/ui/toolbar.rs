@@ -99,20 +99,22 @@ impl MailApp {
             .size_full()
             // The conversation keeps the keyboard; clicks never reach the list beneath.
             .occlude()
-            .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer, cx))
+            .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer.clone(), cx))
             .child(self.render_reader(conversation, p, window, cx))
             .when(self.reader_top != ReaderTop::Top, |d| {
                 d.child(div().absolute().top_0().left_0().right_0().h(px(design::reader::SCRIM_HEIGHT)).bg(scrim))
             })
-            .child(self.render_detail_toolbar(conversation, two_pane, p, window, cx))
+            .child(self.render_detail_toolbar(conversation, layer, two_pane, p, window, cx))
             .into_any_element()
     }
 
     /// Floats over the top of the conversation: ✕ closes it beside the list, ‹ goes back to the
-    /// list it covers; then its actions.
+    /// list it covers; then its actions. A press on it may drag the layer `layer` off (MS-266):
+    /// it hears the press before the rows scrolled under it, which may keep theirs.
     fn render_detail_toolbar(
         &self,
         conversation: &Conversation,
+        layer: SharedString,
         two_pane: bool,
         p: &'static Palette,
         window: &mut Window,
@@ -124,6 +126,7 @@ impl MailApp {
         let starred = conversation.starred;
         let (close_icon, close_tip) = if two_pane { (Icon::Close, "Close (Esc)") } else { (Icon::Back, "Back (Esc)") };
         title_bar("detail-toolbar", window, cx)
+            .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer, cx))
             .absolute()
             .top_0()
             .left_0()

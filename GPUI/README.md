@@ -102,6 +102,8 @@ Linux differs from the Mac in:
 - The window: the compositor draws its frame where it offers to; elsewhere dragging the window
   between the islands or their title rows moves it once the pointer has travelled a few points
   with the button held (a click or tap there never does, MS-206); rows and controls never move it.
+  On a page's title row (the conversation's, the calendar event's and its page's) a drag that
+  sets off sideways moves the page instead (MS-266), any other the window.
   The type is the desktop's sans-serif family (fontconfig). The back swipe takes the scroll as
   the compositor turns it for the person's scrolling direction.
 - The window's material (MS-249): where the compositor blurs translucent windows (Hyprland with
@@ -149,7 +151,7 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 | `src/controls.rs` | The shared controls every view composes (Flutter's `controls.dart`, `glass.dart`, `common.dart`): buttons, icon buttons, tooltips, switches, segmented controls, tags and toasts (gpui-kit's, see above), capsules, islands, the title bars that move the window, popovers, pills, marks, list rows and their lifted card, notices |
 | `src/webview.rs` | macOS, the reader's WebView renderer: HTML bodies in native `WKWebView`s laid over the reader: placed and clipped each frame, sized to their page, the engine's page and page script (style sheet, quote fold), page scripts off, links the engine allows opened in the browser, wheel events handed back to the reader |
 | `src/blitz_body.rs` | HTML bodies drawn by Blitz on the engine's pages thread (the default renderer everywhere), shown as tiles near the viewport, quoted history as a page of its own; links the engine allows open in the browser, a drag selects and ⌘C (Ctrl+C) copies |
-| `src/swipe.rs` | Two-finger back swipe over the bundle and reader layers, following the system's swipe-between-pages setting |
+| `src/swipe.rs` | Dragging a page (bundle, reader, the calendar's event and its page) off to close it: the two-finger back swipe, following the system's swipe-between-pages setting, and the mouse's sideways drag (MS-266), on one state machine and one slide |
 | `src/chat.rs` | `ChatPane`: Google Chat spaces (older pages load near the list's end, `chat_more`), a space's log (bottom-aligned, runs and day dividers, markup and links, uploaded pictures shown in it once `chat_attachment` downloads them, other files and videos as tiles in their kind's color that open in the system's default app), sending, earlier pages, threads, New Chat completing the account's Chat partners (`chat_people`) before contacts; the engine keeps the open space (`chat_open`) and the pane re-reads the list and the space on its `Chat`/`ChatMessages` events. `MAILSTREAM_CHAT_FIXTURE=<file.json>` shows a synthetic chat without an account (the module's `fixture` says what the file holds) |
 | `src/calendar.rs`, `src/calendar/` | `CalendarPane` (MS-211): every account's events from `calendar_events` (a week back on, read again on the engine's `Calendar` event), shown instead of the mail list while Calendar is selected. `agenda.rs`: the list island (this week's days on a strip with their booked hours, the meeting about to start with Join, notices for accounts to sign in again or whose fetch failed, the days from today with their events; Going / Maybe / Decline on unanswered invitations, through `calendar_respond`); `detail.rs`: the open event beside it (over it in a narrow window) with its answer, Join, guests and notes, or in the week view in gpui-kit's popover beside its card, closed by a press outside it, Esc or another week (MS-184); and its page over the whole window (the popover's or pane's expand button, a double click on the event or Return), with the call's address, every guest's address and answer and the notes' links, Back or Esc returning to the view as it was (MS-184); `model.rs`: the agenda's days, the Up Next meeting, how a day's timed events sit side by side and the hours they book |
 | `src/compose.rs`, `src/compose/` | The drafts (From picker, recipient completion, attachments, discard confirmation) in the compose column (`column.rs`: tabs, docked, swapped, floating or minimized), and the reader's reply card |
@@ -180,7 +182,10 @@ mailboxes while it is hidden), and the list and the conversation are rounded isl
 it. From 1000 pt wide the conversation opens beside the list, which narrows as it slides in;
 narrower windows slide it over the list. A bundle slides over the rows within the list's island.
 The list stays mounted beneath them, so going back (Esc or a two-finger swipe) reveals the live
-list without reloading it. Opening a conversation shows its header at once; bodies arrive after.
+list without reloading it. A mouse drag does the same (MS-266): pressed on the conversation, a
+bundle or the calendar's open event or its page outside a mail body, the reply box, links and
+buttons, and dragged sideways, the page follows the pointer and goes off past a third of its width
+or on a flick, else springs back, as the swipe does. Opening a conversation shows its header at once; bodies arrive after.
 
 Writing mail happens in a compose column, as in Flutter (MS-61, MS-66), so other mail can be read
 beside it: ⌘N, the list's pencil, F (forward) and the reply card's "move to the compose column"

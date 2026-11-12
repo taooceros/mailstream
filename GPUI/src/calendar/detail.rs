@@ -72,11 +72,7 @@ impl CalendarPane {
             // The event keeps the keyboard; clicks never reach the list beneath.
             .occlude()
             // A sideways drag from here closes it (MS-266).
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, _| {
-                if event.click_count == 1 {
-                    this.press_surface(false, event.position);
-                }
-            }))
+            .on_mouse_down(MouseButton::Left, Self::press_listener(false, cx))
             .child(self.render_event(index, Surface::Pane, p, cx))
             .child(self.render_toolbar(index, two_pane, p, window, cx))
             .into_any_element()
@@ -136,6 +132,7 @@ impl CalendarPane {
             View::Week => "Week",
         };
         let toolbar = title_bar("calendar-page-toolbar", window, cx)
+            .on_mouse_down(MouseButton::Left, Self::press_listener(true, cx))
             .absolute()
             .top_0()
             .left_0()
@@ -168,11 +165,7 @@ impl CalendarPane {
                 .left(px(shift))
                 // Nothing under it takes the pointer.
                 .occlude()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, _| {
-                    if event.click_count == 1 {
-                        this.press_surface(true, event.position);
-                    }
-                }))
+                .on_mouse_down(MouseButton::Left, Self::press_listener(true, cx))
                 .p(px(layout::GAP))
                 .bg(design::window_fill(p))
                 .font_family(design::ui_font())
@@ -243,6 +236,17 @@ impl CalendarPane {
             )
     }
 
+    /// A single left press on the page (`page`) or the pane, from which a sideways drag may close
+    /// it (MS-266). Their title rows take it too: they hear it before what scrolled under them,
+    /// which may keep its presses.
+    fn press_listener(page: bool, cx: &mut Context<Self>) -> impl Fn(&MouseDownEvent, &mut Window, &mut gpui::App) + 'static {
+        cx.listener(move |this, event: &MouseDownEvent, _, _| {
+            if event.click_count == 1 {
+                this.press_surface(page, event.position);
+            }
+        })
+    }
+
     /// Edit and Delete, for an event the account organizes on a calendar it can write.
     fn edit_buttons(&self, index: usize, p: &'static Palette, cx: &mut Context<Self>) -> Option<[Button; 2]> {
         let event = &self.events[index];
@@ -294,6 +298,7 @@ impl CalendarPane {
     ) -> impl IntoElement {
         let (close_icon, close_tip) = if two_pane { (Icon::Close, "Close (Esc)") } else { (Icon::Back, "Back (Esc)") };
         title_bar("calendar-detail-toolbar", window, cx)
+            .on_mouse_down(MouseButton::Left, Self::press_listener(false, cx))
             .absolute()
             .top_0()
             .left_0()

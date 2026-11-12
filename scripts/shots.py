@@ -22,7 +22,8 @@ are window points from its top left (a PNG's pixels halved: shots are drawn at 2
     shot NAME                  save NAME-light.png / NAME-dark.png
     click X Y [right|double]   click there
     move X Y                   hover there
-    drag X1 Y1 X2 Y2           drag
+    drag X1 Y1 X2 Y2 [hold]    drag (`hold`: the button stays down, for a shot mid-drag)
+    release                    let go of a held drag
     scroll X Y DY [DX]         scroll the view under X Y by DY points down (negative: up)
     key COMBO...               escape, down, enter, j, shift-tab, secondary-n (⌘N / Ctrl+N)
     type TEXT                  type into the focused field

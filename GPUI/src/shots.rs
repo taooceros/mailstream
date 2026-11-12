@@ -18,7 +18,9 @@
 //! shot NAME                  save DIR/NAME-light.png (or -dark) of the whole window, at 2x
 //! click X Y [right|double]   move the pointer there and click
 //! move X Y                   move the pointer there (hover)
-//! drag X1 Y1 X2 Y2           press at X1 Y1, move to X2 Y2, release
+//! drag X1 Y1 X2 Y2 [hold]    press at X1 Y1, move to X2 Y2, release (`hold`: keep the button
+//!                            down, for a shot mid-drag, until `release`)
+//! release                    let go of a held drag where the pointer is
 //! scroll X Y DY [DX]         scroll the view under X Y by DY points down (DX right); negative: up
 //! key COMBO...               press keys: `escape`, `down`, `enter`, `j`, `shift-tab`,
 //!                            `secondary-n` (⌘N on the Mac, Ctrl+N elsewhere)
@@ -235,7 +237,8 @@ enum Command {
     Shot(String),
     Click(Point<Pixels>, MouseButton, usize),
     Move(Point<Pixels>),
-    Drag(Point<Pixels>, Point<Pixels>),
+    Drag(Point<Pixels>, Point<Pixels>, bool),
+    Release,
     Scroll(Point<Pixels>, Point<Pixels>),
     Keys(Vec<String>),
     Type(String),
@@ -268,7 +271,12 @@ impl Command {
                 Command::Click(spot(0)?, button, count)
             }
             "move" => Command::Move(spot(0)?),
-            "drag" => Command::Drag(spot(0)?, spot(2)?),
+            "drag" => match words.get(4).copied() {
+                None => Command::Drag(spot(0)?, spot(2)?, false),
+                Some("hold") => Command::Drag(spot(0)?, spot(2)?, true),
+                Some(other) => return Err(format!("drag: {other} is not hold")),
+            },
+            "release" => Command::Release,
             "scroll" => {
                 let dx = if words.len() > 3 { number(3)? } else { 0. };
                 Command::Scroll(spot(0)?, point(px(dx), px(number(2)?)))
@@ -375,7 +383,7 @@ impl Run {
                 }
             }
             Command::Move(position) => self.pointer_to(position, None),
-            Command::Drag(from, to) => {
+            Command::Drag(from, to, hold) => {
                 self.pointer_to(from, None);
                 let modifiers = Modifiers::default();
                 self.event(MouseDownEvent { button: MouseButton::Left, position: from, modifiers, click_count: 1, first_mouse: false });
@@ -384,7 +392,13 @@ impl Run {
                     self.pointer_to(from + (to - from) * along, Some(MouseButton::Left));
                     self.pass(FRAME);
                 }
-                self.event(MouseUpEvent { button: MouseButton::Left, position: to, modifiers, click_count: 1 });
+                if !hold {
+                    self.event(MouseUpEvent { button: MouseButton::Left, position: to, modifiers, click_count: 1 });
+                }
+            }
+            Command::Release => {
+                let position = self.pointer;
+                self.event(MouseUpEvent { button: MouseButton::Left, position, modifiers: Modifiers::default(), click_count: 1 });
             }
             Command::Scroll(position, by) => {
                 self.pointer_to(position, None);
