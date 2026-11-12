@@ -339,7 +339,7 @@ pub const COMMANDS: &[Spec] = &[
             Argument::new(
                 "cached",
                 Kind::Bool,
-                "Lists the mail already loaded without asking the providers for their newest first.",
+                "Lists the mail already loaded, without asking the providers for anything.",
             ),
         ],
     ),

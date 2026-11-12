@@ -2,9 +2,11 @@
 //! (`Sources/MailstreamKit/Backend/API.swift`) sends them. A 401 drops the access token and
 //! refreshes once; rate limiting (429, or Google's 403 rate-limit reasons, which never ran)
 //! backs off and repeats, pausing the account's `QuotaBudget` meanwhile; 5xx and dropped
-//! connections repeat only requests that may run twice. Concurrency is bounded per priority so
-//! background prefetch never starves interactive reads, and a request with a `cost` spends it
-//! from the account's budget on every attempt once it holds a permit.
+//! connections repeat only requests that may run twice. Every request gives up after `HTTP`'s
+//! 30 s, and one that ran out of time is not sent again: a provider that stops answering costs
+//! each request one wait, and the next refresh asks again (MS-278). Concurrency is bounded per
+//! priority so background prefetch never starves interactive reads, and a request with a `cost`
+//! spends it from the account's budget on every attempt once it holds a permit.
 use std::fmt;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -52,6 +54,13 @@ impl ApiError {
 
     pub fn unexpected_answer(host: &str, error: impl fmt::Display) -> Self {
         Self::malformed(format!("Unexpected answer from {host}: {error}"))
+    }
+
+    /// The account can't get its mail at all, rather than one request being refused: no answer
+    /// (timed out, no connection), the provider failing or limiting it, or its sign-in refused.
+    /// A 400 or 404 (a stale cursor, a folder gone) concerns that request alone.
+    pub fn cuts_off(&self) -> bool {
+        matches!(self.status, 0 | 401 | 403 | 429 | 500..=599)
     }
 }
 
@@ -360,7 +369,10 @@ impl Api {
             }
             let response = match builder.send().await {
                 Ok(response) => response,
-                Err(error) if repeatable && attempt < 3 && (error.is_timeout() || error.is_connect() || error.is_request()) => {
+                // A timeout already waited the client's whole 30 s: no second wait.
+                Err(error)
+                    if repeatable && attempt < 3 && !error.is_timeout() && (error.is_connect() || error.is_request()) =>
+                {
                     tokio::time::sleep(Duration::from_millis(300 * u64::from(attempt))).await;
                     continue;
                 }

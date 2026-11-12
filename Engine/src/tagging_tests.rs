@@ -86,8 +86,9 @@ fn tags_the_inbox_with_omp_and_shares_corrections() {
         call(&engine, "config.set", json!({ "key": key, "value": value })).unwrap();
     }
     let mail = engine.core.mail.clone();
+    // A page longer than the provider's first pages through the inbox (a cached list never asks).
     wait_until("both pages", || {
-        let listed = call(&engine, "mail.list", json!({ "limit": 100, "cached": true }));
+        let listed = call(&engine, "mail.list", json!({ "limit": 100 }));
         listed.is_ok_and(|listed| listed["conversations"].as_array().unwrap().len() == 59)
     });
     assert_eq!(counts(&dir), [0usize; 0]);
@@ -277,8 +278,9 @@ fn tags_synthetic_mail_on_device() {
     for (key, value) in [("aiTagging.backend", backend), ("aiTagging.batchSize", "20"), ("aiTagging.passLimit", "20")] {
         call(&engine, "config.set", json!({ "key": key, "value": value })).unwrap();
     }
+    // A page longer than the provider's first pages through the inbox (a cached list never asks).
     wait_until("both pages", || {
-        let listed = call(&engine, "mail.list", json!({ "limit": 100, "cached": true }));
+        let listed = call(&engine, "mail.list", json!({ "limit": 100 }));
         listed.is_ok_and(|listed| listed["conversations"].as_array().unwrap().len() == 59)
     });
     let started = std::time::Instant::now();
@@ -317,7 +319,7 @@ fn reports_status() {
     assert_eq!(status["settingsIssues"], json!(["Unknown setting \"nope\" is ignored."]));
     assert_eq!(
         status["accounts"],
-        json!([{ "id": "me@gmail.com", "label": "me@gmail.com", "provider": "google", "mailboxesLoaded": true }])
+        json!([{ "id": "me@gmail.com", "label": "me@gmail.com", "provider": "google", "mailboxesLoaded": true, "problem": null }])
     );
     let sync = status["sync"].as_object().unwrap();
     let mut keys: Vec<&str> = sync.keys().map(String::as_str).collect();

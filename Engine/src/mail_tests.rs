@@ -1,8 +1,8 @@
 //! The mail commands end to end: an engine in a throwaway folder, signed in through a test
 //! Keychain item, against fake Gmail and Graph servers answering what the providers answer.
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -128,57 +128,62 @@ pub(crate) struct GmailCounters {
 pub(crate) fn gmail_server(counters: Arc<GmailCounters>) -> FakeServer {
     let metadata = gmail_metadata();
     FakeServer::start(move |request| {
-        let path = request.path.as_str();
-        if path == "/token" {
+        if request.path == "/token" {
             return token_reply(&counters.tokens);
         }
-        if path == "/batch/gmail/v1" {
-            return gmail_batch(request, &metadata);
-        }
-        let Some(resource) = path.strip_prefix("/gmail/v1/users/me/") else {
-            return Reply::status(404, json!({ "error": { "message": "No such path" } }));
-        };
-        match resource {
-            "profile" => Reply::json(json!({ "emailAddress": "me@gmail.com", "historyId": "100" })),
-            "settings/sendAs" => {
-                Reply::json(json!({ "sendAs": [{ "sendAsEmail": "me@gmail.com", "displayName": "Me Gmail", "isPrimary": true }] }))
-            }
-            "labels" => {
-                // The first answer refuses the token: the engine drops it and refreshes once.
-                if counters.labels.fetch_add(1, Ordering::SeqCst) == 0 {
-                    return Reply::status(401, json!({ "error": { "message": "Invalid Credentials" } }));
-                }
-                Reply::json(json!({ "labels": [
-                    { "id": "INBOX", "name": "INBOX", "type": "system" }, { "id": "SENT", "name": "SENT", "type": "system" },
-                    { "id": "TRASH", "name": "TRASH", "type": "system" }, { "id": "SPAM", "name": "SPAM", "type": "system" },
-                    { "id": "CATEGORY_SOCIAL", "name": "CATEGORY_SOCIAL", "type": "system" },
-                    { "id": "Label_1", "name": "Receipts", "type": "user" },
-                ]}))
-            }
-            "history" => Reply::json(json!({ "historyId": "101" })),
-            "messages" => {
-                // The first listing is throttled once: the engine waits as asked and repeats.
-                if counters.listings.fetch_add(1, Ordering::SeqCst) == 0 {
-                    return Reply::status(429, json!({ "error": { "message": "Slow down" } })).header("Retry-After", "0");
-                }
-                let ids: Vec<String> = match (request.param("labelIds"), request.param("q"), request.param("pageToken")) {
-                    (Some("INBOX"), _, None) => (0..50).map(|n| format!("i{n:02}")).collect(),
-                    (Some("INBOX"), _, Some("p2")) => (50..60).map(|n| format!("i{n:02}")).collect(),
-                    (Some("SENT"), _, _) => vec!["s0".into()],
-                    (None, Some(_), _) => vec!["i10".into(), "s0".into()],
-                    _ => vec![],
-                };
-                let next = (request.param("labelIds") == Some("INBOX") && request.param("pageToken").is_none()).then_some("p2");
-                let items: Vec<Value> = ids.iter().map(|id| json!({ "id": id })).collect();
-                Reply::json(json!({ "messages": items, "nextPageToken": next, "resultSizeEstimate": ids.len() }))
-            }
-            "messages/i00/attachments/att1" => Reply::json(json!({ "data": encode("%PDF") })),
-            other => match other.strip_prefix("messages/") {
-                Some(id) if request.param("format") == Some("full") => Reply::json(gmail_full(id)),
-                _ => Reply::status(404, json!({ "error": { "message": "Not Found" } })),
-            },
-        }
+        gmail_reply(request, &counters, &metadata)
     })
+}
+
+/// What the fake Gmail answers `request` with, `metadata` its messages; the token endpoint aside.
+pub(crate) fn gmail_reply(request: &FakeRequest, counters: &GmailCounters, metadata: &HashMap<String, Value>) -> Reply {
+    let path = request.path.as_str();
+    if path == "/batch/gmail/v1" {
+        return gmail_batch(request, metadata);
+    }
+    let Some(resource) = path.strip_prefix("/gmail/v1/users/me/") else {
+        return Reply::status(404, json!({ "error": { "message": "No such path" } }));
+    };
+    match resource {
+        "profile" => Reply::json(json!({ "emailAddress": "me@gmail.com", "historyId": "100" })),
+        "settings/sendAs" => {
+            Reply::json(json!({ "sendAs": [{ "sendAsEmail": "me@gmail.com", "displayName": "Me Gmail", "isPrimary": true }] }))
+        }
+        "labels" => {
+            // The first answer refuses the token: the engine drops it and refreshes once.
+            if counters.labels.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Reply::status(401, json!({ "error": { "message": "Invalid Credentials" } }));
+            }
+            Reply::json(json!({ "labels": [
+                { "id": "INBOX", "name": "INBOX", "type": "system" }, { "id": "SENT", "name": "SENT", "type": "system" },
+                { "id": "TRASH", "name": "TRASH", "type": "system" }, { "id": "SPAM", "name": "SPAM", "type": "system" },
+                { "id": "CATEGORY_SOCIAL", "name": "CATEGORY_SOCIAL", "type": "system" },
+                { "id": "Label_1", "name": "Receipts", "type": "user" },
+            ]}))
+        }
+        "history" => Reply::json(json!({ "historyId": "101" })),
+        "messages" => {
+            // The first listing is throttled once: the engine waits as asked and repeats.
+            if counters.listings.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Reply::status(429, json!({ "error": { "message": "Slow down" } })).header("Retry-After", "0");
+            }
+            let ids: Vec<String> = match (request.param("labelIds"), request.param("q"), request.param("pageToken")) {
+                (Some("INBOX"), _, None) => (0..50).map(|n| format!("i{n:02}")).collect(),
+                (Some("INBOX"), _, Some("p2")) => (50..60).map(|n| format!("i{n:02}")).collect(),
+                (Some("SENT"), _, _) => vec!["s0".into()],
+                (None, Some(_), _) => vec!["i10".into(), "s0".into()],
+                _ => vec![],
+            };
+            let next = (request.param("labelIds") == Some("INBOX") && request.param("pageToken").is_none()).then_some("p2");
+            let items: Vec<Value> = ids.iter().map(|id| json!({ "id": id })).collect();
+            Reply::json(json!({ "messages": items, "nextPageToken": next, "resultSizeEstimate": ids.len() }))
+        }
+        "messages/i00/attachments/att1" => Reply::json(json!({ "data": encode("%PDF") })),
+        other => match other.strip_prefix("messages/") {
+            Some(id) if request.param("format") == Some("full") => Reply::json(gmail_full(id)),
+            _ => Reply::status(404, json!({ "error": { "message": "Not Found" } })),
+        },
+    }
 }
 
 pub(crate) fn ids(listing: &Value) -> Vec<String> {
@@ -316,76 +321,81 @@ pub(crate) fn graph_message(id: &str, conversation: &str, from: (&str, &str), su
 
 fn graph_server(tokens: Arc<AtomicUsize>) -> FakeServer {
     FakeServer::start(move |request| {
-        let path = request.path.as_str();
-        if path == "/token" {
+        if request.path == "/token" {
             return token_reply(&tokens);
         }
-        assert!(request.header("Prefer").is_some_and(|prefer| prefer.contains("IdType=\"ImmutableId\"")), "{path}");
-        assert_eq!(request.method, "GET", "receiving mail only reads: {path}");
-        let Some(resource) = path.strip_prefix("/v1.0/") else {
-            return Reply::status(404, json!({ "error": { "message": "No such path" } }));
-        };
-        let folder = |id: &str, name: &str, unread: i64, children: i64| {
-            json!({ "id": id, "displayName": name, "childFolderCount": children, "unreadItemCount": unread, "totalItemCount": 9 })
-        };
-        let well_known = [
-            ("inbox", "F-inbox"), ("sentitems", "F-sent"), ("drafts", "F-drafts"), ("deleteditems", "F-trash"),
-            ("junkemail", "F-junk"), ("archive", "F-archive"), ("conversationhistory", "F-history"),
-        ];
-        match resource {
-            "me" => Reply::json(json!({ "displayName": "Me Outlook", "mail": "me@outlook.com" })),
-            "me/mailFolders" => Reply::json(json!({ "value": [
-                folder("F-inbox", "Inbox", 2, 1), folder("F-sent", "Sent Items", 0, 0), folder("F-drafts", "Drafts", 0, 0),
-                folder("F-trash", "Deleted Items", 0, 0), folder("F-junk", "Junk Email", 0, 0),
-                folder("F-archive", "Archive", 0, 0), folder("F-history", "Conversation History", 0, 0),
-            ]})),
-            "me/mailFolders/F-inbox/childFolders" => Reply::json(json!({ "value": [folder("F-projects", "Projects", 0, 0)] })),
-            "me/mailFolders/F-inbox/messages" => Reply::json(json!({ "value": [
-                graph_message("g3", "c1", ("Bob", "bob@x.com"), "RE: Plan", 30),
-                graph_message("g2", "c2", ("Carol", "carol@x.com"), "Photos", 20),
-                graph_message("g1", "c1", ("Bob", "bob@x.com"), "Plan", 0),
-            ]})),
-            "me/mailFolders/F-sent/messages" => Reply::json(json!({ "value": [
-                graph_message("g4", "c1", ("Me", "me@outlook.com"), "RE: Plan", 10),
-            ]})),
-            "me/messages" => {
-                assert_eq!(request.param("$search"), Some("\"photos\""));
-                let mut hit = graph_message("g2", "c2", ("Carol", "carol@x.com"), "Photos", 20);
-                hit["parentFolderId"] = json!("F-inbox");
-                let mut junk = graph_message("g9", "c9", ("Spam", "spam@x.com"), "Photos!!", 25);
-                junk["parentFolderId"] = json!("F-junk");
-                Reply::json(json!({ "value": [hit, junk] }))
-            }
-            "me/messages/g2" => Reply::json(json!({
-                "body": { "contentType": "html", "content": "<p>See <img src=\"cid:img1\"></p>" },
-                "ccRecipients": [], "replyTo": [], "hasAttachments": true,
-                "internetMessageHeaders": [{ "name": "References", "value": "<g1@outlook>" }],
-            })),
-            "me/messages/g2/attachments" => Reply::json(json!({ "value": [
-                { "@odata.type": "#microsoft.graph.fileAttachment", "id": "a1", "name": "photo.jpg",
-                  "contentType": "image/jpeg", "contentId": "img1", "isInline": true, "contentBytes": STANDARD.encode("jpg") },
-                { "@odata.type": "#microsoft.graph.itemAttachment", "id": "a2", "name": "Fwd" },
-            ]})),
-            "me/messages/g2/attachments/a2" => Reply::json(json!({ "item": {
-                "subject": "Old photos", "from": { "emailAddress": { "name": "Dan", "address": "dan@x.com" } },
-                "body": { "contentType": "text", "content": "Inner text" },
-            }})),
-            other => {
-                if let Some(name) = other.strip_prefix("me/mailFolders/")
-                    && let Some((_, id)) = well_known.iter().find(|(known, _)| *known == name)
-                {
-                    return Reply::json(json!({ "id": id }));
-                }
-                if let Some(id) = other.strip_prefix("me/messages/") {
-                    return Reply::json(json!({ "body": { "contentType": "text", "content": format!("Text of {id}") } }));
-                }
-                if other.starts_with("me/mailFolders/") && other.ends_with("/messages") {
-                    return Reply::json(json!({ "value": [] }));
-                }
-                Reply::status(404, json!({ "error": { "message": "Not found" } }))
-            }
-        }
+        graph_reply(request)
     })
+}
+
+/// What the fake Graph answers `request` with; the token endpoint aside.
+fn graph_reply(request: &FakeRequest) -> Reply {
+    let path = request.path.as_str();
+    assert!(request.header("Prefer").is_some_and(|prefer| prefer.contains("IdType=\"ImmutableId\"")), "{path}");
+    assert_eq!(request.method, "GET", "receiving mail only reads: {path}");
+    let Some(resource) = path.strip_prefix("/v1.0/") else {
+        return Reply::status(404, json!({ "error": { "message": "No such path" } }));
+    };
+    let folder = |id: &str, name: &str, unread: i64, children: i64| {
+        json!({ "id": id, "displayName": name, "childFolderCount": children, "unreadItemCount": unread, "totalItemCount": 9 })
+    };
+    let well_known = [
+        ("inbox", "F-inbox"), ("sentitems", "F-sent"), ("drafts", "F-drafts"), ("deleteditems", "F-trash"),
+        ("junkemail", "F-junk"), ("archive", "F-archive"), ("conversationhistory", "F-history"),
+    ];
+    match resource {
+        "me" => Reply::json(json!({ "displayName": "Me Outlook", "mail": "me@outlook.com" })),
+        "me/mailFolders" => Reply::json(json!({ "value": [
+            folder("F-inbox", "Inbox", 2, 1), folder("F-sent", "Sent Items", 0, 0), folder("F-drafts", "Drafts", 0, 0),
+            folder("F-trash", "Deleted Items", 0, 0), folder("F-junk", "Junk Email", 0, 0),
+            folder("F-archive", "Archive", 0, 0), folder("F-history", "Conversation History", 0, 0),
+        ]})),
+        "me/mailFolders/F-inbox/childFolders" => Reply::json(json!({ "value": [folder("F-projects", "Projects", 0, 0)] })),
+        "me/mailFolders/F-inbox/messages" => Reply::json(json!({ "value": [
+            graph_message("g3", "c1", ("Bob", "bob@x.com"), "RE: Plan", 30),
+            graph_message("g2", "c2", ("Carol", "carol@x.com"), "Photos", 20),
+            graph_message("g1", "c1", ("Bob", "bob@x.com"), "Plan", 0),
+        ]})),
+        "me/mailFolders/F-sent/messages" => Reply::json(json!({ "value": [
+            graph_message("g4", "c1", ("Me", "me@outlook.com"), "RE: Plan", 10),
+        ]})),
+        "me/messages" => {
+            assert_eq!(request.param("$search"), Some("\"photos\""));
+            let mut hit = graph_message("g2", "c2", ("Carol", "carol@x.com"), "Photos", 20);
+            hit["parentFolderId"] = json!("F-inbox");
+            let mut junk = graph_message("g9", "c9", ("Spam", "spam@x.com"), "Photos!!", 25);
+            junk["parentFolderId"] = json!("F-junk");
+            Reply::json(json!({ "value": [hit, junk] }))
+        }
+        "me/messages/g2" => Reply::json(json!({
+            "body": { "contentType": "html", "content": "<p>See <img src=\"cid:img1\"></p>" },
+            "ccRecipients": [], "replyTo": [], "hasAttachments": true,
+            "internetMessageHeaders": [{ "name": "References", "value": "<g1@outlook>" }],
+        })),
+        "me/messages/g2/attachments" => Reply::json(json!({ "value": [
+            { "@odata.type": "#microsoft.graph.fileAttachment", "id": "a1", "name": "photo.jpg",
+              "contentType": "image/jpeg", "contentId": "img1", "isInline": true, "contentBytes": STANDARD.encode("jpg") },
+            { "@odata.type": "#microsoft.graph.itemAttachment", "id": "a2", "name": "Fwd" },
+        ]})),
+        "me/messages/g2/attachments/a2" => Reply::json(json!({ "item": {
+            "subject": "Old photos", "from": { "emailAddress": { "name": "Dan", "address": "dan@x.com" } },
+            "body": { "contentType": "text", "content": "Inner text" },
+        }})),
+        other => {
+            if let Some(name) = other.strip_prefix("me/mailFolders/")
+                && let Some((_, id)) = well_known.iter().find(|(known, _)| *known == name)
+            {
+                return Reply::json(json!({ "id": id }));
+            }
+            if let Some(id) = other.strip_prefix("me/messages/") {
+                return Reply::json(json!({ "body": { "contentType": "text", "content": format!("Text of {id}") } }));
+            }
+            if other.starts_with("me/mailFolders/") && other.ends_with("/messages") {
+                return Reply::json(json!({ "value": [] }));
+            }
+            Reply::status(404, json!({ "error": { "message": "Not found" } }))
+        }
+    }
 }
 
 #[test]
@@ -427,5 +437,174 @@ fn lists_shows_and_searches_outlook() {
     let found = call(&engine, "mail.search", json!({ "query": "photos" })).unwrap();
     assert_eq!(ids(&found), ["me@outlook.com|g2@outlook"]);
     drop(engine);
+    cleanup(&config);
+}
+
+// MARK: - Accounts on their own (MS-278)
+
+/// How a provider of `two_providers` answers: as usual, never (the connection stays open), or
+/// failing (503).
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Outage {
+    #[default]
+    None,
+    Hang,
+    Fail,
+}
+
+#[derive(Default)]
+struct Outages {
+    /// Outlook's requests (`/v1.0/`).
+    outlook: Mutex<Outage>,
+    /// Every request, the token endpoint's too.
+    all: Mutex<Outage>,
+    /// Gmail's inbox has a new message, `n0`, at its top.
+    fresh: AtomicBool,
+}
+
+/// Gmail and Outlook on one server, answering as `gmail_server` and `graph_server` do unless
+/// `outages` says otherwise.
+fn two_providers(outages: Arc<Outages>) -> FakeServer {
+    let counters = GmailCounters { tokens: AtomicUsize::new(0), labels: AtomicUsize::new(0), listings: AtomicUsize::new(0) };
+    let mut metadata = gmail_metadata();
+    let fresh = json!({
+        "id": "n0", "threadId": "t-n0", "labelIds": ["INBOX", "UNREAD"], "internalDate": (BASE_MS + 3_600_000).to_string(),
+        "payload": { "mimeType": "text/plain", "headers": [
+            header("From", "New <new@x.com>"), header("To", "Me <me@gmail.com>"), header("Subject", "Just in"),
+            header("Message-ID", "<n0@x>"),
+        ]},
+    });
+    metadata.insert("n0".into(), fresh);
+    FakeServer::start(move |request| {
+        let outlook = request.path.starts_with("/v1.0/");
+        let outage = match *outages.all.lock().unwrap() {
+            Outage::None if outlook => *outages.outlook.lock().unwrap(),
+            all => all,
+        };
+        match outage {
+            Outage::Hang => return Reply::bytes(200, Vec::new()).after(Duration::from_secs(3600)),
+            Outage::Fail => return Reply::status(503, json!({ "error": { "message": "Service unavailable" } })),
+            Outage::None => {}
+        }
+        if request.path == "/token" {
+            return token_reply(&counters.tokens);
+        }
+        if outlook {
+            return graph_reply(request);
+        }
+        if outages.fresh.load(Ordering::SeqCst)
+            && request.path == "/gmail/v1/users/me/messages"
+            && request.param("labelIds") == Some("INBOX")
+            && request.param("pageToken").is_none()
+        {
+            let ids = std::iter::once("n0".to_string()).chain((0..49).map(|n| format!("i{n:02}")));
+            let items: Vec<Value> = ids.map(|id| json!({ "id": id })).collect();
+            return Reply::json(json!({ "messages": items, "nextPageToken": "p2" }));
+        }
+        gmail_reply(request, &counters, &metadata)
+    })
+}
+
+const BOTH: [(&str, &str); 2] = [("me@gmail.com", "google"), ("me@outlook.com", "microsoft")];
+
+/// The unified inbox's conversation ids as the engine holds them (`cached`, what front ends
+/// show), none while it can't list yet.
+fn held(engine: &Engine, limit: usize) -> Vec<String> {
+    call(engine, "mail.list", json!({ "cached": true, "limit": limit })).map(|listing| ids(&listing)).unwrap_or_default()
+}
+
+/// `status`'s line for `account`: whether its mailboxes loaded, and its problem.
+fn account_status(engine: &Engine, account: &str) -> (bool, Value) {
+    let status = call(engine, "status", json!({})).unwrap();
+    let line = status["accounts"].as_array().unwrap().iter().find(|line| line["id"] == account).unwrap().clone();
+    (line["mailboxesLoaded"] == json!(true), line["problem"].clone())
+}
+
+/// Whether `event` arrives within 5 s.
+fn heard(events: &mpsc::Receiver<&'static str>, event: &str) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match events.recv_timeout(left) {
+            Ok(heard) if heard == event => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+#[test]
+fn an_account_that_never_answers_holds_up_no_other() {
+    let outages = Arc::new(Outages::default());
+    *outages.outlook.lock().unwrap() = Outage::Hang;
+    let server = two_providers(outages.clone());
+    let (engine, config) = engine_for(&server, &BOTH);
+    // Gmail's inbox lists while Outlook's first requests still wait for an answer.
+    wait_until("Gmail's inbox", || held(&engine, 25).contains(&"me@gmail.com|i00@x".to_string()));
+    assert_eq!(account_status(&engine, "me@gmail.com"), (true, Value::Null));
+    assert_eq!(account_status(&engine, "me@outlook.com"), (false, Value::Null));
+    drop(engine);
+    cleanup(&config);
+}
+
+#[test]
+fn an_account_that_fails_says_so_on_its_own_and_loads_once_it_answers() {
+    let outages = Arc::new(Outages::default());
+    *outages.outlook.lock().unwrap() = Outage::Fail;
+    let server = two_providers(outages.clone());
+    let (engine, config) = engine_for(&server, &BOTH);
+    wait_until("Gmail's inbox", || held(&engine, 25).contains(&"me@gmail.com|i00@x".to_string()));
+    wait_until("Outlook's problem", || account_status(&engine, "me@outlook.com").1 == json!("Service unavailable"));
+    assert_eq!(account_status(&engine, "me@gmail.com"), (true, Value::Null));
+
+    // A refresh tries the account again; it loads, and its problem goes.
+    *outages.outlook.lock().unwrap() = Outage::None;
+    call(&engine, "refresh", json!({})).unwrap();
+    wait_until("Outlook's inbox", || held(&engine, 25).contains(&"me@outlook.com|g1@outlook".to_string()));
+    wait_until("Outlook's problem gone", || account_status(&engine, "me@outlook.com") == (true, Value::Null));
+
+    // New mail in one account shows, and front ends hear of it, while another never answers.
+    std::thread::sleep(Duration::from_millis(300));
+    let (sender, events) = mpsc::channel();
+    engine.subscribe(move |event| {
+        let _ = sender.send(event);
+    });
+    *outages.outlook.lock().unwrap() = Outage::Hang;
+    outages.fresh.store(true, Ordering::SeqCst);
+    call(&engine, "refresh", json!({})).unwrap();
+    assert!(heard(&events, "conversations"), "the new mail was announced");
+    assert_eq!(held(&engine, 25)[0], "me@gmail.com|n0@x");
+    drop(engine);
+    cleanup(&config);
+}
+
+#[test]
+fn the_cached_list_shows_before_any_provider_answers() {
+    let outages = Arc::new(Outages::default());
+    let server = two_providers(outages.clone());
+    let (engine, config) = engine_for(&server, &BOTH);
+    wait_until("both inboxes", || {
+        let held = held(&engine, 25);
+        held.contains(&"me@gmail.com|i00@x".to_string()) && held.contains(&"me@outlook.com|g1@outlook".to_string())
+    });
+    // mail.db's writer catches up.
+    std::thread::sleep(Duration::from_secs(1));
+    drop(engine);
+
+    // Next launch, every provider (and the token endpoint) keeps its connections open forever.
+    *outages.all.lock().unwrap() = Outage::Hang;
+    let engine = Arc::new(Engine::start(config.clone()));
+    wait_until("restored mailboxes", || {
+        let boxes = call(&engine, "mailboxes", json!({})).unwrap();
+        boxes["me@gmail.com"].is_array() && boxes["me@outlook.com"].is_array()
+    });
+    // A front end's first list: a page longer than what is held, which asks no provider for more.
+    let (sender, answer) = mpsc::channel();
+    let asking = engine.clone();
+    std::thread::spawn(move || {
+        let _ = sender.send(held(&asking, 100));
+    });
+    let listed = answer.recv_timeout(Duration::from_secs(3)).expect("the held list answers at once");
+    assert!(listed.contains(&"me@gmail.com|i00@x".to_string()) && listed.contains(&"me@outlook.com|g1@outlook".to_string()), "{listed:?}");
     cleanup(&config);
 }

@@ -81,6 +81,9 @@ pub struct AccountStatus {
     pub label: String,
     pub provider: Provider,
     pub mailboxes_loaded: bool,
+    /// Why the account's mail could not load just now (no answer, the provider failing, the
+    /// sign-in refused), until it loads again; the `problems` event follows it (MS-278).
+    pub problem: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]

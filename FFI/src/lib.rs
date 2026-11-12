@@ -159,11 +159,13 @@ pub struct CalendarDraft {
 pub enum Event {
     Accounts,
     Mailboxes,
-    /// The inbox list changed: new mail, flags, moves.
+    /// The inbox list changed: new mail, flags, moves; sent as each mailbox's answer comes in.
     Conversations,
     Previews,
     Tags,
     Sync,
+    /// `status` changed its failures: the last one, an account that can't connect
+    /// (`AccountStatus::problem`) or connects again, the AI tagger's.
     Problems,
     /// settings.json changed, from any front end, the CLI or an editor.
     Settings,

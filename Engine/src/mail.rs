@@ -98,11 +98,14 @@ struct State {
     known_order: VecDeque<String>,
     /// The latest failure, until a refresh clears it.
     problem: Option<String>,
-    /// A refresh of the default list is running (the Swift engine's `isLoading`): the `sync`
-    /// event follows it, and polling skips a turn while it runs.
-    loading: bool,
-    /// Refreshes started; only the latest one's end clears `loading`.
-    refreshes: u64,
+    /// Why each account's mail could not load (`ApiError::cuts_off`), until it loads again: the
+    /// account's own "can't connect", which `status` hands every front end.
+    account_problems: HashMap<String, String>,
+    /// Accounts whose identity and mailboxes are loading (`connect_account`).
+    connecting: HashSet<String>,
+    /// Refresh passes running (the Swift engine's `isLoading` while any runs): the `sync` event
+    /// follows the count leaving and reaching zero, and polling skips a turn while it is not.
+    passes: usize,
     /// When the default list last finished refreshing, for `status`.
     last_refresh: Option<Date>,
     /// Every account's first load finished: identities are known and a reconnecting push socket
@@ -231,8 +234,9 @@ impl Mail {
 
     // MARK: - Startup and accounts
 
-    /// Paints the signed-in accounts from mail.db (identities, mailboxes, tags, listings), then
-    /// loads every account's identity and mailboxes and fetches the inboxes' first pages.
+    /// Paints the signed-in accounts from mail.db (identities, mailboxes, tags, listings) and
+    /// fetches what it held afresh, while every account loads its identity and mailboxes and
+    /// fetches its inboxes' first pages on its own (MS-278).
     pub async fn start(self: Arc<Self>) {
         let weak = Arc::downgrade(&self);
         let pushing = Arc::downgrade(&self);
@@ -277,21 +281,39 @@ impl Mail {
         self.events.emit_soon("accounts");
         let names: Vec<String> = restored.iter().map(|account| account.name.clone()).collect();
         self.load_cached_mailboxes(&names).await;
-        self.clone().refresh();
-        self.connect(names).await;
+        let held = Self::default_keys(&self.state());
+        self.clone().refresh_keys(held.clone());
+        self.connect(names, held.into_iter().collect()).await;
     }
 
-    async fn connect(self: Arc<Self>, names: Vec<String>) {
-        futures::future::join_all(names.iter().map(|name| self.load_account(name))).await;
-        let accounts = {
+    /// Connects every account of `names` (`connect_account`), all at once; `fetching`: the
+    /// mailboxes a refresh already fetches.
+    async fn connect(self: Arc<Self>, names: Vec<String>, fetching: HashSet<MailboxKey>) {
+        futures::future::join_all(names.into_iter().map(|name| self.clone().connect_account(name, &fetching))).await;
+        self.state().connected = true;
+        self.tagging.schedule();
+    }
+
+    /// Loads `name`'s identity and mailboxes, then fetches its default-list mailboxes but
+    /// `fetching`'s and its counts: each account on its own, so one that is slow or can't connect
+    /// holds up no other. An account already connecting is left to that.
+    async fn connect_account(self: Arc<Self>, name: String, fetching: &HashSet<MailboxKey>) {
+        if !self.state().connecting.insert(name.clone()) {
+            return;
+        }
+        self.load_account(&name).await;
+        let (accounts, keys) = {
             let mut state = self.state();
-            state.connected = true;
-            state.accounts.clone()
+            state.connecting.remove(&name);
+            let keys: Vec<MailboxKey> = Self::default_keys(&state)
+                .into_iter()
+                .filter(|key| key.account == name && !fetching.contains(key))
+                .collect();
+            (state.accounts.clone(), keys)
         };
         self.cache.save_accounts(&accounts);
-        self.clone().refresh();
-        self.tagging.schedule();
-        self.refresh_counts();
+        self.refresh_account_counts(name);
+        self.refresh_keys(keys);
     }
 
     /// The default list changed: front ends list again, the tagger looks at it a moment later
@@ -351,7 +373,8 @@ impl Mail {
         &self.tagging
     }
 
-    /// `status`'s accounts: the mail store's, and whether their mailboxes have loaded.
+    /// `status`'s accounts: the mail store's, whether their mailboxes have loaded, and why their
+    /// mail could not load just now.
     pub(crate) fn account_statuses(&self) -> Vec<answers::AccountStatus> {
         let state = self.state();
         state
@@ -362,6 +385,7 @@ impl Mail {
                 label: account.label.clone(),
                 provider: account.provider,
                 mailboxes_loaded: state.mailboxes.get(&account.name).is_some_and(|list| !list.is_empty()),
+                problem: state.account_problems.get(&account.name).cloned(),
             })
             .collect()
     }
@@ -417,6 +441,7 @@ impl Mail {
                     state.mailboxes.remove(name);
                     state.apis.remove(name);
                     state.backends.remove(name);
+                    state.account_problems.remove(name);
                 }
                 state.listings.retain(|key, _| !removed.contains(&key.account));
                 state.first_page_requests.retain(|key, _| !removed.contains(&key.account));
@@ -439,11 +464,8 @@ impl Mail {
         let mail = self.clone();
         tokio::spawn(async move {
             mail.load_cached_mailboxes(&load).await;
-            futures::future::join_all(load.iter().map(|name| mail.load_account(name))).await;
-            let accounts = mail.state().accounts.clone();
-            mail.cache.save_accounts(&accounts);
-            mail.clone().refresh();
-            mail.refresh_counts();
+            let none = HashSet::new();
+            futures::future::join_all(load.into_iter().map(|name| mail.clone().connect_account(name, &none))).await;
         });
     }
 
@@ -521,7 +543,12 @@ impl Mail {
                 drop(state);
                 self.events.emit_soon("mailboxes");
             }
-            Err(error) => self.report(&error, Some(name)),
+            Err(error) => {
+                self.report(&error, Some(name));
+                if error.cuts_off() {
+                    self.account_failed(name, &error);
+                }
+            }
         }
         if let Ok(identity) = identity {
             let mut state = self.state();
@@ -573,7 +600,7 @@ impl Mail {
 
     /// A refresh of the default list is running.
     pub fn is_loading(&self) -> bool {
-        self.state().loading
+        self.state().passes > 0
     }
 
     /// When the default list last finished refreshing.
@@ -701,31 +728,51 @@ impl Mail {
         futures::future::join_all(reads).await;
     }
 
-    /// The default list's mailboxes, fetched afresh. `loading` holds until the latest refresh
-    /// ends, and each change of it sends `sync`.
+    /// The default list's mailboxes fetched afresh, each account's on its own, and accounts whose
+    /// mailboxes never loaded tried again (`connect_account`).
     pub fn refresh(self: Arc<Self>) {
-        let (keys, mine) = {
+        let (keys, unloaded) = {
             let mut state = self.state();
             if state.problem.take().is_some() {
                 self.events.emit_soon("problems");
             }
-            let keys = Self::default_keys(&state);
-            if keys.is_empty() {
-                return;
-            }
-            state.refreshes += 1;
-            if !state.loading {
-                state.loading = true;
+            let unloaded: Vec<String> = state
+                .accounts
+                .iter()
+                .map(|account| account.name.clone())
+                .filter(|name| state.mailboxes.get(name).is_none_or(Vec::is_empty) && !state.connecting.contains(name))
+                .collect();
+            (Self::default_keys(&state), unloaded)
+        };
+        for name in unloaded {
+            let mail = self.clone();
+            tokio::spawn(async move {
+                let none = HashSet::new();
+                mail.connect_account(name, &none).await;
+            });
+        }
+        self.refresh_keys(keys);
+    }
+
+    /// One refresh pass: `keys`' first pages fetched afresh, after reading those not loaded yet
+    /// from mail.db. `is_loading` holds while any pass runs.
+    fn refresh_keys(self: Arc<Self>, keys: Vec<MailboxKey>) {
+        if keys.is_empty() {
+            return;
+        }
+        {
+            let mut state = self.state();
+            state.passes += 1;
+            if state.passes == 1 {
                 self.events.emit_soon("sync");
             }
-            (keys, state.refreshes)
-        };
+        }
         tokio::spawn(async move {
             self.load_cached_listings(&keys).await;
             self.fetch_first_pages(&keys).await;
             let mut state = self.state();
-            if state.refreshes == mine {
-                state.loading = false;
+            state.passes -= 1;
+            if state.passes == 0 {
                 state.last_refresh = Some(now());
                 drop(state);
                 self.events.emit_soon("sync");
@@ -755,8 +802,10 @@ impl Mail {
         });
     }
 
-    /// First pages of `keys`, and the keys that failed. A key's answer counts only if no later
-    /// request for it was made, so a slow older pass never overwrites a newer one.
+    /// First pages of `keys`, and the keys that failed. Each page is taken in as it arrives, so a
+    /// slow or failing mailbox holds up no other (MS-278), and once an account's pages are all in
+    /// it says whether its mail loaded (`account_loaded`, `account_failed`). A key's answer counts
+    /// only if no later request for it was made, so a slow older pass never overwrites a newer one.
     async fn fetch_first_pages(self: &Arc<Self>, keys: &[MailboxKey]) -> HashMap<MailboxKey, ApiError> {
         let mut tickets = HashMap::new();
         {
@@ -767,38 +816,59 @@ impl Mail {
                 tickets.insert(key.clone(), *ticket);
             }
         }
-        let mut jobs: FuturesUnordered<_> = keys
-            .iter()
-            .filter_map(|key| self.backend(&key.account).map(|backend| (key.clone(), backend)))
+        let asked: Vec<(MailboxKey, Arc<Backend>)> =
+            keys.iter().filter_map(|key| self.backend(&key.account).map(|backend| (key.clone(), backend))).collect();
+        // Per account: its pages still out, whether one counted, and the failure that cut it off.
+        let mut accounts: HashMap<String, (usize, bool, Option<ApiError>)> = HashMap::new();
+        for (key, _) in &asked {
+            accounts.entry(key.account.clone()).or_default().0 += 1;
+        }
+        let mut jobs: FuturesUnordered<_> = asked
+            .into_iter()
             .map(|(key, backend)| async move {
                 let result = backend.envelopes(&key.mailbox, None, PAGE_SIZE, Priority::Interactive).await;
                 (key, result)
             })
             .collect();
         let mut failures = HashMap::new();
-        let mut shown_changed = false;
         while let Some((key, result)) = jobs.next().await {
-            let mut state = self.state();
-            if !state.accounts.iter().any(|account| account.name == key.account)
-                || state.first_page_requests.get(&key) != tickets.get(&key)
-            {
-                continue;
-            }
-            match result {
-                Ok(page) => {
-                    if self.merge_first_page(&mut state, page.envelopes, page.next, &key) && Self::default_keys(&state).contains(&key) {
-                        shown_changed = true;
-                    }
+            // None: the answer doesn't count (signed out, or a newer request was made).
+            let answer: Option<Result<(), ApiError>> = {
+                let mut state = self.state();
+                if !state.accounts.iter().any(|account| account.name == key.account)
+                    || state.first_page_requests.get(&key) != tickets.get(&key)
+                {
+                    None
+                } else {
+                    Some(result.map(|page| {
+                        if self.merge_first_page(&mut state, page.envelopes, page.next, &key)
+                            && Self::default_keys(&state).contains(&key)
+                        {
+                            self.conversations_changed();
+                        }
+                    }))
                 }
-                Err(error) => {
-                    drop(state);
+            };
+            let tally = accounts.get_mut(&key.account).expect("every asked account is counted");
+            tally.0 -= 1;
+            match answer {
+                Some(Ok(())) => tally.1 = true,
+                Some(Err(error)) => {
+                    tally.1 = true;
                     self.report(&error, Some(&key.account));
-                    failures.insert(key, error);
+                    if error.cuts_off() {
+                        tally.2 = Some(error.clone());
+                    }
+                    failures.insert(key.clone(), error);
+                }
+                None => {}
+            }
+            if tally.0 == 0 && tally.1 {
+                match tally.2.take() {
+                    Some(error) => self.account_failed(&key.account, &error),
+                    None => self.account_loaded(&key.account),
                 }
             }
-        }
-        if shown_changed {
-            self.conversations_changed();
         }
         failures
     }
@@ -845,8 +915,8 @@ impl Mail {
     }
 
     /// The next page of each of `keys` that has one, fetched at once and kept in mail.db with
-    /// the cursor after it.
-    async fn fetch_next_pages(self: &Arc<Self>, keys: &[MailboxKey]) {
+    /// the cursor after it; answers the keys whose page failed.
+    async fn fetch_next_pages(self: &Arc<Self>, keys: &[MailboxKey]) -> HashMap<MailboxKey, ApiError> {
         let jobs: Vec<(MailboxKey, String)> = {
             let state = self.state();
             keys.iter()
@@ -862,6 +932,7 @@ impl Mail {
             })
             .collect();
         let mut grew = false;
+        let mut failures = HashMap::new();
         while let Some((key, cursor, result)) = running.next().await {
             let mut state = self.state();
             let Some(listing) = state.listings.get_mut(&key) else { continue };
@@ -887,6 +958,10 @@ impl Mail {
                     } else {
                         drop(state);
                         self.report(&error, Some(&key.account));
+                        if error.cuts_off() {
+                            self.account_failed(&key.account, &error);
+                        }
+                        failures.insert(key, error);
                     }
                 }
             }
@@ -897,6 +972,7 @@ impl Mail {
                 self.conversations_changed();
             }
         }
+        failures
     }
 
     fn messages(state: &State, key: &MailboxKey, envelopes: &[Arc<Envelope>]) -> Vec<MailMessage> {
@@ -937,10 +1013,12 @@ impl Mail {
         }
     }
 
-    /// One page of `keys`' conversations that pass `include`, newest first. The first page
-    /// fetches the providers' first pages unless `cached`; later pages fetch further pages until
-    /// the page is complete: every mailbox with more mail has been listed back past the page's
-    /// oldest conversation, Sent too for inboxes, which list the conversations the user started.
+    /// One page of `keys`' conversations that pass `include`, newest first. Unless `cached`, the
+    /// first page fetches the providers' first pages, and every page fetches further pages until
+    /// it is complete: every mailbox with more mail has been listed back past the page's oldest
+    /// conversation, Sent too for inboxes, which list the conversations the user started. A
+    /// mailbox whose page failed is not asked again for this listing. `cached` answers what is
+    /// held without a request, so a front end's list never waits on a provider (MS-278).
     async fn agent_listing(
         self: &Arc<Self>,
         keys: &[MailboxKey],
@@ -968,6 +1046,7 @@ impl Mail {
             }
         }
         failures.sort();
+        let mut given_up: HashSet<MailboxKey> = HashSet::new();
         let mut round = 0;
         loop {
             let step = {
@@ -991,7 +1070,7 @@ impl Mail {
                     .iter()
                     .copied()
                     .filter(|key| {
-                        if !Self::has_next_page(&state, key) {
+                        if cached || given_up.contains(*key) || !Self::has_next_page(&state, key) {
                             return false;
                         }
                         let Some(floor) = floor else { return true };
@@ -1019,7 +1098,14 @@ impl Mail {
                     return listing;
                 }
                 Err(short) => {
-                    self.fetch_next_pages(&short).await;
+                    let failed = self.fetch_next_pages(&short).await;
+                    let state = self.state();
+                    for (key, error) in failed {
+                        let name = Self::mailbox(&state, &key).map_or(key.mailbox.as_str(), Mailbox::display_name);
+                        failures.push(format!("{} {}: {}", key.account, name, error.message));
+                        given_up.insert(key);
+                    }
+                    failures.sort();
                     round += 1;
                 }
             }
@@ -1535,6 +1621,26 @@ impl Mail {
         };
         self.state().problem = Some(message);
         self.events.emit_soon("problems");
+    }
+
+    /// `account` can't get its mail (`ApiError::cuts_off`): `status` says so for it alone until
+    /// its mail loads again; `problems` announces the change.
+    fn account_failed(&self, account: &str, error: &ApiError) {
+        let mut state = self.state();
+        if !state.accounts.iter().any(|known| known.name == account) {
+            return;
+        }
+        if state.account_problems.insert(account.into(), error.message.clone()).as_ref() != Some(&error.message) {
+            drop(state);
+            self.events.emit_soon("problems");
+        }
+    }
+
+    /// `account`'s mail loaded: its problem, if it had one, goes.
+    fn account_loaded(&self, account: &str) {
+        if self.state().account_problems.remove(account).is_some() {
+            self.events.emit_soon("problems");
+        }
     }
 }
 
