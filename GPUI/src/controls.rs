@@ -213,14 +213,16 @@ pub fn island(color: Hsla, p: &Palette) -> Div {
 
 /// How far the pointer travels with the button held before a press on a title bar moves the
 /// window; short of it the press stays a click (a tap on a touchpad wobbles a point or two).
-const WINDOW_MOVE_SLOP: f64 = 4.;
+pub const WINDOW_MOVE_SLOP: f64 = 4.;
 
 /// A region that moves the window as a title bar does (the window between the islands, their
 /// title rows), a double click zooming it (the Mac). The window moves only once the pointer has
 /// travelled `WINDOW_MOVE_SLOP` with the button held, never on the press: on Linux the compositor
 /// takes the pointer for a move (`start_window_move`), so a move begun on the press turned every
 /// click and tap there into a drag of the window (MS-206). Controls and rows laid over one stop
-/// their presses, so dragging them never moves the window.
+/// their presses, so dragging them never moves the window. On a page's title row (the reader's,
+/// the calendar event's and its page's) a drag that sets off sideways moves the page instead
+/// (MS-266, `swipe.rs`), which decides over the same `WINDOW_MOVE_SLOP` before this does.
 pub fn title_bar(id: impl Into<ElementId>, window: &mut Window, cx: &mut App) -> Stateful<Div> {
     let id = id.into();
     // Where the press that may move the window went down, until it is released or moves it.
@@ -263,6 +265,13 @@ pub fn title_bar(id: impl Into<ElementId>, window: &mut Window, cx: &mut App) ->
             }
         })
         .child(follow.absolute().size_0())
+}
+
+/// Keeps a left press on `element` from what lies under it, for content whose own drag must
+/// stay its own (a mail body's text selection and links, a text field): a drag from there never
+/// moves a page (MS-266, `swipe.rs`) or the window.
+pub fn own_presses<E: InteractiveElement>(element: E) -> E {
+    element.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
 /// A hairline rule across.

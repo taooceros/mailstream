@@ -1,8 +1,7 @@
 //! Selection, the layers over the list, keyboard movement and search.
 
 use super::*;
-use crate::design::{self, motion};
-use crate::swipe::{self, Step};
+use crate::swipe::{Pointer, Step};
 use gpui::{DismissEvent, ScrollEvent};
 
 impl MailApp {
@@ -207,13 +206,7 @@ impl MailApp {
 
     /// How far right of its place the top layer sits now, without advancing anything.
     fn current_offset(&self) -> f32 {
-        let width = self.content_width;
-        match self.slide {
-            Slide::Rest => 0.0,
-            Slide::Drag(offset) => offset,
-            Slide::Opening(start) => (1.0 - design::house_curve(progress(start))) * width,
-            Slide::Settle { from, to, start, .. } => from + (to - from) * design::house_curve(progress(start)),
-        }
+        self.slide.offset(self.content_width)
     }
 
     /// Where the top layer sits in a content area `width` wide, called while rendering: advances
@@ -228,49 +221,45 @@ impl MailApp {
             self.slide_layer = Some(top);
             self.slide = Slide::Rest;
         }
-        let offset = self.current_offset();
-        match self.slide {
-            Slide::Rest | Slide::Drag(_) => offset,
-            Slide::Opening(start) | Slide::Settle { start, .. } if progress(start) < 1.0 => {
-                window.request_animation_frame();
-                offset
-            }
-            Slide::Settle { back: true, .. } => {
-                self.finish_closing();
-                0.0
-            }
-            Slide::Opening(_) | Slide::Settle { .. } => {
-                self.slide = Slide::Rest;
-                0.0
-            }
-        }
+        self.slide.advance(width, window).unwrap_or_else(|| {
+            self.layers.pop();
+            self.slide_layer = None;
+            0.0
+        })
     }
 
     /// A scroll event in the content area, in the capture phase: true when the back swipe took it.
     pub fn feed_swipe(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) -> bool {
         let can_start = !self.live_layers().is_empty() && self.context_menu.is_none();
-        match self.swipe.feed(event, can_start) {
-            Step::Pass => false,
-            Step::Consume => true,
-            Step::Drag(offset) => {
-                self.finish_closing();
-                self.slide_layer = self.layers.last().map(Layer::id);
-                self.slide = Slide::Drag(offset);
-                cx.notify();
-                true
-            }
-            Step::Release { offset, velocity } => {
-                let (back, to) = swipe::settle(offset, velocity, self.content_width);
-                self.slide = Slide::Settle { from: offset, to, start: Instant::now(), back };
-                cx.notify();
-                true
-            }
-            Step::Cancel(offset) => {
-                self.slide = Slide::Settle { from: offset, to: 0.0, start: Instant::now(), back: false };
-                cx.notify();
-                true
-            }
+        let step = self.swipe.feed(event, can_start);
+        self.follow(step, cx)
+    }
+
+    /// A single left press on layer `layer` at `at`: a sideways drag from there may close it, when
+    /// it is the top one (MS-266, `swipe.rs`).
+    pub fn press_layer(&mut self, layer: &SharedString, at: Point<Pixels>) {
+        let top = self.live_layers().last().is_some_and(|top| &top.id() == layer);
+        self.drag.press(at, top && self.context_menu.is_none());
+    }
+
+    /// The mouse after a press on a layer, in the capture phase: true when the drag took it.
+    pub fn feed_drag(&mut self, pointer: Pointer, cx: &mut Context<Self>) -> bool {
+        let step = self.drag.feed(pointer);
+        self.follow(step, cx)
+    }
+
+    /// The top layer follows a swipe's or a drag's step: true when the gesture took the event.
+    fn follow(&mut self, step: Step, cx: &mut Context<Self>) -> bool {
+        let moves = !matches!(step, Step::Pass | Step::Consume);
+        if matches!(step, Step::Drag(_)) {
+            self.finish_closing();
+            self.slide_layer = self.layers.last().map(Layer::id);
         }
+        let took = self.slide.follow(step, self.content_width);
+        if moves {
+            cx.notify();
+        }
+        took
     }
 
     pub fn toggle_expanded(&mut self, key: &SharedString, cx: &mut Context<Self>) {
@@ -477,9 +466,4 @@ impl MailApp {
             self.back(&Back, window, cx);
         }
     }
-}
-
-/// How far through the standard slide a motion that began at `start` is, 0 to 1.
-fn progress(start: Instant) -> f32 {
-    (start.elapsed().as_secs_f32() / motion::ENTER.as_secs_f32()).min(1.0)
 }

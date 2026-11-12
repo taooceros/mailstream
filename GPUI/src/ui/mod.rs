@@ -16,9 +16,9 @@ mod toolbar;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, CursorStyle, Div, DispatchPhase, DragMoveEvent, ElementId, EmptyView,
+    AnyElement, App, AppContext, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId, EmptyView,
     Focusable,
-    FontWeight, InteractiveElement, IntoElement, MouseButton, NavigationDirection, ParentElement, Render,
+    FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, NavigationDirection, ParentElement, Render,
     ScrollEvent, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, canvas, div, px, relative,
 };
 use mailstream::{Category, Conversation, MailboxRole};
@@ -27,7 +27,7 @@ use crate::avatars;
 use crate::compose::{ComposeColumn, ResizeColumn};
 use crate::controls::{
     Tone, capsule, centered_note, field_frame, hairline, icon_avatar, icon_button, island, list_row, mark_dot, notice,
-    pill, raised_capsule, row_layout, section_header, tag, title_bar,
+    own_presses, pill, raised_capsule, row_layout, section_header, tag, title_bar,
 };
 #[cfg(target_os = "macos")]
 use crate::controls::{segment, segmented};
@@ -38,6 +38,7 @@ use crate::format;
 use crate::icons::{Icon, icon};
 use crate::input;
 use crate::split::{self, ResizeList};
+use crate::swipe;
 use crate::model::{AccountExt, CategoryExt, ConversationExt, MailboxExt, RoleExt, ShownMessage, UNIFIED};
 use crate::state::{
     Archive, Back, CONTEXT, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh, Removal, Reply,
@@ -285,37 +286,26 @@ impl MailApp {
                         .shadow(p.page_shadow.clone())
                         // The page keeps the keyboard; clicks never reach the list beneath.
                         .occlude()
+                        .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer.id(), cx))
                         .child(self.render_bundle(*category, p, cx))
                         .into_any_element(),
                 ),
                 Layer::Reader(conversation) => {
-                    reader = Some((self.render_detail(conversation, two_pane, p, window, cx), shift));
+                    reader = Some((self.render_detail(conversation, layer.id(), two_pane, p, window, cx), shift));
                 }
             }
         }
 
         // Two-finger back swipe: scroll events are seen in the capture phase, before the lists
         // and the reader scroll with them, so a horizontal swipe is never eaten by a scroll view.
-        let entity = cx.entity();
-        let swipe = canvas(
-            |_, _, _| (),
-            move |bounds, _, window, _| {
-                window.on_mouse_event(move |event: &ScrollEvent, phase, _, cx: &mut App| {
-                    if phase != DispatchPhase::Capture || !bounds.contains(&event.position) {
-                        return;
-                    }
-                    if entity.update(cx, |this, cx| this.feed_swipe(event, cx)) {
-                        cx.stop_propagation();
-                    }
-                });
-            },
-        )
-        .absolute()
-        .size_full();
+        // A mouse drag from a press on the top layer moves it the same way (MS-266); its
+        // listeners go under the layers and over them (`swipe::mouse_capture`).
+        let swipe = swipe::scroll_capture(cx.entity(), Self::feed_swipe).absolute().size_full();
+        let (drag_under, drag_over) = swipe::mouse_capture(cx.entity(), Self::feed_drag);
 
         let list = self.render_list_island(bundles, p, window, cx);
-        let content = div().relative().size_full().child(swipe);
-        match reader {
+        let content = div().relative().size_full().child(swipe).child(drag_under.absolute().size_0());
+        let content = match reader {
             // Beside the list, which narrows as the conversation slides in from the window's edge;
             // the conversation keeps its width, so its text does not reflow as it moves.
             Some((detail, shift)) if two_pane => {
@@ -356,15 +346,26 @@ impl MailApp {
                             .w(px(mail - split_list - layout::GAP))
                             .child(detail),
                     )
-                    .into_any_element()
             }
             // Over the list's island.
             Some((detail, shift)) => content
                 .child(list.size_full())
-                .child(div().absolute().top_0().bottom_0().w_full().left(px(shift)).child(detail))
-                .into_any_element(),
-            None => content.child(list.size_full()).into_any_element(),
-        }
+                .child(div().absolute().top_0().bottom_0().w_full().left(px(shift)).child(detail)),
+            None => content.child(list.size_full()),
+        };
+        content.child(drag_over.absolute().size_0()).into_any_element()
+    }
+
+    /// A single left press on layer `layer`, from which a sideways drag may close it (MS-266).
+    fn press_layer_listener(
+        layer: SharedString,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, event: &MouseDownEvent, _, _| {
+            if event.click_count == 1 {
+                this.press_layer(&layer, event.position);
+            }
+        })
     }
 
     /// The docked compose column, `width` wide.

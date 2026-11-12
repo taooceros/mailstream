@@ -20,7 +20,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::base::Selectable;
 use gpui::component::popover::Popover;
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Context, DispatchPhase, Div, ElementId, FontWeight, HighlightStyle, Hsla,
+    Anchor, AnyElement, App, ClickEvent, Context, Div, ElementId, FontWeight, HighlightStyle, Hsla,
     InteractiveElement, IntoElement, ParentElement, PathBuilder, RenderOnce, ScrollEvent, Stateful,
     StatefulInteractiveElement, StyleRefinement, Styled, StyledText, Window, canvas, div, linear_color_stop,
     linear_gradient, point, px, relative,
@@ -229,8 +229,8 @@ impl CalendarPane {
 
     /// A scroll event over the grid, in the capture phase: true when the page swipe took it.
     fn feed_swipe(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) -> bool {
-        // A swipe over the event's page scrolls the page.
-        if self.page {
+        // A swipe over the event's page, or the pane over the days, is theirs (`feed_close_swipe`).
+        if self.page || self.pane_covers {
             return false;
         }
         let width = self.page_width.get().max(1.);
@@ -512,22 +512,7 @@ impl CalendarPane {
 
         // Two-finger paging: scroll events are seen in the capture phase, before the timeline
         // scrolls with them, so a sideways swipe is never eaten by it.
-        let entity = cx.entity();
-        let swipe = canvas(
-            |_, _, _| (),
-            move |bounds, _, window, _| {
-                window.on_mouse_event(move |event: &ScrollEvent, phase, _, cx: &mut App| {
-                    if phase != DispatchPhase::Capture || !bounds.contains(&event.position) {
-                        return;
-                    }
-                    if entity.update(cx, |this, cx| this.feed_swipe(event, cx)) {
-                        cx.stop_propagation();
-                    }
-                });
-            },
-        )
-        .absolute()
-        .size_full();
+        let swipe = swipe::scroll_capture(cx.entity(), Self::feed_swipe).absolute().size_full();
 
         div()
             .relative()
@@ -1342,6 +1327,100 @@ mod tests {
         assert_eq!(opened(&pane, cx).as_deref(), Some("today"), "back to the pane");
         double_click_on(cx, "card:today");
         bounds(cx, "calendar-page");
+    }
+
+    /// A left press at `from`, the pointer held through `steps` moves to `to`; released there
+    /// unless `hold`.
+    fn mouse_drag(cx: &mut VisualTestContext, from: Point<Pixels>, to: Point<Pixels>, steps: usize, hold: bool) {
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        for step in 1..=steps {
+            let t = step as f32 / steps as f32;
+            let at = point(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+            cx.simulate_mouse_move(at, MouseButton::Left, Modifiers::default());
+        }
+        if !hold {
+            cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        }
+        cx.run_until_parked();
+    }
+
+    /// The frames once a slide has had its time.
+    fn slide_done(pane: &Entity<CalendarPane>, cx: &mut VisualTestContext) {
+        std::thread::sleep(crate::design::motion::ENTER + std::time::Duration::from_millis(50));
+        pane.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+    }
+
+    fn close_offset(pane: &Entity<CalendarPane>, cx: &mut VisualTestContext) -> f32 {
+        pane.read_with(cx, |pane, _| pane.close.offset(pane.close_width.get()))
+    }
+
+    #[gpui::test]
+    fn a_sideways_mouse_drag_closes_the_pane_and_a_short_one_springs_back(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        key(cx, "d");
+        click_on(cx, "card:today");
+        let detail = bounds(cx, "calendar-detail");
+        // On the event's head, under its toolbar.
+        let at = point(detail.center().x, detail.top() + px(120.));
+
+        // Mid-drag the pane is under the pointer; let go short of a third, at rest, it springs back.
+        mouse_drag(cx, at, point(at.x + px(80.), at.y + px(2.)), 8, true);
+        assert_eq!(close_offset(&pane, cx), 80., "the pane follows the pointer");
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        cx.simulate_mouse_up(point(at.x + px(80.), at.y), MouseButton::Left, Modifiers::default());
+        slide_done(&pane, cx);
+        assert_eq!(opened(&pane, cx).as_deref(), Some("today"), "a short drag springs back");
+        assert_eq!(bounds(cx, "calendar-detail"), detail, "back in its place");
+
+        // A drag that sets off downward leaves it alone.
+        mouse_drag(cx, at, point(at.x + px(60.), at.y + px(60.)), 6, false);
+        slide_done(&pane, cx);
+        assert_eq!(opened(&pane, cx).as_deref(), Some("today"));
+        assert_eq!(bounds(cx, "calendar-detail"), detail);
+
+        // Past a third of its width it slides off and closes.
+        mouse_drag(cx, at, point(at.x + detail.size.width * 0.6, at.y), 12, false);
+        slide_done(&pane, cx);
+        assert_eq!(opened(&pane, cx), None, "dragged off, the pane closed");
+        assert!(cx.debug_bounds("calendar-detail").is_none());
+
+        // Two fingers do the same.
+        click_on(cx, "card:today");
+        let at = bounds(cx, "calendar-detail").center();
+        cx.simulate_event(touchpad(at, TouchPhase::Started, 0., 0.));
+        for _ in 0..12 {
+            cx.simulate_event(touchpad(at, TouchPhase::Moved, 50., 0.));
+        }
+        cx.simulate_event(touchpad(at, TouchPhase::Ended, 0., 0.));
+        slide_done(&pane, cx);
+        assert_eq!(opened(&pane, cx), None, "swiped off, the pane closed");
+    }
+
+    #[gpui::test]
+    fn the_page_drags_off_from_its_title_row_back_to_the_pane_and_the_popover_stays(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        key(cx, "d");
+        click_on(cx, "card:today");
+        key(cx, "enter");
+        let page = bounds(cx, "calendar-page");
+        // The title row, between its Back and its buttons.
+        let at = point(page.center().x, page.top() + px(30.));
+        mouse_drag(cx, at, point(at.x + px(700.), at.y), 14, false);
+        slide_done(&pane, cx);
+        assert!(cx.debug_bounds("calendar-page").is_none(), "dragged off, the page went back");
+        assert_eq!(opened(&pane, cx).as_deref(), Some("today"), "to the pane, as it was");
+        bounds(cx, "calendar-detail");
+
+        // The week's popover closes with a press outside it, not a drag.
+        key(cx, "w");
+        click_on(cx, "card:saturday");
+        let popover = bounds(cx, "calendar-popover");
+        let at = point(popover.center().x, popover.top() + px(80.));
+        mouse_drag(cx, at, point(at.x + px(300.), at.y), 10, false);
+        slide_done(&pane, cx);
+        assert_eq!(opened(&pane, cx).as_deref(), Some("saturday"));
+        assert_eq!(bounds(cx, "calendar-popover"), popover);
     }
 }
 

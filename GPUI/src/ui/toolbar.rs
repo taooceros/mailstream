@@ -78,10 +78,12 @@ impl MailApp {
     }
 
     /// The conversation's island: the message scrolls under its toolbar, behind a scrim of the
-    /// page's surface once anything has (MS-255).
+    /// page's surface once anything has (MS-255). A press on it outside what takes presses of its
+    /// own (the bodies, the reply box, buttons) may drag the layer `layer` off (MS-266).
     pub(super) fn render_detail(
         &self,
         conversation: &Conversation,
+        layer: SharedString,
         two_pane: bool,
         p: &'static Palette,
         window: &mut Window,
@@ -97,6 +99,7 @@ impl MailApp {
             .size_full()
             // The conversation keeps the keyboard; clicks never reach the list beneath.
             .occlude()
+            .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer, cx))
             .child(self.render_reader(conversation, p, window, cx))
             .when(self.reader_top != ReaderTop::Top, |d| {
                 d.child(div().absolute().top_0().left_0().right_0().h(px(design::reader::SCRIM_HEIGHT)).bg(scrim))

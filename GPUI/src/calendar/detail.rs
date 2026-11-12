@@ -16,7 +16,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::component::button::Button;
 use gpui::{
     AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, HighlightStyle, InteractiveElement, InteractiveText,
-    IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledText, Window, div, px, relative,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledText, Window, div, px, relative,
 };
 use linkify::{LinkFinder, LinkKind};
 use mailstream::CalendarPerson;
@@ -26,8 +26,8 @@ use super::model;
 use super::{CalendarPane, View};
 use crate::avatars;
 use crate::controls::{
-    ButtonKind, ControlSize, capsule, hairline, icon_button, icon_label_button, island, mark_dot, pill, popover,
-    title_bar, tooltip,
+    ButtonKind, ControlSize, capsule, hairline, icon_button, icon_label_button, island, mark_dot, own_presses, pill,
+    popover, title_bar, tooltip,
 };
 use crate::design::{self, Palette, calendar as metrics, icon as icon_size, layout, radius, space, text};
 use crate::format;
@@ -67,9 +67,16 @@ impl CalendarPane {
         let event = &self.events[index];
         island(p.background, p)
             .id(ElementId::Name(format!("calendar-detail:{}:{}", event.key.account, event.key.id).into()))
+            .debug_selector(|| "calendar-detail".into())
             .size_full()
             // The event keeps the keyboard; clicks never reach the list beneath.
             .occlude()
+            // A sideways drag from here closes it (MS-266).
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, _| {
+                if event.click_count == 1 {
+                    this.press_surface(false, event.position);
+                }
+            }))
             .child(self.render_event(index, Surface::Pane, p, cx))
             .child(self.render_toolbar(index, two_pane, p, window, cx))
             .into_any_element()
@@ -113,12 +120,15 @@ impl CalendarPane {
 
     /// The open event's page over the whole window (MS-184), for the window to draw over
     /// everything it holds: none unless it is open. The window's own keys reach the pane, which
-    /// keeps the keyboard under it (Esc goes back).
-    pub fn render_page(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// keeps the keyboard under it (Esc goes back). Dragged sideways it slides off the view
+    /// beneath and goes back to it (MS-266).
+    pub fn render_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let shift = self.close_offset(true, window, cx);
         if !self.page {
             return None;
         }
         let index = self.opened.as_ref().and_then(|key| self.event_index(key))?;
+        let (under, over) = self.close_listeners(true, cx);
         let p = design::palette(window.appearance());
         let back = match self.view {
             View::Agenda => "Agenda",
@@ -152,20 +162,30 @@ impl CalendarPane {
                 .id("calendar-page")
                 .debug_selector(|| "calendar-page".into())
                 .absolute()
-                .inset_0()
+                .top_0()
+                .bottom_0()
+                .w_full()
+                .left(px(shift))
                 // Nothing under it takes the pointer.
                 .occlude()
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, _| {
+                    if event.click_count == 1 {
+                        this.press_surface(true, event.position);
+                    }
+                }))
                 .p(px(layout::GAP))
                 .bg(design::window_fill(p))
                 .font_family(design::ui_font())
                 .text_size(px(text::BODY))
                 .text_color(p.text)
+                .children(under)
                 .child(
                     island(p.background, p)
                         .size_full()
                         .child(self.render_page_event(index, f32::from(window.viewport_size().width), p, cx))
                         .child(toolbar),
                 )
+                .children(over)
                 .into_any_element(),
         )
     }
@@ -475,7 +495,8 @@ fn detail_line(glyph: Icon, child: AnyElement, p: &Palette) -> Div {
 }
 
 /// `text` with its web addresses and mail addresses in the links' color (as Chat's), a click on
-/// one opening it in the browser or the mail app.
+/// one opening it in the browser or the mail app. Presses on text with links are its own: no
+/// drag of the pane or the page starts there (MS-266).
 fn linked_text(id: impl Into<ElementId>, text: &str, p: &Palette) -> AnyElement {
     let (ranges, targets) = links(text);
     let link = HighlightStyle { color: Some(p.accent), ..HighlightStyle::default() };
@@ -483,13 +504,12 @@ fn linked_text(id: impl Into<ElementId>, text: &str, p: &Palette) -> AnyElement 
     if ranges.is_empty() {
         return styled.into_any_element();
     }
-    InteractiveText::new(id, styled)
-        .on_click(ranges, move |index, _, cx| {
-            if let Some(target) = targets.get(index) {
-                cx.open_url(target);
-            }
-        })
-        .into_any_element()
+    let text = InteractiveText::new(id, styled).on_click(ranges, move |index, _, cx| {
+        if let Some(target) = targets.get(index) {
+            cx.open_url(target);
+        }
+    });
+    own_presses(div()).child(text).into_any_element()
 }
 
 /// Where `text`'s web and mail addresses are, and what each opens (`mailto:` for a mail address).

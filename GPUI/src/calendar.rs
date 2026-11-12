@@ -4,7 +4,9 @@
 //! and the meeting about to start; the open event sits beside it (over it in a narrow window),
 //! answering its invitation through the account's calendar. In the week view it floats in a
 //! popover beside its card instead (MS-184). From either, the event's page covers the whole
-//! window (`render_page`), until Back or Esc returns to the view as it was.
+//! window (`render_page`), until Back or Esc returns to the view as it was. The pane and the page
+//! close as the reader does, dragged sideways off with two fingers or the mouse (MS-266,
+//! `swipe.rs`); the week's popover closes with a press anywhere outside it.
 //!
 //! The engine fetches Google Calendar and Outlook every five minutes and keeps what it fetched in
 //! mail.db; the pane reads what it holds (a week back on) and reads it again on its `Calendar`
@@ -24,16 +26,17 @@ use std::time::{Duration, Instant};
 use chrono::{Days, Local, NaiveDate};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, ListAlignment,
-    ListOffset, ListState, ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, Styled, Subscription, Task,
-    Window, actions, div, px, relative,
+    AnyElement, App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    KeyBinding, ListAlignment, ListOffset, ListState, ParentElement, Pixels, Point, Render, ScrollEvent, ScrollHandle,
+    SharedString, Styled, Subscription, Task, Window, actions, canvas, div, px, relative,
 };
 use mailstream::CalendarAccount;
 
 use crate::design::{self, layout, text};
 use crate::split;
+use crate::swipe;
 use crate::engine::engine;
-use crate::swipe::BackSwipe;
+use crate::swipe::{BackSwipe, MouseDrag, Pointer, Slide, Step};
 use model::{Event, EventKey};
 
 actions!(
@@ -169,6 +172,17 @@ pub struct CalendarPane {
     scroll_to_now: bool,
     swipe: BackSwipe,
     pan: Pan,
+    /// The open event's surface on top (its page, else the pane beside or over the view) dragged
+    /// off to close it, with two fingers (`close_swipe`) or the mouse (`drag`), MS-266.
+    close: Slide,
+    close_swipe: BackSwipe,
+    drag: MouseDrag,
+    /// The surface `close` belongs to (`top_surface`); another rests.
+    close_surface: Option<(EventKey, bool)>,
+    /// The top surface's width, as last laid out.
+    close_width: Rc<Cell<f32>>,
+    /// The pane lies over the day view (a narrow window): its swipes are the pane's, not paging.
+    pane_covers: bool,
     /// The width of one page of days, as last laid out.
     page_width: Rc<Cell<f32>>,
     /// The calendar's share of the pane beside an open event (`gpui.calendarWidth`), which the
@@ -233,6 +247,12 @@ impl CalendarPane {
             scroll_to_now: true,
             swipe: BackSwipe::default(),
             pan: Pan::Rest,
+            close: Slide::Rest,
+            close_swipe: BackSwipe::default(),
+            drag: MouseDrag::default(),
+            close_surface: None,
+            close_width: Rc::new(Cell::new(0.)),
+            pane_covers: false,
             page_width: Rc::new(Cell::new(0.)),
             list_share: split::shares(split::CALENDAR_WIDTH).default,
             band_top: Rc::new(Cell::new(0.)),
@@ -444,6 +464,82 @@ impl CalendarPane {
         }
     }
 
+    /// The open event's surface on top, which a sideways drag may close: its page (true), else
+    /// the pane (false); none in the week view, whose popover a press outside closes.
+    fn top_surface(&self) -> Option<(EventKey, bool)> {
+        let key = self.opened.clone()?;
+        (self.page || self.view != View::Week).then_some((key, self.page))
+    }
+
+    /// A single left press on the page (`page`) or the pane, from which a sideways drag may close
+    /// it when it is on top.
+    fn press_surface(&mut self, page: bool, at: Point<Pixels>) {
+        let on_top = self.top_surface().is_some_and(|(_, top)| top == page);
+        self.drag.press(at, on_top);
+    }
+
+    /// A scroll event over the top surface, in the capture phase: true when the swipe took it.
+    fn feed_close_swipe(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) -> bool {
+        let step = self.close_swipe.feed(event, self.top_surface().is_some());
+        self.follow_close(step, cx)
+    }
+
+    /// The mouse after a press on the top surface, in the capture phase: true when the drag took it.
+    fn feed_drag(&mut self, pointer: Pointer, cx: &mut Context<Self>) -> bool {
+        let step = self.drag.feed(pointer);
+        self.follow_close(step, cx)
+    }
+
+    fn follow_close(&mut self, step: Step, cx: &mut Context<Self>) -> bool {
+        let moves = !matches!(step, Step::Pass | Step::Consume);
+        if matches!(step, Step::Drag(_)) {
+            self.close_surface = self.top_surface();
+        }
+        let took = self.close.follow(step, self.close_width.get());
+        if moves {
+            cx.notify();
+        }
+        took
+    }
+
+    /// Where the page (`page`) or the pane sits, called while drawing it: the top surface follows
+    /// its drag and closes once it has slid off; the pane under the page rests.
+    fn close_offset(&mut self, page: bool, window: &mut Window, cx: &mut Context<Self>) -> f32 {
+        let top = self.top_surface();
+        if top.as_ref().is_none_or(|(_, on_top)| *on_top != page) {
+            return 0.;
+        }
+        if self.close_surface != top {
+            self.close_surface = top;
+            self.close = Slide::Rest;
+        }
+        self.close.advance(self.close_width.get(), window).unwrap_or_else(|| {
+            if page { self.close_page(cx) } else { self.close_event(cx) }
+            0.
+        })
+    }
+
+    /// The listeners and the measure of the top surface (`on_top`), laid around it: the swipe's
+    /// and the mouse's first, under it (`swipe.rs`), the mouse's release after it. None for the
+    /// pane under the page, so a gesture goes to one surface.
+    fn close_listeners(&self, on_top: bool, cx: &mut Context<Self>) -> (Vec<AnyElement>, Option<AnyElement>) {
+        if !on_top {
+            return (Vec::new(), None);
+        }
+        let width = self.close_width.clone();
+        let measure = canvas(move |bounds, _, _| width.set(f32::from(bounds.size.width)), |_, _, _, _| {});
+        let swipe = swipe::scroll_capture(cx.entity(), Self::feed_close_swipe);
+        let (under, over) = swipe::mouse_capture(cx.entity(), Self::feed_drag);
+        (
+            vec![
+                measure.absolute().size_full().into_any_element(),
+                swipe.absolute().size_full().into_any_element(),
+                under.absolute().size_0().into_any_element(),
+            ],
+            Some(over.absolute().size_0().into_any_element()),
+        )
+    }
+
     /// Answers the invitation to `key` (`accepted`, `tentative` or `declined`) through its
     /// account's calendar, which tells the organizer; that occurrence alone when it repeats. The
     /// answer shows chosen while it is sent.
@@ -633,12 +729,21 @@ impl Render for CalendarPane {
             window.focus(&self.focus, cx);
         }
         let two_pane = f32::from(window.viewport_size().width) >= layout::TWO_PANE_WIDTH;
+        // First: a pane that slid off is closed before anything is drawn.
+        let shift = self.close_offset(false, window, cx);
+        let pane = (self.view != View::Week).then(|| self.opened.clone().and_then(|key| self.event_index(&key))).flatten();
+        self.pane_covers = pane.is_some() && !two_pane;
         let list = self.render_list_island(today, p, window, cx);
         // The week view floats the open event beside its card (`grid.rs`).
-        let detail = (self.view != View::Week)
-            .then(|| self.opened.clone().and_then(|key| self.event_index(&key)))
-            .flatten()
-            .map(|index| self.render_detail(index, two_pane, p, window, cx));
+        let (under, over) = self.close_listeners(pane.is_some() && !self.page, cx);
+        let detail = pane.map(|index| {
+            div()
+                .relative()
+                .size_full()
+                .children(under)
+                .child(div().absolute().top_0().bottom_0().w_full().left(px(shift)).child(self.render_detail(index, two_pane, p, window, cx)))
+                .children(over)
+        });
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -680,7 +785,7 @@ impl Render for CalendarPane {
                     )
                     .child(div().flex_1().min_w(px(layout::MIN_DETAIL)).h_full().child(detail)),
                 // Over the list.
-                Some(detail) => d.child(list.size_full()).child(div().absolute().size_full().child(detail)),
+                Some(detail) => d.child(list.size_full()).child(detail.absolute()),
                 None => d.child(list.size_full()),
             })
     }

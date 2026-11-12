@@ -100,7 +100,7 @@ impl MailApp {
             }
         }
         if let Some(reply) = self.reply.as_ref().filter(|r| r.conversation == conversation.id) {
-            rows.push(column().mt(px(space::S12)).child(reply.view.clone()).into_any_element());
+            rows.push(own_presses(column().mt(px(space::S12))).child(reply.view.clone()).into_any_element());
         }
         match self.reader_pin {
             // Taken up as the reader lays out: the end of what it holds now.
@@ -264,7 +264,8 @@ impl MailApp {
             div().px(px(space::S16)).pb(px(space::S12)).child(self.render_invitation(message, invitation, p, cx))
         });
         card.children(invitation)
-            .children(self.render_body(message, p, cx).map(|body| inset().child(body)))
+            // The body's presses are its own (text selection, links): no drag of the reader there.
+            .children(self.render_body(message, p, cx).map(|body| own_presses(inset()).child(body)))
             .when(message.truncated && message.body_html.is_none(), |d| {
                 d.child(
                     inset()
@@ -566,7 +567,7 @@ impl MailApp {
             .children(message.invitation.as_ref().map(|invitation| {
                 div().pb(px(space::S8)).child(self.render_invitation(message, invitation, p, cx))
             }))
-            .children(self.render_body(message, p, cx))
+            .children(self.render_body(message, p, cx).map(|body| own_presses(div()).child(body)))
             .when(!message.tiles.is_empty(), |d| {
                 d.child(div().pt(px(space::S8)).child(self.render_attachments(message, p, cx)))
             });

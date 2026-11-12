@@ -33,7 +33,7 @@ use crate::compose::{ComposeColumn, ReplyBox};
 use crate::engine::{MailError, engine};
 use crate::frame_rate::FrameRateMeter;
 use crate::model::{ConversationExt, RoleExt, ShownMessage};
-use crate::swipe::{BackSwipe, Preferences};
+use crate::swipe::{BackSwipe, MouseDrag, Preferences, Slide};
 
 actions!(
     mail,
@@ -296,18 +296,6 @@ pub enum ReaderTop {
     PastTitle,
 }
 
-/// How the top layer sits over what lies beneath.
-#[derive(Clone, Copy)]
-pub enum Slide {
-    Rest,
-    /// Sliding in from the right since then.
-    Opening(Instant),
-    /// Under the user's fingers, `offset` points to the right.
-    Drag(f32),
-    /// Released (or sent back by a key): from `from` to `to`; `back` pops the layer on arrival.
-    Settle { from: f32, to: f32, start: Instant, back: bool },
-}
-
 /// A right-click menu over a row: gpui-kit's `PopupMenu` (`ui/menu.rs`), at the pointer.
 pub struct ContextMenu {
     pub id: String,
@@ -399,6 +387,9 @@ pub struct MailApp {
     /// The user opened the sidebar while the column folded it.
     pub sidebar_beside_compose: bool,
     pub swipe: BackSwipe,
+    /// A mouse drag on the top layer (MS-266).
+    pub drag: MouseDrag,
+    /// How the top layer sits over what lies beneath.
     pub slide: Slide,
     /// The top layer `slide` belongs to; a different top layer rests.
     pub slide_layer: Option<SharedString>,
@@ -507,6 +498,7 @@ impl MailApp {
             sidebar_folded: false,
             sidebar_beside_compose: false,
             swipe: BackSwipe::default(),
+            drag: MouseDrag::default(),
             slide: Slide::Rest,
             slide_layer: None,
             content_width: 0.0,
