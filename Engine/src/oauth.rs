@@ -4,7 +4,7 @@
 //! allows.
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -254,15 +254,12 @@ fn open_in_browser(url: &str) {
 }
 
 pub struct OAuth {
-    /// Made at the first token request: loading the system's root certificates takes ~75 ms,
-    /// which engine start should not wait for.
-    http: LazyLock<reqwest::Client>,
     config: OAuthConfig,
 }
 
 impl OAuth {
     pub fn new(config: OAuthConfig) -> Self {
-        Self { http: LazyLock::new(reqwest::Client::new), config }
+        Self { config }
     }
 
     fn redirect(&self) -> String {
@@ -358,8 +355,7 @@ impl OAuth {
             form.entry(name).or_insert(value);
         }
         let url = self.config.token_endpoint.as_deref().unwrap_or(provider.token_url());
-        let response = self
-            .http
+        let response = crate::api::HTTP
             .post(url)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .header("Accept", "application/json")

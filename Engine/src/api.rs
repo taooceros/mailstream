@@ -172,9 +172,10 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
-/// One HTTP client for every account: connections and TLS sessions are shared. Made at the
-/// first request, as loading the system's root certificates takes a while.
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
+/// One HTTP client for every account and for OAuth token requests: connections and TLS sessions
+/// are shared, and every request times out after 30 s. Made at the first request, as loading the
+/// system's root certificates takes a while (~75 ms), which engine start should not wait for.
+pub(crate) static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(8)
