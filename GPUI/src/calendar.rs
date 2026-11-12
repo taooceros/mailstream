@@ -49,7 +49,7 @@ const CLOCK: Duration = Duration::from_secs(15);
 pub fn bind_keys(cx: &mut App) {
     // Google Calendar's keys, as mail takes Gmail's; never while a field has focus. The window's
     // own keys (mail's) give way to these inside it.
-    let list = Some("Calendar && !TextInput && !TextArea");
+    let list = Some("Calendar && !Input");
     let pane = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("down", Next, list),

@@ -14,6 +14,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Local, Utc};
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
+use gpui::component::input::{Escape, InputEvent, InputState};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, AnyWindowHandle, App, AppContext, Bounds, Context, Div, ElementId, Entity, Focusable, FontWeight, Global,
@@ -27,7 +28,7 @@ use crate::design::{self, Palette, radius, settings as metrics, stroke, text};
 use crate::engine::{MailError, engine};
 use crate::format;
 use crate::icons::{Icon, icon};
-use crate::input::{InputEvent, TextInput};
+use crate::input;
 
 actions!(settings, [ShowSettings]);
 
@@ -264,7 +265,7 @@ fn shown(key: &str) -> bool {
 /// A text field of a number or text setting (keyed by the setting), or the field that adds to an
 /// address setting (keyed by the setting and `ADD`).
 struct Field {
-    input: Entity<TextInput>,
+    input: Entity<InputState>,
     /// The engine's value the field last took; a new one replaces the text unless it is being edited.
     shown: SharedString,
     _subscriptions: Vec<Subscription>,
@@ -273,7 +274,7 @@ struct Field {
 /// The account being renamed and its field.
 struct Rename {
     id: SharedString,
-    input: Entity<TextInput>,
+    input: Entity<InputState>,
     _subscription: Subscription,
 }
 
@@ -283,8 +284,8 @@ struct Rename {
 struct ClientForm {
     provider: Provider,
     suggested: Option<OAuthClientInfo>,
-    id: Entity<TextInput>,
-    secret: Entity<TextInput>,
+    id: Entity<InputState>,
+    secret: Entity<InputState>,
     error: Option<SharedString>,
     _subscriptions: [Subscription; 2],
 }
@@ -500,7 +501,7 @@ impl Settings {
         for (key, value) in wanted {
             if let Some(field) = self.fields.get_mut(&key) {
                 if field.shown != value && !field.input.focus_handle(cx).is_focused(window) {
-                    field.input.update(cx, |input, cx| input.set_text(value.clone(), cx));
+                    field.input.update(cx, |input, cx| input.set_value(value.clone(), window, cx));
                     field.shown = value;
                 }
                 continue;
@@ -511,43 +512,34 @@ impl Settings {
                 _ if adds => "Add address",
                 _ => "",
             };
-            let input = cx.new(|cx| {
-                let mut input = TextInput::new(placeholder, cx);
-                input.set_text(value.clone(), cx);
-                input
-            });
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).default_value(value.clone()));
             let submitted = key.clone();
             let mut subscriptions = vec![cx.subscribe_in(&input, window, move |this, _, event: &InputEvent, window, cx| {
-                match event {
-                    InputEvent::Submit => this.commit_field(&submitted, cx),
-                    InputEvent::Cancel => {
-                        this.revert_field(&submitted, cx);
-                        window.blur(cx);
-                    }
-                    InputEvent::Changed => {}
+                if let InputEvent::PressEnter { secondary: false, .. } = event {
+                    this.commit_field(&submitted, window, cx);
                 }
             })];
             // A number or text commits as the field loses the keys; an address waits for Return or Add.
             if !adds {
                 let blurred = key.clone();
                 let focus = input.focus_handle(cx);
-                subscriptions.push(cx.on_blur(&focus, window, move |this, _, cx| this.commit_field(&blurred, cx)));
+                subscriptions.push(cx.on_blur(&focus, window, move |this, window, cx| this.commit_field(&blurred, window, cx)));
             }
             self.fields.insert(key, Field { input, shown: value, _subscriptions: subscriptions });
         }
     }
 
-    fn revert_field(&mut self, key: &str, cx: &mut Context<Self>) {
+    fn revert_field(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(field) = self.fields.get(key) else { return };
         let shown = field.shown.clone();
-        field.input.update(cx, |input, cx| input.set_text(shown, cx));
+        field.input.update(cx, |input, cx| input.set_value(shown, window, cx));
         self.errors.remove(key);
         cx.notify();
     }
 
-    fn commit_field(&mut self, key: &str, cx: &mut Context<Self>) {
+    fn commit_field(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(input) = self.fields.get(key).map(|field| field.input.clone()) else { return };
-        let typed = input.read(cx).text().trim().to_string();
+        let typed = input.read(cx).value().trim().to_string();
         if let Some(setting) = key.strip_suffix(ADD) {
             let added: Vec<String> =
                 typed.split(|c: char| c == ',' || c.is_whitespace()).filter(|a| !a.is_empty()).map(str::to_owned).collect();
@@ -557,7 +549,7 @@ impl Settings {
             if added.is_empty() {
                 return;
             }
-            input.update(cx, |input, cx| input.clear(cx));
+            input.update(cx, |input, cx| input.clean(window, cx));
             addresses.extend(added);
             self.write(setting.to_owned(), Some(SettingValue::Addresses { addresses }), cx);
             return;
@@ -623,10 +615,10 @@ impl Settings {
     // MARK: Rename
 
     fn start_rename(&mut self, account: &AccountRow, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| TextInput::new(account.id.clone(), cx));
-        input.update(cx, |input, cx| input.set_text(account.label.clone(), cx));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(account.id.clone()).default_value(account.label.clone()));
         let subscription = cx.subscribe_in(&input, window, Self::on_rename_event);
         window.focus(&input.read(cx).focus_handle(cx), cx);
+        input.update(cx, |input, cx| input.select_all(window, cx));
         self.confirming = None;
         self.renaming = Some(Rename { id: account.id.clone(), input, _subscription: subscription });
         cx.notify();
@@ -634,18 +626,14 @@ impl Settings {
 
     fn on_rename_event(
         &mut self,
-        input: &Entity<TextInput>,
+        input: &Entity<InputState>,
         event: &InputEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match event {
-            InputEvent::Submit => {
-                let label = input.read(cx).text().trim().to_string();
-                self.commit_rename(label, cx);
-            }
-            InputEvent::Cancel => self.cancel_rename(cx),
-            InputEvent::Changed => {}
+        if let InputEvent::PressEnter { secondary: false, .. } = event {
+            let label = input.read(cx).value().trim().to_string();
+            self.commit_rename(label, cx);
         }
     }
 
@@ -721,11 +709,11 @@ impl Settings {
     ) {
         let google = provider == Provider::Google;
         let id = cx.new(|cx| {
-            let mut input = TextInput::new(if google { "Client ID" } else { "Application (client) ID" }, cx);
-            if let Some(client) = &suggested {
-                input.set_text(client.id.clone(), cx);
+            let input = InputState::new(window, cx).placeholder(if google { "Client ID" } else { "Application (client) ID" });
+            match &suggested {
+                Some(client) => input.default_value(client.id.clone()),
+                None => input,
             }
-            input
         });
         let secret_placeholder = if suggested.as_ref().is_some_and(|client| client.has_secret) {
             "Saved; leave empty to keep it"
@@ -734,18 +722,12 @@ impl Settings {
         } else {
             "Empty for a public client"
         };
-        let secret = cx.new(|cx| {
-            let mut input = TextInput::new(secret_placeholder, cx);
-            input.set_obscured(true, cx);
-            input
-        });
+        let secret = cx.new(|cx| InputState::new(window, cx).placeholder(secret_placeholder).masked(true));
         let focus = if suggested.is_some() { &secret } else { &id };
         window.focus(&focus.focus_handle(cx), cx);
-        let on_event = |this: &mut Self, _: &Entity<TextInput>, event: &InputEvent, _: &mut Window, cx: &mut Context<Self>| {
-            match event {
-                InputEvent::Submit => this.submit_client(cx),
-                InputEvent::Cancel => this.cancel_client(cx),
-                InputEvent::Changed => {}
+        let on_event = |this: &mut Self, _: &Entity<InputState>, event: &InputEvent, _: &mut Window, cx: &mut Context<Self>| {
+            if let InputEvent::PressEnter { secondary: false, .. } = event {
+                this.submit_client(cx);
             }
         };
         let subscriptions = [cx.subscribe_in(&id, window, on_event), cx.subscribe_in(&secret, window, on_event)];
@@ -760,8 +742,8 @@ impl Settings {
 
     fn submit_client(&mut self, cx: &mut Context<Self>) {
         let Some(form) = &mut self.client else { return };
-        let id = form.id.read(cx).text().trim().to_string();
-        let secret = form.secret.read(cx).text().trim().to_string();
+        let id = form.id.read(cx).value().trim().to_string();
+        let secret = form.secret.read(cx).value().trim().to_string();
         let saved_secret = form.suggested.as_ref().is_some_and(|client| client.has_secret && client.id == id);
         if id.is_empty() {
             form.error = Some("Enter your OAuth client's ID to sign in.".into());
@@ -918,7 +900,7 @@ impl Settings {
 
     fn render_client_form(&self, form: &ClientForm, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let google = form.provider == Provider::Google;
-        let field = |label: &'static str, input: &Entity<TextInput>, window: &mut Window, cx: &mut Context<Self>| {
+        let field = |label: &'static str, input: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>| {
             let focused = input.focus_handle(cx).is_focused(window);
             div()
                 .flex()
@@ -932,7 +914,8 @@ impl Settings {
                         .min_w_0()
                         .h(px(26.))
                         .px(px(8.))
-                        .child(div().flex_1().min_w_0().child(input.clone())),
+                        .on_action(cx.listener(|this, _: &Escape, _, cx| this.cancel_client(cx)))
+                        .child(div().flex_1().min_w_0().child(input::field(input))),
                 )
         };
         card(p)
@@ -1001,7 +984,8 @@ impl Settings {
                 .rounded(px(radius::SMALL))
                 .border_1()
                 .border_color(p.accent)
-                .child(input.clone())
+                .on_action(cx.listener(|this, _: &Escape, _, cx| this.cancel_rename(cx)))
+                .child(input::field(input))
                 .into_any_element(),
             None => div().font_weight(FontWeight::MEDIUM).truncate().child(row.title()).into_any_element(),
         };
@@ -1016,7 +1000,7 @@ impl Settings {
                 )
                 .child(button(("rename-save", index), "Save", ButtonKind::Primary, ControlSize::Small, true, p).on_click(
                     cx.listener(|this, _, _, cx| {
-                        let label = this.renaming.as_ref().map(|rename| rename.input.read(cx).text().trim().to_string());
+                        let label = this.renaming.as_ref().map(|rename| rename.input.read(cx).value().trim().to_string());
                         if let Some(label) = label {
                             this.commit_rename(label, cx);
                         }
@@ -1267,7 +1251,14 @@ impl Settings {
                 .h(px(26.))
                 .px(px(8.))
                 .gap(px(4.))
-                .child(div().flex_1().min_w_0().child(field.input.clone()))
+                .on_action(cx.listener({
+                    let key = key.to_owned();
+                    move |this, _: &Escape, window, cx| {
+                        this.revert_field(&key, window, cx);
+                        window.blur(cx);
+                    }
+                }))
+                .child(div().flex_1().min_w_0().child(input::field(&field.input)))
                 .children(suffix.map(|suffix| div().text_color(p.muted).child(suffix)))
                 .into_any_element(),
         )
@@ -1306,7 +1297,7 @@ impl Settings {
             .children(self.render_field(&add_key, 220., None, p, window, cx))
             .child(
                 button(ElementId::Name(format!("add-{key}").into()), "Add", ButtonKind::Secondary, ControlSize::Small, true, p)
-                    .on_click(cx.listener(move |this, _, _, cx| this.commit_field(&add_key, cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| this.commit_field(&add_key, window, cx))),
             )
     }
 

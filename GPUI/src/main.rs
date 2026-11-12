@@ -31,7 +31,6 @@ mod model;
 mod settings;
 mod state;
 mod swipe;
-mod textarea;
 mod ui;
 #[cfg(target_os = "macos")]
 mod updater;
@@ -41,12 +40,12 @@ mod blitz_body;
 #[cfg(target_os = "macos")]
 mod webview;
 
+use gpui::component::input::{Copy, Cut, Paste, SelectAll};
 use gpui::{
     App, AppContext, Bounds, Menu, MenuItem, OsAction, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
     point, px, size,
 };
 
-use crate::input::{Copy, Cut, Paste, SelectAll};
 use crate::state::{
     Archive, Back, FocusSearch, Forward, MailApp, NewChat, NewMessage, Quit, Refresh, Reply, ReplyAll, Restore,
     Retag, Star, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
@@ -62,10 +61,8 @@ fn main() {
         // The engine paints from the cache and syncs while the window opens.
         engine::engine();
         avatars::init(cx);
-        input::bind_keys(cx);
         chat::bind_keys(cx);
         calendar::bind_keys(cx);
-        textarea::bind_keys(cx);
         compose::bind_keys(cx);
         state::bind_keys(cx);
         blitz_body::bind_keys(cx);

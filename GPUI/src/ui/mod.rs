@@ -36,6 +36,7 @@ use crate::design::{
 };
 use crate::format;
 use crate::icons::{Icon, icon};
+use crate::input;
 use crate::model::{Category, Conversation, Message, Role};
 use crate::state::{
     Archive, Back, CONTEXT, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh, Removal, Reply,
@@ -373,8 +374,9 @@ impl MailApp {
                         .gap(px(space::S6))
                         .line_height(px(18.))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_action(cx.listener(Self::cancel_search))
                         .child(icon(Icon::Search, 14., p.muted))
-                        .child(div().flex_1().min_w_0().child(self.search.clone())),
+                        .child(div().flex_1().min_w_0().child(input::field(&self.search))),
                 ),
             )
             .child(hairline(p))

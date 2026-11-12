@@ -10,22 +10,21 @@ mod column;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use gpui::component::button::Button;
+use gpui::component::input::{Escape, InputEvent, InputState, Paste, TextareaState};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, AppContext, ClickEvent, Context, Div, ElementId, Entity, EntityInputHandler, EventEmitter, ExternalPaths,
-    FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, actions, deferred,
-    div, px, relative,
+    App, AppContext, ClickEvent, Context, Div, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
+    FontWeight, InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Window, actions, deferred, div, px, relative,
 };
 use crate::avatars;
 use crate::controls::{ButtonKind, ControlSize, button, icon_button, popover};
-use gpui::component::button::Button;
 use crate::design::{self, Palette, compose as metrics, editor, radius, space, text};
 use crate::engine::engine;
 use crate::icons::Icon;
-use crate::input::{InputEvent, TextInput};
+use crate::input::{self, AREA_INSET};
 use crate::model::{Account, Address};
-use crate::textarea::{TextArea, TextAreaEvent};
 use attachments::{Attachments, Remove};
 pub use column::{ColumnEvent, ComposeColumn, ResizeColumn};
 
@@ -45,16 +44,24 @@ const MOVE_TIP: &str = "Move to the Compose Column to Change Recipients or Subje
 
 pub fn bind_keys(cx: &mut App) {
     let window = Some(CONTEXT);
+    // The kit's text fields take these keys themselves (a newline, an indent); in a draft they
+    // send and walk the fields. Bound after the kit's, so they win inside its fields.
+    let field = Some("Compose > Input");
+    let reply_field = Some("ReplyBox > Input");
     cx.bind_keys([
         KeyBinding::new(secondary!("enter"), Send, window),
+        KeyBinding::new(secondary!("enter"), Send, field),
         KeyBinding::new("escape", Cancel, window),
         KeyBinding::new(secondary!("w"), Close, window),
         KeyBinding::new("tab", FocusNext, window),
+        KeyBinding::new("tab", FocusNext, field),
         KeyBinding::new("shift-tab", FocusPrevious, window),
+        KeyBinding::new("shift-tab", FocusPrevious, field),
         KeyBinding::new(secondary!("shift-a"), Attach, window),
-        KeyBinding::new("down", SuggestionNext, Some(RECIPIENTS)),
-        KeyBinding::new("up", SuggestionPrevious, Some(RECIPIENTS)),
+        KeyBinding::new("down", SuggestionNext, Some("Recipients > Input")),
+        KeyBinding::new("up", SuggestionPrevious, Some("Recipients > Input")),
         KeyBinding::new("escape", Cancel, Some(REPLY_CONTEXT)),
+        KeyBinding::new(secondary!("enter"), Send, reply_field),
         KeyBinding::new(secondary!("shift-a"), Attach, Some(REPLY_CONTEXT)),
         KeyBinding::new(secondary!("shift-o"), MoveToColumn, Some(REPLY_CONTEXT)),
     ]);
@@ -246,13 +253,12 @@ struct Compose {
     /// `mail.reply`, which keeps the thread and quotes the original.
     reply: Option<(SharedString, bool)>,
     picking_from: bool,
-    to: Entity<TextInput>,
-    cc: Entity<TextInput>,
-    bcc: Entity<TextInput>,
+    to: Entity<InputState>,
+    cc: Entity<InputState>,
+    bcc: Entity<InputState>,
     show_bcc: bool,
-    subject: Entity<TextInput>,
-    body: Entity<TextArea>,
-    body_scroll: ScrollHandle,
+    subject: Entity<InputState>,
+    body: Entity<TextareaState>,
     /// What the draft opened with, to tell an edited draft from an untouched one, and a reply's
     /// recipients the engine planned from the ones the user changed.
     initial_to: String,
@@ -280,16 +286,11 @@ impl Compose {
             ComposeMode::Reply(reply) if reply.all => ("Reply All".into(), Icon::ReplyAll),
             ComposeMode::Reply(_) => ("Reply".into(), Icon::Reply),
         };
-        let to = cx.new(|cx| TextInput::new("", cx));
-        let cc = cx.new(|cx| TextInput::new("", cx));
-        let bcc = cx.new(|cx| TextInput::new("", cx));
-        let subject = cx.new(|cx| TextInput::new("Subject", cx));
-        let body_scroll = ScrollHandle::new();
-        let body = cx.new(|cx| {
-            let mut body = TextArea::new("", metrics::BODY_MIN_ROWS, cx);
-            body.scroll_with(body_scroll.clone());
-            body
-        });
+        let to = cx.new(|cx| InputState::new(window, cx));
+        let cc = cx.new(|cx| InputState::new(window, cx));
+        let bcc = cx.new(|cx| InputState::new(window, cx));
+        let subject = cx.new(|cx| InputState::new(window, cx).placeholder("Subject"));
+        let body = cx.new(|cx| TextareaState::new(window, cx));
 
         let mut attachments = Attachments::default();
         let mut reply = None;
@@ -315,39 +316,38 @@ impl Compose {
         };
         for (input, value) in [(&to, initial_to.as_str()), (&cc, initial_cc.as_str()), (&subject, initial_subject.as_ref())] {
             if !value.is_empty() {
-                input.update(cx, |input, cx| {
-                    input.select_everything(cx);
-                    input.replace_text_in_range(None, value, window, cx);
-                });
+                input.update(cx, |input, cx| input.set_value(value.to_owned(), window, cx));
             }
         }
         let text = if text.is_empty() { initial_body.to_string() } else { text };
         if !text.is_empty() {
-            body.update(cx, |body, cx| body.set_text(text, cx));
+            // The caret starts above a quote.
+            body.update(cx, |body, cx| body.set_value(text, window, cx));
         }
 
         let mut subscriptions = Vec::new();
         for (field, input) in [(Field::To, &to), (Field::Cc, &cc), (Field::Bcc, &bcc)] {
             subscriptions.push(cx.subscribe_in(input, window, move |this, _, event: &InputEvent, window, cx| {
                 match event {
-                    InputEvent::Changed => this.recipients_changed(field, cx),
-                    InputEvent::Submit => {
+                    InputEvent::Change => this.recipients_changed(field, cx),
+                    InputEvent::PressEnter { secondary: false, .. } => {
                         if !this.accept_suggestion(window, cx) {
                             this.move_focus(1, window, cx);
                         }
                     }
-                    InputEvent::Cancel => this.escape(window, cx),
+                    _ => {}
                 }
             }));
         }
         subscriptions.push(cx.subscribe_in(&subject, window, |this, _, event: &InputEvent, window, cx| match event {
-            InputEvent::Submit => this.move_focus(1, window, cx),
-            InputEvent::Cancel => this.escape(window, cx),
-            InputEvent::Changed => this.edited(cx),
+            InputEvent::PressEnter { secondary: false, .. } => this.move_focus(1, window, cx),
+            InputEvent::Change => this.edited(cx),
+            _ => {}
         }));
-        subscriptions.push(cx.subscribe_in(&body, window, |this, _, event: &TextAreaEvent, window, cx| match event {
-            TextAreaEvent::Submit => this.send(window, cx),
-            TextAreaEvent::Changed => this.edited(cx),
+        subscriptions.push(cx.subscribe_in(&body, window, |this, _, event: &InputEvent, _, cx| {
+            if let InputEvent::Change = event {
+                this.edited(cx);
+            }
         }));
 
         Self {
@@ -365,7 +365,6 @@ impl Compose {
             show_bcc: false,
             subject,
             body,
-            body_scroll,
             initial_to,
             initial_cc,
             initial_subject,
@@ -381,7 +380,7 @@ impl Compose {
         }
     }
 
-    fn input(&self, field: Field) -> &Entity<TextInput> {
+    fn input(&self, field: Field) -> &Entity<InputState> {
         match field {
             Field::To => &self.to,
             Field::Cc => &self.cc,
@@ -403,7 +402,7 @@ impl Compose {
     /// To when it is empty, otherwise the body.
     fn focus_first(&self, window: &mut Window, cx: &mut Context<Self>) {
         let handle =
-            if self.to.read(cx).text().is_empty() { self.to.focus_handle(cx) } else { self.body.focus_handle(cx) };
+            if self.to.read(cx).value().is_empty() { self.to.focus_handle(cx) } else { self.body.focus_handle(cx) };
         window.focus(&handle, cx);
     }
 
@@ -439,22 +438,24 @@ impl Compose {
 
     /// Whether closing would lose something the user wrote.
     fn has_draft(&self, cx: &App) -> bool {
-        let text = |input: &Entity<TextInput>| input.read(cx).text().trim().to_owned();
+        let text = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
         text(&self.to) != self.initial_to
             || text(&self.cc) != self.initial_cc
             || !text(&self.bcc).is_empty()
-            || *self.subject.read(cx).text() != self.initial_subject
-            || self.body.read(cx).text() != self.initial_body.as_ref()
+            || self.subject.read(cx).value() != self.initial_subject
+            || self.body.read(cx).value() != self.initial_body
             || !self.attachments.is_empty()
     }
 
     /// The tab's name: the subject, else who it goes to, else what it is.
     fn tab_title(&self, cx: &App) -> SharedString {
-        let subject = self.subject.read(cx).text().trim();
+        let subject = self.subject.read(cx).value();
+        let subject = subject.trim();
         if !subject.is_empty() {
             return subject.to_owned().into();
         }
-        let to = self.to.read(cx).text().trim();
+        let to = self.to.read(cx).value();
+        let to = to.trim();
         if to.is_empty() { self.title.clone() } else { format!("To: {to}").into() }
     }
 
@@ -553,7 +554,7 @@ impl Compose {
         }
         self.lookup += 1;
         let generation = self.lookup;
-        let query = split_recipients(self.input(field).read(cx).text()).last().map_or("", |last| last.trim()).to_owned();
+        let query = split_recipients(&self.input(field).read(cx).value()).last().map_or("", |last| last.trim()).to_owned();
         if query.is_empty() {
             if self.suggestions.take().is_some() {
                 cx.notify();
@@ -562,7 +563,10 @@ impl Compose {
         }
         let taken: Vec<String> = [&self.to, &self.cc, &self.bcc]
             .iter()
-            .flat_map(|input| split_recipients(input.read(cx).text()).into_iter().map(|part| Address::parse(part).email))
+            .flat_map(|input| {
+                let text = input.read(cx).value();
+                split_recipients(&text).into_iter().map(|part| Address::parse(part).email).collect::<Vec<_>>()
+            })
             .map(|email| email.to_lowercase())
             .collect();
         cx.spawn(async move |this, cx| {
@@ -633,16 +637,14 @@ impl Compose {
 
     fn pick(&mut self, field: Field, person: &Person, window: &mut Window, cx: &mut Context<Self>) {
         let input = self.input(field).clone();
-        let current = input.read(cx).text().clone();
+        let current = input.read(cx).value();
         let parts = split_recipients(&current);
         let mut text: Vec<String> =
             parts[..parts.len() - 1].iter().map(|part| part.trim()).filter(|part| !part.is_empty()).map(str::to_owned).collect();
         text.push(person.formatted());
         let text = format!("{}, ", text.join(", "));
-        input.update(cx, |input, cx| {
-            input.select_everything(cx);
-            input.replace_text_in_range(None, &text, window, cx);
-        });
+        // Replaced as an edit, so Undo brings back what was typed.
+        input.update(cx, |input, cx| input.replace_all(text, window, cx));
         self.suggestions = None;
         window.focus(&input.focus_handle(cx), cx);
         cx.notify();
@@ -671,7 +673,7 @@ impl Compose {
         self.invalid.clear();
         let mut lists = Vec::with_capacity(3);
         for field in [Field::To, Field::Cc, Field::Bcc] {
-            match parse_recipients(self.input(field).read(cx).text()) {
+            match parse_recipients(&self.input(field).read(cx).value()) {
                 Ok(list) => lists.push(list),
                 Err(bad) => {
                     self.invalid.push(field);
@@ -688,13 +690,13 @@ impl Compose {
             window.focus(&self.to.focus_handle(cx), cx);
             return self.fail("Add at least one recipient.", cx);
         }
-        let subject = self.subject.read(cx).text().trim().to_string();
-        let body = self.body.read(cx).text().to_string();
+        let subject = self.subject.read(cx).value().trim().to_string();
+        let body = self.body.read(cx).value().to_string();
         let attachments = self.attachments.paths();
         let request = match self.reply.clone() {
             // Fields left as they opened keep the engine's reply plan.
             Some((conversation, all)) => {
-                let changed = |input: &Entity<TextInput>, initial: &str| input.read(cx).text().trim() != initial;
+                let changed = |input: &Entity<InputState>, initial: &str| input.read(cx).value().trim() != initial;
                 let overrides = mailstream::ReplyOverrides {
                     to: changed(&self.to, &self.initial_to).then_some(to),
                     cc: changed(&self.cc, &self.initial_cc).then_some(cc),
@@ -886,7 +888,7 @@ impl Compose {
             });
         self.header_row(Some(field.label()), self.invalid.contains(&field), p)
             .key_context(RECIPIENTS)
-            .child(div().flex_1().min_w_0().flex().child(input.clone()))
+            .child(div().flex_1().min_w_0().child(input::field(input)))
             .children(suggestions)
     }
 
@@ -935,7 +937,6 @@ impl Render for Compose {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = design::palette(window.appearance());
         let sending = matches!(self.status, Status::Sending);
-        let body = self.body.clone();
         let attached = self.attachments.render("compose-attachment", !sending, &Self::remover(cx), p);
         div()
             .key_context(CONTEXT)
@@ -948,8 +949,8 @@ impl Render for Compose {
             .on_action(cx.listener(Self::suggestion_next))
             .on_action(cx.listener(Self::suggestion_previous))
             .on_action(cx.listener(Self::pick_files))
-            .capture_action(cx.listener(|this, _: &crate::input::Paste, _, cx| this.paste(cx)))
-            .capture_action(cx.listener(|this, _: &crate::textarea::Paste, _, cx| this.paste(cx)))
+            .on_action(cx.listener(|this, _: &Escape, window, cx| this.escape(window, cx)))
+            .capture_action(cx.listener(|this, _: &Paste, _, cx| this.paste(cx)))
             .group(COMPOSE_DROP)
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
             .relative()
@@ -982,7 +983,7 @@ impl Render for Compose {
                             .h(px(metrics::SUBJECT_HEIGHT))
                             .text_size(px(text::PANE_TITLE))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(self.subject.clone()),
+                            .child(div().flex_1().min_w_0().child(input::field(&self.subject))),
                     )
                     .when_some(attached, |d, attached| {
                         d.child(
@@ -998,26 +999,15 @@ impl Render for Compose {
             )
             .child(
                 div()
-                    .id("compose-body")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.body_scroll)
-                    .cursor_text()
-                    // The window's own focus would otherwise take the click (`prevent_default` keeps it).
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        window.focus(&body.focus_handle(cx), cx);
-                        window.prevent_default();
-                    })
-                    .child(
-                        div()
-                            .px(px(metrics::MARGIN))
-                            .py(px(metrics::BODY_PADDING))
-                            .text_size(px(text::READING))
-                            .line_height(relative(editor::LEADING))
-                            .when(sending, |d| d.opacity(metrics::SENT_TEXT_OPACITY))
-                            .child(self.body.clone()),
-                    ),
+                    .pl(px(metrics::MARGIN - AREA_INSET))
+                    .pr(px(metrics::MARGIN - AREA_INSET))
+                    .py(px(metrics::BODY_PADDING))
+                    .text_size(px(text::READING))
+                    .line_height(relative(editor::LEADING))
+                    .when(sending, |d| d.opacity(metrics::SENT_TEXT_OPACITY))
+                    .child(input::area(&self.body).full()),
             )
             .when_some(status_line(&self.status, p), |d, status| {
                 d.child(
@@ -1051,9 +1041,8 @@ pub struct ReplyBox {
     conversation_id: SharedString,
     all: bool,
     recipients: SharedString,
-    text: Entity<TextArea>,
+    text: Entity<TextareaState>,
     focus: FocusHandle,
-    scroll: ScrollHandle,
     attachments: Attachments,
     status: Status,
     _subscription: Subscription,
@@ -1070,21 +1059,17 @@ impl ReplyBox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let scroll = ScrollHandle::new();
         let text = cx.new(|cx| {
-            let mut text = TextArea::new(if all { "Reply to everyone…" } else { "Reply…" }, metrics::REPLY_MIN_ROWS, cx);
-            text.scroll_with(scroll.clone());
-            text
+            TextareaState::new(window, cx)
+                .placeholder(if all { "Reply to everyone…" } else { "Reply…" })
+                .auto_grow(metrics::REPLY_MIN_ROWS, metrics::REPLY_MAX_ROWS)
         });
         let focus = text.focus_handle(cx);
         window.focus(&focus, cx);
-        let subscription = cx.subscribe_in(&text, window, |this, _, event: &TextAreaEvent, window, cx| match event {
-            TextAreaEvent::Submit => this.send(window, cx),
-            TextAreaEvent::Changed => {
-                if matches!(this.status, Status::Failed(_)) {
-                    this.status = Status::Idle;
-                    cx.notify();
-                }
+        let subscription = cx.subscribe_in(&text, window, |this, _, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::Change) && matches!(this.status, Status::Failed(_)) {
+                this.status = Status::Idle;
+                cx.notify();
             }
         });
         Self {
@@ -1093,7 +1078,6 @@ impl ReplyBox {
             recipients: recipients_preview,
             text,
             focus,
-            scroll,
             attachments: Attachments::default(),
             status: Status::Idle,
             _subscription: subscription,
@@ -1108,7 +1092,7 @@ impl ReplyBox {
         if matches!(self.status, Status::Sending) {
             return;
         }
-        let body = self.text.read(cx).text().to_owned();
+        let body = self.text.read(cx).value().to_string();
         if body.trim().is_empty() && self.attachments.is_empty() {
             self.status = Status::Failed("Write something to send.".into());
             cx.notify();
@@ -1144,9 +1128,10 @@ impl ReplyBox {
         .detach();
     }
 
-    /// Escape leaves an empty reply; written text and files stay until Send or Discard.
-    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        if self.text.read(cx).text().trim().is_empty()
+    /// Escape (here or in the text, as the kit's `Escape`) leaves an empty reply; written text and
+    /// files stay until Send or Discard.
+    fn cancel(&mut self, cx: &mut Context<Self>) {
+        if self.text.read(cx).value().trim().is_empty()
             && self.attachments.is_empty()
             && !matches!(self.status, Status::Sending)
         {
@@ -1159,7 +1144,7 @@ impl ReplyBox {
         if matches!(self.status, Status::Sending) {
             return;
         }
-        let body = self.text.read(cx).text().to_owned();
+        let body = self.text.read(cx).value().to_string();
         cx.emit(ReplyEvent::Moved { body, attachments: self.attachments.take() });
     }
 
@@ -1217,14 +1202,15 @@ impl Render for ReplyBox {
         let sending = matches!(self.status, Status::Sending);
         let mut ring = p.accent;
         ring.a = metrics::FOCUS_RING_ALPHA;
-        let focus = self.focus.clone();
         let attached = self.attachments.render("reply-attachment", !sending, &Self::remover(cx), p);
         div()
             .key_context(REPLY_CONTEXT)
-            .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(|this, _: &Cancel, _, cx| this.cancel(cx)))
+            .on_action(cx.listener(|this, _: &Escape, _, cx| this.cancel(cx)))
+            .on_action(cx.listener(|this, _: &Send, window, cx| this.send(window, cx)))
             .on_action(cx.listener(Self::pick_files))
             .on_action(cx.listener(Self::move_to_column))
-            .capture_action(cx.listener(|this, _: &crate::textarea::Paste, _, cx| this.paste(cx)))
+            .capture_action(cx.listener(|this, _: &Paste, _, cx| this.paste(cx)))
             .group(REPLY_DROP)
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
             .relative()
@@ -1258,22 +1244,14 @@ impl Render for ReplyBox {
             )
             .child(
                 div()
-                    .id("reply-text")
-                    .max_h(px(metrics::REPLY_MAX_HEIGHT))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .cursor_text()
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        window.focus(&focus, cx);
-                        window.prevent_default();
-                    })
-                    .px(px(metrics::REPLY_PADDING))
+                    .pl(px(metrics::REPLY_PADDING - AREA_INSET))
+                    .pr(px(metrics::REPLY_PADDING - AREA_INSET))
                     .py(px(8.))
                     .text_size(px(text::READING))
                     .line_height(relative(editor::LEADING))
                     .text_color(p.text)
                     .when(sending, |d| d.opacity(metrics::SENT_TEXT_OPACITY))
-                    .child(self.text.clone()),
+                    .child(input::area(&self.text)),
             )
             .when_some(attached, |d, attached| d.child(div().px(px(metrics::REPLY_PADDING)).pb(px(8.)).child(attached)))
             .child(

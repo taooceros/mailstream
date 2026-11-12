@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Local, NaiveDate, Utc};
+use gpui::component::input::{Escape, InputEvent, InputState};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable, FontStyle,
@@ -32,7 +33,7 @@ use crate::design::{self, AttachmentKind, Palette, chat as metrics, layout, list
 use crate::icons::{Icon, icon};
 use crate::engine::{MailError, engine};
 use crate::format;
-use crate::input::{InputEvent, TextInput};
+use crate::input;
 
 actions!(chat, [Back, Next, Previous, Open, NewChat, Refresh]);
 
@@ -44,8 +45,8 @@ const SUGGESTIONS: u32 = 8;
 const OVERDRAW: f32 = 800.0;
 
 pub fn bind_keys(cx: &mut App) {
-    // Single keys act on the list, never while a field has focus; a field's Escape is its Cancel.
-    let list = Some("Chat && !TextInput");
+    // Single keys act on the list, never while a field has focus; a field's Escape closes it.
+    let list = Some("Chat && !Input");
     let pane = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("escape", Back, list),
@@ -722,8 +723,8 @@ struct NewChatForm {
 
 pub struct ChatPane {
     focus: FocusHandle,
-    composer: Entity<TextInput>,
-    people_input: Entity<TextInput>,
+    composer: Entity<InputState>,
+    people_input: Entity<InputState>,
     /// Why the space list failed to load, until a load succeeds.
     failure: Option<SharedString>,
     /// The first space list arrived.
@@ -766,8 +767,8 @@ impl Focusable for ChatPane {
 
 impl ChatPane {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let composer = cx.new(|cx| TextInput::new("Message", cx));
-        let people_input = cx.new(|cx| TextInput::new("Name or email address", cx));
+        let composer = cx.new(|cx| InputState::new(window, cx).placeholder("Message"));
+        let people_input = cx.new(|cx| InputState::new(window, cx).placeholder("Name or email address"));
         let subscriptions = vec![
             cx.subscribe_in(&composer, window, Self::on_composer_event),
             cx.subscribe_in(&people_input, window, Self::on_people_event),
@@ -985,7 +986,7 @@ impl ChatPane {
         self.hovered_message = None;
         // Downloads that failed are tried again.
         self.files.retain(|_, file| !matches!(file, FileState::Failed(_)));
-        self.composer.update(cx, |input, cx| input.clear(cx));
+        self.composer.update(cx, |input, cx| input.clean(window, cx));
         let first_open = !self.logs.contains_key(&key);
         let log = self.logs.entry(key.clone()).or_insert_with(Log::new);
         // A new "New" line each time the space is opened.
@@ -1154,11 +1155,11 @@ impl ChatPane {
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let View::Space(key) = &self.view else { return };
         let key = key.clone();
-        let text = self.composer.read(cx).text().trim().to_owned();
+        let text = self.composer.read(cx).value().trim().to_owned();
         if text.is_empty() {
             return;
         }
-        self.composer.update(cx, |input, cx| input.clear(cx));
+        self.composer.update(cx, |input, cx| input.clean(window, cx));
         let thread = self.reply_thread.take().map(|(thread, _)| thread);
         self.deliver(&key, text, thread, window, cx);
     }
@@ -1247,15 +1248,18 @@ impl ChatPane {
         cx.notify();
     }
 
-    fn on_composer_event(&mut self, _: &Entity<TextInput>, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>) {
-        match event {
-            InputEvent::Submit => self.send(window, cx),
-            InputEvent::Cancel if self.reply_thread.is_some() => {
-                self.reply_thread = None;
-                cx.notify();
-            }
-            InputEvent::Cancel => self.close(window, cx),
-            InputEvent::Changed => {}
+    fn on_composer_event(&mut self, _: &Entity<InputState>, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if let InputEvent::PressEnter { secondary: false, .. } = event {
+            self.send(window, cx);
+        }
+    }
+
+    /// Esc in the composer leaves the thread it replies in, else closes the space.
+    fn composer_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.reply_thread.take().is_some() {
+            cx.notify();
+        } else {
+            self.close(window, cx);
         }
     }
 
@@ -1272,7 +1276,7 @@ impl ChatPane {
             .or_else(|| self.accounts.first().map(|a| a.id.clone()));
         self.form = NewChatForm { account, ..Default::default() };
         self.view = View::NewChat;
-        self.people_input.update(cx, |input, cx| input.clear(cx));
+        self.people_input.update(cx, |input, cx| input.clean(window, cx));
         window.focus(&self.people_input.focus_handle(cx), cx);
         self.load_partners(cx);
         cx.notify();
@@ -1305,7 +1309,7 @@ impl ChatPane {
     /// partners first (all of them while nothing is typed), then those the contact lookup found;
     /// an address typed out in full first of all.
     fn suggest(&mut self, cx: &mut Context<Self>) {
-        let query = self.people_input.read(cx).text().trim().to_lowercase();
+        let query = self.people_input.read(cx).value().trim().to_lowercase();
         let form = &mut self.form;
         let mut seen: HashSet<String> = form.people.iter().map(|p| p.email.to_lowercase()).collect();
         let partners = form.partners.iter().filter(|person| {
@@ -1325,20 +1329,20 @@ impl ChatPane {
         cx.notify();
     }
 
-    fn on_people_event(&mut self, input: &Entity<TextInput>, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_people_event(&mut self, input: &Entity<InputState>, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            InputEvent::Changed => {
+            InputEvent::Change => {
                 self.form.generation += 1;
                 self.form.failure = None;
                 self.form.contacts.clear();
                 self.suggest(cx);
-                let query = input.read(cx).text().trim().to_owned();
+                let query = input.read(cx).value().trim().to_owned();
                 if !query.is_empty() {
                     self.search_people(query, self.form.generation, cx);
                 }
             }
-            InputEvent::Submit => {
-                let typed = input.read(cx).text().trim().to_owned();
+            InputEvent::PressEnter { secondary: false, .. } => {
+                let typed = input.read(cx).value().trim().to_owned();
                 if typed.is_empty() {
                     self.start_chat(window, cx);
                 } else if typed.contains('@') && !typed.contains(char::is_whitespace) {
@@ -1347,7 +1351,7 @@ impl ChatPane {
                     self.add_person(first, window, cx);
                 }
             }
-            InputEvent::Cancel => self.close(window, cx),
+            _ => {}
         }
     }
 
@@ -1381,7 +1385,7 @@ impl ChatPane {
         }
         self.form.generation += 1;
         self.form.contacts.clear();
-        self.people_input.update(cx, |input, cx| input.clear(cx));
+        self.people_input.update(cx, |input, cx| input.clean(window, cx));
         window.focus(&self.people_input.focus_handle(cx), cx);
         self.suggest(cx);
     }
@@ -1986,7 +1990,8 @@ impl ChatPane {
                         .text_size(px(text::READING))
                         .cursor_text()
                         .on_click(move |_, window, cx| window.focus(&composer.focus_handle(cx), cx))
-                        .child(self.composer.clone())
+                        .on_action(cx.listener(Self::composer_escape))
+                        .child(div().flex_1().min_w_0().child(input::field(&self.composer)))
                         .child(div().flex_shrink_0().text_size(px(text::CAPTION)).text_color(p.faint).child("↩")),
                 )
                 .child(
@@ -2054,6 +2059,7 @@ impl ChatPane {
             .bg(p.chip)
             .cursor_text()
             .on_click(move |_, window, cx| window.focus(&people_input.focus_handle(cx), cx))
+            .on_action(cx.listener(|this, _: &Escape, window, cx| this.close(window, cx)))
             .children(form.people.iter().enumerate().map(|(index, person)| {
                 let email = person.email.clone();
                 div()
@@ -2084,7 +2090,7 @@ impl ChatPane {
                             .child("✕"),
                     )
             }))
-            .child(div().flex_1().min_w(px(160.)).h(px(22.)).flex().items_center().child(self.people_input.clone()));
+            .child(div().flex_1().min_w(px(160.)).h(px(22.)).flex().items_center().child(input::field(&self.people_input)));
         let suggestions = div().flex().flex_col().children(form.suggestions.iter().enumerate().map(|(index, person)| {
             let chosen = person.clone();
             div()

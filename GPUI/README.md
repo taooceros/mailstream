@@ -29,12 +29,22 @@ Anything else a render reads (a `Cell`, a thread-local, the time) needs `cx.noti
 `GPUI_VIEW_RETENTION=0` draws every frame from scratch, to tell a stale view from a bug.
 
 The controls are gpui-kit's components where the kit has one (MS-226): buttons and icon buttons
-(`controls::button`, `icon_button`), their tooltips (`controls::tooltip`) and switches. `main.rs`
-calls `gpui::init` and opens every window with `gpui::open_window`, whose root hosts the kit's
-tooltips, menus and popovers over the app; `design::sync_kit_theme` puts the palette into the kit's
-theme (colors, `radius::CONTROL` corners, the UI font, `text::BODY` as the rem) at launch and on
-every change of appearance, so the components keep MS-200's look in both. The app's buttons and
-switches stay out of the Tab order, as before the kit.
+(`controls::button`, `icon_button`), their tooltips (`controls::tooltip`), switches and text
+fields. `main.rs` calls `gpui::init` and opens every window with `gpui::open_window`, whose root
+hosts the kit's tooltips, menus and popovers over the app; `design::sync_kit_theme` puts the
+palette into the kit's theme (colors, `radius::CONTROL` corners, the UI font, `text::BODY` as the
+rem) at launch and on every change of appearance, so the components keep MS-200's look in both.
+The app's buttons and switches stay out of the Tab order, as before the kit.
+
+Text fields are the kit's `InputState` (one line; `masked` for a secret) and `TextareaState`
+(written text), drawn by `input::field` / `input::area` without the kit's frame, in the text
+style around them (`controls::field_frame` frames the search box and settings). The views
+subscribe to the kit's `InputEvent::Change` and `PressEnter`; Esc reaches them as the kit's
+`Escape` action, caught with `on_action` on an element around the field. The fields' key context
+is `Input`: single-key bindings say `!Input`, and keys a draft takes inside its fields (Tab, ⌘↩)
+are bound in `Compose > Input` / `ReplyBox > Input` after the kit's own bindings, which they then
+beat. Placeholders take the kit's `muted_foreground` (MS-200's `muted`), and a right click in a
+field opens the kit's Cut / Copy / Paste / Select All menu.
 
 Always start it through `run.sh`. On macOS the engine reads the sign-ins from the Keychain item
 that macOS pins to Mailstream's signature (identifier `dev.mailstream.Mailstream`, the Apple
@@ -110,7 +120,7 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 | `src/avatars.rs` | Contact photos from `mail.avatars`, cached in memory; initials otherwise |
 | `src/design.rs` | Flutter's style tokens (`Flutter/lib/ui/design.dart`): both palettes with their elevations, the type, radii, spacing, strokes, motion, list, mark, avatar, tag and notice metrics, avatar/topic/account/attachment colors |
 | `src/icons.rs`, `src/format.rs` | Material Symbols glyphs; dates and sizes |
-| `src/input.rs`, `src/textarea.rs` | Single-line field (IME, selection, clipboard; masked for a secret) adapted from gpui's input example, and the multi-line editor for bodies |
+| `src/input.rs` | `field` / `area`: gpui-kit's one-line and multi-line text fields in the surrounding text style (see above) |
 | `src/bench.rs` | The frame measurement `scripts/bench.sh gpui` runs (`MAILSTREAM_BENCH=scroll`): the list scrolls itself and every frame's start and render-to-paint time is logged |
 | `src/updater.rs` | Mac only: starts Sparkle from the bundle's Frameworks and adds the two update items to the application menu |
 

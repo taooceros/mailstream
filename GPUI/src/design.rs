@@ -655,13 +655,10 @@ pub mod settings {
     pub const ROW_HEIGHT: f32 = 56.0;
 }
 
-/// The multi-line text editor (`textarea.rs`).
+/// Written text (the kit's text fields, `input.rs`).
 pub mod editor {
-    pub const CARET_WIDTH: f32 = 1.5;
     /// The accent's opacity behind selected text.
     pub const SELECTION_ALPHA: f32 = 0.3;
-    /// How wide a selected line break shows.
-    pub const NEWLINE_SELECTION: f32 = 5.0;
     /// Line height of written text, as a multiple of its size (the composer's `1.55`).
     pub const LEADING: f32 = 1.55;
 }
@@ -705,7 +702,6 @@ pub mod compose {
     pub const LABEL_WIDTH: f32 = 52.0;
     pub const ROW_HEIGHT: f32 = 34.0;
     pub const SUBJECT_HEIGHT: f32 = 44.0;
-    pub const BODY_MIN_ROWS: usize = 10;
     pub const BODY_PADDING: f32 = 14.0;
     /// Recipient completion: how many people, the menu's width, a row's height and avatar.
     pub const SUGGESTIONS: usize = 6;
@@ -714,9 +710,10 @@ pub mod compose {
     pub const MENU_AVATAR: f32 = 24.0;
     /// Typing pauses this long before the directory is asked.
     pub const COMPLETION_DELAY: Duration = Duration::from_millis(120);
-    /// The inline reply: rows the text starts with and the most the card grows to.
+    /// The inline reply: rows the text starts with and grows to (about 360 points of written
+    /// text), then it scrolls.
     pub const REPLY_MIN_ROWS: usize = 3;
-    pub const REPLY_MAX_HEIGHT: f32 = 360.0;
+    pub const REPLY_MAX_ROWS: usize = 15;
     pub const REPLY_PADDING: f32 = 14.0;
     /// The reply card's border while it has the keyboard: the accent at this opacity.
     pub const FOCUS_RING_ALPHA: f32 = 0.45;

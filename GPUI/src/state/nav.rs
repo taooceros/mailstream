@@ -25,7 +25,7 @@ impl MailApp {
         self.context_menu = None;
         self.source = source;
         self.query = None;
-        self.search.update(cx, |search, cx| search.clear(cx));
+        self.search.update(cx, |search, cx| search.clean(window, cx));
         self.layers.clear();
         if !same {
             self.highlight = None;
@@ -59,14 +59,14 @@ impl MailApp {
 
     pub(super) fn on_search_event(
         &mut self,
-        search: &Entity<TextInput>,
+        search: &Entity<InputState>,
         event: &InputEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
-            InputEvent::Submit => {
-                let text = search.read(cx).text().trim().to_owned();
+            InputEvent::PressEnter { secondary: false, .. } => {
+                let text = search.read(cx).value().trim().to_owned();
                 if text.is_empty() {
                     self.end_search(cx);
                 } else {
@@ -80,17 +80,21 @@ impl MailApp {
                 }
                 window.focus(&self.focus, cx);
             }
-            InputEvent::Cancel => {
-                search.update(cx, |search, cx| search.clear(cx));
-                self.end_search(cx);
-                window.focus(&self.focus, cx);
-            }
-            InputEvent::Changed => {
-                if search.read(cx).text().is_empty() && self.query.is_some() {
+            InputEvent::Change => {
+                if search.read(cx).value().is_empty() && self.query.is_some() {
                     self.end_search(cx);
                 }
             }
+            _ => return,
         }
+        cx.notify();
+    }
+
+    /// Esc in the search field clears it, ends the search and gives the keys back to the list.
+    pub fn cancel_search(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |search, cx| search.clean(window, cx));
+        self.end_search(cx);
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 
@@ -107,7 +111,7 @@ impl MailApp {
     pub fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
         let focus = self.search.focus_handle(cx);
         window.focus(&focus, cx);
-        self.search.update(cx, |search, cx| search.select_everything(cx));
+        self.search.update(cx, |search, cx| search.select_all(window, cx));
     }
 
     pub fn refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
@@ -425,7 +429,7 @@ impl MailApp {
                 self.slide = Slide::Settle { from, to: self.content_width, start: Instant::now(), back: true };
             }
         } else if self.query.is_some() {
-            self.search.update(cx, |search, cx| search.clear(cx));
+            self.search.update(cx, |search, cx| search.clean(window, cx));
             self.end_search(cx);
         }
         window.focus(&self.focus, cx);

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use chrono::Local;
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
+use gpui::component::input::{Escape, InputEvent, InputState};
 use gpui::{
     App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, ListAlignment, ListOffset, ListState, Pixels,
     Point, ScrollHandle, SharedString, Subscription, Window, actions, px,
@@ -29,7 +30,6 @@ use crate::chat::ChatPane;
 use crate::compose::{ComposeColumn, ReplyBox};
 use crate::engine::{MailError, engine};
 use crate::format;
-use crate::input::{InputEvent, TextInput};
 use crate::model::{Account, Category, Conversation, Listing, Mailbox, Message, Role};
 use crate::swipe::{BackSwipe, Preferences};
 
@@ -66,7 +66,7 @@ pub const CONTEXT: &str = "Mail";
 pub fn bind_keys(cx: &mut App) {
     // Single keys act on the list, never while a text field has focus, in Chat or the calendar
     // (which have their own), or in a draft.
-    let list = Some("Mail && !TextInput && !TextArea && !Chat && !Calendar && !Compose");
+    let list = Some("Mail && !Input && !Chat && !Calendar && !Compose");
     let window = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("j", Next, list),
@@ -333,7 +333,7 @@ impl Renderer {
 
 pub struct MailApp {
     pub focus: FocusHandle,
-    pub search: Entity<TextInput>,
+    pub search: Entity<InputState>,
     pub accounts: Vec<Account>,
     pub mailboxes: HashMap<SharedString, Vec<Mailbox>>,
     pub source: Source,
@@ -418,7 +418,7 @@ pub struct ReplyDraft {
 
 impl MailApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| TextInput::new("Search", cx));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let chat = cx.new(|cx| ChatPane::new(window, cx));
         let calendar = cx.new(|cx| CalendarPane::new(window, cx));
         let compose = cx.new(|_| ComposeColumn::new());
