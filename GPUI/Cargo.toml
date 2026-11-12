@@ -16,6 +16,11 @@ url = "2"
 image = { version = "0.25", default-features = false }
 base64 = "0.22"
 
+# Tests that draw views in a test window and feed them input as the platform would (the
+# calendar's two-finger paging, MS-212).
+[dev-dependencies]
+gpui = { version = "0.2.2", features = ["test-support"] }
+
 # The Mac reader's other renderer, WKWebViews (`webview.rs`), and the Dock icon.
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-handle = "0.6"

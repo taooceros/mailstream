@@ -15,7 +15,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     App, ClickEvent, Context, DispatchPhase, Div, ElementId, FontWeight, HighlightStyle, Hsla, InteractiveElement,
     IntoElement, ParentElement, ScrollWheelEvent, StatefulInteractiveElement, Styled, StyledText, Window, canvas, div,
-    linear_color_stop, linear_gradient, point, px,
+    linear_color_stop, linear_gradient, point, px, relative,
 };
 
 use super::agenda::{dot_color, guest_avatars};
@@ -87,6 +87,30 @@ impl Page {
     fn shown_rows(&self) -> usize {
         self.rows.min(metrics::ALL_DAY_ROWS)
     }
+}
+
+/// The pages side by side in a band, shifted `pan` points to the right. They are placed in
+/// proportion to the band, not by a width measured in an earlier frame, so they fill it at
+/// whatever width it has now (an open event or a docked draft narrowing the list).
+fn strip(pan: f32, pages: impl IntoIterator<Item = Div>) -> Div {
+    div().absolute().top_0().bottom_0().left(px(pan)).w_full().children(pages)
+}
+
+/// A page `offset` pages from the shown one, as wide as the band.
+fn place(offset: i64, page: Div) -> Div {
+    page.absolute().top_0().bottom_0().left(relative(offset as f32)).w_full()
+}
+
+/// Day `index`'s column of `count`, the full height of its page.
+fn day_column(index: usize, count: usize) -> Div {
+    div().absolute().top_0().bottom_0().left(relative(index as f32 / count as f32)).w(relative(1. / count as f32))
+}
+
+/// `count` equal shares of a flex row's width, alongside others.
+fn shares(count: usize) -> Div {
+    let mut share = div().flex_basis(px(0.)).min_w_0();
+    share.style().flex_grow = Some(count as f32);
+    share
 }
 
 /// A day's weekday and date (`CalendarDayHeader`): today's raised on a small card in the accent,
@@ -258,7 +282,12 @@ impl CalendarPane {
         cx: &mut Context<Self>,
     ) -> Div {
         let pan = self.current_pan(window);
-        let width = self.page_width.get();
+        // The pages' width as last measured, for what follows a card's width (its content) and
+        // not its place; before the first layout, the window's less the gutter.
+        let measured = self.page_width.get();
+        let width = if measured > 0. { measured } else { (f32::from(window.viewport_size().width) - metrics::GUTTER).max(1.) };
+        // How far a line across a page may need to reach, whatever the page's width now.
+        let reach = f32::from(window.viewport_size().width);
         let offsets: &[i64] = if pan == 0. { &[0] } else { &[-1, 0, 1] };
         let pages: Vec<(i64, Page)> =
             offsets.iter().map(|&offset| (offset, Page::new(&self.events, self.page_days(offset)))).collect();
@@ -267,16 +296,10 @@ impl CalendarPane {
         if std::mem::take(&mut self.scroll_to_now) {
             self.scroll_timeline_to((now.hour() * 60 + now.minute()) as f32);
         }
-        // Each page `width` wide, `offset` pages from the shown one; before the first layout,
-        // the shown one fills the band.
-        let place = move |offset: i64, d: Div| {
-            let d = d.absolute().top_0().bottom_0().left(px(offset as f32 * width + pan));
-            if width > 0. { d.w(px(width)) } else { d.w_full() }
-        };
         let unsynced = self.synced.filter(|(from, until)| current.days.iter().any(|day| day < from || day >= until));
 
         let header = div().flex_shrink_0().h(px(metrics::HEADER_HEIGHT)).flex().child(div().flex_shrink_0().w(px(metrics::GUTTER))).child(
-            div().flex_1().h_full().relative().overflow_hidden().children(pages.iter().map(|(offset, page)| {
+            div().flex_1().h_full().relative().overflow_hidden().child(strip(pan, pages.iter().map(|(offset, page)| {
                 place(
                     *offset,
                     div().flex().children(page.days.iter().zip(&page.booked).map(|(&day, &booked)| {
@@ -294,7 +317,7 @@ impl CalendarPane {
                             .child(day_header(day, day == today, booked, p))
                     })),
                 )
-            })),
+            }))),
         );
 
         let rows = current.shown_rows();
@@ -316,8 +339,8 @@ impl CalendarPane {
                         .child("all-day"),
                 )
                 .child(
-                    div().flex_1().h_full().relative().overflow_hidden().children(pages.iter().map(|(offset, page)| {
-                        let bars = self.render_all_day_bars(page, width, now, p, cx);
+                    div().flex_1().h_full().relative().overflow_hidden().child(strip(pan, pages.iter().map(|(offset, page)| {
+                        let bars = self.render_all_day_bars(page, now, p, cx);
                         place(
                             *offset,
                             div().child(
@@ -334,7 +357,7 @@ impl CalendarPane {
                                     ),
                             ),
                         )
-                    })),
+                    }))),
                 )
         });
 
@@ -396,17 +419,21 @@ impl CalendarPane {
                 )
             });
 
-        // The pages' width, measured as laid out: a new width (the window, the open event
-        // narrowing the list) draws the pane again at once.
+        // The pages' width, measured as laid out, for the cards' content. A notify while the
+        // frame is drawn is dropped (gpui forgets the views marked dirty as the frame ends), so
+        // a new width draws the pane again on the next frame.
         let measure = {
             let cell = self.page_width.clone();
             let pane = cx.entity().downgrade();
             canvas(
-                move |bounds, _, cx| {
+                move |bounds, window, _| {
                     let measured = f32::from(bounds.size.width);
                     if (cell.get() - measured).abs() > 0.5 {
                         cell.set(measured);
-                        pane.update(cx, |_, cx| cx.notify()).ok();
+                        let pane = pane.clone();
+                        window.on_next_frame(move |_, cx| {
+                            pane.update(cx, |_, cx| cx.notify()).ok();
+                        });
                     }
                 },
                 |_, _, _, _| {},
@@ -434,10 +461,14 @@ impl CalendarPane {
                             .top_0()
                             .bottom_0()
                             .overflow_hidden()
+                            .debug_selector(|| "timeline-band".into())
                             .child(measure)
-                            .children(pages.iter().map(|(offset, page)| {
-                                place(*offset, self.render_timeline(page, today, now, width, p, cx))
-                            })),
+                            .child(strip(
+                                pan,
+                                pages
+                                    .iter()
+                                    .map(|(offset, page)| place(*offset, self.render_timeline(page, today, now, (width, reach), p, cx))),
+                            )),
                     ),
             );
 
@@ -484,13 +515,15 @@ impl CalendarPane {
     }
 
     /// One page of the timeline: today's column lit, unfetched days shaded, the hour lines and
-    /// the lines between days, the cards, and the time now.
+    /// the lines between days, the cards, and the time now. Everything sits in proportion to the
+    /// page; `width`, the page's as last measured, only decides what a card has room to show, and
+    /// `reach` how far a line may have to run.
     fn render_timeline(
         &self,
         page: &Page,
         today: NaiveDate,
         now: DateTime<Local>,
-        width: f32,
+        (width, reach): (f32, f32),
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -503,14 +536,8 @@ impl CalendarPane {
             None => Vec::new(),
         };
         let mut d = div()
-            .when_some(today_at, |d, at| {
-                d.child(div().absolute().top_0().bottom_0().left(px(at as f32 * column)).w(px(column)).bg(p.spotlight))
-            })
-            .children(
-                unfetched
-                    .into_iter()
-                    .map(|i| div().absolute().top_0().bottom_0().left(px(i as f32 * column)).w(px(column)).bg(shade)),
-            )
+            .when_some(today_at, |d, at| d.child(day_column(at, count).bg(p.spotlight)))
+            .children(unfetched.into_iter().map(|i| day_column(i, count).bg(shade)))
             .children((0..=24).map(|hour| {
                 div()
                     .absolute()
@@ -520,56 +547,65 @@ impl CalendarPane {
                     .h(px(1.))
                     .bg(p.line)
             }))
-            .children((0..count).map(|i| div().absolute().top_0().bottom_0().left(px(i as f32 * column)).w(px(1.)).bg(p.line)));
-        if width > 0. {
-            let gap = metrics::CONFLICT_GAP;
-            for (i, (placed, conflicts)) in page.timed.iter().zip(&page.conflicts).enumerate() {
-                // Half a gap from the day's line on the left, a whole one before the next day's.
-                let room = column - 1.5 * gap;
-                for (placement, &conflict) in placed.iter().zip(conflicts) {
-                    let share = room / placement.columns as f32;
-                    let trailing = if placement.column + placement.span < placement.columns { gap } else { 0. };
-                    let card_width = share * placement.span as f32 - trailing;
-                    let card_height = (placement.bottom - placement.top) as f32 * PER_MINUTE - gap / 2.;
-                    let left = i as f32 * column + gap / 2. + share * placement.column as f32;
-                    let top = metrics::INSET + placement.top as f32 * PER_MINUTE;
-                    d = d.child(self.render_card(placement, conflict, (left, top, card_width, card_height), now, p, cx));
-                }
+            .children((0..count).map(|i| day_column(i, count).w(px(1.)).bg(p.line)));
+        let gap = metrics::CONFLICT_GAP;
+        // Half a gap from the day's line on the left, a whole one before the next day's.
+        let room = column - 1.5 * gap;
+        for (i, (placed, conflicts)) in page.timed.iter().zip(&page.conflicts).enumerate() {
+            let mut cards = div().absolute().top_0().bottom_0().left(px(gap / 2.)).right(px(gap));
+            for (placement, &conflict) in placed.iter().zip(conflicts) {
+                let columns = placement.columns as f32;
+                let trailing = if placement.column + placement.span < placement.columns { gap } else { 0. };
+                let card_width = room / columns * placement.span as f32 - trailing;
+                let card_height = ((placement.bottom - placement.top) as f32 * PER_MINUTE - gap / 2.).max(0.);
+                // A row across the day's room: the card's slot takes as many shares of it as the
+                // columns it spans, after as many as it is in from the left.
+                cards = cards.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(metrics::INSET + placement.top as f32 * PER_MINUTE))
+                        .h(px(card_height))
+                        .flex()
+                        .child(shares(placement.column))
+                        .child(
+                            shares(placement.span)
+                                .flex()
+                                .child(self.render_card(placement, conflict, (card_width, card_height), now, p, cx))
+                                .child(div().flex_shrink_0().w(px(trailing))),
+                        )
+                        .child(shares(placement.columns - placement.column - placement.span)),
+                );
             }
+            d = d.child(day_column(i, count).child(cards));
         }
         // The time now: a line with a dot across today's column, dashed across the other days.
         if let Some(at) = today_at {
             let y = metrics::INSET + (now.hour() * 60 + now.minute()) as f32 * PER_MINUTE;
-            let left = at as f32 * column;
             let trail = design::tint(p.danger, metrics::NOW_TRAIL_OPACITY);
-            // Dashes `DASH` long, as far apart, from `from` to `to`.
-            let dashed = |from: f32, to: f32| {
-                let count = ((to - from).max(0.) / (2. * metrics::DASH)).ceil() as usize;
-                (0..count).map(move |i| {
-                    let x = from + i as f32 * 2. * metrics::DASH;
-                    div().absolute().top(px(y - 0.5)).left(px(x)).w(px(metrics::DASH.min(to - x))).h(px(1.)).bg(trail)
-                })
+            // Dashes `DASH` long, as far apart, across `band`, which cuts them off at its end.
+            let dashed = |band: Div| {
+                let dashes = (reach / (2. * metrics::DASH)).ceil() as usize;
+                band.absolute().top(px(y - 0.5)).h(px(1.)).overflow_hidden().children((0..dashes).map(|i| {
+                    div().absolute().top_0().left(px(i as f32 * 2. * metrics::DASH)).w(px(metrics::DASH)).h(px(1.)).bg(trail)
+                }))
             };
             d = d
-                .children(dashed(0., left))
-                .children(dashed(left + column, width))
+                .child(dashed(div().left_0().w(relative(at as f32 / count as f32))))
+                .child(dashed(div().left(relative((at + 1) as f32 / count as f32)).right_0()))
                 .child(
-                    div()
-                        .absolute()
-                        .left(px(left))
-                        .w(px(column))
-                        .top(px(y - metrics::NOW_LINE / 2.))
-                        .h(px(metrics::NOW_LINE))
-                        .bg(p.danger),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(left - 3.))
-                        .top(px(y - 3.))
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(p.danger),
+                    day_column(at, count)
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .top(px(y - metrics::NOW_LINE / 2.))
+                                .h(px(metrics::NOW_LINE))
+                                .bg(p.danger),
+                        )
+                        .child(div().absolute().left(px(-3.)).top(px(y - 3.)).size(px(6.)).rounded_full().bg(p.danger)),
                 );
         }
         d
@@ -584,7 +620,7 @@ impl CalendarPane {
         &self,
         placement: &Placement,
         conflict: bool,
-        (left, top, width, height): (f32, f32, f32, f32),
+        (width, height): (f32, f32),
         now: DateTime<Local>,
         p: &'static Palette,
         cx: &mut Context<Self>,
@@ -739,11 +775,10 @@ impl CalendarPane {
         let raised = p.raised_shadow.clone();
         let card = div()
             .id(ElementId::Name(format!("card:{}:{}:{}:{}", key.account, key.calendar, key.id, placement.top).into()))
-            .absolute()
-            .left(px(left))
-            .top(px(top))
-            .w(px(width.max(0.)))
-            .h(px(height.max(0.)))
+            .debug_selector(|| format!("card:{}", key.id))
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .overflow_hidden()
             .rounded(px(metrics::CARD_RADIUS))
             .cursor_pointer()
@@ -773,7 +808,10 @@ impl CalendarPane {
                     .shadow(p.card_shadow.clone()),
             }
         };
-        card.child(content)
+        // The content as wide as the card was last measured: its lines are cut to fit (…) only
+        // in a box of known width. The card itself always fills its place; a frame after the
+        // width changes, the content follows.
+        card.child(content.w(px(width.max(0.))))
     }
 
     /// The all-day row's bars of `page`: each tinted with its calendar's color, lifted when open,
@@ -781,15 +819,10 @@ impl CalendarPane {
     fn render_all_day_bars(
         &self,
         page: &Page,
-        width: f32,
         now: DateTime<Local>,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
-        if width <= 0. {
-            return Vec::new();
-        }
-        let column = width / page.days.len() as f32;
         let (first_day, last_day) = (page.days[0], page.days[page.days.len() - 1]);
         page.all_day
             .iter()
@@ -811,13 +844,11 @@ impl CalendarPane {
                 );
                 let key = event.key.clone();
                 let raised = p.raised_shadow.clone();
-                div()
+                let bar = div()
                     .id(ElementId::Name(format!("bar:{}:{}:{}:{first_day}", key.account, key.calendar, key.id).into()))
-                    .absolute()
-                    .left(px(placed.first as f32 * column + 1.))
-                    .w(px((placed.last - placed.first + 1) as f32 * column - 2.))
-                    .top(px(placed.row as f32 * metrics::ALL_DAY_HEIGHT + 2.))
-                    .h(px(metrics::ALL_DAY_HEIGHT - 2.))
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
                     .px(px(space::S6))
                     .flex()
                     .items_center()
@@ -839,7 +870,25 @@ impl CalendarPane {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(design::tint(p.text, fade))
                             .child(title),
+                    );
+                // Over its days in the row, a point in from their lines.
+                let days = page.days.len();
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(placed.row as f32 * metrics::ALL_DAY_HEIGHT + 2.))
+                    .h(px(metrics::ALL_DAY_HEIGHT - 2.))
+                    .flex()
+                    .child(shares(placed.first))
+                    .child(
+                        shares(placed.last - placed.first + 1)
+                            .flex()
+                            .child(div().flex_shrink_0().w(px(1.)))
+                            .child(bar)
+                            .child(div().flex_shrink_0().w(px(1.))),
                     )
+                    .child(shares(days - 1 - placed.last))
                     .into_any_element()
             })
             .collect()
@@ -875,5 +924,131 @@ impl CalendarPane {
             )
             .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Days, Local, NaiveDate};
+    use gpui::{
+        Bounds, Entity, Modifiers, Pixels, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
+        point, px, size,
+    };
+
+    use super::super::model::{self, tests::timed};
+    use super::super::{CalendarPane, Pan, View};
+
+    /// The calendar's week view of this week in a window 1400 wide, with an hour on its Saturday
+    /// (`saturday`) and today.
+    fn week_view(cx: &mut TestAppContext) -> (Entity<CalendarPane>, &mut VisualTestContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| CalendarPane::new(window, cx));
+        cx.simulate_resize(size(px(1400.), px(900.)));
+        let today = Local::now().date_naive();
+        let saturday = model::week_of(today) + Days::new(6);
+        pane.update(cx, |pane, cx| {
+            pane.events = vec![timed("today", today, (10, 0), (11, 0)), timed("saturday", saturday, (10, 0), (11, 0))];
+            pane.events.sort_by_key(|event| event.start);
+            pane.listed = true;
+            pane.view = View::Week;
+            pane.rebuild(today);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        (pane, cx)
+    }
+
+    fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> Bounds<Pixels> {
+        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
+    }
+
+    /// A scroll over the timeline as gpui's Wayland client sends a touchpad's: `Started` with no
+    /// movement as the fingers land, `Moved` in points as they move, `Ended` with none as they
+    /// lift, then the fling as `Moved` again.
+    fn touchpad(at: gpui::Point<Pixels>, phase: TouchPhase, dx: f32, dy: f32) -> ScrollWheelEvent {
+        ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
+            modifiers: Modifiers::default(),
+            touch_phase: phase,
+        }
+    }
+
+    fn shown(pane: &Entity<CalendarPane>, cx: &mut VisualTestContext) -> (NaiveDate, Pan) {
+        pane.read_with(cx, |pane, _| (pane.focus_day, pane.pan))
+    }
+
+    #[gpui::test]
+    fn an_open_event_narrowing_the_list_keeps_the_whole_week_in_it(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        let wide = bounds(cx, "timeline-band");
+        assert!(wide.contains(&bounds(cx, "card:saturday").center()));
+        // One frame at the new width: what the pane last measured is the old one.
+        pane.update(cx, |pane, cx| {
+            let key = pane.events.iter().find(|event| event.item.id == "today").unwrap().key.clone();
+            pane.open(key, cx);
+        });
+        let band = bounds(cx, "timeline-band");
+        assert!(band.size.width < wide.size.width * 0.6, "the open event takes most of the room");
+        let saturday = bounds(cx, "card:saturday");
+        assert!(
+            saturday.left() > band.left() + band.size.width * 6. / 7. - px(1.) && saturday.right() <= band.right(),
+            "Saturday's card sits in the last seventh of the band: {saturday:?} in {band:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_two_finger_swipe_to_the_left_pages_to_the_next_week(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        let at = bounds(cx, "timeline-band").center();
+        let (week, _) = shown(&pane, cx);
+        cx.simulate_event(touchpad(at, TouchPhase::Started, 0., 0.));
+        for _ in 0..10 {
+            cx.simulate_event(touchpad(at, TouchPhase::Moved, -50., 0.5));
+        }
+        assert!(matches!(shown(&pane, cx), (day, Pan::Drag(offset)) if day == week && offset == -500.), "the week follows the fingers");
+        cx.simulate_event(touchpad(at, TouchPhase::Ended, 0., 0.));
+        let (day, pan) = shown(&pane, cx);
+        assert_eq!(day, week + Days::new(7));
+        assert!(matches!(pan, Pan::Settle { .. }), "the next week slides on from where the fingers left it");
+        // The fling after the lift is the swipe's: the timeline doesn't scroll with it.
+        let scrolled = pane.read_with(cx, |pane, _| pane.timeline.offset());
+        cx.simulate_event(touchpad(at, TouchPhase::Moved, -30., -30.));
+        assert_eq!(pane.read_with(cx, |pane, _| pane.timeline.offset()), scrolled);
+        assert_eq!(shown(&pane, cx).0, week + Days::new(7));
+    }
+
+    #[gpui::test]
+    fn a_short_swipe_springs_back_and_a_vertical_one_scrolls_the_hours(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        let at = bounds(cx, "timeline-band").center();
+        let (week, _) = shown(&pane, cx);
+        cx.simulate_event(touchpad(at, TouchPhase::Started, 0., 0.));
+        cx.simulate_event(touchpad(at, TouchPhase::Moved, 8., 0.));
+        cx.simulate_event(touchpad(at, TouchPhase::Moved, 7., 0.));
+        cx.simulate_event(touchpad(at, TouchPhase::Ended, 0., 0.));
+        assert!(matches!(shown(&pane, cx), (day, Pan::Settle { from, .. }) if day == week && from == 15.), "back to this week");
+
+        // From midnight, so the hours can scroll on whatever the time now.
+        pane.update(cx, |pane, cx| {
+            pane.scroll_timeline_to(0.);
+            cx.notify();
+        });
+        let scrolled = pane.read_with(cx, |pane, _| pane.timeline.offset().y);
+        cx.simulate_event(touchpad(at, TouchPhase::Started, 0., 0.));
+        for _ in 0..3 {
+            cx.simulate_event(touchpad(at, TouchPhase::Moved, 1., -40.));
+        }
+        cx.simulate_event(touchpad(at, TouchPhase::Ended, 0., 0.));
+        assert_eq!(shown(&pane, cx).0, week);
+        assert!(pane.read_with(cx, |pane, _| pane.timeline.offset().y) < scrolled, "the hours scrolled");
+
+        // A mouse wheel's sideways step is no swipe.
+        cx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Lines(point(-3., 0.)),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        assert_eq!(shown(&pane, cx).0, week);
     }
 }

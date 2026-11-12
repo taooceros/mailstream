@@ -555,7 +555,7 @@ pub fn hex_color(hex: Option<&str>) -> Option<Hsla> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     fn item(id: &str, start: &str, end: &str) -> CalendarItem {
@@ -592,7 +592,7 @@ mod tests {
         NaiveDate::from_ymd_opt(2026, 11, n).unwrap()
     }
 
-    fn timed(id: &str, on: NaiveDate, from: (u32, u32), to: (u32, u32)) -> Event {
+    pub(crate) fn timed(id: &str, on: NaiveDate, from: (u32, u32), to: (u32, u32)) -> Event {
         Event::new(item(id, &local(on, from.0, from.1), &local(on, to.0, to.1))).unwrap()
     }
 
