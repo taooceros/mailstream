@@ -76,8 +76,10 @@ data and cache folders elsewhere), written through the engine's cache layer: a G
 Outlook account, threads with HTML, attachments and inline answers, an invitation with its
 event, a long report with a table, Chinese mail, bundles, Chat and the calendars. The mode has
 no system appearance or desktop behind it, so `design::palette` takes its appearance and
-`design::window_material` is opaque; installed builds leave the feature out. The accounts aren't
-signed in: actions that reach the provider fail with a toast.
+`design::window_material` is opaque; installed builds leave the feature out. The accounts are
+signed in, with sign-ins kept in memory, to the engine's stand-in provider on the loopback
+interface (`Engine/src/shots.rs`, MS-265): marking read, starring, archiving and sending succeed,
+and reads are refused, so the synthetic mail stays as written.
 
 HTML bodies are drawn by Blitz, the engine's renderer (`src/blitz_body.rs`, as in Flutter's
 reader), on every platform: the build turns on the FFI crate's `blitz` feature, with one

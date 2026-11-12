@@ -401,8 +401,8 @@ Reuse these instead of writing another copy:
   batch requests go through `Api::batch`, which sends again what was throttled or unanswered, with
   `multipart_parts` (Gmail) or `json_parts` (Graph `$batch`) reading the answers; queries and forms
   are `api::form_encoded`. OAuth scopes are the constants in `oauth.rs`.
-- Engine tests: engine folders, sign-ins, `call`/`wait_until` and the fake HTTP server are in
-  `Engine/src/testkit.rs`.
+- Engine tests: engine folders, sign-ins and `call`/`wait_until` are in `Engine/src/testkit.rs`;
+  the fake HTTP server, which GPUI's screenshot mode also uses, is in `Engine/src/fake_server.rs`.
 - Mail HTML: where quoted history starts, the reader's style sheet, the web views' content policy
   and page script, the inline parts a page may show and the links a click opens are
   `FFI/src/mail_html.rs`, which Blitz (`html_page.rs`) and every front end's web view use.

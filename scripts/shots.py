@@ -36,9 +36,11 @@ puts each on Linear (the machine's app token: ~/.config/linear/token.json on Lin
 `linear-omp` Keychain item on the Mac, as scripts/linear-poll.py reads it) and prints the
 Markdown to paste into the issue's comment, light first, then dark.
 
-What it can't show: the synthetic accounts aren't signed in, so actions that reach the provider
-(marking read as a conversation opens, archive, star, send) fail with a toast for 5 s (`wait 6000`
-lets it pass); the window is opaque (no Liquid Glass or compositor blur behind it); the Mac's
+The synthetic accounts are signed in to a stand-in provider (`Engine/src/shots.rs`, MS-265), so
+marking read as a conversation opens, archive, star and send succeed and the screens after them
+can be shot; the run prints each change the provider took (`shots: provider: …`).
+
+What it can't show: the window is opaque (no Liquid Glass or compositor blur behind it); the Mac's
 WebView renderer, menus, file dialogs and the touchpad's momentum are the real platform's. For
 those, on Linux, use scripts/vhypr.py: it runs the app in a private nested Hyprland desktop and
 screenshots that, real compositor and input included. shots.py is the default for hand-over

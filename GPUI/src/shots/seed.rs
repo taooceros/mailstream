@@ -1,7 +1,8 @@
 //! The synthetic mail the screenshot mode shows (`shots.rs`), written into a fresh data folder
 //! through the engine's own cache layer, as `FFI/examples/bench.rs` seeds its runs, so it keeps
-//! the engine's shapes as they change. No account is signed in and nothing is fetched: the
-//! engine paints what is here.
+//! the engine's shapes as they change. The accounts sign in to the engine's stand-in provider
+//! (`mailstream_engine::shots`), which takes changes and holds no mail: the engine paints what is
+//! here, and nothing fetched replaces it.
 //!
 //! What there is, for the states a change usually touches:
 //! - A Gmail account (Sam Lee, sam@example.com) with mail, Chat and a calendar, and an Outlook
@@ -450,6 +451,12 @@ fn write_mail(cache: &MailCache, all: &[(Mail, Option<Value>)]) {
             json!({ "account": account, "id": "junk", "name": "Spam", "role": "junk" }),
             json!({ "account": account, "id": "trash", "name": "Trash", "role": "trash" }),
         ];
+        // Where Archive moves to: Gmail's All Mail, Outlook's Archive folder.
+        boxes.push(if account == GMAIL {
+            json!({ "account": account, "id": "ALL", "name": "All Mail", "role": "all" })
+        } else {
+            json!({ "account": account, "id": "AAMk-archive", "name": "Archive", "role": "archive" })
+        });
         if account == GMAIL {
             boxes.extend(["Projects", "Receipts", "Travel"].map(|name| json!({ "account": account, "id": name, "name": name, "role": "other" })));
         }

@@ -10,6 +10,9 @@
 //!
 //! Linux keeps the same file, `<service>.signins` in `~/.local/share/Mailstream`, readable by the
 //! user alone (mode 0600): many desktops run no Secret Service to hold it.
+//!
+//! The screenshot mode (the `shots` feature, `crate::shots`) keeps its fake sign-ins in memory
+//! under `shots::SERVICE`: they never reach a Keychain item or a file.
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -73,6 +76,27 @@ pub use sealed::KeychainError;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use private_file::KeychainError;
 
+impl Keychain {
+    /// The stored sign-ins; empty when there are none.
+    pub fn load(&self) -> Result<SignIns, KeychainError> {
+        #[cfg(feature = "shots")]
+        if self.service == crate::shots::SERVICE {
+            return Ok(crate::shots::SIGN_INS.lock().expect("sign-ins lock").clone());
+        }
+        self.load_item()
+    }
+
+    /// Replaces the stored sign-ins.
+    pub fn store(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
+        #[cfg(feature = "shots")]
+        if self.service == crate::shots::SERVICE {
+            *crate::shots::SIGN_INS.lock().expect("sign-ins lock") = sign_ins.clone();
+            return Ok(());
+        }
+        self.store_item(sign_ins)
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod apple {
     // Security's status constants (`errSecSuccess`) are matched by their C names.
@@ -118,7 +142,7 @@ mod apple {
         }
 
         /// The stored sign-ins; empty when there are none.
-        pub fn load(&self) -> Result<SignIns, KeychainError> {
+        pub(super) fn load_item(&self) -> Result<SignIns, KeychainError> {
             let mut query = self.base();
             unsafe {
                 query.push((CFString::wrap_under_get_rule(kSecReturnData), CFBoolean::true_value().into_CFType()));
@@ -141,7 +165,7 @@ mod apple {
 
         /// Replaces the stored sign-ins; with no refresh token and no remembered client left the item
         /// is deleted.
-        pub fn store(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
+        pub(super) fn store_item(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
             let base = CFDictionary::from_CFType_pairs(&self.base());
             if sign_ins.refresh_tokens.is_empty() && sign_ins.last_clients.is_empty() {
                 let deleted = unsafe { SecItemDelete(base.as_concrete_TypeRef()) };
@@ -215,7 +239,7 @@ mod sealed {
         }
 
         /// The stored sign-ins; empty when there are none.
-        pub fn load(&self) -> Result<SignIns, KeychainError> {
+        pub(super) fn load_item(&self) -> Result<SignIns, KeychainError> {
             let sealed = match std::fs::read(self.path()) {
                 Ok(sealed) => sealed,
                 Err(error) if error.kind() == ErrorKind::NotFound => return Ok(SignIns::default()),
@@ -226,7 +250,7 @@ mod sealed {
 
         /// Replaces the stored sign-ins; with no refresh token and no remembered client left the
         /// file is deleted.
-        pub fn store(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
+        pub(super) fn store_item(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
             let path = self.path();
             if sign_ins.refresh_tokens.is_empty() && sign_ins.last_clients.is_empty() {
                 return match std::fs::remove_file(&path) {
@@ -326,7 +350,7 @@ mod private_file {
         }
 
         /// The stored sign-ins; empty when there are none.
-        pub fn load(&self) -> Result<SignIns, KeychainError> {
+        pub(super) fn load_item(&self) -> Result<SignIns, KeychainError> {
             match std::fs::read(self.path()) {
                 Ok(data) => Ok(SignIns::decode(&data)),
                 Err(error) if error.kind() == ErrorKind::NotFound => Ok(SignIns::default()),
@@ -336,7 +360,7 @@ mod private_file {
 
         /// Replaces the stored sign-ins; with no refresh token and no remembered client left the
         /// file is deleted.
-        pub fn store(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
+        pub(super) fn store_item(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
             let path = self.path();
             if sign_ins.refresh_tokens.is_empty() && sign_ins.last_clients.is_empty() {
                 return match std::fs::remove_file(&path) {

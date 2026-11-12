@@ -6,9 +6,12 @@
 //! window, views and engine in a headless GPUI app (gpui-kit's `HeadlessAppContext`: GPUI's test
 //! platform with the system's text system and its offscreen renderer, Metal on the Mac and wgpu on
 //! Linux), over the synthetic mail of `seed.rs` in a fresh data folder of its own (the person's
-//! mail, sign-ins and settings are never read). It needs no compositor, screen or focus: it works
-//! with the screen locked, over SSH and beside the person's work. SCRIPT (`-` for stdin) drives
-//! it, one command per line (`#` starts a comment; X Y are window points from its top left):
+//! mail, sign-ins and settings are never read). Its accounts are signed in to the engine's
+//! stand-in provider (`mailstream_engine::shots`, MS-265): marking read, starring, archiving and
+//! sending succeed as they would, and nothing fetched replaces the synthetic mail. It needs no
+//! compositor, screen or focus: it works with the screen locked, over SSH and beside the person's
+//! work. SCRIPT (`-` for stdin) drives it, one command per line (`#` starts a comment; X Y are
+//! window points from its top left):
 //!
 //! ```text
 //! wait MS                    let MS of real time pass, drawing frames (data, animations)
@@ -120,7 +123,11 @@ impl Shots {
         std::fs::create_dir_all(&self.out).unwrap_or_else(|error| fail(&format!("{}: {error}", self.out.display())));
         APPEARANCE.set(if self.dark { WindowAppearance::Dark } else { WindowAppearance::Light }).ok();
         let home = data_folder();
-        seed::write(&mailstream_engine::support_directory(), &mailstream_engine::cache_directory());
+        let support = mailstream_engine::support_directory();
+        seed::write(&support, &mailstream_engine::cache_directory());
+        // Before the engine starts: its accounts sign in to a stand-in provider, so changes
+        // (marking read, archive, star, send) succeed.
+        mailstream_engine::shots::start(&support);
 
         let platform = gpui::platform::current_platform(true);
         let mut cx = HeadlessAppContext::with_platform(
@@ -155,6 +162,12 @@ impl Shots {
                 break;
             }
         }
+        // What reached the provider other than refused reads: the changes the run made.
+        for line in mailstream_engine::shots::log() {
+            if !line.trim_start().starts_with("400 ") && !line.ends_with(" /token") {
+                eprintln!("shots: provider: {line}");
+            }
+        }
         if self.keep {
             eprintln!("shots: data folder kept at {}", home.display());
         } else {
@@ -172,8 +185,8 @@ fn fail(message: &str) -> ! {
 
 /// A fresh data folder the engine and the app use instead of the person's (`Engine/src/lib.rs`,
 /// `support_directory`, `cache_directory`): HOME on the Mac (Application Support and Caches are
-/// under it), the XDG data and cache folders elsewhere; and a sign-ins item of its own on the
-/// Mac's Keychain, which no one has signed in to.
+/// under it), the XDG data and cache folders elsewhere. Sign-ins stay in memory
+/// (`mailstream_engine::shots`).
 fn data_folder() -> PathBuf {
     let home = std::env::temp_dir().join(format!("mailstream-shots-{}", std::process::id()));
     std::fs::remove_dir_all(&home).ok();
@@ -204,7 +217,6 @@ fn data_folder() -> PathBuf {
             std::env::set_var("XDG_DATA_HOME", home.join("data"));
             std::env::set_var("XDG_CACHE_HOME", home.join("cache"));
         }
-        std::env::set_var("MAILSTREAM_KEYCHAIN_SERVICE", "dev.mailstream.Mailstream.shots");
     }
     home
 }

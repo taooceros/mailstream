@@ -26,6 +26,10 @@ pub mod commands;
 mod content;
 pub mod control;
 pub mod display;
+// The providers' stand-in: the tests' and the screenshot mode's (`shots`).
+#[cfg(any(test, feature = "shots"))]
+#[cfg_attr(not(test), allow(dead_code))]
+mod fake_server;
 mod files;
 pub mod gmail;
 pub mod graph;
@@ -42,6 +46,8 @@ mod omp;
 mod polling;
 pub mod push;
 pub mod settings;
+#[cfg(feature = "shots")]
+pub mod shots;
 pub mod signal;
 pub mod tagging;
 pub mod tagsync;
@@ -144,12 +150,14 @@ pub struct Config {
 impl Config {
     /// The data, sign-ins and OAuth clients this process's app shares with the Swift engine.
     /// `MAILSTREAM_KEYCHAIN_SERVICE` names another sign-ins item, as it does for the Swift engine
-    /// (benchmarks and tests that must not read the person's sign-ins).
+    /// (benchmarks and tests that must not read the person's sign-ins). Builds with the `shots`
+    /// feature use the screenshot mode's provider instead once it runs (`shots::start`).
+    #[allow(clippy::let_and_return, reason = "`shots` builds change it before it returns")]
     pub fn for_this_app() -> Self {
         let support = support_directory();
         let caches = cache_directory();
         let service = std::env::var("MAILSTREAM_KEYCHAIN_SERVICE").ok().filter(|service| !service.is_empty());
-        Self {
+        let config = Self {
             support_directory: support,
             cache_directory: caches,
             keychain_service: service.unwrap_or_else(|| keychain::SERVICE.into()),
@@ -164,7 +172,10 @@ impl Config {
                 .unwrap_or_else(|| PathBuf::from(omp::APPLE_TAGGER)),
             avatar_web: avatars::web::Internet::shared(),
             control_socket: true,
-        }
+        };
+        #[cfg(feature = "shots")]
+        let config = shots::config(config);
+        config
     }
 }
 

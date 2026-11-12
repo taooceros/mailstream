@@ -18,7 +18,8 @@ url = "2"
 image = { version = "0.25", default-features = false }
 # `shots` only: the synthetic mail (`src/shots/seed.rs`) goes through the engine's cache layer,
 # which runs on tokio, in the engine's serde shapes, and names its sender pictures as the engine
-# does (SHA-256).
+# does (SHA-256); the engine's own `shots` feature is the stand-in provider the synthetic accounts
+# sign in to (MS-265). Through feature unification the FFI crate's engine gets it too.
 mailstream-engine = { path = "../Engine", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
 sha2 = { version = "0.10", optional = true }
@@ -28,7 +29,7 @@ serde = { version = "1", optional = true }
 # drawn by GPUI's offscreen renderer (Metal on the Mac, wgpu on Linux) in a headless app, over
 # synthetic mail. Installed builds leave it out.
 [features]
-shots = ["gpui/test-support", "image/png", "dep:mailstream-engine", "dep:tokio", "dep:sha2", "dep:serde"]
+shots = ["gpui/test-support", "image/png", "dep:mailstream-engine", "mailstream-engine/shots", "dep:tokio", "dep:sha2", "dep:serde"]
 
 # Tests that draw views in a test window and feed them input as the platform would (the
 # calendar's two-finger paging, MS-212).

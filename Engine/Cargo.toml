@@ -41,6 +41,11 @@ hickory-resolver = "0.26"
 # Attachment file names in NFC, as the Swift engine sends them (MS-114).
 unicode-normalization = "0.1"
 
+# The screenshot mode's stand-in provider and in-memory sign-ins (`src/shots.rs`, MS-265), for
+# GPUI's `shots` feature only; installed builds leave it out.
+[features]
+shots = []
+
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 mime_guess = "2"
 
