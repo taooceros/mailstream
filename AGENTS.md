@@ -129,8 +129,8 @@ hashes stay as they are.
   polling session hands one over. Move it to In Progress, comment
   `[omp @ <checkout>] start (<agent id>): <plan>` (the subagent/roster id, so the issue shows
   who owns it), then add the `claimed` label. Taking over or resuming counts as starting: post a
-  new start comment with your own id. Remove `claimed` when you stop (In Review, handed to the
-  install batch, Todo with a question, Backlog when blocked).
+  new start comment with your own id. Remove `claimed` when you stop (In Review, also when
+  handed to the install batch; Todo with a question; Backlog when blocked).
 - Progress: record decisions, blockers and dead ends as comments; the next session only sees
   what is on the issue.
 - Blocked by another issue (it needs that change first, or the user said to wait for it): add a
@@ -144,12 +144,14 @@ hashes stay as they are.
 - Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work)
   and land it on `main` (`scripts/land.py`, [Version control](#version-control-jj)) once the
   tests for what you changed pass and you have checked it in the
-  real app yourself; then hand it to the install batch ([Release delivery](#release-delivery)),
-  which only puts `main`'s tip in `/Applications`. A commit or passing tests is not completion:
-  the batch install agent moves the issue to In Review once the installed copy passes its
-  mechanical checks, with a short note (deployed commit, `/Applications` targets, checks); the
+  real app yourself; then move it to In Review yourself with the hand-over comment and the
+  `install` label ([Release delivery](#release-delivery)), so the user can review it without
+  waiting for the install (MS-272). The batch install agent only puts `main`'s tip in
+  `/Applications` (`~/.local/opt` on Linux), runs its mechanical checks, removes `install` and
+  leaves a short note (deployed commit, targets, checks); it never changes an issue's state. The
   user moves it to Done. Tooling-only changes install nothing: their agent moves them to In
-  Review itself, commenting what changed, the checks run and what remains.
+  Review the same way, without `install`, commenting what changed, the checks run and what
+  remains.
 - UI changes (a new or changed view, flow or interaction, in any front end): before handing
   over, the code agent attaches to the issue screenshots of its own build of the real app (a
   recording for motion) showing every state the change adds or alters, light and dark; without
@@ -334,12 +336,13 @@ The code agent:
    agent installs them as below.
 4. Hands over: a comment starting `**待安装**` with what changed, the commit, the targets and
    what it verified, with its screenshots; nothing is left for the installer to test. Then it
-   adds the `install` label, removes `claimed`, leaves the issue In Progress and removes its
-   checkout.
+   adds the `install` label, removes `claimed`, moves the issue to In Review, does the parent
+   check ([Working an issue](#working-an-issue)) and removes its checkout.
 
 The batch install agent (one per `install` line of the poller, [Polling session](#polling-session)):
 
-1. Claims each listed issue (start comment, `claimed`) and takes the targets from its latest
+1. Claims each listed issue with a start comment and `claimed`, without changing its state (In
+   Review, or Done if the user got there first), and takes the targets from its latest
    `**待安装**` comment.
 2. Opens one fresh checkout at `main`'s tip ([Version control](#version-control-jj)) and runs
    `./scripts/install.sh <every target the issues name>` there once, as one blocking eval cell
@@ -359,8 +362,8 @@ The batch install agent (one per `install` line of the poller, [Polling session]
    is still running 30 s later; then it stops that desktop. No UI interaction, synthetic data or
    screenshots.
 4. Passed → per issue a short comment (deployed commit, targets, checks), `install` and
-   `claimed` removed, In Review, then the parent check. Install or launch failed → a comment
-   with the exact error on each issue, `claimed` removed and `install` kept.
+   `claimed` removed; the state stays as it is. Install or launch failed → a comment with the
+   exact error on each issue, `claimed` removed and `install` kept.
 5. Removes its checkout; leaves every other checkout and workspace alone.
 
 ## Performance: 120 fps
