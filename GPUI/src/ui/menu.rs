@@ -59,7 +59,7 @@ impl MailApp {
         groups.push(filing);
 
         let count = groups.len();
-        let mut body = div()
+        let mut body = popover(p)
             .id("context-menu")
             .key_context("ContextMenu")
             .track_focus(&menu.focus)
@@ -67,14 +67,9 @@ impl MailApp {
             .on_mouse_down_out(cx.listener(|this, _, window, cx| this.dismiss_menu(window, cx)))
             .occlude()
             .w(px(layout::MENU_WIDTH))
-            .py(px(4.))
+            .py(px(space::S4))
             .flex()
             .flex_col()
-            .rounded(px(radius::CARD))
-            .bg(p.popover)
-            .border_1()
-            .border_color(p.line)
-            .shadow(popover_shadow(p))
             .font_family(design::ui_font())
             .text_size(px(text::BODY))
             .text_color(p.text);
@@ -84,22 +79,23 @@ impl MailApp {
                 body = body.child(
                     div()
                         .id(entry.title)
-                        .mx(px(4.))
+                        .mx(px(space::S4))
                         .h(px(layout::MENU_ROW))
-                        .px(px(8.))
+                        .px(px(space::S8))
                         .flex()
                         .items_center()
-                        .gap(px(10.))
+                        .gap(px(space::S10))
                         .rounded(px(radius::SMALL))
                         .cursor_pointer()
-                        .hover(|s| s.bg(p.selection))
+                        .hover(|s| s.bg(p.hover))
+                        .active(|s| s.bg(p.pressed))
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| run(this, window, cx)))
-                        .child(icon(entry.glyph, icon_size::SMALL, p.muted))
+                        .child(icon(entry.glyph, icon_size::ROW, p.muted))
                         .child(entry.title),
                 );
             }
             if index + 1 < count {
-                body = body.child(div().my(px(4.)).h(px(1.)).bg(p.line));
+                body = body.child(hairline(p).my(px(space::S4)));
             }
         }
         Some(deferred(anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(body)).into_any_element())

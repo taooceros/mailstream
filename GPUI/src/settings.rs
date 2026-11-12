@@ -12,14 +12,15 @@ use std::rc::Rc;
 use chrono::{DateTime, Local, Utc};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, actions, AppContext, Bounds, Focusable, Context, Div, ElementId, Entity, FontWeight, Global, Hsla, KeyBinding,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Stateful, StatefulInteractiveElement,
+    AnyElement, App, actions, AppContext, Bounds, Focusable, Context, Div, Entity, FontWeight, Global, KeyBinding,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement,
     Styled, Subscription, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, px, size,
 };
 use serde_json::{Map, Value};
 
 use crate::engine::{MailError, engine};
-use crate::design::{self, Palette, radius, settings as metrics, text};
+use crate::controls::{ButtonKind, ControlSize, button, switch, tag};
+use crate::design::{self, Palette, notice, radius, settings as metrics, stroke, text};
 use crate::format;
 use crate::input::{InputEvent, TextInput};
 
@@ -461,7 +462,7 @@ impl Render for Settings {
             .font_family(design::ui_font())
             .text_size(px(text::BODY))
             .text_color(p.text)
-            .bg(p.page)
+            .bg(p.background)
             .p(px(metrics::PADDING))
             .flex()
             .flex_col()
@@ -478,7 +479,7 @@ impl Settings {
             .flex()
             .flex_col()
             .gap(px(4.))
-            .child(div().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child("Accounts"))
+            .child(div().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::SEMIBOLD).child("Accounts"))
             .child(div().text_size(px(text::CAPTION)).text_color(p.muted).child(
                 "Mailstream signs in to Google and Microsoft in your browser, with an OAuth client you registered. \
                  Sign-ins stay in your Keychain.",
@@ -493,7 +494,7 @@ impl Settings {
                 .flex_col()
                 .items_center()
                 .gap(px(6.))
-                .child(div().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child("No Accounts"))
+                .child(div().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::SEMIBOLD).child("No Accounts"))
                 .child(
                     div()
                         .text_size(px(text::CAPTION))
@@ -521,17 +522,17 @@ impl Settings {
                         .text_color(p.muted)
                         .child(format!("Waiting for the {} sign-in in your browser…", provider.name())),
                 )
-                .child(button("stop-waiting", "Stop Waiting", p).on_click(cx.listener(|this, _, _, cx| this.stop_waiting(cx))))
+                .child(button("stop-waiting", "Stop Waiting", ButtonKind::Secondary, ControlSize::Regular, true, p).on_click(cx.listener(|this, _, _, cx| this.stop_waiting(cx))))
                 .into_any_element(),
             None => div()
                 .flex()
                 .gap(px(8.))
                 .child(
-                    button("add-google", "Sign in with Google…", p)
+                    button("add-google", "Sign in with Google…", ButtonKind::Secondary, ControlSize::Regular, true, p)
                         .on_click(cx.listener(|this, _, _, cx| this.sign_in(Provider::Google, cx))),
                 )
                 .child(
-                    button("add-microsoft", "Sign in with Microsoft…", p)
+                    button("add-microsoft", "Sign in with Microsoft…", ButtonKind::Secondary, ControlSize::Regular, true, p)
                         .on_click(cx.listener(|this, _, _, cx| this.sign_in(Provider::Microsoft, cx))),
                 )
                 .into_any_element(),
@@ -588,8 +589,8 @@ impl Settings {
             div()
                 .flex()
                 .gap(px(4.))
-                .child(button(("rename-cancel", index), "Cancel", p).on_click(cx.listener(|this, _, _, cx| this.cancel_rename(cx))))
-                .child(button(("rename-save", index), "Save", p).text_color(p.accent).on_click(cx.listener(
+                .child(button(("rename-cancel", index), "Cancel", ButtonKind::Secondary, ControlSize::Small, true, p).on_click(cx.listener(|this, _, _, cx| this.cancel_rename(cx))))
+                .child(button(("rename-save", index), "Save", ButtonKind::Primary, ControlSize::Small, true, p).on_click(cx.listener(
                     |this, _, _, cx| {
                         let label = this.renaming.as_ref().map(|(_, i)| i.read(cx).text().trim().to_string());
                         if let Some(label) = label {
@@ -604,10 +605,10 @@ impl Settings {
             div()
                 .flex()
                 .gap(px(4.))
-                .child(button(("rename", index), "Rename", p).on_click(cx.listener(move |this, _, window, cx| {
+                .child(button(("rename", index), "Rename", ButtonKind::Plain, ControlSize::Small, true, p).on_click(cx.listener(move |this, _, window, cx| {
                     this.start_rename(&account, window, cx)
                 })))
-                .child(button(("remove", index), "Sign Out…", p).text_color(p.danger).on_click(cx.listener(
+                .child(button(("remove", index), "Sign Out…", ButtonKind::Plain, ControlSize::Small, true, p).text_color(p.danger).on_click(cx.listener(
                     move |this, _, _, cx| {
                         this.cancel_rename(cx);
                         this.confirming = Some(remove_id.clone());
@@ -637,7 +638,7 @@ impl Settings {
                         div()
                             .flex()
                             .gap(px(4.))
-                            .children(row.services.iter().map(|s| service_chip(s, p))),
+                            .children(row.services.iter().map(|s| tag(service_title(s), None, p))),
                     ),
             )
             .child(actions);
@@ -655,7 +656,7 @@ impl Settings {
                         .mb(px(10.))
                         .p(px(12.))
                         .rounded(px(radius::CONTROL))
-                        .bg(tint(p.danger))
+                        .bg(design::tint(p.danger, notice::TINT))
                         .flex()
                         .flex_col()
                         .gap(px(8.))
@@ -670,16 +671,14 @@ impl Settings {
                                 .flex()
                                 .justify_end()
                                 .gap(px(6.))
-                                .child(button(("remove-cancel", index), "Cancel", p).on_click(cx.listener(
+                                .child(button(("remove-cancel", index), "Cancel", ButtonKind::Secondary, ControlSize::Regular, true, p).on_click(cx.listener(
                                     |this, _, _, cx| {
                                         this.confirming = None;
                                         cx.notify();
                                     },
                                 )))
                                 .child(
-                                    button(("remove-confirm", index), "Sign Out", p)
-                                        .bg(p.danger)
-                                        .text_color(p.on_accent)
+                                    button(("remove-confirm", index), "Sign Out", ButtonKind::Destructive, ControlSize::Regular, true, p)
                                         .on_click(cx.listener(move |this, _, _, cx| this.remove(remove_id.clone(), cx))),
                                 ),
                         ),
@@ -730,9 +729,15 @@ impl Settings {
                 "Tag every conversation again, replacing the tags the model gave before."
             }))
             .child(
-                button("retag", "Re-tag All Conversations", p)
-                    .when(enabled != Some(true) || self.retag_started, |this| this.opacity(0.5))
-                    .when(enabled == Some(true) && !self.retag_started, |this| {
+                button(
+                    "retag",
+                    "Re-tag All Conversations",
+                    ButtonKind::Secondary,
+                    ControlSize::Regular,
+                    enabled == Some(true) && !self.retag_started,
+                    p,
+                )
+                .when(enabled == Some(true) && !self.retag_started, |this| {
                         this.on_click(cx.listener(|this, _, _, cx| this.retag(cx)))
                     }),
             );
@@ -787,69 +792,24 @@ fn section(title: &'static str, p: &Palette) -> Div {
         .flex()
         .flex_col()
         .gap(px(8.))
-        .child(div().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(title))
+        .child(div().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(title))
 }
 
 fn card(p: &Palette) -> Div {
-    div().flex().flex_col().rounded(px(radius::CARD)).border_1().border_color(p.line).bg(p.sidebar)
+    div().flex().flex_col().rounded(px(radius::CARD)).border(px(stroke::HAIRLINE)).border_color(p.line).bg(p.fill)
 }
 
 fn note(text: impl Into<SharedString>, p: &Palette) -> Div {
     div().py(px(12.)).text_size(px(text::FOOTNOTE)).text_color(p.muted).child(text.into())
 }
 
-fn tint(color: Hsla) -> Hsla {
-    let mut fill = color;
-    fill.a *= 0.12;
-    fill
-}
-
-fn service_chip(service: &str, p: &Palette) -> Div {
-    let label = match service {
+fn service_title(service: &str) -> String {
+    match service {
         "mail" => "Mail",
         "contacts" => "Contacts",
         "chat" => "Chat",
         other => other,
-    };
-    div()
-        .px(px(6.))
-        .py(px(1.))
-        .rounded(px(radius::SMALL))
-        .bg(p.chip)
-        .text_color(p.muted)
-        .text_size(px(text::MICRO))
-        .font_weight(FontWeight::MEDIUM)
-        .child(label.to_string())
+    }
+    .to_owned()
 }
 
-/// A Material switch: a track with a thumb at its end.
-fn switch(on: bool, p: &Palette) -> Div {
-    div()
-        .flex_shrink_0()
-        .w(px(34.))
-        .h(px(20.))
-        .p(px(2.))
-        .rounded_full()
-        .bg(if on { p.accent } else { p.line })
-        .flex()
-        .when(on, |this| this.justify_end())
-        .child(div().size(px(16.)).rounded_full().bg(p.on_accent))
-}
-
-/// A text button (as in the main window).
-fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, p: &Palette) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_shrink_0()
-        .h(px(26.))
-        .px(px(10.))
-        .flex()
-        .items_center()
-        .rounded(px(radius::CONTROL))
-        .text_size(px(text::FOOTNOTE))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(p.text)
-        .cursor_pointer()
-        .hover(|s| s.bg(p.hover))
-        .child(label.into())
-}

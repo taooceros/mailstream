@@ -17,12 +17,16 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable, FontStyle,
     FontWeight, HighlightStyle, InteractiveElement, InteractiveText, IntoElement, KeyBinding, ListAlignment, ListState,
-    MouseButton, ParentElement, Render, ScrollStrategy, SharedString, Stateful, StatefulInteractiveElement,
+    ParentElement, Render, ScrollStrategy, SharedString, StatefulInteractiveElement,
     StrikethroughStyle, Styled, StyledText, Subscription, UniformListScrollHandle, Window, actions, div, list, px,
     relative, uniform_list,
 };
 
+use crate::controls::{
+    ButtonKind, ControlSize, Tone, button, centered_note, icon_button, list_row, mark_dot, monogram, notice, row_layout,
+};
 use crate::design::{self, Palette, chat as metrics, layout, list as rows, radius, text};
+use crate::icons::Icon;
 use crate::engine::{MailError, engine};
 use crate::format;
 use crate::input::{InputEvent, TextInput};
@@ -1270,7 +1274,7 @@ impl Render for ChatPane {
             .flex_col()
             .font_family(design::ui_font())
             .text_size(px(text::BODY))
-            .bg(p.page)
+            .bg(p.background)
             .text_color(p.text)
             .child(body)
     }
@@ -1281,7 +1285,7 @@ impl ChatPane {
         div()
             .flex_shrink_0()
             .h(px(metrics::HEADER_HEIGHT))
-            .px(px(rows::INSET + rows::SENDER_X - rows::DOT_X))
+            .px(px(rows::INSET + rows::SECTION_X))
             .flex()
             .items_center()
             .gap(px(8.))
@@ -1293,27 +1297,27 @@ impl ChatPane {
         let title = self.filter.as_ref().map_or_else(|| SharedString::from("Chat"), |a| self.account_label(a));
         let header = self
             .header(p)
-            .child(div().flex_1().min_w_0().truncate().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::SEMIBOLD).child(title))
             .when(!self.accounts.is_empty(), |d| {
-                d.child(button("chat-new", "New Chat", p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.start_form(window, cx))))
+                d.child(button("chat-new", "New Chat", ButtonKind::Secondary, ControlSize::Small, true, p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.start_form(window, cx))))
             });
         let content: AnyElement = if let Some(failure) = &self.failure {
-            note(failure.clone(), p).into_any_element()
+            centered_note(failure.clone(), p).into_any_element()
         } else if !self.loaded {
-            note("Loading chats…", p).into_any_element()
+            centered_note("Loading chats…", p).into_any_element()
         } else if self.accounts.is_empty() {
-            note("No Google Chat accounts. Sign in to a Google account with Chat access in Mailstream's settings.", p)
+            centered_note("No Google Chat accounts. Sign in to a Google account with Chat access in Mailstream's settings.", p)
                 .into_any_element()
         } else if self.visible.is_empty() {
-            note("No conversations yet.", p)
-                .child(button("chat-new-empty", "New Chat", p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.start_form(window, cx))))
+            centered_note("No conversations yet.", p)
+                .child(button("chat-new-empty", "New Chat", ButtonKind::Secondary, ControlSize::Small, true, p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.start_form(window, cx))))
                 .into_any_element()
         } else {
             uniform_list(
                 "chat-spaces",
                 self.visible.len(),
                 cx.processor(move |this, range: Range<usize>, _, cx| {
-                    range.map(|ix| this.render_row(this.visible[ix], p, cx)).collect::<Vec<_>>()
+                    range.map(|position| this.render_row(position, p, cx)).collect::<Vec<_>>()
                 }),
             )
             .track_scroll(self.scroll.clone())
@@ -1325,80 +1329,40 @@ impl ChatPane {
         div().size_full().flex().flex_col().child(header).child(content).into_any_element()
     }
 
-    fn render_row(&self, ix: usize, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let space = &self.spaces[ix];
+    /// The `position`th space in view.
+    fn render_row(&self, position: usize, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let space = &self.spaces[self.visible[position]];
         let key = space.key();
-        let highlighted = self.highlight.as_ref() == Some(&key);
+        let selected = self.highlight.as_ref() == Some(&key);
         let unread = space.unread;
-        let weight = if unread { FontWeight::SEMIBOLD } else { FontWeight::NORMAL };
-        div()
-            .id(ElementId::Name(format!("chat-row:{}:{}", space.account, space.id).into()))
-            .relative()
-            .h(px(rows::ROW_HEIGHT))
-            .w_full()
-            .rounded(px(radius::CONTROL))
-            .cursor_pointer()
-            .when(highlighted, |d| d.bg(p.selection))
-            .when(!highlighted, |d| d.hover(|s| s.bg(p.hover)))
+        let next = self.visible.get(position + 1).map(|&next| self.spaces[next].key());
+        let rule = next.is_some_and(|next| self.highlight.as_ref() != Some(&next));
+        let title = div()
+            .min_w_0()
+            .truncate()
+            .font_weight(if unread { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
+            .child(space.title.clone());
+        let meta = div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .text_size(px(text::FOOTNOTE))
+            .text_color(if unread { p.accent } else { p.muted })
+            .when_some(self.account_color(&space.account), |d, color| d.child(mark_dot(color)))
+            .child(space.when.clone());
+        let subtitle = div().min_w_0().truncate().text_color(p.muted).child(space.snippet.clone());
+        list_row(ElementId::Name(format!("chat-row:{}:{}", space.account, space.id).into()), selected, rule, p)
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open(key.clone(), window, cx)))
-            .when(unread, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .left(px(rows::DOT_X - 3.))
-                        .top(px(rows::ROW_HEIGHT / 2. - 3.))
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(p.accent),
-                )
-            })
-            .child(
-                avatar(&space.avatar.name, &space.avatar.color_key, rows::AVATAR, p)
-                    .absolute()
-                    .left(px(rows::SENDER_X))
-                    .top(px((rows::ROW_HEIGHT - rows::AVATAR) / 2.)),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(rows::NAME_X))
-                    .w(px(rows::SENDER_X + rows::SENDER_WIDTH - rows::NAME_X))
-                    .top_0()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .child(div().min_w_0().truncate().font_weight(weight).child(space.title.clone())),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(rows::SUBJECT_X))
-                    .right(px(rows::TRAILING_INSET + rows::DATE_WIDTH + 8.))
-                    .top_0()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .overflow_hidden()
-                    .child(div().flex_1().min_w_0().truncate().text_color(p.muted).child(space.snippet.clone())),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .right(px(rows::TRAILING_INSET))
-                    .w(px(rows::DATE_WIDTH + 30.))
-                    .top_0()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .gap(px(6.))
-                    .text_size(px(text::CAPTION))
-                    .text_color(if unread { p.accent } else { p.muted })
-                    .when_some(self.account_color(&space.account), |d, color| {
-                        d.child(div().size(px(metrics::ACCOUNT_DOT)).rounded_full().bg(color))
-                    })
-                    .child(space.when.clone()),
-            )
+            .child(row_layout(
+                unread,
+                monogram(initial(&space.avatar.name), &space.avatar.color_key, rows::AVATAR, p),
+                title,
+                meta,
+                subtitle,
+                Vec::new(),
+                p,
+            ))
             .into_any_element()
     }
 
@@ -1419,14 +1383,14 @@ impl ChatPane {
         }
         let header = self
             .header(p)
-            .child(button("chat-back", "‹", p).text_size(px(text::HEADLINE)).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
+            .child(icon_button("chat-back", Icon::Back, "Back", true, p.muted, p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(div().truncate().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child(title.clone()))
+                    .child(div().truncate().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::SEMIBOLD).child(title.clone()))
                     .child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(meta.join(" · "))),
             );
         let log: AnyElement = match self.logs.get(key) {
@@ -1477,9 +1441,9 @@ impl ChatPane {
             .w(px(metrics::GUTTER))
             .flex()
             .justify_center()
-            .when(!continued, |d| d.child(avatar(&message.initial, &message.color_key, metrics::AVATAR, p)))
+            .when(!continued, |d| d.child(monogram(initial(&message.initial), &message.color_key, metrics::AVATAR, p)))
             .when(continued, |d| {
-                d.child(div().text_size(px(text::MICRO)).line_height(px(22.)).text_color(time_color).child(message.time.clone()))
+                d.child(div().text_size(px(text::TAG)).line_height(px(22.)).text_color(time_color).child(message.time.clone()))
             });
 
         let status: Option<SharedString> = match &message.status {
@@ -1503,7 +1467,7 @@ impl ChatPane {
                 )
                 .child(
                     div()
-                        .text_size(px(text::MICRO))
+                        .text_size(px(text::TAG))
                         .text_color(p.faint)
                         .child(status.clone().unwrap_or_else(|| message.time.clone())),
                 )
@@ -1582,10 +1546,10 @@ impl ChatPane {
                             .pt(px(4.))
                             .text_size(px(text::FOOTNOTE))
                             .child(div().text_color(p.danger).child(format!("Not sent: {reason}")))
-                            .child(button(ElementId::Name(format!("retry:{}", message.id).into()), "Retry", p).on_click(
+                            .child(button(ElementId::Name(format!("retry:{}", message.id).into()), "Retry", ButtonKind::Secondary, ControlSize::Small, true, p).on_click(
                                 cx.listener(move |this, _: &ClickEvent, window, cx| this.retry(&retry_key, &retry_id, window, cx)),
                             ))
-                            .child(button(ElementId::Name(format!("discard:{}", message.id).into()), "Delete", p).on_click(
+                            .child(button(ElementId::Name(format!("discard:{}", message.id).into()), "Delete", ButtonKind::Plain, ControlSize::Small, true, p).on_click(
                                 cx.listener(move |this, _: &ClickEvent, _, cx| this.discard(&discard_key, &discard_id, cx)),
                             )),
                     )
@@ -1606,8 +1570,8 @@ impl ChatPane {
                 .rounded(px(radius::CONTROL))
                 .border_1()
                 .border_color(p.line)
-                .bg(p.page)
-                .child(button(ElementId::Name(format!("reply:{}", message.id).into()), "Reply in Thread", p).on_click(
+                .bg(p.background)
+                .child(button(ElementId::Name(format!("reply:{}", message.id).into()), "Reply in Thread", ButtonKind::Plain, ControlSize::Small, true, p).on_click(
                     cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.reply_thread = Some((thread.clone(), who.clone()));
                         window.focus(&this.composer.focus_handle(cx));
@@ -1663,7 +1627,7 @@ impl ChatPane {
                 .flex()
                 .justify_center()
                 .child(
-                    button("chat-earlier", if log.loading_earlier { "Loading…" } else { "Load earlier messages" }, p)
+                    button("chat-earlier", if log.loading_earlier { "Loading…" } else { "Load earlier messages" }, ButtonKind::Plain, ControlSize::Small, true, p)
                         .text_color(p.muted)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.load_earlier(&key, cx))),
                 )
@@ -1686,7 +1650,7 @@ impl ChatPane {
                 .text_size(px(text::FOOTNOTE))
                 .text_color(p.muted)
                 .child(format!("↳ Replying in thread to {who}"))
-                .child(button("chat-unthread", "✕", p).text_color(p.muted).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                .child(icon_button("chat-unthread", Icon::Close, "Reply in the space", true, p.muted, p).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.reply_thread = None;
                     cx.notify();
                 })))
@@ -1732,15 +1696,16 @@ impl ChatPane {
             .and_then(|id| self.chat_accounts.iter().find(|a| &a.id == id))
             .is_none_or(|a| a.can_start);
         let count = form.people.len();
-        let (note_text, note_color): (SharedString, _) = match &form.failure {
-            Some(failure) => (failure.clone(), p.danger),
-            None if form.starting => ("Starting…".into(), p.muted),
-            None if count > 1 => (format!("Starts a group chat with these {count} people.").into(), p.muted),
+        // Something failed or stands in the way: a notice; otherwise what Start will do.
+        let (note_text, tone): (SharedString, Option<Tone>) = match &form.failure {
+            Some(failure) => (failure.clone(), Some(Tone::Error)),
+            None if form.starting => ("Starting…".into(), None),
+            None if count > 1 => (format!("Starts a group chat with these {count} people.").into(), None),
             None if !can_start => (
                 "This account can only reopen direct messages it has; sign in again to start new chats.".into(),
-                p.muted,
+                Some(Tone::Action),
             ),
-            None => ("Opens your direct message with this person, or starts one.".into(), p.muted),
+            None => ("Opens your direct message with this person, or starts one.".into(), None),
         };
         let accounts = (self.accounts.len() > 1).then(|| {
             div()
@@ -1752,7 +1717,7 @@ impl ChatPane {
                 .children(self.accounts.iter().map(|account| {
                     let id = account.id.clone();
                     let selected = form.account.as_ref() == Some(&account.id);
-                    button(ElementId::Name(format!("chat-from:{}", account.id).into()), account.label.clone(), p)
+                    button(ElementId::Name(format!("chat-from:{}", account.id).into()), account.label.clone(), ButtonKind::Secondary, ControlSize::Small, true, p)
                         .when(selected, |b| b.bg(p.selection))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.form.account = Some(id.clone());
@@ -1820,7 +1785,7 @@ impl ChatPane {
                 .when(index == 0, |d| d.bg(p.selection))
                 .when(index != 0, |d| d.hover(|s| s.bg(p.hover)))
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.add_person(chosen.clone(), window, cx)))
-                .child(avatar(&person.label(), &person.email, rows::AVATAR, p))
+                .child(monogram(initial(&person.label()), &person.email, rows::AVATAR, p))
                 .child(div().min_w_0().truncate().child(person.label()))
                 .when(person.name.is_some(), |d| d.child(div().min_w_0().truncate().text_color(p.muted).child(person.email.clone())))
         }));
@@ -1845,8 +1810,8 @@ impl ChatPane {
             .flex_col()
             .child(
                 self.header(p)
-                    .child(button("chat-form-back", "‹", p).text_size(px(text::HEADLINE)).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
-                    .child(div().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child("New Chat")),
+                    .child(icon_button("chat-form-back", Icon::Back, "Back", true, p.muted, p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
+                    .child(div().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::SEMIBOLD).child("New Chat")),
             )
             .child(
                 div().flex_1().flex().justify_center().pt(px(32.)).child(
@@ -1860,13 +1825,16 @@ impl ChatPane {
                         .children(accounts)
                         .child(field)
                         .child(suggestions)
-                        .child(div().text_size(px(text::FOOTNOTE)).text_color(note_color).child(note_text))
+                        .child(match tone {
+                            Some(tone) => notice(tone, None, note_text, false, p),
+                            None => div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(note_text),
+                        })
                         .child(
                             div()
                                 .flex()
                                 .justify_end()
                                 .gap(px(8.))
-                                .child(button("chat-form-cancel", "Cancel", p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
+                                .child(button("chat-form-cancel", "Cancel", ButtonKind::Secondary, ControlSize::Small, true, p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
                                 .child(start),
                         ),
                 ),
@@ -1900,40 +1868,7 @@ fn day_label(date: DateTime<Local>, now: DateTime<Local>) -> String {
     }
 }
 
-fn avatar(name: &str, color_key: &str, size: f32, p: &Palette) -> Div {
-    div()
-        .flex_shrink_0()
-        .size(px(size))
-        .rounded_full()
-        .bg(design::avatar_color(color_key, p.dark))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(size * 0.43))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(p.on_accent)
-        .child(initial(name))
-}
 
-/// A text button that keeps its click from moving the window (`ui::button`).
-fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, p: &Palette) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_shrink_0()
-        .h(px(26.))
-        .px(px(10.))
-        .flex()
-        .items_center()
-        .rounded(px(radius::CONTROL))
-        .text_size(px(text::FOOTNOTE))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(p.text)
-        .cursor_pointer()
-        .hover(|s| s.bg(p.hover))
-        .active(|s| s.bg(p.selection))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(label.into())
-}
 
 /// A line across the log with a label in it.
 fn divider(label: SharedString, color: gpui::Hsla, line: gpui::Hsla) -> Div {
@@ -1951,18 +1886,6 @@ fn divider(label: SharedString, color: gpui::Hsla, line: gpui::Hsla) -> Div {
         .child(div().flex_1().h(px(1.)).bg(line))
 }
 
-fn note(text: impl Into<SharedString>, p: &Palette) -> Div {
-    div()
-        .size_full()
-        .flex()
-        .flex_col()
-        .gap(px(12.))
-        .items_center()
-        .justify_center()
-        .px(px(32.))
-        .text_color(p.muted)
-        .child(div().text_center().child(text.into()))
-}
 
 #[cfg(test)]
 mod tests {

@@ -47,7 +47,8 @@ Linux differs from the Mac in:
 | `src/model.rs` | Accounts, mailboxes, conversations and messages converted from the crate's records; display strings derived once per answer, off the main thread |
 | `src/state.rs` | `MailApp`: selection, lists served from memory for 90 s and reloaded on change events, paging, search, previews, layers over the list, key bindings |
 | `src/state/nav.rs`, `src/state/actions.rs` | Navigation (sources, bundles, the reader, refresh) and optimistic actions (archive, trash, restore, star, read, waiting, tags) that roll back on failure |
-| `src/ui/` | Sidebar tree (`sidebar.rs`), toolbar, the lazy conversation list with Smart Inbox bundles pinned at its top and its "Waiting on you" group (`list.rs`), the reader with its reply card and Resolve (`reader.rs`), the context menu (`menu.rs`) |
+| `src/ui/` | The window as islands (`mod.rs`): the sidebar tree and the rail that stands in for it (`sidebar.rs`), the list's title row and the conversation's floating toolbar (`toolbar.rs`), the lazy conversation list of two-line rows with Smart Inbox bundles pinned at its top and its "Waiting on you" group (`list.rs`), the reader's message cards with the reply card (`reader.rs`), the context menu (`menu.rs`) |
+| `src/controls.rs` | The shared controls every view composes (Flutter's `controls.dart`, `glass.dart`, `common.dart`): buttons, icon buttons and tooltips, capsules, islands, popovers, tags, pills, marks, list rows and their lifted card, notices, toasts, switches |
 | `src/webview.rs` | macOS: HTML bodies in native `WKWebView`s laid over the reader: placed and clipped each frame, sized to their page, page scripts off, links opened in the browser, wheel events handed back to the reader |
 | `src/blitz_body.rs` | Linux: HTML bodies drawn by Blitz on the engine's pages thread, shown as tiles near the viewport; links open in the browser, a drag selects and Ctrl+C copies, inline parts go in as `data:` URLs |
 | `src/swipe.rs` | Two-finger back swipe over the bundle and reader layers, following the system's swipe-between-pages setting |
@@ -55,7 +56,7 @@ Linux differs from the Mac in:
 | `src/compose.rs` | The New Message and Forward windows (From picker, recipient completion, discard confirmation) and the reader's reply card |
 | `src/settings.rs` | Accounts (rename, sign in, sign out), AI tagging and re-tagging, engine status |
 | `src/avatars.rs` | Contact photos from `mail.avatars`, cached in memory; initials otherwise |
-| `src/design.rs` | The native `Design` tokens: both palettes, type scale, radii, durations, house curve, list metrics, avatar/topic colors |
+| `src/design.rs` | Flutter's style tokens (`Flutter/lib/ui/design.dart`): both palettes with their elevations, the type, radii, spacing, strokes, motion, list, mark, avatar, tag and notice metrics, avatar/topic/account colors |
 | `src/icons.rs`, `src/format.rs` | Material Symbols glyphs; dates and sizes |
 | `src/input.rs`, `src/textarea.rs` | Single-line field (IME, selection, clipboard) adapted from gpui's input example, and the multi-line editor for bodies |
 | `src/bench.rs` | The frame measurement `scripts/bench.sh gpui` runs (`MAILSTREAM_BENCH=scroll`): the list scrolls itself and every frame's start and render-to-paint time is logged |
@@ -67,9 +68,12 @@ or ⇧⌘F forwards, ⌘N writes a new message (a new chat in Chat), / or ⌘F s
 ⌃⌘S toggles the sidebar, ⌘, opens Settings. In a draft ⌘Return sends and Esc closes (asking first
 when something was written). Right-click a conversation for the same commands.
 
-Layers: a bundle and the reader slide over the list, which stays mounted beneath them, so going
-back (Esc or a two-finger swipe) reveals the live list without reloading it. Opening a
-conversation shows its header at once; bodies arrive after.
+The window follows Flutter's (MS-200): the sidebar sits on the window (a rail of the unified
+mailboxes while it is hidden), and the list and the conversation are rounded islands floating on
+it. From 1000 pt wide the conversation opens beside the list, which narrows as it slides in;
+narrower windows slide it over the list. A bundle slides over the rows within the list's island.
+The list stays mounted beneath them, so going back (Esc or a two-finger swipe) reveals the live
+list without reloading it. Opening a conversation shows its header at once; bodies arrive after.
 
 Limits:
 - Deleting from the Trash for good is left to the app.

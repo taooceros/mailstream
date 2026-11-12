@@ -187,8 +187,12 @@ impl MailApp {
     /// Resolves a conversation waiting on the user, or puts it back on "Waiting on you".
     pub fn toggle_waiting(&mut self, _: &ToggleWaiting, window: &mut Window, cx: &mut Context<Self>) {
         let Some(conversation) = self.take_target(window, cx).filter(Conversation::can_mark_waiting) else { return };
+        self.set_waiting(&conversation, !conversation.waiting, cx);
+    }
+
+    /// Puts a conversation on "Waiting on you" or resolves it; rolls back if the engine refuses.
+    pub fn set_waiting(&mut self, conversation: &Conversation, waiting: bool, cx: &mut Context<Self>) {
         let id = conversation.id.clone();
-        let waiting = !conversation.waiting;
         self.patch(&id, |c| c.waiting = waiting);
         self.rebuild_items();
         cx.notify();

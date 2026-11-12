@@ -16,7 +16,7 @@ impl MailApp {
         self.layers.clear();
         if !same {
             self.highlight = None;
-            self.list_scroll = UniformListScrollHandle::new();
+            self.list_scroll = list_state(0);
         }
         self.rebuild_items();
         self.load_list(self.key(), false, cx);
@@ -50,7 +50,7 @@ impl MailApp {
                     self.query = Some(text.into());
                     self.layers.clear();
                     self.highlight = None;
-                    self.list_scroll = UniformListScrollHandle::new();
+                    self.list_scroll = list_state(0);
                     self.rebuild_items();
                     self.load_list(self.key(), false, cx);
                 }
@@ -74,7 +74,7 @@ impl MailApp {
         if self.query.take().is_some() {
             self.layers.clear();
             self.highlight = None;
-            self.list_scroll = UniformListScrollHandle::new();
+            self.list_scroll = list_state(0);
             self.rebuild_items();
             self.load_list(self.key(), false, cx);
         }
@@ -121,7 +121,7 @@ impl MailApp {
         match item {
             Item::Section(title) => format!("section:{title}").into(),
             Item::Waiting(_) => "section:waiting".into(),
-            Item::Row(index) => self.list().map(|l| l.conversations[*index].id.clone()).unwrap_or_default(),
+            Item::Row(index) => self.list().and_then(|l| l.conversations.get(*index)).map(|c| c.id.clone()).unwrap_or_default(),
             Item::Bundle(bundle) => format!("bundle:{}", bundle.category.key()).into(),
         }
     }
@@ -292,10 +292,10 @@ impl MailApp {
         let reading = self.reader().is_some();
         if in_bundle {
             self.bundle_highlight = Some(id.clone());
-            self.bundle_scroll.scroll_to_item(scroll_index, ScrollStrategy::Top);
+            self.bundle_scroll.scroll_to_reveal_item(scroll_index);
         } else {
             self.highlight = Some(id.clone());
-            self.list_scroll.scroll_to_item(scroll_index, ScrollStrategy::Top);
+            self.list_scroll.scroll_to_reveal_item(scroll_index);
         }
         // In the reader, the keys page through the conversations under it, in place.
         if reading && Some(target) != position {
@@ -340,7 +340,9 @@ impl MailApp {
             };
             self.highlight = Some(id.clone());
             self.bundle_highlight = None;
-            self.bundle_scroll = UniformListScrollHandle::new();
+            self.bundle_scroll = list_state(0);
+            // A conversation open beside the list closes with it.
+            self.layers.retain(|layer| matches!(layer, Layer::Bundle(_)));
             self.push_layer(Layer::Bundle(category), animate);
             cx.notify();
             return;
@@ -356,7 +358,12 @@ impl MailApp {
         self.reader_scroll = ScrollHandle::new();
         self.load_thread(&conversation, cx);
         let unread = conversation.unread;
-        self.push_layer(Layer::Reader(Box::new(conversation.clone())), animate);
+        // A conversation open beside the list gives way to this one in place.
+        let replacing = matches!(self.layers.last(), Some(Layer::Reader(_)));
+        if replacing {
+            self.layers.pop();
+        }
+        self.push_layer(Layer::Reader(Box::new(conversation.clone())), animate && !replacing);
         if unread {
             self.set_unread(&conversation, false, cx);
         }
@@ -392,5 +399,5 @@ impl MailApp {
 
 /// How far through the standard slide a motion that began at `start` is, 0 to 1.
 fn progress(start: Instant) -> f32 {
-    (start.elapsed().as_secs_f32() / motion::STANDARD.as_secs_f32()).min(1.0)
+    (start.elapsed().as_secs_f32() / motion::ENTER.as_secs_f32()).min(1.0)
 }

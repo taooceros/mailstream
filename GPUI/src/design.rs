@@ -1,82 +1,178 @@
-//! The native app's `Design` tokens (Sources/Mailstream/UI/Design.swift), ported: semantic colors
-//! for both appearances, the type scale, radii, durations, the house curve and list metrics. Every
-//! literal in the UI comes from here.
+//! The app's look, ported from Flutter's `Flutter/lib/ui/design.dart` (MS-182–192, MS-200): the
+//! color roles and elevations of both appearances ([`Palette`], Flutter's `MailColors`), the scales
+//! ([`radius`], [`space`], [`stroke`], [`icon`]), the type, the motion and the metrics of the window's
+//! islands, rows, marks, avatars, tags and notices. Every literal in the UI comes from here; use the
+//! nearest step of a scale, and add a token rather than a literal.
 
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use gpui::{Hsla, WindowAppearance, rgba};
+use gpui::{BoxShadow, Hsla, WindowAppearance, point, px, rgba};
 
 pub struct Palette {
     pub dark: bool,
-    /// The reading surface: the reader page, and what a sliding list uncovers.
-    pub page: Hsla,
-    pub sidebar: Hsla,
+    /// The window behind the islands, where the sidebar sits.
+    pub window: Hsla,
+    /// Islands (the conversation), sheets, fields, menus.
+    pub background: Hsla,
+    /// The list's island, a shade under `background`, so rows can lift off it.
+    pub tray: Hsla,
+    /// The label color.
     pub text: Hsla,
+    /// The secondary label: small print, counts, dates.
     pub muted: Hsla,
+    /// Placeholders and disabled glyphs.
     pub faint: Hsla,
-    /// Hairlines between messages, card borders, separators.
+    /// Field and control outlines.
+    pub border: Hsla,
+    /// Separators and hairline rims.
     pub line: Hsla,
-    /// Row and button hover fill.
-    pub hover: Hsla,
-    /// Quiet fill for chips and thumbnails.
+    /// Quiet fills (message cards, the composer) and a pill's face.
+    pub fill: Hsla,
     pub chip: Hsla,
-    /// The selected sidebar row and the keyboard highlight.
+    /// The unemphasized selection gray (a selected sidebar row).
     pub selection: Hsla,
+    /// Hover and press washes over the sidebar, buttons and menu items; rows lift instead.
+    pub hover: Hsla,
+    pub pressed: Hsla,
     pub accent: Hsla,
-    pub danger: Hsla,
-    pub star: Hsla,
-    pub waiting: Hsla,
     pub on_accent: Hsla,
-    /// The shadow under a page sliding over another.
-    pub shadow: Hsla,
-    /// Menus and tooltips floating over the window.
-    pub popover: Hsla,
+    /// "Waiting on you": the system indigo.
+    pub waiting: Hsla,
+    pub waiting_fill: Hsla,
+    pub on_waiting_fill: Hsla,
+    pub danger: Hsla,
+    pub red_fill: Hsla,
+    pub on_red_fill: Hsla,
+    /// Notices floating over the window.
+    pub toast: Hsla,
+    pub on_toast: Hsla,
+    pub star: Hsla,
+    /// A hairline around cards resting on the tray (a half-lifted row).
+    pub card_border: Hsla,
+    /// The opaque face of a toolbar capsule floating over content, inside its rim.
+    pub capsule: Hsla,
+    pub capsule_rim: Hsla,
+    /// The capsule floating over a row (its hover actions): lit from above, top to bottom.
+    pub raised_capsule: [Hsla; 2],
+    pub raised_capsule_rim: Hsla,
+    /// The rim just outside an island.
+    pub island_rim: Hsla,
+    /// What the user opened or selected on a tray (MS-189): a face lit from above, top to bottom,
+    /// in a `stroke::RIM` of `lifted_rim`, on the `lifted_shadow`.
+    pub lifted_card: [Hsla; 2],
+    pub lifted_rim: Hsla,
+    /// A row under the pointer lifts half as far: this face, a `card_border` hairline and the
+    /// `raised_shadow`. Opaque, so the shadow doesn't show through.
+    pub half_lifted: Hsla,
+    // Elevation, lowest first.
+    /// A resting card.
+    pub card_shadow: Vec<BoxShadow>,
+    /// A control raised off its surface, a row half lifted under the pointer.
+    pub raised_shadow: Vec<BoxShadow>,
+    /// A lifted card.
+    pub lifted_shadow: Vec<BoxShadow>,
+    /// An island on the window.
+    pub island_shadow: Vec<BoxShadow>,
+    /// Popovers, menus, tooltips and toasts.
+    pub popover_shadow: Vec<BoxShadow>,
+    /// A page sliding over the list within its island (an open bundle): its leading edge.
+    pub page_shadow: Vec<BoxShadow>,
 }
 
-/// `0xAARRGGBB`, as the native tokens are written.
+/// `0xAARRGGBB`, as the Flutter tokens are written.
 fn argb(value: u32) -> Hsla {
     rgba(value.rotate_left(8)).into()
 }
 
+fn shadow(color: u32, y: f32, blur: f32) -> BoxShadow {
+    BoxShadow { color: argb(color), offset: point(px(0.), px(y)), blur_radius: px(blur), spread_radius: px(0.) }
+}
+
 static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
     dark: false,
-    page: argb(0xFFFFFFFF),
-    sidebar: argb(0xFFF1F1F3),
-    text: argb(0xD9000000),
-    muted: argb(0x80000000),
-    faint: argb(0x40000000),
-    line: argb(0x1A000000),
-    hover: argb(0x0A000000),
-    chip: argb(0x0F000000),
-    selection: argb(0x14000000),
+    window: argb(0xFFE4E5EA),
+    background: argb(0xFFFFFFFF),
+    tray: argb(0xFFF5F6FA),
+    text: argb(0xFF1D1D1F),
+    muted: argb(0xFF6E6E73),
+    faint: argb(0x401D1D1F),
+    border: argb(0xFFC7C7CC),
+    line: argb(0xFFE5E5EA),
+    fill: argb(0xFFF5F5F7),
+    chip: argb(0x0D1D1D1F),
+    selection: argb(0x171D1D1F),
+    hover: argb(0x0D1D1D1F),
+    pressed: argb(0x1A1D1D1F),
     accent: argb(0xFF007AFF),
-    danger: argb(0xFFFF3B30),
-    star: argb(0xFFFFCC00),
-    waiting: argb(0xFFFF9500),
     on_accent: argb(0xFFFFFFFF),
-    shadow: argb(0x1F000000),
-    popover: argb(0xFFFCFCFD),
+    waiting: argb(0xFF5856D6),
+    waiting_fill: argb(0xFFECEBFB),
+    on_waiting_fill: argb(0xFF3634A3),
+    danger: argb(0xFFFF3B30),
+    red_fill: argb(0xFFFFE8E6),
+    on_red_fill: argb(0xFFB3261E),
+    toast: argb(0xFF2C2C2E),
+    on_toast: argb(0xFFF5F5F7),
+    star: argb(0xFFFFB800),
+    card_border: argb(0x14000000),
+    capsule: argb(0xFFF5F5F7),
+    capsule_rim: argb(0x14000000),
+    raised_capsule: [argb(0xFFFFFFFF), argb(0xFFF4F4F6)],
+    raised_capsule_rim: argb(0x1A000000),
+    island_rim: argb(0x12000000),
+    lifted_card: [argb(0xFFFFFFFF), argb(0xFFFAFCFF)],
+    lifted_rim: argb(0x52007AFF),
+    half_lifted: argb(0xFFFCFCFE),
+    card_shadow: vec![shadow(0x0F0F172A, 1., 3.)],
+    raised_shadow: vec![shadow(0x14000000, 1., 2.), shadow(0x14000000, 4., 10.)],
+    lifted_shadow: vec![shadow(0x0F0F172A, 1., 2.), shadow(0x170055FF, 4., 14.)],
+    island_shadow: vec![shadow(0x0D000000, 0.5, 1.), shadow(0x12000000, 4., 18.)],
+    popover_shadow: vec![shadow(0x33000000, 6., 18.)],
+    page_shadow: vec![BoxShadow { offset: point(px(-2.), px(0.)), ..shadow(0x1A000000, 0., 12.) }],
 });
 
 static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
     dark: true,
-    page: argb(0xFF1E1E1E),
-    sidebar: argb(0xFF282829),
-    text: argb(0xD9FFFFFF),
-    muted: argb(0x8CFFFFFF),
-    faint: argb(0x40FFFFFF),
-    line: argb(0x1AFFFFFF),
-    hover: argb(0x0DFFFFFF),
-    chip: argb(0x14FFFFFF),
-    selection: argb(0x1FFFFFFF),
+    window: argb(0xFF2A2A2D),
+    background: argb(0xFF1E1E1E),
+    tray: argb(0xFF18181A),
+    text: argb(0xFFF5F5F7),
+    muted: argb(0xFF98989D),
+    faint: argb(0x40F5F5F7),
+    border: argb(0xFF545458),
+    line: argb(0xFF38383A),
+    fill: argb(0xFF2A2A2C),
+    chip: argb(0x1AF5F5F7),
+    selection: argb(0x24F5F5F7),
+    hover: argb(0x14F5F5F7),
+    pressed: argb(0x24F5F5F7),
     accent: argb(0xFF0A84FF),
-    danger: argb(0xFFFF453A),
-    star: argb(0xFFFFD60A),
-    waiting: argb(0xFFFF9F0A),
     on_accent: argb(0xFFFFFFFF),
-    shadow: argb(0x59000000),
-    popover: argb(0xFF2C2C2E),
+    waiting: argb(0xFF7D7AFF),
+    waiting_fill: argb(0xFF26254D),
+    on_waiting_fill: argb(0xFFD0CFFF),
+    danger: argb(0xFFFF453A),
+    red_fill: argb(0xFF4D1D1A),
+    on_red_fill: argb(0xFFFFB4AB),
+    toast: argb(0xFFE5E5EA),
+    on_toast: argb(0xFF1D1D1F),
+    star: argb(0xFFFFB800),
+    card_border: argb(0x1AFFFFFF),
+    capsule: argb(0xFF2C2C2E),
+    capsule_rim: argb(0x1FFFFFFF),
+    raised_capsule: [argb(0xFF424245), argb(0xFF35353A)],
+    raised_capsule_rim: argb(0x1FFFFFFF),
+    island_rim: argb(0x17FFFFFF),
+    lifted_card: [argb(0xFF2C2C30), argb(0xFF252529)],
+    lifted_rim: argb(0x4D0A84FF),
+    half_lifted: argb(0xFF2A2A2C),
+    card_shadow: vec![shadow(0x33000000, 1., 3.)],
+    raised_shadow: vec![shadow(0x66000000, 1., 2.), shadow(0x4D000000, 4., 10.)],
+    lifted_shadow: vec![shadow(0x0F000000, 1., 2.), shadow(0x45000000, 4., 14.)],
+    island_shadow: vec![shadow(0x4D000000, 0.5, 1.), shadow(0x59000000, 4., 18.)],
+    popover_shadow: vec![shadow(0x33000000, 6., 18.)],
+    page_shadow: vec![BoxShadow { offset: point(px(-2.), px(0.)), ..shadow(0x1A000000, 0., 12.) }],
 });
 
 pub fn palette(appearance: WindowAppearance) -> &'static Palette {
@@ -84,6 +180,11 @@ pub fn palette(appearance: WindowAppearance) -> &'static Palette {
         WindowAppearance::Dark | WindowAppearance::VibrantDark => &DARK,
         WindowAppearance::Light | WindowAppearance::VibrantLight => &LIGHT,
     }
+}
+
+/// `color` at `alpha` of its own opacity: a tag's or a notice's wash of its hue.
+pub fn tint(color: Hsla, alpha: f32) -> Hsla {
+    Hsla { a: color.a * alpha, ..color }
 }
 
 /// The system's UI font: the Mac's own, and on Linux the desktop's sans-serif family as fontconfig
@@ -103,68 +204,149 @@ pub fn ui_font() -> &'static str {
     }
 }
 
-/// The type scale, in points.
+/// The type, in points (Flutter's `TextRoles`): `DISPLAY` titles a detail (a subject), `PANE_TITLE`
+/// a list or panel, `BODY` (semibold for a headline) the UI's text, `READING` message text,
+/// `FOOTNOTE` and `CAPTION` small print, `TAG` a tag's label.
 pub mod text {
-    pub const MICRO: f32 = 10.5;
+    pub const TAG: f32 = 10.0;
     pub const CAPTION: f32 = 11.0;
     pub const FOOTNOTE: f32 = 12.0;
     pub const BODY: f32 = 13.0;
-    /// Message text in the reader.
+    /// Message text in the reader, at `READING_LEADING`.
     pub const READING: f32 = 14.0;
-    pub const HEADLINE: f32 = 15.0;
+    pub const READING_LEADING: f32 = 1.5;
+    pub const PANE_TITLE: f32 = 15.0;
     /// The thread title.
-    pub const DISPLAY: f32 = 27.0;
+    pub const DISPLAY: f32 = 22.0;
 }
 
-/// Corner radii.
+/// Corner radii: `SMALL` for inline marks, `CONTROL` for buttons and controls, `CARD` for cards,
+/// banners and lifted rows, `PANE` for the islands and message cards; capsules are fully round.
 pub mod radius {
     pub const SMALL: f32 = 4.0;
     pub const CONTROL: f32 = 8.0;
     pub const CARD: f32 = 10.0;
+    pub const PANE: f32 = 12.0;
 }
 
-/// Animation durations.
+/// The spacing scale for padding and gaps.
+pub mod space {
+    pub const S2: f32 = 2.0;
+    pub const S4: f32 = 4.0;
+    pub const S6: f32 = 6.0;
+    pub const S8: f32 = 8.0;
+    pub const S10: f32 = 10.0;
+    pub const S12: f32 = 12.0;
+    pub const S16: f32 = 16.0;
+    pub const S20: f32 = 20.0;
+    pub const S24: f32 = 24.0;
+    pub const S32: f32 = 32.0;
+}
+
+/// Line widths: a `HAIRLINE` for separators, card and capsule rims; a `RIM` for the accent edge
+/// of a lifted or focused thing.
+pub mod stroke {
+    pub const HAIRLINE: f32 = 0.5;
+    pub const RIM: f32 = 1.0;
+}
+
+/// Animation durations and the curve.
 pub mod motion {
     use super::Duration;
-    /// Folds and slides.
-    pub const STANDARD: Duration = Duration::from_millis(300);
+    /// A page sliding in over the list or beside it, and back out.
+    pub const ENTER: Duration = Duration::from_millis(400);
 }
 
-/// The conversation list's fixed columns (`ListMetrics`).
+/// The conversation list's rows: Mail's two lines.
 pub mod list {
-    pub const ROW_HEIGHT: f32 = 38.0;
-    pub const DOT_X: f32 = 14.0;
-    pub const SENDER_X: f32 = 28.0;
-    pub const AVATAR: f32 = 28.0;
-    pub const SENDER_WIDTH: f32 = 196.0;
-    pub const NAME_X: f32 = SENDER_X + AVATAR + 9.0;
-    pub const SUBJECT_X: f32 = SENDER_X + SENDER_WIDTH + 16.0;
-    pub const DATE_WIDTH: f32 = 62.0;
-    pub const INSET: f32 = 10.0;
+    pub const ROW_HEIGHT: f32 = 60.0;
+    pub const SECTION_HEIGHT: f32 = 30.0;
+    pub const AVATAR: f32 = 36.0;
+    /// The rows' inset from the island's edges.
+    pub const INSET: f32 = 6.0;
     pub const TRAILING_INSET: f32 = 14.0;
+    /// Lifted rows (selected, under the pointer) stay this far apart, their cards inset by half.
+    pub const LIFT_GAP: f32 = 4.0;
+    /// A selected row's accent bar at its card's start: `LIFT_BAR` wide, `LIFT_BAR_INSET` from the
+    /// card's top and bottom.
+    pub const LIFT_BAR: f32 = 3.0;
+    pub const LIFT_BAR_INSET: f32 = 14.0;
+    pub const AVATAR_GAP: f32 = 12.0;
+    /// Where the hairline under a row starts: past the unread column and the avatar.
+    pub const SEPARATOR_X: f32 = super::marks::UNREAD_SLOT + AVATAR + AVATAR_GAP;
+    /// A date group's title, from the row's start.
+    pub const SECTION_X: f32 = 22.0;
 }
 
-/// Icon sizes.
+/// Marks (MS-190): an account or a topic is a `DOT` of its color; unread is an `UNREAD` accent dot
+/// in an `UNREAD_SLOT` wide column before the avatar.
+pub mod marks {
+    pub const DOT: f32 = 6.0;
+    pub const UNREAD: f32 = 7.0;
+    pub const UNREAD_SLOT: f32 = 16.0;
+}
+
+/// Avatars (MS-192): a person's picture, else their initial in their hue at `LETTER` of the
+/// avatar's size, on a `TINT` wash of that hue; a bundle's glyph at `GLYPH`.
+pub mod avatar {
+    pub const TINT: f32 = 0.15;
+    pub const LETTER: f32 = 0.4;
+    pub const GLYPH: f32 = 0.5;
+}
+
+/// Tags (MS-190): small print in its color on a `TINT` wash of it, fully round.
+pub mod tag {
+    pub const HEIGHT: f32 = 18.0;
+    pub const TINT: f32 = 0.12;
+    pub const PADDING: f32 = super::space::S6;
+}
+
+/// Notices (MS-191): a wash of the tone's color, `TINT` of it in light mode and `DARK_TINT` in
+/// dark, inside a hairline of it at `RIM`; `COMPACT_HEIGHT` tall as one line over a view.
+pub mod notice {
+    pub const TINT: f32 = 0.10;
+    pub const DARK_TINT: f32 = 0.14;
+    pub const RIM: f32 = 0.22;
+    pub const COMPACT_HEIGHT: f32 = 28.0;
+}
+
+/// Icon sizes: `INLINE` beside small print, `ROW` in rows and chips, `TOOLBAR` on toolbar buttons;
+/// `BUTTON` is an icon button's square.
 pub mod icon {
-    pub const SMALL: f32 = 16.0;
-    pub const TOOLBAR: f32 = 18.0;
+    pub const INLINE: f32 = 12.0;
+    pub const ROW: f32 = 15.0;
+    pub const TOOLBAR: f32 = 17.0;
     pub const BUTTON: f32 = 30.0;
 }
 
-/// The window's fixed regions.
+/// The window as islands, after Dia: the sidebar sits on the window, and the list and the
+/// conversation are rounded islands floating on it, `GAP` apart and from the window's edges.
 pub mod layout {
-    pub const SIDEBAR_WIDTH: f32 = 220.0;
-    pub const SIDEBAR_ROW: f32 = 28.0;
+    pub const GAP: f32 = super::space::S8;
+    pub const SIDEBAR_WIDTH: f32 = 232.0;
+    pub const SIDEBAR_ROW: f32 = 30.0;
     /// How far each level of the sidebar tree steps in.
-    pub const SIDEBAR_INDENT: f32 = 14.0;
-    /// The toolbar, which is also the title bar the traffic lights sit in.
-    pub const TOOLBAR_HEIGHT: f32 = 52.0;
-    /// Room for the traffic lights when the sidebar is hidden; elsewhere the compositor draws the
-    /// window's controls, and the toolbar starts at its usual inset.
+    pub const SIDEBAR_INDENT: f32 = 18.0;
+    /// The sidebar's top band, which moves the window (and on the Mac holds the traffic lights).
+    pub const SIDEBAR_TOP: f32 = 44.0;
+    /// The rail that stands in for the sidebar when it is hidden.
+    pub const RAIL_WIDTH: f32 = 72.0;
+    /// Room above the rail's first button for the Mac's traffic lights.
     #[cfg(target_os = "macos")]
-    pub const TRAFFIC_LIGHTS: f32 = 78.0;
+    pub const RAIL_TOP: f32 = 36.0;
     #[cfg(not(target_os = "macos"))]
-    pub const TRAFFIC_LIGHTS: f32 = 10.0;
+    pub const RAIL_TOP: f32 = 8.0;
+    /// The list's title row, and the band at the top of a detail pane its toolbar floats in.
+    pub const HEADER_HEIGHT: f32 = 56.0;
+    /// A capsule of toolbar buttons: a `icon::BUTTON` control and its padding.
+    pub const CAPSULE_HEIGHT: f32 = 36.0;
+    pub const CAPSULE_PADDING: f32 = 3.0;
+    /// From this window width the conversation opens beside the list instead of over it.
+    pub const TWO_PANE_WIDTH: f32 = 1000.0;
+    /// The list's share of the room beside the sidebar, and the narrowest list and page.
+    pub const LIST_SHARE: f32 = 0.4;
+    pub const MIN_LIST: f32 = 300.0;
+    pub const MIN_DETAIL: f32 = 420.0;
     /// The reader's text column.
     pub const READING_WIDTH: f32 = 720.0;
     pub const MENU_WIDTH: f32 = 236.0;
@@ -188,17 +370,16 @@ pub mod chat {
     pub const HEADER_HEIGHT: f32 = 56.0;
     /// Width of the new-chat form.
     pub const FORM_WIDTH: f32 = 520.0;
-    /// The per-account mark in rows when several accounts are listed.
-    pub const ACCOUNT_DOT: f32 = 6.0;
     /// A message still being sent.
     pub const PENDING_OPACITY: f32 = 0.55;
 }
 
-/// The house easing curve, `cubic-bezier(0.2, 0.9, 0.25, 1)`: quick start, long soft landing.
+/// The house easing curve (Flutter's `Motion.curve`), `cubic-bezier(0.05, 0.7, 0.1, 1)`: a strong
+/// deceleration, quick off the mark, a long settle.
 pub fn house_curve(progress: f32) -> f32 {
-    const X1: f32 = 0.2;
-    const Y1: f32 = 0.9;
-    const X2: f32 = 0.25;
+    const X1: f32 = 0.05;
+    const Y1: f32 = 0.7;
+    const X2: f32 = 0.1;
     const Y2: f32 = 1.0;
     fn bezier(t: f32, p1: f32, p2: f32) -> f32 {
         let u = 1.0 - t;
@@ -232,19 +413,20 @@ const AVATAR_DARK: [u32; 11] = [
     0xFF63E6E2, 0xFF64D2FF,
 ];
 
-/// Sender avatar colors (`Avatar.color`): system colors by a stable hash of the address.
+/// A person's hue (`MailColors.avatarHue`): system colors by a stable hash of the lowercased
+/// address (else the name).
 pub fn avatar_color(email: &str, dark: bool) -> Hsla {
     let palette = if dark { &AVATAR_DARK } else { &AVATAR_LIGHT };
     argb(palette[stable_index(&email.to_lowercase(), palette.len())])
 }
 
-/// Stable per-account colors, in sidebar order (`AccountStyle`).
+/// Stable per-account colors, in sidebar order: the system blue, orange, purple, green, red, teal.
 pub fn account_color(index: usize) -> Hsla {
-    const PALETTE: [u32; 6] = [0xFF007AFF, 0xFFFF9500, 0xFFAF52DE, 0xFF34C759, 0xFFFF2D55, 0xFF30B0C7];
+    const PALETTE: [u32; 6] = [0xFF007AFF, 0xFFFF9500, 0xFFAF52DE, 0xFF34C759, 0xFFFF3B30, 0xFF30B0C7];
     argb(PALETTE[index % PALETTE.len()])
 }
 
-/// Muted topic colors (`TagPalette`): known topics keep fixed hues.
+/// Topic colors: known topics keep fixed hues, the rest take a stable one.
 pub fn topic_color(label: &str, dark: bool) -> Hsla {
     const KNOWN: [(&str, u32, u32); 9] = [
         ("work", 0xFF3B82F6, 0xFF60A5FA),
@@ -266,6 +448,18 @@ pub fn topic_color(label: &str, dark: bool) -> Hsla {
         .map(|(_, l, d)| (*l, *d))
         .unwrap_or_else(|| FALLBACK[stable_index(&key, FALLBACK.len())]);
     argb(if dark { dark_color } else { light })
+}
+
+/// A Smart Inbox bundle's color: its glyph sits white on it, as Mail marks its categories.
+pub fn category_color(category: crate::model::Category, p: &Palette) -> Hsla {
+    use crate::model::Category;
+    match category {
+        Category::People => p.accent,
+        Category::Notification => argb(0xFF5AC8FA),
+        Category::Newsletter => argb(0xFFFF2D55),
+        Category::Invitation => argb(0xFFFF9500),
+        Category::Other => argb(0xFF8E8E93),
+    }
 }
 
 #[cfg(test)]
@@ -323,8 +517,6 @@ pub mod compose {
     pub const SUBJECT_HEIGHT: f32 = 44.0;
     pub const BODY_MIN_ROWS: usize = 10;
     pub const BODY_PADDING: f32 = 14.0;
-    /// The Send button and the confirm bar's buttons.
-    pub const BUTTON_HEIGHT: f32 = 28.0;
     /// Recipient completion: how many people, the menu's width, a row's height and avatar.
     pub const SUGGESTIONS: usize = 6;
     pub const MENU_WIDTH: f32 = 340.0;
@@ -338,14 +530,8 @@ pub mod compose {
     pub const REPLY_PADDING: f32 = 14.0;
     /// The reply card's border while it has the keyboard: the accent at this opacity.
     pub const FOCUS_RING_ALPHA: f32 = 0.45;
-    /// The reply card's floating shadow.
-    pub const CARD_SHADOW_Y: f32 = 2.0;
-    pub const CARD_SHADOW_BLUR: f32 = 14.0;
-    /// The Send button while a send is in flight.
-    pub const SENDING_OPACITY: f32 = 0.55;
     /// Text being sent.
     pub const SENT_TEXT_OPACITY: f32 = 0.6;
-    /// The Send button under the pointer, and its ⌘↩ hint.
-    pub const SEND_HOVER_OPACITY: f32 = 0.9;
+    /// The Send button's ⌘↩ hint.
     pub const KEY_HINT_OPACITY: f32 = 0.72;
 }

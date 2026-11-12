@@ -5,6 +5,7 @@ mod avatars;
 mod bench;
 mod chat;
 mod compose;
+mod controls;
 mod design;
 mod engine;
 mod format;

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, Context, IntoElement, Styled, UniformListScrollHandle, Window, canvas, point, px};
+use gpui::{AnyElement, Context, IntoElement, ListState, Styled, Window, canvas, px};
 
 use crate::state::MailApp;
 
@@ -57,13 +57,12 @@ impl Bench {
     /// paint last, which ends the frame's work.
     pub fn frame(
         &mut self,
-        list: &UniformListScrollHandle,
+        list: &ListState,
         window: &mut Window,
         cx: &mut Context<MailApp>,
     ) -> Option<AnyElement> {
         let now = Instant::now();
-        let scroll = list.0.borrow().base_handle.clone();
-        let max = f32::from(scroll.max_offset().height);
+        let max = f32::from(list.max_offset_for_scrollbar().height);
         let started = match self.started {
             Some(started) => started,
             None if now - self.launched >= SETTLE && max > 0. => *self.started.insert(now),
@@ -78,7 +77,9 @@ impl Bench {
         let leg = elapsed.as_secs_f32() / LEG.as_secs_f32();
         let along = leg.fract();
         let depth = if (leg as u32) % 2 == 0 { along } else { 1. - along };
-        scroll.set_offset(point(px(0.), px(-(depth * DISTANCE).min(max))));
+        // The list measures rows as they come into view, so it moves by the difference.
+        let at = -f32::from(list.scroll_px_offset_for_scrollbar().y);
+        list.scroll_by(px(depth * DISTANCE - at));
         window.request_animation_frame();
 
         let start = (now - self.launched).as_secs_f64() * 1000.;

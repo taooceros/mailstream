@@ -4,14 +4,15 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, AppContext, Bounds, BoxShadow, ClickEvent, Context, Div, ElementId, Entity, EntityInputHandler, EventEmitter,
+    App, AppContext, Bounds, ClickEvent, Context, Div, ElementId, Entity, EntityInputHandler, EventEmitter,
     FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement,
     Render, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, Subscription, TitlebarOptions,
     Window, WindowBounds, WindowOptions, actions, deferred, div, point, px, relative, size,
 };
 use crate::avatars;
+use crate::controls::{ButtonKind, ControlSize, button, popover};
+use crate::design::{self, Palette, compose as metrics, editor, layout, radius, space, text};
 use crate::engine::engine;
-use crate::design::{self, Palette, compose as metrics, editor, layout, radius, text};
 use crate::input::{InputEvent, TextInput};
 use crate::model::{Account, Address};
 use crate::textarea::{TextArea, TextAreaEvent};
@@ -179,55 +180,20 @@ fn forward_subject(subject: &str) -> SharedString {
     }
 }
 
-/// A text button that keeps its click from moving the window (the list's `ui::button`).
-fn text_button(id: impl Into<ElementId>, label: impl Into<SharedString>, p: &Palette) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_shrink_0()
-        .h(px(metrics::BUTTON_HEIGHT))
-        .px(px(10.))
-        .flex()
-        .items_center()
-        .rounded(px(radius::CONTROL))
-        .text_size(px(text::FOOTNOTE))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(p.text)
-        .cursor_pointer()
-        .hover(|s| s.bg(p.hover))
-        .active(|s| s.bg(p.selection))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(label.into())
-}
-
 /// The accent Send button with its shortcut; dimmed and inert while sending.
 fn send_button(id: &'static str, sending: bool, p: &Palette) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_shrink_0()
-        .h(px(metrics::BUTTON_HEIGHT))
-        .px(px(12.))
-        .flex()
-        .items_center()
-        .gap(px(6.))
-        .rounded(px(radius::CONTROL))
-        .bg(p.accent)
-        .text_color(p.on_accent)
-        .text_size(px(text::FOOTNOTE))
-        .font_weight(FontWeight::SEMIBOLD)
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .when(sending, |b| b.opacity(metrics::SENDING_OPACITY).child("Sending…"))
-        .when(!sending, |b| {
-            b.cursor_pointer()
-                .hover(|s| s.opacity(metrics::SEND_HOVER_OPACITY))
-                .child("Send")
-                .child(
-                    div()
-                        .text_size(px(text::CAPTION))
-                        .font_weight(FontWeight::MEDIUM)
-                        .opacity(metrics::KEY_HINT_OPACITY)
-                        .child("⌘↩"),
-                )
-        })
+    button(id, if sending { "Sending…" } else { "Send" }, ButtonKind::Primary, ControlSize::Regular, !sending, p).when(
+        !sending,
+        |b| {
+            b.child(
+                div()
+                    .text_size(px(text::CAPTION))
+                    .font_weight(FontWeight::MEDIUM)
+                    .opacity(metrics::KEY_HINT_OPACITY)
+                    .child("⌘↩"),
+            )
+        },
+    )
 }
 
 fn status_line(status: &Status, p: &Palette) -> Option<Div> {
@@ -642,7 +608,7 @@ impl Compose {
         div()
             .id("compose-title")
             .flex_shrink_0()
-            .h(px(layout::TOOLBAR_HEIGHT))
+            .h(px(layout::HEADER_HEIGHT))
             .pl(px(metrics::TITLE_INSET))
             .pr(px(metrics::MARGIN))
             .flex()
@@ -660,7 +626,7 @@ impl Compose {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(text::HEADLINE))
+                    .text_size(px(text::PANE_TITLE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(self.title.clone()),
             )
@@ -748,7 +714,7 @@ impl Compose {
                     }))
             });
             deferred(
-                popover(p)
+                menu(p)
                     .id("from-menu")
                     .top(px(metrics::ROW_HEIGHT))
                     .left(px(metrics::LABEL_WIDTH + 8.))
@@ -812,7 +778,7 @@ impl Compose {
                         )
                 });
                 deferred(
-                    popover(p)
+                    menu(p)
                         .id(ElementId::Name(format!("suggestions:{}", field.label()).into()))
                         .top(px(metrics::ROW_HEIGHT))
                         .left(px(metrics::LABEL_WIDTH + 8.))
@@ -836,39 +802,30 @@ impl Compose {
             .gap(px(8.))
             .border_t_1()
             .border_color(p.line)
-            .bg(p.sidebar)
+            .bg(p.fill)
             .child(div().flex_1().min_w_0().truncate().child("Discard this message?"))
-            .child(text_button("keep", "Keep Editing", p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.confirming_discard = false;
-                window.focus(&this.body.focus_handle(cx));
-                cx.notify();
-            })))
+            .child(button("keep", "Keep Editing", ButtonKind::Secondary, ControlSize::Regular, true, p).on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.confirming_discard = false;
+                    window.focus(&this.body.focus_handle(cx));
+                    cx.notify();
+                }),
+            ))
             .child(
-                text_button("discard", "Discard", p)
-                    .text_color(p.danger)
+                button("discard", "Discard", ButtonKind::Destructive, ControlSize::Regular, true, p)
                     .on_click(cx.listener(|_, _: &ClickEvent, window, _| window.remove_window())),
             )
     }
 }
 
 /// A floating menu under a header field.
-fn popover(p: &Palette) -> Div {
-    div()
+fn menu(p: &Palette) -> Div {
+    popover(p)
         .absolute()
         .w(px(metrics::MENU_WIDTH))
-        .p(px(4.))
+        .p(px(space::S4))
         .flex()
         .flex_col()
-        .rounded(px(radius::CARD))
-        .border_1()
-        .border_color(p.line)
-        .bg(p.page)
-        .shadow(vec![BoxShadow {
-            color: p.shadow,
-            offset: point(px(0.), px(metrics::CARD_SHADOW_Y)),
-            blur_radius: px(metrics::CARD_SHADOW_BLUR),
-            spread_radius: px(0.),
-        }])
         .occlude()
         // A click in the menu leaves the keyboard in the field.
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -895,7 +852,7 @@ impl Render for Compose {
             .font_family(design::ui_font())
             .text_size(px(text::BODY))
             .text_color(p.text)
-            .bg(p.page)
+            .bg(p.background)
             .child(self.render_title_bar(p, cx))
             .child(
                 div()
@@ -906,7 +863,7 @@ impl Render for Compose {
                     .child(self.render_from(p, cx))
                     .child(self.render_recipients(Field::To, window, p, cx))
                     .child(self.render_recipients(Field::Cc, window, p, cx).when(!self.show_bcc, |row| {
-                        row.child(text_button("show-bcc", "Bcc", p).text_color(p.muted).on_click(cx.listener(
+                        row.child(button("show-bcc", "Bcc", ButtonKind::Plain, ControlSize::Small, true, p).on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
                                 this.show_bcc = true;
                                 window.focus(&this.bcc.focus_handle(cx));
@@ -918,7 +875,7 @@ impl Render for Compose {
                     .child(
                         self.header_row(None, false, p)
                             .h(px(metrics::SUBJECT_HEIGHT))
-                            .text_size(px(text::HEADLINE))
+                            .text_size(px(text::PANE_TITLE))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(self.subject.clone()),
                     ),
@@ -1080,13 +1037,8 @@ impl Render for ReplyBox {
             .rounded(px(radius::CARD))
             .border_1()
             .border_color(if self.focus.is_focused(window) { ring } else { p.line })
-            .bg(p.page)
-            .shadow(vec![BoxShadow {
-                color: p.shadow,
-                offset: point(px(0.), px(metrics::CARD_SHADOW_Y)),
-                blur_radius: px(metrics::CARD_SHADOW_BLUR),
-                spread_radius: px(0.),
-            }])
+            .bg(p.background)
+            .shadow(p.popover_shadow.clone())
             .child(
                 div()
                     .flex()
@@ -1136,8 +1088,7 @@ impl Render for ReplyBox {
                     .pb(px(8.))
                     .child(status_line(&self.status, p).unwrap_or_else(|| div().flex_1()))
                     .child(
-                        text_button("reply-discard", "Discard", p)
-                            .text_color(p.muted)
+                        button("reply-discard", "Discard", ButtonKind::Secondary, ControlSize::Regular, !sending, p)
                             .when(!sending, |b| {
                                 b.on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(ReplyEvent::Discarded)))
                             }),

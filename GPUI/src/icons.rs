@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use gpui::{AssetSource, Hsla, Result, SharedString, Svg, prelude::*, px, svg};
 
-use crate::model::Role;
+use crate::model::{Category, Role};
 
 macro_rules! icons {
     ($($variant:ident => $file:literal),* $(,)?) => {
@@ -22,10 +22,13 @@ macro_rules! icons {
 }
 
 icons! {
+    Add => "add_circle",
     Archive => "archive",
     Attachment => "attach_file",
     Back => "chevron_left",
+    Calendar => "calendar_month_fill",
     Chat => "forum",
+    Close => "close",
     Compose => "edit_square",
     Delete => "delete",
     Disclosure => "chevron_right",
@@ -34,6 +37,9 @@ icons! {
     Forward => "forward",
     Inbox => "inbox",
     Label => "label",
+    Newsletter => "newspaper_fill",
+    Notification => "notifications_fill",
+    People => "group_fill",
     MarkRead => "mark_email_read",
     MarkUnread => "mark_email_unread",
     Person => "person",
@@ -64,6 +70,17 @@ impl Icon {
             Role::Junk => Icon::Spam,
             Role::Trash => Icon::Delete,
             Role::Other => Icon::Folder,
+        }
+    }
+
+    /// A Smart Inbox bundle's glyph.
+    pub fn for_category(category: Category) -> Icon {
+        match category {
+            Category::People => Icon::People,
+            Category::Notification => Icon::Notification,
+            Category::Newsletter => Icon::Newsletter,
+            Category::Invitation => Icon::Calendar,
+            Category::Other => Icon::Folder,
         }
     }
 }

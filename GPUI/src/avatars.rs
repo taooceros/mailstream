@@ -10,12 +10,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Div, FontWeight, Global, Hsla, IntoElement, ObjectFit, ParentElement, SharedString, Styled,
-    StyledImage, div, img, px,
+    AnyElement, App, Global, IntoElement, ObjectFit, ParentElement, SharedString, Styled, StyledImage, div, img, px,
 };
 use url::Url;
 
-use crate::design::{self, Palette};
+use crate::controls::monogram;
+use crate::design::Palette;
 use crate::engine::{MailError, engine};
 use crate::model::Address;
 
@@ -51,46 +51,29 @@ pub fn init(cx: &mut App) {
     cx.set_global(Avatars::default());
 }
 
-/// A `size` circle for `address`: its photo once the app has one, else its initial on its color.
-/// Drawing it asks for the photo; rows redraw when it arrives.
-pub fn avatar(address: &Address, size: f32, p: &Palette, cx: &mut App) -> AnyElement {
-    let color = design::avatar_color(&address.email, p.dark);
+/// A `size` circle for `address`: its photo once the app has one, else its initial in its hue on
+/// a wash of it (`controls::monogram`). Drawing it asks for the photo; rows redraw when it arrives.
+pub fn avatar(address: &Address, size: f32, p: &'static Palette, cx: &mut App) -> AnyElement {
+    let key: SharedString = if address.email.is_empty() { address.display_name() } else { address.email.clone() };
     let Some(path) = photo(&address.email, cx) else {
-        return initials(address.initial(), size, color, p.on_accent).into_any_element();
+        return monogram(address.initial(), &key, size, p).into_any_element();
     };
     let initial = address.initial();
-    let on_accent = p.on_accent;
     div()
         .flex_shrink_0()
         .size(px(size))
         .rounded_full()
         // The app's pictures are square; anything else is cut to the circle's square, not spilled.
         .overflow_hidden()
-        .bg(color)
         .child(
             img(path)
                 .size_full()
                 .rounded_full()
                 .object_fit(ObjectFit::Cover)
                 // A file that is gone or unreadable shows the letter, as no photo would.
-                .with_fallback(move || initials(initial.clone(), size, color, on_accent).into_any_element()),
+                .with_fallback(move || monogram(initial.clone(), &key, size, p).into_any_element()),
         )
         .into_any_element()
-}
-
-fn initials(initial: SharedString, size: f32, color: Hsla, text: Hsla) -> Div {
-    div()
-        .flex_shrink_0()
-        .size(px(size))
-        .rounded_full()
-        .bg(color)
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(size * 0.43))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(text)
-        .child(initial)
 }
 
 /// The known photo for `email`; an address not asked for yet (or due for a retry) joins the queue.

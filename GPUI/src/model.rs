@@ -126,8 +126,6 @@ pub struct Account {
     pub label: SharedString,
     /// `google` or `microsoft`.
     pub provider: SharedString,
-    /// The person's name, when the provider gave one.
-    pub name: Option<SharedString>,
 }
 
 impl From<mailstream::Account> for Account {
@@ -136,7 +134,6 @@ impl From<mailstream::Account> for Account {
             id: account.id.into(),
             label: account.label.into(),
             provider: account.provider.into(),
-            name: account.name.map(Into::into),
         }
     }
 }
@@ -149,10 +146,6 @@ impl Account {
     /// Gmail calls its user folders labels.
     pub fn folders_title(&self) -> &'static str {
         if self.provider.as_ref() == "google" { "Labels" } else { "Folders" }
-    }
-
-    pub fn address(&self) -> Address {
-        Address { name: Some(self.name.clone().unwrap_or_else(|| self.title())), email: self.id.clone() }
     }
 }
 
@@ -271,6 +264,8 @@ pub struct Conversation {
     /// The row's date, as of `prepare`.
     pub when: SharedString,
     pub sender: SharedString,
+    /// Everyone in it, for the row's first line; the sender when the engine names no one.
+    pub senders: SharedString,
 }
 
 impl From<mailstream::Conversation> for Conversation {
@@ -295,6 +290,7 @@ impl From<mailstream::Conversation> for Conversation {
             tag: SharedString::default(),
             when: SharedString::default(),
             sender: SharedString::default(),
+            senders: SharedString::default(),
         }
     }
 }
@@ -310,6 +306,8 @@ impl Conversation {
             Some(from) => from.display_name(),
             None => self.participants.first().cloned().unwrap_or_else(|| "(unknown)".into()),
         };
+        self.senders =
+            if self.participants.is_empty() { self.sender.clone() } else { self.participants.join(", ").into() };
     }
 
     /// Service mail the Smart Inbox folds into a bundle; anything waiting on the user stays out.

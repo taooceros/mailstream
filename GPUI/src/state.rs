@@ -16,8 +16,8 @@ use chrono::Local;
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::{
-    App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, Pixels, Point, ScrollHandle, ScrollStrategy,
-    SharedString, Subscription, UniformListScrollHandle, Window, actions,
+    App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, ListAlignment, ListOffset, ListState, Pixels,
+    Point, ScrollHandle, SharedString, Subscription, Window, actions, px,
 };
 use mailstream::{Change, Event, EventListener, ListQuery};
 
@@ -211,29 +211,32 @@ pub struct Bundle {
     pub category: Category,
     /// Indexes into the list's conversations, newest first.
     pub members: Vec<usize>,
-    /// The latest senders, for the row.
+    /// Who sent what is new (what came last once all is read), for the row.
     pub senders: SharedString,
-    pub unread: bool,
+    /// What the newest of that is about.
+    pub subject: SharedString,
+    pub unread: usize,
 }
 
 impl Bundle {
     fn new(category: Category, members: Vec<usize>, conversations: &[Conversation]) -> Self {
+        let unread = members.iter().filter(|&&ix| conversations[ix].unread).count();
+        let shown = members.iter().map(|&ix| &conversations[ix]).filter(|c| unread == 0 || c.unread);
         let mut senders: Vec<&str> = Vec::new();
-        for &ix in &members {
-            let sender = conversations[ix].sender.as_ref();
-            if !senders.contains(&sender) {
+        let mut subject = SharedString::default();
+        for conversation in shown {
+            if subject.is_empty() {
+                subject = conversation.title.clone();
+            }
+            let sender = conversation.sender.as_ref();
+            if !sender.is_empty() && !senders.contains(&sender) {
                 senders.push(sender);
             }
-            if senders.len() == 4 {
+            if senders.len() == 6 {
                 break;
             }
         }
-        Self {
-            category,
-            unread: members.iter().any(|&ix| conversations[ix].unread),
-            senders: senders.join(", ").into(),
-            members,
-        }
+        Self { category, unread, senders: senders.join(", ").into(), subject, members }
     }
 }
 
@@ -316,8 +319,9 @@ pub struct MailApp {
     /// The row under the pointer, which shows its actions.
     pub hovered_row: Option<SharedString>,
     toast_generation: u64,
-    pub list_scroll: UniformListScrollHandle,
-    pub bundle_scroll: UniformListScrollHandle,
+    /// The list's and the open bundle's rows (rows and group titles differ in height).
+    pub list_scroll: ListState,
+    pub bundle_scroll: ListState,
     pub reader_scroll: ScrollHandle,
     /// Sidebar nodes the user opened, by key.
     pub expanded: HashSet<SharedString>,
@@ -326,7 +330,8 @@ pub struct MailApp {
     pub slide: Slide,
     /// The top layer `slide` belongs to; a different top layer rests.
     pub slide_layer: Option<SharedString>,
-    /// The content area's width, as last laid out: how far a layer slides.
+    /// How far the top layer travels between in and out, as last laid out: the list island's
+    /// width for a layer over it, the room the conversation takes beside the list.
     pub content_width: f32,
     pub context_menu: Option<ContextMenu>,
     /// Google Chat, shown instead of the mail list while `chat_view` is set.
@@ -379,8 +384,8 @@ impl MailApp {
             toast: None,
             hovered_row: None,
             toast_generation: 0,
-            list_scroll: UniformListScrollHandle::new(),
-            bundle_scroll: UniformListScrollHandle::new(),
+            list_scroll: list_state(0),
+            bundle_scroll: list_state(0),
             reader_scroll: ScrollHandle::new(),
             expanded: ["unified:inbox", "chat", "section:accounts"].into_iter().map(SharedString::from).collect(),
             sidebar_open: true,
@@ -621,6 +626,7 @@ impl MailApp {
         let sections = key.query.is_none();
         let Some(list) = self.lists.get(&key) else {
             self.items.clear();
+            self.list_scroll.reset(0);
             return;
         };
         let mut rows = Vec::with_capacity(list.conversations.len());
@@ -664,7 +670,16 @@ impl MailApp {
             }
             items.push(Item::Row(index));
         }
+        // The row at the top stays there, wherever the new lines put it.
+        let top = self.list_scroll.logical_scroll_top();
+        let kept = self.items.get(top.item_ix).map(|item| self.item_id(item));
         self.items = items;
+        self.list_scroll.reset(self.items.len());
+        let at = kept.and_then(|id| self.items.iter().position(|item| self.item_id(item) == id));
+        self.list_scroll.scroll_to(match at {
+            Some(item_ix) => ListOffset { item_ix, offset_in_item: top.offset_in_item },
+            None => ListOffset::default(),
+        });
     }
 
     /// Drops a bundle layer whose bundle is gone, and keeps open readers' conversations current.
@@ -744,6 +759,11 @@ impl MailApp {
             },
         );
     }
+}
+
+/// A fresh list of `count` rows, scrolled to the top.
+pub fn list_state(count: usize) -> ListState {
+    ListState::new(count, ListAlignment::Top, px(400.))
 }
 
 /// Hands the engine's change events to the window's task.

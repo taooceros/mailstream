@@ -3,15 +3,17 @@
 //! labels or folders. Expansion is remembered by node key.
 
 use super::*;
-use gpui::{Transformation, radians};
+use gpui::{AppContext, Transformation, radians};
+
+use crate::controls::Tooltip;
 
 use crate::model::{Account, Mailbox};
+use crate::settings::ShowSettings;
 
 /// What a row draws before its title.
 enum Leading {
     Icon(Icon),
-    Dot(Hsla),
-    Avatar(Address, Hsla),
+    Dot(gpui::Hsla),
 }
 
 /// One row of the tree.
@@ -25,8 +27,6 @@ struct Node {
     expandable: bool,
     /// What selecting it shows; `None` rows only fold.
     source: Option<Pick>,
-    /// Account inboxes under the unified Inbox: secondary text.
-    secondary: bool,
     tooltip: Option<SharedString>,
 }
 
@@ -39,28 +39,34 @@ enum Pick {
 }
 
 impl MailApp {
+    /// The sidebar, on the window: a top band that moves the window and hides the sidebar, then
+    /// the tree under "Mailboxes", and Add Account… at its end.
     pub(super) fn render_sidebar(&self, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let mut rows: Vec<AnyElement> = Vec::new();
         for node in self.sidebar_nodes(cx) {
             rows.push(self.sidebar_row(node, p, cx));
         }
+        rows.push(
+            destination("add-account".into(), 0, false, p)
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(ShowSettings), cx))
+                .child(icon(Icon::Add, icon_size::TOOLBAR, p.accent))
+                .child(div().flex_1().min_w_0().truncate().child("Add Account…"))
+                .into_any_element(),
+        );
         div()
             .w(px(layout::SIDEBAR_WIDTH))
             .h_full()
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .bg(p.sidebar)
-            .border_r_1()
-            .border_color(p.line)
             .child(
                 title_bar("sidebar-title")
-                    .h(px(layout::TOOLBAR_HEIGHT))
+                    .h(px(layout::SIDEBAR_TOP))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
                     .justify_end()
-                    .px(px(10.))
+                    .px(px(space::S8))
                     .child(
                         icon_button("hide-sidebar", Icon::Sidebar, "Hide Sidebar", true, p.muted, p)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -68,16 +74,71 @@ impl MailApp {
                             })),
                     ),
             )
+            .child(group_title("Mailboxes", p))
             .child(
                 div()
                     .id("sidebar")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .px(px(10.))
-                    .pb(px(16.))
+                    .px(px(space::S10))
+                    .pb(px(space::S12))
                     .children(rows),
             )
+    }
+
+    /// The rail standing in for the hidden sidebar: a button that brings it back, then the unified
+    /// mailboxes and Chat, each a glyph over its name.
+    pub(super) fn render_rail(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let chat = self.chat.read(cx);
+        let mut items: Vec<AnyElement> = Vec::new();
+        for role in Role::UNIFIED {
+            let members: Vec<&Mailbox> = self
+                .accounts
+                .iter()
+                .filter_map(|account| {
+                    // Archive falls back to each account's All Mail, as in the sidebar.
+                    let all = self.mailboxes.get(&account.id)?;
+                    all.iter()
+                        .find(|b| b.role == role)
+                        .or_else(|| if role == Role::Archive { all.iter().find(|b| b.role == Role::All) } else { None })
+                })
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let source = Source::Unified(role);
+            let selected = self.chat_view.is_none() && self.source == source && self.query.is_none();
+            let count = members.iter().map(|b| b.badge()).sum::<u32>();
+            items.push(
+                rail_item(role.arg(), Icon::for_role(role), role.title(), count, selected, p)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.select(source.clone(), window, cx)))
+                    .into_any_element(),
+            );
+        }
+        if !chat.accounts().is_empty() {
+            let count = chat.unread(None) as u32;
+            items.push(
+                rail_item("chat", Icon::Chat, "Chat", count, self.chat_view.is_some(), p)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.select_chat(None, window, cx)))
+                    .into_any_element(),
+            );
+        }
+        div()
+            .w(px(layout::RAIL_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(
+                title_bar("rail-title").w_full().pt(px(layout::RAIL_TOP)).pb(px(space::S8)).flex().justify_center().child(
+                    icon_button("show-sidebar", Icon::Sidebar, "Show Sidebar", true, p.muted, p)
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx))),
+                ),
+            )
+            .child(div().id("rail").flex_1().min_h_0().w_full().overflow_y_scroll().px(px(space::S8)).children(items))
+            .into_any_element()
     }
 
     /// The visible rows: the tree flattened through expanded nodes.
@@ -113,7 +174,6 @@ impl MailApp {
                 badge: members.iter().map(|(_, _, b)| b.badge()).sum(),
                 expandable: children,
                 source: Some(Pick::Mail(Source::Unified(role))),
-                secondary: false,
                 tooltip: None,
             });
             if expanded {
@@ -126,7 +186,6 @@ impl MailApp {
                         badge: inbox.unread.unwrap_or(0),
                         expandable: false,
                         source: Some(Pick::Mail(mailbox_source(account, inbox))),
-                        secondary: true,
                         tooltip: Some(account.id.clone()),
                     });
                 }
@@ -147,7 +206,6 @@ impl MailApp {
                 badge: chat.unread(None) as u32,
                 expandable: several,
                 source: Some(Pick::Chat(None)),
-                secondary: false,
                 tooltip: None,
             });
             if open {
@@ -162,7 +220,6 @@ impl MailApp {
                         badge: chat.unread(Some(&account.id)) as u32,
                         expandable: false,
                         source: Some(Pick::Chat(Some(account.id.clone()))),
-                        secondary: true,
                         tooltip: Some(account.id.clone()),
                     });
                 }
@@ -182,7 +239,6 @@ impl MailApp {
             badge: 0,
             expandable: true,
             source: None,
-            secondary: false,
             tooltip: None,
         });
         if !open {
@@ -196,11 +252,10 @@ impl MailApp {
                 key,
                 depth: 0,
                 title: account.title(),
-                leading: Leading::Avatar(account.address(), design::account_color(index)),
+                leading: Leading::Dot(design::account_color(index)),
                 badge: 0,
                 expandable: !all.is_empty(),
                 source: None,
-                secondary: false,
                 tooltip: Some(account.id.clone()),
             });
             if !expanded {
@@ -223,7 +278,6 @@ impl MailApp {
                 badge: 0,
                 expandable: true,
                 source: None,
-                secondary: false,
                 tooltip: None,
             });
             if folders_open {
@@ -234,7 +288,6 @@ impl MailApp {
     }
 
     fn sidebar_row(&self, node: Node, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let is_section = node.key.starts_with("section:");
         let selected = node.source.as_ref().is_some_and(|pick| match pick {
             Pick::Mail(source) => self.chat_view.is_none() && self.source == *source && self.query.is_none(),
             Pick::Chat(account) => self.chat_view.as_ref() == Some(account),
@@ -244,90 +297,45 @@ impl MailApp {
         let toggle_key = node.key.clone();
         let source = node.source.clone();
 
-        let disclosure = node.expandable.then(|| {
-            div()
-                .id(ElementId::Name(format!("disclose:{}", node.key).into()))
-                .flex_shrink_0()
-                .size(px(icon_size::SMALL))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(radius::SMALL))
-                .hover(|s| s.bg(p.hover))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    this.toggle_expanded(&toggle_key, cx);
-                }))
-                .child(icon(Icon::Disclosure, icon_size::SMALL, p.muted).with_transformation(Transformation::rotate(
-                    radians(if expanded { std::f32::consts::FRAC_PI_2 } else { 0. }),
-                )))
-        });
-
-        if is_section {
-            // A group row: small caps, folds the accounts.
-            return div()
+        if node.key.starts_with("section:") {
+            // A group's title; it folds the accounts.
+            return group_title(node.title, p)
                 .id(ElementId::Name(key.clone()))
-                .group("section")
-                .mt(px(14.))
-                .h(px(layout::SIDEBAR_ROW))
-                .px(px(8.))
-                .flex()
-                .items_center()
-                .text_size(px(text::CAPTION))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(p.muted)
+                .mx(px(-space::S10))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_expanded(&key, cx)))
-                .child(div().flex_1().child(node.title))
-                .child(
-                    div()
-                        .invisible()
-                        .group_hover("section", |s| s.visible())
-                        .text_color(p.faint)
-                        .child(if expanded { "Hide" } else { "Show" }),
-                )
                 .into_any_element();
         }
 
         let leading: AnyElement = match node.leading {
-            Leading::Icon(glyph) => {
-                icon(glyph, icon_size::SMALL, if selected { p.accent } else { p.muted }).into_any_element()
-            }
+            Leading::Icon(glyph) => icon(glyph, icon_size::TOOLBAR, p.accent).into_any_element(),
             Leading::Dot(color) => div()
                 .flex_shrink_0()
-                .size(px(icon_size::SMALL))
+                .w(px(icon_size::TOOLBAR))
                 .flex()
-                .items_center()
                 .justify_center()
-                .child(div().size(px(8.)).rounded_full().bg(color))
-                .into_any_element(),
-            Leading::Avatar(address, color) => div()
-                .flex_shrink_0()
-                .size(px(icon_size::SMALL + 2.))
-                .rounded_full()
-                .bg(color)
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(text::MICRO))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(p.on_accent)
-                .child(address.initial())
+                .child(mark_dot(color))
                 .into_any_element(),
         };
+        let disclosure = node.expandable.then(|| {
+            div()
+                .id(ElementId::Name(format!("disclose:{}", node.key).into()))
+                .flex_shrink_0()
+                .w(px(22.))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.toggle_expanded(&toggle_key, cx);
+                }))
+                .child(icon(Icon::Disclosure, 13., p.muted).with_transformation(Transformation::rotate(radians(
+                    if expanded { std::f32::consts::FRAC_PI_2 } else { 0. },
+                ))))
+        });
 
-        div()
-            .id(ElementId::Name(node.key.clone()))
-            .h(px(layout::SIDEBAR_ROW))
-            .pl(px(4. + node.depth as f32 * layout::SIDEBAR_INDENT))
-            .pr(px(8.))
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .rounded(px(radius::CONTROL))
-            .cursor_pointer()
-            .when(selected, |d| d.bg(p.selection).font_weight(FontWeight::MEDIUM))
-            .when(!selected, |d| d.hover(|s| s.bg(p.hover)))
+        destination(node.key.clone(), node.depth, selected, p)
             .when_some(node.tooltip, |d, tip| {
                 d.tooltip(move |_, cx| cx.new(|_| Tooltip { text: tip.clone(), p }).into())
             })
@@ -337,27 +345,118 @@ impl MailApp {
                 // Rows that show nothing themselves fold, as clicking them does natively.
                 None => this.toggle_expanded(&key, cx),
             }))
-            // The disclosure triangle, or room for one so titles line up.
-            .child(match disclosure {
-                Some(disclosure) => disclosure.into_any_element(),
-                None => div().flex_shrink_0().w(px(icon_size::SMALL)).into_any_element(),
-            })
             .child(leading)
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .when(node.secondary, |d| d.text_color(p.muted))
+                    .when(selected, |d| d.font_weight(FontWeight::SEMIBOLD))
                     .child(node.title),
             )
             .when(node.badge > 0, |d| {
-                d.child(
-                    div().flex_shrink_0().text_size(px(text::CAPTION)).text_color(p.muted).child(node.badge.to_string()),
-                )
+                d.child(div().flex_shrink_0().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(count(node.badge)))
             })
+            .children(disclosure)
             .into_any_element()
     }
+}
+
+/// A sidebar row: the glyph and the name, the count at its end, a rounded gray highlight when
+/// selected, the wash under the pointer; `depth` steps it in.
+fn destination(key: SharedString, depth: usize, selected: bool, p: &'static Palette) -> Stateful<Div> {
+    div()
+        .id(ElementId::Name(key))
+        .h(px(layout::SIDEBAR_ROW))
+        .mb(px(1.))
+        .ml(px(depth as f32 * layout::SIDEBAR_INDENT))
+        .pl(px(space::S8))
+        .pr(px(space::S6))
+        .flex()
+        .items_center()
+        .gap(px(space::S8))
+        .rounded(px(radius::CONTROL))
+        .cursor_pointer()
+        .when(selected, |d| d.bg(p.selection))
+        .when(!selected, |d| d.hover(|s| s.bg(p.hover)).active(|s| s.bg(p.pressed)))
+}
+
+/// A sidebar group's title: small, bold, secondary, as the Mac's sidebars head their groups.
+fn group_title(title: impl Into<SharedString>, p: &Palette) -> Div {
+    div()
+        .flex_shrink_0()
+        .pt(px(14.))
+        .pb(px(space::S4))
+        .pl(px(space::S20))
+        .text_size(px(text::CAPTION))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(p.muted)
+        .child(title.into())
+}
+
+/// A rail destination: the glyph on a rounded highlight when selected, its name below.
+fn rail_item(id: &'static str, glyph: Icon, label: &'static str, count: u32, selected: bool, p: &'static Palette) -> Stateful<Div> {
+    div()
+        .id(id)
+        .group("rail-item")
+        .mb(px(space::S6))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(3.))
+        .cursor_pointer()
+        .child(
+            div()
+                .relative()
+                .w(px(48.))
+                .h(px(30.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::CONTROL))
+                .when(selected, |d| d.bg(p.selection))
+                .when(!selected, |d| d.group_hover("rail-item", |s| s.bg(p.hover)))
+                .child(icon(glyph, 19., if selected { p.accent } else { p.muted }))
+                .when(count > 0, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .top(px(-2.))
+                            .right(px(2.))
+                            .h(px(15.))
+                            .min_w(px(15.))
+                            .px(px(4.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(p.capsule)
+                            .border(px(stroke::HAIRLINE))
+                            .border_color(p.capsule_rim)
+                            .text_size(px(text::TAG))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.muted)
+                            .child(count_label(count)),
+                    )
+                }),
+        )
+        .child(div().text_size(px(text::CAPTION)).text_color(if selected { p.text } else { p.muted }).child(label))
+}
+
+/// A count as the sidebar shows it: thousands shortened.
+fn count(n: u32) -> String {
+    if n >= 10_000 {
+        format!("{}k", n / 1000)
+    } else if n >= 1000 {
+        format!("{:.1}k", f64::from(n) / 1000.)
+    } else {
+        n.to_string()
+    }
+}
+
+/// A rail badge's count: past 99 it says so.
+fn count_label(n: u32) -> String {
+    if n > 99 { "99+".into() } else { n.to_string() }
 }
 
 fn mailbox_source(account: &Account, mailbox: &Mailbox) -> Source {
@@ -379,7 +478,6 @@ fn mailbox_node(account: &Account, mailbox: &Mailbox, depth: usize) -> Node {
         badge: mailbox.badge(),
         expandable: false,
         source: Some(Pick::Mail(source)),
-        secondary: false,
         tooltip: None,
     }
 }
