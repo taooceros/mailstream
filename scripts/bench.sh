@@ -18,8 +18,8 @@
 #   frame times. Logs go to BENCH_DIR (/tmp/mailstream-bench).
 #   BENCH_HOME=<dir> runs the front end on the throwaway home in <dir> (HOME and
 #   CFFIXED_USER_HOME, and a sign-ins Keychain item of its own) instead of your data; fill it
-#   with the engine benchmark's mail: (cd FFI && cargo run --release --target-dir target/bench
-#   --features swift-engine --example bench -- --seed <dir>).
+#   with the engine benchmark's mail: cargo run --release -p mailstream --target-dir target/bench
+#   --features swift-engine --example bench -- --seed <dir>.
 set -eu
 cd "$(dirname "$0")/.."
 FRONTEND=${1:-}
@@ -30,7 +30,7 @@ DIR=${BENCH_DIR:-/tmp/mailstream-bench}
 SCENARIO=${BENCH_SCENARIO:-scroll}
 case $FRONTEND in
   flutter) BINARY="Flutter/build/macos/Build/Products/Release/Mailstream Flutter.app/Contents/MacOS/Mailstream Flutter" ;;
-  gpui) BINARY=GPUI/target/release/mailstream-gpui ;;
+  gpui) BINARY=target/release/mailstream-gpui ;;
   *)
     echo "usage: scripts/bench.sh flutter|gpui [RUNS]" >&2
     exit 2

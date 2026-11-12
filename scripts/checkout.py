@@ -23,9 +23,9 @@ directory listing with the sizes files had when the directory was opened, and th
 over newer writes, so a file just written reads as empty or cut short for a second
 (https://github.com/stencil-hq/ovnfs/issues/48). Every rustc lists `target/*/deps` as it starts
 while others write objects there, and cargo builds in the mount fail ("failed to map object file:
-memory map must have a non-zero length"). unmount_targets() below gives each crate (`*/Cargo.toml`)
-a target folder in ~/.cache/mailstream-checkouts/NAME, starting as a reflink copy of the default
-checkout's warm build (btrfs: no copying, no extra disk), and makes the checkout's `<crate>/target`
+memory map must have a non-zero length"). unmount_target() below gives the cargo workspace (MS-279)
+its target folder in ~/.cache/mailstream-checkouts/NAME/target, starting as a reflink copy of the
+default checkout's warm build (btrfs: no copying, no extra disk), and makes the checkout's `target`
 a symlink to it; `rm` deletes it.
 
 Every checkout shares the default checkout's jj repository (MS-179): commits, bookmarks, the
@@ -49,7 +49,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 from repo import ROOT, default_checkout, jj, ovnfs, run  # noqa: E402
 
-BUILD = ["FFI/target", "Engine/target", ".turso"]
+BUILD = ["target", ".turso"]
 TARGETS = Path.home() / ".cache/mailstream-checkouts"
 
 
@@ -125,24 +125,22 @@ def main():
         raise
 
 
-def unmount_targets(source, path, name):
-    """Linux: replaces each crate's target folder in the checkout with a symlink to one outside the
-    FUSE mount, started from the default checkout's warm build (header). Folders a checkout of the
-    same name left behind without `rm` are deleted first: the ovnfs name was free."""
+def unmount_target(source, path, name):
+    """Linux: replaces the workspace's target folder in the checkout with a symlink to one outside
+    the FUSE mount, started from the default checkout's warm build (header). Folders a checkout of
+    the same name left behind without `rm` are deleted first: the ovnfs name was free."""
     outside = TARGETS / name
     shutil.rmtree(outside, ignore_errors=True)
-    for manifest in sorted(path.glob("*/Cargo.toml")):
-        crate = manifest.parent.name
-        target = outside / crate / "target"
-        target.parent.mkdir(parents=True)
-        warm = source / crate / "target"
-        if warm.is_dir():
-            run("cp", "-a", "--reflink=auto", str(warm), str(target))
-        else:
-            target.mkdir()
-        inside = manifest.parent / "target"
-        shutil.rmtree(inside, ignore_errors=True)
-        inside.symlink_to(target, target_is_directory=True)
+    outside.mkdir(parents=True)
+    target = outside / "target"
+    warm = source / "target"
+    if warm.is_dir():
+        run("cp", "-a", "--reflink=auto", str(warm), str(target))
+    else:
+        target.mkdir()
+    inside = path / "target"
+    shutil.rmtree(inside, ignore_errors=True)
+    inside.symlink_to(target, target_is_directory=True)
 
 
 def set_up(source, path, name):
@@ -156,7 +154,7 @@ def set_up(source, path, name):
     jj("new", "main", cwd=path)
     if sys.platform == "linux":
         # After `jj new main`, whose .gitignore also ignores the symlinks.
-        unmount_targets(source, path, name)
+        unmount_target(source, path, name)
     print(path, "at main", jj("log", "--no-graph", "-r", "main",
                               "-T", 'commit_id.short() ++ " " ++ description.first_line()', cwd=path))
 

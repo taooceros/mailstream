@@ -1,7 +1,3 @@
-[workspace]
-members = [".", "bindgen"]
-resolver = "3"
-
 [package]
 name = "mailstream"
 version = "0.1.0"

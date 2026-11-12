@@ -16,9 +16,10 @@ Each folder keeps its config.json (OAuth clients; the engine reads it beside the
 AppIcon.png, gets the built commit in `revision`, and a `nix-env` profile holding the devenv shell
 the build used, so a nix garbage collection keeps the libraries the binaries load.
 
-Builds run in `devenv shell`. Cargo can't build inside the ovnfs mount (MS-201), so GPUI/target,
-FFI/target and Flutter/build become symlinks to ~/.cache/mailstream-checkouts/<checkout>/ (where
-scripts/checkout.py puts them; `checkout.py rm` deletes them) unless they are symlinks already.
+Builds run in `devenv shell`. Cargo can't build inside the ovnfs mount (MS-201), so the cargo
+workspace's `target` (MS-279) and Flutter/build become symlinks to
+~/.cache/mailstream-checkouts/<checkout>/ (where scripts/checkout.py puts them; `checkout.py rm`
+deletes them) unless they are symlinks already.
 The running installed copy is stopped (SIGTERM, never forced) and the folder swapped; the previous
 one stays in ~/.cache/mailstream-install/previous-<folder> until the next install. Then check each
 install: `revision` equals main, and the binary stays up 30 s in a scripts/vhypr.py desktop
@@ -39,9 +40,9 @@ OUTSIDE = HOME / ".cache/mailstream-checkouts" / ROOT.name
 LOCK = Path("/tmp/mailstream-release-install.lock")
 FRONTENDS = {
     "gpui": {"folder": OPT / "mailstream-gpui", "executable": "mailstream-gpui",
-             "outside": ["GPUI/target"], "icon": "GPUI/assets/AppIcon.png"},
+             "outside": ["target"], "icon": "GPUI/assets/AppIcon.png"},
     "flutter": {"folder": OPT / "mailstream", "executable": "mailstream_ui",
-                "outside": ["FFI/target", "Flutter/build"], "icon": "Resources/AppIcon.png"},
+                "outside": ["target", "Flutter/build"], "icon": "Resources/AppIcon.png"},
 }
 DESKTOP = HOME / ".local/share/applications/dev.mailstream.MailstreamGPUI.desktop"
 
@@ -82,10 +83,10 @@ def build(frontend):
     """Builds `frontend` in devenv shell; returns the folder to install."""
     if frontend == "gpui":
         devenv("cd GPUI && cargo build --release")
-        staged = Path(os.path.realpath(ROOT / "GPUI/target")) / "release/mailstream-gpui-install"
+        staged = Path(os.path.realpath(ROOT / "target")) / "release/mailstream-gpui-install"
         shutil.rmtree(staged, ignore_errors=True)
         staged.mkdir()
-        shutil.copy2(ROOT / "GPUI/target/release/mailstream-gpui", staged / "mailstream-gpui")
+        shutil.copy2(ROOT / "target/release/mailstream-gpui", staged / "mailstream-gpui")
         return staged
     devenv('CONFIG=release DART_OUT="$PWD/Flutter/packages/mailstream/lib/src" python3 scripts/ffi.py'
            " && cd Flutter && flutter pub get && flutter build linux --release")

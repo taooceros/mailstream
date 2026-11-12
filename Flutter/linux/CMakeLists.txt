@@ -114,7 +114,7 @@ install(DIRECTORY "${NATIVE_ASSETS_DIR}"
 
 # The mailstream command line (scripts/ffi.py builds it), beside the app as in
 # the Mac's Contents/MacOS; it starts this executable when no front end runs.
-install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/../../FFI/target/release/mailstream"
+install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/../../target/release/mailstream"
   DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
 
 # Fully re-copy the assets directory on each build to avoid having stale files

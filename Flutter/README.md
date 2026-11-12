@@ -11,8 +11,8 @@ every command answers with, the ones GPUI uses: `Conversation`, `Message`, `Addr
 `bindings.dart` exports together; `package:mailstream` exports it. The UI uses those types as they
 come (MS-238): `lib/backend/models.dart` only adds what the window needs on top of them.
 The app also carries the `mailstream` command line in `Contents/MacOS` (the Xcode build copies
-`FFI/target/release/mailstream`, which `ffi.py` builds); it starts this app when no front end runs.
-Beside it is `mailstream-apple-tagger` (`FFI/target/release/`, also built by `ffi.py`), which
+`target/release/mailstream`, which `ffi.py` builds); it starts this app when no front end runs.
+Beside it is `mailstream-apple-tagger` (`target/release/`, also built by `ffi.py`), which
 the engine runs to tag with Apple Intelligence when `aiTagging.backend` is `apple`.
 The UI lists accounts, mailboxes and conversations, reads previews, sender avatars and
 messages (with their HTML), searches, marks, archives, trashes, tags, replies and sends new mail through it,
@@ -45,7 +45,7 @@ in the Keychain. The build is arm64 only. The app is not sandboxed.
 `windows/` is the Windows x64 runner. The same Dart UI runs there; `lib/platform.dart` (`Host`)
 holds every place the two desktops differ, and the Mac's behavior is unchanged. The engine is
 the same Rust one, as `mailstream.dll` beside the executable (the build hook bundles
-`FFI/target/release/mailstream.dll`; its Windows specifics are in the root README's FFI section).
+`target/release/mailstream.dll`; its Windows specifics are in the root README's FFI section).
 The built-in OAuth clients and push settings come from a `config.json` placed beside
 `mailstream_ui.exe` (nothing commits or writes one); without it the app has neither, as an
 unconfigured Mac build. Build on Windows with Rust (MSVC), Flutter and Visual Studio 2022's
@@ -449,7 +449,7 @@ for no preparation and a prefetched conversation only loads its messages.
 its fold, its links and the height protocol (owner parameters, the pull, late older heights,
 views gone before they answer), and the Blitz body's fold; `test/reader_renderer_test.dart` the
 renderer switch and the Windows page's doctype; the rules themselves are tested in the engine
-(`cd FFI && cargo test --release -p mailstream --lib mail_html html_page`). `flutter build macos
+(`cargo test --release -p mailstream --lib mail_html html_page`). `flutter build macos
 --release -t test/html_open_app.dart`, launched with `MAILSTREAM_HTML_OPEN_OUT=/tmp/open.json`
 and `MAILSTREAM_READER_RENDERER=blitz` or `webKit`, times how long a body takes to open (mount to
 first reported height) for four synthetic mails (4, 22, 65 and 300 KB) one at a time and all at

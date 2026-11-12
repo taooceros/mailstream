@@ -73,9 +73,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            GPUI/target
-          key: gpui-cargo-${{ runner.os }}-${{ hashFiles('GPUI/Cargo.lock', 'FFI/Cargo.toml', 'Engine/Cargo.toml') }}
-          restore-keys: gpui-cargo-${{ runner.os }}-
+            target
+          key: gpui-cargo-workspace-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'GPUI/Cargo.toml', 'FFI/Cargo.toml', 'Engine/Cargo.toml') }}
+          restore-keys: gpui-cargo-workspace-${{ runner.os }}-
 
       - name: GPUI (release)
         run: cd GPUI && cargo build --release
@@ -114,9 +114,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            FFI/target
-          key: ffi-cargo-${{ runner.os }}-${{ hashFiles('FFI/Cargo.lock', 'FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml', 'Engine/Cargo.toml') }}
-          restore-keys: ffi-cargo-${{ runner.os }}-
+            target
+          key: ffi-cargo-workspace-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml', 'Engine/Cargo.toml') }}
+          restore-keys: ffi-cargo-workspace-${{ runner.os }}-
 
       - name: Engine, command line and Dart bindings (release)
         run: CONFIG=release DART_OUT=$PWD/Flutter/packages/mailstream/lib/src python3 scripts/ffi.py

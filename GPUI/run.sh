@@ -10,7 +10,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 CONFIG=${CONFIG:-debug}
-TARGET=${CARGO_TARGET_DIR:-GPUI/target}
+TARGET=${CARGO_TARGET_DIR:-target}
 
 if [ "$CONFIG" = release ]; then
   (cd GPUI && ../scripts/capped cargo build --release)

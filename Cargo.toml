@@ -1,0 +1,31 @@
+# Every Rust crate in the repo is one cargo workspace with one Cargo.lock and one `target/` here
+# (MS-279): a library the engine, FFI and GPUI share compiles once per configuration, and the
+# warm build (scripts/warm-build.py) covers every member without naming it. New crates go in
+# `members`.
+[workspace]
+members = ["Engine", "FFI", "FFI/bindgen", "GPUI"]
+# Not members: GPUI's patched copies of crates.io crates ([patch.crates-io] below), and Flutter's
+# Linux runner, which only Flutter's CMake build compiles, with a target folder of its own in
+# Flutter/build (Flutter/linux/runner/CMakeLists.txt).
+exclude = ["GPUI/vendor", "Flutter/linux/runner"]
+resolver = "3"
+
+# Stylo (Blitz's CSS engine) 0.22's derives leave an error type to inference that GPUI's build
+# makes ambiguous; `GPUI/vendor/stylo_derive` is 0.22.0 with that one type spelled out (`to_css.rs`).
+# `GPUI/vendor/gpui-fast-linux` is GPUI Fast's Linux platform 0.1.14 with smooth wheel steps and
+# kinetic touchpad scrolling on Wayland (MS-208, `src/linux/wayland/scroll_motion.rs` and its use in
+# `client.rs`, marked "Mailstream patch").
+# `GPUI/vendor/gpui-fast-wgpu` is GPUI Fast's wgpu renderer and Linux text system 0.1.14 drawing a
+# variable font at the weight cosmic-text shaped it at rather than at its default instance, which for
+# Noto Sans CJK (the CJK fallback) is Thin (MS-230), and loading a variable face matched for another
+# weight at the requested one, so Noto Sans's single file draws bold as bold (MS-205; both in
+# `src/cosmic_text_system.rs`, marked "Mailstream patch").
+[patch.crates-io]
+stylo_derive = { path = "GPUI/vendor/stylo_derive" }
+gpui-fast-linux = { path = "GPUI/vendor/gpui-fast-linux" }
+gpui-fast-wgpu = { path = "GPUI/vendor/gpui-fast-wgpu" }
+
+# Debug builds with optimized dependencies, as GPUI had them on its own; one profile for every
+# member, so a debug build of GPUI and the engine's tests share their dependencies.
+[profile.dev.package."*"]
+opt-level = 2

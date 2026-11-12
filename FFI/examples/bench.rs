@@ -6,7 +6,7 @@
 //!
 //! ```sh
 //! ./scripts/turso.sh && swift build -c release --product MailstreamKit
-//! cd FFI && MAILSTREAM_KIT_CONFIG=release cargo run --release --target-dir target/bench --features swift-engine --example bench -- [options]
+//! MAILSTREAM_KIT_CONFIG=release cargo run --release -p mailstream --target-dir target/bench --features swift-engine --example bench -- [options]
 //! ```
 //!
 //! Its own target folder keeps the feature out of `target/release/libmailstream.dylib`, which

@@ -7,7 +7,7 @@ Every tracked file gets the macOS ACL entry `everyone deny write,append,delete` 
 holding one (the root included) `everyone deny add_file,add_subdirectory,delete_child,delete`, so
 editing, creating, deleting or renaming anything there fails with "Permission denied", whatever
 tool does it. Reads, `jj st`/`jj log`/`jj git fetch` and `ovnfs new` still work, and the ignored
-build folders (`FFI/target`, `Engine/target`, `.turso/`) stay writable inside, though they can't
+build folders (`target/`, `.turso/`) stay writable inside, though they can't
 be deleted or renamed as a whole. An ACL, unlike `chmod a-w`, doesn't reach ovnfs checkouts: a
 checkout copies the source's file modes, so read-only files there would drop writes.
 

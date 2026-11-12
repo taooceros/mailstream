@@ -65,7 +65,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 LINUX = platform.system() == "Linux"
 # The shots build, copied aside so a later default build in the same target can't stand in for it.
-BINARY = "GPUI/target/release/mailstream-gpui-shots"
+BINARY = "target/release/mailstream-gpui-shots"
 
 
 def fail(message):
@@ -73,14 +73,15 @@ def fail(message):
 
 
 def target_outside():
-    """Linux: GPUI/target as a symlink outside the ovnfs mount (MS-201), seeded from the newest
-    other checkout's build so a first build doesn't start cold."""
-    inside = ROOT / "GPUI/target"
+    """Linux: the workspace's target as a symlink outside the ovnfs mount (MS-201) when the
+    checkout has none yet, seeded from the newest other checkout's build so a first build doesn't
+    start cold."""
+    inside = ROOT / "target"
     if inside.is_symlink() or inside.exists():
         return
-    outside = Path.home() / ".cache/mailstream-checkouts" / ROOT.name / "GPUI/target"
+    outside = Path.home() / ".cache/mailstream-checkouts" / ROOT.name / "target"
     if not outside.exists():
-        others = [path for path in (Path.home() / ".cache/mailstream-checkouts").glob("*/GPUI/target")
+        others = [path for path in (Path.home() / ".cache/mailstream-checkouts").glob("*/target")
                   if (path / "release").is_dir() and path != outside]
         outside.parent.mkdir(parents=True, exist_ok=True)
         if others:
@@ -164,7 +165,7 @@ def main():
         # Under the machine's compile limit (scripts/capped: Linux's capped slice, MS-268; the
         # Mac's compile budget, MS-260).
         commands.append("(cd GPUI && ../scripts/capped cargo build --release --features shots)")
-        commands.append(f"cp GPUI/target/release/mailstream-gpui {BINARY}")
+        commands.append(f"cp target/release/mailstream-gpui {BINARY}")
     elif not (ROOT / BINARY).exists():
         fail(f"no {BINARY} yet: run it once without --no-build")
     appearances = [args.only] if args.only else ["light", "dark"]

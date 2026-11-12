@@ -7,7 +7,7 @@ import 'package:hooks/hooks.dart';
 /// (asset `package:mailstream/uniffi:mailstream`). `scripts/ffi.py` at the repository root builds
 /// it, and the release build is used: on macOS `libmailstream.dylib` for this Mac's architecture
 /// (arm64) only, on Windows (x64) `mailstream.dll`, on Linux (x64, arm64) `libmailstream.so` for
-/// the host's architecture (`cd FFI && cargo build --release -p mailstream`).
+/// the host's architecture (`cargo build --release -p mailstream`).
 void main(List<String> args) async {
   await build(args, (input, output) async {
     if (!input.config.buildCodeAssets) return;
@@ -15,11 +15,11 @@ void main(List<String> args) async {
     final root = input.packageRoot.resolve('../../../');
     final Uri library;
     if (code.targetOS == OS.macOS && code.targetArchitecture == Architecture.arm64) {
-      library = root.resolve('FFI/target/release/libmailstream.dylib');
+      library = root.resolve('target/release/libmailstream.dylib');
     } else if (code.targetOS == OS.windows && code.targetArchitecture == Architecture.x64) {
-      library = root.resolve('FFI/target/release/mailstream.dll');
+      library = root.resolve('target/release/mailstream.dll');
     } else if (code.targetOS == OS.linux && const [Architecture.x64, Architecture.arm64].contains(code.targetArchitecture)) {
-      library = root.resolve('FFI/target/release/libmailstream.so');
+      library = root.resolve('target/release/libmailstream.so');
     } else {
       return;
     }

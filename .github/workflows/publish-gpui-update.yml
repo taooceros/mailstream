@@ -11,6 +11,8 @@ on:
       - GPUI/**
       - Engine/**
       - FFI/**
+      - Cargo.toml
+      - Cargo.lock
       - scripts/gpui-bundle.sh
       - scripts/apple-tagger.py
       - scripts/sign.sh
@@ -70,9 +72,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            GPUI/target
-          key: gpui-cargo-${{ runner.os }}-${{ hashFiles('GPUI/Cargo.lock', 'FFI/Cargo.toml', 'Engine/Cargo.toml') }}
-          restore-keys: gpui-cargo-${{ runner.os }}-
+            target
+          key: gpui-cargo-workspace-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'GPUI/Cargo.toml', 'FFI/Cargo.toml', 'Engine/Cargo.toml') }}
+          restore-keys: gpui-cargo-workspace-${{ runner.os }}-
       - name: Choose build number
         env:
           GH_TOKEN: ${{ github.token }}

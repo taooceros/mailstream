@@ -239,7 +239,7 @@ it is handed over; it is not moved mid-way.
 
 ## Building
 
-- Rust builds (`Engine/`, `FFI/`, `GPUI/`, Turso) run plain rustc: the repo's
+- Rust builds (the workspace's crates, Turso) run plain rustc: the repo's
   `.cargo/config.toml` sets `RCACHE_DISABLE=1`, so the rcache wrapper in `~/.cargo/config.toml`
   (it handed out corrupt artifacts in ovnfs checkouts, MS-131) passes rustc through untouched.
   Don't set `RUSTC_WRAPPER` or `build.rustc-wrapper`: on the Mac the compile budget below is the
@@ -260,19 +260,26 @@ it is handed over; it is not moved mid-way.
     slots and passes `-j 4` on. Builds queue rather than fail, so a slow build may just be
     waiting: `python3 scripts/build-budget.py status` shows who holds what. Don't pass cargo a
     `-j` or add a build lock of your own.
-- The default checkout keeps a warm build of `main` (`FFI/target` release, `Engine/target`
-  debug for the engine's tests, `.turso/`) that every new checkout starts from and keeps (MS-151,
-  MS-152, MS-159): a checkout's first release `ffi.py` rebuilds only the repo's 2 crates (~30 s)
-  instead of 460 (~3–4 min). On the Mac it also keeps `GPUI/target` warm in every configuration agents
-  build (release, release with `shots`, debug, `cargo test --no-run`; MS-273), so a checkout's
-  first GPUI build recompiles only the repo's crates instead of ~670 (cold: ~6 min of cargo time
-  plus the wait for the build slot). `ffi.py` builds the library and the command line in one cargo run
-  into `FFI/target` and drops `SDKROOT`/`CPATH`-style variables: C build scripts rebuild
-  everything above them when those differ from the warm build's. Run release engine builds
-  through `ffi.py`, not a second cargo in `Engine/` (that compiles the engine and its
-  dependencies again). Never delete the default checkout's build folders. Only `python3
-  scripts/warm-build.py` builds there: it fetches `main`, moves the default checkout's empty
-  change onto it (unlocking its source for the run) and builds.
+- Every Rust crate is a member of one cargo workspace (the root `Cargo.toml`: `Engine`, `FFI`,
+  `FFI/bindgen`, `GPUI`; MS-279) with one `Cargo.lock` and one `target/` at the root. A new crate
+  goes in its `members`; cargo works as before from a member's folder or with `-p` from the root,
+  and builds land in the root `target/` (`target/release/mailstream-gpui`,
+  `target/release/libmailstream.dylib`). Flutter's Linux runner (`Flutter/linux/runner`) stays
+  outside it: only Flutter's CMake build compiles it.
+- The default checkout keeps a warm `target/` of `main` (and `.turso/`) that every new checkout
+  starts from and keeps (MS-151, MS-152, MS-159), so a checkout's first build of any
+  configuration below recompiles only the repo's own crates. `warm-build.py` builds `ffi.py`'s
+  release, and on the Mac every member's tests (`cargo test -p MEMBER --no-run`, found from the
+  workspace, so a new crate is covered) and GPUI in release, release with `shots` and debug
+  (MS-273); on Linux the engine's tests. Cargo builds a dependency once per set of features the
+  build asks of it, so these configurations share what they can. The FFI crate's `cdylib` has no
+  hash in its name, so building another configuration that includes it (ffi.py after a GPUI
+  build, or GPUI release after `shots`) recompiles it and what depends on it (~30 s). `ffi.py`
+  builds the library and the command line in one cargo run and drops `SDKROOT`/`CPATH`-style
+  variables: C build scripts rebuild everything above them when those differ from the warm
+  build's. Run release engine builds through `ffi.py`. Never delete the default checkout's build
+  folders. Only `python3 scripts/warm-build.py` builds there: it fetches `main`, moves the default
+  checkout's empty change onto it (unlocking its source for the run) and builds.
 - Run anything that may take over a minute (a cold cargo build, `ffi.py`, `install.sh`, `flutter
   build`, a Swift release build, `bench.sh`) as one blocking eval cell, not `bash`: Python
   `subprocess.run(…, capture_output=True, text=True)` with the cell's `timeout` set (up to 3600),

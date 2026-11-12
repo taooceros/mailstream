@@ -34,10 +34,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            Engine/target
-            FFI/target
-          key: windows-cargo-${{ hashFiles('Engine/Cargo.lock', 'Engine/Cargo.toml', 'FFI/Cargo.lock', 'FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml') }}
-          restore-keys: windows-cargo-
+            target
+          key: windows-cargo-workspace-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'Engine/Cargo.toml', 'FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml') }}
+          restore-keys: windows-cargo-workspace-
 
       - name: Toolchain
         run: rustup default stable && cargo --version
@@ -48,15 +47,15 @@ jobs:
       # Also after failed tests, so one run shows every step that fails.
       - name: UniFFI crate (mailstream.dll) and the smoke test
         if: ${{ !cancelled() }}
-        run: cd FFI && cargo build --release -p mailstream --lib --example smoke
+        run: cargo build --release -p mailstream --lib --example smoke
 
       - name: Smoke test
         if: ${{ !cancelled() }}
-        run: FFI/target/release/examples/smoke.exe
+        run: target/release/examples/smoke.exe
 
       - name: Dart bindings
         if: ${{ !cancelled() }}
-        run: cd FFI && cargo run -q -p mailstream-bindgen -- target/release/mailstream.dll --out-dir ../Flutter/packages/mailstream/lib/src
+        run: cargo run -q -p mailstream-bindgen -- target/release/mailstream.dll --out-dir Flutter/packages/mailstream/lib/src
 
       - uses: subosito/flutter-action@v2
         if: ${{ !cancelled() }}

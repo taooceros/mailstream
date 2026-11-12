@@ -1,5 +1,5 @@
 #!/bin/sh
-# Bundles GPUI/target/release/mailstream-gpui (build it first: cd GPUI && cargo build --release)
+# Bundles target/release/mailstream-gpui (build it first: cd GPUI && cargo build --release)
 # as an unsigned "Mailstream GPUI.app" for scripts/install.sh, the nightly and the signed
 # updates CI publishes (MS-219): the Apple Intelligence tagger, Sparkle in Frameworks
 # (the pinned version scripts/sparkle.sh fetches once into build/) and an Info.plist naming the
@@ -21,7 +21,7 @@ sparkle=$(./scripts/sparkle.sh)
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources"
-cp GPUI/target/release/mailstream-gpui "$app/Contents/MacOS/"
+cp target/release/mailstream-gpui "$app/Contents/MacOS/"
 python3 scripts/apple-tagger.py "$app/Contents/MacOS/mailstream-apple-tagger"
 ditto "$sparkle/Sparkle.framework" "$app/Contents/Frameworks/Sparkle.framework"
 # The app's own icon (MS-245) for Finder, Launchpad and Sparkle's update window; main.rs sets

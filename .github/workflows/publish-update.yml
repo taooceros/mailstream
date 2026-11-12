@@ -11,6 +11,8 @@ on:
       - Flutter/**
       - Engine/**
       - FFI/**
+      - Cargo.toml
+      - Cargo.lock
       - scripts/ffi.py
       - scripts/sign.sh
       - scripts/release-sign.sh

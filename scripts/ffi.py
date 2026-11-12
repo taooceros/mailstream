@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Builds the engine for FFI front ends: the UniFFI crate in FFI/ with the Rust engine in Engine/
 (libmailstream.dylib on macOS, mailstream.dll on Windows, libmailstream.so on Linux), the
-mailstream command line (FFI/target/<config>/mailstream, which the Flutter app bundles on macOS
-and Linux), on macOS the Apple Intelligence tagger (FFI/target/<config>/mailstream-apple-tagger,
+mailstream command line (target/<config>/mailstream, which the Flutter app bundles on macOS
+and Linux), on macOS the Apple Intelligence tagger (target/<config>/mailstream-apple-tagger,
 bundled beside it) and, with DART_OUT=<dir>, the Dart bindings into <dir>.
 CONFIG=debug|release (default: debug).
 
-The library and the command line come from one cargo run in FFI/'s workspace, so the engine and
-its dependencies compile once into FFI/target (a second run in Engine/ compiled them all again
-into Engine/target: ~3 min more from cold and every engine edit built twice, MS-159).
+The library and the command line come from one cargo run in the repository's workspace (MS-279),
+into its one `target/`, where GPUI and the engine's tests find the same dependencies built.
 
 The Dart bindings are one file per crate (MS-238): `mailstream.dart` for the FFI crate's methods
 and `mailstream_engine.dart` for the engine's records (what commands answer), plus uniffi-dart's
@@ -32,20 +31,20 @@ PROFILE = ["--release"] if CONFIG == "release" else []
 ENV = build_env()
 
 
-def cargo(directory, *args):
-    subprocess.run(capped(["cargo", *args]), cwd=ROOT / directory, check=True, env=ENV)
+def cargo(*args):
+    subprocess.run(capped(["cargo", *args]), cwd=ROOT, check=True, env=ENV)
 
 
 def main():
-    cargo("FFI", "build", *PROFILE, "-p", "mailstream", "-p", "mailstream-engine", "--lib", "--bins")
-    print(f"Built FFI/target/{CONFIG}/{LIBRARY} and FFI/target/{CONFIG}/mailstream", flush=True)
+    cargo("build", *PROFILE, "-p", "mailstream", "-p", "mailstream-engine", "--lib", "--bins")
+    print(f"Built target/{CONFIG}/{LIBRARY} and target/{CONFIG}/mailstream", flush=True)
     if sys.platform == "darwin":
-        tagger = ROOT / f"FFI/target/{CONFIG}/mailstream-apple-tagger"
+        tagger = ROOT / f"target/{CONFIG}/mailstream-apple-tagger"
         subprocess.run([sys.executable, str(ROOT / "scripts/apple-tagger.py"), str(tagger)], check=True)
         print(f"Built {tagger.relative_to(ROOT)}", flush=True)
     if os.environ.get("DART_OUT"):
         out = Path(os.environ["DART_OUT"])
-        cargo("FFI", "run", "-q", "-p", "mailstream-bindgen", "--", f"target/{CONFIG}/{LIBRARY}",
+        cargo("run", "-q", "-p", "mailstream-bindgen", "--", f"target/{CONFIG}/{LIBRARY}",
               "--out-dir", str(out))
         write_exports(out)
 
