@@ -312,8 +312,15 @@ impl Thread {
     pub(crate) fn dress(&mut self) {
         let labels = DateLabels::now();
         self.conversation.dress(&labels);
-        for message in &mut self.messages {
+        let senders: Vec<String> =
+            self.messages.iter().map(|message| message.from.first().map(|from| address(from).normalized_email()).unwrap_or_default()).collect();
+        let dates: Vec<_> = self.messages.iter().map(|message| local(message.date.as_deref())).collect();
+        let entries: Vec<RunEntry<'_>> =
+            senders.iter().zip(&dates).map(|(sender, date)| RunEntry { sender, date: *date, opens_run: false }).collect();
+        let runs = display::chat_runs(&entries, &labels);
+        for (message, run) in self.messages.iter_mut().zip(runs) {
             message.dress(&labels);
+            message.divider = run.divider;
         }
     }
 }
@@ -350,16 +357,27 @@ impl ChatThread {
         for user in &mut self.members {
             user.dress();
         }
-        for message in &mut self.messages {
-            message.dress(&names);
+        let labels = DateLabels::now();
+        let dates: Vec<_> = self.messages.iter().map(|message| local(message.created.as_deref())).collect();
+        let entries: Vec<RunEntry<'_>> = self
+            .messages
+            .iter()
+            .zip(&dates)
+            .map(|(message, date)| RunEntry { sender: &message.sender.id, date: *date, opens_run: false })
+            .collect();
+        let runs = display::chat_runs(&entries, &labels);
+        for ((message, run), date) in self.messages.iter_mut().zip(runs).zip(dates) {
+            message.dress(&names, date.map(|date| display::time(&date)).unwrap_or_default(), run);
         }
     }
 }
 
 impl ChatMessage {
-    fn dress(&mut self, names: &HashMap<String, String>) {
+    fn dress(&mut self, names: &HashMap<String, String>, time: String, run: display::Run) {
         self.sender.dress();
         self.body = chat_markup::parse(&self.markup, &|id| names.get(id).cloned()).into_iter().map(block).collect();
+        self.time = time;
+        (self.divider, self.continued) = (run.divider, run.continued);
     }
 }
 

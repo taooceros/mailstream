@@ -167,16 +167,21 @@ pub struct Conversation {
     /// The subject as lists show it: leading `[list]` tags (empty when none) apart from the title,
     /// which drops reply and forward prefixes.
     #[serde(skip)]
+    #[uniffi(default = "")]
     pub tag: String,
     #[serde(skip)]
+    #[uniffi(default = "")]
     pub title: String,
     /// `date` as the list shows it, and its date group.
     #[serde(skip)]
+    #[uniffi(default = "")]
     pub when: String,
     #[serde(skip)]
+    #[uniffi(default = "")]
     pub section: String,
     /// The avatar of `from`, else of the first participant.
     #[serde(skip)]
+    #[uniffi(default)]
     pub avatar: Avatar,
 }
 
@@ -265,12 +270,20 @@ pub struct Message {
     pub invitation: Option<MeetingInvitation>,
     /// `date` as the reader shows it, and its time of day.
     #[serde(skip)]
+    #[uniffi(default = "")]
     pub when: String,
     #[serde(skip)]
+    #[uniffi(default = "")]
     pub time: String,
     /// The avatar of its sender.
     #[serde(skip)]
+    #[uniffi(default)]
     pub avatar: Avatar,
+    /// The day divider above it when its thread reads as a chat log ([`chat_runs`]): empty on the
+    /// day of the message before.
+    #[serde(skip)]
+    #[uniffi(default = "")]
+    pub divider: String,
 }
 
 /// A conversation with its messages and bodies.
@@ -499,6 +512,7 @@ pub struct ChatSpace {
     pub avatar_name: String,
     /// The row's avatar without a picture: a person's initial, or a space's.
     #[serde(skip)]
+    #[uniffi(default)]
     pub avatar: Avatar,
     /// The picture Google Chat publishes for them.
     pub avatar_url: Option<String>,
@@ -525,6 +539,7 @@ pub struct ChatUser {
     pub avatar_url: Option<String>,
     pub bot: bool,
     #[serde(skip)]
+    #[uniffi(default)]
     pub avatar: Avatar,
 }
 
@@ -567,7 +582,20 @@ pub struct ChatMessage {
     pub attachments: Vec<ChatAttachment>,
     /// `markup` laid out, mentions named.
     #[serde(skip)]
+    #[uniffi(default = [])]
     pub body: Vec<ChatBlock>,
+    /// `created`'s time of day.
+    #[serde(skip)]
+    #[uniffi(default = "")]
+    pub time: String,
+    /// Its place in the loaded log ([`chat_runs`]): the day divider above it (empty on the day of
+    /// the message before), and whether it continues the run above, without a head.
+    #[serde(skip)]
+    #[uniffi(default = "")]
+    pub divider: String,
+    #[serde(skip)]
+    #[uniffi(default = false)]
+    pub continued: bool,
 }
 
 /// A message sent from here that Google has not taken yet, or that it refused (`failure`).

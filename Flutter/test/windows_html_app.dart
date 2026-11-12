@@ -48,6 +48,7 @@ class WindowsHtmlMail extends ReaderMail {
         id: '$id-html',
         mailbox: 'INBOX',
         role: 'inbox',
+        avatar: engine.avatar(name: 'Example Weekly', key: 'news@example.test'),
         from: ['Example Weekly <news@example.test>'],
         to: ['reader@example.test'],
         cc: [],

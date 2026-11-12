@@ -17,7 +17,6 @@ import 'common.dart';
 import 'conversation_list.dart';
 import 'controls.dart';
 import 'design.dart';
-import 'format.dart';
 import 'glass.dart';
 import 'people.dart';
 import 'reader.dart';
@@ -25,13 +24,24 @@ import 'reader.dart';
 /// A Chat person's picture: the engine's cached file for an address (Google Chat publishes it
 /// there), else Google's own link, else their initial.
 class ChatAvatar extends StatelessWidget {
-  const ChatAvatar({super.key, required this.state, required this.avatarKey, required this.name, this.url, this.size = ListMetrics.avatarSize});
+  const ChatAvatar({
+    super.key,
+    required this.state,
+    required this.avatarKey,
+    required this.name,
+    this.avatar,
+    this.url,
+    this.size = ListMetrics.avatarSize,
+  });
 
   final MailState state;
 
   /// Lowercased address, else `users/…`.
   final String avatarKey;
   final String name;
+
+  /// Their initial and color slot, as the engine's answer carried them.
+  final engine.Avatar? avatar;
   final String? url;
   final double size;
 
@@ -40,7 +50,7 @@ class ChatAvatar extends StatelessWidget {
     final email = avatarKey.contains('@') ? avatarKey : '';
     if (email.isNotEmpty) state.requestAvatars([(email, false)]);
     return PersonAvatar(
-      address: Address(name: name, email: avatarKey),
+      address: Address(name: name, email: avatarKey, avatar: avatar),
       photo: email.isEmpty ? null : state.avatar(email),
       photoUrl: url,
       size: size,
@@ -232,9 +242,12 @@ class _ChatRowState extends State<_ChatRow> {
               // Unread as in the mail list: a dot before the avatar; the date stays gray.
               UnreadDot(unread: space.unread),
               space.kind == 'space' && space.avatarKey.isEmpty
-                  ? PersonAvatar(address: Address(name: space.avatarName, email: space.space), icon: CupertinoIcons.person_3_fill)
+                  ? PersonAvatar(
+                      address: Address(name: space.avatarName, email: space.space, avatar: space.avatar),
+                      icon: CupertinoIcons.person_3_fill,
+                    )
                   : ChatAvatar(state: widget.state, avatarKey: space.avatarKey.isEmpty ? space.space : space.avatarKey,
-                      name: space.avatarName, url: space.avatarUrl),
+                      name: space.avatarName, avatar: space.avatar, url: space.avatarUrl),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -282,9 +295,10 @@ class _ChatRowState extends State<_ChatRow> {
 sealed class _LogItem {}
 
 final class _Day extends _LogItem {
-  _Day(this.date);
+  _Day(this.label);
 
-  final DateTime date;
+  /// The engine's day divider (`ChatMessage.divider`).
+  final String label;
 }
 
 final class _Sent extends _LogItem {
@@ -360,25 +374,13 @@ class _ChatReaderState extends State<ChatReader> {
     _focus.requestFocus();
   }
 
-  static DateTime? _date(String? iso) => iso == null ? null : DateTime.tryParse(iso)?.toLocal();
-
   /// Oldest first: day dividers, messages (a sender's run shows their head once), then pending.
+  /// Dividers and runs are the engine's (`ChatMessage.divider`, `continued`).
   List<_LogItem> _log(engine.ChatThread thread) {
     final out = <_LogItem>[];
-    DateTime? day;
-    String? sender;
-    DateTime? last;
     for (final message in thread.messages) {
-      final created = _date(message.created);
-      if (created != null && (day == null || !sameDay(day, created))) {
-        day = created;
-        out.add(_Day(created));
-        sender = null;
-      }
-      final head = sender != message.sender.id || (created != null && last != null && created.difference(last).inMinutes >= 5);
-      out.add(_Sent(message, head: head));
-      sender = message.sender.id;
-      last = created;
+      if (message.divider.isNotEmpty) out.add(_Day(message.divider));
+      out.add(_Sent(message, head: !message.continued));
     }
     for (final pending in thread.pending) {
       out.add(_Pending(pending));
@@ -404,10 +406,6 @@ class _ChatReaderState extends State<ChatReader> {
     } else {
       final items = _log(thread).reversed.toList();
       // Mentions name members and anyone who wrote here.
-      final names = {
-        for (final user in thread.members) user.id: user.name,
-        for (final message in thread.messages) message.sender.id: message.sender.name,
-      };
       final extra = thread.more ? 1 : 0;
       log = ListView.builder(
         controller: _scroll,
@@ -426,13 +424,12 @@ class _ChatReaderState extends State<ChatReader> {
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: Reader.column),
               child: switch (items[index]) {
-                _Day(:final date) => _DayDivider(date: date),
+                _Day(:final label) => _DayDivider(label: label),
                 _Sent(:final message, :final head) => _MessageRow(
                   key: ValueKey(message.id),
                   state: widget.state,
                   message: message,
                   account: widget.space.account,
-                  names: names,
                   head: head,
                 ),
                 _Pending(:final pending) => _PendingRow(key: ValueKey(pending.id), pending: pending),
@@ -511,9 +508,9 @@ class _ChatReaderState extends State<ChatReader> {
 }
 
 class _DayDivider extends StatelessWidget {
-  const _DayDivider({required this.date});
+  const _DayDivider({required this.label});
 
-  final DateTime date;
+  final String label;
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -522,7 +519,7 @@ class _DayDivider extends StatelessWidget {
       const Expanded(child: Hairline()),
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12),
-        child: Text(dayDivider(date, DateTime.now()),
+        child: Text(label,
             style: context.text.callout.copyWith(color: context.colors.secondaryLabel)),
       ),
       const Expanded(child: Hairline()),
@@ -538,7 +535,6 @@ class _MessageRow extends StatelessWidget {
     required this.state,
     required this.message,
     required this.account,
-    required this.names,
     required this.head,
   });
 
@@ -548,8 +544,6 @@ class _MessageRow extends StatelessWidget {
   /// The account's address: the user's own messages show its picture, as Chat on the web does.
   final String account;
 
-  /// `users/<id>` → name, for mentions.
-  final Map<String, String> names;
   final bool head;
 
   static const _avatar = 32.0;
@@ -558,9 +552,8 @@ class _MessageRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.colors;
     final sender = message.sender;
-    final created = DateTime.tryParse(message.created ?? '')?.toLocal();
     final body = <Widget>[
-      if (message.markup.isNotEmpty) ChatText(text: message.markup, names: names, onOpen: state.openExternal),
+      if (message.body.isNotEmpty) ChatText(blocks: message.body, onOpen: state.openExternal),
       if (message.markup.isEmpty && message.card)
         Text('Card', style: context.text.body.copyWith(color: colors.secondaryLabel, fontStyle: FontStyle.italic)),
       if (message.attachments.isNotEmpty)
@@ -584,6 +577,7 @@ class _MessageRow extends StatelessWidget {
                     state: state,
                     avatarKey: message.mine && sender.email == null ? account : sender.avatarKey,
                     name: sender.name,
+                    avatar: message.mine && sender.email == null ? null : sender.avatar,
                     url: sender.avatarUrl,
                     size: _avatar,
                   )
@@ -603,7 +597,7 @@ class _MessageRow extends StatelessWidget {
                             style: chatReading(context).copyWith(fontWeight: FontWeight.w600, height: 1.3)),
                       ),
                       const SizedBox(width: 8),
-                      Text(messageTime(created), style: context.text.callout.copyWith(color: colors.secondaryLabel)),
+                      Text(message.time, style: context.text.callout.copyWith(color: colors.secondaryLabel)),
                       if (message.edited != null)
                         Text(' · Edited', style: context.text.callout.copyWith(color: colors.secondaryLabel)),
                     ]),

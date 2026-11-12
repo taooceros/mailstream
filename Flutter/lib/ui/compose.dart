@@ -35,47 +35,6 @@ enum _Field {
   final String label;
 }
 
-/// The recipient list split at commas and semicolons outside quotes and angle brackets.
-List<String> _splitRecipients(String text) {
-  final parts = <String>[];
-  var start = 0;
-  var quoted = false, angle = false;
-  for (var i = 0; i < text.length; i++) {
-    switch (text[i]) {
-      case '"':
-        quoted = !quoted;
-      case '<' when !quoted:
-        angle = true;
-      case '>' when !quoted:
-        angle = false;
-      case ',' || ';' when !quoted && !angle:
-        parts.add(text.substring(start, i));
-        start = i + 1;
-    }
-  }
-  parts.add(text.substring(start));
-  return parts;
-}
-
-bool _validEmail(String email) {
-  final at = email.lastIndexOf('@');
-  if (at <= 0) return false;
-  final domain = email.substring(at + 1);
-  return domain.contains('.') && !domain.startsWith('.') && !domain.endsWith('.') && !RegExp(r'[\s<>,;"]').hasMatch(email);
-}
-
-/// A field's recipients as written (`Name <address>` or a bare address), or the first one that
-/// is not an address.
-({List<String> recipients, String? invalid}) _parseRecipients(String text) {
-  final recipients = <String>[];
-  for (final part in _splitRecipients(text).map((p) => p.trim()).where((p) => p.isNotEmpty)) {
-    final angled = RegExp(r'<([^>]*)>\s*$').firstMatch(part);
-    if (!_validEmail((angled?.group(1) ?? part).trim())) return (recipients: recipients, invalid: part);
-    recipients.add(part);
-  }
-  return (recipients: recipients, invalid: null);
-}
-
 /// [person] as a recipient: `Name <address>`, the name quoted when it holds a separator.
 String formatRecipient(Address person) {
   final name = person.name?.replaceAll('"', '').trim();
@@ -439,7 +398,7 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
     _invalid.clear();
     final lists = <_Field, List<String>>{};
     for (final field in _Field.values) {
-      final parsed = _parseRecipients(_fields[field]!.text);
+      final parsed = engine.parseRecipients(text: _fields[field]!.text);
       if (parsed.invalid case final invalid?) {
         _invalid.add(field);
         if (field == _Field.bcc) d.showBcc = true;
@@ -742,12 +701,12 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
 
   /// The people for the address being typed in a field, without those already in To, Cc or Bcc.
   Future<List<Suggestion>> _suggest(String text) async {
-    final typed = _splitRecipients(text).last.trim();
+    final typed = engine.splitRecipients(text: text).last.trim();
     if (typed.isEmpty || d.sending) return const [];
     final people = await widget.state.searchContacts(typed);
     final chosen = {
       for (final field in _Field.values)
-        for (final part in _splitRecipients(_fields[field]!.text))
+        for (final part in engine.splitRecipients(text: _fields[field]!.text))
           if (part.trim().isNotEmpty && part.trim() != typed) Address.parse(part).email.toLowerCase(),
     };
     return [
@@ -759,7 +718,7 @@ class _ComposeDraftViewState extends State<_ComposeDraftView> {
   /// Puts [person] in place of the address being typed in [field], ready for the next one.
   void _complete(_Field field, Address person) {
     final controller = _fields[field]!;
-    final typing = _splitRecipients(controller.text).last;
+    final typing = engine.splitRecipients(text: controller.text).last;
     final before = controller.text.substring(0, controller.text.length - typing.length);
     final text = '${before.isEmpty || before.endsWith(' ') ? before : '$before '}${formatRecipient(person)}, ';
     controller.value = TextEditingValue(

@@ -278,11 +278,21 @@ kept for errors. `flutter test test/marks_test.dart` covers them.
 
 People have one avatar (`PersonAvatar` in `lib/ui/common.dart`, MS-192), the web reader's look:
 their picture, else their initial in one of the 11 system hues on a 15% wash of it
-(`MailColors.avatarHue`, `AvatarMetrics`), the hue picked from the lowercased address as the native
-app's `Avatar.color` picks it. Senders, Chat people and spaces (a group glyph when a space has no
+(`MailColors.avatarHue`, `AvatarMetrics`); the initial and the hue's slot are the engine's
+(`Avatar`, `Engine/src/display.rs`), which come with the answers that name the person
+(conversations, messages, Chat users and spaces, contacts) or, for anyone else, from `avatar()`
+once per person (`avatarOf` in `lib/backend/models.dart`). Senders, Chat people and spaces (a group glyph when a space has no
 picture), calendar guests (ringed in the card's color where they overlap) and the accounts in
 Settings all use it; only Smart Inbox bundles keep their category glyph (`IconAvatar`). `flutter
 test test/avatars_test.dart` covers it.
+
+What text reads as is the engine's, as in GPUI (MS-235, `Engine/src/display.rs`): list dates and
+date groups, subjects without reply and forward prefixes, the reader's dates and times, day
+dividers and runs in logs, and Chat's text laid out (`chat_markup.dart`) come filled in with the
+answers (`Conversation.when`/`section`/`tag`/`title`, `Message.when`/`time`/`divider`,
+`ChatMessage.body`/`time`/`divider`/`continued`), so no row asks the engine while the list
+scrolls; replies and forwards take `replySubject`, `forwardSubject` and `forwardBody`, and the
+compose fields `splitRecipients` and `parseRecipients`.
 
 The sidebar shows from 1200 dp wide (a rail below, whose menu button opens it). The list's
 island fills the window; from 1000 dp opening a conversation splits it, the conversation's
@@ -543,7 +553,7 @@ kept hours and the order ↑ and ↓ follow.
 | `lib/state/chat_state.dart` | `ChatState`: chat accounts and spaces, the open space's messages, sending and starting chats; re-read on the engine's `chat`/`chatMessages` events |
 | `lib/ui/chat.dart` | The chat list, the open space (newest at the bottom, older pages loading at the top, messages as Chat draws their Markdown, videos playing and pictures showing in the log, other attachments as tiles, a composer: Return sends, ⇧Return a new line) and the New chat dialog (completing to the account's chat partners, then mail contacts) |
 | `lib/ui/controls.dart` | The app's own controls, the same on every platform: `MailButton`, `MailIconButton`, `MailSegmented`, `MailTextField`, `MailSearchField`, `MailMenuButton`, `MailDateButton`, `MailSwitch`, `MailCheckbox`, `confirmAction` |
-| `lib/ui/chat_markup.dart` | A Chat message's `formattedText`, which the Chat API answers in Markdown (CommonMark and GitHub's extensions, `<chat-user>` mentions), parsed with `package:markdown` and drawn as text: bold, italic, strike, code, monospace blocks, lists, quotes, tables, links, mentions |
+| `lib/ui/chat_markup.dart` | A Chat message's `formattedText` (Markdown: CommonMark and GitHub's extensions, `<chat-user>` mentions) as the engine lays it out (`ChatMessage.body`, `Engine/src/chat_markup.rs`), drawn as text: bold, italic, strike, code, monospace blocks, lists, quotes, tables, links, mentions |
 | `lib/ui/design.dart` | The style tokens, the same on every platform: color roles and elevations (`MailColors`), radii, spacing, strokes, icon sizes, text roles, motion, list and island metrics, marks, avatars and tags (`MarkMetrics`, `AvatarMetrics`, `TagMetrics`), stable account/topic/avatar colors; `MailTheme` (the `macos_ui` theme the remaining `macos_ui` controls use) |
 | `lib/ui/glass.dart` | Islands, toolbar capsules (`GlassCapsule`, drawn by Flutter), raised capsules, toolbar buttons, spinner |
 | `lib/ui/shell.dart` | Islands layout, toolbars, search field, keys, snackbars |

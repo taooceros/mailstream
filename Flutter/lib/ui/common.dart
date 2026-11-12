@@ -19,7 +19,7 @@ import 'design.dart';
 class PersonAvatar extends StatelessWidget {
   const PersonAvatar({super.key, required this.address, this.photo, this.photoUrl, this.icon, this.ring, this.size = ListMetrics.avatarSize});
 
-  /// Who: the hue follows the lowercased address (else a Chat id, else the name), the letter the name.
+  /// Who: the engine's avatar for them gives the letter and the hue ([avatarOf]).
   final Address address;
 
   /// The picture's file, when the app has one.
@@ -35,14 +35,15 @@ class PersonAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hue = context.colors.avatarHue(address.email.isNotEmpty ? address.email : address.displayName);
+    final avatar = avatarOf(address);
+    final hue = context.colors.avatarHue(avatar.slot);
     final ring = this.ring;
     final wash = hue.withValues(alpha: AvatarMetrics.tint);
     final icon = this.icon;
     final mark = Center(
       child: icon != null
           ? MacosIcon(icon, size: size * AvatarMetrics.glyph, color: hue)
-          : Text(address.initials, style: context.roles.headline.copyWith(color: hue, fontSize: size * AvatarMetrics.letter, height: 1)),
+          : Text(avatar.initial, style: context.roles.headline.copyWith(color: hue, fontSize: size * AvatarMetrics.letter, height: 1)),
     );
     final photo = this.photo;
     final photoUrl = this.photoUrl;

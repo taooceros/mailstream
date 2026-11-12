@@ -89,22 +89,20 @@ class ReaderState extends State<Reader> {
   void forward() {
     final messages = widget.state.thread(c).messages;
     final latest = messages?.lastWhere((m) => m.role != MailboxRole.drafts, orElse: () => messages.last);
-    final lower = c.subject.trimLeft().toLowerCase();
-    final subject = lower.startsWith('fwd:') || lower.startsWith('fw:') ? c.subject : 'Fwd: ${c.subject}';
-    final header = <String>[
-      '---------- Forwarded message ---------',
-      if (latest != null && latest.from.isNotEmpty) 'From: ${latest.from.map(formatRecipient).join(', ')}' else if (c.from != null) 'From: ${formatRecipient(c.from!)}',
-      if ((latest?.date ?? c.date) case final date?) 'Date: ${messageDate(date, DateTime.now())}',
-      'Subject: ${c.subject}',
-      if (latest != null && latest.to.isNotEmpty) 'To: ${latest.to.map(formatRecipient).join(', ')}',
-      if (latest != null && latest.cc.isNotEmpty) 'Cc: ${latest.cc.map(formatRecipient).join(', ')}',
-    ].join('\n');
-    final original = latest?.text?.trim() ?? '';
+    final from = latest != null && latest.from.isNotEmpty ? latest.from : [?c.from];
+    final body = engine.forwardBody(
+      from: from.map(formatRecipient).toList(),
+      to: latest?.to.map(formatRecipient).toList() ?? const [],
+      cc: latest?.cc.map(formatRecipient).toList() ?? const [],
+      date: (latest?.date ?? c.date)?.toUtc().toIso8601String(),
+      subject: c.subject,
+      text: latest?.text ?? '',
+    );
     widget.state.compose(
       kind: ComposeKind.forward,
       from: c.account,
-      subject: subject,
-      body: '\n\n${original.isEmpty ? header : '$header\n\n$original'}',
+      subject: engine.forwardSubject(subject: c.subject),
+      body: '\n\n$body',
       initialBodySelection: 0,
     );
   }
@@ -123,7 +121,6 @@ class ReaderState extends State<Reader> {
   Widget _body(BuildContext context, ThreadEntry thread) {
     final colors = context.colors;
     final messages = thread.messages;
-    final now = DateTime.now();
 
     final body = <Widget>[
       _Header(state: widget.state, conversation: c),
@@ -136,7 +133,6 @@ class ReaderState extends State<Reader> {
           _ChatLog(
             conversation: c,
             messages: messages,
-            now: now,
             state: widget.state,
             onReply: reply,
             topInset: widget.topInset,
@@ -149,7 +145,6 @@ class ReaderState extends State<Reader> {
                 conversation: c,
                 message: m,
                 state: widget.state,
-                now: now,
                 expanded: _expanded.contains(m.id) != Reader.opensExpanded(messages, i),
                 onToggle: () => _toggle(m.id),
                 onReply: reply,
@@ -245,13 +240,12 @@ class _Header extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = conversation;
-    final subject = splitSubject(c.subject);
     final account = state.account(c.account);
     final colors = context.colors;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(subject.title, style: context.roles.display),
+        Text(c.title, style: context.roles.display),
         const SizedBox(height: 12),
         Wrap(
           spacing: 8,
@@ -267,7 +261,7 @@ class _Header extends StatelessWidget {
                 deleteTooltip: 'Resolve (D)',
                 onDelete: () => state.setWaiting(c, waiting: false),
               ),
-            if (subject.tag.isNotEmpty) MarkChip(label: subject.tag),
+            if (c.tag.isNotEmpty) MarkChip(label: c.tag),
             for (final label in c.labels) MarkChip(label: label, mark: topicColor(label, context.brightness)),
             if (account != null) MarkChip(label: account.title, mark: accountColor(state.accountIndex(account.id))),
             for (final role in c.mailboxes.where((r) => r != MailboxRole.inbox && r != MailboxRole.other)) MarkChip(label: role.title),
@@ -287,7 +281,6 @@ class _MessageCard extends StatelessWidget {
     required this.conversation,
     required this.message,
     required this.state,
-    required this.now,
     required this.expanded,
     required this.onToggle,
     required this.onReply,
@@ -296,7 +289,6 @@ class _MessageCard extends StatelessWidget {
   final Conversation conversation;
   final MessageDetail message;
   final MailState state;
-  final DateTime now;
   final bool expanded;
   final VoidCallback onToggle;
   final void Function({bool all}) onReply;
@@ -366,7 +358,7 @@ class _MessageCard extends StatelessWidget {
                             ),
                     ),
                     const SizedBox(width: 12),
-                    Text(messageDate(m.date, now), style: text.callout.copyWith(color: colors.secondaryLabel)),
+                    Text(m.when, style: text.callout.copyWith(color: colors.secondaryLabel)),
                     if (expanded) ...[
                       const SizedBox(width: 4),
                       ToolButton(tooltip: 'Reply', icon: CupertinoIcons.arrowshape_turn_up_left, onPressed: () => onReply()),
@@ -796,7 +788,6 @@ class _ChatLog extends StatefulWidget {
   const _ChatLog({
     required this.conversation,
     required this.messages,
-    required this.now,
     required this.state,
     required this.onReply,
     required this.topInset,
@@ -804,7 +795,6 @@ class _ChatLog extends StatefulWidget {
 
   final Conversation conversation;
   final List<MessageDetail> messages;
-  final DateTime now;
   final MailState state;
   final void Function({bool all}) onReply;
 
@@ -827,18 +817,15 @@ class _ChatLogState extends State<_ChatLog> {
   @override
   Widget build(BuildContext context) {
     final children = <Widget>[];
-    MessageDetail? previous;
     for (final (index, m) in widget.messages.indexed) {
-      final date = m.date;
-      final newDay = date != null && (previous?.date == null || !sameDay(previous!.date!, date));
-      if (newDay) {
+      if (m.divider.isNotEmpty) {
         children.add(Padding(
           padding: const EdgeInsets.symmetric(vertical: 12),
           child: Row(children: [
             const Expanded(child: Hairline()),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Text(dayDivider(date, widget.now), style: context.text.callout.copyWith(color: context.colors.secondaryLabel)),
+              child: Text(m.divider, style: context.text.callout.copyWith(color: context.colors.secondaryLabel)),
             ),
             const Expanded(child: Hairline()),
           ]),
@@ -853,7 +840,6 @@ class _ChatLogState extends State<_ChatLog> {
         hovered: _hovered,
         topInset: widget.topInset,
       ));
-      previous = m;
     }
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children);
   }
@@ -1001,7 +987,7 @@ class _ChatMessageState extends State<_ChatMessage> {
                         padding: const EdgeInsets.only(bottom: 4),
                         child: Text.rich(TextSpan(children: [
                           TextSpan(text: m.sender.displayName, style: text.headline),
-                          TextSpan(text: '  ${messageTime(m.date)}', style: text.subheadline.copyWith(color: colors.secondaryLabel)),
+                          TextSpan(text: '  ${m.time}', style: text.subheadline.copyWith(color: colors.secondaryLabel)),
                         ])),
                       ),
                       if (m.invitation case final invitation?)
@@ -1141,7 +1127,7 @@ class _ComposerState extends State<_Composer> {
       replyAll: widget.all,
       from: widget.conversation.account,
       to: _recipients,
-      subject: rawSubject.trimLeft().toLowerCase().startsWith('re:') ? rawSubject : 'Re: $rawSubject',
+      subject: engine.replySubject(subject: rawSubject),
       body: _text.text,
       focusBodyInitially: true,
     );

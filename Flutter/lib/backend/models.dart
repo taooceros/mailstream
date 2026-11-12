@@ -72,30 +72,37 @@ class Mailbox {
 }
 
 class Address {
-  const Address({this.name, required this.email});
+  const Address({this.name, required this.email, this.avatar});
 
-  /// `Name <email>` or a bare address, as the engine writes them.
-  factory Address.parse(String raw) {
+  /// `Name <email>` or a bare address, as the engine writes them; [avatar] as the engine gave it
+  /// with the answer the address came in.
+  factory Address.parse(String raw, {engine.Avatar? avatar}) {
     final match = RegExp(r'^\s*(.*?)\s*<([^>]+)>\s*$').firstMatch(raw);
-    if (match == null) return Address(email: raw.trim());
+    if (match == null) return Address(email: raw.trim(), avatar: avatar);
     var name = match.group(1)!.trim();
     if (name.length >= 2 && name.startsWith('"') && name.endsWith('"')) name = name.substring(1, name.length - 1);
-    return Address(name: name.isEmpty ? null : name, email: match.group(2)!.trim());
+    return Address(name: name.isEmpty ? null : name, email: match.group(2)!.trim(), avatar: avatar);
   }
 
   final String? name;
   final String email;
 
-  String get displayName => (name == null || name!.isEmpty) ? email : name!;
+  /// Their initial and color slot where there is no picture, when the engine's answer carried it;
+  /// else [avatarOf] asks the engine once.
+  final engine.Avatar? avatar;
 
-  /// The first letter or digit of the name, uppercased (`Avatar.initials`).
-  String get initials {
-    for (final rune in displayName.trim().runes) {
-      final char = String.fromCharCode(rune);
-      if (RegExp(r'[\p{L}\p{N}]', unicode: true).hasMatch(char)) return char.toUpperCase();
-    }
-    return '?';
-  }
+  String get displayName => (name == null || name!.isEmpty) ? email : name!;
+}
+
+final _avatars = <(String, String), engine.Avatar>{};
+
+/// [address]'s avatar by the engine's rules (MS-235): the one its answer carried, else asked once
+/// per person and kept.
+engine.Avatar avatarOf(Address address) {
+  if (address.avatar case final avatar?) return avatar;
+  final name = address.displayName;
+  final key = address.email.isNotEmpty ? address.email : name;
+  return _avatars[(name, key)] ??= engine.avatar(name: name, key: key);
 }
 
 /// One row of a listing or a search.
@@ -116,6 +123,10 @@ class Conversation {
     required this.category,
     required this.waiting,
     required this.labels,
+    this.tag = '',
+    this.title = '',
+    this.when = '',
+    this.section = '',
   });
 
   factory Conversation.of(engine.Conversation c) => Conversation(
@@ -123,7 +134,7 @@ class Conversation {
     account: c.account,
     subject: c.subject,
     date: _date(c.date),
-    from: c.from.let(Address.parse),
+    from: c.from.let((from) => Address.parse(from, avatar: c.avatar)),
     participants: c.participants,
     messageCount: c.messageCount,
     unread: c.unread,
@@ -134,6 +145,10 @@ class Conversation {
     category: MailCategory.values.where((category) => category.name == c.category).firstOrNull,
     waiting: c.waiting,
     labels: c.labels,
+    tag: c.tag,
+    title: c.title,
+    when: c.when,
+    section: c.section,
   );
 
   final String id;
@@ -153,6 +168,15 @@ class Conversation {
   final MailCategory? category;
   final bool waiting;
   final List<String> labels;
+
+  /// The subject as the list shows it (the engine's `split_subject`): leading `[list]` tags, and
+  /// the title without reply and forward prefixes.
+  final String tag;
+  final String title;
+
+  /// [date] as the list shows it, and its date group, as of the answer.
+  final String when;
+  final String section;
 
   /// Service mail the Smart Inbox folds into a bundle; anything waiting on the user stays out.
   MailCategory? get bundle => switch (category) {
@@ -180,7 +204,9 @@ class Conversation {
       snippet == other.snippet &&
       category == other.category &&
       waiting == other.waiting &&
-      listEquals(labels, other.labels);
+      listEquals(labels, other.labels) &&
+      when == other.when &&
+      section == other.section;
 
   Conversation copyWith({bool? unread, bool? starred, bool? waiting, String? snippet}) => Conversation(
     id: id,
@@ -198,6 +224,10 @@ class Conversation {
     category: category,
     waiting: waiting ?? this.waiting,
     labels: labels,
+    tag: tag,
+    title: title,
+    when: when,
+    section: section,
   );
 }
 
@@ -230,6 +260,9 @@ class MessageDetail {
     required this.attachments,
     required this.error,
     this.invitation,
+    this.when = '',
+    this.time = '',
+    this.divider = '',
   });
 
   factory MessageDetail.of(engine.Message m) {
@@ -237,7 +270,7 @@ class MessageDetail {
     return MessageDetail(
       id: m.id,
       role: roleNamed(m.role),
-      from: addresses(m.from),
+      from: [for (final (i, raw) in m.from.indexed) Address.parse(raw, avatar: i == 0 ? m.avatar : null)],
       to: addresses(m.to),
       cc: addresses(m.cc),
       date: _date(m.date),
@@ -249,6 +282,9 @@ class MessageDetail {
       attachments: m.attachments.map(AttachmentInfo.of).toList(),
       error: m.error,
       invitation: m.invitation,
+      when: m.when,
+      time: m.time,
+      divider: m.divider,
     );
   }
 
@@ -268,6 +304,13 @@ class MessageDetail {
 
   /// The meeting invitation it carries.
   final engine.MeetingInvitation? invitation;
+
+  /// [date] as the reader shows it, and its time of day, as of the answer.
+  final String when;
+  final String time;
+
+  /// The day divider above it in a chat log; empty on the day of the message before.
+  final String divider;
 
   Address get sender => from.isEmpty ? const Address(email: 'unknown') : from.first;
 }

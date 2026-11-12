@@ -1,16 +1,18 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:macos_ui/macos_ui.dart';
+import 'package:mailstream/mailstream.dart' as engine;
 import 'package:mailstream_ui/ui/chat_markup.dart';
 
-/// Every run of text `ChatText` draws, with whether it is bold, italic or struck through.
+/// Every run of text `ChatText` draws of the engine's layout of [markdown] (`chat_body`), with
+/// whether it is bold, italic or struck through.
 Future<List<String>> draw(WidgetTester tester, String markdown) async {
   await tester.pumpWidget(
     MacosTheme(
       data: MacosThemeData.light(),
       child: Directionality(
         textDirection: TextDirection.ltr,
-        child: ChatText(text: markdown, names: const {'users/1': 'Brent'}, onOpen: (_) {}),
+        child: ChatText(blocks: engine.chatBody(markup: markdown, names: const {'users/1': 'Brent'}), onOpen: (_) {}),
       ),
     ),
   );

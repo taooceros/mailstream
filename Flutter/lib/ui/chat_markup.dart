@@ -1,52 +1,20 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
-import 'package:markdown/markdown.dart' as md;
+import 'package:mailstream/mailstream.dart' as engine;
 
 import 'design.dart';
-
-/// A Chat message's `formattedText` as Markdown nodes. Google answers projects without a Chat app
-/// configuration (Mailstream's) in Markdown: CommonMark with GitHub's extensions (`~~strike~~`,
-/// tables, bare links), escapes for what is meant literally (`\*\*`, `1\.`), and mentions as
-/// `<chat-user data-user="users/…">` or `data-email="…"`. Lines are wrapped at 80 columns, so a
-/// single line break is a space; a line break the sender typed comes as a hard break (`\`).
-List<md.Node> parseChatMarkdown(String text) => md.Document(
-  extensionSet: md.ExtensionSet.gitHubFlavored,
-  inlineSyntaxes: [_MentionSyntax()],
-  encodeHtml: false,
-).parse(text);
-
-/// `<chat-user data-user="users/…"></chat-user>` (or `data-email`) as a `mention` element whose
-/// `user` or `email` attribute names the person.
-class _MentionSyntax extends md.InlineSyntax {
-  _MentionSyntax() : super(r'<chat-user\s+data-(user|email)="([^"]*)"[^>]*>(?:\s*</chat-user>)?', startCharacter: 0x3C);
-
-  @override
-  bool onMatch(md.InlineParser parser, Match match) {
-    parser.addNode(md.Element.empty('mention')..attributes[match[1]!] = match[2]!);
-    return true;
-  }
-}
-
-const _blockTags = {
-  'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'blockquote', 'ul', 'ol', 'li', 'hr', 'table', //
-};
-
-/// A soft line break and the indentation around it, which Markdown reads as one space.
-final _softBreak = RegExp(r'[ \t]*\n[ \t]*');
 
 /// The type of a message's text: a size up from the list's and looser lines, for reading.
 TextStyle chatReading(BuildContext context) => context.text.body.copyWith(fontSize: 14, height: 1.5, letterSpacing: 0);
 
-/// A Chat message's text, drawn from its Markdown: paragraphs flow to the column's width, lists,
-/// quotes, monospace blocks and tables are laid out, links open in the browser through `onOpen`,
-/// and mentions show the person's name.
+/// A Chat message's text as the engine lays it out (`ChatMessage.body`, from the Markdown Google
+/// sends; MS-235): blocks one below the other, each in its quotes and lists, with styled runs.
+/// Paragraphs flow to the column's width, quotes take a bar per level, list items their marker,
+/// code blocks a monospace box and tables a grid; links open in the browser through `onOpen`.
 class ChatText extends StatefulWidget {
-  const ChatText({super.key, required this.text, required this.names, required this.onOpen});
+  const ChatText({super.key, required this.blocks, required this.onOpen});
 
-  final String text;
-
-  /// `users/<id>` → name, for mentions.
-  final Map<String, String> names;
+  final List<engine.ChatBlock> blocks;
   final void Function(String url) onOpen;
 
   @override
@@ -55,13 +23,6 @@ class ChatText extends StatefulWidget {
 
 class _ChatTextState extends State<ChatText> {
   final List<TapGestureRecognizer> _recognizers = [];
-  late List<md.Node> _nodes = parseChatMarkdown(widget.text);
-
-  @override
-  void didUpdateWidget(ChatText old) {
-    super.didUpdateWidget(old);
-    if (old.text != widget.text) _nodes = parseChatMarkdown(widget.text);
-  }
 
   @override
   void dispose() {
@@ -89,18 +50,17 @@ class _ChatTextState extends State<ChatText> {
       code: mono.copyWith(backgroundColor: colors.fill),
       link: TextStyle(color: colors.accent),
       mention: TextStyle(color: colors.accent, fontWeight: FontWeight.w600),
-      names: widget.names,
       open: (url) {
         final recognizer = TapGestureRecognizer()..onTap = () => widget.onOpen(url);
         _recognizers.add(recognizer);
         return recognizer;
       },
     );
-    return renderer.column(_nodes, body);
+    return renderer.column(widget.blocks);
   }
 }
 
-/// Lays Markdown nodes out as widgets and their inline content as spans.
+/// Lays the engine's blocks out as widgets and their runs as spans.
 class _Renderer {
   _Renderer({
     required this.colors,
@@ -109,130 +69,98 @@ class _Renderer {
     required this.code,
     required this.link,
     required this.mention,
-    required this.names,
     required this.open,
   });
 
   final MailColors colors;
   final TextStyle body, mono, code, link, mention;
-  final Map<String, String> names;
   final GestureRecognizer Function(String url) open;
 
-  /// Between paragraphs and other blocks: half a line.
+  /// Between paragraphs and other blocks: half a line; between the items of a tight list, less.
   static const _blockGap = 8.0;
+  static const _tightGap = 2.0;
 
-  static bool _isBlock(md.Node node) => node is md.Element && _blockTags.contains(node.tag);
+  /// The column a list item's marker sits in.
+  static const _markerWidth = 22.0;
 
-  /// `nodes` one below the other, [_blockGap] apart (`gap` inside a tight list item): runs of
-  /// inline nodes (a tight list item's text) become one paragraph in `style`. Blocks with no text
-  /// (a paragraph of spaces) take no room.
-  Widget column(List<md.Node> nodes, TextStyle style, {double gap = _blockGap}) {
+  Widget column(List<engine.ChatBlock> blocks) {
     final children = <Widget>[];
-    final run = <md.Node>[];
-    void flush() {
-      if (run.isEmpty) return;
-      final spans = _trimmed(run);
-      if (spans.isNotEmpty) children.add(Text.rich(TextSpan(children: spans), style: style));
-      run.clear();
+    for (final block in blocks) {
+      final content = _block(block);
+      if (content == null) continue;
+      final gap = children.isEmpty ? 0.0 : (block.tight ? _tightGap : _blockGap);
+      children.add(_placed(block, content, gap));
     }
-
-    for (final node in nodes) {
-      if (_isBlock(node)) {
-        flush();
-        final block = _block(node as md.Element, style);
-        if (block != null) children.add(block);
-      } else {
-        run.add(node);
-      }
-    }
-    flush();
     if (children.isEmpty) return const SizedBox.shrink();
     if (children.length == 1) return children.single;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        for (final (i, child) in children.indexed) ...[if (i > 0) SizedBox(height: gap), child],
-      ],
-    );
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: children);
   }
 
-  Widget? _block(md.Element element, TextStyle style) {
-    final children = element.children ?? const <md.Node>[];
-    switch (element.tag) {
-      case 'p':
-        final spans = _trimmed(children);
-        return spans.isEmpty ? null : Text.rich(TextSpan(children: spans), style: style);
-      case 'h1' || 'h2' || 'h3' || 'h4' || 'h5' || 'h6':
-        final scale = switch (element.tag) { 'h1' => 1.3, 'h2' => 1.18, 'h3' => 1.08, _ => 1.0 };
+  /// `content` in its lists (an indent each, the item's marker beside its first block) and quotes
+  /// (a bar each), `gap` above it inside the bars so a quote's bar runs on between its blocks.
+  Widget _placed(engine.ChatBlock block, Widget content, double gap) {
+    Widget placed = content;
+    final marker = block.marker;
+    if (marker != null) {
+      placed = Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: _markerWidth,
+            child: Text(marker, style: body.copyWith(color: colors.secondaryLabel, fontFeatures: const [FontFeature.tabularFigures()])),
+          ),
+          Expanded(child: placed),
+        ],
+      );
+    }
+    final indent = (block.indent - (marker == null ? 0 : 1)) * _markerWidth;
+    placed = Padding(padding: EdgeInsets.only(left: indent, top: gap), child: placed);
+    for (var level = 0; level < block.quote; level++) {
+      placed = Container(
+        padding: const EdgeInsets.only(left: 12),
+        decoration: BoxDecoration(border: Border(left: BorderSide(color: colors.border, width: 3))),
+        child: placed,
+      );
+    }
+    return placed;
+  }
+
+  Widget? _block(engine.ChatBlock block) {
+    final style = block.quote > 0 ? body.copyWith(color: colors.secondaryLabel) : body;
+    switch (block.kind) {
+      case engine.HeadingChatBlockKind(:final level):
+        final scale = switch (level) { 1 => 1.3, 2 => 1.18, 3 => 1.08, _ => 1.0 };
         final heading = style.copyWith(fontWeight: FontWeight.w700, fontSize: (style.fontSize ?? 14) * scale, height: 1.3);
-        return Text.rich(TextSpan(children: _trimmed(children)), style: heading);
-      case 'pre':
-        var text = element.textContent;
-        if (text.endsWith('\n')) text = text.substring(0, text.length - 1);
+        return Text.rich(TextSpan(children: _spans(block.spans)), style: heading);
+      case engine.CodeChatBlockKind():
         return Container(
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(color: colors.fill, borderRadius: BorderRadius.circular(8)),
-          child: Text(text, style: mono.copyWith(height: 1.45)),
+          child: Text(block.spans.map((span) => span.text).join(), style: mono.copyWith(height: 1.45)),
         );
-      case 'blockquote':
-        return Container(
-          padding: const EdgeInsets.only(left: 12),
-          decoration: BoxDecoration(border: Border(left: BorderSide(color: colors.border, width: 3))),
-          child: column(children, style.copyWith(color: colors.secondaryLabel)),
-        );
-      case 'ul' || 'ol':
-        final ordered = element.tag == 'ol';
-        var number = int.tryParse(element.attributes['start'] ?? '') ?? 1;
-        final items = children.whereType<md.Element>().where((e) => e.tag == 'li').toList();
-        // A loose list (items apart by blank lines) spaces its items like paragraphs.
-        final loose = items.any((item) => (item.children ?? const []).any((c) => c is md.Element && c.tag == 'p'));
-        final marker = style.copyWith(color: colors.secondaryLabel, fontFeatures: const [FontFeature.tabularFigures()]);
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            for (final (i, item) in items.indexed)
-              Padding(
-                padding: EdgeInsets.only(top: i == 0 ? 0 : (loose ? 6 : 2)),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SizedBox(
-                      width: ordered ? 24 : 18,
-                      child: Text(ordered ? '${number++}.' : '•', style: marker),
-                    ),
-                    Expanded(child: column(item.children ?? const [], style, gap: loose ? 6 : 2)),
-                  ],
-                ),
-              ),
-          ],
-        );
-      case 'hr':
+      case engine.RuleChatBlockKind():
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
           child: Container(height: 1, color: colors.separator),
         );
-      case 'table':
-        final rows = <md.Element>[
-          for (final section in children.whereType<md.Element>())
-            ...(section.children ?? const <md.Node>[]).whereType<md.Element>().where((e) => e.tag == 'tr'),
-        ];
+      case engine.TableChatBlockKind():
         return ClipRRect(
           borderRadius: BorderRadius.circular(8),
           child: Table(
             defaultColumnWidth: const IntrinsicColumnWidth(),
             border: TableBorder.symmetric(inside: BorderSide(color: colors.separator)),
             children: [
-              for (final (r, row) in rows.indexed)
+              for (final (r, row) in block.rows.indexed)
                 TableRow(
                   decoration: BoxDecoration(color: r == 0 ? colors.fill : null),
                   children: [
-                    for (final cell in (row.children ?? const <md.Node>[]).whereType<md.Element>())
+                    for (final cell in row.cells)
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                         child: Text.rich(
-                          TextSpan(children: _trimmed(cell.children ?? const [])),
-                          style: cell.tag == 'th' ? style.copyWith(fontWeight: FontWeight.w600) : style,
+                          TextSpan(children: _spans(cell.spans)),
+                          style: r == 0 ? style.copyWith(fontWeight: FontWeight.w600) : style,
                         ),
                       ),
                   ],
@@ -240,54 +168,27 @@ class _Renderer {
             ],
           ),
         );
-      default: // li outside a list
-        return column(children, style);
-    }
-  }
-
-  /// Inline nodes as spans, without the spaces and line breaks that end a paragraph.
-  List<InlineSpan> _trimmed(List<md.Node> nodes) {
-    final spans = [for (final node in nodes) _inline(node)];
-    while (spans.isNotEmpty && spans.last is TextSpan && (spans.last as TextSpan).toPlainText().trim().isEmpty) {
-      spans.removeLast();
-    }
-    return spans;
-  }
-
-  /// One inline node; `tap` is the link it sits in.
-  InlineSpan _inline(md.Node node, [GestureRecognizer? tap]) {
-    if (node is md.Text) return TextSpan(text: node.text.replaceAll(_softBreak, ' '), recognizer: tap);
-    if (node is! md.Element) return TextSpan(text: node.textContent, recognizer: tap);
-    List<InlineSpan> children([GestureRecognizer? inner]) => [
-      for (final child in node.children ?? const <md.Node>[]) _inline(child, inner ?? tap),
-    ];
-
-    switch (node.tag) {
-      case 'strong':
-        return TextSpan(style: const TextStyle(fontWeight: FontWeight.w600), children: children());
-      case 'em':
-        return TextSpan(style: const TextStyle(fontStyle: FontStyle.italic), children: children());
-      case 'del':
-        return TextSpan(style: const TextStyle(decoration: TextDecoration.lineThrough), children: children());
-      case 'code':
-        // Thin spaces in the code's fill pad it at both ends, like a chip.
-        return TextSpan(text: '\u2009${node.textContent.replaceAll(_softBreak, ' ')}\u2009', style: code, recognizer: tap);
-      case 'br':
-        return const TextSpan(text: '\n');
-      case 'a':
-        final href = node.attributes['href'];
-        return TextSpan(style: link, children: children(href == null ? null : open(href)));
-      case 'img':
-        final src = node.attributes['src'];
-        final alt = node.attributes['alt'];
-        final label = alt == null || alt.isEmpty ? (src ?? '') : alt;
-        return TextSpan(text: label, style: link, recognizer: src == null ? tap : open(src));
-      case 'mention':
-        final user = node.attributes['user'];
-        final name = user == null ? node.attributes['email'] : (user == 'users/all' ? 'all' : names[user]);
-        return TextSpan(text: '@${name ?? 'user'}', style: mention);
       default:
-        return TextSpan(children: children());
+        if (block.spans.every((span) => span.text.trim().isEmpty)) return null;
+        return Text.rich(TextSpan(children: _spans(block.spans)), style: style);
     }
+  }
+
+  List<InlineSpan> _spans(List<engine.ChatSpan> spans) => [for (final span in spans) _span(span)];
+
+  InlineSpan _span(engine.ChatSpan span) {
+    final url = span.link;
+    final recognizer = url == null ? null : open(url);
+    if (span.code) {
+      // Thin spaces in the code's fill pad it at both ends, like a chip.
+      return TextSpan(text: '\u2009${span.text}\u2009', style: url == null ? code : code.merge(link), recognizer: recognizer);
+    }
+    var style = const TextStyle();
+    if (span.mention) style = style.merge(mention);
+    if (url != null) style = style.merge(link);
+    if (span.bold) style = style.copyWith(fontWeight: FontWeight.w600);
+    if (span.italic) style = style.copyWith(fontStyle: FontStyle.italic);
+    if (span.strike) style = style.copyWith(decoration: TextDecoration.lineThrough);
+    return TextSpan(text: span.text, style: style, recognizer: recognizer);
   }
 }

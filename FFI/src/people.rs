@@ -10,6 +10,7 @@ pub struct Person {
     pub name: Option<String>,
     pub email: String,
     #[serde(skip)]
+    #[uniffi(default)]
     pub avatar: crate::Avatar,
 }
 

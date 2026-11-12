@@ -181,16 +181,15 @@ final class MailColors {
   final Color capsuleRim;
 
   /// People's colors where there is no picture, after the system hues (blue, purple, pink, red,
-  /// orange, green, teal, indigo, brown, mint, cyan) the web reader's avatars use; [avatarHue]
-  /// picks one per person.
+  /// orange, green, teal, indigo, brown, mint, cyan) the web reader's avatars use: one per slot of
+  /// the engine's avatars (`AVATAR_SLOTS`), which [avatarHue] reads.
   final List<Color> avatarPalette;
 
   /// Links in text the app draws, and the default for links mail leaves uncolored.
   Color get link => accent;
 
-  /// [key]'s color from [avatarPalette], the same on every launch (a lowercased address, else a
-  /// Chat user id).
-  Color avatarHue(String key) => avatarPalette[stableIndex(key.toLowerCase(), avatarPalette.length)];
+  /// The color of an engine avatar's [slot] (`Avatar.slot`), the same on every launch.
+  Color avatarHue(int slot) => avatarPalette[slot % avatarPalette.length];
 
   /// Hover and press washes over the sidebar, buttons and menu items; rows and cards lift instead
   /// ([halfLifted]).

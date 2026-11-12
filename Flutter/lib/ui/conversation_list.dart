@@ -7,7 +7,6 @@ import '../bench.dart';
 import '../state/mail_state.dart';
 import 'common.dart';
 import 'design.dart';
-import 'format.dart';
 import 'glass.dart';
 import 'reader.dart';
 
@@ -42,7 +41,6 @@ final class BundleItem extends ListItem {
 /// action follows under its own "Waiting on you" header, as in the native app. Headers group the
 /// remaining rows by date.
 List<ListItem> listItems(List<Conversation> conversations, {required bool bundles, required bool sections}) {
-  final now = DateTime.now();
   final grouped = <MailCategory, List<Conversation>>{};
   final pinned = <ListItem>[];
   final waiting = <ListItem>[];
@@ -63,7 +61,7 @@ List<ListItem> listItems(List<Conversation> conversations, {required bool bundle
       continue;
     }
     if (sections) {
-      final section = listSection(c.date, now);
+      final section = c.section;
       if (section != current) {
         out.add(SectionItem(section));
         current = section;
@@ -201,7 +199,6 @@ class ConversationListState extends State<ConversationList> {
       }
       return empty;
     }
-    final now = DateTime.now();
     final footer = state.canLoadMore ? 1 : 0;
     // MacosApp's scroll behavior puts the Mac's overlay scrollbar on it.
     return ListView.builder(
@@ -226,7 +223,6 @@ class ConversationListState extends State<ConversationList> {
             highlight: widget.highlight,
             hover: _hover,
             next: next,
-            now: now,
             onTap: () => widget.onActivate(item),
           ),
           BundleItem() => BundleRow(
@@ -235,7 +231,6 @@ class ConversationListState extends State<ConversationList> {
             highlight: widget.highlight,
             hover: _hover,
             next: next,
-            now: now,
             onTap: () => widget.onActivate(item),
           ),
         };
@@ -435,7 +430,6 @@ class ConversationRow extends StatefulWidget {
     required this.highlight,
     required this.hover,
     required this.next,
-    required this.now,
     required this.onTap,
   });
 
@@ -446,7 +440,6 @@ class ConversationRow extends StatefulWidget {
 
   /// The row below's id, if a row follows.
   final String? next;
-  final DateTime now;
   final VoidCallback onTap;
 
   @override
@@ -484,7 +477,6 @@ class _ConversationRowState extends State<ConversationRow> {
     final colors = context.colors;
     final text = context.text;
     final person = c.from ?? const Address(email: '?');
-    final subject = splitSubject(c.subject);
     final topic = c.labels.firstOrNull;
     final senders = c.participants.isEmpty ? person.displayName : c.participants.join(', ');
     final archivable = state.selection.role == MailboxRole.inbox || c.mailboxes.contains(MailboxRole.inbox);
@@ -504,7 +496,7 @@ class _ConversationRowState extends State<ConversationRow> {
             padding: const EdgeInsets.only(right: Space.s6),
             child: MarkDot(accountColor(state.accountIndex(c.account))),
           ),
-        Text(listDate(c.date, widget.now), style: text.callout.copyWith(color: colors.secondaryLabel, fontWeight: FontWeight.w400)),
+        Text(c.when, style: text.callout.copyWith(color: colors.secondaryLabel, fontWeight: FontWeight.w400)),
       ],
     );
 
@@ -580,13 +572,13 @@ class _ConversationRowState extends State<ConversationRow> {
               subtitle: Text.rich(
                 TextSpan(
                   children: [
-                    if (subject.tag.isNotEmpty)
+                    if (c.tag.isNotEmpty)
                       TextSpan(
-                        text: '${subject.tag} ',
+                        text: '${c.tag} ',
                         style: TextStyle(color: colors.secondaryLabel, fontWeight: FontWeight.w400),
                       ),
                     TextSpan(
-                      text: subject.title.isEmpty ? '(no subject)' : subject.title,
+                      text: c.title,
                       style: TextStyle(
                         color: colors.label,
                         fontWeight: c.unread ? FontWeight.w500 : FontWeight.w400,
@@ -644,7 +636,6 @@ class BundleRow extends StatelessWidget {
     required this.highlight,
     required this.hover,
     required this.next,
-    required this.now,
     required this.onTap,
   });
 
@@ -654,7 +645,6 @@ class BundleRow extends StatelessWidget {
 
   /// The row below's id, if a row follows.
   final String? next;
-  final DateTime now;
   final VoidCallback onTap;
 
   @override
@@ -696,7 +686,7 @@ class BundleRow extends StatelessWidget {
               Tag(label: unread > 0 ? '$unread new' : '${items.length}', color: tone.background),
             ],
           ),
-          meta: Text(listDate(items.first.date, now), style: text.callout.copyWith(color: colors.secondaryLabel, fontWeight: FontWeight.w400)),
+          meta: Text(items.first.when, style: text.callout.copyWith(color: colors.secondaryLabel, fontWeight: FontWeight.w400)),
           subtitle: Text.rich(
             TextSpan(
               children: [
@@ -704,7 +694,7 @@ class BundleRow extends StatelessWidget {
                   text: senders,
                   style: TextStyle(color: colors.label, fontWeight: unread > 0 ? FontWeight.w600 : FontWeight.w400),
                 ),
-                TextSpan(text: '  —  ${splitSubject(shown.first.subject).title}'),
+                TextSpan(text: '  —  ${shown.first.title}'),
               ],
             ),
             maxLines: 1,

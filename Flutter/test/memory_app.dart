@@ -86,6 +86,7 @@ class MemoryMail extends ReaderMail {
           id: m.id,
           mailbox: m.mailbox,
           role: m.role,
+          avatar: engine.avatar(name: m.from.first, key: m.from.first),
           from: m.from,
           to: m.to,
           cc: m.cc,

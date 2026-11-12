@@ -20,6 +20,7 @@ Conversation _mail(String id, String sender, {required int minute, bool unread =
   category: MailCategory.notification,
   waiting: false,
   labels: const [],
+  title: 'Subject $id',
 );
 
 void main() {
@@ -38,7 +39,6 @@ void main() {
                 highlight: ListHighlight(),
                 hover: ListHighlight(),
                 next: null,
-                now: DateTime.utc(2026, 11, 6, 13),
                 onTap: () {},
               ),
             ),

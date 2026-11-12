@@ -2,12 +2,14 @@ import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:macos_ui/macos_ui.dart';
+import 'package:mailstream/mailstream.dart' as engine;
 import 'package:mailstream_ui/backend/models.dart';
 import 'package:mailstream_ui/ui/common.dart';
 import 'package:mailstream_ui/ui/design.dart';
 
 /// Avatars (MS-192): the web reader's look, a person's initial in their system hue on a 15% wash of
-/// it, the hue picked as the native app's `Avatar.color` picks it.
+/// it; the initial and the hue's slot are the engine's (MS-235), picked as the native app's
+/// `Avatar.color` picks them.
 void main() {
   Widget host(Widget child, Brightness brightness) => MacosApp(
     theme: MailTheme.macos(brightness),
@@ -45,7 +47,7 @@ void main() {
       Brightness.light,
     ));
     final glyph = tester.widget<MacosIcon>(find.byType(MacosIcon));
-    expect(glyph.color, MailColors.light.avatarHue('spaces/AAA'));
+    expect(glyph.color, MailColors.light.avatarHue(engine.avatar(name: 'Project 2', key: 'spaces/AAA').slot));
     expect(find.text('P'), findsNothing);
   });
 }

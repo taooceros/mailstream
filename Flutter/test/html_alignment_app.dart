@@ -30,6 +30,7 @@ class AlignmentMail extends ReaderMail {
         id: '$id-alignment',
         mailbox: 'INBOX',
         role: 'inbox',
+        avatar: engine.avatar(name: 'Alex', key: 'alex@example.test'),
         from: ['Alex <alex@example.test>'],
         to: ['reader@example.test'],
         cc: [],

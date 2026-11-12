@@ -10,7 +10,6 @@ import '../state/mail_state.dart';
 import 'common.dart';
 import 'controls.dart';
 import 'design.dart';
-import 'format.dart';
 import 'glass.dart';
 
 /// Opens Settings (⌘,): the accounts, as the app's Accounts window has them (add through the
@@ -409,8 +408,8 @@ class _AutoReadLog extends StatelessWidget {
   }
 
   static String? _markedAt(String iso) {
-    final date = DateTime.tryParse(iso)?.toLocal();
-    return date == null ? null : 'marked ${listDate(date, DateTime.now())}';
+    final date = engine.listDate(date: iso);
+    return date.isEmpty ? null : 'marked $date';
   }
 }
 
