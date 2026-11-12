@@ -27,6 +27,8 @@ regex = "1"
 encoding_rs = "0.8"
 unicode-segmentation = "1"
 linkify = "0.10"
+# Chat messages' Markdown (`chat_markup.rs`).
+pulldown-cmark = { version = "0.13", default-features = false }
 # Local-time dates: chat list labels, AI tagging's calendar days, outgoing mail's Date header
 # and reply attributions.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

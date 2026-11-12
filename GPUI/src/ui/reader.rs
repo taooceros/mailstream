@@ -3,7 +3,6 @@
 //! fold behind a "more" toggle in each body. The reader opens at its end and holds there while
 //! bodies load, until it is scrolled (MS-70).
 
-use chrono::{DateTime, Local};
 use gpui::ScrollDelta;
 
 use super::*;
@@ -120,7 +119,7 @@ impl MailApp {
     ) -> AnyElement {
         let sender = message.sender();
         let id = message.id.clone();
-        let photo = avatars::avatar(&sender, metrics::AVATAR, p, cx);
+        let photo = avatars::avatar(&sender.email, &message.avatar, metrics::AVATAR, p, cx);
         let header = div()
             .id(ElementId::Name(format!("message:{id}").into()))
             .pl(px(space::S16))
@@ -331,17 +330,11 @@ impl MailApp {
     /// sender's avatar, name and time, standing on its own with its sign-off (MS-73). The message
     /// under the pointer takes a faint wash, its reply buttons floating on its top edge.
     fn render_chat_log(&self, messages: &[Message], p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let now = Local::now();
         let mut rows: Vec<AnyElement> = Vec::with_capacity(messages.len() * 2);
-        let mut previous: Option<Option<DateTime<Local>>> = None;
         for message in messages {
-            let date = message.date.map(|date| date.with_timezone(&Local));
-            if let Some(date) = date
-                && previous.is_none_or(|before| before.is_none_or(|before| before.date_naive() != date.date_naive()))
-            {
-                rows.push(day_divider(format::day_divider(date, now), p).into_any_element());
+            if !message.divider.is_empty() {
+                rows.push(day_divider(message.divider.clone(), p).into_any_element());
             }
-            previous = Some(date);
             rows.push(self.render_log_message(message, p, cx));
         }
         div().flex().flex_col().children(rows).into_any_element()
@@ -351,7 +344,7 @@ impl MailApp {
         let id = message.id.clone();
         let hovered = self.hovered_message.as_ref() == Some(&id);
         let sender = message.sender();
-        let photo = avatars::avatar(&sender, metrics::AVATAR, p, cx);
+        let photo = avatars::avatar(&sender.email, &message.avatar, metrics::AVATAR, p, cx);
         let column = div()
             .flex_1()
             .min_w_0()
@@ -433,7 +426,7 @@ fn attachments(message: &Message, p: &'static Palette) -> Div {
 }
 
 /// A line across the log with the day in it.
-fn day_divider(label: String, p: &Palette) -> Div {
+fn day_divider(label: SharedString, p: &Palette) -> Div {
     // A half-point hairline vanishes at some offsets on a 1x screen.
     let rule = || div().flex_1().h(px(stroke::RIM)).bg(p.line);
     div()

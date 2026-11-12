@@ -9,12 +9,18 @@ use crate::{MailError, Mailstream, call};
 pub struct Person {
     pub name: Option<String>,
     pub email: String,
+    #[serde(skip)]
+    pub avatar: crate::Avatar,
 }
 
 #[uniffi::export]
 impl Mailstream {
     /// People whose name or address starts with `query`, best first; at most `limit` (1-12).
     pub async fn search_contacts(&self, query: String, limit: u32) -> Result<Vec<Person>, MailError> {
-        call("contacts.search", json!({ "query": query, "limit": limit })).await
+        let mut people: Vec<Person> = call("contacts.search", json!({ "query": query, "limit": limit })).await?;
+        for person in &mut people {
+            person.dress();
+        }
+        Ok(people)
     }
 }

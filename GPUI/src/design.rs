@@ -362,6 +362,23 @@ pub fn ui_font() -> &'static str {
     }
 }
 
+/// The system's monospace font, for code in chat messages: Menlo on the Mac, the desktop's
+/// monospace family on Linux.
+pub fn mono_font() -> &'static str {
+    #[cfg(target_os = "macos")]
+    return "Menlo";
+    #[cfg(not(target_os = "macos"))]
+    {
+        static FAMILY: LazyLock<String> = LazyLock::new(|| {
+            let mut fonts =
+                fontique::Collection::new(fontique::CollectionOptions { shared: false, system_fonts: true });
+            let mono = fonts.generic_families(fontique::GenericFamily::Monospace).next();
+            mono.and_then(|id| fonts.family_name(id).map(str::to_owned)).unwrap_or_else(|| "monospace".into())
+        });
+        &FAMILY
+    }
+}
+
 /// The type, in points (Flutter's `TextRoles`): `DISPLAY` titles a detail (a subject), `PANE_TITLE`
 /// a list or panel, `BODY` (semibold for a headline) the UI's text, `READING` message text,
 /// `FOOTNOTE` and `CAPTION` small print, `TAG` a tag's label.
@@ -534,8 +551,6 @@ pub mod chat {
     pub const GAP: f32 = 12.0;
     /// Text line height, relative to its size.
     pub const LINE: f32 = 1.55;
-    /// Messages from one person within this many seconds of the last one continue its run.
-    pub const RUN_SECONDS: i64 = 3600;
     /// The composer's field.
     pub const COMPOSER_HEIGHT: f32 = 40.0;
     /// The space header above the log.
@@ -633,30 +648,21 @@ pub fn house_curve(progress: f32) -> f32 {
     bezier((low + high) / 2.0, Y1, Y2)
 }
 
-/// A slot in `0..count` for `key` that is the same on every launch and matches the native app
-/// (FNV-1a 64 over UTF-8).
-pub fn stable_index(key: &str, count: usize) -> usize {
-    let mut hash: u64 = 1_469_598_103_934_665_603;
-    for byte in key.bytes() {
-        hash = (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211);
-    }
-    (hash % count as u64) as usize
-}
-
-const AVATAR_LIGHT: [u32; 11] = [
+/// The avatar palette, one color per engine slot (`mailstream::AVATAR_SLOTS`).
+const AVATAR_LIGHT: [u32; mailstream::AVATAR_SLOTS as usize] = [
     0xFF007AFF, 0xFFAF52DE, 0xFFFF2D55, 0xFFFF3B30, 0xFFFF9500, 0xFF34C759, 0xFF30B0C7, 0xFF5856D6, 0xFFA2845E,
     0xFF00C7BE, 0xFF32ADE6,
 ];
-const AVATAR_DARK: [u32; 11] = [
+const AVATAR_DARK: [u32; mailstream::AVATAR_SLOTS as usize] = [
     0xFF0A84FF, 0xFFBF5AF2, 0xFFFF375F, 0xFFFF453A, 0xFFFF9F0A, 0xFF30D158, 0xFF40C8E0, 0xFF5E5CE6, 0xFFAC8E68,
     0xFF63E6E2, 0xFF64D2FF,
 ];
 
-/// A person's hue (`MailColors.avatarHue`): system colors by a stable hash of the lowercased
-/// address (else the name).
-pub fn avatar_color(email: &str, dark: bool) -> Hsla {
+/// A person's hue (`MailColors.avatarHue`): the system color of the slot the engine gives their
+/// avatar.
+pub fn avatar_color(slot: u32, dark: bool) -> Hsla {
     let palette = if dark { &AVATAR_DARK } else { &AVATAR_LIGHT };
-    argb(palette[stable_index(&email.to_lowercase(), palette.len())])
+    argb(palette[slot as usize % palette.len()])
 }
 
 /// Stable per-account colors, in sidebar order: the system blue, orange, purple, green, red, teal.
@@ -685,7 +691,7 @@ pub fn topic_color(label: &str, dark: bool) -> Hsla {
         .iter()
         .find(|(name, _, _)| *name == key)
         .map(|(_, l, d)| (*l, *d))
-        .unwrap_or_else(|| FALLBACK[stable_index(&key, FALLBACK.len())]);
+        .unwrap_or_else(|| FALLBACK[mailstream::stable_slot(&key, FALLBACK.len() as u32) as usize]);
     argb(if dark { dark_color } else { light })
 }
 

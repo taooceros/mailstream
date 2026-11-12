@@ -27,12 +27,13 @@ pub struct Subject {
     pub title: String,
 }
 
-const PREFIX_WORDS: [(&str, Prefix); 14] = [
+const PREFIX_WORDS: [(&str, Prefix); 15] = [
     ("re", Prefix::Reply),
     ("aw", Prefix::Reply),
     ("sv", Prefix::Reply),
     ("vs", Prefix::Reply),
     ("rif", Prefix::Reply),
+    ("antw", Prefix::Reply),
     ("回复", Prefix::Reply),
     ("答复", Prefix::Reply),
     ("回覆", Prefix::Reply),
@@ -63,6 +64,27 @@ impl Subject {
         }
         Self { prefix, list, title: text.trim().to_string() }
     }
+
+    /// The subject as lists show it: its `[list]` tags apart, so the row can dim them, and its
+    /// title without prefixes, `(no subject)` when there is none.
+    pub fn list_parts(subject: &str) -> (String, String) {
+        let parsed = Self::parse(subject);
+        let title = if parsed.title.is_empty() { "(no subject)".to_string() } else { parsed.title };
+        (parsed.list, title)
+    }
+}
+
+/// The subject of a reply to `subject`: unchanged when it already starts as a reply.
+pub fn reply_subject(subject: &str) -> String {
+    let raw = subject.trim();
+    if Subject::parse(raw).prefix == Some(Prefix::Reply) { raw.to_string() } else { format!("Re: {raw}") }
+}
+
+/// The subject of a forward of `subject`: unchanged when it already starts as a forward in any
+/// language mail clients write (`Fwd:`, `TR:`, `WG:`, `转发：`).
+pub fn forward_subject(subject: &str) -> String {
+    let raw = subject.trim();
+    if Subject::parse(raw).prefix == Some(Prefix::Forward) { raw.to_string() } else { format!("Fwd: {raw}") }
 }
 
 fn drop_prefixes(text: &mut &str) -> Option<Prefix> {
@@ -688,6 +710,18 @@ mod tests {
         let subject = Subject::parse("[alone]");
         assert_eq!((subject.list.as_str(), subject.title.as_str()), ("", "[alone]"));
         assert_eq!(Subject::parse("Rebate: 10%").prefix, None);
+    }
+
+    #[test]
+    fn lists_replies_and_forwards_name_subjects() {
+        assert_eq!(Subject::list_parts("[rust-lang/rust] Re: PR #1"), ("[rust-lang/rust]".into(), "PR #1".into()));
+        assert_eq!(Subject::list_parts("Antw: Re: "), (String::new(), "(no subject)".into()));
+        assert_eq!(Subject::list_parts("Reply all"), (String::new(), "Reply all".into()));
+        assert_eq!(reply_subject(" AW: Plan"), "AW: Plan");
+        assert_eq!(reply_subject("TR: Plan"), "Re: TR: Plan");
+        assert_eq!(forward_subject("TR: x"), "TR: x");
+        assert_eq!(forward_subject("转发：x"), "转发：x");
+        assert_eq!(forward_subject("Re: x"), "Fwd: Re: x");
     }
 
     #[test]

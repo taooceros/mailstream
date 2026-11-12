@@ -243,7 +243,7 @@ fn guest_card(person: &CalendarPerson, organizer: bool, p: &'static Palette, cx:
         .gap(px(space::S8))
         .rounded(px(radius::CONTROL))
         .bg(p.fill)
-        .child(avatars::avatar(&address, metrics::GUEST_AVATAR, p, cx))
+        .child(avatars::avatar(&address.email, &address.avatar(), metrics::GUEST_AVATAR, p, cx))
         .child(
             div()
                 .flex_1()

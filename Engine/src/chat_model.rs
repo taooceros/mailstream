@@ -2,14 +2,13 @@
 //! accounts, users, messages and spaces, in the JSON mail.db holds (dates as seconds since 2001,
 //! absent optionals left out), so either engine reads what the other wrote; and what the list and
 //! the commands show of them: rows with their date labels and previews, and message text without
-//! Chat's markup (`ChatMarkup.plain` in `UI/ChatPage.swift`).
-use std::sync::LazyLock;
-
-use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike};
+//! its markup ([`crate::chat_markup`]).
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 
-use crate::model::{DISTANT_PAST, Date, iso8601, unix_seconds};
+use crate::chat_markup;
+pub use crate::display::DateLabels;
+use crate::model::{DISTANT_PAST, Date, iso8601};
 
 /// A Google account with Chat access; `name` and `email` are both its address (the account id).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -109,7 +108,7 @@ pub struct ChatMessage {
     pub created: Date,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edited: Option<Date>,
-    /// Plain text with Google Chat markup (`*bold*`, `_italic_`, `` `code` ``, fences, `<url|label>`).
+    /// The text as Google Chat sent it, in Markdown ([`crate::chat_markup`]).
     #[serde(default)]
     pub text: String,
     /// `spaces/x/threads/z`.
@@ -132,7 +131,7 @@ impl ChatMessage {
     pub fn json(&self) -> Value {
         json!({
             "id": self.name, "sender": self.sender.json(), "created": iso8601(self.created),
-            "edited": self.edited.map(iso8601), "text": markup_plain(&self.text), "markup": self.text,
+            "edited": self.edited.map(iso8601), "text": chat_markup::plain(&self.text), "markup": self.text,
             "thread": self.thread, "threadReply": self.thread_reply, "mine": self.mine, "card": self.card,
             "attachments": self.attachments.iter().map(|attachment| json!({
                 "name": attachment.name, "url": attachment.url,
@@ -316,7 +315,7 @@ impl ChatRow {
 
 /// A message as a row's preview.
 pub fn preview(message: &ChatMessage) -> String {
-    let mut body = markup_plain(&message.text);
+    let mut body = chat_markup::plain(&message.text);
     if body.is_empty() {
         body = match message.attachments.first() {
             Some(attachment) => format!("Attachment: {}", attachment.name),
@@ -328,169 +327,9 @@ pub fn preview(message: &ChatMessage) -> String {
     if body.is_empty() { who } else { format!("{who}: {body}") }
 }
 
-// MARK: - Date labels
-
-const MONTHS: [&str; 12] =
-    ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-
-/// A list's date and date group of a moment, as the Swift engine's `ConversationRow.dateLabels`
-/// writes them for the en_US locale (weeks start on Sunday): "4:00 PM" today, "Nov 7" this year,
-/// "11/7/2025" before; groups Today, Yesterday, This Week, Last Week, then months.
-pub struct DateLabels {
-    today: NaiveDate,
-}
-
-impl DateLabels {
-    pub fn now() -> Self {
-        Self { today: Local::now().date_naive() }
-    }
-
-    #[cfg(test)]
-    pub fn at(today: NaiveDate) -> Self {
-        Self { today }
-    }
-
-    pub fn labels(&self, date: Option<Date>) -> (String, String) {
-        let Some(moment) = date.and_then(local) else { return (String::new(), "Older".into()) };
-        (self.format(&moment), self.section(&moment))
-    }
-
-    fn format(&self, moment: &DateTime<Local>) -> String {
-        let day = moment.date_naive();
-        if day == self.today {
-            let hour = moment.hour() % 12;
-            let half = if moment.hour() < 12 { "AM" } else { "PM" };
-            return format!("{}:{:02}\u{202F}{half}", if hour == 0 { 12 } else { hour }, moment.minute());
-        }
-        if day.year() == self.today.year() {
-            return format!("{} {}", &MONTHS[day.month0() as usize][..3], day.day());
-        }
-        format!("{}/{}/{}", day.month(), day.day(), day.year())
-    }
-
-    fn section(&self, moment: &DateTime<Local>) -> String {
-        let day = moment.date_naive();
-        let week = |date: NaiveDate| date - chrono::Days::new(u64::from(date.weekday().num_days_from_sunday()));
-        if day == self.today {
-            return "Today".into();
-        }
-        if self.today.pred_opt() == Some(day) {
-            return "Yesterday".into();
-        }
-        if week(day) == week(self.today) {
-            return "This Week".into();
-        }
-        if week(day) == week(self.today - chrono::Days::new(7)) {
-            return "Last Week".into();
-        }
-        let month = MONTHS[day.month0() as usize];
-        if day.year() == self.today.year() { month.into() } else { format!("{month} {}", day.year()) }
-    }
-}
-
-fn local(date: Date) -> Option<DateTime<Local>> {
-    let unix = unix_seconds(date);
-    let seconds = unix.floor();
-    let nanos = (((unix - seconds) * 1e9) as u32).min(999_999_999);
-    Local.timestamp_opt(seconds as i64, nanos).earliest()
-}
-
-// MARK: - Markup
-
-static TOKEN: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"<(https?://[^|>\s]+)(?:\|([^>\n]*))?>|<(users/[^>\s]+)>").expect("the token pattern compiles")
-});
-
-/// One line of text for list previews: links as their labels, mentions as "@", emphasis
-/// markers dropped, whitespace runs as one space.
-pub fn markup_plain(text: &str) -> String {
-    let mut out = TOKEN
-        .replace_all(text, |captures: &regex::Captures<'_>| match captures.get(1) {
-            Some(url) => {
-                let label = captures.get(2).map_or("", |label| label.as_str());
-                if label.is_empty() { url.as_str().to_string() } else { label.to_string() }
-            }
-            None => "@".to_string(),
-        })
-        .replace("```", " ");
-    for marker in ['*', '_', '~'] {
-        out = strip_emphasis(&out, marker);
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn is_word(character: char) -> bool {
-    character.is_alphanumeric() || character == '_'
-}
-
-/// `(?<![\w*])\*(?=\S)([^*\n]*?\S)\*(?![\w*])` (for `*`; likewise `_` and `~`) replaced by its
-/// group, matches taken leftmost and without overlap as NSRegularExpression replaces them.
-fn strip_emphasis(text: &str, marker: char) -> String {
-    if !text.contains(marker) {
-        return text.to_string();
-    }
-    let characters: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
-    let mut index = 0;
-    while index < characters.len() {
-        if characters[index] == marker
-            && let Some(end) = emphasis_end(&characters, index, marker)
-        {
-            out.extend(&characters[index + 1..end]);
-            index = end + 1;
-        } else {
-            out.push(characters[index]);
-            index += 1;
-        }
-    }
-    out
-}
-
-/// Where the emphasis opened at `start` closes, if it does.
-fn emphasis_end(characters: &[char], start: usize, marker: char) -> Option<usize> {
-    let edge = |character: char| character == marker || is_word(character);
-    if start > 0 && edge(characters[start - 1]) {
-        return None;
-    }
-    if characters.get(start + 1)?.is_whitespace() {
-        return None;
-    }
-    let mut last = start + 1;
-    loop {
-        let character = *characters.get(last)?;
-        if !character.is_whitespace()
-            && characters.get(last + 1) == Some(&marker)
-            && characters.get(last + 2).is_none_or(|after| !edge(*after))
-        {
-            return Some(last + 1);
-        }
-        if character == marker || character == '\n' {
-            return None;
-        }
-        last += 1;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::date_from_unix;
-
-    #[test]
-    fn strips_markup_like_the_swift_engine() {
-        assert_eq!(markup_plain("see <https://x.com/a|the doc> and <https://y.com>"), "see the doc and https://y.com");
-        assert_eq!(markup_plain("hi <users/123>,\n\n*bold* _it_ ~gone~ snake_case_name"), "hi @, bold it gone snake_case_name");
-        assert_eq!(markup_plain("```\ncode\n``` 2*3*4 * not *"), "code 2*3*4 * not *");
-        assert_eq!(markup_plain("*ab**"), "ab*");
-        assert_eq!(markup_plain("**x**"), "**x**");
-        // What NSRegularExpression makes of these, checked against the Swift engine's patterns.
-        assert_eq!(markup_plain("*a *b* c*"), "*a b c*");
-        assert_eq!(markup_plain("_a_b_ x"), "_a_b_ x");
-        assert_eq!(markup_plain("*multi\nline*"), "*multi line*");
-        assert_eq!(markup_plain("~ x~ *y *z*"), "~ x~ *y z");
-        assert_eq!(markup_plain("é*ü*é (*ok*)"), "é*ü*é (ok)");
-        assert_eq!(markup_plain("*see <https://x.com|it>*"), "see it");
-    }
 
     fn user(display: Option<&str>, email: Option<&str>) -> ChatUser {
         ChatUser {
@@ -521,28 +360,6 @@ mod tests {
             attachments: vec![ChatAttachment { name: "a.png".into(), content_type: None, url: None, resource: None }],
         };
         assert_eq!(preview(&message), "Brent: Attachment: a.png");
-    }
-
-    #[test]
-    fn labels_dates_like_the_swift_engine() {
-        // A Wednesday.
-        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
-        let labels = DateLabels::at(today);
-        let at = |day: NaiveDate, hour: u32| {
-            let local = Local.from_local_datetime(&day.and_hms_opt(hour, 5, 0).unwrap()).earliest().unwrap();
-            Some(date_from_unix(local.timestamp() as f64))
-        };
-        assert_eq!(labels.labels(at(today, 16)), ("4:05\u{202F}PM".into(), "Today".into()));
-        assert_eq!(labels.labels(at(today, 0)).0, "12:05\u{202F}AM");
-        assert_eq!(labels.labels(at(today.pred_opt().unwrap(), 9)), ("Nov 10".into(), "Yesterday".into()));
-        assert_eq!(labels.labels(at(NaiveDate::from_ymd_opt(2026, 11, 8).unwrap(), 9)).1, "This Week");
-        assert_eq!(labels.labels(at(NaiveDate::from_ymd_opt(2026, 11, 7).unwrap(), 9)).1, "Last Week");
-        assert_eq!(labels.labels(at(NaiveDate::from_ymd_opt(2026, 10, 31).unwrap(), 9)).1, "October");
-        assert_eq!(
-            labels.labels(at(NaiveDate::from_ymd_opt(2025, 3, 4).unwrap(), 9)),
-            ("3/4/2025".into(), "March 2025".into())
-        );
-        assert_eq!(labels.labels(None), (String::new(), "Older".into()));
     }
 
     #[test]

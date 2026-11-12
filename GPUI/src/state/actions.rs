@@ -147,9 +147,7 @@ impl MailApp {
             }
             _ => Default::default(),
         };
-        let subject = conversation.subject.trim_start();
-        let subject =
-            if subject.to_lowercase().starts_with("re:") { subject.to_owned() } else { format!("Re: {subject}") };
+        let subject = mailstream::reply_subject(conversation.subject.to_string());
         let moved = MovedReply {
             conversation: id.clone(),
             all,

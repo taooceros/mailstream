@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Local, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use gpui::component::input::{Escape, InputEvent, InputState};
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -32,7 +32,6 @@ use crate::controls::{
 use crate::design::{self, AttachmentKind, Palette, chat as metrics, layout, list as rows, radius, space, stroke, text};
 use crate::icons::{Icon, icon};
 use crate::engine::{MailError, engine};
-use crate::format;
 use crate::input;
 
 actions!(chat, [Back, Next, Previous, Open, NewChat, Refresh]);
@@ -100,14 +99,13 @@ struct Space {
     snippet: SharedString,
     unread: bool,
     last_active: Option<DateTime<Utc>>,
-    avatar: SpaceAvatar,
-    /// The row's date, derived off the main thread.
+    avatar: mailstream::Avatar,
+    /// The row's date, as the engine labels it.
     when: SharedString,
 }
 
 impl Space {
-    /// Converts off the main thread, deriving the row's date against `now`.
-    fn new(space: mailstream::ChatSpace, now: DateTime<Local>) -> Self {
+    fn new(space: mailstream::ChatSpace) -> Self {
         let last_active = date(space.activity);
         Space {
             account: space.account.into(),
@@ -117,8 +115,8 @@ impl Space {
             snippet: space.preview.into(),
             unread: space.unread,
             last_active,
-            avatar: SpaceAvatar { name: space.avatar_name.into(), color_key: space.avatar_color_key.into() },
-            when: format::list_date(last_active, now).into(),
+            avatar: space.avatar,
+            when: space.date.into(),
         }
     }
 
@@ -141,22 +139,16 @@ impl Space {
 }
 
 #[derive(Clone, PartialEq)]
-struct SpaceAvatar {
-    name: SharedString,
-    color_key: SharedString,
-}
-
-#[derive(Clone, PartialEq)]
 struct User {
     /// `users/<id>`.
     id: SharedString,
-    email: Option<SharedString>,
     label: SharedString,
+    avatar: mailstream::Avatar,
 }
 
 impl From<mailstream::ChatUser> for User {
     fn from(user: mailstream::ChatUser) -> Self {
-        User { id: user.id.into(), email: user.email.map(Into::into), label: user.name.into() }
+        User { id: user.id.into(), label: user.name.into(), avatar: user.avatar }
     }
 }
 
@@ -257,225 +249,239 @@ impl Person {
 
 // MARK: - Message text
 
-/// How a stretch of a message's text is drawn.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Mark {
-    Bold,
-    Italic,
-    Strike,
-    Code,
-    Link,
-    Mention,
-    Faint,
+/// How a run of a message's text is drawn, as the engine laid it out (`mailstream::ChatSpan`).
+#[derive(Clone, Copy, PartialEq, Default, Debug)]
+struct Mark {
+    bold: bool,
+    italic: bool,
+    strike: bool,
+    code: bool,
+    link: bool,
+    mention: bool,
+    faint: bool,
 }
 
-/// A message's text with Google Chat markup (`*bold*`, `_italic_`, `~strike~`, `` `code` ``,
-/// fences, `<url|label>`, `<users/…>` mentions) turned into styled ranges; bare URLs become links.
+/// A paragraph's text with its styled ranges and the targets of its links, in order.
 #[derive(Clone, Default, Debug)]
-struct Body {
+struct Inline {
     text: SharedString,
     /// Sorted, never overlapping.
     marks: Vec<(Range<usize>, Mark)>,
-    /// The targets of the `Link` marks, in order.
     links: Vec<SharedString>,
 }
 
-impl Body {
-    fn parse(text: &str, names: &HashMap<String, SharedString>, edited: bool) -> Self {
-        let mut builder = BodyBuilder { out: String::with_capacity(text.len()), marks: Vec::new(), links: Vec::new(), names };
-        let mut rest = text;
-        while let Some(start) = rest.find("```") {
-            let after = &rest[start + 3..];
-            let Some(end) = after.find("```") else { break };
-            builder.tokens(&rest[..start]);
-            builder.push(after[..end].trim_matches('\n'), Some(Mark::Code));
-            rest = &after[end + 3..];
+impl Inline {
+    fn new(spans: &[mailstream::ChatSpan]) -> Self {
+        let mut text = String::new();
+        let (mut marks, mut links) = (Vec::new(), Vec::new());
+        for span in spans {
+            let start = text.len();
+            text.push_str(&span.text);
+            let mark = Mark {
+                bold: span.bold,
+                italic: span.italic,
+                strike: span.strike,
+                code: span.code,
+                link: span.link.is_some(),
+                mention: span.mention,
+                faint: false,
+            };
+            if mark != Mark::default() {
+                marks.push((start..text.len(), mark));
+            }
+            if let Some(link) = &span.link {
+                links.push(SharedString::from(link.clone()));
+            }
         }
-        builder.tokens(rest);
-        if edited {
-            builder.push(" (edited)", Some(Mark::Faint));
-        }
-        Body { text: builder.out.into(), marks: builder.marks, links: builder.links }
+        Inline { text: text.into(), marks, links }
     }
 
-    fn note(text: &str) -> Self {
-        Body { text: SharedString::from(text.to_owned()), marks: vec![(0..text.len(), Mark::Italic)], links: Vec::new() }
+    fn push(&mut self, text: &str, mark: Mark) {
+        let mut owned = self.text.to_string();
+        let start = owned.len();
+        owned.push_str(text);
+        self.marks.push((start..owned.len(), mark));
+        self.text = owned.into();
     }
 
     fn link_ranges(&self) -> Vec<Range<usize>> {
-        self.marks.iter().filter(|(_, mark)| *mark == Mark::Link).map(|(range, _)| range.clone()).collect()
+        self.marks.iter().filter(|(_, mark)| mark.link).map(|(range, _)| range.clone()).collect()
+    }
+
+    /// The text, its links opening in the browser.
+    fn element(&self, id: ElementId, p: &Palette) -> AnyElement {
+        let styled = StyledText::new(self.text.clone()).with_highlights(self.marks.iter().map(|(range, mark)| (range.clone(), mark_style(*mark, p))));
+        let links = self.link_ranges();
+        if links.is_empty() {
+            return styled.into_any_element();
+        }
+        let urls = self.links.clone();
+        InteractiveText::new(id, styled)
+            .on_click(links, move |index, _, cx| {
+                if let Some(url) = urls.get(index) {
+                    cx.open_url(url);
+                }
+            })
+            .into_any_element()
     }
 }
 
-struct BodyBuilder<'a> {
-    out: String,
-    marks: Vec<(Range<usize>, Mark)>,
-    links: Vec<SharedString>,
-    names: &'a HashMap<String, SharedString>,
+#[derive(Clone, Debug)]
+enum PieceKind {
+    Text,
+    Heading(u8),
+    Code,
+    Rule,
+    /// Rows of cells, the header row first.
+    Table(Vec<Vec<Inline>>),
 }
 
-/// Punctuation that ends a sentence rather than a bare URL.
-const URL_TRAILING: [char; 10] = ['.', ',', ';', ':', '!', '?', ')', ']', '\'', '"'];
+/// One block of a message (`mailstream::ChatBlock`).
+#[derive(Clone, Debug)]
+struct Piece {
+    kind: PieceKind,
+    inline: Inline,
+    quote: u32,
+    indent: u32,
+    marker: Option<SharedString>,
+    tight: bool,
+}
 
-impl BodyBuilder<'_> {
-    fn push(&mut self, s: &str, mark: Option<Mark>) {
-        if s.is_empty() {
-            return;
-        }
-        let start = self.out.len();
-        self.out.push_str(s);
-        if let Some(mark) = mark {
-            self.marks.push((start..self.out.len(), mark));
-        }
-    }
+/// A message's text, laid out by the engine (`chat_body`): blocks one below the other.
+#[derive(Clone, Default, Debug)]
+struct Body {
+    pieces: Vec<Piece>,
+}
 
-    fn link(&mut self, label: &str, url: &str) {
-        self.push(label, Some(Mark::Link));
-        self.links.push(SharedString::from(url.to_owned()));
-    }
-
-    /// `<url|label>` links and `<users/…>` mentions; the text around them goes to `inline`.
-    fn tokens(&mut self, mut rest: &str) {
-        while let Some(open) = rest.find('<') {
-            let after = &rest[open + 1..];
-            let token = after
-                .find(['>', '\n'])
-                .filter(|&close| after[close..].starts_with('>'))
-                .map(|close| (&after[..close], &after[close + 1..]));
-            match token {
-                Some((inner, tail))
-                    if (inner.starts_with("http://") || inner.starts_with("https://"))
-                        && !inner.split('|').next().unwrap_or_default().contains(char::is_whitespace) =>
-                {
-                    let (url, label) = inner.split_once('|').unwrap_or((inner, ""));
-                    self.inline(&rest[..open]);
-                    self.link(if label.is_empty() { url } else { label }, url);
-                    rest = tail;
-                }
-                Some((inner, tail)) if inner.starts_with("users/") && !inner.contains(char::is_whitespace) => {
-                    self.inline(&rest[..open]);
-                    let name = self.names.get(inner).map_or("someone", |name| name.as_ref());
-                    let mention = format!("@{name}");
-                    self.push(&mention, Some(Mark::Mention));
-                    rest = tail;
-                }
-                _ => {
-                    self.inline(&rest[..=open]);
-                    rest = after;
-                }
+impl Body {
+    fn new(blocks: &[mailstream::ChatBlock], edited: bool) -> Self {
+        let mut pieces: Vec<Piece> = blocks
+            .iter()
+            .map(|block| Piece {
+                kind: match &block.kind {
+                    mailstream::ChatBlockKind::Paragraph => PieceKind::Text,
+                    mailstream::ChatBlockKind::Heading { level } => PieceKind::Heading(*level),
+                    mailstream::ChatBlockKind::Code => PieceKind::Code,
+                    mailstream::ChatBlockKind::Rule => PieceKind::Rule,
+                    mailstream::ChatBlockKind::Table => PieceKind::Table(
+                        block.rows.iter().map(|row| row.cells.iter().map(|cell| Inline::new(&cell.spans)).collect()).collect(),
+                    ),
+                },
+                inline: Inline::new(&block.spans),
+                quote: block.quote,
+                indent: block.indent,
+                marker: block.marker.clone().map(Into::into),
+                tight: block.tight,
+            })
+            .collect();
+        if edited {
+            let faint = Mark { faint: true, ..Mark::default() };
+            match pieces.last_mut().filter(|piece| matches!(piece.kind, PieceKind::Text)) {
+                Some(last) => last.inline.push(" (edited)", faint),
+                None => pieces.push(Piece::text(Inline::default(), "(edited)", faint)),
             }
         }
-        self.inline(rest);
+        Body { pieces }
     }
 
-    /// Bare URLs become links; the rest goes to `emphasis`.
-    fn inline(&mut self, mut rest: &str) {
-        while let Some(start) = find_url(rest) {
-            let tail = &rest[start..];
-            let scheme = tail.find("//").map_or(0, |i| i + 2);
-            let mut end = tail.find(char::is_whitespace).unwrap_or(tail.len());
-            while end > scheme && tail[..end].ends_with(URL_TRAILING) {
-                end -= 1;
-            }
-            if end <= scheme {
-                self.emphasis(&rest[..start + scheme]);
-                rest = &rest[start + scheme..];
-                continue;
-            }
-            self.emphasis(&rest[..start]);
-            self.link(&tail[..end], &tail[..end]);
-            rest = &tail[end..];
-        }
-        self.emphasis(rest);
+    /// One line in italics, for what has no text (a card).
+    fn note(text: &str) -> Self {
+        Body { pieces: vec![Piece::text(Inline::default(), text, Mark { italic: true, ..Mark::default() })] }
     }
 
-    fn emphasis(&mut self, piece: &str) {
-        let bytes = piece.as_bytes();
-        let (mut plain, mut i) = (0, 0);
-        while i < bytes.len() {
-            // Google escapes markup characters it means literally (`thanks\!`): drop the
-            // backslash, keep the character as text.
-            if bytes[i] == b'\\' && bytes.get(i + 1).is_some_and(u8::is_ascii_punctuation) {
-                self.push(&piece[plain..i], None);
-                plain = i + 1;
-                i += 2;
-                continue;
-            }
-            let mark = match bytes[i] {
-                b'*' => Mark::Bold,
-                b'_' => Mark::Italic,
-                b'~' => Mark::Strike,
-                b'`' => Mark::Code,
-                _ => {
-                    i += 1;
-                    continue;
-                }
+    fn is_empty(&self) -> bool {
+        self.pieces.is_empty()
+    }
+
+    /// The blocks, `id` naming their links' elements.
+    fn element(&self, id: &str, p: &Palette) -> Div {
+        div().flex().flex_col().children(self.pieces.iter().enumerate().map(|(index, piece)| {
+            let element_id = ElementId::Name(format!("chat-text:{id}:{index}").into());
+            let gap = if index == 0 { 0. } else if piece.tight { 2. } else { 6. };
+            let content: AnyElement = match &piece.kind {
+                PieceKind::Text => piece.inline.element(element_id, p),
+                PieceKind::Heading(level) => div()
+                    .font_weight(FontWeight::BOLD)
+                    .text_size(px(text::READING * match level { 1 => 1.3, 2 => 1.18, 3 => 1.08, _ => 1.0 }))
+                    .child(piece.inline.element(element_id, p))
+                    .into_any_element(),
+                PieceKind::Code => div()
+                    .w_full()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(radius::CONTROL))
+                    .bg(p.chip)
+                    .font_family(design::mono_font())
+                    .text_size(px(text::READING * 0.86))
+                    .child(piece.inline.text.clone())
+                    .into_any_element(),
+                PieceKind::Rule => div().w_full().my(px(4.)).h(px(1.)).bg(p.line).into_any_element(),
+                PieceKind::Table(rows) => div()
+                    .flex()
+                    .flex_col()
+                    .rounded(px(radius::CONTROL))
+                    .border_1()
+                    .border_color(p.line)
+                    .overflow_hidden()
+                    .children(rows.iter().enumerate().map(|(r, row)| {
+                        div().flex().when(r == 0, |d| d.bg(p.chip).font_weight(FontWeight::SEMIBOLD)).when(r > 0, |d| d.border_t_1().border_color(p.line)).children(
+                            row.iter().enumerate().map(|(c, cell)| {
+                                let cell_id = ElementId::Name(format!("chat-text:{id}:{index}:{r}:{c}").into());
+                                div().flex_1().min_w_0().px(px(10.)).py(px(4.)).when(c > 0, |d| d.border_l_1().border_color(p.line)).child(cell.element(cell_id, p))
+                            }),
+                        )
+                    }))
+                    .into_any_element(),
             };
-            match closing(piece, i) {
-                Some(close) => {
-                    self.push(&piece[plain..i], None);
-                    self.push(&piece[i + 1..close], Some(mark));
-                    i = close + 1;
-                    plain = i;
-                }
-                None => i += 1,
+            let mut block = div().w_full().min_w_0().child(content);
+            if piece.indent > 0 {
+                let marker = div()
+                    .flex_shrink_0()
+                    .w(px(20.))
+                    .text_color(p.muted)
+                    .children(piece.marker.clone());
+                block = div().w_full().min_w_0().pl(px(20. * (piece.indent - 1) as f32)).flex().child(marker).child(div().flex_1().min_w_0().child(block));
             }
-        }
-        self.push(&piece[plain..], None);
+            for _ in 0..piece.quote {
+                block = div().w_full().min_w_0().border_l(px(3.)).border_color(p.line).pl(px(10.)).text_color(p.muted).child(block);
+            }
+            block.mt(px(gap))
+        }))
     }
 }
 
-/// The first `http://` or `https://` that starts a word.
-fn find_url(s: &str) -> Option<usize> {
-    let mut from = 0;
-    while let Some(i) = s[from..].find("http").map(|i| i + from) {
-        let rest = &s[i..];
-        let starts_word = s[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
-        if starts_word && (rest.starts_with("http://") || rest.starts_with("https://")) {
-            return Some(i);
-        }
-        from = i + 4;
+impl Piece {
+    fn text(mut inline: Inline, text: &str, mark: Mark) -> Self {
+        inline.push(text, mark);
+        Piece { kind: PieceKind::Text, inline, quote: 0, indent: 0, marker: None, tight: false }
     }
-    None
-}
-
-/// Where the emphasis marker at `open` closes, by Google Chat's rules (`ChatMarkup`): the next
-/// same marker on the line, with text that starts and ends with non-space, not inside a word.
-fn closing(s: &str, open: usize) -> Option<usize> {
-    let marker = char::from(s.as_bytes()[open]);
-    let start = open + 1;
-    let close = s[start..].find(marker)? + start;
-    let content = &s[start..close];
-    if content.is_empty() || content.contains('\n') {
-        return None;
-    }
-    if marker == '`' {
-        return Some(close);
-    }
-    let word = |c: char| c.is_alphanumeric() || c == '_';
-    let before = s[..open].chars().next_back();
-    let after = s[close + 1..].chars().next();
-    let first = content.chars().next()?;
-    let last = content.chars().next_back()?;
-    let fits = before.is_none_or(|c| !word(c) && c != marker)
-        && !first.is_whitespace()
-        && !last.is_whitespace()
-        && after.is_none_or(|c| !word(c) && c != marker);
-    fits.then_some(close)
 }
 
 fn mark_style(mark: Mark, p: &Palette) -> HighlightStyle {
-    match mark {
-        Mark::Bold => HighlightStyle { font_weight: Some(FontWeight::BOLD), ..Default::default() },
-        Mark::Italic => HighlightStyle { font_style: Some(FontStyle::Italic), ..Default::default() },
-        Mark::Strike => {
-            HighlightStyle { strikethrough: Some(StrikethroughStyle { thickness: px(1.), color: None }), ..Default::default() }
-        }
-        Mark::Code => HighlightStyle { background_color: Some(p.chip), ..Default::default() },
-        Mark::Link => HighlightStyle { color: Some(p.accent), ..Default::default() },
-        Mark::Mention => HighlightStyle { color: Some(p.accent), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() },
-        Mark::Faint => HighlightStyle { color: Some(p.faint), ..Default::default() },
+    let mut style = HighlightStyle::default();
+    if mark.bold {
+        style.font_weight = Some(FontWeight::BOLD);
     }
+    if mark.italic {
+        style.font_style = Some(FontStyle::Italic);
+    }
+    if mark.strike {
+        style.strikethrough = Some(StrikethroughStyle { thickness: px(1.), color: None });
+    }
+    if mark.code {
+        style.background_color = Some(p.chip);
+    }
+    if mark.link {
+        style.color = Some(p.accent);
+    }
+    if mark.mention {
+        style.color = Some(p.accent);
+        style.font_weight = Some(FontWeight::SEMIBOLD);
+    }
+    if mark.faint {
+        style.color = Some(p.faint);
+    }
+    style
 }
 
 // MARK: - The log
@@ -492,11 +498,8 @@ struct Msg {
     sender_id: SharedString,
     /// "You" for the user's own messages.
     name: SharedString,
-    initial: SharedString,
-    color_key: SharedString,
+    avatar: mailstream::Avatar,
     created: Option<DateTime<Utc>>,
-    day: Option<NaiveDate>,
-    day_label: SharedString,
     time: SharedString,
     thread: Option<SharedString>,
     thread_reply: bool,
@@ -509,25 +512,22 @@ struct Msg {
 }
 
 impl Msg {
-    fn from_wire(message: mailstream::ChatMessage, names: &HashMap<String, SharedString>, now: DateTime<Local>) -> Self {
-        let created = date(message.created);
-        let local = created.map(|date| date.with_timezone(&Local));
+    fn from_wire(message: mailstream::ChatMessage) -> Self {
+        let created = date(message.created.clone());
+        let time = mailstream::message_time(message.created).into();
         let sender = User::from(message.sender);
-        let body = if message.card && message.markup.is_empty() {
+        let body = if message.card && message.body.is_empty() {
             Body::note("Card message")
         } else {
-            Body::parse(&message.markup, names, message.edited.is_some())
+            Body::new(&message.body, message.edited.is_some())
         };
         Msg {
             name: if message.mine { "You".into() } else { sender.label.clone() },
-            initial: initial(&sender.label),
-            color_key: sender.email.clone().unwrap_or_else(|| sender.id.clone()),
+            avatar: sender.avatar,
             sender_id: sender.id,
             id: message.id.into(),
             created,
-            day: local.map(|date| date.date_naive()),
-            day_label: local.map(|date| format::day_divider(date, now)).unwrap_or_default().into(),
-            time: local.map(|date| date.format("%-I:%M %p").to_string()).unwrap_or_default().into(),
+            time,
             thread: message.thread.map(Into::into),
             thread_reply: message.thread_reply,
             mine: message.mine,
@@ -538,21 +538,14 @@ impl Msg {
         }
     }
 
-    fn convert(messages: Vec<mailstream::ChatMessage>, members: &[User]) -> Vec<Msg> {
-        let mut names: HashMap<String, SharedString> =
-            members.iter().map(|user| (user.id.to_string(), user.label.clone())).collect();
-        for message in &messages {
-            names.entry(message.sender.id.clone()).or_insert_with(|| message.sender.name.clone().into());
+    /// Who mentions in a message from here name: members and anyone who wrote in the space.
+    fn names(log: &Log) -> HashMap<String, String> {
+        let mut names: HashMap<String, String> = log.members.iter().map(|user| (user.id.to_string(), user.label.to_string())).collect();
+        for message in &log.messages {
+            names.entry(message.sender_id.to_string()).or_insert_with(|| message.name.to_string());
         }
-        let now = Local::now();
-        messages.into_iter().map(|message| Msg::from_wire(message, &names, now)).collect()
+        names
     }
-}
-
-/// Where a message stands in the log: a day divider above it, or part of the run above.
-struct Run {
-    divider: Option<SharedString>,
-    continued: bool,
 }
 
 /// A space's history as the engine holds it, converted off the main thread.
@@ -572,7 +565,7 @@ impl Loaded {
         let members: Vec<User> = thread.members.into_iter().map(User::from).collect();
         Loaded {
             title: thread.title.map(Into::into),
-            messages: Msg::convert(thread.messages, &members),
+            messages: thread.messages.into_iter().map(Msg::from_wire).collect(),
             members,
             last_read: date(thread.last_read),
             more: thread.more,
@@ -591,7 +584,8 @@ struct Log {
     messages: Vec<Msg>,
     /// Sent from here, not confirmed yet (or failed); drawn after `messages`.
     pending: Vec<Msg>,
-    runs: Vec<Run>,
+    /// Each entry's place in the log (`mailstream::chat_runs`).
+    runs: Vec<mailstream::ChatRun>,
     /// Older messages exist before the first one here.
     more: bool,
     loaded: bool,
@@ -644,23 +638,17 @@ impl Log {
     /// Recomputes runs and tells the list which entries changed since `before` (the ids then), so
     /// only those are measured again.
     fn relayout(&mut self, before: &[SharedString]) {
-        let mut runs = Vec::with_capacity(self.len());
-        let mut previous: Option<&Msg> = None;
-        for message in self.messages.iter().chain(&self.pending) {
-            let same_day = message.day.is_some() && previous.and_then(|p| p.day) == message.day;
-            let close = match (previous.and_then(|p| p.created), message.created) {
-                (Some(last), Some(now)) => (now - last).num_seconds() < metrics::RUN_SECONDS,
-                _ => false,
-            };
-            let continued = same_day
-                && close
-                && previous.is_some_and(|p| p.sender_id == message.sender_id)
-                && self.first_unread.as_ref() != Some(&message.id);
-            let divider = (!same_day && !message.day_label.is_empty()).then(|| message.day_label.clone());
-            runs.push(Run { divider, continued });
-            previous = Some(message);
-        }
-        self.runs = runs;
+        let entries = self
+            .messages
+            .iter()
+            .chain(&self.pending)
+            .map(|message| mailstream::ChatRunEntry {
+                sender: message.sender_id.to_string(),
+                date: message.created.map(|date| date.to_rfc3339()),
+                opens_run: self.first_unread.as_ref() == Some(&message.id),
+            })
+            .collect();
+        self.runs = mailstream::chat_runs(entries);
 
         let after = self.ids();
         let prefix = before.iter().zip(&after).take_while(|(a, b)| a == b).count();
@@ -876,8 +864,7 @@ impl ChatPane {
                 };
                 let more = answer.more;
                 let accounts: Vec<Account> = answer.accounts.into_iter().map(Account::from).collect();
-                let now = Local::now();
-                let spaces: Vec<Space> = answer.spaces.into_iter().map(|space| Space::new(space, now)).collect();
+                let spaces: Vec<Space> = answer.spaces.into_iter().map(Space::new).collect();
                 // Account colors follow the sidebar's order of every account; asked for again only
                 // when a chat account is not in the known order.
                 let order = if accounts.iter().all(|a| known.contains(&a.id)) {
@@ -1169,22 +1156,19 @@ impl ChatPane {
         let Some(log) = self.logs.get_mut(key) else { return };
         self.pending_serial += 1;
         let id: SharedString = format!("pending-{}", self.pending_serial).into();
-        let now = Local::now();
+        let now = Utc::now();
         let me = log.messages.iter().rev().find(|m| m.mine);
         let pending = Msg {
             id: id.clone(),
             sender_id: me.map_or_else(|| "me".into(), |m| m.sender_id.clone()),
             name: "You".into(),
-            initial: me.map_or_else(|| initial(&key.account), |m| m.initial.clone()),
-            color_key: me.map_or_else(|| key.account.clone(), |m| m.color_key.clone()),
-            created: Some(now.with_timezone(&Utc)),
-            day: Some(now.date_naive()),
-            day_label: "Today".into(),
-            time: now.format("%-I:%M %p").to_string().into(),
+            avatar: me.map_or_else(|| mailstream::avatar(String::new(), key.account.to_string()), |m| m.avatar.clone()),
+            created: Some(now),
+            time: mailstream::message_time(Some(now.to_rfc3339())).into(),
             thread: thread.clone(),
             thread_reply: thread.is_some(),
             mine: true,
-            body: Body::parse(&text, &HashMap::new(), false),
+            body: Body::new(&mailstream::chat_body(text.clone(), Msg::names(log)), false),
             attachments: Vec::new(),
             status: Status::Sending,
             draft: Some((text.clone(), thread.clone())),
@@ -1604,7 +1588,7 @@ impl ChatPane {
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open(key.clone(), window, cx)))
             .child(row_layout(
                 unread,
-                monogram(initial(&space.avatar.name), &space.avatar.color_key, rows::AVATAR, p),
+                monogram(&space.avatar, rows::AVATAR, p),
                 title,
                 meta,
                 subtitle,
@@ -1695,7 +1679,7 @@ impl ChatPane {
             .w(px(metrics::GUTTER))
             .flex()
             .justify_center()
-            .when(!continued, |d| d.child(monogram(initial(&message.initial), &message.color_key, metrics::AVATAR, p)))
+            .when(!continued, |d| d.child(monogram(&message.avatar, metrics::AVATAR, p)))
             .when(continued, |d| {
                 d.child(div().text_size(px(text::TAG)).line_height(px(22.)).text_color(time_color).child(message.time.clone()))
             });
@@ -1727,22 +1711,6 @@ impl ChatPane {
                 )
         });
 
-        let body_text = StyledText::new(message.body.text.clone())
-            .with_highlights(message.body.marks.iter().map(|(range, mark)| (range.clone(), mark_style(*mark, p))));
-        let links = message.body.link_ranges();
-        let body: AnyElement = if links.is_empty() {
-            body_text.into_any_element()
-        } else {
-            let urls = message.body.links.clone();
-            InteractiveText::new(ElementId::Name(format!("chat-text:{}", message.id).into()), body_text)
-                .on_click(links, move |index, _, cx| {
-                    if let Some(url) = urls.get(index) {
-                        cx.open_url(url);
-                    }
-                })
-                .into_any_element()
-        };
-
         let main = div()
             .flex_1()
             .min_w_0()
@@ -1752,14 +1720,14 @@ impl ChatPane {
             .when(message.thread_reply, |d| {
                 d.child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child("↳ Reply in thread"))
             })
-            .when(!message.body.text.is_empty(), |d| {
+            .when(!message.body.is_empty(), |d| {
                 d.child(
                     div()
                         .text_size(px(text::READING))
                         .line_height(relative(metrics::LINE))
                         .when(message.thread_reply, |d| d.pl(px(10.)))
                         .when(matches!(message.status, Status::Failed(_)), |d| d.text_color(p.muted))
-                        .child(body),
+                        .child(message.body.element(&message.id, p)),
                 )
             })
             .when(!message.attachments.is_empty(), |d| {
@@ -1848,7 +1816,7 @@ impl ChatPane {
             div()
                 .flex()
                 .flex_col()
-                .when_some(run.divider.clone(), |d, label| d.child(divider(label, p.muted, p.line)))
+                .when(!run.divider.is_empty(), |d| d.child(divider(run.divider.clone().into(), p.muted, p.line)))
                 .when(new_line, |d| d.child(divider("New".into(), p.accent, p.accent.opacity(0.45))))
                 .child(row),
         )
@@ -2105,7 +2073,7 @@ impl ChatPane {
                 .when(index == 0, |d| d.bg(p.selection))
                 .when(index != 0, |d| d.hover(|s| s.bg(p.hover)))
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.add_person(chosen.clone(), window, cx)))
-                .child(monogram(initial(&person.label()), &person.email, rows::AVATAR, p))
+                .child(monogram(&mailstream::avatar(person.label().to_string(), person.email.to_string()), rows::AVATAR, p))
                 .child(div().min_w_0().truncate().child(person.label()))
                 .when(person.name.is_some(), |d| d.child(div().min_w_0().truncate().text_color(p.muted).child(person.email.clone())))
         }));
@@ -2164,14 +2132,6 @@ impl ChatPane {
 }
 
 // MARK: - Pieces
-
-/// The first letter or digit of a name, uppercased (`Address::initial`).
-fn initial(name: &str) -> SharedString {
-    name.chars()
-        .find(|c| c.is_alphanumeric())
-        .map(|c| c.to_uppercase().collect::<String>().into())
-        .unwrap_or_else(|| "?".into())
-}
 
 /// A line across the log with a label in it.
 fn divider(label: SharedString, color: gpui::Hsla, line: gpui::Hsla) -> Div {
@@ -2273,6 +2233,7 @@ mod fixture {
         let shown = fixture.page.saturating_mul(PAGES.load(Ordering::Relaxed));
         answer.more = shown < answer.spaces.len();
         answer.spaces.truncate(shown);
+        answer.dress();
         Some(answer)
     }
 
@@ -2288,11 +2249,23 @@ mod fixture {
     pub fn thread(account: &str, space: &str) -> Option<Result<ChatThread, MailError>> {
         let fixture = FIXTURE.as_ref()?;
         let thread = fixture.threads.iter().find(|thread| thread.account == account && thread.space == space);
-        Some(thread.cloned().ok_or_else(|| missing(space)))
+        Some(
+            thread
+                .cloned()
+                .map(|mut thread| {
+                    thread.dress();
+                    thread
+                })
+                .ok_or_else(|| missing(space)),
+        )
     }
 
     pub fn people() -> Option<ChatPeople> {
-        Some(ChatPeople { can_start: true, people: FIXTURE.as_ref()?.people.clone() })
+        let mut people = FIXTURE.as_ref()?.people.clone();
+        for person in &mut people {
+            person.dress();
+        }
+        Some(ChatPeople { can_start: true, people })
     }
 
     pub fn file(resource: &str) -> Option<Result<String, MailError>> {
@@ -2304,41 +2277,6 @@ mod fixture {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn parsed(text: &str) -> Body {
-        let names = HashMap::from([("users/1".to_owned(), SharedString::from("Brent"))]);
-        Body::parse(text, &names, false)
-    }
-
-    #[test]
-    fn markup_becomes_styled_ranges() {
-        let body = parsed("*bold* and _it_ ~gone~ `x` <https://a.example/b|site> <users/1> https://c.example/d.");
-        assert_eq!(body.text.as_ref(), "bold and it gone x site @Brent https://c.example/d.");
-        let kinds: Vec<Mark> = body.marks.iter().map(|(_, mark)| *mark).collect();
-        assert_eq!(kinds, [Mark::Bold, Mark::Italic, Mark::Strike, Mark::Code, Mark::Link, Mark::Mention, Mark::Link]);
-        assert_eq!(body.links, [SharedString::from("https://a.example/b"), SharedString::from("https://c.example/d")]);
-    }
-
-    #[test]
-    fn markers_inside_words_stay_text() {
-        let body = parsed("snake_case_name and 2*3*4 and a * b");
-        assert_eq!(body.text.as_ref(), "snake_case_name and 2*3*4 and a * b");
-        assert!(body.marks.is_empty());
-    }
-
-    #[test]
-    fn escaped_markup_is_literal() {
-        let body = parsed("thanks\\! give me \\~5min \\*not bold\\*");
-        assert_eq!(body.text.as_ref(), "thanks! give me ~5min *not bold*");
-        assert!(body.marks.is_empty());
-    }
-
-    #[test]
-    fn fences_keep_their_lines() {
-        let body = parsed("look:\n```\nlet a = 1;\n```\ndone");
-        assert_eq!(body.text.as_ref(), "look:\nlet a = 1;\ndone");
-        assert_eq!(body.marks.len(), 1);
-    }
 
     #[test]
     fn attachments_take_their_kind_from_type_name_and_link() {

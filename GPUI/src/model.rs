@@ -1,9 +1,10 @@
-//! The UI's values, converted from the engine's records (`mailstream` crate). Conversion and the
-//! derived display strings (`prepare`) run on the background executor.
+//! The UI's values, converted from the engine's records (`mailstream` crate), which come with
+//! their display strings (dates, subjects, avatars; MS-235). Conversion and the strings derived
+//! here (`prepare`) run on the background executor.
 
 use std::collections::HashSet;
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Utc};
 use gpui::SharedString;
 
 use crate::format;
@@ -220,13 +221,9 @@ impl Address {
         }
     }
 
-    /// The first letter or digit of the name, uppercased (`Avatar.initials`).
-    pub fn initial(&self) -> SharedString {
-        let name = self.name.as_ref().unwrap_or(&self.email);
-        name.chars()
-            .find(|c| c.is_alphanumeric())
-            .map(|c| c.to_uppercase().collect::<String>().into())
-            .unwrap_or_else(|| "?".into())
+    /// The engine's avatar for it: the name's initial, the address's color.
+    pub fn avatar(&self) -> mailstream::Avatar {
+        mailstream::avatar(self.name.as_deref().unwrap_or_default().to_owned(), self.email.to_string())
     }
 }
 
@@ -263,8 +260,10 @@ pub struct Conversation {
     /// The subject without reply prefixes; `tag` holds leading `[list]` tags.
     pub title: SharedString,
     pub tag: SharedString,
-    /// The row's date, as of `prepare`.
+    /// The row's date and its date group, as of the engine's answer.
     pub when: SharedString,
+    pub section: SharedString,
+    pub avatar: mailstream::Avatar,
     pub sender: SharedString,
     /// Everyone in it, for the row's first line; the sender when the engine names no one.
     pub senders: SharedString,
@@ -288,9 +287,11 @@ impl From<mailstream::Conversation> for Conversation {
             waiting: c.waiting,
             labels: c.labels.into_iter().map(Into::into).collect(),
             mailboxes: c.mailboxes.iter().map(|role| Role::named(role)).collect(),
-            title: SharedString::default(),
-            tag: SharedString::default(),
-            when: SharedString::default(),
+            title: c.title.into(),
+            tag: c.tag.into(),
+            when: c.when.into(),
+            section: c.section.into(),
+            avatar: c.avatar,
             sender: SharedString::default(),
             senders: SharedString::default(),
         }
@@ -299,11 +300,7 @@ impl From<mailstream::Conversation> for Conversation {
 
 impl Conversation {
     /// Fills the display strings, once per answer rather than once per frame.
-    pub fn prepare(&mut self, now: DateTime<Local>) {
-        let (tag, title) = format::split_subject(&self.subject);
-        self.tag = tag.into();
-        self.title = title.into();
-        self.when = format::list_date(self.date, now).into();
+    pub fn prepare(&mut self) {
         self.sender = match &self.from {
             Some(from) => from.display_name(),
             None => self.participants.first().cloned().unwrap_or_else(|| "(unknown)".into()),
@@ -322,9 +319,9 @@ impl Conversation {
         }
     }
 
-    /// The address the avatar is drawn for.
-    pub fn avatar(&self) -> Address {
-        self.from.clone().unwrap_or_else(|| Address { name: Some(self.sender.clone()), email: self.sender.clone() })
+    /// The address whose photo the row's avatar shows.
+    pub fn avatar_email(&self) -> SharedString {
+        self.from.as_ref().map_or_else(|| self.sender.clone(), |from| from.email.clone())
     }
 
     /// Something sits in an inbox-like mailbox (`MailStore.canArchive`).
@@ -393,7 +390,14 @@ pub struct Message {
     /// The meeting invitation it carries; the reader's card asks the calendar about it.
     pub invitation: Option<mailstream::MeetingInvitation>,
 
+    /// The date and the time of day (for the chat log), as of the engine's answer.
     pub when: SharedString,
+    pub time: SharedString,
+    /// The sender's avatar.
+    pub avatar: mailstream::Avatar,
+    /// The day divider above it in a chat log; empty on the day of the message before
+    /// (`Message::divide`).
+    pub divider: SharedString,
     /// The first line of the body, for a folded message.
     pub preview: SharedString,
     /// `to` and `cc`, joined.
@@ -402,8 +406,6 @@ pub struct Message {
     /// signature folded behind a toggle (`format::fold`).
     pub shown: SharedString,
     pub quoted: Option<SharedString>,
-    /// The time of day, for the chat log.
-    pub time: SharedString,
 }
 
 impl From<mailstream::Message> for Message {
@@ -429,20 +431,20 @@ impl From<mailstream::Message> for Message {
                 .collect(),
             error: m.error.map(Into::into),
             invitation: m.invitation,
-            when: SharedString::default(),
+            when: m.when.into(),
+            time: m.time.into(),
+            avatar: m.avatar,
+            divider: SharedString::default(),
             preview: SharedString::default(),
             recipients: SharedString::default(),
             shown: SharedString::default(),
             quoted: None,
-            time: SharedString::default(),
         }
     }
 }
 
 impl Message {
-    pub fn prepare(&mut self, now: DateTime<Local>) {
-        self.when = format::message_date(self.date, now).into();
-        self.time = format::message_time(self.date).into();
+    pub fn prepare(&mut self) {
         if let Some(text) = &self.text {
             let (shown, quoted) = format::fold(text);
             self.shown = shown.into();
@@ -465,6 +467,21 @@ impl Message {
             recipients.push_str(&names.join(", "));
         }
         self.recipients = recipients.into();
+    }
+
+    /// Places the day dividers of `messages`, oldest first, as a chat log shows them.
+    pub fn divide(messages: &mut [Message]) {
+        let entries = messages
+            .iter()
+            .map(|message| mailstream::ChatRunEntry {
+                sender: message.sender().email.to_string(),
+                date: message.date.map(|date| date.to_rfc3339()),
+                opens_run: false,
+            })
+            .collect();
+        for (message, run) in messages.iter_mut().zip(mailstream::chat_runs(entries)) {
+            message.divider = run.divider.into();
+        }
     }
 
     pub fn sender(&self) -> Address {
@@ -502,20 +519,18 @@ impl Message {
         (to, cc)
     }
 
-    /// The body a forward of this message starts with (`Replies.forward`): a header block, then
-    /// the text.
+    /// The body a forward of this message starts with: the engine's forwarded-message header,
+    /// then the text.
     pub fn forwarded(&self, subject: &str) -> String {
-        let list = |addresses: &[Address]| addresses.iter().map(Address::header_form).collect::<Vec<_>>().join(", ");
-        let mut header = vec!["---------- Forwarded message ---------".to_owned(), format!("From: {}", list(&self.from))];
-        if let Some(date) = self.date {
-            header.push(format!("Date: {}", date.with_timezone(&Local).format("%a, %b %-d, %Y at %-I:%M %p")));
-        }
-        header.push(format!("Subject: {subject}"));
-        header.push(format!("To: {}", list(&self.to)));
-        if !self.cc.is_empty() {
-            header.push(format!("Cc: {}", list(&self.cc)));
-        }
-        format!("{}\n\n{}", header.join("\n"), self.text.as_ref().map_or("", |text| text.as_ref()))
+        let list = |addresses: &[Address]| addresses.iter().map(Address::header_form).collect();
+        mailstream::forward_body(
+            list(&self.from),
+            list(&self.to),
+            list(&self.cc),
+            self.date.map(|date| date.to_rfc3339()),
+            subject.to_owned(),
+            self.text.as_ref().map_or_else(String::new, ToString::to_string),
+        )
     }
 }
 

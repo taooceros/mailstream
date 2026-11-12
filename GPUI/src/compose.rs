@@ -93,11 +93,12 @@ pub struct MovedReply {
 struct Person {
     name: Option<SharedString>,
     email: SharedString,
+    avatar: mailstream::Avatar,
 }
 
 impl From<mailstream::Person> for Person {
     fn from(person: mailstream::Person) -> Self {
-        Self { name: person.name.map(SharedString::from), email: person.email.into() }
+        Self { name: person.name.map(SharedString::from), email: person.email.into(), avatar: person.avatar }
     }
 }
 
@@ -151,54 +152,6 @@ enum Status {
 enum Outgoing {
     Message(mailstream::Draft),
     Reply { id: String, body: String, all: bool, overrides: mailstream::ReplyOverrides },
-}
-
-/// The recipient list split at commas and semicolons outside quotes and angle brackets.
-fn split_recipients(text: &str) -> Vec<&str> {
-    let (mut parts, mut start, mut quoted, mut angle) = (Vec::new(), 0, false, false);
-    for (ix, ch) in text.char_indices() {
-        match ch {
-            '"' => quoted = !quoted,
-            '<' if !quoted => angle = true,
-            '>' if !quoted => angle = false,
-            ',' | ';' if !quoted && !angle => {
-                parts.push(&text[start..ix]);
-                start = ix + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(&text[start..]);
-    parts
-}
-
-fn valid_email(email: &str) -> bool {
-    let Some((local, domain)) = email.rsplit_once('@') else { return false };
-    !local.is_empty()
-        && domain.contains('.')
-        && !domain.starts_with('.')
-        && !domain.ends_with('.')
-        && !email.chars().any(|c| c.is_whitespace() || matches!(c, '<' | '>' | ',' | ';' | '"'))
-}
-
-/// A field's recipients, or the first one that is not an address.
-fn parse_recipients(text: &str) -> Result<Vec<String>, String> {
-    split_recipients(text)
-        .into_iter()
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(|part| if valid_email(&Address::parse(part).email) { Ok(part.to_owned()) } else { Err(part.to_owned()) })
-        .collect()
-}
-
-/// `Fwd: subject`, unless it already says so.
-fn forward_subject(subject: &str) -> SharedString {
-    let lower = subject.trim_start().to_lowercase();
-    if lower.starts_with("fwd:") || lower.starts_with("fw:") {
-        subject.to_owned().into()
-    } else {
-        format!("Fwd: {subject}").into()
-    }
 }
 
 /// The accent Send button with its shortcut; dimmed and inert while sending.
@@ -301,7 +254,7 @@ impl Compose {
                 (from, false, SharedString::default(), SharedString::default())
             }
             ComposeMode::Forward { from, subject, quoted } => {
-                (Some(from), true, forward_subject(&subject), format!("\n\n{quoted}").into())
+                (Some(from), true, mailstream::forward_subject(subject.to_string()).into(), format!("\n\n{quoted}").into())
             }
             ComposeMode::Reply(moved) => {
                 let list = |addresses: &[Address]| addresses.iter().map(Address::header_form).collect::<Vec<_>>().join(", ");
@@ -554,7 +507,8 @@ impl Compose {
         }
         self.lookup += 1;
         let generation = self.lookup;
-        let query = split_recipients(&self.input(field).read(cx).value()).last().map_or("", |last| last.trim()).to_owned();
+        let typed = mailstream::split_recipients(self.input(field).read(cx).value().to_string());
+        let query = typed.last().map_or("", |last| last.trim()).to_owned();
         if query.is_empty() {
             if self.suggestions.take().is_some() {
                 cx.notify();
@@ -565,7 +519,7 @@ impl Compose {
             .iter()
             .flat_map(|input| {
                 let text = input.read(cx).value();
-                split_recipients(&text).into_iter().map(|part| Address::parse(part).email).collect::<Vec<_>>()
+                mailstream::split_recipients(text.to_string()).iter().map(|part| Address::parse(part).email).collect::<Vec<_>>()
             })
             .map(|email| email.to_lowercase())
             .collect();
@@ -638,7 +592,7 @@ impl Compose {
     fn pick(&mut self, field: Field, person: &Person, window: &mut Window, cx: &mut Context<Self>) {
         let input = self.input(field).clone();
         let current = input.read(cx).value();
-        let parts = split_recipients(&current);
+        let parts = mailstream::split_recipients(current.to_string());
         let mut text: Vec<String> =
             parts[..parts.len() - 1].iter().map(|part| part.trim()).filter(|part| !part.is_empty()).map(str::to_owned).collect();
         text.push(person.formatted());
@@ -673,9 +627,9 @@ impl Compose {
         self.invalid.clear();
         let mut lists = Vec::with_capacity(3);
         for field in [Field::To, Field::Cc, Field::Bcc] {
-            match parse_recipients(&self.input(field).read(cx).value()) {
-                Ok(list) => lists.push(list),
-                Err(bad) => {
+            match mailstream::parse_recipients(self.input(field).read(cx).value().to_string()) {
+                mailstream::Recipients { recipients, invalid: None } => lists.push(recipients),
+                mailstream::Recipients { invalid: Some(bad), .. } => {
                     self.invalid.push(field);
                     if field == Field::Bcc {
                         self.show_bcc = true;
@@ -839,7 +793,7 @@ impl Compose {
                 let rows = suggestions.people.iter().enumerate().map(|(ix, person)| {
                     let address = person.address();
                     let picked = person.clone();
-                    let photo = avatars::avatar(&address, metrics::MENU_AVATAR, p, cx);
+                    let photo = avatars::avatar(&address.email, &person.avatar, metrics::MENU_AVATAR, p, cx);
                     div()
                         .id(ElementId::NamedInteger("suggestion".into(), ix as u64))
                         .h(px(metrics::MENU_ROW))

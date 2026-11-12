@@ -24,6 +24,7 @@ uniffi::setup_scaffolding!();
 
 #[cfg(feature = "blitz")]
 mod html_page;
+mod display;
 mod main_thread;
 mod people;
 #[cfg(feature = "swift-engine")]
@@ -31,6 +32,13 @@ mod swift;
 
 #[cfg(feature = "blitz")]
 pub use html_page::{HtmlPage, HtmlPart, HtmlSize, HtmlTile};
+pub use display::{
+    Avatar, ChatBlock, ChatBlockKind, ChatRun, ChatRunEntry, ChatSpan, ChatTableCell, ChatTableRow, Recipients, SubjectParts,
+    avatar, chat_body, chat_runs, day_divider, forward_body, forward_subject, list_date, list_section, message_date,
+    message_time, parse_recipients, reply_subject, split_recipients, split_subject,
+};
+/// For Rust hosts (GPUI): the stable color slot of a key, as avatars pick theirs.
+pub use mailstream_engine::display::{AVATAR_SLOTS, stable_slot};
 pub use people::Person;
 
 /// A failed request: the engine's stable `code` (`unknown_account`, `provider`, `confirm`, …)
@@ -152,6 +160,20 @@ pub struct Conversation {
     /// Waits on the user's reply or action.
     pub waiting: bool,
     pub labels: Vec<String>,
+    /// The subject as lists show it: leading `[list]` tags (empty when none) apart from the title,
+    /// which drops reply and forward prefixes.
+    #[serde(skip)]
+    pub tag: String,
+    #[serde(skip)]
+    pub title: String,
+    /// `date` as the list shows it, and its date group.
+    #[serde(skip)]
+    pub when: String,
+    #[serde(skip)]
+    pub section: String,
+    /// The avatar of `from`, else of the first participant.
+    #[serde(skip)]
+    pub avatar: Avatar,
 }
 
 #[derive(Clone, Debug, Deserialize, uniffi::Record)]
@@ -237,6 +259,14 @@ pub struct Message {
     /// account answered.
     #[serde(default)]
     pub invitation: Option<MeetingInvitation>,
+    /// `date` as the reader shows it, and its time of day.
+    #[serde(skip)]
+    pub when: String,
+    #[serde(skip)]
+    pub time: String,
+    /// The avatar of its sender.
+    #[serde(skip)]
+    pub avatar: Avatar,
 }
 
 /// A conversation with its messages and bodies.
@@ -463,8 +493,9 @@ pub struct ChatSpace {
     /// The person the row shows: their lowercased address, else their Chat user id; empty for none.
     pub avatar_key: String,
     pub avatar_name: String,
-    /// What picks the row's avatar color, as the native list picks it.
-    pub avatar_color_key: String,
+    /// The row's avatar without a picture: a person's initial, or a space's.
+    #[serde(skip)]
+    pub avatar: Avatar,
     /// The picture Google Chat publishes for them.
     pub avatar_url: Option<String>,
 }
@@ -489,6 +520,8 @@ pub struct ChatUser {
     pub avatar_key: String,
     pub avatar_url: Option<String>,
     pub bot: bool,
+    #[serde(skip)]
+    pub avatar: Avatar,
 }
 
 #[derive(Clone, Debug, Deserialize, uniffi::Record)]
@@ -528,6 +561,9 @@ pub struct ChatMessage {
     /// Carries a card the text does not show.
     pub card: bool,
     pub attachments: Vec<ChatAttachment>,
+    /// `markup` laid out, mentions named.
+    #[serde(skip)]
+    pub body: Vec<ChatBlock>,
 }
 
 /// A message sent from here that Google has not taken yet, or that it refused (`failure`).
@@ -898,18 +934,24 @@ impl Mailstream {
         if !query.mailboxes.is_empty() {
             args["mailbox"] = json!(query.mailboxes);
         }
-        call("mail.list", args).await
+        let mut listing: Listing = call("mail.list", args).await?;
+        listing.dress();
+        Ok(listing)
     }
 
     /// The providers' own search over every mailbox but trash and junk.
     pub async fn search(&self, query: String, account: Option<String>, limit: u32) -> Result<Listing, MailError> {
-        call("mail.search", json!({ "query": query, "account": account, "limit": limit })).await
+        let mut listing: Listing = call("mail.search", json!({ "query": query, "account": account, "limit": limit })).await?;
+        listing.dress();
+        Ok(listing)
     }
 
     /// A conversation from a listing, with text bodies of at most `max_chars` characters and,
     /// with `html`, the HTML bodies.
     pub async fn show(&self, id: String, max_chars: u32, html: bool) -> Result<Thread, MailError> {
-        call("mail.show", json!({ "id": id, "max-chars": max_chars, "html": html })).await
+        let mut thread: Thread = call("mail.show", json!({ "id": id, "max-chars": max_chars, "html": html })).await?;
+        thread.dress();
+        Ok(thread)
     }
 
     /// The preview line of each conversation's latest message by id, loading those not loaded yet.
@@ -1013,7 +1055,9 @@ impl Mailstream {
 
     /// Google Chat accounts and their spaces, from what the engine has loaded.
     pub async fn chat_spaces(&self, account: Option<String>) -> Result<ChatSpaces, MailError> {
-        call("chat.spaces", json!({ "account": account })).await
+        let mut spaces: ChatSpaces = call("chat.spaces", json!({ "account": account })).await?;
+        spaces.dress();
+        Ok(spaces)
     }
 
     /// Loads another page of older spaces; [`Event::Chat`] follows.
@@ -1029,7 +1073,7 @@ impl Mailstream {
     /// Opens a space: its cached messages now, the newest from Google after
     /// ([`Event::ChatMessages`]), kept current and read while it stays open.
     pub async fn chat_open(&self, account: String, space: String) -> Result<ChatThread, MailError> {
-        call("chat.open", json!({ "account": account, "space": space })).await
+        chat_thread("chat.open", json!({ "account": account, "space": space })).await
     }
 
     pub async fn chat_close(&self) -> Result<(), MailError> {
@@ -1038,12 +1082,12 @@ impl Mailstream {
 
     /// What is loaded of a space's history.
     pub async fn chat_messages(&self, account: String, space: String) -> Result<ChatThread, MailError> {
-        call("chat.messages", json!({ "account": account, "space": space })).await
+        chat_thread("chat.messages", json!({ "account": account, "space": space })).await
     }
 
     /// Loads the page before the oldest loaded message.
     pub async fn chat_earlier(&self, account: String, space: String) -> Result<ChatThread, MailError> {
-        call("chat.earlier", json!({ "account": account, "space": space })).await
+        chat_thread("chat.earlier", json!({ "account": account, "space": space })).await
     }
 
     /// Sends `text` (shown pending at once) and returns once Google took it. `confirm` is the
@@ -1066,7 +1110,11 @@ impl Mailstream {
 
     /// People `account` chats with, most recently active first.
     pub async fn chat_people(&self, account: String) -> Result<ChatPeople, MailError> {
-        call("chat.people", json!({ "account": account })).await
+        let mut people: ChatPeople = call("chat.people", json!({ "account": account })).await?;
+        for person in &mut people.people {
+            person.dress();
+        }
+        Ok(people)
     }
 
     /// The direct message with one person or the group chat with several, found or started.
@@ -1222,6 +1270,13 @@ pub async fn call<T: DeserializeOwned>(command: &str, args: Value) -> Result<T, 
     let result = ENGINE.call(command, args).await?;
     serde_json::from_value(result)
         .map_err(|error| MailError::new("decode", format!("Unexpected result of {command}: {error}")))
+}
+
+/// A chat command answering a space's history, its display filled in.
+async fn chat_thread(command: &str, args: Value) -> Result<ChatThread, MailError> {
+    let mut thread: ChatThread = call(command, args).await?;
+    thread.dress();
+    Ok(thread)
 }
 
 /// `calendar.create` and `calendar.update`'s arguments for `draft`; `null` ones are left out.

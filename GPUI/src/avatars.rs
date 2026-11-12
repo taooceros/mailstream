@@ -17,7 +17,6 @@ use url::Url;
 use crate::controls::monogram;
 use crate::design::Palette;
 use crate::engine::{MailError, engine};
-use crate::model::Address;
 
 /// Addresses per request.
 const BATCH: usize = 50;
@@ -51,14 +50,14 @@ pub fn init(cx: &mut App) {
     cx.set_global(Avatars::default());
 }
 
-/// A `size` circle for `address`: its photo once the app has one, else its initial in its hue on
-/// a wash of it (`controls::monogram`). Drawing it asks for the photo; rows redraw when it arrives.
-pub fn avatar(address: &Address, size: f32, p: &'static Palette, cx: &mut App) -> AnyElement {
-    let key: SharedString = if address.email.is_empty() { address.display_name() } else { address.email.clone() };
-    let Some(path) = photo(&address.email, cx) else {
-        return monogram(address.initial(), &key, size, p).into_any_element();
+/// A `size` circle for `email`: its photo once the app has one, else `mark`, the engine's initial
+/// and hue for it (`controls::monogram`). Drawing it asks for the photo; rows redraw when it
+/// arrives.
+pub fn avatar(email: &SharedString, mark: &mailstream::Avatar, size: f32, p: &'static Palette, cx: &mut App) -> AnyElement {
+    let Some(path) = photo(email, cx) else {
+        return monogram(mark, size, p).into_any_element();
     };
-    let initial = address.initial();
+    let mark = mark.clone();
     div()
         .flex_shrink_0()
         .size(px(size))
@@ -71,7 +70,7 @@ pub fn avatar(address: &Address, size: f32, p: &'static Palette, cx: &mut App) -
                 .rounded_full()
                 .object_fit(ObjectFit::Cover)
                 // A file that is gone or unreadable shows the letter, as no photo would.
-                .with_fallback(move || monogram(initial.clone(), &key, size, p).into_any_element()),
+                .with_fallback(move || monogram(&mark, size, p).into_any_element()),
         )
         .into_any_element()
 }

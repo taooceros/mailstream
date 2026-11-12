@@ -107,7 +107,7 @@ impl MailApp {
         } else {
             conversation.senders.clone()
         };
-        let photo = avatars::avatar(&conversation.avatar(), metrics::AVATAR, p, cx);
+        let photo = avatars::avatar(&conversation.avatar_email(), &conversation.avatar, metrics::AVATAR, p, cx);
         let hovered = self.hovered_row.as_ref() == Some(&id);
         let menu_open = self.context_menu.as_ref().is_some_and(|menu| menu.id == id);
 
