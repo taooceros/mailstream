@@ -55,7 +55,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 LINUX = platform.system() == "Linux"
-BINARY = "GPUI/target/release/mailstream-gpui"
+# The shots build, copied aside so a later default build in the same target can't stand in for it.
+BINARY = "GPUI/target/release/mailstream-gpui-shots"
 
 
 def fail(message):
@@ -152,10 +153,14 @@ def main():
         if LINUX:
             target_outside()
         commands.append("(cd GPUI && cargo build --release --features shots)")
+        commands.append(f"cp GPUI/target/release/mailstream-gpui {BINARY}")
+    elif not (ROOT / BINARY).exists():
+        fail(f"no {BINARY} yet: run it once without --no-build")
     appearances = [args.only] if args.only else ["light", "dark"]
     for appearance in appearances:
         flags = f"--size {args.size}" + (" --dark" if appearance == "dark" else "") + (" --keep" if args.keep else "")
-        commands.append(f"{BINARY} --shots '{script}' --out '{out}' {flags}")
+        # Without a display to reach, nothing can open on the person's screen.
+        commands.append(f"env -u WAYLAND_DISPLAY -u DISPLAY {BINARY} --shots '{script}' --out '{out}' {flags}")
     printed = run(commands)
     files = [Path(line) for line in printed.splitlines() if line.endswith(".png")]
     for file in files:

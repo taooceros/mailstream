@@ -61,10 +61,16 @@ use crate::state::{
 };
 
 fn main() {
-    // `--shots`: screenshots of the window drawn headless, without a display (`shots.rs`).
+    // `--shots`: screenshots of the window drawn headless, without a display (`shots.rs`). A build
+    // without the feature refuses it rather than open the app on the person's screen and data.
     #[cfg(feature = "shots")]
     if let Some(shots) = shots::Shots::from_args() {
         return shots.run();
+    }
+    #[cfg(not(feature = "shots"))]
+    if std::env::args().any(|arg| arg == "--shots") {
+        eprintln!("mailstream-gpui: built without the `shots` feature; take screenshots with scripts/shots.py");
+        std::process::exit(2);
     }
     gpui::application().with_assets(icons::Assets).run(|cx: &mut App| {
         #[cfg(target_os = "macos")]
