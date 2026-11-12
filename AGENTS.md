@@ -72,7 +72,8 @@ tools, nothing in this repo); every `WIN` issue goes to the Windows poller. Use 
 The issue, not the session, is the record other sessions read.
 
 Three machines poll: the Mac (Linear app `omp`), Windows (`windows-omp`; `WIN` issues and `MS`
-issues labelled `windows`) and Linux (NixOS, `linux-omp`; `MS` issues labelled `linux`).
+issues labelled `windows`) and Linux (NixOS, `linux-omp`; `MS` issues labelled `linux`). `MS`
+work goes to Linux unless it is Mac-specific (MS-254, [Polling session](#polling-session)).
 On Windows and Linux there are no omp Linear tools or keychain. Linear
 is reached as the machine's OAuth app: its client id (line 1) and secret (line 2) are in
 `~/.config/linear/credentials`, and the access token in `~/.config/linear/token.json`. Call
@@ -191,7 +192,9 @@ Cost rules (MS-157): at most three heavy agents (ones that write code) run at on
 claimed issues wait in the queue of `~/.local/state/linear-poll/session.md`, stay in Todo with a
 comment saying they are queued (Backlog holds only what nobody plans to do yet, MS-175), and start
 in order as slots free; the poller doesn't hand out a Todo issue again once omp has commented on
-it or claimed it. Code is written by the default model, and its agent tests it in the real app
+it or claimed it. Urgent issues are the exception (MS-252): one whose `priority` (on its
+`issue` line) is `Urgent` starts at once, however many heavy agents run, and goes ahead of the
+queue. Code is written by the default model, and its agent tests it in the real app
 itself; release installs and their mechanical checks go to the batch install agent, one run for
 every issue waiting, at most once an hour (`INSTALL_EVERY`). Agents write their full report on
 the issue and yield only two or three lines (result, commit, issue state, anything the user
@@ -213,6 +216,13 @@ chore on the Windows machine, not repo work): its poller claims it whoever creat
 naming a machine's app reaches that machine alone on any issue, from the user or another
 machine; agents write the name in backticks (`` `@omp` ``), since Linear rejects an app's
 @-mention of an app.
+
+Linux does the work unless it is Mac-specific (MS-254). Mac-specific means it needs macOS:
+macOS packaging and signing, installing to `/Applications`, `bench.sh` benchmarks, Mac menus and
+shortcuts, the AppKit app, Liquid Glass. The Mac poller keeps those; every other `MS` issue it
+claims (GPUI, Flutter, the engine, tooling) gets `linux` and `omp` and goes to `` `@linux-omp` ``
+with a comment saying so, unworked. An issue already being worked on the Mac stays there until
+it is handed over; it is not moved mid-way.
 
 ## Building
 
@@ -257,8 +267,8 @@ machine; agents write the name in backticks (`` `@omp` ``), since Linear rejects
 
 ## Release delivery
 
-Finished fixes reach `/Applications` as signed release builds, never Debug, in batches (MS-159);
-on Linux they reach `~/.local/opt` the same way (MS-224, below).
+Finished fixes reach the machine that did them as signed release builds, never Debug, in
+batches (MS-159): `/Applications` on the Mac, `~/.local/opt` on Linux (MS-224, below).
 All testing happens before that (MS-176): each code agent checks its own change in the real app,
 and one cheap agent then installs `main`'s tip for every issue waiting and checks only that the
 install worked. Separately, each push to `main` that touches the GPUI or Flutter app or the
@@ -322,8 +332,9 @@ The batch install agent (one per `install` line of the poller, [Polling session]
 
 ## Performance: 120 fps
 
-The front ends aim at 120 fps. Measure only with `scripts/bench.sh flutter|gpui [RUNS]` on a
-release build (setup, scenario and log format in its header and `scripts/frame-stats.swift`). A
+The front ends aim at 120 fps. Measure only on the Mac, with `scripts/bench.sh flutter|gpui
+[RUNS]` on a release build (setup, scenario and log format in its header and
+`scripts/frame-stats.swift`). A
 run passes when at most 1% of vsyncs drop and the interval p99 is at most 12.5 ms (1.5 frames).
 Report 3 runs with their load; work over 8.3 ms shows where time goes. New scenarios get their own
 `MAILSTREAM_BENCH` value and the same log format.

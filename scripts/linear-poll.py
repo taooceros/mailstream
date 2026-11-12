@@ -3,10 +3,13 @@
 should act on now and prints it as JSON lines, which that session hands to subagents, each
 working in its own checkout (AGENTS.md, Version control). Each line carries what the session
 needs to hand it out, so it doesn't ask Linear about it (MS-174). Python 3.9+ standard library
-only, so the same script runs on macOS and Windows.
+only, so the same script runs on macOS, Windows and Linux.
 
-  {"kind": "issue", "id", "identifier", "resume", "unblockedBy", "title", "state", "labels",
-    "creator", "project", "parent", "description"}: an issue to start. labels are its label names
+  {"kind": "issue", "id", "identifier", "resume", "unblockedBy", "title", "state", "priority",
+    "priorityValue", "labels", "creator", "project", "parent", "description"}: an issue to start.
+    priority is Linear's priority label (`Urgent`, `High`, `Medium`, `Low`, `No priority`) and
+    priorityValue its number (1 Urgent … 4 Low, 0 none); an Urgent issue starts at once, past the
+    limit on heavy agents (AGENTS.md, Polling session, MS-252). labels are its label names
     (`omp` left out), creator the name of whoever filed it, parent `<identifier> <title>`,
     description its first DESCRIPTION characters (default 600, `…` when cut); project, parent
     and description are left out when unset. Claimed when it is
@@ -263,7 +266,7 @@ QUERY = """query($teams: [ID!], $label: String!, $claimed: String!, $install: St
     team: { id: { in: $teams } }, state: { type: { in: ["triage", "backlog", "unstarted"] } },
     or: [{ labels: { some: { name: { eq: $label } } } }, { state: { name: { eq: "Todo" } } },
       { hasBlockedByRelations: { eq: true } }] }) {
-    nodes { id identifier number title description team { key } state { name }
+    nodes { id identifier number title description priority priorityLabel team { key } state { name }
       creator { id name app guest } project { name } parent { identifier title }
       labels { nodes { id name } } comments(first: 100) { nodes { user { app } } }
       inverseRelations(first: 50) { nodes { type issue { id identifier state { name type }
@@ -325,6 +328,7 @@ def resolved(issue):
 def about(issue):
     """What the caller needs to hand an issue out without asking Linear: see the issue line above."""
     out = {"title": issue["title"], "state": issue["state"]["name"],
+           "priority": issue["priorityLabel"], "priorityValue": issue["priority"],
            "labels": [l["name"] for l in issue["labels"]["nodes"] if l["name"] != LABEL],
            "creator": (issue["creator"] or {}).get("name")}
     if issue["project"]:
