@@ -366,6 +366,9 @@ Reuse these instead of writing another copy:
   are `api::form_encoded`. OAuth scopes are the constants in `oauth.rs`.
 - Engine tests: engine folders, sign-ins, `call`/`wait_until` and the fake HTTP server are in
   `Engine/src/testkit.rs`.
+- Mail HTML: where quoted history starts, the reader's style sheet, the web views' content policy
+  and page script, the inline parts a page may show and the links a click opens are
+  `FFI/src/mail_html.rs`, which Blitz (`html_page.rs`) and every front end's web view use.
 - Disk: mail data (accounts, mailboxes, listings, content, tags, chat) lives in the Turso database
   behind `MailCache` (`MailDatabase`, `Support/SQLite.swift`), in Application Support/Mailstream/mail.db;
   `MailCache` queues its writes. Other JSON files are read and written with `JSONFile`.

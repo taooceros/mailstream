@@ -23,7 +23,12 @@ class FakePage implements engine.HtmlPageInterface {
   }
 
   @override
-  Future<engine.HtmlTile?> tile({required double width, required double scale, required double top, required double height}) async {
+  Future<engine.HtmlTile?> tile({
+    required double width,
+    required double scale,
+    required double top,
+    required double height,
+  }) async {
     tops.add(top);
     final (w, h) = ((width * scale).round(), (height * scale).round());
     return engine.HtmlTile(width: w, height: h, pixels: Uint8List(w * h * 4));
@@ -48,6 +53,9 @@ class FakePage implements engine.HtmlPageInterface {
   Future<String?> text() async => 'Alpha beta gamma';
 
   @override
+  Future<bool?> quoted() async => true;
+
+  @override
   Future<int?> changed({required int version}) => changes.stream.first.then<int?>((v) => v, onError: (_) => null);
 
   @override
@@ -59,19 +67,32 @@ class FakePage implements engine.HtmlPageInterface {
 
 void main() {
   late FakePage page;
+  late List<engine.HtmlPart> parts;
   late List<String> opened;
   late ScrollController scroll;
 
-  Widget app({bool show = true}) => Directionality(
-    textDirection: TextDirection.ltr,
-    child: MediaQuery(
-      data: const MediaQueryData(size: Size(400, 600), devicePixelRatio: 2),
-      child: SingleChildScrollView(
-        controller: scroll,
-        child: show ? BlitzBody(html: '<p>x</p>', page: (_) => page, openLink: opened.add) : const SizedBox(height: 10),
-      ),
-    ),
-  );
+  Widget app({bool show = true, engine.HtmlPart part = engine.HtmlPart.whole, ValueChanged<bool>? onQuoted}) =>
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: MediaQuery(
+          data: const MediaQueryData(size: Size(400, 600), devicePixelRatio: 2),
+          child: SingleChildScrollView(
+            controller: scroll,
+            child: show
+                ? BlitzBody(
+                    html: '<p>x</p>',
+                    part: part,
+                    onQuoted: onQuoted,
+                    page: (_, part) {
+                      parts.add(part);
+                      return page;
+                    },
+                    openLink: opened.add,
+                  )
+                : const SizedBox(height: 10),
+          ),
+        ),
+      );
 
   /// Lets the fake's answers and the pixel decoding (real async work) finish.
   Future<void> settle(WidgetTester tester) async {
@@ -84,6 +105,7 @@ void main() {
   setUp(() {
     page = FakePage();
     opened = [];
+    parts = [];
     scroll = ScrollController();
   });
 
@@ -151,5 +173,20 @@ void main() {
 
     await tester.pumpWidget(app(show: false));
     expect(page.closed, isTrue);
+  });
+
+  testWidgets("a part's page says whether the mail has quoted history; a whole page is not asked", (tester) async {
+    final heard = <bool>[];
+    await tester.pumpWidget(app(part: engine.HtmlPart.main, onQuoted: heard.add));
+    await settle(tester);
+    expect(parts, [engine.HtmlPart.main]);
+    expect(heard, [true]);
+    await tester.pumpWidget(app(show: false));
+    page = FakePage();
+    heard.clear();
+    await tester.pumpWidget(app(onQuoted: heard.add));
+    await settle(tester);
+    expect(parts.last, engine.HtmlPart.whole);
+    expect(heard, isEmpty);
   });
 }

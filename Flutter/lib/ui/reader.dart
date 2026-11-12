@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
+import 'package:mailstream/mailstream.dart' as engine;
 
 import '../backend/models.dart';
 import '../platform.dart';
@@ -14,10 +15,8 @@ import 'controls.dart';
 import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
-import 'html_parts.dart';
 import 'mail_html_windows.dart';
 import 'blitz_body.dart';
-import 'mail_resources.dart';
 import 'invitation.dart';
 import 'reader_renderer.dart';
 
@@ -42,30 +41,9 @@ class Reader extends StatefulWidget {
   static bool opensExpanded(List<MessageDetail> messages, int index) =>
       index == messages.length - 1 || messages[index].unread;
 
-  /// The HTML bodies a reader of [c] draws as it opens, latest first: the open cards' or, in a
-  /// chat log, those of the messages without text.
-  static List<String> openingHtml(Conversation c, List<MessageDetail> messages) {
-    final chatLog = chat(c);
-    return [
-      for (var i = messages.length - 1; i >= 0; i--)
-        if (messages[i] case MessageDetail(error: null, :final html?)
-            when html.trim().isNotEmpty &&
-                (chatLog ? (messages[i].text ?? '').trim().isEmpty : opensExpanded(messages, i)))
-          html,
-    ];
-  }
-
-  /// Loads [c]'s messages ahead of opening it (a pointer resting on its row, a keyboard step)
-  /// and, when the renderer in use draws prepared parts ([prepare]), splits the HTML its reader
-  /// opens with behind any open reader's, so opening it draws the bodies at once.
-  static void prefetch(MailState state, Conversation c, {required bool prepare, HtmlPartsCache? partsCache}) {
-    final entry = state.prefetch(c);
-    if (!prepare) return;
-    entry.future.then((messages) {
-      // A newer load replaced this one: it warms its own messages when prefetched.
-      if (identical(entry.messages, messages)) (partsCache ?? HtmlPartsCache.shared).warm(openingHtml(c, messages));
-    }, onError: (Object _) {});
-  }
+  /// Loads [c]'s messages ahead of opening it (a pointer resting on its row, a keyboard step),
+  /// so opening it draws the bodies at once.
+  static void prefetch(MailState state, Conversation c) => state.prefetch(c);
 
   @override
   State<Reader> createState() => ReaderState();
@@ -471,24 +449,21 @@ class _Body extends StatelessWidget {
 
 /// An HTML body at the height of its content. On the Mac the reader's switch picks the renderer
 /// ([ReaderRendererScope]): Blitz ([BlitzBody], laid out and painted in Rust) by default, or WebKit
-/// (`MailHtmlView` in the runner). Blitz draws the prepared parts; WebKit loads the mail as the
-/// engine gave it ([webKitDocument]) and folds its quotes in the page (MS-167). Only the chosen
-/// one is mounted, and switching keeps the parts and the fold. Windows draws the split parts with
-/// WebView2 ([WindowsMailHtml]). Quoted history (Gmail, Outlook, Thunderbird, Apple Mail markup) is
-/// cut out of the body (or hidden in the WebKit page) and folds behind a toggle.
+/// (`MailHtmlView` in the runner); Linux draws with Blitz and Windows with WebView2
+/// ([WindowsMailHtml]). Every renderer takes the mail as the engine gave it and folds its quoted
+/// history behind a toggle by the engine's rules (`FFI/src/mail_html.rs`): Blitz draws the part
+/// before the quotes and, once the toggle opens, a page of the quotes; the web views hide the
+/// quotes in their page. Only the chosen renderer is mounted; switching keeps the fold.
 class MailHtml extends StatefulWidget {
-  const MailHtml({super.key, required this.owner, required this.html, required this.onOpenLink, this.partsCache});
+  const MailHtml({super.key, required this.owner, required this.html, required this.onOpenLink});
 
   /// The message the HTML belongs to: a WebKit page closed with its reader is shown again only
   /// for the same message and HTML.
   final HtmlOwner owner;
   final String html;
 
-  /// Opens a clicked link on Windows; the Mac's runner opens links itself.
+  /// Opens a clicked link on Windows; the Mac's and Linux's runners open links themselves.
   final ValueChanged<String> onOpenLink;
-
-  /// Overrides preparation for deterministic tests.
-  final HtmlPartsCache? partsCache;
 
   @override
   State<MailHtml> createState() => _MailHtmlState();
@@ -497,133 +472,71 @@ class MailHtml extends StatefulWidget {
 typedef HtmlOwner = ({String account, String conversation, String message});
 
 class _MailHtmlState extends State<MailHtml> {
-  HtmlParts? _parts;
-  Object? _error;
-
-  /// The HTML [_parts] were prepared from.
-  String? _partsHtml;
-
-  /// The HTML the parts last asked for are (or will be) prepared from.
-  String? _wanted;
-
-  /// The split this body waits for, released when it goes, shows other HTML or the WebKit body
-  /// takes over, so queued work for mail no longer shown is skipped.
-  HtmlPartsRequest? _pending;
-
-  /// The WebKit body draws the HTML as it came: no parts.
-  bool _raw = false;
-
   /// Whether the quoted history is open, whichever renderer draws it.
   bool _open = false;
 
-  /// The HTML whose WebKit page found quoted history to fold.
-  String? _quotedPage;
-
-  HtmlPartsCache get _cache => widget.partsCache ?? HtmlPartsCache.shared;
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _raw = !ReaderRendererScope.current(context).preparesHtml;
-    _sync();
-  }
-
-  @override
-  void didUpdateWidget(MailHtml old) {
-    super.didUpdateWidget(old);
-    if (old.partsCache != widget.partsCache) _wanted = null;
-    _sync();
-  }
-
-  @override
-  void dispose() {
-    _pending?.release();
-    super.dispose();
-  }
-
-  /// Asks for the parts of the HTML shown, unless the WebKit body draws it as it came.
-  void _sync() {
-    if (!_raw) {
-      if (_wanted != widget.html) _prepare();
-    } else if (_pending case final pending?) {
-      pending.release();
-      _pending = null;
-      _wanted = _partsHtml;
-    }
-  }
-
-  void _prepare() {
-    _pending?.release();
-    _pending = null;
-    final html = _wanted = widget.html;
-    _error = null;
-    final cached = _cache.peek(html);
-    if (cached != null) {
-      _parts = cached;
-      _partsHtml = html;
-      return;
-    }
-    // A refresh keeps this message's mounted body/fold until its replacement is ready.
-    // Different messages have different keys in _Body, so never show the previous mail.
-    final pending = _pending = _cache.request(html);
-    pending.parts.then((parts) {
-      if (!mounted || !identical(pending, _pending)) return;
-      _pending = null;
-      setState(() {
-        _parts = parts;
-        _partsHtml = html;
-      });
-    }, onError: (Object error, StackTrace stack) {
-      if (!mounted || !identical(pending, _pending)) return;
-      _pending = null;
-      FlutterError.reportError(FlutterErrorDetails(exception: error, stack: stack, library: 'mail HTML'));
-      setState(() => _error = error);
-    });
-  }
+  /// The HTML whose body found quoted history to fold.
+  String? _quoted;
 
   void _toggle() => setState(() => _open = !_open);
 
+  void _found(String html, bool quoted) {
+    if (!mounted) return;
+    final found = quoted ? html : null;
+    if (found != _quoted && (quoted || _quoted == html)) setState(() => _quoted = found);
+  }
+
   @override
   Widget build(BuildContext context) {
-    if (_raw) {
-      final html = widget.html;
+    final html = widget.html;
+    final quoted = _quoted == html;
+    final Widget body;
+    if (Host.mac && ReaderRendererScope.current(context) == ReaderRenderer.webKit) {
       final owner = widget.owner;
+      body = _WebBody(
+        key: ValueKey(html),
+        owner: [owner.account, owner.conversation, owner.message],
+        html: html,
+        open: _open,
+        onQuoted: (found) => _found(html, found),
+      );
+    } else if (!Host.mac && !Host.linux) {
+      body = WindowsMailHtml(
+        key: ValueKey(html),
+        html: html,
+        open: _open,
+        onOpenLink: widget.onOpenLink,
+        onQuoted: (found) => _found(html, found),
+      );
+    } else {
+      // Blitz: the quotes are a page of their own, drawn once the toggle opens them.
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _WebBody(
-            key: ValueKey(html),
-            owner: [owner.account, owner.conversation, owner.message],
-            html: html,
-            open: _open,
-            onQuoted: (quoted) => setState(() => _quotedPage = quoted ? html : null),
-          ),
-          if (_quotedPage == html) Align(alignment: Alignment.topLeft, child: _FoldToggle(open: _open, onTap: _toggle)),
+          BlitzBody(key: ValueKey(html), html: html, part: engine.HtmlPart.main, onQuoted: (found) => _found(html, found)),
+          if (quoted)
+            _Fold(
+              open: _open,
+              onToggle: _toggle,
+              child: BlitzBody(key: ValueKey(('quoted', html)), html: html, part: engine.HtmlPart.quoted),
+            ),
         ],
       );
     }
-    final parts = _parts;
-    if (parts == null) {
-      if (_error != null) return Text('Could not prepare HTML: $_error', style: context.text.body);
-      return const SizedBox(height: 40, child: Center(child: Spinner()));
-    }
-    final (main, quoted) = parts;
-    Widget view(String html) => !Host.mac && !Host.linux
-        ? WindowsMailHtml(key: ValueKey(html), html: html, onOpenLink: widget.onOpenLink)
-        : BlitzBody(key: ValueKey(html), html: html);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        view(main),
-        if (quoted != null) _Fold(open: _open, onToggle: _toggle, child: view(quoted)),
+        body,
+        if (quoted) Align(alignment: Alignment.topLeft, child: _FoldToggle(open: _open, onTap: _toggle)),
       ],
     );
   }
 }
 
-/// One WebKit view of a whole mail, as tall as the page it holds says it is, under
-/// [webKitContentPolicy]. Its quoted history, if the page finds any ([onQuoted]), shows when
-/// [open].
+/// One WebKit view of a whole mail, as tall as the page it holds says it is: the engine's page
+/// for the mail (`mail_web_document`, under its content policy) with the engine's page script.
+/// Its quoted history, if the page finds any ([onQuoted]), shows when [open]. A link clicked in
+/// it opens if the engine's rule allows ([BlitzBody.openMailLink]).
 class _WebBody extends StatefulWidget {
   const _WebBody({super.key, required this.owner, required this.html, required this.open, required this.onQuoted});
 
@@ -653,8 +566,17 @@ class _WebBodyState extends State<_WebBody> {
   /// views, whose bodies have taken theirs or gone (view ids only grow).
   static final _early = <int, List<Object?>>{};
 
+  /// The engine's page script and the folder its inline parts are served from, the same for
+  /// every page.
+  static final _script = engine.mailWebScript(view: engine.MailWebView.webKit);
+  static final _inlineCache = engine.inlinePartsFolder();
+
   static Future<void> _receive(MethodCall call) async {
     final arguments = call.arguments;
+    if (call.method == 'link' && arguments is List && arguments.length == 2 && arguments[1] is String) {
+      BlitzBody.openMailLink(arguments[1] as String);
+      return;
+    }
     if (call.method != 'height' || arguments is! List || arguments.length < 3) return;
     final [view, ...height] = arguments;
     final body = _bodies[view];
@@ -678,7 +600,7 @@ class _WebBodyState extends State<_WebBody> {
   bool _quoted = false;
 
   /// The body's key is its HTML, so the document is fixed for this state's lifetime.
-  late final _document = webKitDocument(widget.html);
+  late final _document = engine.mailWebDocument(html: widget.html, inline: engine.InlineParts.served);
 
   void _created(int id) {
     if (!mounted) return;
@@ -727,7 +649,13 @@ class _WebBodyState extends State<_WebBody> {
     height: _height,
     child: AppKitView(
       viewType: 'mailstream/html',
-      creationParams: {'owner': widget.owner, 'html': _document, 'inlineCache': inlineCacheRoot, 'open': widget.open},
+      creationParams: {
+        'owner': widget.owner,
+        'html': _document,
+        'script': _script,
+        'inlineCache': _inlineCache,
+        'open': widget.open,
+      },
       creationParamsCodec: const StandardMessageCodec(),
       onPlatformViewCreated: _created,
     ),

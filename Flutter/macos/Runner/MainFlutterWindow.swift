@@ -55,10 +55,11 @@ class MainFlutterWindow: NSWindow {
         self?.performZoom(nil)
         result(nil)
       case "openMailLink":
-        // A link clicked in a Blitz body, under the WebView's rules.
-        guard let value = call.arguments as? String, let url = URL(string: value), MailLink.open(url) else {
-          return result(FlutterError(code: "link", message: "Unsupported mail link", details: nil))
+        // A link clicked in a mail body, which Flutter checked against the engine's rule.
+        guard let value = call.arguments as? String, let url = URL(string: value) else {
+          return result(FlutterError(code: "link", message: "Not a link", details: nil))
         }
+        NSWorkspace.shared.open(url)
         result(nil)
       case "frameRate":
         self?.frameRateShown = call.arguments as? Bool ?? false

@@ -89,12 +89,16 @@ zipped Release folder as artifacts. On Windows:
   implementation of `video_player`.
 - HTML mail is drawn by WebView2 through `webview_plus` (`WindowsMailHtml` in
   `lib/ui/mail_html_windows.dart`), composed into a Flutter texture as tall as the page, so it
-  scrolls with the conversation; quoted history folds as on the Mac. The mail's scripts are off
-  (`javaScriptEnabled: false`, WebView2's `IsScriptEnabled`); the app measures the page through
-  `ExecuteScript`, which that switch does not stop. Each body is a file in
-  `%TEMP%\mailstream-html` (WebView2 gives strings no base URL, so the `file://` inline images in
-  the cache would not load), deleted with its view. Links (`target="_blank"` removed first) open
-  in the default browser; remote images load in an InPrivate profile. Pages taller than the
+  scrolls with the conversation. Like the Mac's WebView it loads the engine's page of the whole
+  mail (`mail_web_document`: the mail under a content policy allowing HTTPS, data and `file:`
+  images) and runs the engine's page script (`mail_web_script`), which adds the reader's style
+  sheet and folds the quoted history in the page behind the reader's toggle (MS-234). The mail's
+  scripts are off (`javaScriptEnabled: false`, WebView2's `IsScriptEnabled`); the app runs its
+  scripts and measures the page through `ExecuteScript`, which that switch does not stop. Each
+  body is a file in `%TEMP%\mailstream-html` (WebView2 gives strings no base URL, so the `file://`
+  inline images in the cache would not load), deleted with its view. Links (`target="_blank"`
+  removed first) open in the default browser when the engine's `is_mail_link` allows; remote
+  images load in an InPrivate profile. Pages taller than the
   16384 px texture limit stop there and scroll inside. WebView2 Runtime ships with Windows 11.
   `packages/webview_plus` is upstream 0.9.5 with only its Windows implementation declared, so
   the Mac build carries none of it (upstream's macOS Swift package does not resolve under
@@ -348,30 +352,34 @@ the width makes them cells again (MS-165). In the same test mail, at a reader na
 points the "Other rentals" card stacks its picture over its text. Known Blitz gap: an image URL
 Blitz can't resolve (`<img src="http://">`) leaves that body blank.
 
-Preparation (`prepareMailImages` in `lib/ui/mail_resources.dart`) is Blitz's image policy: inline
-parts (`file://` copies under Mailstream's `messages-v2` cache, canonical paths only, raster bytes
-checked) become data URLs, and images that are not HTTPS or raster data are removed; mail without
-images goes through as it came. Prepared and split HTML is written back with the doctype the
-mail wrote (`documentHtml`): package:html drops a doctype's PUBLIC/SYSTEM keyword, which put
-XHTML and HTML 4 newsletters into quirks mode (MS-160).
-Links open through the runner's `MailLink` (HTTP(S) with a host, or mailto), in every renderer.
+Every renderer takes the mail as the engine gave it and applies the engine's one set of mail
+HTML rules (`FFI/src/mail_html.rs`, MS-234), which GPUI's renderers share too: where quoted
+history starts (Gmail, Outlook, Thunderbird, Yahoo and Apple Mail markup, and the
+`blockquote.ms-quote` the engine makes of a plain-text mail's `>` lines), the reader's style sheet
+over the mail's own, the web views' content policy, the inline parts a page may show (`file://`
+copies under Mailstream's `messages-v2` cache, canonical paths only, at most 20 MB, PNG, JPEG,
+GIF or WebP bytes) and the links a click opens (`is_mail_link`: HTTP(S) with a host, or mailto,
+without credentials). Blitz reads the inline parts itself and ignores other images that are not
+HTTPS or raster data. A clicked link reaches the runner (`openMailLink`) only once Dart has
+checked it with the engine.
 
 The WebView is `macos/Runner/MailHtmlView.swift`, a platform view (`mailstream/html`). It gets
-the mail as the engine gave it, not the prepared parts (MS-167): `webKitDocument` makes two
-string edits and parses nothing. It puts a content policy (HTTPS, data and `mscid:` resources
+the mail as the engine gave it (MS-167): the engine's `mail_web_document` makes two string edits
+and parses nothing. It puts a content policy (HTTPS, data and `mscid:` resources
 only) ahead of everything but a leading doctype, and readdresses the inline cache's `file://`
 folder URL to `mscid://<message>/<part>`, which the page's `InlinePartHandler` serves: only
 canonical files inside the inline cache, at most 20 MB, whose bytes are PNG, JPEG, GIF or WebP
-(the rule preparation reads them by). So the page keeps the mail's doctype, Outlook's
+(the rule Blitz reads them by). So the page keeps the mail's doctype, Outlook's
 conditional comments and `srcset`; an http image or an unresolved `cid:` stays blocked by the
 policy instead of being removed. The view runs none of the mail's scripts, has no base URL,
 allows only its own first load (no redirects, frames or meta refreshes), loads remote images
 without cookies, zooms out a body wider than the column, and reports its content height so the
 body scrolls with the conversation. Every view talks over the one channel `mailstream/html`, its
 calls carrying the view id (a channel per view stayed registered in the engine after the view
-went, MS-154). The app's script in the page hides quoted history (the same Gmail, Outlook,
-Thunderbird and Apple Mail markup the split cuts out, mail that is nothing but quotes shown whole)
-and reports whether it found any with each height; the reader then shows the "…" toggle under
+went, MS-154); a clicked link goes over it to Dart, which opens it if the engine allows. The
+engine's page script (`mail_web_script`, passed as `script`) adds the reader's style sheet and
+hides quoted history (the engine's rule, mail that is nothing but quotes shown whole); the
+runner's own script reports with each height whether there is any; the reader then shows the "…" toggle under
 the page, which opens the quotes in place (`fold`), with a rule at their left. Dark mode is the
 white card the reader draws around every HTML body, as before. Its `html` and `body` are as
 tall as their content (`height: fit-content`): in quirks mode an `auto` height stretched them to
@@ -413,40 +421,21 @@ WebKit ends a closed page's process by leaving it to exit by itself, which a bac
 on a busy machine did not get to do, so every closed page kept its process (MS-153); the pool
 kills the process of each page it lets go, once WebKit has closed the page.
 
-For Blitz, HTML DOM parsing, quote traversal and serialization run in a
-background Dart isolate before the bodies show (MS-87). A shared eight-entry LRU reuses unchanged
-HTML and shares in-flight requests; only one parse isolate runs at a time. Main/quoted parts
-retain the original head styling and Gmail/Outlook/Thunderbird/Apple quote rules, including
-keeping pure-quote mail whole. A refresh retains the mounted body until replacement parts arrive;
-message keys and request handles prevent a disposed or superseded request from replacing another
-selection. Opening/closing a quote never reparses HTML. The WebKit body waits for none of this:
-it asks for no parts (a request queued when the switch moves to WebKit is let go), and prefetch
-splits nothing while it is chosen.
+Blitz parses nothing in Dart (MS-234): a body is a page of the engine's (`HtmlPage.part_`) of
+the mail as the engine gave it, which leaves out the quoted history (`main`) and says whether it
+had some; the "…" toggle then opens a second page of the same mail showing only the quotes
+(`quoted`). Pages parse, lay out and draw on the engine's pages thread, so opening a mail waits
+for no preparation and a prefetched conversation only loads its messages.
 
-Each body releases its request when it goes or its HTML changes, and a split every request
-released before its turn is skipped, so switching conversations quickly never waits for the
-previous one's queued bodies (a running split finishes) (MS-94). A prefetched conversation (the
-80 ms hover, a keyboard step in the single-column list) also splits the HTML its reader opens
-with (`Reader.openingHtml`), at low priority: readers' requests always go first, a newer prefetch
-replaces the queued one, and prefetched parts wait in an LRU of their own until a reader takes
-them, so they never push a reader's parts out. Opening a prefetched conversation then draws its
-bodies in the first frame instead of a spinner.
-
-`flutter test test/mail_resources_test.dart` covers the resource policy and the renderer
-switch; `test/html_parts_test.dart` output, caching, replacement/disposal races,
-queue skipping and prefetch priority, fold behavior, the WebKit page's HTML (the engine's but for
-the policy and inline image addresses) and its fold, and the height protocol (owner parameters, the
-pull, late older heights, views gone before they answer). `flutter build macos --release -t
-test/html_open_app.dart`, launched with `MAILSTREAM_HTML_OPEN_OUT=/tmp/open.json`, times how long
-a WebKit body takes to open (mount to first reported height) for four synthetic mails (4, 22, 65
-and 300 KB) one at a time and all at once (MS-167). `flutter run -d macos --release -t test/html_parts_app.dart` opens a synthetic-only
-native reader without accounts or private mail. Set `MAILSTREAM_HTML_BENCH_OUT=/tmp/html-parts.json`
-when launching that fixture to compare the exact pre-MS-87 synchronous algorithm (a1fc4b3d)
-with queued isolate parsing in the same release runtime: 20 alternating-order pairs each for
-small and 2,500-row HTML, reporting enqueue/synchronous time, total preparation latency,
-maximum 1 ms event-loop heartbeat gap and cache-hit latency. The gap includes scheduling noise;
-enqueue time alone is not the total main-thread cost, and isolate latency is not assumed to
-beat synchronous parsing. This is a parsing comparison, not the 120 Hz scrolling benchmark.
+`flutter test test/mail_html_test.dart` covers the WebKit page's HTML and script (the engine's),
+its fold, its links and the height protocol (owner parameters, the pull, late older heights,
+views gone before they answer), and the Blitz body's fold; `test/reader_renderer_test.dart` the
+renderer switch and the Windows page's doctype; the rules themselves are tested in the engine
+(`cd FFI && cargo test --release -p mailstream --lib mail_html html_page`). `flutter build macos
+--release -t test/html_open_app.dart`, launched with `MAILSTREAM_HTML_OPEN_OUT=/tmp/open.json`
+and `MAILSTREAM_READER_RENDERER=blitz` or `webKit`, times how long a body takes to open (mount to
+first reported height) for four synthetic mails (4, 22, 65 and 300 KB) one at a time and all at
+once (MS-167, MS-234).
 
 Conversation changes fade the reader without scaling its native viewport. The scale-in
 transition can leave native WebKit content offset relative to the Flutter body card (MS-82).

@@ -7,15 +7,15 @@ import 'package:mailstream/mailstream.dart' as engine;
 import 'package:mailstream_ui/main.dart';
 import 'package:mailstream_ui/platform.dart';
 import 'package:mailstream_ui/state/mail_state.dart';
-import 'package:mailstream_ui/ui/mail_resources.dart';
 
 import 'reader_fixture.dart';
 
-// The WebKit body on mail as the engine hands it over (MS-167): quoted history folding in the
-// page, inline images from the inline cache (a 1x picture and its 2x `srcset`), and a forward
-// that is nothing but quote. Synthetic mail only: no real backend, accounts or private mail; the
-// pictures are drawn at launch into the inline cache's synthetic folder `f167…`.
-// MAILSTREAM_READER_RENDERER=webKit flutter run -d macos -t test/html_webkit_app.dart
+// HTML bodies on mail as the engine hands it over (MS-167, MS-234): quoted history folding in the
+// page, inline images from the inline cache (a 1x picture and its 2x `srcset`), a plain-text reply
+// whose `>` lines fold, and a forward that is nothing but quote. Synthetic mail only: no real
+// backend, accounts or private mail; the pictures are drawn at launch into the inline cache's
+// synthetic folder `f167…`.
+// MAILSTREAM_READER_RENDERER=webKit (or blitz) flutter run -d macos -t test/html_webkit_app.dart
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   if (Host.mac) await WindowManipulator.initialize(enableWindowDelegate: true);
@@ -26,10 +26,10 @@ void main() async {
 }
 
 const _key = 'f167f167f167f167f167f167f167f167';
-String get _folder => '$inlineCacheRoot/$_key';
+String get _folder => '${engine.inlinePartsFolder()}/$_key';
 
 /// The engine's address of an inline part, as it hands HTML to Flutter.
-String _part(String name) => '$inlineCacheUrl$_key/$name';
+String _part(String name) => '${Uri.directory(engine.inlinePartsFolder())}$_key/$name';
 
 /// A 160×48 point badge saying [label], at [scale] pixels per point.
 Future<void> _badge(String name, String label, double scale, ui.Color color) async {
@@ -76,6 +76,13 @@ final _mails = {
   'forward': (
     'Forward that is all quote (no toggle)',
     '<blockquote type="cite"><p>Forwarded synthetic message: nothing outside the quote, so it shows whole.</p></blockquote>',
+  ),
+  // As the engine writes a plain-text mail's body (`text::plain_to_html`, MS-234).
+  'plain': (
+    'Plain-text reply (quotes from > lines)',
+    '<div class="ms-plain">Sounds good, see you at noon.\n\nOn Mon, Nov 9, 2026, Sam &lt;sam@example.test&gt; wrote:\n'
+        '<blockquote class="ms-quote">Lunch tomorrow?\n<blockquote class="ms-quote">Earlier: the synthetic menu.\n'
+        '</blockquote></blockquote></div>',
   ),
 };
 

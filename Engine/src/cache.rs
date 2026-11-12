@@ -439,7 +439,13 @@ impl MailCache {
     }
 
     pub fn message_directory(&self, message: &MessageRef) -> PathBuf {
-        self.root.join("messages-v2").join(Self::message_key(message))
+        Self::parts_folder(&self.root).join(Self::message_key(message))
+    }
+
+    /// The folder of every message's inline parts and attachments under the cache folder `root`
+    /// (the readers' inline images come from here, `FFI/src/mail_html.rs`).
+    pub fn parts_folder(root: &Path) -> PathBuf {
+        root.join("messages-v2")
     }
 
     /// Where the reader's scheme handler serves `message`'s inline parts from.
@@ -447,11 +453,15 @@ impl MailCache {
         format!("{SCHEME}://{}/", Self::message_key(message))
     }
 
-    /// The message's directory as a `file:` URL with a trailing slash, as `URL.absoluteString`
-    /// writes a directory.
+    /// The message's directory as a `file:` URL with a trailing slash ([`Self::folder_url`]).
     pub fn message_directory_url(&self, message: &MessageRef) -> String {
-        let path = self.message_directory(message);
-        format!("file://{}/", crate::assembly::path_encoded(&crate::files::url_path(&path)))
+        Self::folder_url(&self.message_directory(message))
+    }
+
+    /// `folder` as a `file:` URL with a trailing slash, as `URL.absoluteString` writes a
+    /// directory and the engine writes inline parts into bodies.
+    pub fn folder_url(folder: &Path) -> String {
+        format!("file://{}/", crate::assembly::path_encoded(&crate::files::url_path(folder)))
     }
 
     fn content_key(message: &MessageRef) -> String {

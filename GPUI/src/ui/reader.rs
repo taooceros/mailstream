@@ -231,19 +231,24 @@ impl MailApp {
     }
 
     /// An HTML body. Blitz draws what the mail wrote, and its quoted history (a page of its own)
-    /// once the toggle opens it; the Mac's web view, when chosen, shows the mail whole. Only the
-    /// chosen renderer holds pages: the other's close at the next frame (`begin_frame`).
+    /// once the toggle opens it; the Mac's web view, when chosen, folds the quotes inside its
+    /// page behind the same toggle. Only the chosen renderer holds pages: the other's close at
+    /// the next frame (`begin_frame`).
     fn render_html(&self, message: &Message, html: SharedString, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let id = message.id.clone();
+        let open = self.quotes_open.contains(&id);
         #[cfg(target_os = "macos")]
         if self.renderer == Renderer::WebKit {
-            return web_body(id, html);
+            let body = web_body(id.clone(), html, open);
+            if webview::quoted(&id) != Some(true) {
+                return body;
+            }
+            return div().flex().flex_col().child(body).child(self.render_fold(&id, open, div(), p, cx)).into_any_element();
         }
         let main = blitz_html(id.clone(), html.clone(), blitz_body::HtmlPart::Main);
         if blitz_body::quoted(&id) != Some(true) {
             return main;
         }
-        let open = self.quotes_open.contains(&id);
         let quoted = blitz_html(format!("{id}#quoted").into(), html, blitz_body::HtmlPart::Quoted);
         div().flex().flex_col().child(main).child(self.render_fold(&id, open, quoted, p, cx)).into_any_element()
     }
@@ -460,10 +465,10 @@ fn blitz_html(key: SharedString, html: SharedString, part: blitz_body::HtmlPart)
 }
 
 /// The Mac's WebView renderer: a placeholder the native web view of the whole body is laid over,
-/// as tall as its page once that is measured.
+/// as tall as its page once that is measured; its quoted history shows while `open`.
 #[cfg(target_os = "macos")]
-fn web_body(id: SharedString, html: SharedString) -> AnyElement {
+fn web_body(id: SharedString, html: SharedString, open: bool) -> AnyElement {
     let height = webview::height(&id).unwrap_or(40.);
-    let body = canvas(|_, _, _| {}, move |bounds, _, window, _| webview::paint(&id, &html, bounds, window));
+    let body = canvas(|_, _, _| {}, move |bounds, _, window, _| webview::paint(&id, &html, open, bounds, window));
     body.w_full().h(px(height)).into_any_element()
 }

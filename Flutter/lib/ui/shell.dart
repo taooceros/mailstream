@@ -22,7 +22,6 @@ import 'controls.dart';
 import 'design.dart';
 import 'glass.dart';
 import 'reader.dart';
-import 'reader_renderer.dart';
 import 'settings.dart';
 import 'sidebar.dart';
 import 'slide_layer.dart';
@@ -232,7 +231,7 @@ class _MailShellState extends State<MailShell> {
       if (_twoPane && state.opened != null) {
         state.open(item.conversation);
       } else {
-        Reader.prefetch(state, item.conversation, prepare: ReaderRendererScope.read(context).preparesHtml);
+        Reader.prefetch(state, item.conversation);
       }
     }
   }

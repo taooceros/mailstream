@@ -10,7 +10,6 @@ import 'design.dart';
 import 'format.dart';
 import 'glass.dart';
 import 'reader.dart';
-import 'reader_renderer.dart';
 
 /// One line of the list: a date group header, a conversation, or a Smart Inbox bundle.
 sealed class ListItem {
@@ -474,7 +473,7 @@ class _ConversationRowState extends State<ConversationRow> {
     final rest = _rest = Future.delayed(const Duration(milliseconds: 80));
     rest.then((_) {
       if (!mounted || !_hover || !identical(rest, _rest)) return;
-      Reader.prefetch(widget.state, widget.conversation, prepare: ReaderRendererScope.read(context).preparesHtml);
+      Reader.prefetch(widget.state, widget.conversation);
     });
   }
 

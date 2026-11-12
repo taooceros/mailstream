@@ -3,7 +3,8 @@
 //! - `mailstream/files`: the compose column's open dialog (`pick`), pasted files and images
 //!   (`pasted`), and files dragged onto the window (`hover`, `drop`).
 //! - `mailstream/shell`: opens a file or link in its default app (`open`).
-//! - `mailstream/window`: opens a link clicked in a mail body (`openMailLink`); `frameRate` (the
+//! - `mailstream/window`: opens a link clicked in a mail body (`openMailLink`, which Dart checked
+//!   against the engine's `is_mail_link`); `frameRate` (the
 //!   Mac's menu checkmark) has nothing to update here.
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -93,7 +94,7 @@ impl Channels {
     fn window(&self, call: MethodCall) {
         match call.method() {
             "openMailLink" => {
-                if let Some(url) = call.string_argument().filter(|url| is_mail_link(url)) {
+                if let Some(url) = call.string_argument() {
                     let _ = gtk::show_uri_on_window(Some(&self.window), &url, NOW);
                 }
                 call.succeed(None);
@@ -251,15 +252,4 @@ fn target_uri(target: &str) -> Option<String> {
         return glib::filename_to_uri(target, None).ok().map(String::from);
     }
     glib::Uri::peek_scheme(target).map(|_| target.to_owned())
-}
-
-/// HTTP(S) with a host, or mailto, without credentials, as the Mac's `MailLink` allows; anything
-/// else (file, javascript, custom schemes) is refused.
-fn is_mail_link(url: &str) -> bool {
-    let Ok(uri) = glib::Uri::parse(url, glib::UriFlags::NONE) else { return false };
-    if uri.userinfo().is_some() {
-        return false;
-    }
-    let scheme = uri.scheme().to_ascii_lowercase();
-    scheme == "mailto" || (["https", "http"].contains(&scheme.as_str()) && uri.host().is_some_and(|host| !host.is_empty()))
 }

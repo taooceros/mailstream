@@ -4,12 +4,15 @@
 //! page's height and for tiles, strips of RGBA pixels it shows as they scroll into view.
 //!
 //! Mail safety: Blitz runs no scripts, follows no `<meta refresh>` and opens nothing on a click
-//! (the front end asks [`HtmlPage::link_at`] and opens the link itself). Frames and plug-ins are
-//! removed before anything is fetched. A page reads what WebKit's view does, anonymously: `data:`
-//! and `https:` raster images, `https:` stylesheets (linked, and what those and the mail's own
-//! styles `@import`, one level deep) and the `https:` and `data:` web fonts they name; nothing
-//! else, `file:` included (the front end inlines the cached parts it allows as `data:`). SVG is
-//! off, as its renderer would read files an SVG's `<image>` names.
+//! (the front end asks [`HtmlPage::link_at`] and opens the link itself when
+//! [`crate::is_mail_link`] allows). Frames and plug-ins are removed before anything is fetched. A
+//! page reads what WebKit's view does, anonymously: `data:` and `https:` raster images, the
+//! inline parts in the engine's cache that its bodies name by `file:` URL
+//! ([`mail_html::inline_part`]), `https:` stylesheets (linked, and what those and the mail's own
+//! styles `@import`, one level deep) and the `https:` and `data:` web fonts they name; no other
+//! file. SVG is off, as its renderer would read files an SVG's `<image>` names. The reader's
+//! style sheet and where quoted history starts are the rules every reader shares
+//! (`mail_html.rs`).
 //!
 //! Web fonts (MS-164) never hold a page back: it lays out and draws in system fonts at once, and a
 //! font arriving later lays it out again, unless it comes [`LATE`] after the page was first shown,
@@ -42,17 +45,11 @@ use peniko::{Color, Fill};
 use sha2::{Digest, Sha256};
 use style::values::specified::box_::{DisplayInside, DisplayOutside};
 
-/// The reader's look over the mail's own styles, the one WebKit's view applies
-/// (`MailHtmlView.swift`): the document is as tall as its content, so nothing sizes from the
-/// viewport (a flex `html` makes mail layout tables' `height: 100%` auto).
-const MAIL_CSS: &str = "
-html, body { height: auto !important; min-height: 0 !important; overflow: hidden !important; }
-html { display: flex !important; flex-direction: column !important; width: 100% !important; }
-body { margin: 0; padding: 2px 0; color: #1f1f1f; font: 14px/1.45 -apple-system, system-ui, sans-serif;
-  overflow-wrap: break-word; }
-img { max-width: 100%; }
-pre { white-space: pre-wrap; }
-";
+use crate::mail_html;
+
+/// The reader's look over the mail's own styles (`mail_html.rs`, as WebKit's and WebView2's views
+/// apply it): the document is as tall as its content, so nothing sizes from the viewport.
+static MAIL_CSS: LazyLock<String> = LazyLock::new(mail_html::blitz_css);
 
 /// Elements whose content would come from elsewhere: removed right after parsing, their requests
 /// dropped unanswered.
@@ -125,10 +122,10 @@ pub struct HtmlTile {
     pub pixels: Vec<u8>,
 }
 
-/// Which part of a mail a page shows. Quoted history (the Gmail, Outlook, Thunderbird and Apple
-/// Mail markup Flutter's `splitMailHtml` cuts out) folds behind a toggle in GPUI's reader: its
-/// `Main` page leaves the quotes out, and a `Quoted` page of the same HTML shows only them when the
-/// toggle opens. Mail that is nothing but quotes stays whole in its `Main` page.
+/// Which part of a mail a page shows. Quoted history (where [`mail_html::QUOTES`] says it starts)
+/// folds behind a toggle in the readers: a `Main` page leaves the quotes out, and a `Quoted` page
+/// of the same HTML shows only them when the toggle opens. Mail that is nothing but quotes stays
+/// whole in its `Main` page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum HtmlPart {
     Whole,
@@ -638,15 +635,9 @@ impl Page {
     }
 }
 
-/// Whether `node` starts quoted history, as Flutter's `splitMailHtml` finds it: Gmail's and
-/// Thunderbird's quote containers, Outlook's reply header and Apple Mail's cited blockquote.
-fn is_quote(node: &blitz_dom::Node) -> bool {
-    let Some(element) = node.element_data() else { return false };
-    let classes = element.attr(local_name!("class")).unwrap_or_default();
-    classes.split_ascii_whitespace().any(|class| matches!(class, "gmail_quote" | "gmail_quote_container" | "moz-cite-prefix"))
-        || matches!(element.attr(local_name!("id")), Some("divRplyFwdMsg" | "appendonsend"))
-        || (element.name.local == local_name!("blockquote")
-            && element.attr(local_name!("type")).is_some_and(|kind| kind.eq_ignore_ascii_case("cite")))
+/// The elements that start quoted history ([`mail_html::QUOTES`]); the outermost of them count.
+fn quote_starts(doc: &BaseDocument) -> HashSet<NodeId> {
+    doc.query_selector_all(mail_html::QUOTES).map(|ids| ids.into_iter().collect()).unwrap_or_default()
 }
 
 /// Leaves `part` of the body: `Main` without its quoted history, `Quoted` only that (moved to the
@@ -654,13 +645,14 @@ fn is_quote(node: &blitz_dom::Node) -> bool {
 /// quotes (no text or image outside them) has none to fold and stays whole. Whether it has some.
 fn cut_quotes(doc: &mut BaseDocument, part: HtmlPart) -> bool {
     let Some(body) = doc.query_selector("body").ok().flatten() else { return false };
+    let starts = quote_starts(doc);
     let mut quotes = Vec::new();
     // Outside the quotes: whether there is text, or an image.
     let (mut text, mut image) = (false, false);
     let mut stack = vec![body];
     while let Some(id) = stack.pop() {
         let Some(node) = doc.get_node(id) else { continue };
-        if id != body && is_quote(node) {
+        if id != body && starts.contains(&id) {
             quotes.push(id);
             continue;
         }
@@ -889,7 +881,7 @@ fn sanitize(doc: &mut BaseDocument) -> Allowed {
             let hints = style(&mut mutator, &css);
             mutator.prepend_nodes(head, &[hints]);
         }
-        let reader = style(&mut mutator, MAIL_CSS);
+        let reader = style(&mut mutator, &MAIL_CSS);
         mutator.append_children(head, &[reader]);
     }
     drop(mutator);
@@ -1097,13 +1089,20 @@ impl NetProvider for Gate {
     }
 }
 
-/// A raster image from `data:` (at once) or `https:`; anything else gets an empty answer.
+/// A raster image from `data:` (at once), the inline cache (`file:`, read off the pages' thread)
+/// or `https:`; anything else gets an empty answer.
 fn fetch_image(url: Url, handler: Box<dyn NetHandler>, web: Arc<dyn Web>) {
     match url.scheme() {
         "data" => match data_url::DataUrl::process(url.as_str()).ok().and_then(|data| data.decode_to_vec().ok()) {
             Some((bytes, _)) if is_raster_image(&bytes) => handler.bytes(url.to_string(), Bytes::from(bytes)),
             _ => refuse(url, handler),
         },
+        "file" => {
+            NET.spawn_blocking(move || match mail_html::inline_part(url.as_str()) {
+                Some((bytes, _)) => handler.bytes(url.to_string(), Bytes::from(bytes)),
+                None => refuse(url, handler),
+            });
+        }
         "https" => {
             NET.spawn(async move {
                 let page = web.get(url.to_string(), IMAGE_CAP).await;
@@ -1507,6 +1506,17 @@ mod tests {
         assert!(!forward.quoted);
         assert_eq!(forward.text(), "From: Dan All of it");
         assert!(!part("<p>Plain</p>\n<blockquote>Not a cite</blockquote>", HtmlPart::Main).quoted);
+        // A plain-text reply as the engine writes it (`text::plain_to_html`), Yahoo's quote and a
+        // cite spelled in capitals fold too.
+        let plain = mailstream_engine::text::plain_to_html("Sounds good.\n\nOn Mon, Dan wrote:\n> Lunch?\n> > Earlier\n");
+        let main = part(&plain, HtmlPart::Main);
+        assert!(main.quoted);
+        assert_eq!(main.text(), "Sounds good. On Mon, Dan wrote:");
+        assert_eq!(part(&plain, HtmlPart::Quoted).text(), "Lunch? Earlier");
+        for quote in ["<div class=\"yahoo_quoted\">Old</div>", "<blockquote type=\"CITE\">Old</blockquote>"] {
+            let main = part(&format!("<p>New</p>{quote}"), HtmlPart::Main);
+            assert!(main.quoted && main.text() == "New", "{quote}");
+        }
     }
 
     #[test]
@@ -1603,6 +1613,7 @@ mod tests {
             "data:image/png;base64,iVBORw0K".to_string(),
             "data:font/woff2;base64,d09GMgABAAA".into(),
             "data:text/css,p{color:red}".into(),
+            // A file outside the inline cache (answered off this thread).
             format!("file://{}", file.display()),
             "http://example.com/a.png".into(),
             "javascript:alert(1)".into(),
@@ -1611,7 +1622,13 @@ mod tests {
         ] {
             fetch_image(Url::parse(&url).unwrap(), Box::new(Probe(got.clone())), Arc::new(FakeWeb::default()));
         }
-        assert_eq!(*got.lock().unwrap(), [6, 0, 0, 0, 0, 0, 0]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while got.lock().unwrap().len() < 7 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut sizes = got.lock().unwrap().clone();
+        sizes.sort_unstable();
+        assert_eq!(sizes, [0, 0, 0, 0, 0, 0, 6]);
         assert!(is_raster_image(b"\x89PNG\r\n") && !is_raster_image(b"body { color: red }"));
         assert!(is_font(b"wOF2\0\x01\0\0") && is_font(b"\0\x01\0\0\0\x10") && !is_font(b"body { color: red }"));
     }

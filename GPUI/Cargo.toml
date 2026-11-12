@@ -16,7 +16,6 @@ mailstream = { path = "../FFI", default-features = false, features = ["blitz"] }
 futures = "0.3"
 url = "2"
 image = { version = "0.25", default-features = false }
-base64 = "0.22"
 
 # Tests that draw views in a test window and feed them input as the platform would (the
 # calendar's two-finger paging, MS-212).
@@ -29,9 +28,9 @@ gpui = { package = "gpui-kit", version = "0.9.1", features = ["gpui-fast", "prof
 raw-window-handle = "0.6"
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL", "NSURLRequest", "NSValue", "NSGeometry", "NSError", "NSObject", "NSObjCRuntime", "NSData", "NSBundle", "NSSet", "NSDictionary", "NSUserDefaults"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL", "NSURLRequest", "NSValue", "NSGeometry", "NSError", "NSObject", "NSObjCRuntime", "NSData", "NSBundle", "NSSet", "NSDictionary", "NSUserDefaults", "NSURLResponse"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView", "NSResponder", "NSWorkspace", "NSEvent", "NSApplication", "NSImage", "NSMenu", "NSMenuItem", "NSGlassEffectView", "NSGraphics", "NSColor", "objc2-core-foundation", "NSAppearance"] }
-objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "objc2-core-foundation", "block2", "WKWebView", "WKWebViewConfiguration", "WKPreferences", "WKWebpagePreferences", "WKNavigationDelegate", "WKNavigationAction", "WKNavigation", "WKWebsiteDataStore", "WKUIDelegate", "WKWindowFeatures", "WKFrameInfo"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "objc2-core-foundation", "block2", "WKWebView", "WKWebViewConfiguration", "WKPreferences", "WKWebpagePreferences", "WKNavigationDelegate", "WKNavigationAction", "WKNavigation", "WKWebsiteDataStore", "WKUIDelegate", "WKWindowFeatures", "WKFrameInfo", "WKURLSchemeHandler", "WKURLSchemeTask"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 # Blitz's font lookup (fontique) and GPUI's font-kit share fontconfig-sys; with `dlopen` its

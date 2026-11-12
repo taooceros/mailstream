@@ -5,36 +5,32 @@
 //! which only asks for its height and for tiles, strips [`TILE`] points tall of RGBA pixels, for
 //! the part of the body in or near the reader's viewport, and paints them as GPUI images. The body
 //! is as tall as its page, so the reader scrolls over it as over text. As in Flutter's Blitz reader
-//! (`Flutter/lib/ui/blitz_body.dart`): a click opens the link under it in the browser (http,
-//! https and mailto only), a drag selects text and ⌘C (Ctrl+C) copies it, and late content (a
-//! remote image, a web font) lays the page out again. Inline parts the engine cached go in as
-//! `data:` URLs ([`inline_images`]): the page reads no file.
+//! (`Flutter/lib/ui/blitz_body.dart`): a click opens the link under it in the browser when the
+//! engine's `is_mail_link` allows (http, https and mailto), a drag selects text and ⌘C (Ctrl+C)
+//! copies it, and late content (a remote image, a web font) lays the page out again. The page
+//! takes the mail as the engine gave it; the rules every reader shares (quotes, inline images,
+//! style) are the engine's (`FFI/src/mail_html.rs`).
 //!
 //! Each frame starts with [`begin_frame`] (painted first, at the window root), which closes the
 //! pages no placeholder painted in the frame before and frees their tiles; [`paint`] draws one.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use base64::Engine as _;
 use gpui::{
     App, Bounds, ClipboardItem, Corners, CursorStyle, DispatchPhase, Hitbox, HitboxBehavior, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, SharedString, Window, actions, point,
     px, size,
 };
 pub use mailstream::HtmlPart;
-use mailstream::{HtmlPage, HtmlTile};
+use mailstream::{HtmlPage, HtmlTile, is_mail_link};
 
 /// Tiles are this many points tall.
 const TILE: f32 = 512.;
 
 /// Tiles this many beyond the viewport are drawn ahead; past twice this they are freed.
 const AHEAD: usize = 1;
-
-/// The largest inline part made a `data:` URL.
-const MAX_INLINE_IMAGE: u64 = 20 << 20;
 
 actions!(mail_body, [CopyBody]);
 
@@ -193,13 +189,12 @@ pub fn paint(
     listen(key, bounds, hitbox, window);
 }
 
-/// Reads the body's inline images off this thread, then opens its page.
+/// Opens the body's page, which parses on the engine's pages thread.
 fn open(key: &SharedString, html: &SharedString, part: HtmlPart, window: &Window, cx: &App) {
-    let (key, html) = (key.clone(), html.clone());
-    let prepared = cx.background_executor().spawn(async move { inline_images(&html) });
+    let key = key.clone();
+    let page = HtmlPage::part(html.to_string(), part);
     window
         .spawn(cx, async move |cx| {
-            let page = HtmlPage::part(prepared.await, part);
             let opened = PAGES.with_borrow_mut(|pages| match pages.entries.get_mut(&key) {
                 Some(entry) => {
                     entry.page = Some(page.clone());
@@ -519,113 +514,4 @@ fn copy_selection(cx: &mut App) {
         }
     })
     .detach();
-}
-
-/// Links a click opens: web pages and mail addresses, nothing local.
-fn is_mail_link(link: &str) -> bool {
-    let Ok(url) = url::Url::parse(link) else { return false };
-    match url.scheme() {
-        "mailto" => true,
-        "http" | "https" => url.username().is_empty() && url.host().is_some(),
-        _ => false,
-    }
-}
-
-/// `html` with each `file:` URL of a part in the engine's inline cache replaced by a `data:` URL
-/// of its bytes, when they are a raster image of at most [`MAX_INLINE_IMAGE`]. Other `file:` URLs
-/// stay; Blitz reads none. Blocking.
-fn inline_images(html: &str) -> String {
-    if !html.contains("file:") {
-        return html.to_owned();
-    }
-    let Some(root) = inline_cache().and_then(|root| root.canonicalize().ok()) else { return html.to_owned() };
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(start) = rest.find("file://") {
-        out.push_str(&rest[..start]);
-        let tail = &rest[start..];
-        let end = tail.find(['"', '\'', '>', ')', ' ']).unwrap_or(tail.len());
-        let source = &tail[..end];
-        out.push_str(cached_image_data(source, &root).as_deref().unwrap_or(source));
-        rest = &tail[end..];
-    }
-    out.push_str(rest);
-    out
-}
-
-/// The engine's inline-part cache (`cache_directory()` in `Engine/src/lib.rs`, after the `dirs`
-/// crate): `~/Library/Caches` on the Mac; elsewhere `$XDG_CACHE_HOME`, else `~/.cache`.
-fn inline_cache() -> Option<PathBuf> {
-    let home = || std::env::var_os("HOME").map(PathBuf::from);
-    #[cfg(target_os = "macos")]
-    let caches = home()?.join("Library").join("Caches");
-    #[cfg(not(target_os = "macos"))]
-    let caches = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| home().map(|home| home.join(".cache")))?;
-    Some(caches.join("dev.mailstream.Mailstream").join("messages-v2"))
-}
-
-/// `source` as a `data:` URL, if it names a raster image inside `root`, its real path included.
-fn cached_image_data(source: &str, root: &Path) -> Option<String> {
-    let url = url::Url::parse(source).ok()?;
-    if url.scheme() != "file" || url.host().is_some() || url.query().is_some() || url.fragment().is_some() {
-        return None;
-    }
-    let path = url.to_file_path().ok()?.canonicalize().ok()?;
-    if !path.starts_with(root) || std::fs::metadata(&path).ok()?.len() > MAX_INLINE_IMAGE {
-        return None;
-    }
-    let bytes = std::fs::read(&path).ok()?;
-    // The type comes from the bytes, not from a name the sender chose.
-    let mime = raster_mime(&bytes)?;
-    Some(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes)))
-}
-
-fn raster_mime(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF8") {
-        Some("image/gif")
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else {
-        None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn links_a_click_opens() {
-        assert!(is_mail_link("https://example.com/a"));
-        assert!(is_mail_link("mailto:someone@example.com"));
-        assert!(!is_mail_link("file:///etc/passwd"));
-        assert!(!is_mail_link("https://user@example.com/"));
-        assert!(!is_mail_link("javascript:alert(1)"));
-    }
-
-    #[test]
-    fn inline_parts_become_data_urls_only_inside_the_cache() {
-        let base = std::env::temp_dir().join(format!("mailstream-gpui-inline-{}", std::process::id()));
-        let root = base.join("dev.mailstream.Mailstream").join("messages-v2");
-        std::fs::create_dir_all(root.join("m1")).unwrap();
-        std::fs::write(root.join("m1/logo.png"), b"\x89PNG\r\n\x1a\nrest").unwrap();
-        std::fs::write(root.join("m1/notes.txt"), b"plain").unwrap();
-        std::fs::write(base.join("outside.png"), b"\x89PNG\r\n\x1a\nrest").unwrap();
-        let root = root.canonicalize().unwrap();
-        let url = |path: &Path| url::Url::from_file_path(path).unwrap().to_string();
-
-        let inside = cached_image_data(&url(&root.join("m1/logo.png")), &root).unwrap();
-        assert!(inside.starts_with("data:image/png;base64,"));
-        assert_eq!(cached_image_data(&url(&root.join("m1/notes.txt")), &root), None);
-        assert_eq!(cached_image_data(&url(&base.join("outside.png")), &root), None);
-        assert_eq!(cached_image_data(&url(&root.join("m1/../../../outside.png")), &root), None);
-        std::fs::remove_dir_all(&base).unwrap();
-    }
 }

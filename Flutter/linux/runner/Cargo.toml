@@ -16,7 +16,7 @@ gtk = "0.18"
 gdk = "0.18"
 gdk-pixbuf = "0.18"
 gio = "0.18"
-# v2_66: GUri, which checks the links a mail body opens.
+# v2_66: GUri, which reads the scheme of what `open` is given.
 glib = { version = "0.18", features = ["v2_66"] }
 
 [build-dependencies]

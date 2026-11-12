@@ -24,6 +24,7 @@ uniffi::setup_scaffolding!();
 
 #[cfg(feature = "blitz")]
 mod html_page;
+mod mail_html;
 mod main_thread;
 mod people;
 #[cfg(feature = "swift-engine")]
@@ -31,6 +32,9 @@ mod swift;
 
 #[cfg(feature = "blitz")]
 pub use html_page::{HtmlPage, HtmlPart, HtmlSize, HtmlTile};
+pub use mail_html::{
+    InlineParts, MailWebView, QUOTES, inline_parts_folder, is_mail_link, mail_web_document, mail_web_script, served_inline_part,
+};
 pub use people::Person;
 
 /// A failed request: the engine's stable `code` (`unknown_account`, `provider`, `confirm`, …)

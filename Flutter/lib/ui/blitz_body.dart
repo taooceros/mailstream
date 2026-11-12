@@ -9,31 +9,44 @@ import 'package:flutter/widgets.dart';
 import 'package:mailstream/mailstream.dart' as engine;
 
 import '../platform.dart';
-import 'mail_resources.dart';
 
 /// An HTML body drawn by Blitz (MS-147) in the engine's library (`FFI/src/html_page.rs`): parsing,
 /// layout and drawing run on a thread of their own there, and this widget only shows the tiles it
 /// draws, strips [tileHeight] points tall, for the part of the body in or near the reader's
 /// viewport. The body is as tall as its content and scrolls with the conversation, as the WebView's
-/// does. A click opens the link under it ([openMailLink], under the WebView's rules), a mouse drag
-/// selects text and ⌘C (Ctrl+C) copies it.
+/// does. The page takes the mail as the engine gave it and shows [part] of it: the engine finds
+/// its quoted history and reads its inline images (`FFI/src/mail_html.rs`), and [onQuoted] hears
+/// whether there is quoted history to fold. A click opens the link under it ([openMailLink]), a
+/// mouse drag selects text and ⌘C (Ctrl+C) copies it.
 class BlitzBody extends StatefulWidget {
-  const BlitzBody({super.key, required this.html, this.page = _page, this.openLink = BlitzBody.openMailLink});
+  const BlitzBody({
+    super.key,
+    required this.html,
+    this.part = engine.HtmlPart.whole,
+    this.onQuoted,
+    this.page = _page,
+    this.openLink = BlitzBody.openMailLink,
+  });
 
   final String html;
+  final engine.HtmlPart part;
+
+  /// Whether the mail has quoted history [part] leaves out (`main`) or shows (`quoted`), once the
+  /// page says.
+  final ValueChanged<bool>? onQuoted;
 
   /// Makes the page for [html]; tests answer from memory.
-  final engine.HtmlPageInterface Function(String html) page;
+  final engine.HtmlPageInterface Function(String html, engine.HtmlPart part) page;
   final void Function(String url) openLink;
 
   static const tileHeight = 512.0;
 
-  static engine.HtmlPageInterface _page(String html) => engine.HtmlPage(html: html);
+  static engine.HtmlPageInterface _page(String html, engine.HtmlPart part) => engine.HtmlPage.part_(html: html, part_: part);
 
-  /// Opens [url] through the runner's `MailLink`, which checks it again and refuses what it does
-  /// not allow.
+  /// Opens [url] in the browser (or mail app) through the runner, if the engine's rule allows a
+  /// click to open it (`is_mail_link`: web pages and mail addresses, nothing local).
   static void openMailLink(String url) {
-    if (isMailLink(url)) const MethodChannel('mailstream/window').invokeMethod<void>('openMailLink', url).ignore();
+    if (engine.isMailLink(link: url)) const MethodChannel('mailstream/window').invokeMethod<void>('openMailLink', url).ignore();
   }
 
   /// Tiles this far (in tiles) beyond the viewport are drawn ahead; past twice this they are freed.
@@ -92,8 +105,13 @@ class _BlitzBodyState extends State<BlitzBody> {
   }
 
   void _open() {
-    _page = widget.page(widget.html);
-    _watch(_page);
+    final page = _page = widget.page(widget.html, widget.part);
+    _watch(page);
+    if (widget.part != engine.HtmlPart.whole) {
+      page.quoted().then((quoted) {
+        if (quoted != null && !_closed && identical(page, _page)) widget.onQuoted?.call(quoted);
+      });
+    }
   }
 
   /// Late content (a remote image) changes the page: lay it out and draw it again.
@@ -109,7 +127,7 @@ class _BlitzBodyState extends State<BlitzBody> {
   @override
   void didUpdateWidget(BlitzBody old) {
     super.didUpdateWidget(old);
-    if (old.html == widget.html) return;
+    if (old.html == widget.html && old.part == widget.part) return;
     _page.close();
     _clearTiles();
     _width = _scale = null;

@@ -5,27 +5,37 @@ import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
+import 'package:html/dom.dart' as dom;
+import 'package:html/parser.dart' as html_parser;
+import 'package:mailstream/mailstream.dart' as engine;
 import 'package:webview_plus/webview_plus.dart';
-
-import 'html_parts.dart';
 
 /// One HTML body on Windows, drawn by WebView2 through `webview_plus` into a Flutter texture, as
 /// tall as its content, so it scrolls with the conversation (the Mac's is `MailHtmlView` in the
-/// runner). The mail's own scripts never run (`javaScriptEnabled: false` is WebView2's
-/// `IsScriptEnabled`); the app's measuring script runs through `ExecuteScript`, which that switch
-/// does not stop and the mail cannot reach. Links open in the default browser. Remote images load
-/// in an InPrivate profile, without cookies.
+/// runner). The page is the engine's for the mail (`mail_web_document`: the mail under its content
+/// policy) and the engine's page script (`mail_web_script`) adds the reader's style sheet and
+/// folds the quoted history, which shows while [open]; [onQuoted] hears whether there is some.
+/// The mail's own scripts never run (`javaScriptEnabled: false` is WebView2's `IsScriptEnabled`);
+/// the app's scripts run through `ExecuteScript`, which that switch does not stop and the mail
+/// cannot reach. Links open in the default browser when the engine's `is_mail_link` allows. Remote
+/// images load in an InPrivate profile, without cookies.
 ///
 /// The page is a file in a temporary folder, not a string: WebView2 ignores a base URL for
 /// strings, so the `file://` inline parts in Mailstream's cache (`cid:` images) would not load,
 /// and it caps strings at 2 MB. The file goes with the view.
 class WindowsMailHtml extends StatefulWidget {
-  const WindowsMailHtml({super.key, required this.html, required this.onOpenLink});
+  const WindowsMailHtml({super.key, required this.html, required this.onOpenLink, this.open = false, this.onQuoted});
 
   final String html;
 
   /// Opens a link the reader clicked, in the browser (or mail app for `mailto:`).
   final ValueChanged<String> onOpenLink;
+
+  /// Whether the quoted history shows.
+  final bool open;
+
+  /// Whether the page has quoted history to fold, each time that changes.
+  final ValueChanged<bool>? onQuoted;
 
   @override
   State<WindowsMailHtml> createState() => _WindowsMailHtmlState();
@@ -43,6 +53,9 @@ class _WindowsMailHtmlState extends State<WindowsMailHtml> {
 
   /// The width the last measurement ran at; another width lays the page out again.
   double? _measuredWidth;
+
+  /// What the page last said about its quoted history.
+  bool _quoted = false;
 
   /// Measurements after load, while late images and fonts can still change the height.
   final List<Timer> _later = [];
@@ -85,12 +98,13 @@ class _WindowsMailHtmlState extends State<WindowsMailHtml> {
 
   static int _next = 0;
 
-  /// Writes [html]'s page ([windowsMailPage]) in a background isolate. Static, so the closure
-  /// sent to the isolate holds only strings, never this state.
+  /// Writes [html]'s page (the engine's, then [windowsMailPage]) in a background isolate. Static,
+  /// so the closure sent to the isolate holds only strings, never this state.
   static Future<String> _writePage(String html) async {
     final folder = await _folder;
     final path = '$folder${Platform.pathSeparator}$pid-${_next++}.html';
-    await Isolate.run(() => File(path).writeAsStringSync(windowsMailPage(html)), debugName: 'mail-html-page');
+    final document = engine.mailWebDocument(html: html, inline: engine.InlineParts.files);
+    await Isolate.run(() => File(path).writeAsStringSync(windowsMailPage(document)), debugName: 'mail-html-page');
     return path;
   }
 
@@ -103,6 +117,12 @@ class _WindowsMailHtmlState extends State<WindowsMailHtml> {
   }();
 
   static void _delete(String path) => File(path).delete().catchError((Object _) => File(path));
+
+  @override
+  void didUpdateWidget(WindowsMailHtml old) {
+    super.didUpdateWidget(old);
+    if (old.open != widget.open && _loaded) _measureAt(const [0]);
+  }
 
   @override
   void dispose() {
@@ -142,7 +162,7 @@ class _WindowsMailHtmlState extends State<WindowsMailHtml> {
     _measuredWidth = box.size.width;
     final Object? answer;
     try {
-      answer = await controller.evaluateJavascript(_script(_tallest));
+      answer = await controller.evaluateJavascript(_script(_tallest, open: widget.open));
     } on Object {
       return; // The view can go before it answers.
     }
@@ -151,12 +171,15 @@ class _WindowsMailHtmlState extends State<WindowsMailHtml> {
     if (size is! Map || size['height'] is! num) return;
     final height = math.min((size['height'] as num).toDouble().ceilToDouble(), _tallest);
     if ((height - _height).abs() >= 1) setState(() => _height = height);
+    final quoted = size['quoted'] == true;
+    if (quoted != _quoted) widget.onQuoted?.call(_quoted = quoted);
   }
 
   Future<bool> _navigate(WebviewPlusController _, Uri uri) async {
     // The page itself never navigates. Web and mail links go to the browser or mail app; other
     // schemes (protocol handlers the shell would launch, `javascript:`) are dropped.
-    if (const {'http', 'https', 'mailto'}.contains(uri.scheme)) widget.onOpenLink(uri.toString());
+    final link = uri.toString();
+    if (engine.isMailLink(link: link)) widget.onOpenLink(link);
     return false;
   }
 
@@ -184,26 +207,17 @@ class _WindowsMailHtmlState extends State<WindowsMailHtml> {
     });
   }
 
-  /// Applied over the mail's own styles, as on the Mac (`MailHtmlView.script`): the document sizes
-  /// to its content and nothing sizes from the viewport (a quirks-mode `height: 100%` would grow
-  /// with the view without end). Content wider than the view zooms out to fit, down to 30%.
-  /// Answers the height in logical pixels as JSON; past [tallest] the page scrolls inside.
-  static String _script(double tallest) => '''
+  /// The engine's page script (it runs once per page).
+  static final _setup = engine.mailWebScript(view: engine.MailWebView.webView2);
+
+  /// [_setup], then the fold the reader asks for. Content wider than the view zooms out to fit,
+  /// down to 30%. Answers the height in logical pixels and whether the page has quoted history,
+  /// as JSON; past [tallest] the page scrolls inside.
+  static String _script(double tallest, {required bool open}) => '''
+$_setup
+mailstreamFold($open);
 (() => {
   const doc = document, root = doc.documentElement, body = doc.body;
-  if (!doc.getElementById('mailstream-style')) {
-    const style = doc.createElement('style');
-    style.id = 'mailstream-style';
-    style.textContent = `
-      html, body { height: auto !important; min-height: 0 !important; overflow: hidden !important; }
-      html { display: flex !important; flex-direction: column !important; }
-      body { margin: 0; padding: 2px 0; color: #1f1f1f; font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
-        overflow-wrap: break-word; }
-      img { max-width: 100%; }
-      pre { white-space: pre-wrap; }
-    `;
-    (doc.head || root).appendChild(style);
-  }
   const target = body || root;
   target.style.zoom = '';
   const room = root.clientWidth;
@@ -214,7 +228,44 @@ class _WindowsMailHtmlState extends State<WindowsMailHtml> {
   const height = box.bottom + window.scrollY + margin;
   const overflow = height > $tallest ? 'auto' : 'hidden';
   for (const element of [root, body]) if (element) element.style.setProperty('overflow', overflow, 'important');
-  return JSON.stringify({ height });
+  return JSON.stringify({ height, quoted: !!window.mailstreamQuoted });
 })()
 ''';
+}
+
+/// [html] as the page a WebView2 body loads on Windows: links open in the same page, where the
+/// body's navigation handler sends them to the browser. WebView2 opens `target="_blank"` links and
+/// forms in a window of its own, which `webview_plus` leaves to it.
+String windowsMailPage(String html) {
+  final document = html_parser.parse(html);
+  for (final element in document.querySelectorAll('[target]')) {
+    element.attributes.remove('target');
+  }
+  return documentHtml(document);
+}
+
+/// [document] as HTML, its doctype keeping the PUBLIC or SYSTEM keyword before its identifiers.
+/// package:html writes them without it (`<!DOCTYPE html "-//W3C//DTD XHTML 1.0 Transitional//EN"
+/// "…">`), which browsers read as a broken doctype: the mail then lays out in quirks mode instead
+/// of the mode it was written for (MS-160).
+String documentHtml(dom.Document document) {
+  final doctype = document.nodes.whereType<dom.DocumentType>().firstOrNull;
+  if (doctype != null && doctype is! _Doctype) doctype.replaceWith(_Doctype(doctype));
+  return document.outerHtml;
+}
+
+class _Doctype extends dom.DocumentType {
+  _Doctype(dom.DocumentType doctype) : super(doctype.name, doctype.publicId, doctype.systemId);
+
+  @override
+  String toString() {
+    String quoted(String id) => id.contains('"') ? "'$id'" : '"$id"';
+    final name = this.name ?? '';
+    return switch ((publicId, systemId)) {
+      (null, null) => '<!DOCTYPE $name>',
+      (final public?, null) => '<!DOCTYPE $name PUBLIC ${quoted(public)}>',
+      (null, final system?) => '<!DOCTYPE $name SYSTEM ${quoted(system)}>',
+      (final public?, final system?) => '<!DOCTYPE $name PUBLIC ${quoted(public)} ${quoted(system)}>',
+    };
+  }
 }

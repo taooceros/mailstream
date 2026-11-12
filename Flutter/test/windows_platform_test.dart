@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -6,7 +7,6 @@ import 'package:mailstream_ui/platform.dart';
 import 'package:mailstream_ui/ui/common.dart';
 import 'package:mailstream_ui/ui/design.dart';
 import 'package:mailstream_ui/ui/glass.dart';
-import 'package:mailstream_ui/ui/html_parts.dart';
 import 'package:mailstream_ui/ui/mail_html_windows.dart';
 import 'package:mailstream_ui/ui/reader.dart';
 
@@ -135,13 +135,36 @@ void main() {
             owner: (account: 'a', conversation: 'c', message: 'm'),
             html: '<p>Hello</p>',
             onOpenLink: (_) {},
-            partsCache: HtmlPartsCache(split: (html) async => (html, null)),
           ),
         ),
       ));
       await tester.pump();
       expect(find.byType(WindowsMailHtml), findsOneWidget);
       expect(find.byType(AppKitView), findsNothing);
+    });
+
+    testWidgets("fold their quoted history in the page, behind the reader's toggle", (tester) async {
+      Host.debugMacOverride = false;
+      await tester.pumpWidget(MacosApp(
+        theme: MailTheme.macos(Brightness.light),
+        home: SingleChildScrollView(
+          child: MailHtml(
+            owner: (account: 'a', conversation: 'c', message: 'm'),
+            html: '<p>New</p><div class="gmail_quote">Old</div>',
+            onOpenLink: (_) {},
+          ),
+        ),
+      ));
+      await tester.pump();
+      WindowsMailHtml body() => tester.widget<WindowsMailHtml>(find.byType(WindowsMailHtml));
+      expect(find.byIcon(CupertinoIcons.ellipsis), findsNothing);
+      body().onQuoted!(true);
+      await tester.pump();
+      expect(body().open, isFalse);
+      await tester.tap(find.byIcon(CupertinoIcons.ellipsis));
+      await tester.pump();
+      expect(body().open, isTrue);
+      expect(find.byType(WindowsMailHtml), findsOneWidget, reason: 'one page: the quotes have none of their own');
     });
   });
 }

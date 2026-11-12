@@ -19,6 +19,8 @@ uniffi = "=0.31.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# mail_html.rs: the links a click opens and the inline parts' `file:` URLs.
+url = "2"
 mailstream-engine = { path = "../Engine" }
 # html_page.rs's answers to Dart's async calls; the swift engine's replies too.
 futures-channel = "0.3"

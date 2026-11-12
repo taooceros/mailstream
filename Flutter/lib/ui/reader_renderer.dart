@@ -20,11 +20,6 @@ enum ReaderRenderer {
   /// included, MS-196).
   static ReaderRenderer fromName(String? name) =>
       values.firstWhere((r) => r.name.toLowerCase() == name?.toLowerCase(), orElse: () => initial);
-
-  /// Whether bodies it draws need the reader's prepared parts (`HtmlPartsCache`): the Mac's
-  /// WebKit loads the mail as the engine gave it and folds quotes in the page (MS-167); Windows'
-  /// WebView2 and Linux's Blitz draw the split parts whatever the switch says.
-  bool get preparesHtml => !Host.mac || this != webKit;
 }
 
 /// The Mac reader's renderer, kept in memory: every launch starts in Blitz, and a choice
