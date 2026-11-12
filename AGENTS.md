@@ -236,6 +236,14 @@ it is handed over; it is not moved mid-way.
 - Rust builds (`Engine/`, `FFI/`, `GPUI/`, Turso) run plain cargo: the repo's
   `.cargo/config.toml` turns off the rcache wrapper in `~/.cargo/config.toml`, which handed out
   corrupt artifacts in ovnfs checkouts (MS-131). Don't set `RUSTC_WRAPPER` to bring it back.
+- Every compile on Linux runs under the machine's limit: at most 8 CPUs and 16 GB for all of
+  them together (MS-268). Prefix builds and tests you run yourself with `scripts/capped` (from
+  the repo root: `scripts/capped devenv shell -- cargo test`, `scripts/capped flutter build
+  linux`); it runs them in the shared systemd user slice `mailstream-build.slice`, where cargo
+  sees 8 CPUs, so don't pass a larger `-j`. `ffi.py`, `warm-build.py`, `shots.py` and
+  `install-linux.py` already build through it. Cheap commands (jj, rg, reading files) don't
+  need it. On the Mac it runs the interim one-compile-at-a-time `~/.local/bin/build-slot` where
+  that is installed.
 - The default checkout keeps a warm build of `main` (`FFI/target` release, `Engine/target`
   debug for the engine's tests, `.turso/`) that every new checkout starts from and keeps (MS-151,
   MS-152, MS-159): a checkout's first release `ffi.py` rebuilds only the repo's 2 crates (~30 s)

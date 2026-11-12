@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.dont_write_bytecode = True
-from repo import ROOT, build_env, checkouts_of, is_default_checkout, jj  # noqa: E402
+from repo import ROOT, build_env, capped, checkouts_of, is_default_checkout, jj  # noqa: E402
 from checkout import frozen  # noqa: E402
 import source_lock  # noqa: E402
 
@@ -92,9 +92,10 @@ def build(open_before):
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="mailstream-warm-dart-") as dart:
         steps = [
-            ("turso.sh", ["sh", "scripts/turso.sh"], ROOT, {}),
+            # ffi.py caps its own cargo; the Mac's build-slot must not be entered twice.
+            ("turso.sh", capped(["sh", "scripts/turso.sh"]), ROOT, {}),
             ("ffi.py", [sys.executable, "scripts/ffi.py"], ROOT, {"CONFIG": "release", "DART_OUT": dart}),
-            ("engine tests", ["cargo", "test", "--no-run"], ROOT / "Engine", {}),
+            ("engine tests", capped(["cargo", "test", "--no-run"]), ROOT / "Engine", {}),
         ]
         for name, command, cwd, extra in steps:
             step = time.monotonic()

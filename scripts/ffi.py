@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.dont_write_bytecode = True
-from repo import ROOT, build_env  # noqa: E402
+from repo import ROOT, build_env, capped  # noqa: E402
 
 CONFIG = os.environ.get("CONFIG", "debug")
 LIBRARY = {"win32": "mailstream.dll", "darwin": "libmailstream.dylib"}.get(sys.platform, "libmailstream.so")
@@ -26,7 +26,7 @@ ENV = build_env()
 
 
 def cargo(directory, *args):
-    subprocess.run(["cargo", *args], cwd=ROOT / directory, check=True, env=ENV)
+    subprocess.run(capped(["cargo", *args]), cwd=ROOT / directory, check=True, env=ENV)
 
 
 def main():

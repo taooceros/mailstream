@@ -152,10 +152,9 @@ def main():
     if not args.no_build:
         if LINUX:
             target_outside()
-        # The Mac's interim limit on compiles (one at a time across agents, 11-12) where installed.
-        slot = Path.home() / ".local/bin/build-slot"
-        prefix = f"'{slot}' " if slot.exists() else ""
-        commands.append(f"(cd GPUI && {prefix}cargo build --release --features shots)")
+        # Under the machine's compile limit (scripts/capped: Linux's capped slice, MS-268; the
+        # Mac's build-slot where installed).
+        commands.append("(cd GPUI && ../scripts/capped cargo build --release --features shots)")
         commands.append(f"cp GPUI/target/release/mailstream-gpui {BINARY}")
     elif not (ROOT / BINARY).exists():
         fail(f"no {BINARY} yet: run it once without --no-build")

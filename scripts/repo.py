@@ -1,6 +1,6 @@
 """Helpers the repo's Python scripts share (MS-239): running commands, jj and ovnfs in the
 repository, telling the default checkout (~/projects/mailstream) from an ovnfs checkout of it,
-and the environment cargo builds run in. Standard library only, like every script here."""
+and the environment and limit cargo builds run in. Standard library only, like every script here."""
 import json
 import os
 import subprocess
@@ -21,6 +21,12 @@ def build_env(**extra):
     """os.environ for a cargo build, without DRIFTING on macOS, plus `extra`."""
     drop = DRIFTING if sys.platform == "darwin" else []
     return {**{k: v for k, v in os.environ.items() if k not in drop}, **extra}
+
+
+def capped(argv):
+    """argv run under the machine's compile limit (`scripts/capped`, MS-268); unchanged on Windows,
+    which has no bash to run it."""
+    return argv if sys.platform == "win32" else [str(ROOT / "scripts/capped"), *argv]
 
 
 def run(*args, cwd=ROOT):

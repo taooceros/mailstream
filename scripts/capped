@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Runs a build or test command under this machine's compile limit: `scripts/capped CMD [ARG...]`.
+#
+# Linux (MS-268): every compile on the machine together gets at most 8 CPUs and 16 GB. The
+# command runs in a scope inside the shared systemd user slice `mailstream-build.slice`
+# (CPUQuota=800%, MemoryHigh=15G, MemoryMax=16G), so all agents' builds add up to that limit;
+# inside it `nproc`, cargo and rustc see 8 CPUs. The slice's limits are set on every run (they
+# are runtime-only and gone after a reboot). A command already in the slice runs directly, so
+# scripts that wrap their builds can be nested (install-linux.py → ffi.py).
+# The Mac: the interim one-compile-at-a-time wrapper `~/.local/bin/build-slot` where installed,
+# else directly.
+#
+# Exit status is the command's. Cheap commands (jj, git, rg) don't need it.
+set -euo pipefail
+[ $# -gt 0 ] || { echo "usage: scripts/capped CMD [ARG...]" >&2; exit 2; }
+
+if [ "$(uname -s)" = Linux ] && command -v systemd-run >/dev/null 2>&1; then
+  if grep -q '/mailstream-build\.slice/' /proc/self/cgroup; then
+    exec "$@"
+  fi
+  systemctl --user set-property --runtime mailstream-build.slice \
+    CPUQuota=800% MemoryHigh=15G MemoryMax=16G
+  exec systemd-run --user --scope --slice=mailstream-build.slice --collect --quiet -- "$@"
+fi
+
+slot="$HOME/.local/bin/build-slot"
+if [ -x "$slot" ]; then
+  exec "$slot" "$@"
+fi
+exec "$@"

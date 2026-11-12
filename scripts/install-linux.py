@@ -58,7 +58,8 @@ def run(*args, capture=False):
 
 
 def devenv(script, capture=False):
-    return run("devenv", "shell", "--", "sh", "-euc", script, capture=capture)
+    # Under the machine's compile limit (scripts/capped, MS-268).
+    return run(str(ROOT / "scripts/capped"), "devenv", "shell", "--", "sh", "-euc", script, capture=capture)
 
 
 def main_revision():
