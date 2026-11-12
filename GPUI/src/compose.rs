@@ -24,7 +24,8 @@ use crate::design::{self, Palette, compose as metrics, editor, radius, space, te
 use crate::engine::engine;
 use crate::icons::Icon;
 use crate::input::{self, AREA_INSET};
-use crate::model::{Account, Address};
+use crate::model::AccountExt;
+use mailstream::{Account, Address, Person};
 use attachments::{Attachments, Remove};
 pub use column::{ColumnEvent, ComposeColumn, ResizeColumn};
 
@@ -71,18 +72,18 @@ pub fn bind_keys(cx: &mut App) {
 /// text, put under the caret. A reply moved out of the reader keeps its text and files; its `to`
 /// and `cc` are who the engine will send it to, unless they are edited.
 pub enum ComposeMode {
-    New { from: Option<SharedString> },
-    Forward { from: SharedString, subject: SharedString, quoted: SharedString },
+    New { from: Option<String> },
+    Forward { from: String, subject: String, quoted: SharedString },
     Reply(MovedReply),
 }
 
 /// A reply the reader moved to the compose column.
 pub struct MovedReply {
-    pub conversation: SharedString,
+    pub conversation: String,
     /// The message it answers; the conversation's latest when `None`.
-    pub message: Option<SharedString>,
+    pub message: Option<String>,
     pub all: bool,
-    pub from: SharedString,
+    pub from: String,
     pub to: Vec<Address>,
     pub cc: Vec<Address>,
     pub subject: SharedString,
@@ -91,33 +92,14 @@ pub struct MovedReply {
 }
 
 /// One person `contacts.search` offers.
-#[derive(Clone)]
-struct Person {
-    name: Option<SharedString>,
-    email: SharedString,
-    avatar: mailstream::Avatar,
-}
-
-impl From<mailstream::Person> for Person {
-    fn from(person: mailstream::Person) -> Self {
-        Self { name: person.name.map(SharedString::from), email: person.email.into(), avatar: person.avatar }
-    }
-}
-
-impl Person {
-    fn address(&self) -> Address {
-        Address { name: self.name.clone().filter(|name| !name.is_empty()), email: self.email.clone() }
-    }
-
-    /// `Name <email>`, quoting a name the recipient list would split.
-    fn formatted(&self) -> String {
-        match self.name.as_ref().filter(|name| !name.is_empty()) {
-            Some(name) if name.contains([',', ';', '"', '<', '>']) => {
-                format!("\"{}\" <{}>", name.replace('"', "'"), self.email)
-            }
-            Some(name) => format!("{name} <{}>", self.email),
-            None => self.email.to_string(),
+/// `person` as a recipient field takes them: `Name <email>`, quoting a name the list would split.
+fn formatted(person: &Person) -> String {
+    match person.name.as_ref().filter(|name| !name.is_empty()) {
+        Some(name) if name.contains([',', ';', '"', '<', '>']) => {
+            format!("\"{}\" <{}>", name.replace('"', "'"), person.email)
         }
+        Some(name) => format!("{name} <{}>", person.email),
+        None => person.email.clone(),
     }
 }
 
@@ -201,12 +183,12 @@ struct Compose {
     title: SharedString,
     glyph: Icon,
     accounts: Vec<Account>,
-    from: Option<SharedString>,
+    from: Option<String>,
     /// A forward and a reply keep the account it came to.
     from_locked: bool,
     /// The conversation a moved reply answers, the message in it (else its latest), and whether
     /// it answers everyone: sent with `mail.reply`, which keeps the thread and quotes the original.
-    reply: Option<(SharedString, Option<SharedString>, bool)>,
+    reply: Option<(String, Option<String>, bool)>,
     picking_from: bool,
     to: Entity<InputState>,
     cc: Entity<InputState>,
@@ -259,7 +241,7 @@ impl Compose {
                 (Some(from), true, mailstream::forward_subject(subject.to_string()).into(), format!("\n\n{quoted}").into())
             }
             ComposeMode::Reply(moved) => {
-                let list = |addresses: &[Address]| addresses.iter().map(Address::header_form).collect::<Vec<_>>().join(", ");
+                let list = |addresses: &[Address]| addresses.iter().map(Address::text).collect::<Vec<_>>().join(", ");
                 initial_to = list(&moved.to);
                 initial_cc = list(&moved.cc);
                 text = moved.body;
@@ -521,7 +503,7 @@ impl Compose {
             .iter()
             .flat_map(|input| {
                 let text = input.read(cx).value();
-                mailstream::split_recipients(text.to_string()).iter().map(|part| Address::parse(part).email).collect::<Vec<_>>()
+                mailstream::split_recipients(text.to_string()).iter().map(|part| mailstream::address_text::read(part).email).collect::<Vec<_>>()
             })
             .map(|email| email.to_lowercase())
             .collect();
@@ -543,7 +525,6 @@ impl Compose {
                     Ok(people) => {
                         let people: Vec<Person> = people
                             .into_iter()
-                            .map(Person::from)
                             .filter(|person| !taken.contains(&person.email.to_lowercase()))
                             .take(metrics::SUGGESTIONS)
                             .collect();
@@ -597,7 +578,7 @@ impl Compose {
         let parts = mailstream::split_recipients(current.to_string());
         let mut text: Vec<String> =
             parts[..parts.len() - 1].iter().map(|part| part.trim()).filter(|part| !part.is_empty()).map(str::to_owned).collect();
-        text.push(person.formatted());
+        text.push(formatted(person));
         let text = format!("{}, ", text.join(", "));
         // Replaced as an edit, so Undo brings back what was typed.
         input.update(cx, |input, cx| input.replace_all(text, window, cx));
@@ -794,7 +775,7 @@ impl Compose {
             .filter(|suggestions| suggestions.field == field && input.focus_handle(cx).is_focused(window))
             .map(|suggestions| {
                 let rows = suggestions.people.iter().enumerate().map(|(ix, person)| {
-                    let address = person.address();
+                    let address = Address::new(person.name.clone().filter(|name| !name.is_empty()), person.email.clone());
                     let picked = person.clone();
                     let photo = avatars::avatar(&address.email, &person.avatar, metrics::MENU_AVATAR, p, cx);
                     div()
@@ -995,8 +976,8 @@ pub enum ReplyEvent {
 /// The reader's reply card: a mail reply (or reply all) to a conversation's latest message, or
 /// the one the reader picked, with files picked, dropped or pasted on it.
 pub struct ReplyBox {
-    conversation_id: SharedString,
-    message: Option<SharedString>,
+    conversation_id: String,
+    message: Option<String>,
     all: bool,
     recipients: SharedString,
     text: Entity<TextareaState>,
@@ -1011,8 +992,8 @@ impl EventEmitter<ReplyEvent> for ReplyBox {}
 impl ReplyBox {
     /// `recipients_preview` is who the reply goes to, as the reader shows it.
     pub fn new(
-        conversation_id: SharedString,
-        message: Option<SharedString>,
+        conversation_id: String,
+        message: Option<String>,
         all: bool,
         recipients_preview: SharedString,
         window: &mut Window,
@@ -1058,7 +1039,7 @@ impl ReplyBox {
             cx.notify();
             return;
         }
-        let (id, all) = (self.conversation_id.to_string(), self.all);
+        let (id, all) = (self.conversation_id.clone(), self.all);
         let overrides = (!self.attachments.is_empty() || self.message.is_some()).then(|| mailstream::ReplyOverrides {
             to: None,
             cc: None,

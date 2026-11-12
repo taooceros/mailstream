@@ -250,7 +250,7 @@ impl CalendarPane {
 
     /// What the provider's web calendar is called.
     fn provider_page(&self, index: usize) -> &'static str {
-        let microsoft = self.account_of(&self.events[index]).is_some_and(|account| account.provider == "microsoft");
+        let microsoft = self.account_of(&self.events[index]).is_some_and(|account| account.provider == mailstream::Provider::Microsoft);
         if microsoft { "Open in Outlook" } else { "Open in Google Calendar" }
     }
 
@@ -540,7 +540,7 @@ fn guest_card(person: &CalendarPerson, organizer: bool, address_shown: bool, p: 
         .gap(px(space::S8))
         .rounded(px(radius::CONTROL))
         .bg(p.fill)
-        .child(avatars::avatar(&address.email, &address.avatar(), metrics::GUEST_AVATAR, p, cx))
+        .child(avatars::avatar(&address.email, &mailstream::Avatar::of(&address), metrics::GUEST_AVATAR, p, cx))
         .child(
             div()
                 .flex_1()

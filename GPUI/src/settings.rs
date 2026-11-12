@@ -21,13 +21,17 @@ use gpui::{
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, StatefulInteractiveElement,
     Styled, Subscription, TitlebarOptions, Window, WeakEntity, WindowBounds, WindowOptions, actions, div, px, size,
 };
-use mailstream::{AutoReadLog, Change, Event, EventListener, OAuthClientInfo, SettingEntry, SettingValue};
+use mailstream::{
+    Account, AutoReadLog, AutoReadReason, Category, Change, Event, EventListener, OAuthClientInfo, Provider, SettingEntry,
+    SettingValue,
+};
 
 use crate::controls::{ButtonKind, ControlSize, Tone, button, field_frame, icon_button, notice, pill, switch, tag};
 use crate::design::{self, Palette, radius, settings as metrics, stroke, text};
 use crate::engine::{MailError, engine};
 use crate::icons::{Icon, icon};
 use crate::input;
+use crate::model::{AccountExt, ProviderExt};
 
 actions!(settings, [ShowSettings]);
 
@@ -106,41 +110,6 @@ impl EventListener for Changes {
 
 // MARK: - Values
 
-#[derive(Clone)]
-struct AccountRow {
-    id: SharedString,
-    label: SharedString,
-    provider: SharedString,
-    name: Option<SharedString>,
-    services: Vec<SharedString>,
-}
-
-impl From<mailstream::Account> for AccountRow {
-    fn from(account: mailstream::Account) -> Self {
-        Self {
-            id: account.id.into(),
-            label: account.label.into(),
-            provider: account.provider.into(),
-            name: account.name.map(SharedString::from),
-            services: account.services.into_iter().map(SharedString::from).collect(),
-        }
-    }
-}
-
-impl AccountRow {
-    fn title(&self) -> SharedString {
-        if self.label.is_empty() { self.id.clone() } else { self.label.clone() }
-    }
-
-    fn provider_name(&self) -> &str {
-        match self.provider.as_ref() {
-            "google" => "Google",
-            "microsoft" => "Microsoft",
-            other => other,
-        }
-    }
-}
-
 /// What the Status section shows of the engine's `status`.
 struct Status {
     version: String,
@@ -164,28 +133,6 @@ impl From<mailstream::Status> for Status {
             last_error: sync.last_error,
             push_connected: sync.push_connected,
             tagging: status.ai_tagging,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Provider {
-    Google,
-    Microsoft,
-}
-
-impl Provider {
-    fn key(self) -> &'static str {
-        match self {
-            Provider::Google => "google",
-            Provider::Microsoft => "microsoft",
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Provider::Google => "Google",
-            Provider::Microsoft => "Microsoft",
         }
     }
 }
@@ -278,7 +225,7 @@ struct Field {
 
 /// The account being renamed and its field.
 struct Rename {
-    id: SharedString,
+    id: String,
     input: Entity<InputState>,
     _subscription: Subscription,
 }
@@ -297,7 +244,7 @@ struct ClientForm {
 
 struct Settings {
     on_changed: Rc<dyn Fn(&mut App)>,
-    accounts: Option<Result<Vec<AccountRow>, MailError>>,
+    accounts: Option<Result<Vec<Account>, MailError>>,
     status: Option<Status>,
     settings: Option<Result<mailstream::Settings, MailError>>,
     auto_read: Option<AutoReadLog>,
@@ -306,7 +253,7 @@ struct Settings {
     errors: HashMap<String, SharedString>,
     renaming: Option<Rename>,
     /// The account whose removal waits for confirmation.
-    confirming: Option<SharedString>,
+    confirming: Option<String>,
     client: Option<ClientForm>,
     /// The provider being signed in to, and the attempt it belongs to.
     signing_in: Option<Provider>,
@@ -379,7 +326,7 @@ impl Settings {
     fn load_accounts(&self, cx: &mut Context<Self>) {
         self.background(
             cx,
-            async { engine().accounts().await.map(|list| list.into_iter().map(AccountRow::from).collect()) },
+            async { engine().accounts().await },
             |this, accounts, cx| {
                 this.accounts = Some(accounts);
                 cx.notify();
@@ -419,7 +366,7 @@ impl Settings {
         cx.notify();
     }
 
-    fn rows(&self) -> &[AccountRow] {
+    fn rows(&self) -> &[Account] {
         match &self.accounts {
             Some(Ok(rows)) => rows,
             _ => &[],
@@ -619,7 +566,7 @@ impl Settings {
 
     // MARK: Rename
 
-    fn start_rename(&mut self, account: &AccountRow, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_rename(&mut self, account: &Account, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(account.id.clone()).default_value(account.label.clone()));
         let subscription = cx.subscribe_in(&input, window, Self::on_rename_event);
         window.focus(&input.read(cx).focus_handle(cx), cx);
@@ -649,7 +596,7 @@ impl Settings {
 
     fn commit_rename(&mut self, label: String, cx: &mut Context<Self>) {
         let Some(Rename { id, .. }) = self.renaming.take() else { return };
-        let unchanged = self.rows().iter().any(|row| row.id == id && row.label.as_ref() == label);
+        let unchanged = self.rows().iter().any(|row| row.id == id && row.label == label);
         cx.notify();
         if unchanged {
             return;
@@ -671,7 +618,7 @@ impl Settings {
 
     // MARK: Remove
 
-    fn remove(&mut self, id: SharedString, cx: &mut Context<Self>) {
+    fn remove(&mut self, id: String, cx: &mut Context<Self>) {
         self.confirming = None;
         cx.notify();
         let account = id.to_string();
@@ -697,7 +644,7 @@ impl Settings {
         cx.spawn_in(window, async move |this, cx| {
             let suggested = cx
                 .background_executor()
-                .spawn(async move { engine().suggested_client(provider.key().to_string()).await })
+                .spawn(async move { engine().suggested_client(provider.as_str().to_string()).await })
                 .await;
             this.update_in(cx, |this, window, cx| this.show_client_form(provider, suggested.ok().flatten(), window, cx))
                 .ok();
@@ -771,7 +718,7 @@ impl Settings {
         cx.notify();
         self.background(
             cx,
-            async move { engine().add_account(provider.key().to_string(), Some(client_id), client_secret).await },
+            async move { engine().add_account(provider.as_str().to_string(), Some(client_id), client_secret).await },
             move |this, result, cx| {
                 // The user stopped waiting, or started over.
                 if this.attempt != attempt {
@@ -868,7 +815,7 @@ impl Settings {
                 .gap(px(8.))
                 .children([Provider::Google, Provider::Microsoft].map(|provider| {
                     button(
-                        ElementId::Name(format!("add-{}", provider.key()).into()),
+                        ElementId::Name(format!("add-{}", provider.as_str()).into()),
                         format!("{} Account…", provider.name()),
                         ButtonKind::Secondary,
                         ControlSize::Regular,
@@ -967,7 +914,7 @@ impl Settings {
     fn render_row(
         &self,
         index: usize,
-        row: &AccountRow,
+        row: &Account,
         last: bool,
         p: &'static Palette,
         cx: &mut Context<Self>,
@@ -975,7 +922,7 @@ impl Settings {
         let id = row.id.clone();
         let renaming = self.renaming.as_ref().filter(|rename| rename.id == id).map(|rename| rename.input.clone());
         let confirming = self.confirming.as_ref() == Some(&id);
-        let mut detail = vec![row.provider_name().to_string(), row.id.to_string()];
+        let mut detail = vec![row.provider.name().to_string(), row.id.to_string()];
         if let Some(name) = row.name.as_ref().filter(|n| !n.is_empty()) {
             detail.insert(1, name.to_string());
         }
@@ -1319,7 +1266,7 @@ impl Settings {
             .iter()
             .filter(|account| account.services.iter().any(|s| s == "mail"))
             .map(|account| {
-                let what = if account.provider == "google" { "Gmail labels" } else { "Outlook categories" };
+                let what = if account.provider == Provider::Google { "Gmail labels" } else { "Outlook categories" };
                 (account.id.to_lowercase(), format!("{}  ·  {what}", account.title()))
             })
             .collect();
@@ -1446,9 +1393,9 @@ impl Settings {
                 .filter(|date| !date.is_empty())
                 .map(|date| format!("marked {date}"));
             let detail = [
-                Some(if entry.category == "newsletter" { "Newsletter" } else { "Notification" }.to_owned()),
+                Some(if entry.category == Category::Newsletter { "Newsletter" } else { "Notification" }.to_owned()),
                 Some(
-                    if entry.reason == "superseded" {
+                    if entry.reason == AutoReadReason::Superseded {
                         "a newer one from the same sender arrived"
                     } else {
                         "unread too long"

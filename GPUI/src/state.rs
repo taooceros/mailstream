@@ -24,7 +24,7 @@ use gpui::{
     ListState, Pixels,
     Point, ScrollHandle, SharedString, Subscription, Task, Window, actions, px,
 };
-use mailstream::{Change, Event, EventListener, ListQuery};
+use mailstream::{Account, Category, Change, Conversation, Event, EventListener, ListQuery, Listing, Mailbox, MailboxRole};
 
 use crate::bench::Bench;
 use crate::calendar::{CalendarPane, CalendarToast};
@@ -32,7 +32,7 @@ use crate::chat::ChatPane;
 use crate::compose::{ComposeColumn, ReplyBox};
 use crate::engine::{MailError, engine};
 use crate::frame_rate::FrameRateMeter;
-use crate::model::{Account, Category, Conversation, Listing, Mailbox, Message, Role};
+use crate::model::{ConversationExt, RoleExt, ShownMessage};
 use crate::swipe::{BackSwipe, Preferences};
 
 actions!(
@@ -117,12 +117,12 @@ const FRESH: Duration = Duration::from_secs(90);
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Source {
     /// One role across every account.
-    Unified(Role),
-    Mailbox { account: SharedString, id: SharedString, name: SharedString, role: Role },
+    Unified(MailboxRole),
+    Mailbox { account: String, id: String, name: SharedString, role: MailboxRole },
 }
 
 impl Source {
-    pub fn role(&self) -> Role {
+    pub fn role(&self) -> MailboxRole {
         match self {
             Source::Unified(role) | Source::Mailbox { role, .. } => *role,
         }
@@ -130,12 +130,12 @@ impl Source {
 
     pub fn title(&self) -> SharedString {
         match self {
-            Source::Unified(role) => role.title().into(),
+            Source::Unified(role) => role.label().into(),
             Source::Mailbox { name, .. } => name.clone(),
         }
     }
 
-    fn account(&self) -> Option<&SharedString> {
+    fn account(&self) -> Option<&String> {
         match self {
             Source::Unified(_) => None,
             Source::Mailbox { account, .. } => Some(account),
@@ -153,28 +153,23 @@ pub struct ListKey {
 impl ListKey {
     /// One page of this list from the engine, prepared for display.
     async fn fetch(self, cursor: Option<String>) -> Result<Listing, MailError> {
-        let account = self.source.account().map(|a| a.to_string());
-        let listing = match &self.query {
-            Some(query) => engine().search(query.to_string(), account, PAGE).await?,
+        let account = self.source.account().cloned();
+        match &self.query {
+            Some(query) => engine().search(query.to_string(), account, PAGE).await,
             None => {
                 let mailbox = match &self.source {
-                    Source::Unified(role) => role.arg().to_owned(),
-                    Source::Mailbox { id, .. } => id.to_string(),
+                    Source::Unified(role) => role.as_str().to_owned(),
+                    Source::Mailbox { id, .. } => id.clone(),
                 };
                 let query = ListQuery { mailboxes: vec![mailbox], account, limit: PAGE, cursor, ..ListQuery::default() };
-                engine().list(query).await?
+                engine().list(query).await
             }
-        };
-        let mut listing = Listing::from(listing);
-        for conversation in &mut listing.conversations {
-            conversation.prepare();
         }
-        Ok(listing)
     }
 
     /// The Smart Inbox folds bundles in the inbox, outside search.
     pub fn bundles(&self) -> bool {
-        self.query.is_none() && self.source.role() == Role::Inbox
+        self.query.is_none() && self.source.role() == MailboxRole::Inbox
     }
 }
 
@@ -228,13 +223,13 @@ impl Bundle {
     fn new(category: Category, members: Vec<usize>, conversations: &[Conversation]) -> Self {
         let unread = members.iter().filter(|&&ix| conversations[ix].unread).count();
         let shown = members.iter().map(|&ix| &conversations[ix]).filter(|c| unread == 0 || c.unread);
-        let mut senders: Vec<&str> = Vec::new();
+        let mut senders: Vec<SharedString> = Vec::new();
         let mut subject = SharedString::default();
         for conversation in shown {
             if subject.is_empty() {
-                subject = conversation.title.clone();
+                subject = conversation.title.clone().into();
             }
-            let sender = conversation.sender.as_ref();
+            let sender = conversation.sender_name();
             if !sender.is_empty() && !senders.contains(&sender) {
                 senders.push(sender);
             }
@@ -256,7 +251,7 @@ pub enum Layer {
 impl Layer {
     pub fn id(&self) -> SharedString {
         match self {
-            Layer::Bundle(category) => format!("bundle:{}", category.key()).into(),
+            Layer::Bundle(category) => format!("bundle:{}", category.as_str()).into(),
             Layer::Reader(conversation) => format!("reader:{}", conversation.id).into(),
         }
     }
@@ -264,7 +259,7 @@ impl Layer {
 
 pub enum ThreadState {
     Loading,
-    Loaded(Rc<[Message]>),
+    Loaded(Rc<[ShownMessage]>),
     Failed(SharedString),
 }
 
@@ -287,7 +282,7 @@ pub enum ReaderPin {
     /// The head of this message just under the toolbar: the first unread (else the last) of a
     /// thread whose first message isn't it. A single mail, or a thread opening at its first
     /// message, stays at its top.
-    Message(SharedString),
+    Message(String),
     /// Its end: the reply box being written, or the reply just sent.
     End,
 }
@@ -315,7 +310,7 @@ pub enum Slide {
 
 /// A right-click menu over a row: gpui-kit's `PopupMenu` (`ui/menu.rs`), at the pointer.
 pub struct ContextMenu {
-    pub id: SharedString,
+    pub id: String,
     pub position: Point<Pixels>,
     pub menu: Entity<PopupMenu>,
     /// Closes it here when the kit dismisses it (Escape, a press outside, an entry run).
@@ -357,7 +352,7 @@ pub struct MailApp {
     pub focus: FocusHandle,
     pub search: Entity<InputState>,
     pub accounts: Vec<Account>,
-    pub mailboxes: HashMap<SharedString, Vec<Mailbox>>,
+    pub mailboxes: HashMap<String, Vec<Mailbox>>,
     pub source: Source,
     pub query: Option<SharedString>,
     pub lists: HashMap<ListKey, List>,
@@ -365,32 +360,32 @@ pub struct MailApp {
     pub items: Vec<Item>,
     /// The keyboard highlight in the list and in the open bundle: a conversation id or a bundle's
     /// `bundle:<category>`.
-    pub highlight: Option<SharedString>,
-    pub bundle_highlight: Option<SharedString>,
+    pub highlight: Option<String>,
+    pub bundle_highlight: Option<String>,
     pub layers: Vec<Layer>,
-    pub threads: HashMap<SharedString, ThreadEntry>,
+    pub threads: HashMap<String, ThreadEntry>,
     /// Folded messages the user opened.
-    pub unfolded: HashSet<SharedString>,
+    pub unfolded: HashSet<String>,
     /// Messages whose quoted history the user opened.
-    pub quotes_open: HashSet<SharedString>,
+    pub quotes_open: HashSet<String>,
     /// Messages whose full headers the user opened from their recipient line.
-    pub headers_open: HashSet<SharedString>,
+    pub headers_open: HashSet<String>,
     /// Meeting invitations' cards, by message.
-    pub invitations: HashMap<SharedString, InvitationCard>,
+    pub invitations: HashMap<String, InvitationCard>,
     pub reader_pin: ReaderPin,
     pub reader_top: ReaderTop,
     /// The chat log's message under the pointer, which shows its reply buttons.
-    pub hovered_message: Option<SharedString>,
+    pub hovered_message: Option<String>,
     thread_requests: u64,
     /// Conversations being archived or trashed: refreshes that still list them leave them out.
-    removing: HashSet<SharedString>,
+    removing: HashSet<String>,
     /// A previews request is out; `previews_again` asks once more when it lands.
     previews_asking: bool,
     previews_again: bool,
     /// The window, for the toasts (`show_toast`) asked for from a task without one at hand.
     pub window: AnyWindowHandle,
     /// The row under the pointer, which shows its actions.
-    pub hovered_row: Option<SharedString>,
+    pub hovered_row: Option<String>,
     /// The list's and the open bundle's rows (rows and group titles differ in height).
     pub list_scroll: ListState,
     pub bundle_scroll: ListState,
@@ -426,7 +421,7 @@ pub struct MailApp {
     /// The drafts being written, in a column of the window.
     pub compose: Entity<ComposeColumn>,
     /// A conversation to forward once its messages arrive.
-    forward_pending: Option<SharedString>,
+    forward_pending: Option<String>,
     /// The frame measurement, when the environment asks for one (`bench.rs`).
     pub bench: Option<Bench>,
     /// The list's share of the room beside the navigation next to an open conversation
@@ -448,9 +443,9 @@ pub struct MailApp {
 
 pub struct ReplyDraft {
     pub all: bool,
-    pub conversation: SharedString,
+    pub conversation: String,
     /// The message it answers; the conversation's latest when `None`.
-    pub message: Option<SharedString>,
+    pub message: Option<String>,
     pub view: Entity<ReplyBox>,
     _subscription: Subscription,
 }
@@ -483,7 +478,7 @@ impl MailApp {
             search,
             accounts: Vec::new(),
             mailboxes: HashMap::new(),
-            source: Source::Unified(Role::Inbox),
+            source: Source::Unified(MailboxRole::Inbox),
             query: None,
             lists: HashMap::new(),
             items: Vec::new(),
@@ -632,7 +627,7 @@ impl MailApp {
                     mailboxes
                         .into_iter()
                         .map(|(account, list)| (account.into(), list.into_iter().map(Mailbox::from).collect()))
-                        .collect::<HashMap<SharedString, Vec<Mailbox>>>(),
+                        .collect::<HashMap<String, Vec<Mailbox>>>(),
                 ))
             },
             |this, result, cx| {
@@ -689,17 +684,17 @@ impl MailApp {
             Ok(mut listing) => {
                 listing.conversations.retain(|c| !self.removing.contains(&c.id));
                 if more {
-                    let known: HashSet<SharedString> = list.conversations.iter().map(|c| c.id.clone()).collect();
+                    let known: HashSet<String> = list.conversations.iter().map(|c| c.id.clone()).collect();
                     list.conversations.extend(listing.conversations.into_iter().filter(|c| !known.contains(&c.id)));
                     list.next = listing.next;
                 } else {
                     // A refreshed first page replaces its span; older pages already loaded stay,
                     // with the cursor past them.
-                    let oldest = listing.conversations.last().and_then(|c| c.date);
-                    let fresh: HashSet<SharedString> = listing.conversations.iter().map(|c| c.id.clone()).collect();
+                    let oldest = listing.conversations.last().and_then(ConversationExt::time);
+                    let fresh: HashSet<String> = listing.conversations.iter().map(|c| c.id.clone()).collect();
                     let tail: Vec<Conversation> = std::mem::take(&mut list.conversations)
                         .into_iter()
-                        .filter(|c| !fresh.contains(&c.id) && oldest.is_some_and(|oldest| c.date.is_some_and(|d| d < oldest)))
+                        .filter(|c| !fresh.contains(&c.id) && oldest.is_some_and(|oldest| c.time().is_some_and(|d| d < oldest)))
                         .collect();
                     list.conversations = listing.conversations;
                     list.fetched = Some(Instant::now());
@@ -747,8 +742,8 @@ impl MailApp {
                     // A conversation without one shows none rather than being asked for again.
                     for list in this.lists.values_mut() {
                         for conversation in &mut list.conversations {
-                            if let Some(preview) = previews.get(conversation.id.as_ref()) {
-                                conversation.snippet = Some(preview.clone().unwrap_or_default().into());
+                            if let Some(preview) = previews.get(&conversation.id) {
+                                conversation.snippet = Some(preview.clone().unwrap_or_default());
                             }
                         }
                     }
@@ -802,12 +797,12 @@ impl MailApp {
             items.push(Item::Waiting(waiting.len()));
             items.extend(waiting.into_iter().map(Item::Row));
         }
-        let mut current: Option<&SharedString> = None;
+        let mut current: Option<&String> = None;
         for index in rows {
             if sections {
                 let section = &list.conversations[index].section;
                 if current != Some(section) {
-                    items.push(Item::Section(section.clone()));
+                    items.push(Item::Section(section.clone().into()));
                     current = Some(section);
                 }
             }
@@ -837,7 +832,7 @@ impl MailApp {
             })
             .collect();
         let mut layers = std::mem::take(&mut self.layers);
-        let current: HashMap<&SharedString, &Conversation> = self
+        let current: HashMap<&String, &Conversation> = self
             .list()
             .map(|list| list.conversations.iter().map(|c| (&c.id, c)).collect())
             .unwrap_or_default();
@@ -886,22 +881,14 @@ impl MailApp {
                 self.threads.insert(id.clone(), entry);
             }
         }
-        let arg = id.to_string();
+        let arg = id.clone();
         let own = self.own_addresses();
         self.background(
             cx,
             async move {
                 let thread = engine().show(arg, 200_000, true).await?;
-                let mut messages: Vec<Message> = thread
-                    .messages
-                    .into_iter()
-                    .map(|message| {
-                        let mut message = Message::from(message);
-                        message.prepare(&own);
-                        message
-                    })
-                    .collect();
-                Message::divide(&mut messages);
+                let messages: Vec<ShownMessage> =
+                    thread.messages.into_iter().map(|message| ShownMessage::new(message, &own)).collect();
                 Ok::<_, MailError>(messages)
             },
             move |this, result, cx| {
@@ -909,7 +896,7 @@ impl MailApp {
                 let mut loaded = None;
                 match result {
                     Ok(messages) => {
-                        let messages: Rc<[Message]> = messages.into();
+                        let messages: Rc<[ShownMessage]> = messages.into();
                         thread.state = ThreadState::Loaded(messages.clone());
                         loaded = Some(messages);
                     }
@@ -932,8 +919,8 @@ impl MailApp {
     /// Decides where the conversation just opened holds, once its messages are in: the head of
     /// its first unread message, else of its last; its top when that is its first message (a
     /// single mail always), where the title shows.
-    pub(crate) fn pin_opening(&mut self, id: &SharedString) {
-        if self.reader_pin != ReaderPin::Opening || self.reader().is_none_or(|open| &open.id != id) {
+    pub(crate) fn pin_opening(&mut self, id: &str) {
+        if self.reader_pin != ReaderPin::Opening || self.reader().is_none_or(|open| open.id != id) {
             return;
         }
         let Some(ThreadState::Loaded(messages)) = self.threads.get(id).map(|thread| &thread.state) else { return };

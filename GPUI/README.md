@@ -141,7 +141,7 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 | --- | --- |
 | `run.sh` | Builds the app with the engine; on macOS signs it and checks the signature; starts it |
 | `src/engine.rs` | The one in-process `Mailstream` engine, started at launch |
-| `src/model.rs` | Accounts, mailboxes, conversations and messages converted from the crate's records; display strings derived once per answer, off the main thread |
+| `src/model.rs` | What the app adds to the engine's answer types, which it uses as the crate hands them over (MS-238): its titles for mailboxes and bundles (Junk, where the engine says Spam), sidebar badges, and the reader's `ShownMessage` (folded quotes, recipients as "me", attachment tiles, the HTML body), prepared once per answer off the main thread |
 | `src/state.rs` | `MailApp`: selection, lists served from memory for 90 s and reloaded on change events, paging, search, previews, layers over the list, key bindings |
 | `src/state/nav.rs`, `src/state/actions.rs` | Navigation (sources, bundles, the reader, refresh) and optimistic actions (archive, trash, restore, star, read, waiting, tags) that roll back on failure |
 | `src/state/invitations.rs` | Meeting invitations in the reader (MS-210): each card asks the account's calendar for the event and the answer (`calendar_invitation`, again on every `Calendar` event) and answers there (`calendar_respond`) |

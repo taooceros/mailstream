@@ -17,7 +17,7 @@ impl MailApp {
         let bundle = self.open_bundle_members();
         let (title, subtitle): (SharedString, Option<SharedString>) = match (&bundle, &self.query) {
             (Some(bundle), _) => {
-                (bundle.category.title().into(), Some(format!("{} conversations", bundle.members.len()).into()))
+                (bundle.category.label().into(), Some(format!("{} conversations", bundle.members.len()).into()))
             }
             (None, Some(query)) => ("Search".into(), Some(format!("“{query}”").into())),
             (None, None) => {

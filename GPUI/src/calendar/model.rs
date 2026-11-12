@@ -579,7 +579,9 @@ pub(super) mod tests {
             notes: None,
             notes_cut: false,
             link: None,
+            uid: None,
             series: None,
+            mine: false,
             editable: false,
         }
     }
@@ -669,7 +671,7 @@ pub(super) mod tests {
         let account = CalendarAccount {
             id: "me@example.com".into(),
             label: "Me".into(),
-            provider: "google".into(),
+            provider: mailstream::Provider::Google,
             granted: true,
             writable: true,
             loading: false,

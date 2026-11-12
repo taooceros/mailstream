@@ -789,14 +789,13 @@ pub fn topic_color(label: &str, dark: bool) -> Hsla {
 }
 
 /// A Smart Inbox bundle's color: its glyph sits white on it, as Mail marks its categories.
-pub fn category_color(category: crate::model::Category, p: &Palette) -> Hsla {
-    use crate::model::Category;
+pub fn category_color(category: mailstream::Category, p: &Palette) -> Hsla {
+    use mailstream::Category;
     match category {
         Category::People => p.accent,
         Category::Notification => argb(0xFF5AC8FA),
         Category::Newsletter => argb(0xFFFF2D55),
         Category::Invitation => argb(0xFFFF9500),
-        Category::Other => argb(0xFF8E8E93),
     }
 }
 

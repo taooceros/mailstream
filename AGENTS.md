@@ -279,7 +279,10 @@ it is handed over; it is not moved mid-way.
   and the Swift `CommandSpec`/`ControlService` while both exist, then get a typed method in
   `FFI/src/lib.rs`: one entry in its `commands!` list, which the build checks against the table.
   GPUI uses that crate directly, Flutter through the Dart binding `ffi.py` generates
-  (`Flutter/README.md`).
+  (`Flutter/README.md`). What a command answers is a type in `Engine/src/answers/` (MS-238),
+  which the FFI hands over as it is: front ends use those types and keep only extensions of
+  their own (GPUI's `GPUI/src/model.rs`, Flutter's `lib/backend/models.dart`), so a field added
+  there reaches every front end.
 - The engine keeps the state every front end shares (the open chat space and its history, as for
   the native reader); front ends re-read it on the engine's change events.
 - Test only what you changed: build, then exercise the parts your change touches (the view, flow

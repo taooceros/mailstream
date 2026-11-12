@@ -94,7 +94,7 @@ struct Key {
 struct Space {
     account: SharedString,
     id: SharedString,
-    kind: SharedString,
+    kind: mailstream::ChatSpaceKind,
     title: SharedString,
     snippet: SharedString,
     unread: bool,
@@ -110,7 +110,7 @@ impl Space {
         Space {
             account: space.account.into(),
             id: space.space.into(),
-            kind: space.kind.unwrap_or_default().into(),
+            kind: space.kind,
             title: space.title.into(),
             snippet: space.preview.into(),
             unread: space.unread,
@@ -129,11 +129,11 @@ impl Space {
     }
 
     fn kind_title(&self) -> &'static str {
-        match self.kind.as_ref() {
-            "dm" => "Direct message",
-            "group" => "Group chat",
-            "bot" => "App",
-            _ => "Space",
+        match self.kind {
+            mailstream::ChatSpaceKind::Dm => "Direct message",
+            mailstream::ChatSpaceKind::Group => "Group chat",
+            mailstream::ChatSpaceKind::Bot => "App",
+            mailstream::ChatSpaceKind::Space => "Space",
         }
     }
 }
@@ -257,18 +257,18 @@ impl Inline {
             let start = text.len();
             text.push_str(&span.text);
             let mark = Mark {
-                bold: span.bold,
-                italic: span.italic,
-                strike: span.strike,
-                code: span.code,
-                link: span.link.is_some(),
-                mention: span.mention,
+                bold: span.style.bold,
+                italic: span.style.italic,
+                strike: span.style.strike,
+                code: span.style.code,
+                link: span.style.link.is_some(),
+                mention: span.style.mention,
                 faint: false,
             };
             if mark != Mark::default() {
                 marks.push((start..text.len(), mark));
             }
-            if let Some(link) = &span.link {
+            if let Some(link) = &span.style.link {
                 links.push(SharedString::from(link.clone()));
             }
         }
@@ -343,7 +343,7 @@ impl Body {
                     mailstream::ChatBlockKind::Code => PieceKind::Code,
                     mailstream::ChatBlockKind::Rule => PieceKind::Rule,
                     mailstream::ChatBlockKind::Table => PieceKind::Table(
-                        block.rows.iter().map(|row| row.cells.iter().map(|cell| Inline::new(&cell.spans)).collect()).collect(),
+                        block.rows.iter().map(|row| row.iter().map(|cell| Inline::new(cell)).collect()).collect(),
                     ),
                 },
                 inline: Inline::new(&block.spans),
@@ -1589,7 +1589,7 @@ impl ChatPane {
             meta.push(self.account_label(&key.account));
         }
         let members = log.map_or(0, |l| l.members.len());
-        if space.is_some_and(|s| s.kind.as_ref() == "group") && members > 0 {
+        if space.is_some_and(|s| s.kind == mailstream::ChatSpaceKind::Group) && members > 0 {
             meta.push(format!("{} people", members + 1).into());
         }
         let header = self

@@ -60,8 +60,8 @@ impl MailApp {
         self.conversation(id)
     }
 
-    pub fn conversation(&self, id: &SharedString) -> Option<Conversation> {
-        self.list()?.conversations.iter().find(|c| &c.id == id).cloned()
+    pub fn conversation(&self, id: &str) -> Option<Conversation> {
+        self.list()?.conversations.iter().find(|c| c.id == id).cloned()
     }
 
     /// The user's addresses, lowercased: the accounts'.
@@ -70,9 +70,9 @@ impl MailApp {
     }
 
     /// Message `id` of the loaded thread `conversation`.
-    fn loaded_message(&self, conversation: &SharedString, id: &SharedString) -> Option<&Message> {
+    fn loaded_message(&self, conversation: &str, id: &str) -> Option<&ShownMessage> {
         match self.threads.get(conversation).map(|t| &t.state) {
-            Some(ThreadState::Loaded(messages)) => messages.iter().find(|message| &message.id == id),
+            Some(ThreadState::Loaded(messages)) => messages.iter().find(|message| message.id == id),
             _ => None,
         }
     }
@@ -87,13 +87,13 @@ impl MailApp {
 
     /// A reply (to everyone, with `all`) to message `message` of the open conversation, rather
     /// than its latest: the chat log's hover buttons.
-    pub fn reply_to_message(&mut self, message: SharedString, all: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn reply_to_message(&mut self, message: String, all: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.start_reply(all, Some(message), window, cx);
     }
 
     /// Opens the conversation in the reader, if it is not, with a reply box under its messages:
     /// a reply to `message`, else to its latest.
-    fn start_reply(&mut self, all: bool, message: Option<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_reply(&mut self, all: bool, message: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(conversation) = self.take_target(window, cx) else { return };
         if self.reader().is_none_or(|open| open.id != conversation.id) {
             self.activate(&conversation.id, window, cx);
@@ -115,10 +115,10 @@ impl MailApp {
             to.iter().chain(&cc).map(|address| address.display_name()).collect::<Vec<_>>().join(", ").into()
         } else if all {
             let people: Vec<&str> =
-                conversation.participants.iter().map(|p| p.as_ref()).filter(|p| *p != "me").collect();
-            if people.is_empty() { conversation.sender.clone() } else { people.join(", ").into() }
+                conversation.participants.iter().map(String::as_str).filter(|p| *p != "me").collect();
+            if people.is_empty() { conversation.sender_name() } else { people.join(", ").into() }
         } else {
-            conversation.sender.clone()
+            conversation.sender_name()
         };
         let id = conversation.id.clone();
         let view = cx.new(|cx| ReplyBox::new(id.clone(), message.clone(), all, preview, window, cx));
@@ -147,8 +147,8 @@ impl MailApp {
 
     /// The thread grows by a reply: read it again (showing it meanwhile) if it is open, and the
     /// lists with it.
-    fn reload_replied(&mut self, id: &SharedString, cx: &mut Context<Self>) {
-        if let Some(open) = self.reader().filter(|open| &open.id == id).cloned() {
+    fn reload_replied(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(open) = self.reader().filter(|open| open.id == id).cloned() {
             self.reader_pin = ReaderPin::End;
             self.load_thread(&open, true, cx);
         }
@@ -160,15 +160,15 @@ impl MailApp {
     #[allow(clippy::too_many_arguments)]
     fn move_reply(
         &mut self,
-        id: &SharedString,
-        message: Option<SharedString>,
+        id: &str,
+        message: Option<String>,
         all: bool,
         body: String,
         attachments: Vec<std::path::PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let conversation = self.conversation(id).or_else(|| self.reader().filter(|c| &c.id == id).cloned());
+        let conversation = self.conversation(id).or_else(|| self.reader().filter(|c| c.id == id).cloned());
         let Some(conversation) = conversation else { return };
         let own = self.own_addresses();
         let (to, cc) = match self.threads.get(id).map(|t| &t.state) {
@@ -182,7 +182,7 @@ impl MailApp {
         };
         let subject = mailstream::reply_subject(conversation.subject.to_string());
         let moved = MovedReply {
-            conversation: id.clone(),
+            conversation: id.to_owned(),
             message,
             all,
             from: conversation.account.clone(),
@@ -209,18 +209,18 @@ impl MailApp {
     }
 
     /// A forward of message `message` of the open conversation: the chat log's hover button.
-    pub fn forward_message(&mut self, message: SharedString, cx: &mut Context<Self>) {
+    pub fn forward_message(&mut self, message: String, cx: &mut Context<Self>) {
         let Some(id) = self.reader().map(|open| open.id.clone()) else { return };
         self.forward_loaded(&id, Some(&message), cx);
     }
 
     /// Opens a forward of the conversation's message `message`, else its newest, whose thread is
     /// loaded, as the window draws next.
-    pub(super) fn forward_loaded(&mut self, id: &SharedString, message: Option<&SharedString>, cx: &mut Context<Self>) {
-        let conversation = self.conversation(id).or_else(|| self.reader().filter(|c| &c.id == id).cloned());
+    pub(super) fn forward_loaded(&mut self, id: &str, message: Option<&str>, cx: &mut Context<Self>) {
+        let conversation = self.conversation(id).or_else(|| self.reader().filter(|c| c.id == id).cloned());
         let Some(conversation) = conversation else { return };
         let Some(ThreadState::Loaded(messages)) = self.threads.get(id).map(|t| &t.state) else { return };
-        let Some(source) = messages.iter().find(|m| Some(&m.id) == message).or(messages.last()) else { return };
+        let Some(source) = messages.iter().find(|m| Some(m.id.as_str()) == message).or(messages.last()) else { return };
         let quoted = source.forwarded(&conversation.subject).into();
         let mode = ComposeMode::Forward { from: conversation.account.clone(), subject: conversation.subject.clone(), quoted };
         let accounts = self.accounts.clone();
@@ -393,15 +393,15 @@ impl MailApp {
     }
 
     /// Applies `change` to the conversation wherever it is shown.
-    fn patch(&mut self, id: &SharedString, change: impl Fn(&mut Conversation)) {
+    fn patch(&mut self, id: &str, change: impl Fn(&mut Conversation)) {
         for list in self.lists.values_mut() {
-            for conversation in list.conversations.iter_mut().filter(|c| &c.id == id) {
+            for conversation in list.conversations.iter_mut().filter(|c| c.id == id) {
                 change(conversation);
             }
         }
         for layer in &mut self.layers {
             if let Layer::Reader(conversation) = layer
-                && &conversation.id == id
+                && conversation.id == id
             {
                 change(conversation);
             }

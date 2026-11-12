@@ -7,7 +7,7 @@ use gpui::{Transformation, radians};
 
 use crate::controls::tooltip;
 
-use crate::model::{Account, Mailbox};
+use mailstream::{Account, Mailbox};
 use crate::settings::ShowSettings;
 
 /// What a row draws before its title.
@@ -95,7 +95,7 @@ impl MailApp {
     pub(super) fn render_rail(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let chat = self.chat.read(cx);
         let mut items: Vec<AnyElement> = Vec::new();
-        for role in Role::UNIFIED {
+        for role in UNIFIED {
             let members: Vec<&Mailbox> = self
                 .accounts
                 .iter()
@@ -104,7 +104,7 @@ impl MailApp {
                     let all = self.mailboxes.get(&account.id)?;
                     all.iter()
                         .find(|b| b.role == role)
-                        .or_else(|| if role == Role::Archive { all.iter().find(|b| b.role == Role::All) } else { None })
+                        .or_else(|| if role == MailboxRole::Archive { all.iter().find(|b| b.role == MailboxRole::All) } else { None })
                 })
                 .collect();
             if members.is_empty() {
@@ -114,7 +114,7 @@ impl MailApp {
             let selected = self.mail_in_view() && self.source == source && self.query.is_none();
             let count = members.iter().map(|b| b.badge()).sum::<u32>();
             items.push(
-                rail_item(role.arg(), Icon::for_role(role), role.title(), count, selected, p)
+                rail_item(role.as_str(), Icon::for_role(role), role.label(), count, selected, p)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.select(source.clone(), window, cx)))
                     .into_any_element(),
             );
@@ -167,7 +167,7 @@ impl MailApp {
         let mut nodes = Vec::new();
         let boxes = |account: &Account| self.mailboxes.get(&account.id).map(Vec::as_slice).unwrap_or_default();
 
-        for role in Role::UNIFIED {
+        for role in UNIFIED {
             // Archive falls back to each account's All Mail, as `unifiedMailboxes` does.
             let members: Vec<(usize, &Account, &Mailbox)> = self
                 .accounts
@@ -177,20 +177,20 @@ impl MailApp {
                     let all = boxes(account);
                     all.iter()
                         .find(|b| b.role == role)
-                        .or_else(|| if role == Role::Archive { all.iter().find(|b| b.role == Role::All) } else { None })
+                        .or_else(|| if role == MailboxRole::Archive { all.iter().find(|b| b.role == MailboxRole::All) } else { None })
                         .map(|b| (index, account, b))
                 })
                 .collect();
             if members.is_empty() {
                 continue;
             }
-            let key: SharedString = format!("unified:{}", role.arg()).into();
-            let children = role == Role::Inbox && members.len() > 1;
+            let key: SharedString = format!("unified:{}", role.as_str()).into();
+            let children = role == MailboxRole::Inbox && members.len() > 1;
             let expanded = children && self.expanded.contains(&key);
             nodes.push(Node {
                 key,
                 depth: 0,
-                title: role.title().into(),
+                title: role.label().into(),
                 leading: Leading::Icon(Icon::for_role(role)),
                 badge: members.iter().map(|(_, _, b)| b.badge()).sum(),
                 expandable: children,
@@ -204,10 +204,10 @@ impl MailApp {
                         depth: 1,
                         title: account.title(),
                         leading: Leading::Dot(design::account_color(index)),
-                        badge: inbox.unread.unwrap_or(0),
+                        badge: inbox.unread.and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
                         expandable: false,
                         source: Some(Pick::Mail(mailbox_source(account, inbox))),
-                        tooltip: Some(account.id.clone()),
+                        tooltip: Some(account.id.clone().into()),
                     });
                 }
             }
@@ -241,7 +241,7 @@ impl MailApp {
                         badge: chat.unread(Some(&account.id)) as u32,
                         expandable: false,
                         source: Some(Pick::Chat(Some(account.id.clone()))),
-                        tooltip: Some(account.id.clone()),
+                        tooltip: Some(account.id.clone().into()),
                     });
                 }
             }
@@ -287,15 +287,15 @@ impl MailApp {
                 badge: 0,
                 expandable: !all.is_empty(),
                 source: None,
-                tooltip: Some(account.id.clone()),
+                tooltip: Some(account.id.clone().into()),
             });
             if !expanded {
                 continue;
             }
-            for mailbox in all.iter().filter(|b| b.role != Role::Other) {
+            for mailbox in all.iter().filter(|b| b.role != MailboxRole::Other) {
                 nodes.push(mailbox_node(account, mailbox, 1));
             }
-            let others: Vec<&Mailbox> = all.iter().filter(|b| b.role == Role::Other).collect();
+            let others: Vec<&Mailbox> = all.iter().filter(|b| b.role == MailboxRole::Other).collect();
             if others.is_empty() {
                 continue;
             }
@@ -496,7 +496,7 @@ fn mailbox_source(account: &Account, mailbox: &Mailbox) -> Source {
     Source::Mailbox {
         account: account.id.clone(),
         id: mailbox.id.clone(),
-        name: if mailbox.name.is_empty() { mailbox.role.title().into() } else { mailbox.name.clone() },
+        name: if mailbox.name.is_empty() { mailbox.role.label().into() } else { mailbox.name.clone().into() },
         role: mailbox.role,
     }
 }

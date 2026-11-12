@@ -21,6 +21,7 @@ use gpui::{
     FontWeight, InteractiveElement, IntoElement, MouseButton, NavigationDirection, ParentElement, Render,
     ScrollEvent, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, canvas, div, px, relative,
 };
+use mailstream::{Category, Conversation, MailboxRole};
 
 use crate::avatars;
 use crate::compose::{ComposeColumn, ResizeColumn};
@@ -37,7 +38,7 @@ use crate::format;
 use crate::icons::{Icon, icon};
 use crate::input;
 use crate::split::{self, ResizeList};
-use crate::model::{Category, Conversation, Message, Role};
+use crate::model::{AccountExt, CategoryExt, ConversationExt, MailboxExt, RoleExt, ShownMessage, UNIFIED};
 use crate::state::{
     Archive, Back, CONTEXT, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh, Removal, Reply,
     ReplyAll, Restore, Source, Star, ThreadState, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,

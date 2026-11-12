@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use gpui::{AssetSource, Hsla, Result, SharedString, Svg, prelude::*, px, svg};
 
-use crate::model::{Category, Role};
+use mailstream::{Category, MailboxRole};
 
 macro_rules! icons {
     ($($variant:ident => $file:literal),* $(,)?) => {
@@ -72,17 +72,17 @@ icons! {
 }
 
 impl Icon {
-    pub fn for_role(role: Role) -> Icon {
+    pub fn for_role(role: MailboxRole) -> Icon {
         match role {
-            Role::Inbox => Icon::Inbox,
-            Role::Starred => Icon::Star,
-            Role::Important => Icon::Important,
-            Role::Sent => Icon::Sent,
-            Role::Drafts => Icon::Draft,
-            Role::Archive | Role::All => Icon::Archive,
-            Role::Junk => Icon::Spam,
-            Role::Trash => Icon::Delete,
-            Role::Other => Icon::Folder,
+            MailboxRole::Inbox => Icon::Inbox,
+            MailboxRole::Starred => Icon::Star,
+            MailboxRole::Important => Icon::Important,
+            MailboxRole::Sent => Icon::Sent,
+            MailboxRole::Drafts => Icon::Draft,
+            MailboxRole::Archive | MailboxRole::All => Icon::Archive,
+            MailboxRole::Junk => Icon::Spam,
+            MailboxRole::Trash => Icon::Delete,
+            MailboxRole::Other => Icon::Folder,
         }
     }
 
@@ -93,7 +93,6 @@ impl Icon {
             Category::Notification => Icon::Notification,
             Category::Newsletter => Icon::Newsletter,
             Category::Invitation => Icon::Calendar,
-            Category::Other => Icon::Folder,
         }
     }
 }

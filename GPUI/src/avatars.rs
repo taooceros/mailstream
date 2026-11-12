@@ -53,7 +53,7 @@ pub fn init(cx: &mut App) {
 /// A `size` circle for `email`: its photo once the app has one, else `mark`, the engine's initial
 /// and hue for it (`controls::monogram`). Drawing it asks for the photo; rows redraw when it
 /// arrives.
-pub fn avatar(email: &SharedString, mark: &mailstream::Avatar, size: f32, p: &'static Palette, cx: &mut App) -> AnyElement {
+pub fn avatar(email: &str, mark: &mailstream::Avatar, size: f32, p: &'static Palette, cx: &mut App) -> AnyElement {
     let Some(path) = photo(email, cx) else {
         return monogram(mark, size, p).into_any_element();
     };
@@ -76,12 +76,12 @@ pub fn avatar(email: &SharedString, mark: &mailstream::Avatar, size: f32, p: &'s
 }
 
 /// The known photo for `email`; an address not asked for yet (or due for a retry) joins the queue.
-fn photo(email: &SharedString, cx: &mut App) -> Option<Arc<Path>> {
+fn photo(email: &str, cx: &mut App) -> Option<Arc<Path>> {
     let avatars = cx.global_mut::<Avatars>();
     if email.is_empty() {
         return None;
     }
-    let failures = match avatars.photos.get(email.as_ref()) {
+    let failures = match avatars.photos.get(email) {
         Some(Photo::Known(path)) => return path.clone(),
         Some(Photo::Pending { .. }) => return None,
         Some(Photo::Failed { retry, failures }) => {
@@ -92,8 +92,9 @@ fn photo(email: &SharedString, cx: &mut App) -> Option<Arc<Path>> {
         }
         None => 0,
     };
+    let email = SharedString::from(email.to_owned());
     avatars.photos.insert(email.clone(), Photo::Pending { failures });
-    avatars.queue.push(email.clone());
+    avatars.queue.push(email);
     if !avatars.asking {
         avatars.asking = true;
         // Runs after this frame, so everything it draws goes out in one request.

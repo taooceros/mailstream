@@ -24,7 +24,7 @@ use crate::controls::{
 };
 use crate::design::{self, Palette, calendar as metrics, icon as icon_size, layout, list as rows, space, stroke, text};
 use crate::icons::{Icon, icon};
-use crate::model::Address;
+use mailstream::Address;
 use crate::settings::ShowSettings;
 
 /// A guest as the address their avatar is drawn for.
@@ -497,7 +497,7 @@ pub(super) fn guest_avatars(guests: &[&CalendarPerson], max: usize, ring: Hsla, 
                 .enumerate()
                 .map(|(slot, person)| {
                     let address = guest_address(person);
-                    disc(slot).child(avatars::avatar(&address.email, &address.avatar(), size, p, cx))
+                    disc(slot).child(avatars::avatar(&address.email, &mailstream::Avatar::of(&address), size, p, cx))
                 }),
         )
         .when(rest > 0, |d| {

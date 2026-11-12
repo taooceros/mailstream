@@ -9,19 +9,19 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     AppContext, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, EmptyView, Entity, EntityId,
     EventEmitter, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, Render,
-    SharedString, Size, StatefulInteractiveElement, Styled, Subscription, Window, div, point, px, size,
+    Size, StatefulInteractiveElement, Styled, Subscription, Window, div, point, px, size,
 };
 
 use super::{ATTACH_TIP, Attach, Compose, ComposeMode, DraftEvent, send_button};
 use crate::controls::{capsule, hairline, icon_button, island, pill, raised_capsule, title_bar};
 use crate::design::{self, Palette, compose as metrics, layout, radius, space, text};
 use crate::icons::{Icon, icon};
-use crate::model::Account;
+use mailstream::Account;
 
 /// What the column tells the window.
 pub enum ColumnEvent {
     /// A draft went out; a reply names the conversation it answered.
-    Sent { reply: Option<SharedString> },
+    Sent { reply: Option<String> },
     /// The keyboard goes back to the list and the conversation.
     Unfocus,
     /// A "+" asked for a new message, whose sender the window picks (the mailbox in view).
@@ -195,7 +195,7 @@ impl ComposeColumn {
     /// otherwise a new tab.
     pub fn new_message(
         &mut self,
-        from: Option<SharedString>,
+        from: Option<String>,
         accounts: Vec<Account>,
         window: &mut Window,
         cx: &mut Context<Self>,

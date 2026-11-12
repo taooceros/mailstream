@@ -18,7 +18,7 @@ impl MailApp {
     /// The menu for the row `id`, or none once its conversation is gone.
     pub(crate) fn build_context_menu(
         &self,
-        id: &SharedString,
+        id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<PopupMenu>> {

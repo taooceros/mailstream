@@ -53,7 +53,7 @@ fn why_not(status: Option<&InvitationStatus>, cancelled: bool) -> Option<String>
 impl MailApp {
     pub(super) fn render_invitation(
         &self,
-        message: &Message,
+        message: &ShownMessage,
         invitation: &MeetingInvitation,
         p: &'static Palette,
         cx: &mut Context<Self>,

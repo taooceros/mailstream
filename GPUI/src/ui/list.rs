@@ -34,7 +34,7 @@ impl MailApp {
     }
 
     /// The id of the row after `ix` in the main list, if a row follows.
-    fn next_row(&self, ix: usize) -> Option<SharedString> {
+    fn next_row(&self, ix: usize) -> Option<String> {
         match self.items.get(ix + 1)? {
             Item::Section(_) | Item::Waiting(_) => None,
             item => Some(self.item_id(item)),
@@ -54,7 +54,7 @@ impl MailApp {
             }
             Item::Bundle(bundle) => {
                 let newest = &list.conversations[bundle.members[0]];
-                let id: SharedString = format!("bundle:{}", bundle.category.key()).into();
+                let id = format!("bundle:{}", bundle.category.as_str());
                 let selected = self.highlight.as_ref() == Some(&id);
                 let unread = bundle.unread > 0;
                 let color = design::category_color(bundle.category, p);
@@ -63,7 +63,7 @@ impl MailApp {
                     .flex()
                     .items_center()
                     .gap(px(space::S8))
-                    .child(div().font_weight(if unread { FontWeight::BOLD } else { FontWeight::SEMIBOLD }).child(bundle.category.title()))
+                    .child(div().font_weight(if unread { FontWeight::BOLD } else { FontWeight::SEMIBOLD }).child(bundle.category.label()))
                     .child(tag(count, Some(color), p));
                 let subtitle = div()
                     .flex_1()
@@ -71,13 +71,13 @@ impl MailApp {
                     .truncate()
                     .text_color(p.muted)
                     .child(format!("{}  —  {}", bundle.senders, bundle.subject));
-                list_row(ElementId::Name(id.clone()), selected, rule, p)
+                list_row(ElementId::Name(id.clone().into()), selected, rule, p)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate(&id, window, cx)))
                     .child(row_layout(
                         unread,
                         icon_avatar(Icon::for_category(bundle.category), color, metrics::AVATAR),
                         title,
-                        date(newest.when.clone(), p),
+                        date(newest.when.clone().into(), p),
                         subtitle,
                         Vec::new(),
                         p,
@@ -101,11 +101,10 @@ impl MailApp {
             conversation
                 .participants
                 .iter()
-                .find(|name| name.as_ref() != "me")
-                .cloned()
-                .unwrap_or_else(|| conversation.sender.clone())
+                .find(|name| *name != "me")
+                .map_or_else(|| conversation.sender_name(), |name| name.clone().into())
         } else {
-            conversation.senders.clone()
+            conversation.senders()
         };
         let photo = avatars::avatar(&conversation.avatar_email(), &conversation.avatar, metrics::AVATAR, p, cx);
         let hovered = self.hovered_row.as_ref() == Some(&id);
@@ -145,10 +144,10 @@ impl MailApp {
             .gap(px(space::S4))
             .when(conversation.has_attachment, |d| d.child(icon(Icon::Attachment, 13., p.muted)))
             .children(account_dot.map(|dot| dot.mr(px(2.))))
-            .child(date(conversation.when.clone(), p));
+            .child(date(conversation.when.clone().into(), p));
 
         let subject: SharedString =
-            if conversation.title.is_empty() { "(no subject)".into() } else { conversation.title.clone() };
+            if conversation.title.is_empty() { "(no subject)".into() } else { conversation.title.clone().into() };
         let subtitle = div()
             .flex_1()
             .flex()
@@ -174,7 +173,7 @@ impl MailApp {
 
         let mut marks = Vec::new();
         if let Some(topic) = conversation.labels.first() {
-            marks.push(tag(topic.clone(), Some(design::topic_color(topic, p.dark)), p).ml(px(space::S2)).into_any_element());
+            marks.push(tag(SharedString::from(topic.clone()), Some(design::topic_color(topic, p.dark)), p).ml(px(space::S2)).into_any_element());
         }
         if conversation.starred {
             marks.push(icon(Icon::Starred, 13., p.star).into_any_element());
@@ -182,7 +181,7 @@ impl MailApp {
 
         let hover_id = id.clone();
         let menu_id = id.clone();
-        list_row(ElementId::Name(id.clone()), selected || menu_open, rule, p)
+        list_row(ElementId::Name(id.clone().into()), selected || menu_open, rule, p)
             .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
                 if *hovering {
                     this.hovered_row = Some(hover_id.clone());

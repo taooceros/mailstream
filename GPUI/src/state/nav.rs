@@ -126,7 +126,7 @@ impl MailApp {
 
     /// The list the keyboard moves in: the open bundle's, else the main one. Each line is an id
     /// and the row's index in its list view.
-    pub(super) fn active_lines(&self) -> (Vec<(SharedString, usize)>, bool) {
+    pub(super) fn active_lines(&self) -> (Vec<(String, usize)>, bool) {
         if let Some(bundle) = self.open_bundle_members() {
             let Some(list) = self.list() else { return (Vec::new(), true) };
             let lines =
@@ -145,12 +145,12 @@ impl MailApp {
         (lines, false)
     }
 
-    pub fn item_id(&self, item: &Item) -> SharedString {
+    pub fn item_id(&self, item: &Item) -> String {
         match item {
-            Item::Section(title) => format!("section:{title}").into(),
+            Item::Section(title) => format!("section:{title}"),
             Item::Waiting(_) => "section:waiting".into(),
             Item::Row(index) => self.list().and_then(|l| l.conversations.get(*index)).map(|c| c.id.clone()).unwrap_or_default(),
-            Item::Bundle(bundle) => format!("bundle:{}", bundle.category.key()).into(),
+            Item::Bundle(bundle) => format!("bundle:{}", bundle.category.as_str()),
         }
     }
 
@@ -299,7 +299,7 @@ impl MailApp {
 
     pub fn open_context_menu(
         &mut self,
-        id: SharedString,
+        id: String,
         position: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -370,21 +370,21 @@ impl MailApp {
     }
 
     /// Opens a row: a conversation in the reader, or a bundle over the list.
-    pub fn activate(&mut self, id: &SharedString, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn activate(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.open_row(id, true, window, cx);
     }
 
-    fn open_row(&mut self, id: &SharedString, animate: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_row(&mut self, id: &str, animate: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_closing();
         window.focus(&self.focus, cx);
         if let Some(category) = id.strip_prefix("bundle:") {
             let Some(category) = self.items.iter().find_map(|item| match item {
-                Item::Bundle(bundle) if bundle.category.key() == category => Some(bundle.category),
+                Item::Bundle(bundle) if bundle.category.as_str() == category => Some(bundle.category),
                 _ => None,
             }) else {
                 return;
             };
-            self.highlight = Some(id.clone());
+            self.highlight = Some(id.to_owned());
             self.bundle_highlight = None;
             self.bundle_scroll = list_state(0);
             // A conversation open beside the list closes with it.
@@ -393,13 +393,13 @@ impl MailApp {
             cx.notify();
             return;
         }
-        let Some(conversation) = self.list().and_then(|l| l.conversations.iter().find(|c| &c.id == id)).cloned() else {
+        let Some(conversation) = self.list().and_then(|l| l.conversations.iter().find(|c| c.id == id)).cloned() else {
             return;
         };
         if self.open_bundle().is_some() {
-            self.bundle_highlight = Some(id.clone());
+            self.bundle_highlight = Some(id.to_owned());
         } else {
-            self.highlight = Some(id.clone());
+            self.highlight = Some(id.to_owned());
         }
         self.reader_scroll = ScrollHandle::new();
         self.reader_pin = ReaderPin::Opening;
@@ -440,28 +440,28 @@ impl MailApp {
         cx.notify();
     }
 
-    pub fn toggle_fold(&mut self, message: &SharedString, cx: &mut Context<Self>) {
+    pub fn toggle_fold(&mut self, message: &str, cx: &mut Context<Self>) {
         self.reader_pin = ReaderPin::Free;
         if !self.unfolded.remove(message) {
-            self.unfolded.insert(message.clone());
+            self.unfolded.insert(message.to_owned());
         }
         cx.notify();
     }
 
     /// Opens or closes a message's quoted history.
-    pub fn toggle_quotes(&mut self, message: &SharedString, cx: &mut Context<Self>) {
+    pub fn toggle_quotes(&mut self, message: &str, cx: &mut Context<Self>) {
         self.reader_pin = ReaderPin::Free;
         if !self.quotes_open.remove(message) {
-            self.quotes_open.insert(message.clone());
+            self.quotes_open.insert(message.to_owned());
         }
         cx.notify();
     }
 
     /// Opens or closes a message's full headers.
-    pub fn toggle_headers(&mut self, message: &SharedString, cx: &mut Context<Self>) {
+    pub fn toggle_headers(&mut self, message: &str, cx: &mut Context<Self>) {
         self.reader_pin = ReaderPin::Free;
         if !self.headers_open.remove(message) {
-            self.headers_open.insert(message.clone());
+            self.headers_open.insert(message.to_owned());
         }
         cx.notify();
     }

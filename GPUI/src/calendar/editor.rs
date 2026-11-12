@@ -22,7 +22,7 @@ use gpui::{
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, StatefulInteractiveElement,
     Styled, Subscription, WeakEntity, Window, actions, div, px,
 };
-use mailstream::{CalendarAccount, CalendarDraft, CalendarItem};
+use mailstream::{CalendarAccount, CalendarDraft, CalendarItem, Provider};
 
 use super::CalendarPane;
 use super::model::EventKey;
@@ -58,7 +58,7 @@ struct Choice {
     calendar: String,
     label: SharedString,
     color: Hsla,
-    provider: String,
+    provider: Provider,
 }
 
 impl SelectItem for Choice {
@@ -196,7 +196,7 @@ pub(super) struct EventEditor {
     /// What the event had, to send only what changed.
     initial: Option<Form>,
     /// `google` or `microsoft`, for what the notes say.
-    provider: Option<String>,
+    provider: Option<Provider>,
     time_zone: String,
     focus: FocusHandle,
     title: Entity<InputState>,
@@ -256,7 +256,7 @@ impl EventEditor {
         let provider = accounts
             .iter()
             .find(|account| event.as_ref().is_some_and(|event| event.account == account.id))
-            .map(|account| account.provider.clone());
+            .map(|account| account.provider);
 
         // Every calendar a new event can go on, account by account; the account's own first.
         let many_accounts = accounts.iter().filter(|a| a.granted && a.writable).count() > 1;
@@ -276,7 +276,7 @@ impl EventEditor {
                     account: account.id.clone(),
                     calendar: calendar.id.clone(),
                     label: label.into(),
-                    provider: account.provider.clone(),
+                    provider: account.provider,
                     color: super::model::hex_color(calendar.color.as_deref()).unwrap_or_else(|| design::account_color(index)),
                 });
             }
@@ -615,10 +615,10 @@ impl EventEditor {
     /// The service that emails the guests and holds the description.
     fn service(&self) -> &'static str {
         let provider = match &self.event {
-            Some(_) => self.provider.as_deref(),
-            None => self.chosen.and_then(|index| self.choices.get(index)).map(|choice| choice.provider.as_str()),
+            Some(_) => self.provider,
+            None => self.chosen.and_then(|index| self.choices.get(index)).map(|choice| choice.provider),
         };
-        if provider == Some("microsoft") { "Outlook" } else { "Google Calendar" }
+        if provider == Some(Provider::Microsoft) { "Outlook" } else { "Google Calendar" }
     }
 }
 

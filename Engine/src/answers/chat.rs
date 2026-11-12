@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::chat_markup::ChatBlock;
-use crate::chat_model::ChatSpaceKind;
+pub use crate::chat_model::ChatSpaceKind;
 use crate::display::Avatar;
 
 /// A Google Chat account: a Google account signed in with Chat access.

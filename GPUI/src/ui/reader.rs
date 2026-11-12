@@ -184,7 +184,7 @@ impl MailApp {
     /// (the sender, who it went to or a preview while folded, the date) folds it.
     fn render_message(
         &self,
-        message: &Message,
+        message: &ShownMessage,
         open: bool,
         last: bool,
         p: &'static Palette,
@@ -265,7 +265,7 @@ impl MailApp {
         });
         card.children(invitation)
             .children(self.render_body(message, p, cx).map(|body| inset().child(body)))
-            .when(message.truncated && message.html_body().is_none(), |d| {
+            .when(message.truncated && message.body_html.is_none(), |d| {
                 d.child(
                     inset()
                         .text_size(px(text::FOOTNOTE))
@@ -276,13 +276,13 @@ impl MailApp {
             .when_some(message.error.as_ref(), |d, error| {
                 d.child(inset().child(notice(Tone::Error, None, error.clone(), false, p)))
             })
-            .when(!message.attachments.is_empty(), |d| d.child(inset().child(self.render_attachments(message, p, cx))))
+            .when(!message.tiles.is_empty(), |d| d.child(inset().child(self.render_attachments(message, p, cx))))
             .into_any_element()
     }
 
     /// Who a message went to, the user as "me", on one line; a click opens its full headers
     /// (From, To, Cc with their addresses, and the date) in its place, and another closes them.
-    fn render_recipients(&self, message: &Message, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_recipients(&self, message: &ShownMessage, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         if message.recipients.is_empty() {
             return None;
         }
@@ -313,12 +313,13 @@ impl MailApp {
     /// A message's attachments as tiles of two lines (Mail's): a mark in the file kind's color, or
     /// a picture's thumbnail, beside its name over its size and type, and a button that saves a
     /// copy. A click on the tile opens the file in the system's app.
-    fn render_attachments(&self, message: &Message, p: &'static Palette, cx: &mut Context<Self>) -> Div {
-        div().flex().flex_wrap().gap(px(space::S8)).children(message.attachments.iter().enumerate().map(|(index, attachment)| {
+    fn render_attachments(&self, message: &ShownMessage, p: &'static Palette, cx: &mut Context<Self>) -> Div {
+        div().flex().flex_wrap().gap(px(space::S8)).children(message.tiles.iter().enumerate().map(|(index, tile)| {
+            let attachment = &tile.attachment;
             let here = !attachment.path.is_empty();
-            let color = design::attachment_color(attachment.kind, p.dark);
-            let thumbnail = (here && attachment.kind == AttachmentKind::Image)
-                .then(|| img(std::path::PathBuf::from(attachment.path.as_ref())).size_full().object_fit(ObjectFit::Cover));
+            let color = design::attachment_color(tile.kind, p.dark);
+            let thumbnail = (here && tile.kind == AttachmentKind::Image)
+                .then(|| img(std::path::PathBuf::from(&attachment.path)).size_full().object_fit(ObjectFit::Cover));
             let mark = div()
                 .flex_shrink_0()
                 .size(px(metrics_reader::ATTACHMENT_MARK))
@@ -333,9 +334,10 @@ impl MailApp {
                 .text_color(color)
                 .map(|d| match thumbnail {
                     Some(thumbnail) => d.child(thumbnail),
-                    None => d.child(attachment.mark.clone()),
+                    None => d.child(tile.mark.clone()),
                 });
-            let (open, save, name) = (attachment.path.clone(), attachment.path.clone(), attachment.filename.clone());
+            let name = SharedString::from(attachment.filename.clone());
+            let (open, save, file) = (attachment.path.clone(), SharedString::from(attachment.path.clone()), name.clone());
             div()
                 .id(ElementId::Name(format!("attachment:{}:{index}", message.id).into()))
                 .min_w(px(metrics_reader::ATTACHMENT_MIN_WIDTH))
@@ -352,10 +354,10 @@ impl MailApp {
                 .when(!here, |d| d.opacity(design::chat::DIMMED))
                 .when(here, |d| {
                     d.cursor_pointer().hover(|s| s.bg(p.hover)).on_click(move |_, _, cx| {
-                        cx.open_with_system(std::path::Path::new(open.as_ref()));
+                        cx.open_with_system(std::path::Path::new(&open));
                     })
                 })
-                .tooltip(tooltip(attachment.filename.clone()))
+                .tooltip(tooltip(name.clone()))
                 .child(mark)
                 .child(
                     div()
@@ -363,20 +365,20 @@ impl MailApp {
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .child(div().truncate().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).child(attachment.filename.clone()))
-                        .child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(attachment.detail.clone())),
+                        .child(div().truncate().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).child(name))
+                        .child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(tile.detail.clone())),
                 )
                 .child(
                     icon_button(ElementId::Name(format!("attachment-save:{}:{index}", message.id).into()), Icon::Download, "Save…", here, p.glyph)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.save_attachment(save.clone(), name.clone(), cx))),
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.save_attachment(save.clone(), file.clone(), cx))),
                 )
         }))
     }
 
-    /// A message's body: its HTML when it has one (`Message::html_body`), else its text with its
+    /// A message's body: its HTML when it has one (`mailstream::Message::html_body`), else its text with its
     /// `>` quotes in place; either way with its quoted history folded.
-    fn render_body(&self, message: &Message, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if let Some(html) = message.html_body() {
+    fn render_body(&self, message: &ShownMessage, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if let Some(html) = &message.body_html {
             return Some(self.render_html(message, html.clone(), p, cx));
         }
         message.text.as_ref()?;
@@ -399,9 +401,9 @@ impl MailApp {
     /// once the toggle opens it; the Mac's web view, when chosen, folds the quotes inside its
     /// page behind the same toggle. Only the chosen renderer holds pages: the other's close at
     /// the next frame (`begin_frame`).
-    fn render_html(&self, message: &Message, html: SharedString, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let id = message.id.clone();
-        let open = self.quotes_open.contains(&id);
+    fn render_html(&self, message: &ShownMessage, html: SharedString, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let id: SharedString = message.id.clone().into();
+        let open = self.quotes_open.contains(&message.id);
         #[cfg(target_os = "macos")]
         if self.renderer == Renderer::WebKit {
             let body = web_body(id.clone(), html, open);
@@ -451,13 +453,13 @@ impl MailApp {
     /// while open.
     fn render_fold(
         &self,
-        message: &SharedString,
+        message: &str,
         open: bool,
         content: impl IntoElement,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let id = message.clone();
+        let id = message.to_owned();
         let tip: SharedString = if open { "Hide quoted text" } else { "Show quoted text" }.into();
         let toggle = div()
             .id(ElementId::Name(format!("fold:{message}").into()))
@@ -505,15 +507,15 @@ impl MailApp {
     /// the reader to scroll.
     fn render_chat_log(
         &self,
-        messages: &[Message],
+        messages: &[ShownMessage],
         p: &'static Palette,
         cx: &mut Context<Self>,
-    ) -> Vec<(Option<SharedString>, AnyElement)> {
+    ) -> Vec<(Option<String>, AnyElement)> {
         let mut rows = Vec::with_capacity(messages.len() * 2);
-        let mut previous: Option<&Message> = None;
+        let mut previous: Option<&ShownMessage> = None;
         for message in messages {
             if !message.divider.is_empty() {
-                rows.push((None, day_divider(message.divider.clone(), p).into_any_element()));
+                rows.push((None, day_divider(message.divider.clone().into(), p).into_any_element()));
             }
             // A message joining a run names its recipients only when they changed.
             let recipients = !message.continued || previous.is_none_or(|before| before.recipients != message.recipients);
@@ -523,7 +525,7 @@ impl MailApp {
         rows
     }
 
-    fn render_log_message(&self, message: &Message, recipients: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_log_message(&self, message: &ShownMessage, recipients: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let id = message.id.clone();
         let hovered = self.hovered_message.as_ref() == Some(&id);
         let continued = message.continued;
@@ -565,7 +567,7 @@ impl MailApp {
                 div().pb(px(space::S8)).child(self.render_invitation(message, invitation, p, cx))
             }))
             .children(self.render_body(message, p, cx))
-            .when(!message.attachments.is_empty(), |d| {
+            .when(!message.tiles.is_empty(), |d| {
                 d.child(div().pt(px(space::S8)).child(self.render_attachments(message, p, cx)))
             });
         // The buttons answer the message under the pointer, not the conversation's latest.
