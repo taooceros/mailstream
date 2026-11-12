@@ -400,6 +400,8 @@ fn attachments(message: &Message, p: &'static Palette) -> Div {
 
 /// A line across the log with the day in it.
 fn day_divider(label: String, p: &Palette) -> Div {
+    // A half-point hairline vanishes at some offsets on a 1x screen.
+    let rule = || div().flex_1().h(px(stroke::RIM)).bg(p.line);
     div()
         .py(px(space::S12))
         .flex()
@@ -407,9 +409,9 @@ fn day_divider(label: String, p: &Palette) -> Div {
         .gap(px(space::S12))
         .text_size(px(text::FOOTNOTE))
         .text_color(p.muted)
-        .child(hairline(p).flex_1())
+        .child(rule())
         .child(label)
-        .child(hairline(p).flex_1())
+        .child(rule())
 }
 
 /// An HTML body: a placeholder the native web view is laid over (the Mac) or Blitz's tiles of
