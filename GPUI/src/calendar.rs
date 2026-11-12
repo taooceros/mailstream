@@ -10,25 +10,32 @@
 
 mod agenda;
 mod detail;
+mod grid;
 pub mod model;
 
+use std::cell::Cell;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use chrono::{Days, Local, NaiveDate};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, ListAlignment,
-    ListState, ParentElement, Render, ScrollHandle, SharedString, Styled, Subscription, Task, Window, actions, div, px,
-    relative,
+    ListOffset, ListState, ParentElement, Render, ScrollHandle, SharedString, Styled, Subscription, Task, Window, actions,
+    div, px, relative,
 };
 use mailstream::CalendarAccount;
 
 use crate::design::{self, layout, text};
 use crate::engine::engine;
+use crate::swipe::BackSwipe;
 use model::{Event, EventKey};
 
-actions!(calendar, [Next, Previous, Back, Refresh]);
+actions!(
+    calendar,
+    [Next, Previous, Later, Earlier, PageNext, PagePrevious, ShowAgenda, ShowDay, ShowWeek, Today, Back, Refresh]
+);
 
 const CONTEXT: &str = "Calendar";
 
@@ -36,23 +43,50 @@ const CONTEXT: &str = "Calendar";
 const DAYS: i64 = 60;
 /// Days back the engine fetches, read along for the views that show past days.
 const PAST_DAYS: i64 = 7;
-/// How often the agenda follows the clock (the Up Next card, a new day).
+/// How often the calendar follows the clock (the Up Next card, the time line, a new day).
 const CLOCK: Duration = Duration::from_secs(15);
 
 pub fn bind_keys(cx: &mut App) {
-    // Single keys act on the calendar, never while a field has focus; the window's own keys
-    // (mail's) give way to these inside it.
+    // Google Calendar's keys, as mail takes Gmail's; never while a field has focus. The window's
+    // own keys (mail's) give way to these inside it.
     let list = Some("Calendar && !TextInput && !TextArea");
     let pane = Some(CONTEXT);
     cx.bind_keys([
-        KeyBinding::new("j", Next, list),
         KeyBinding::new("down", Next, list),
-        KeyBinding::new("k", Previous, list),
         KeyBinding::new("up", Previous, list),
+        KeyBinding::new("j", Later, list),
+        KeyBinding::new("k", Earlier, list),
+        KeyBinding::new("right", PageNext, list),
+        KeyBinding::new("n", PageNext, list),
+        KeyBinding::new("left", PagePrevious, list),
+        KeyBinding::new("p", PagePrevious, list),
+        KeyBinding::new("a", ShowAgenda, list),
+        KeyBinding::new("d", ShowDay, list),
+        KeyBinding::new("w", ShowWeek, list),
+        KeyBinding::new("t", Today, list),
         KeyBinding::new("escape", Back, list),
         KeyBinding::new("secondary-[", Back, pane),
         KeyBinding::new("secondary-r", Refresh, pane),
     ]);
+}
+
+/// How the calendar lays out its events: a list of the days ahead, or one day's or one week's
+/// hours side by side.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum View {
+    Agenda,
+    Day,
+    Week,
+}
+
+/// Where the day and week views' pages sit, in points to the right of their place.
+#[derive(Clone, Copy)]
+enum Pan {
+    Rest,
+    /// Under the fingers.
+    Drag(f32),
+    /// Sliding from `from` to rest since `start` (one page on, or back after a swipe).
+    Settle { from: f32, start: Instant },
 }
 
 /// A message for the window's toast.
@@ -87,15 +121,28 @@ pub struct CalendarPane {
     /// A read is under way; `read_again` asks for one more when it lands.
     reading: bool,
     read_again: bool,
-    /// The agenda's lines and the order ↑ and ↓ step through its events, for the day they were
-    /// built on (`built_for`); a new day builds them again.
+    /// The agenda's lines, for the day they were built on (`built_for`); a new day builds them
+    /// again.
     entries: Vec<Entry>,
-    order: Vec<usize>,
     built_for: Option<NaiveDate>,
     /// Minutes booked on each day of this week, for the week strip.
     week_booked: [i64; 7],
     agenda: ListState,
     detail_scroll: ScrollHandle,
+    view: View,
+    /// The day the day view shows; the week view shows the week it is in.
+    focus_day: NaiveDate,
+    /// The days the engine fetches, from the first up to, not including, the second; other days
+    /// show no events because none are fetched, not because none are planned.
+    synced: Option<(NaiveDate, NaiveDate)>,
+    /// The day and week views' timeline, kept as they take turns, so the same hours stay in
+    /// view; `scroll_to_now` puts now near its top at the next render (shown first, Today).
+    timeline: ScrollHandle,
+    scroll_to_now: bool,
+    swipe: BackSwipe,
+    pan: Pan,
+    /// The width of one page of days, as last laid out.
+    page_width: Rc<Cell<f32>>,
     _clock: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -135,11 +182,18 @@ impl CalendarPane {
             reading: false,
             read_again: false,
             entries: Vec::new(),
-            order: Vec::new(),
             built_for: None,
             week_booked: [0; 7],
             agenda: ListState::new(0, ListAlignment::Top, px(400.)),
             detail_scroll: ScrollHandle::new(),
+            view: View::Agenda,
+            focus_day: Local::now().date_naive(),
+            synced: None,
+            timeline: ScrollHandle::new(),
+            scroll_to_now: true,
+            swipe: BackSwipe::default(),
+            pan: Pan::Rest,
+            page_width: Rc::new(Cell::new(0.)),
             _clock: clock,
             _subscriptions: vec![cx.observe_window_appearance(window, |_, _, cx| cx.notify())],
         }
@@ -202,6 +256,7 @@ impl CalendarPane {
                     this.events = agenda.events.into_iter().filter_map(Event::new).collect();
                     this.loading = agenda.loading;
                     this.listed = true;
+                    this.synced = agenda.synced.from.parse().ok().zip(agenda.synced.until.parse().ok());
                     if this.opened.as_ref().is_some_and(|key| this.event_index(key).is_none()) {
                         this.opened = None;
                     }
@@ -216,7 +271,7 @@ impl CalendarPane {
         });
     }
 
-    /// The agenda's lines from `today` on, the strip's booked hours, and the stepping order.
+    /// The agenda's lines from `today` on and the strip's booked hours.
     fn rebuild(&mut self, today: NaiveDate) {
         let days = model::agenda_days(&self.events, today);
         let mut entries = Vec::with_capacity(self.accounts.len() + days.len() * 4);
@@ -240,7 +295,6 @@ impl CalendarPane {
                 "No account has calendar access yet. Sign in again to show its calendar here.".into()
             }));
         }
-        self.order = model::in_order(&days);
         for (slot, day) in model::week_days(model::week_of(today)).into_iter().enumerate() {
             let placed = model::layout_day(&self.events, 0..self.events.len(), day);
             self.week_booked[slot] = model::booked_minutes(&self.events, &placed);
@@ -322,16 +376,59 @@ impl CalendarPane {
         );
     }
 
-    /// Opens the event `step` after (1) or before (-1) the open one, bringing its row into view.
+    /// The days the view shows and the order ↑ and ↓ step through their events: the agenda's
+    /// from today on, else the day's or the week's; day by day, all-day ones first, then by start,
+    /// an event over several days once, on its first day shown. Each with the day it is first on.
+    fn view_order(&self) -> Vec<(usize, NaiveDate)> {
+        let (from, until) = match self.view {
+            View::Agenda => (Local::now().date_naive(), None),
+            View::Day => (self.focus_day, Some(model::next_day(self.focus_day))),
+            View::Week => {
+                let start = model::week_of(self.focus_day);
+                (start, Some(start + Days::new(7)))
+            }
+        };
+        let mut days = model::agenda_days(&self.events, from);
+        if let Some(until) = until {
+            days.retain(|(day, _)| *day < until);
+        }
+        model::in_order(&days)
+    }
+
+    /// Opens the event `step` after (1) or before (-1) the open one in the view, bringing it into
+    /// view.
     fn step(&mut self, step: isize, cx: &mut Context<Self>) {
-        let Some(index) = model::stepped(&self.order, &self.events, self.opened.as_ref(), step) else { return };
+        let shown = self.view_order();
+        let order: Vec<usize> = shown.iter().map(|(index, _)| *index).collect();
+        let Some(index) = model::stepped(&order, &self.events, self.opened.as_ref(), step) else { return };
         let key = self.events[index].key.clone();
-        if let Some(line) = self.entries.iter().position(|entry| matches!(entry, Entry::Event { index: at, .. } if *at == index)) {
-            // A day's first event brings its header along.
-            let header = line > 0 && matches!(self.entries[line - 1], Entry::Day { .. });
-            self.agenda.scroll_to_reveal_item(if header && step < 0 { line - 1 } else { line });
+        if self.view == View::Agenda {
+            if let Some(line) = self.entries.iter().position(|entry| matches!(entry, Entry::Event { index: at, .. } if *at == index)) {
+                // A day's first event brings its header along.
+                let header = line > 0 && matches!(self.entries[line - 1], Entry::Day { .. });
+                self.agenda.scroll_to_reveal_item(if header && step < 0 { line - 1 } else { line });
+            }
+        } else if let Some(&(_, day)) = shown.iter().find(|(at, _)| *at == index) {
+            self.reveal_on_timeline(&self.events[index], day);
         }
         self.open(key, cx);
+    }
+
+    /// Agenda, Day or Week; the day and week views keep the hours scrolled to.
+    fn set_view(&mut self, view: View, cx: &mut Context<Self>) {
+        if self.view != view {
+            self.view = view;
+            self.pan = Pan::Rest;
+            cx.notify();
+        }
+    }
+
+    /// `day` in the day view.
+    fn show_day_view(&mut self, day: NaiveDate, cx: &mut Context<Self>) {
+        self.focus_day = day;
+        self.pan = Pan::Rest;
+        self.set_view(View::Day, cx);
+        cx.notify();
     }
 
     fn next(&mut self, _: &Next, _: &mut Window, cx: &mut Context<Self>) {
@@ -340,6 +437,47 @@ impl CalendarPane {
 
     fn previous(&mut self, _: &Previous, _: &mut Window, cx: &mut Context<Self>) {
         self.step(-1, cx);
+    }
+
+    /// J: the next event in the agenda, where it doesn't page; the next page in the day and week
+    /// views. K the other way.
+    fn later(&mut self, _: &Later, _: &mut Window, cx: &mut Context<Self>) {
+        if self.view == View::Agenda { self.step(1, cx) } else { self.page(1, cx) }
+    }
+
+    fn earlier(&mut self, _: &Earlier, _: &mut Window, cx: &mut Context<Self>) {
+        if self.view == View::Agenda { self.step(-1, cx) } else { self.page(-1, cx) }
+    }
+
+    fn page_next(&mut self, _: &PageNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.page(1, cx);
+    }
+
+    fn page_previous(&mut self, _: &PagePrevious, _: &mut Window, cx: &mut Context<Self>) {
+        self.page(-1, cx);
+    }
+
+    fn show_agenda(&mut self, _: &ShowAgenda, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_view(View::Agenda, cx);
+    }
+
+    fn show_day(&mut self, _: &ShowDay, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_view(View::Day, cx);
+    }
+
+    fn show_week(&mut self, _: &ShowWeek, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_view(View::Week, cx);
+    }
+
+    /// Back to today, scrolled to now: the agenda's top, the timeline's current hours.
+    fn today(&mut self, _: &Today, _: &mut Window, cx: &mut Context<Self>) {
+        self.focus_day = Local::now().date_naive();
+        self.pan = Pan::Rest;
+        match self.view {
+            View::Agenda => self.agenda.scroll_to(ListOffset::default()),
+            View::Day | View::Week => self.scroll_to_now = true,
+        }
+        cx.notify();
     }
 
     fn back(&mut self, _: &Back, _: &mut Window, cx: &mut Context<Self>) {
@@ -380,6 +518,14 @@ impl Render for CalendarPane {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::next))
             .on_action(cx.listener(Self::previous))
+            .on_action(cx.listener(Self::later))
+            .on_action(cx.listener(Self::earlier))
+            .on_action(cx.listener(Self::page_next))
+            .on_action(cx.listener(Self::page_previous))
+            .on_action(cx.listener(Self::show_agenda))
+            .on_action(cx.listener(Self::show_day))
+            .on_action(cx.listener(Self::show_week))
+            .on_action(cx.listener(Self::today))
             .on_action(cx.listener(Self::back))
             .on_action(cx.listener(Self::refresh))
             .relative()

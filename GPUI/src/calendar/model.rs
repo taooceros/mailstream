@@ -118,10 +118,13 @@ pub fn agenda_days(events: &[Event], from: NaiveDate) -> Vec<(NaiveDate, Vec<usi
 }
 
 /// The events `days` lists, in the order ↑ and ↓ step through them: day by day as listed, an
-/// event over several days once, on its first day listed.
-pub fn in_order(days: &[(NaiveDate, Vec<usize>)]) -> Vec<usize> {
+/// event over several days once, on its first day listed; each with that day.
+pub fn in_order(days: &[(NaiveDate, Vec<usize>)]) -> Vec<(usize, NaiveDate)> {
     let mut seen = std::collections::HashSet::new();
-    days.iter().flat_map(|(_, indices)| indices.iter().copied()).filter(|&index| seen.insert(index)).collect()
+    days.iter()
+        .flat_map(|(day, indices)| indices.iter().map(move |&index| (index, *day)))
+        .filter(|(index, _)| seen.insert(*index))
+        .collect()
 }
 
 /// The event `step` after (1) or before (-1) `opened` in `order` ([`in_order`]), staying at the
@@ -266,6 +269,138 @@ pub fn booked_minutes(events: &[Event], placements: &[Placement]) -> i64 {
         end = end.max(bottom);
     }
     minutes
+}
+
+/// Which of a day's placed events clash: two the account is committed to (it accepted, organizes
+/// it, or it has no guests) whose times overlap, not merely their drawn heights.
+pub fn day_conflicts(events: &[Event], placements: &[Placement]) -> Vec<bool> {
+    let committed = |event: &Event| matches!(event.item.response.as_deref(), None | Some("accepted" | "organizer"));
+    let mut out = vec![false; placements.len()];
+    for (i, a) in placements.iter().enumerate() {
+        let first = &events[a.event];
+        if a.columns < 2 || !committed(first) {
+            continue;
+        }
+        for (j, b) in placements.iter().enumerate().skip(i + 1) {
+            let second = &events[b.event];
+            if b.columns < 2 || !committed(second) {
+                continue;
+            }
+            if first.start < second.end && second.start < first.end {
+                out[i] = true;
+                out[j] = true;
+            }
+        }
+    }
+    out
+}
+
+/// An event in the all-day row: from day `first` to day `last` (indices into the days shown), in
+/// `row`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllDayPlacement {
+    pub event: usize,
+    pub first: usize,
+    pub last: usize,
+    pub row: usize,
+}
+
+/// The all-day row over `days` (consecutive): each all-day or day-long event of `candidates`
+/// across the days it covers, the earlier and then the longer ones in the upper rows. Answers the
+/// placements and how many rows they take.
+pub fn layout_all_day(
+    events: &[Event],
+    candidates: impl IntoIterator<Item = usize>,
+    days: &[NaiveDate],
+) -> (Vec<AllDayPlacement>, usize) {
+    let Some(&start) = days.first() else { return (Vec::new(), 0) };
+    let mut placed: Vec<(usize, i64, i64)> = Vec::new();
+    for index in candidates {
+        let event = &events[index];
+        if !event.in_all_day_row() {
+            continue;
+        }
+        let first = (event.start.date_naive() - start).num_days();
+        let last = (event.last_day() - start).num_days();
+        if last < 0 || first >= days.len() as i64 {
+            continue;
+        }
+        placed.push((index, first.max(0), last.min(days.len() as i64 - 1)));
+    }
+    placed.sort_by(|a, b| {
+        a.1.cmp(&b.1).then(b.2.cmp(&a.2)).then_with(|| events[a.0].item.title.cmp(&events[b.0].item.title))
+    });
+    let mut row_ends: Vec<i64> = Vec::new();
+    let mut out = Vec::with_capacity(placed.len());
+    for (event, first, last) in placed {
+        let row = match row_ends.iter().position(|&end| end < first) {
+            Some(row) => {
+                row_ends[row] = last;
+                row
+            }
+            None => {
+                row_ends.push(last);
+                row_ends.len() - 1
+            }
+        };
+        out.push(AllDayPlacement { event, first: first as usize, last: last as usize, row });
+    }
+    (out, row_ends.len())
+}
+
+/// How an event's card on the timeline reads: a white card for what is still ahead, marked
+/// inside a dashed border while the invitation waits for an answer (or got a maybe), flattened
+/// into the tray once over or declined.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Look {
+    Upcoming,
+    Invited,
+    Past,
+    Declined,
+}
+
+pub fn look(event: &Event, now: DateTime<Local>) -> Look {
+    if event.declined() {
+        Look::Declined
+    } else if event.end <= now {
+        Look::Past
+    } else if matches!(event.item.response.as_deref(), Some("needsAction" | "tentative")) {
+        Look::Invited
+    } else {
+        Look::Upcoming
+    }
+}
+
+/// From `start` to `end`, the period once when both share it: 10:15 – 11:30 AM.
+pub fn time_range(start: DateTime<Local>, end: DateTime<Local>) -> String {
+    if (start.hour() < 12) == (end.hour() < 12) {
+        format!("{} – {}", start.format("%-I:%M"), clock(end))
+    } else {
+        format!("{} – {}", clock(start), clock(end))
+    }
+}
+
+/// The day view's day: Wednesday, November 11, 2026.
+pub fn day_title(day: NaiveDate) -> String {
+    day.format("%A, %B %-d, %Y").to_string()
+}
+
+/// The week from `start`: November 8 – 14, 2026.
+pub fn week_title(start: NaiveDate) -> String {
+    let end = start + Days::new(6);
+    if start.year() != end.year() {
+        format!("{} – {}", start.format("%B %-d, %Y"), end.format("%B %-d, %Y"))
+    } else if start.month() != end.month() {
+        format!("{} – {}", start.format("%B %-d"), end.format("%B %-d, %Y"))
+    } else {
+        format!("{} – {}, {}", start.format("%B %-d"), end.day(), end.year())
+    }
+}
+
+/// What the engine fetched, for days shown outside it: Only Nov 4 – Jan 10 is synced.
+pub fn synced_note(from: NaiveDate, until: NaiveDate) -> String {
+    let last = until.pred_opt().unwrap_or(until);
+    format!("Only {} – {} is synced", from.format("%b %-d"), last.format("%b %-d"))
 }
 
 /// An event's length, short: 15m, 1h, 1h 30m.
@@ -479,7 +614,7 @@ mod tests {
             .map(|(d, ix)| (d.day(), ix.iter().map(|&i| events[i].item.title.as_str()).collect()))
             .collect();
         assert_eq!(listed, vec![(11, vec!["trip", "standup"]), (12, vec!["trip", "late"])]);
-        assert_eq!(in_order(&days).iter().map(|&i| events[i].item.title.as_str()).collect::<Vec<_>>(), [
+        assert_eq!(in_order(&days).iter().map(|&(i, _)| events[i].item.title.as_str()).collect::<Vec<_>>(), [
             "trip", "standup", "late"
         ]);
     }
@@ -575,5 +710,44 @@ mod tests {
         assert_eq!(meeting_label("https://meet.google.com/abc"), "Meet");
         assert_eq!(short_duration(90), "1h 30m");
         assert_eq!(week_of(day(11)), day(8));
+    }
+
+    #[test]
+    fn all_day_row_stacks_overlapping_bars_and_cuts_them_to_the_days_shown() {
+        let all_day = |id: &str, first: u32, after: u32| {
+            let mut event = item(id, "", "");
+            event.all_day = true;
+            event.start_day = Some(day(first).to_string());
+            event.end_day = Some(day(after).to_string());
+            Event::new(event).unwrap()
+        };
+        let events = vec![
+            all_day("trip", 6, 10),
+            all_day("holiday", 9, 10),
+            all_day("later", 12, 13),
+            timed("meeting", day(9), (9, 0), (10, 0)),
+        ];
+        let week = week_days(week_of(day(11)));
+        let (placed, rows) = layout_all_day(&events, 0..events.len(), &week);
+        let bars: Vec<(usize, usize, usize, usize)> = placed.iter().map(|p| (p.event, p.first, p.last, p.row)).collect();
+        assert_eq!(bars, [(0, 0, 1, 0), (1, 1, 1, 1), (2, 4, 4, 0)]);
+        assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn clashes_count_only_what_the_account_attends() {
+        let mut events = vec![
+            timed("a", day(11), (9, 0), (10, 0)),
+            timed("b", day(11), (9, 30), (10, 30)),
+            timed("c", day(11), (9, 45), (10, 15)),
+        ];
+        events[2].item.response = Some("declined".into());
+        let placed = layout_day(&events, 0..3, day(11));
+        assert_eq!(day_conflicts(&events, &placed), [true, true, false]);
+        let at = |h, m| Local.from_local_datetime(&day(11).and_hms_opt(h, m, 0).unwrap()).earliest().unwrap();
+        assert_eq!(time_range(at(10, 15), at(11, 30)), "10:15 – 11:30 AM");
+        assert_eq!(time_range(at(11, 30), at(13, 0)), "11:30 AM – 1:00 PM");
+        assert_eq!(week_title(day(8)), "November 8 – 14, 2026");
+        assert_eq!(week_title(day(29)), "November 29 – December 5, 2026");
     }
 }

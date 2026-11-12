@@ -1,22 +1,25 @@
-//! The calendar's list island (Flutter's `CalendarListPane`): the title row with Refresh, this
-//! week's days on a strip (today raised, the others over a bar of the hours they book), the
-//! meeting about to start on one card with Join, then the agenda: notices for accounts to sign
-//! in again or whose fetch failed, and each day from today with its events under its header.
+//! The calendar's list island (Flutter's `CalendarListPane`): the title row with Refresh over
+//! the views' bar (Agenda, Day, Week; previous page, Today, next page), then the agenda (this
+//! week's days on a strip, today raised and the others over a bar of the hours they book; the
+//! meeting about to start on one card with Join; notices for accounts to sign in again or whose
+//! fetch failed; each day from today with its events under its header), or the day or week view
+//! (`grid.rs`).
 
 use chrono::{DateTime, Local, NaiveDate};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, ListOffset,
-    ParentElement, StatefulInteractiveElement, Styled, Window, div, list, px,
+    AnyElement, AppContext, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
+    ListOffset, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, list, px,
 };
 use mailstream::CalendarPerson;
 
+use super::grid::day_header;
 use super::model::{self, ReplyState};
-use super::{CalendarPane, Entry, Refresh};
+use super::{CalendarPane, Entry, Refresh, Today, View};
 use crate::avatars;
 use crate::controls::{
-    ButtonKind, ControlSize, Tone, button, capsule, icon_button, icon_label_button, island, list_row, mark_dot, notice,
-    segment, segmented, tag, title_bar,
+    ButtonKind, ControlSize, Tone, Tooltip, button, capsule, icon_button, icon_label_button, island, list_row, mark_dot,
+    notice, segment, segmented, tag, title_bar,
 };
 use crate::design::{self, Palette, calendar as metrics, icon as icon_size, layout, list as rows, space, stroke, text};
 use crate::icons::{Icon, icon};
@@ -29,143 +32,152 @@ pub(super) fn guest_address(person: &CalendarPerson) -> Address {
 }
 
 impl CalendarPane {
-    /// The list island: its title row, the week strip and the Up Next card over the agenda.
+    /// The list island: its title row and the views' bar over the agenda (with the week strip and
+    /// the Up Next card), the day view (Up Next over the timeline) or the week view.
     pub(super) fn render_list_island(
-        &self,
+        &mut self,
         today: NaiveDate,
         p: &'static Palette,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let now = Local::now();
-        let body: AnyElement = if self.listed {
-            list(self.agenda.clone(), cx.processor(move |this, ix: usize, _, cx| this.render_entry(ix, now, p, cx)))
-                .size_full()
-                .pt(px(space::S4))
-                .pb(px(space::S24))
-                .into_any_element()
-        } else {
-            crate::controls::centered_note("Loading…", p).into_any_element()
-        };
-        island(p.tray, p)
-            .occlude()
-            .flex()
-            .flex_col()
-            .child(self.render_header(now, p, window, cx))
-            .child(self.render_week_strip(today, p, cx))
-            .children(self.render_up_next(now, p, cx))
-            .child(div().flex_1().min_h_0().child(body))
+        let header = self.render_header(now, p, window, cx);
+        let island = island(p.tray, p).occlude().flex().flex_col().child(header);
+        if !self.listed {
+            return island.child(div().flex_1().min_h_0().child(crate::controls::centered_note("Loading…", p)));
+        }
+        match self.view {
+            View::Agenda => island
+                .child(self.render_week_strip(today, p, cx))
+                .children(self.render_up_next(now, p, cx))
+                .child(
+                    div().flex_1().min_h_0().child(
+                        list(self.agenda.clone(), cx.processor(move |this, ix: usize, _, cx| this.render_entry(ix, now, p, cx)))
+                            .size_full()
+                            .pt(px(space::S4))
+                            .pb(px(space::S24)),
+                    ),
+                ),
+            View::Day | View::Week => {
+                let notices = self.render_notice_line(p, cx);
+                let up_next = if self.view == View::Day { self.render_up_next(now, p, cx) } else { None };
+                let grid = self.render_grid(today, now, p, window, cx);
+                island.children(notices).children(up_next).child(div().flex_1().min_h_0().child(grid))
+            }
+        }
     }
 
+    /// The title row (Calendar, what the view shows, Refresh) over the views' bar: Agenda, Day
+    /// and Week, then the previous page, Today and the next page.
     fn render_header(&self, now: DateTime<Local>, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let subtitle = match self.view {
+            View::Agenda => now.format("%A, %B %-d").to_string(),
+            View::Day => model::day_title(self.focus_day),
+            View::Week => model::week_title(model::week_of(self.focus_day)),
+        };
+        let paged = self.view != View::Agenda;
+        let unit = if self.view == View::Week { "week" } else { "day" };
+        let views = [(View::Agenda, "Agenda", "A"), (View::Day, "Day", "D"), (View::Week, "Week", "W")];
         title_bar("calendar-header", window, cx)
             .flex_shrink_0()
-            .h(px(layout::HEADER_HEIGHT))
             .px(px(space::S10))
+            .pb(px(space::S8))
             .flex()
-            .items_center()
-            .gap(px(space::S10))
+            .flex_col()
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .h(px(layout::HEADER_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S10))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pl(px(space::S6))
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_baseline()
+                                    .gap(px(space::S8))
+                                    .child(div().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::BOLD).child("Calendar"))
+                                    .when(self.loading, |d| {
+                                        d.child(div().text_size(px(text::CAPTION)).text_color(p.muted).child("Updating…"))
+                                    }),
+                            )
+                            .child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(subtitle)),
+                    )
+                    .child(capsule(p).child(
+                        icon_button("calendar-refresh", Icon::Refresh, "Refresh", self.has_calendars(), p.muted, p)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
+                    )),
+            )
+            .child(
+                div()
                     .pl(px(space::S6))
                     .flex()
-                    .flex_col()
+                    .items_center()
+                    .gap(px(space::S8))
+                    .child(segmented(p).h(px(26.)).children(views.map(|(view, label, key)| {
+                        let tip: SharedString = format!("{label} ({key})").into();
+                        segment(ElementId::Name(format!("view:{label}").into()), label, self.view == view, p)
+                            .tooltip(move |_, cx| cx.new(|_| Tooltip { text: tip.clone(), p }).into())
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_view(view, cx)))
+                    })))
+                    .child(div().flex_1())
                     .child(
-                        div()
-                            .flex()
-                            .items_baseline()
-                            .gap(px(space::S8))
-                            .child(div().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::BOLD).child("Calendar"))
-                            .when(self.loading, |d| {
-                                d.child(div().text_size(px(text::CAPTION)).text_color(p.muted).child("Updating…"))
+                        capsule(p)
+                            .when(paged, |d| {
+                                d.child(
+                                    icon_button("calendar-previous", Icon::Back, format!("Previous {unit} (←)"), true, p.muted, p)
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.page(-1, cx))),
+                                )
+                            })
+                            .child(icon_button("calendar-today", Icon::Today, "Today (T)", true, p.muted, p).on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| this.today(&Today, window, cx)),
+                            ))
+                            .when(paged, |d| {
+                                d.child(
+                                    icon_button("calendar-next", Icon::Disclosure, format!("Next {unit} (→)"), true, p.muted, p)
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.page(1, cx))),
+                                )
                             }),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(text::CAPTION))
-                            .text_color(p.muted)
-                            .child(now.format("%A, %B %-d").to_string()),
                     ),
             )
-            .child(capsule(p).child(
-                icon_button("calendar-refresh", Icon::Refresh, "Refresh", self.has_calendars(), p.muted, p)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
-            ))
     }
 
     /// This week's seven days: today raised on a card, the others over a bar as long as their
-    /// booked hours. A day the agenda lists scrolls it there.
+    /// booked hours. A day the agenda lists scrolls it there; another opens in the day view.
     fn render_week_strip(&self, today: NaiveDate, p: &'static Palette, cx: &mut Context<Self>) -> Div {
         let days = model::week_days(model::week_of(today));
         div().flex_shrink_0().h(px(metrics::WEEK_STRIP)).mx(px(space::S10)).mb(px(space::S8)).flex().children(
             days.into_iter().enumerate().map(|(slot, day)| {
-                let is_today = day == today;
-                let booked = self.week_booked[slot] as f32;
-                let load = if is_today || booked <= 0. { 0. } else { (booked / metrics::FULL_DAY_MINUTES).clamp(0.15, 1.) };
-                let date = div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(text::CAPTION))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(if is_today { p.accent } else { p.muted })
-                            .child(day.format("%a").to_string()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(text::BODY))
-                            .line_height(px(16.))
-                            .font_weight(if is_today { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
-                            .text_color(if is_today { p.accent } else { p.text })
-                            .child(day.format("%-d").to_string()),
-                    )
-                    .child(
-                        div()
-                            .mt(px(3.))
-                            .h(px(metrics::LOAD_BAR))
-                            .w(px(metrics::LOAD_WIDTH * load))
-                            .rounded_full()
-                            .bg(design::tint(p.accent, metrics::LOAD_OPACITY)),
-                    );
                 div()
                     .id(ElementId::Name(format!("week-day:{day}").into()))
                     .flex_1()
                     .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
                     .cursor_pointer()
                     .rounded(px(metrics::CARD_RADIUS))
                     .hover(|s| s.bg(p.hover))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.show_day(day, cx)))
-                    .child(if is_today {
-                        div()
-                            .px(px(space::S10))
-                            .py(px(space::S2))
-                            .rounded(px(metrics::CARD_RADIUS))
-                            .bg(p.background)
-                            .border(px(stroke::HAIRLINE))
-                            .border_color(p.card_border)
-                            .shadow(p.card_shadow.clone())
-                            .child(date)
-                    } else {
-                        date
-                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.strip_day(day, cx)))
+                    .child(day_header(day, day == today, self.week_booked[slot], p))
             }),
         )
     }
 
-    /// The agenda scrolls to `day`'s header when it lists the day.
-    fn show_day(&mut self, day: NaiveDate, cx: &mut Context<Self>) {
+    /// The agenda scrolls to `day`'s header when it lists the day; the day view shows days it
+    /// does not (gone by, nothing planned).
+    fn strip_day(&mut self, day: NaiveDate, cx: &mut Context<Self>) {
         let at = self.entries.iter().position(|entry| matches!(entry, Entry::Day { day: listed, .. } if *listed == day));
-        if let Some(item_ix) = at {
-            self.agenda.scroll_to(ListOffset { item_ix, offset_in_item: px(0.) });
-            cx.notify();
+        match at {
+            Some(item_ix) => {
+                self.agenda.scroll_to(ListOffset { item_ix, offset_in_item: px(0.) });
+                cx.notify();
+            }
+            None => self.show_day_view(day, cx),
         }
     }
 
@@ -450,7 +462,7 @@ pub(super) fn dot_color(color: Hsla, p: &Palette) -> Hsla {
 
 /// Guests as overlapping avatars, each ringed in `ring` (the surface under them): the first
 /// `max`, then +N for the rest.
-fn guest_avatars(guests: &[&CalendarPerson], max: usize, ring: Hsla, p: &'static Palette, cx: &mut gpui::App) -> Div {
+pub(super) fn guest_avatars(guests: &[&CalendarPerson], max: usize, ring: Hsla, p: &'static Palette, cx: &mut gpui::App) -> Div {
     let size = metrics::AVATAR;
     let step = size * metrics::AVATAR_STEP;
     let ring_width = metrics::AVATAR_RING;

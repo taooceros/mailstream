@@ -63,6 +63,7 @@ icons! {
     Important => "priority_high",
     Star => "star",
     Starred => "star_fill",
+    Today => "today",
     Video => "videocam",
     VideoFill => "videocam_fill",
     Waiting => "schedule",

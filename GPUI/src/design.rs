@@ -65,6 +65,10 @@ pub struct Palette {
     /// A row under the pointer lifts half as far: this face, a `card_border` hairline and the
     /// `raised_shadow`. Opaque, so the shadow doesn't show through.
     pub half_lifted: Hsla,
+    /// A card raised a step past a resting one (today's date in the calendar).
+    pub raised_card: Hsla,
+    /// The light over today's column on the calendar's timeline.
+    pub spotlight: Hsla,
     // Elevation, lowest first.
     /// A resting card.
     pub card_shadow: Vec<BoxShadow>,
@@ -124,6 +128,8 @@ static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
     lifted_card: [argb(0xFFFFFFFF), argb(0xFFFAFCFF)],
     lifted_rim: argb(0x52007AFF),
     half_lifted: argb(0xFFFCFCFE),
+    raised_card: argb(0xFFFFFFFF),
+    spotlight: argb(0xA6FFFFFF),
     card_shadow: vec![shadow(0x0F0F172A, 1., 3.)],
     raised_shadow: vec![shadow(0x14000000, 1., 2.), shadow(0x14000000, 4., 10.)],
     lifted_shadow: vec![shadow(0x0F0F172A, 1., 2.), shadow(0x170055FF, 4., 14.)],
@@ -167,6 +173,8 @@ static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
     lifted_card: [argb(0xFF2C2C30), argb(0xFF252529)],
     lifted_rim: argb(0x4D0A84FF),
     half_lifted: argb(0xFF2A2A2C),
+    raised_card: argb(0xFF2C2C32),
+    spotlight: argb(0x06FFFFFF),
     card_shadow: vec![shadow(0x33000000, 1., 3.)],
     raised_shadow: vec![shadow(0x66000000, 1., 2.), shadow(0x4D000000, 4., 10.)],
     lifted_shadow: vec![shadow(0x0F000000, 1., 2.), shadow(0x45000000, 4., 14.)],
@@ -267,6 +275,8 @@ pub mod motion {
     use super::Duration;
     /// A page sliding in over the list or beside it, and back out.
     pub const ENTER: Duration = Duration::from_millis(400);
+    /// The calendar's days paging one page on (← and →).
+    pub const PAGE: Duration = Duration::from_millis(180);
 }
 
 /// The conversation list's rows: Mail's two lines.
@@ -426,6 +436,28 @@ pub mod calendar {
     pub const DECLINED_OPACITY: f32 = 0.40;
     /// A calendar's dot, this far toward the card under it.
     pub const DOT_SOFTEN: f32 = 0.2;
+    /// The day and week views' timeline: an hour's height, the hours' gutter, the days' dates
+    /// over it, an all-day bar (`ALL_DAY_ROWS` show, more scroll), the room over the first hour
+    /// line and under the last.
+    pub const HOUR_HEIGHT: f32 = 48.0;
+    pub const GUTTER: f32 = 52.0;
+    pub const HEADER_HEIGHT: f32 = 44.0;
+    pub const ALL_DAY_HEIGHT: f32 = 22.0;
+    pub const ALL_DAY_ROWS: usize = 3;
+    pub const INSET: f32 = 8.0;
+    /// Cards side by side stay this far apart.
+    pub const CONFLICT_GAP: f32 = 2.0;
+    /// An all-day bar's face: its calendar's color at this over the card.
+    pub const ALL_DAY_TINT: f32 = 0.18;
+    /// An unanswered invitation's card: its calendar's color at this over the card, in a dashed
+    /// border.
+    pub const INVITED_TINT: f32 = 0.08;
+    /// The time line: across today's column `NOW_LINE` thick, across the other days dashed
+    /// (`DASH` long, as far apart) at `NOW_TRAIL_OPACITY`; its time on a `NOW_PILL` in the gutter.
+    pub const NOW_TRAIL_OPACITY: f32 = 0.5;
+    pub const NOW_PILL: f32 = 16.0;
+    pub const NOW_LINE: f32 = 1.5;
+    pub const DASH: f32 = 3.0;
 }
 
 /// The house easing curve (Flutter's `Motion.curve`), `cubic-bezier(0.05, 0.7, 0.1, 1)`: a strong
