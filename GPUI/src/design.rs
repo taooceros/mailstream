@@ -7,7 +7,10 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use gpui::{App, BoxShadow, Hsla, SharedString, WindowAppearance, WindowBackgroundAppearance, point, px, rgba};
+use gpui::{
+    App, Background, BoxShadow, Hsla, SharedString, WindowAppearance, WindowBackgroundAppearance, hsla, linear_color_stop,
+    linear_gradient, point, px, rgba,
+};
 
 pub struct Palette {
     pub dark: bool,
@@ -284,13 +287,49 @@ pub fn window_background() -> WindowBackgroundAppearance {
 pub const WINDOW_WASH: f32 = 0.78;
 
 /// What the app paints behind the islands: [`Palette::window`] where the window is opaque,
-/// nothing over the glass, a [`WINDOW_WASH`] of it over the blur.
-pub fn window_fill(p: &Palette) -> Hsla {
+/// nothing over the glass, a [`WINDOW_WASH`] of it over the blur, on Linux lit from above (MS-249): a
+/// little lighter at the top and darker at the bottom than [`Palette::window`], and a little more
+/// saturated, so the pane reads as a sheet of glass rather than a flat tint.
+pub fn window_fill(p: &Palette) -> Background {
     match window_material() {
-        WindowMaterial::Opaque => p.window,
-        WindowMaterial::Glass => gpui::transparent_black(),
-        WindowMaterial::Blur => tint(p.window, WINDOW_WASH),
+        WindowMaterial::Opaque => p.window.into(),
+        WindowMaterial::Glass => gpui::transparent_black().into(),
+        WindowMaterial::Blur if !cfg!(target_os = "linux") => tint(p.window, WINDOW_WASH).into(),
+        WindowMaterial::Blur => {
+            let pane = |lightness: f32| {
+                let w = p.window;
+                hsla(w.h, (w.s * GLASS_SATURATION).min(1.), (w.l + lightness).clamp(0., 1.), w.a * WINDOW_WASH)
+            };
+            let (top, bottom) = if p.dark { (0.03, -0.03) } else { (0.025, -0.035) };
+            linear_gradient(180., linear_color_stop(pane(top), 0.), linear_color_stop(pane(bottom), 1.))
+        }
     }
+}
+
+/// How much more saturated the frosted window's wash is than [`Palette::window`] (MS-249).
+const GLASS_SATURATION: f32 = 1.25;
+
+/// The frosted window's edge (MS-249): a 1.5 px white rim along the inside of the window's edge
+/// and a soft glow inside it, as light catches a pane's edge. Drawn over everything, with the
+/// compositor's corner radius (`blur::rounding`), so it follows the corners Hyprland clips. None
+/// where the window isn't frosted by Linux's compositor.
+pub fn window_rim(p: &Palette) -> Option<(f32, Vec<BoxShadow>)> {
+    if !cfg!(target_os = "linux") || window_material() != WindowMaterial::Blur {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    let radius = crate::blur::rounding();
+    #[cfg(not(target_os = "linux"))]
+    let radius = 0.;
+    let (rim, glow) = if p.dark { (0x2EFFFFFF, 0x14FFFFFF) } else { (0xB3FFFFFF, 0x59FFFFFF) };
+    let edge = |color: u32, blur: f32, spread: f32| BoxShadow {
+        color: argb(color),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(blur),
+        spread_radius: px(spread),
+        inset: true,
+    };
+    Some((radius, vec![edge(rim, 0., 1.5), edge(glow, 14., 0.)]))
 }
 
 /// gpui-kit's theme in this palette (MS-226): the kit's components (buttons, switches, text fields,

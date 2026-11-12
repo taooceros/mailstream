@@ -188,6 +188,10 @@ impl Render for MailApp {
                     .child(content),
             )
             .children(page)
+            // The frosted window's edge (MS-249), over the islands and pages; takes no pointer.
+            .when_some(design::window_rim(p), |d, (radius, rim)| {
+                d.child(div().absolute().inset_0().rounded(px(radius)).shadow(rim))
+            })
             .when_some(floating, |d, bounds| {
                 d.child(
                     div()

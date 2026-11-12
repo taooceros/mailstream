@@ -4,7 +4,8 @@
 //!
 //! - Hyprland blurs every translucent window while `decoration:blur:enabled` is on; its IPC socket
 //!   answers that option, and its event socket says when the configuration reloads, after which
-//!   the option is asked again. (Its `ext_background_effect_manager_v1` claims blur whatever the
+//!   the option is asked again, with `decoration:rounding`, the window's corner radius, which the
+//!   frosted window's rim follows (`design::window_rim`). (Its `ext_background_effect_manager_v1` claims blur whatever the
 //!   option says, so it isn't asked.)
 //! - Elsewhere on Wayland the window asks for blur through `ext_background_effect_manager_v1`
 //!   (KWin, others), whose capabilities say whether the compositor blurs and tell when that
@@ -18,7 +19,7 @@ use std::env;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -36,6 +37,15 @@ use crate::design;
 /// The answer the window is drawn with; changed only on the main thread, with the window's
 /// background, so a frame never pairs a translucent fill with an opaque window or the reverse.
 static BLURS: AtomicBool = AtomicBool::new(false);
+
+/// The compositor's corner radius of the window in pixels (Hyprland's `decoration:rounding`), 0
+/// where nobody says; read by the watch's thread, so it is the latest answer, not the drawn one.
+static ROUNDING: AtomicU32 = AtomicU32::new(0);
+
+/// The window's corner radius as the compositor rounds it.
+pub fn rounding() -> f32 {
+    ROUNDING.load(Ordering::Relaxed) as f32
+}
 
 /// Whether the desktop blurs behind the window now.
 pub fn blurs() -> bool {
@@ -91,12 +101,13 @@ pub fn follow(watch: Watch, window: AnyWindowHandle, cx: &mut App) {
             while let Ok(later) = answers.try_recv() {
                 blurs = later;
             }
-            if blurs == self::blurs() {
-                continue;
-            }
+            // Redrawn even when the answer stays: a reload may have changed the rounding.
+            let switch = blurs != self::blurs();
             BLURS.store(blurs, Ordering::Relaxed);
             let switched = window.update(cx, |_, window, _| {
-                window.set_background_appearance(design::window_background());
+                if switch {
+                    window.set_background_appearance(design::window_background());
+                }
                 window.refresh();
             });
             if switched.is_err() {
@@ -107,18 +118,26 @@ pub fn follow(watch: Watch, window: AnyWindowHandle, cx: &mut App) {
     .detach();
 }
 
-/// Hyprland's `decoration:blur:enabled`; false when Hyprland doesn't answer.
-fn hyprland_blurs(folder: &Path) -> bool {
+/// One of Hyprland's options as its IPC socket answers `j/getoption`; None when it doesn't.
+fn hyprland_option(folder: &Path, name: &str) -> Option<serde_json::Value> {
     let ask = || -> std::io::Result<String> {
         let mut socket = UnixStream::connect(folder.join(".socket.sock"))?;
         socket.set_read_timeout(Some(Duration::from_secs(1)))?;
         socket.set_write_timeout(Some(Duration::from_secs(1)))?;
-        socket.write_all(b"j/getoption decoration:blur:enabled")?;
+        socket.write_all(format!("j/getoption {name}").as_bytes())?;
         let mut answer = String::new();
         socket.read_to_string(&mut answer)?;
         Ok(answer)
     };
-    let Ok(option) = ask().and_then(|answer| Ok(serde_json::from_str::<serde_json::Value>(&answer)?)) else {
+    serde_json::from_str(&ask().ok()?).ok()
+}
+
+/// Hyprland's `decoration:blur:enabled` (false when Hyprland doesn't answer), storing its
+/// `decoration:rounding` on the way.
+fn hyprland_blurs(folder: &Path) -> bool {
+    let rounding = hyprland_option(folder, "decoration:rounding").and_then(|option| option["int"].as_u64()).unwrap_or(0);
+    ROUNDING.store(rounding.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+    let Some(option) = hyprland_option(folder, "decoration:blur:enabled") else {
         return false;
     };
     // Hyprland 0.57 answers a boolean `bool`; older ones an integer `int`.
