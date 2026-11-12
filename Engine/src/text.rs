@@ -410,18 +410,6 @@ pub fn linkify(text: &str) -> String {
     out
 }
 
-static REMOTE_CONTENT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?i)(src|background|poster)\s*=\s*["']?\s*(https?:)?//|url\(\s*["']?\s*(https?:)?//|<link[^>]+href\s*=\s*["']?\s*https?:"#,
-    )
-    .unwrap()
-});
-
-/// Whether `html` references remote images, styles or fonts.
-pub fn has_remote_content(html: &str) -> bool {
-    REMOTE_CONTENT.is_match(html)
-}
-
 static MOBILE_FOOTER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(Sent from my |Get Outlook for |发自我的)").unwrap());
 
@@ -733,8 +721,6 @@ mod tests {
         assert_eq!(snippet("Hello&nbsp;there\n> quoted\nhttps://x.com/a more\nOn Mon, Bob wrote:\nold"), "Hello there more");
         assert_eq!(snippet("Thanks! On Tue, Jan 2, 2024 at 9:00 AM Bob <b@x.com> wrote: earlier"), "Thanks!");
         assert_eq!(strip_html("<style>p{}</style><p>A&amp;B</p><br>C"), "  A&B\n\nC");
-        assert!(has_remote_content(r#"<img src="https://x/y.png">"#));
-        assert!(!has_remote_content(r#"<img src="cid:a">"#));
         assert_eq!(
             plain_to_html("Hi see www.x.com\n> q\n-- \nSig"),
             "<div class=\"ms-plain\">Hi see <a href=\"http://www.x.com\">www.x.com</a>\n<blockquote class=\"ms-quote\">q\n</blockquote><div class=\"ms-signature\">-- \nSig\n</div></div>"

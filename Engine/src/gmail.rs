@@ -14,7 +14,7 @@ use futures::future::{BoxFuture, Shared};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::api::{self, Api, ApiError, Priority, Request};
+use crate::api::{self, Api, ApiError, GooglePage, Listing, Priority, Request};
 use crate::assembly::{AttachedMessage, MessageAssembly};
 use crate::backend::{EnvelopePage, SearchHit};
 use crate::model::{Address, DISTANT_PAST, Envelope, Mailbox, MailboxRole, MessageContent, date_from_unix};
@@ -79,13 +79,6 @@ const ROLES: [(&str, MailboxRole); 7] = [
 
 /// `resultSizeEstimate` is always present, so a list with no matches still answers `{…}`.
 const LIST_FIELDS: &str = "messages(id),nextPageToken,resultSizeEstimate";
-
-#[derive(Deserialize)]
-struct MessageList {
-    messages: Option<Vec<MessageItem>>,
-    #[serde(rename = "nextPageToken")]
-    next_page_token: Option<String>,
-}
 
 #[derive(Deserialize)]
 struct MessageItem {
@@ -230,7 +223,7 @@ impl Gmail {
             .collect();
         if counts {
             let ids: Vec<String> = boxes.iter().map(|mailbox| mailbox.id.clone()).collect();
-            let query = api::form_encoded(&[("fields", "messagesTotal,messagesUnread")]);
+            let query = api::form_encoded([("fields", "messagesTotal,messagesUnread")]);
             let tallies: HashMap<String, Tally> =
                 batch_get(&self.api, &self.endpoints, "labels", &ids, &query, 1, Priority::Background).await?;
             for mailbox in &mut boxes {
@@ -278,10 +271,11 @@ impl Gmail {
     /// Lists message ids, bringing cached labels up to date meanwhile.
     async fn listing(&self, url: String, priority: Priority) -> Result<(Vec<String>, Option<String>), ApiError> {
         let (synchronized, page) =
-            tokio::join!(self.cache.clone().synchronize(priority), self.api.get::<MessageList>(&url, priority, 5));
+            tokio::join!(self.cache.clone().synchronize(priority), self.api.get::<GooglePage<MessageItem>>(&url, priority, 5));
         let page = page?;
         synchronized?;
-        Ok((page.messages.unwrap_or_default().into_iter().map(|item| item.id).collect(), page.next_page_token))
+        let next = page.token().map(String::from);
+        Ok((page.items().into_iter().map(|item| item.id).collect(), next))
     }
 
     pub async fn content(
@@ -358,12 +352,10 @@ async fn batch_get<T: serde::de::DeserializeOwned>(
     unit_cost: u32,
     priority: Priority,
 ) -> Result<HashMap<String, T>, ApiError> {
-    let numbered: Vec<(usize, String)> =
-        ids.chunks(50).flat_map(|chunk| chunk.iter().cloned().enumerate()).collect();
-    let found: std::sync::Mutex<HashMap<String, T>> = std::sync::Mutex::new(HashMap::new());
+    let mut found: HashMap<String, T> = HashMap::new();
     let root_path = endpoints.path();
-    api.batched(numbered, 50, "Gmail", |pending: Vec<(usize, String)>| {
-        let (found, root_path) = (&found, &root_path);
+    let send = |pending: Vec<(usize, String)>| {
+        let root_path = &root_path;
         async move {
             let boundary = format!("batch_{}", random_hex(32, false));
             let mut body = String::new();
@@ -380,63 +372,21 @@ async fn batch_get<T: serde::de::DeserializeOwned>(
             let Some(response_boundary) = text::header_parameter("boundary", response.content_type.as_deref()) else {
                 return Err(ApiError::new(response.status, "Gmail answered a batch request without parts"));
             };
-            // Whatever stays in `retry` (throttled, failed transiently, unanswered) is sent again.
-            let mut retry: HashMap<usize, String> = pending.iter().cloned().collect();
-            for part in batch_parts(&response.body, &response_boundary) {
-                let Some(number) = part.index else { continue };
-                let Some(id) = retry.get(&number).cloned() else { continue };
-                match part.status {
-                    200 => {
-                        let value = serde_json::from_slice::<T>(part.body.as_bytes())
-                            .map_err(|error| ApiError::unexpected_answer(&endpoints.batch_host(), error))?;
-                        found.lock().expect("batch answers").insert(id, value);
-                    }
-                    404 => {}
-                    status => {
-                        if api::retry(status, part.body.as_bytes()).is_none() {
-                            return Err(ApiError::from_body(status, part.body.as_bytes()));
-                        }
-                        continue;
-                    }
-                }
-                retry.remove(&number);
-            }
-            let again = pending.into_iter().filter(|(number, _)| retry.contains_key(number)).collect();
-            Ok((again, None))
+            Ok(api::multipart_parts(&response.body, &response_boundary))
         }
+    };
+    api.batch(ids.to_vec(), 50, "Gmail", true, send, |id, part| match part.status {
+        200 => {
+            let value =
+                serde_json::from_slice::<T>(&part.body).map_err(|error| ApiError::unexpected_answer(&endpoints.batch_host(), error))?;
+            found.insert(id, value);
+            Ok(())
+        }
+        404 => Ok(()),
+        status => Err(ApiError::from_body(status, &part.body)),
     })
     .await?;
-    Ok(found.into_inner().expect("batch answers"))
-}
-
-struct BatchPart {
-    index: Option<usize>,
-    status: u16,
-    body: String,
-}
-
-/// Splits a multipart/mixed batch answer into its HTTP responses; `index` comes from the
-/// `Content-ID` (`<response-m3>`) of the sub-request it answers.
-fn batch_parts(data: &[u8], boundary: &str) -> Vec<BatchPart> {
-    static CONTENT_ID: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)content-id:\s*<[^>]*?(\d+)>").unwrap());
-    let text = String::from_utf8_lossy(data).replace("\r\n", "\n");
-    let mut parts = Vec::new();
-    for chunk in text.split(&format!("--{boundary}")).skip(1) {
-        if chunk.starts_with("--") {
-            break;
-        }
-        let Some((headers, response)) = chunk.split_once("\n\n") else { continue };
-        let index = CONTENT_ID.captures(headers).and_then(|found| found[1].parse().ok());
-        let status_line = response.split('\n').next().unwrap_or("");
-        let Some(status) = status_line.split(' ').filter(|piece| !piece.is_empty()).nth(1).and_then(|code| code.parse().ok())
-        else {
-            continue;
-        };
-        let body = response.split_once("\n\n").map_or("", |(_, body)| body);
-        parts.push(BatchPart { index, status, body: body.to_string() });
-    }
-    parts
+    Ok(found)
 }
 
 /// `count` random hex digits, lowercase unless not `lowercase`.
@@ -679,9 +629,8 @@ impl EnvelopeCache {
     async fn pull_pages(self: &Arc<Self>, priority: Priority) -> Result<(), ApiError> {
         #[derive(Deserialize)]
         struct Page {
-            history: Option<Vec<Record>>,
-            #[serde(rename = "nextPageToken")]
-            next_page_token: Option<String>,
+            #[serde(flatten)]
+            records: GooglePage<Record>,
             #[serde(rename = "historyId")]
             history_id: Option<String>,
         }
@@ -730,11 +679,12 @@ impl EnvelopeCache {
                 }
                 Err(error) => return Err(error),
             };
-            records.extend(page.history.unwrap_or_default());
             if let Some(id) = page.history_id.and_then(|id| id.parse::<u64>().ok()) {
                 latest = latest.max(id);
             }
-            let Some(next) = page.next_page_token else {
+            let next = page.records.token().map(String::from);
+            records.extend(page.records.items());
+            let Some(next) = next else {
                 let mut state = self.state.lock().await;
                 let mut ids = HashSet::new();
                 for record in records {
@@ -916,12 +866,12 @@ fn metadata_query() -> String {
         query.push(("metadataHeaders", header));
     }
     query.push(("fields", "id,threadId,labelIds,historyId,internalDate,sizeEstimate,payload(mimeType,headers)"));
-    api::form_encoded(&query)
+    api::form_encoded(query)
 }
 
 /// The part tree's file names, two levels deep, without bodies or headers.
 fn parts_query() -> String {
-    api::form_encoded(&[("format", "full"), ("fields", "id,payload(parts(filename,parts(filename)))")])
+    api::form_encoded([("format", "full"), ("fields", "id,payload(parts(filename,parts(filename)))")])
 }
 
 fn entry(message: &GmailMessage, has_attachment: bool) -> Entry {
@@ -1083,15 +1033,6 @@ fn combine(mut segments: Vec<Segment>) -> Option<Segment> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn splits_batch_answers() {
-        let body = "--b\r\nContent-Type: application/http\r\nContent-ID: <response-m1>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"id\":\"x\"}\r\n--b\r\nContent-ID: <response-m0>\r\n\r\nHTTP/1.1 404 Not Found\r\n\r\n{}\r\n--b--\r\n";
-        let parts = batch_parts(body.as_bytes(), "b");
-        assert_eq!(parts.len(), 2);
-        assert_eq!((parts[0].index, parts[0].status, parts[0].body.trim()), (Some(1), 200, "{\"id\":\"x\"}"));
-        assert_eq!((parts[1].index, parts[1].status), (Some(0), 404));
-    }
 
     #[test]
     fn renders_alternatives_inline_images_and_forwards() {

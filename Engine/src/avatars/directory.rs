@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::Provider;
-use crate::api::{self, Api, ApiError, Priority};
+use crate::api::{self, Api, ApiError, GooglePage, GraphPage, Priority};
 
 /// Where a contact's photo is; encoded as Swift encodes the enum (`{"url":{"_0":…}}`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,16 +128,9 @@ pub async fn google(api: &Api, people_root: &str, directory: bool) -> Result<Opt
     for (path, mut query) in lists {
         query.push(("pageSize", "1000"));
         let first = api::url(people_root, path, &query);
-        let next_base = first.clone();
-        let listed = api::pages(
-            first,
-            30,
-            |url| async move { unless_refused(api.get::<PeoplePage>(&url, Priority::Background, 0)).await },
-            move |page: &PeoplePage| {
-                page.next_page_token.as_ref().map(|token| format!("{next_base}&pageToken={}", api::percent_encoded(token)))
-            },
-            PeoplePage::people,
-        )
+        let listed = api::pages(first, 30, |url| async move {
+            unless_refused(api.get::<GooglePage<Person>>(&url, Priority::Background, 0)).await
+        })
         .await?;
         let Some(listed) = listed else { continue };
         answered = true;
@@ -174,23 +167,6 @@ pub async fn google(api: &Api, people_root: &str, directory: bool) -> Result<Opt
         })
         .collect();
     Ok(Some((photos, people)))
-}
-
-/// One page of saved contacts, other contacts or directory people; each list names its people
-/// differently.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PeoplePage {
-    connections: Option<Vec<Person>>,
-    other_contacts: Option<Vec<Person>>,
-    people: Option<Vec<Person>>,
-    next_page_token: Option<String>,
-}
-
-impl PeoplePage {
-    fn people(self) -> Vec<Person> {
-        [self.connections, self.other_contacts, self.people].into_iter().flatten().flatten().collect()
-    }
 }
 
 #[derive(Deserialize)]
@@ -231,9 +207,7 @@ pub async fn graph(api: &Api, graph_root: &str) -> Result<Option<Found>, ApiErro
     let found = api::pages(
         first,
         30,
-        |url| async move { unless_refused(api.get::<GraphContacts>(&url, Priority::Background, 0)).await },
-        |page: &GraphContacts| page.next_link.clone(),
-        |page| page.value,
+        |url| async move { unless_refused(api.get::<GraphPage<GraphContact>>(&url, Priority::Background, 0)).await },
     )
     .await?;
     let Some(found) = found else { return Ok(None) };
@@ -256,13 +230,6 @@ pub async fn graph(api: &Api, graph_root: &str) -> Result<Option<Found>, ApiErro
         people.push(DirectoryPerson { name, emails });
     }
     Ok(Some((photos, people)))
-}
-
-#[derive(Deserialize)]
-struct GraphContacts {
-    value: Vec<GraphContact>,
-    #[serde(rename = "@odata.nextLink")]
-    next_link: Option<String>,
 }
 
 #[derive(Deserialize)]

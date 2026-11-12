@@ -7,6 +7,8 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use regex::Regex;
 
+use crate::api;
+
 /// A successful (200) answer: the body, at most the `cap` asked for plus one byte, the URL it
 /// came from after redirects, and how long it may be reused (`Cache-Control`: `max-age`, zero for
 /// `no-store`/`no-cache`; none when the answer doesn't say).
@@ -43,16 +45,8 @@ pub struct Browser;
 
 const SAFARI: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 
-fn client(user_agent: &str) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .user_agent(user_agent)
-        .build()
-        .expect("the HTTP client builds")
-}
-
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| client("Mailstream"));
-static BROWSER: LazyLock<reqwest::Client> = LazyLock::new(|| client(SAFARI));
+static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| api::client(Duration::from_secs(10), Some("Mailstream")));
+static BROWSER: LazyLock<reqwest::Client> = LazyLock::new(|| api::client(Duration::from_secs(10), Some(SAFARI)));
 
 /// Built from the system's resolver configuration once; nil when it cannot be read.
 static RESOLVER: LazyLock<Option<hickory_resolver::TokioResolver>> =

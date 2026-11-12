@@ -172,21 +172,25 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
+/// A client that times out every request after `timeout`, sending `user_agent` when given. Every
+/// HTTP client of the engine is made here.
+pub(crate) fn client(timeout: Duration, user_agent: Option<&str>) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder().timeout(timeout).pool_max_idle_per_host(8);
+    if let Some(user_agent) = user_agent {
+        builder = builder.user_agent(user_agent);
+    }
+    builder.build().expect("the HTTP client builds")
+}
+
 /// One HTTP client for every account and for OAuth token requests: connections and TLS sessions
 /// are shared, and every request times out after 30 s. Made at the first request, as loading the
 /// system's root certificates takes a while (~75 ms), which engine start should not wait for.
-pub(crate) static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .pool_max_idle_per_host(8)
-        .build()
-        .expect("the HTTP client builds")
-});
+pub(crate) static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| client(Duration::from_secs(30), None));
 
 /// `name=value&…` with values percent-encoded (RFC 3986 unreserved characters kept), names as
 /// they are (Graph's `$select` keeps its `$`).
-pub fn form_encoded(fields: &[(&str, &str)]) -> String {
-    fields.iter().map(|(name, value)| format!("{name}={}", percent_encoded(value))).collect::<Vec<_>>().join("&")
+pub fn form_encoded<N: fmt::Display, V: AsRef<str>>(fields: impl IntoIterator<Item = (N, V)>) -> String {
+    fields.into_iter().map(|(name, value)| format!("{name}={}", percent_encoded(value.as_ref()))).collect::<Vec<_>>().join("&")
 }
 
 const UNRESERVED: &percent_encoding::AsciiSet =
@@ -199,7 +203,7 @@ pub fn percent_encoded(text: &str) -> String {
 
 /// `base` + `path`, then `query` form-encoded.
 pub fn url(base: &str, path: &str, query: &[(&str, &str)]) -> String {
-    if query.is_empty() { format!("{base}{path}") } else { format!("{base}{path}?{}", form_encoded(query)) }
+    if query.is_empty() { format!("{base}{path}") } else { format!("{base}{path}?{}", form_encoded(query.iter().copied())) }
 }
 
 /// A page size query value kept within the provider's 1…`max`.
@@ -388,29 +392,55 @@ impl Api {
         }
     }
 
-    /// Sends `items` `size` at a time, one chunk after another, through `send`, which answers
-    /// the ones to send again (throttled or unanswered) and the longest Retry-After among them.
-    /// Those repeat after a backoff that pauses the account's budget, until none are left.
-    pub async fn batched<Item, Send, Fut>(&self, items: Vec<Item>, size: usize, service: &str, send: Send) -> Result<(), ApiError>
+    /// Sends `items` `size` at a time, one chunk after another: `send` sends one chunk, its items
+    /// numbered from 1, as one batch request and answers what each sub-request got. Sub-requests
+    /// refused for load, or left unanswered, are sent again after the longest Retry-After among
+    /// them (else a backoff) that pauses the account's budget, until none are left; server errors
+    /// too when the sub-requests are `repeatable`. `answered` takes every other answer, the
+    /// successful ones included; its error fails the whole batch.
+    pub async fn batch<Item, Send, Fut>(
+        &self,
+        items: Vec<Item>,
+        size: usize,
+        service: &str,
+        repeatable: bool,
+        send: Send,
+        mut answered: impl FnMut(Item, Part) -> Result<(), ApiError>,
+    ) -> Result<(), ApiError>
     where
         Item: Clone,
-        Send: Fn(Vec<Item>) -> Fut,
-        Fut: Future<Output = Result<(Vec<Item>, Option<f64>), ApiError>>,
+        Send: Fn(Vec<(usize, Item)>) -> Fut,
+        Fut: Future<Output = Result<Vec<Part>, ApiError>>,
     {
         for chunk in items.chunks(size) {
-            let mut pending = chunk.to_vec();
+            let mut pending: Vec<(usize, Item)> = chunk.iter().cloned().enumerate().map(|(index, item)| (index + 1, item)).collect();
             let mut attempt = 0;
             while !pending.is_empty() {
                 attempt += 1;
-                let (again, retry_after) = send(pending).await?;
-                if again.is_empty() {
+                let mut retry_after: Option<f64> = None;
+                for part in send(pending.clone()).await? {
+                    let Some(index) = pending.iter().position(|(number, _)| *number == part.number) else { continue };
+                    let again = match retry(part.status, &part.body) {
+                        Some(Retry::Throttled) => true,
+                        Some(Retry::ServerError) => repeatable,
+                        None => false,
+                    };
+                    if again {
+                        if let Some(seconds) = part.retry_after {
+                            retry_after = Some(retry_after.unwrap_or(0.0).max(seconds));
+                        }
+                        continue;
+                    }
+                    let (_, item) = pending.remove(index);
+                    answered(item, part)?;
+                }
+                if pending.is_empty() {
                     break;
                 }
                 if attempt >= RATE_LIMIT_ATTEMPTS {
                     return Err(ApiError::new(429, format!("{service} is limiting requests; try again shortly")));
                 }
                 self.pause(attempt, retry_after, true).await;
-                pending = again;
             }
         }
         Ok(())
@@ -447,32 +477,147 @@ fn network_message(error: &reqwest::Error) -> String {
     }
 }
 
+// MARK: - Listings
+
+/// One page of a listing: what it holds and where the next page is.
+pub trait Listing {
+    type Item;
+    /// The next page's URL, nil on the last page; `first` is the first page's.
+    fn next(&self, first: &str) -> Option<String>;
+    fn items(self) -> Vec<Self::Item>;
+}
+
+/// A page of a Google listing. Google names a listing's items after what they are, so `items`
+/// answers to each of those names; the next page is the first one with the page's token.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GooglePage<T> {
+    #[serde(
+        alias = "messages",
+        alias = "history",
+        alias = "spaces",
+        alias = "memberships",
+        alias = "connections",
+        alias = "otherContacts",
+        alias = "people"
+    )]
+    pub items: Option<Vec<T>>,
+    pub next_page_token: Option<String>,
+}
+
+impl<T> GooglePage<T> {
+    /// The next page's token; Chat answers an empty one on the last page.
+    pub fn token(&self) -> Option<&str> {
+        self.next_page_token.as_deref().filter(|token| !token.is_empty())
+    }
+}
+
+impl<T> Listing for GooglePage<T> {
+    type Item = T;
+
+    fn next(&self, first: &str) -> Option<String> {
+        let separator = if first.contains('?') { '&' } else { '?' };
+        self.token().map(|token| format!("{first}{separator}pageToken={}", percent_encoded(token)))
+    }
+
+    fn items(self) -> Vec<T> {
+        self.items.unwrap_or_default()
+    }
+}
+
+/// A page of a Graph listing: `value`, and the next page's whole URL.
+#[derive(Deserialize)]
+pub struct GraphPage<T> {
+    pub value: Vec<T>,
+    #[serde(rename = "@odata.nextLink")]
+    pub next: Option<String>,
+}
+
+impl<T> Listing for GraphPage<T> {
+    type Item = T;
+
+    fn next(&self, _first: &str) -> Option<String> {
+        self.next.clone()
+    }
+
+    fn items(self) -> Vec<T> {
+        self.value
+    }
+}
+
 /// Every page of a listing from `first`, at most `limit` pages: `fetch` reads one (nil: the
-/// provider refused it, which ends the listing), `next` names the one after it, `items` takes
-/// what it holds. Nil when the first page was refused.
-pub async fn pages<Page, Item, Fetch, Fut>(
-    first: String,
-    limit: usize,
-    fetch: Fetch,
-    next: impl Fn(&Page) -> Option<String>,
-    items: impl Fn(Page) -> Vec<Item>,
-) -> Result<Option<Vec<Item>>, ApiError>
+/// provider refused it, which ends the listing). Nil when the first page was refused.
+pub async fn pages<Page, Fetch, Fut>(first: String, limit: usize, fetch: Fetch) -> Result<Option<Vec<Page::Item>>, ApiError>
 where
+    Page: Listing,
     Fetch: Fn(String) -> Fut,
     Fut: Future<Output = Result<Option<Page>, ApiError>>,
 {
     let mut found = Vec::new();
-    let mut url = first;
+    let mut url = first.clone();
     for index in 0..limit {
         let Some(page) = fetch(url).await? else { return Ok((index > 0).then_some(found)) };
-        let following = next(&page);
-        found.extend(items(page));
+        let following = page.next(&first);
+        found.extend(page.items());
         match following {
             Some(following) => url = following,
             None => break,
         }
     }
     Ok(Some(found))
+}
+
+// MARK: - Batch answers
+
+/// What one sub-request of a batch got: its number in the batch, its status, how long it asks
+/// to wait before the next attempt and its body.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Part {
+    pub number: usize,
+    pub status: u16,
+    pub retry_after: Option<f64>,
+    pub body: Vec<u8>,
+}
+
+/// Splits a multipart/mixed batch answer (Google's) into its HTTP responses; the number comes
+/// from the `Content-ID` (`<response-m3>`) of the sub-request each answers.
+pub fn multipart_parts(data: &[u8], boundary: &str) -> Vec<Part> {
+    static CONTENT_ID: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?i)content-id:\s*<[^>]*?(\d+)>").unwrap());
+    let text = String::from_utf8_lossy(data).replace("\r\n", "\n");
+    let mut parts = Vec::new();
+    for chunk in text.split(&format!("--{boundary}")).skip(1) {
+        if chunk.starts_with("--") {
+            break;
+        }
+        let Some((headers, response)) = chunk.split_once("\n\n") else { continue };
+        let Some(number) = CONTENT_ID.captures(headers).and_then(|found| found[1].parse().ok()) else { continue };
+        let status_line = response.split('\n').next().unwrap_or("");
+        let Some(status) = status_line.split(' ').filter(|piece| !piece.is_empty()).nth(1).and_then(|code| code.parse().ok())
+        else {
+            continue;
+        };
+        let body = response.split_once("\n\n").map_or("", |(_, body)| body);
+        parts.push(Part { number, status, retry_after: None, body: body.as_bytes().to_vec() });
+    }
+    parts
+}
+
+/// The sub-requests' answers of a JSON batch answer (Graph's `$batch`): `responses`, each with
+/// its sub-request's `id`, `status`, `headers` and `body`.
+pub fn json_parts(answer: &serde_json::Value) -> Vec<Part> {
+    let Some(responses) = answer["responses"].as_array() else { return Vec::new() };
+    responses
+        .iter()
+        .filter_map(|item| {
+            let number = item["id"].as_str()?.parse().ok()?;
+            let retry_after = item["headers"].as_object().and_then(|headers| {
+                let (_, value) = headers.iter().find(|(name, _)| name.eq_ignore_ascii_case("Retry-After"))?;
+                value.as_str()?.trim().parse::<f64>().ok()
+            });
+            let body = if item["body"].is_null() { Vec::new() } else { serde_json::to_vec(&item["body"]).expect("JSON encodes") };
+            Some(Part { number, status: item["status"].as_u64().unwrap_or(0) as u16, retry_after, body })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -488,7 +633,8 @@ mod tests {
         assert_eq!(retry(503, b""), Some(Retry::ServerError));
         assert_eq!(ApiError::from_body(404, br#"{"error":{"message":"Not Found"}}"#).message, "Not Found");
         assert_eq!(ApiError::from_body(502, b"").message, "The server answered 502");
-        assert_eq!(form_encoded(&[("$select", "id,name"), ("q", "from:a b")]), "$select=id%2Cname&q=from%3Aa%20b");
+        assert_eq!(form_encoded([("$select", "id,name"), ("q", "from:a b")]), "$select=id%2Cname&q=from%3Aa%20b");
+        assert_eq!(form_encoded([("scope", "openid https://x/y"), ("a", "b~c-d.e_f*")]), "scope=openid%20https%3A%2F%2Fx%2Fy&a=b~c-d.e_f%2A");
     }
 
     #[tokio::test(start_paused = true)]

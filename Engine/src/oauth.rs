@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -41,9 +41,10 @@ const GOOGLE_SCOPES: &[&str] = &[
     // Calendars and their events (the calendar view), and answering invitations and editing
     // events, asked for together so later calendar features need no second consent.
     GOOGLE_CALENDARS,
-    "https://www.googleapis.com/auth/calendar.events",
+    GOOGLE_EVENTS,
 ];
 pub const GOOGLE_CALENDARS: &str = "https://www.googleapis.com/auth/calendar.readonly";
+pub const GOOGLE_EVENTS: &str = "https://www.googleapis.com/auth/calendar.events";
 const MICROSOFT_SCOPES: &[&str] = &[
     "openid",
     "email",
@@ -56,6 +57,8 @@ const MICROSOFT_SCOPES: &[&str] = &[
     MICROSOFT_CALENDARS,
 ];
 pub const MICROSOFT_CALENDARS: &str = "https://graph.microsoft.com/Calendars.ReadWrite";
+/// The read-only calendar scope accounts signed in before Mailstream edited events were granted.
+pub const MICROSOFT_CALENDARS_READ: &str = "https://graph.microsoft.com/Calendars.Read";
 /// Scopes sign-in asks for that accounts signed in before them never granted. Microsoft refuses
 /// a refresh that asks for more than the sign-in granted, so a refresh asks for these only when
 /// the account's grant has them.
@@ -285,7 +288,7 @@ impl OAuth {
         for (name, value) in provider.authorize_extras() {
             parameters.entry(name).or_insert_with(|| (*value).into());
         }
-        let url = format!("{}?{}", provider.authorize_url(), form_encoded(&parameters));
+        let url = format!("{}?{}", provider.authorize_url(), crate::api::form_encoded(&parameters));
 
         let listener = RedirectListener::bind(self.config.redirect_port, state).await?;
         (self.config.open_url)(&url);
@@ -359,7 +362,7 @@ impl OAuth {
             .post(url)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .header("Accept", "application/json")
-            .body(form_encoded(&form))
+            .body(crate::api::form_encoded(&form))
             .send()
             .await
             .map_err(|error| OAuthError::new("network", error.to_string()))?;
@@ -426,18 +429,6 @@ fn random_token() -> String {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).expect("the system's random source works");
     URL_SAFE_NO_PAD.encode(bytes)
-}
-
-/// Everything but the RFC 3986 unreserved characters (`A-Z a-z 0-9 - . _ ~`) as `%XX`.
-const RESERVED: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
-
-/// `name=value&…` sorted by name, values percent-encoded: a query or a form body.
-fn form_encoded<V: AsRef<str>>(fields: &BTreeMap<&str, V>) -> String {
-    fields
-        .iter()
-        .map(|(name, value)| format!("{name}={}", utf8_percent_encode(value.as_ref(), RESERVED)))
-        .collect::<Vec<_>>()
-        .join("&")
 }
 
 /// One-shot HTTP listener on the loopback interface for the OAuth redirect. Answers the browser
@@ -565,7 +556,7 @@ async fn respond(connection: &mut TcpStream, status: &str, text: Option<&str>) -
     let message = text.unwrap_or("You can close this tab and return to Mailstream.");
     let body = format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>Mailstream</title></head><body style=\"font: 15px -apple-system, sans-serif; margin: 4em auto; max-width: 32em; text-align: center\"><p>{}</p></body></html>",
-        escape_html(message)
+        crate::text::escape_html(message)
     );
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
@@ -576,32 +567,11 @@ async fn respond(connection: &mut TcpStream, status: &str, text: Option<&str>) -
     connection.shutdown().await
 }
 
-fn escape_html(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for char in text.chars() {
-        match char {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(char),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use std::sync::Mutex;
 
     use super::*;
-
-    #[test]
-    fn encodes_forms_like_the_swift_engine() {
-        let fields = BTreeMap::from([("scope", "openid https://x/y"), ("a", "b~c-d.e_f*")]);
-        assert_eq!(form_encoded(&fields), "a=b~c-d.e_f%2A&scope=openid%20https%3A%2F%2Fx%2Fy");
-    }
 
     #[test]
     fn answers_only_the_redirect_with_this_state() {

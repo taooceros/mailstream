@@ -7,7 +7,7 @@ use chrono::{Local, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::api::{self, Api, ApiError, Priority, Request};
+use crate::api::{self, Api, ApiError, GooglePage, GraphPage, Listing, Priority, Request};
 use crate::ics::{Invitation, normalized_uid};
 use crate::model::{Date, date_from_unix, iso8601, now, parse_iso8601, unix_seconds};
 use crate::oauth::Provider;
@@ -191,6 +191,23 @@ impl CalendarRemote<'_> {
         self.api.decode(request, self.priority, 0).await
     }
 
+    /// Every item of the listing from `first`, at most `PAGES` pages, each asked with `prefer`
+    /// (Graph's `Prefer` header) when given.
+    async fn all<Page>(&self, first: String, prefer: Option<&str>) -> Result<Vec<Page::Item>, ApiError>
+    where
+        Page: Listing + serde::de::DeserializeOwned,
+    {
+        let found = api::pages(first, PAGES, |url| async move {
+            let mut request = Request::get(url);
+            if let Some(prefer) = prefer {
+                request = request.header("Prefer", prefer);
+            }
+            self.get::<Page>(request).await.map(Some)
+        })
+        .await?;
+        Ok(found.unwrap_or_default())
+    }
+
     /// Fetches each calendar's events; a calendar the account may no longer read (shared ones
     /// taken back) is left out rather than failing the rest.
     async fn each_calendar<F, Fut>(&self, calendars: &[Calendar], events: F) -> Result<Vec<CalendarEvent>, ApiError>
@@ -214,22 +231,8 @@ impl CalendarRemote<'_> {
     // MARK: Google
 
     async fn google(&self, start: Date, end: Date) -> Result<Fetched, ApiError> {
-        let list = |token: Option<&str>| {
-            let mut query = vec![("minAccessRole", "reader"), ("maxResults", "250")];
-            if let Some(token) = token {
-                query.push(("pageToken", token));
-            }
-            api::url(self.google, "users/me/calendarList", &query)
-        };
-        let entries = api::pages(
-            list(None),
-            PAGES,
-            |url| async move { self.get::<GoogleList<GoogleCalendar>>(Request::get(url)).await.map(Some) },
-            |page| page.next_page_token.as_deref().map(|token| list(Some(token))),
-            |page| page.items.unwrap_or_default(),
-        )
-        .await?
-        .unwrap_or_default();
+        let first = api::url(self.google, "users/me/calendarList", &[("minAccessRole", "reader"), ("maxResults", "250")]);
+        let entries = self.all::<GooglePage<GoogleCalendar>>(first, None).await?;
         // The calendars Google Calendar shows: the primary one and those ticked in its list.
         let calendars: Vec<Calendar> = entries
             .into_iter()
@@ -250,28 +253,18 @@ impl CalendarRemote<'_> {
                 let (time_min, time_max) = (time_min.clone(), time_max.clone());
                 async move {
                     let path = format!("calendars/{}/events", api::percent_encoded(&calendar.id));
-                    let page = |token: Option<&str>| {
-                        let mut query = vec![
+                    let first = api::url(
+                        self.google,
+                        &path,
+                        &[
                             ("timeMin", time_min.as_str()),
                             ("timeMax", time_max.as_str()),
                             ("singleEvents", "true"),
                             ("orderBy", "startTime"),
                             ("maxResults", "2500"),
-                        ];
-                        if let Some(token) = token {
-                            query.push(("pageToken", token));
-                        }
-                        api::url(self.google, &path, &query)
-                    };
-                    let items = api::pages(
-                        page(None),
-                        PAGES,
-                        |url| async move { self.get::<GoogleList<GoogleEvent>>(Request::get(url)).await.map(Some) },
-                        |list| list.next_page_token.as_deref().map(|token| page(Some(token))),
-                        |list| list.items.unwrap_or_default(),
-                    )
-                    .await?
-                    .unwrap_or_default();
+                        ],
+                    );
+                    let items = self.all::<GooglePage<GoogleEvent>>(first, None).await?;
                     Ok(items.into_iter().filter_map(|item| item.event(&calendar.id)).collect())
                 }
             })
@@ -284,15 +277,7 @@ impl CalendarRemote<'_> {
     async fn graph(&self, start: Date, end: Date) -> Result<Fetched, ApiError> {
         let first =
             api::url(self.graph, "me/calendars", &[("$top", "100"), ("$select", "id,name,hexColor,isDefaultCalendar,canEdit")]);
-        let found = api::pages(
-            first,
-            PAGES,
-            |url| async move { self.get::<GraphList<GraphCalendar>>(Request::get(url)).await.map(Some) },
-            |page| page.next.clone(),
-            |page| page.value,
-        )
-        .await?
-        .unwrap_or_default();
+        let found = self.all::<GraphPage<GraphCalendar>>(first, None).await?;
         let calendars: Vec<Calendar> = found
             .into_iter()
             .map(|calendar| Calendar {
@@ -318,18 +303,7 @@ impl CalendarRemote<'_> {
                             ("$select", GRAPH_EVENT_FIELDS),
                         ],
                     );
-                    let items = api::pages(
-                        first,
-                        PAGES,
-                        |url| async move {
-                            let request = Request::get(url).header("Prefer", "outlook.timezone=\"UTC\"");
-                            self.get::<GraphList<GraphEvent>>(request).await.map(Some)
-                        },
-                        |page| page.next.clone(),
-                        |page| page.value,
-                    )
-                    .await?
-                    .unwrap_or_default();
+                    let items = self.all::<GraphPage<GraphEvent>>(first, Some("outlook.timezone=\"UTC\"")).await?;
                     Ok(items.into_iter().filter_map(|item| item.event(&calendar.id)).collect())
                 }
             })
@@ -362,8 +336,8 @@ impl CalendarRemote<'_> {
     async fn google_find(&self, invitation: &Invitation) -> Result<Option<CalendarEvent>, ApiError> {
         let Some(uid) = &invitation.uid else { return Ok(None) };
         let url = api::url(self.google, "calendars/primary/events", &[("iCalUID", uid.as_str())]);
-        let list: GoogleList<GoogleEvent> = self.get(Request::get(url)).await?;
-        let events: Vec<CalendarEvent> = list.items.unwrap_or_default().into_iter().filter_map(|item| item.event(PRIMARY)).collect();
+        let list: GooglePage<GoogleEvent> = self.get(Request::get(url)).await?;
+        let events: Vec<CalendarEvent> = list.items().into_iter().filter_map(|item| item.event(PRIMARY)).collect();
         let found = matching(&events, invitation).cloned();
         let moved = found.as_ref().is_some_and(|event| (event.start - invitation.start).abs() <= 60.0);
         if !invitation.occurrence || moved {
@@ -374,8 +348,8 @@ impl CalendarRemote<'_> {
         let path = format!("calendars/primary/events/{}/instances", api::percent_encoded(&series.id));
         let (from, to) = (iso8601(invitation.start - 60.0), iso8601(invitation.start + 60.0));
         let url = api::url(self.google, &path, &[("timeMin", from.as_str()), ("timeMax", to.as_str())]);
-        let list: GoogleList<GoogleEvent> = self.get(Request::get(url)).await?;
-        Ok(list.items.unwrap_or_default().into_iter().find_map(|item| item.event(PRIMARY)).or(found))
+        let list: GooglePage<GoogleEvent> = self.get(Request::get(url)).await?;
+        Ok(list.items().into_iter().find_map(|item| item.event(PRIMARY)).or(found))
     }
 
     async fn graph_find(&self, invitation: &Invitation) -> Result<Option<CalendarEvent>, ApiError> {
@@ -394,7 +368,7 @@ impl CalendarRemote<'_> {
             "me/calendarView",
             &[("startDateTime", from.as_str()), ("endDateTime", to.as_str()), ("$top", "250"), ("$select", GRAPH_EVENT_FIELDS)],
         );
-        let list: GraphList<GraphEvent> = self.get(utc(url)).await?;
+        let list: GraphPage<GraphEvent> = self.get(utc(url)).await?;
         let events: Vec<CalendarEvent> = list.value.into_iter().filter_map(|event| event.event("")).collect();
         Ok(matching(&events, invitation).cloned())
     }
@@ -510,13 +484,6 @@ pub fn graph_invitation(message: &Value) -> Option<Invitation> {
 }
 
 // MARK: - Google's answers
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GoogleList<T> {
-    items: Option<Vec<T>>,
-    next_page_token: Option<String>,
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -650,13 +617,6 @@ const GRAPH_EVENT_FIELDS: &str = "id,subject,start,end,isAllDay,isCancelled,isOr
 onlineMeetingUrl,organizer,attendees,responseStatus,webLink,bodyPreview,iCalUId,seriesMasterId,type";
 /// The most characters of the description Graph's `bodyPreview` holds.
 const GRAPH_PREVIEW: usize = 255;
-
-#[derive(Deserialize)]
-struct GraphList<T> {
-    value: Vec<T>,
-    #[serde(rename = "@odata.nextLink")]
-    next: Option<String>,
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

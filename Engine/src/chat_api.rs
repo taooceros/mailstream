@@ -12,7 +12,7 @@ use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::api::{self, Api, ApiError, Priority, Request};
+use crate::api::{self, Api, ApiError, GooglePage, Listing, Priority, Request};
 use crate::chat_model::{ChatAttachment, ChatMessage, ChatMessagePage, ChatSpace, ChatSpaceKind, ChatSpaceList, ChatUser};
 use crate::model::{DISTANT_PAST, Date, date_from_unix, iso8601, parse_iso8601, unix_seconds};
 
@@ -94,13 +94,6 @@ pub struct Space {
     pub single_user_bot_dm: bool,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SpacesPage {
-    spaces: Option<Vec<Space>>,
-    next_page_token: Option<String>,
-}
-
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct User {
@@ -163,20 +156,8 @@ pub struct Message {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MessagesPage {
-    messages: Option<Vec<Message>>,
-    next_page_token: Option<String>,
-}
-
-#[derive(Deserialize)]
 struct Membership {
     member: Option<User>,
-}
-
-#[derive(Deserialize)]
-struct MembersPage {
-    memberships: Option<Vec<Membership>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -299,24 +280,13 @@ impl Calls<'_> {
     /// Every space the user is in. Pages are as large as the API allows, so this is one or two calls.
     async fn spaces(&self) -> Result<Vec<Space>, ApiError> {
         let first = self.url("spaces", &[("pageSize", "1000")]);
-        let found = api::pages(
-            first,
-            usize::MAX,
-            |url| async move { self.get::<SpacesPage>(&url).await.map(Some) },
-            |page: &SpacesPage| {
-                page.next_page_token
-                    .as_deref()
-                    .filter(|token| !token.is_empty())
-                    .map(|token| self.url("spaces", &[("pageSize", "1000"), ("pageToken", token)]))
-            },
-            |page| page.spaces.unwrap_or_default(),
-        )
-        .await?;
+        let found =
+            api::pages(first, usize::MAX, |url| async move { self.get::<GooglePage<Space>>(&url).await.map(Some) }).await?;
         Ok(found.unwrap_or_default())
     }
 
     /// The newest `limit` messages created before `before` (RFC 3339), newest first.
-    async fn messages(&self, space: &str, limit: usize, before: Option<&str>) -> Result<MessagesPage, ApiError> {
+    async fn messages(&self, space: &str, limit: usize, before: Option<&str>) -> Result<GooglePage<Message>, ApiError> {
         let size = api::page_size(limit, 1000);
         let filter = before.map(|before| format!("createTime < \"{before}\""));
         let mut query = vec![("pageSize", size.as_str()), ("orderBy", "createTime desc")];
@@ -330,8 +300,8 @@ impl Calls<'_> {
     /// yet has them only as an invitation.
     async fn members(&self, space: &str) -> Result<Vec<User>, ApiError> {
         let url = self.url(&format!("{space}/members"), &[("pageSize", "100"), ("showInvited", "true")]);
-        let page: MembersPage = self.get(&url).await?;
-        Ok(page.memberships.unwrap_or_default().into_iter().filter_map(|membership| membership.member).collect())
+        let page: GooglePage<Membership> = self.get(&url).await?;
+        Ok(page.items().into_iter().filter_map(|membership| membership.member).collect())
     }
 
     async fn read_state(&self, space: &str) -> Result<ReadState, ApiError> {
@@ -529,14 +499,13 @@ impl ChatRemote {
         let state = state.ok();
         let me = self.learn_me(state.as_ref().and_then(ReadState::user), account);
         Ok(ChatMessagePage {
+            more: page.token().is_some(),
             messages: page
-                .messages
-                .unwrap_or_default()
+                .items()
                 .iter()
                 .rev()
                 .map(|message| ChatMessage::from_api(message, me.as_deref(), None))
                 .collect(),
-            more: page.next_page_token.is_some_and(|token| !token.is_empty()),
             last_read: state.and_then(|state| state.last_read()),
         })
     }
@@ -632,7 +601,7 @@ impl ChatRemote {
         let state = calls.read_state(&space.name).await?;
         let me = self.learn_me(state.user(), account);
         let page = calls.messages(&space.name, SUMMARY_MESSAGES, None).await?;
-        let messages = page.messages.unwrap_or_default();
+        let messages = page.items();
         let last_read = state.last_read();
         let unread = messages
             .iter()

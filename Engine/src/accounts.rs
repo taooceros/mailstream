@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::oauth::{GOOGLE_CALENDARS, Grant, MICROSOFT_CALENDARS, Provider, has_scope};
+use crate::oauth::{GOOGLE_CALENDARS, GOOGLE_EVENTS, Grant, MICROSOFT_CALENDARS, MICROSOFT_CALENDARS_READ, Provider, has_scope};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountRecord {
@@ -44,7 +44,7 @@ impl AccountRecord {
         match self.provider {
             Provider::Google => has_scope(&self.scopes, GOOGLE_CALENDARS),
             Provider::Microsoft => {
-                has_scope(&self.scopes, MICROSOFT_CALENDARS) || has_scope(&self.scopes, "Calendars.Read")
+                has_scope(&self.scopes, MICROSOFT_CALENDARS) || has_scope(&self.scopes, MICROSOFT_CALENDARS_READ)
             }
         }
     }
@@ -52,7 +52,7 @@ impl AccountRecord {
     /// Whether its sign-in lets it change events: answer invitations, add and edit events.
     pub fn can_edit_calendars(&self) -> bool {
         match self.provider {
-            Provider::Google => has_scope(&self.scopes, "https://www.googleapis.com/auth/calendar.events"),
+            Provider::Google => has_scope(&self.scopes, GOOGLE_EVENTS),
             Provider::Microsoft => has_scope(&self.scopes, MICROSOFT_CALENDARS),
         }
     }

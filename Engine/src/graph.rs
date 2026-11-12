@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 
-use crate::api::{self, Api, ApiError, Priority, Request};
+use crate::api::{self, Api, ApiError, GraphPage, Priority, Request};
 use crate::assembly::{AttachedMessage, MessageAssembly};
 use crate::backend::{EnvelopePage, SearchHit};
 use crate::model::{Address, DISTANT_PAST, Envelope, Mailbox, MailboxRole, MessageContent, parse_iso8601};
@@ -43,13 +43,6 @@ pub struct Graph {
     /// Well-known folder name → id. Found ids are kept for the backend's life (Graph's folder ids
     /// never change); missing names, which the mailbox may gain, are asked again.
     well_known: Mutex<HashMap<String, String>>,
-}
-
-#[derive(Deserialize)]
-struct Page<Item> {
-    value: Vec<Item>,
-    #[serde(rename = "@odata.nextLink")]
-    next_link: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -350,9 +343,7 @@ impl Graph {
         let found = api::pages(
             first,
             usize::MAX,
-            |url| async move { self.decode::<Page<Item>>(url, None, priority).await.map(Some) },
-            |page: &Page<Item>| page.next_link.clone(),
-            |page| page.value,
+            |url| async move { self.decode::<GraphPage<Item>>(url, None, priority).await.map(Some) },
         )
         .await?;
         Ok(found.unwrap_or_default())
@@ -375,8 +366,8 @@ impl Graph {
                 &[("$top", &page_size.to_string()), ("$orderby", "receivedDateTime desc"), ("$select", ENVELOPE_FIELDS)],
             ),
         };
-        let page: Page<Message> = self.decode(url, None, priority).await?;
-        Ok(EnvelopePage { envelopes: page.value.into_iter().map(envelope).collect(), next: page.next_link })
+        let page: GraphPage<Message> = self.decode(url, None, priority).await?;
+        Ok(EnvelopePage { envelopes: page.value.into_iter().map(envelope).collect(), next: page.next })
     }
 
     /// `/me/messages` spans every folder; each hit keeps the folder it is in.
@@ -391,7 +382,7 @@ impl Graph {
             "me/messages",
             &[("$search", &format!("\"{terms}\"")), ("$top", &page_size.to_string()), ("$select", &select)],
         );
-        let page: Page<Message> = self.decode(url, None, Priority::Interactive).await?;
+        let page: GraphPage<Message> = self.decode(url, None, Priority::Interactive).await?;
         let mut hits: Vec<SearchHit> = page
             .value
             .into_iter()
