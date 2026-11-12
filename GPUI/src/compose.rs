@@ -10,7 +10,7 @@ use gpui::{
     Window, WindowBounds, WindowOptions, actions, deferred, div, point, px, relative, size,
 };
 use crate::avatars;
-use crate::controls::{ButtonKind, ControlSize, button, popover};
+use crate::controls::{ButtonKind, ControlSize, button, popover, title_bar};
 use crate::design::{self, Palette, compose as metrics, editor, layout, radius, space, text};
 use crate::engine::engine;
 use crate::input::{InputEvent, TextInput};
@@ -603,10 +603,9 @@ impl Compose {
 
     // MARK: Rendering
 
-    fn render_title_bar(&self, p: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&self, window: &mut Window, p: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let sending = matches!(self.status, Status::Sending);
-        div()
-            .id("compose-title")
+        title_bar("compose-title", window, cx)
             .flex_shrink_0()
             .h(px(layout::HEADER_HEIGHT))
             .pl(px(metrics::TITLE_INSET))
@@ -614,13 +613,6 @@ impl Compose {
             .flex()
             .items_center()
             .gap(px(8.))
-            .on_mouse_down(MouseButton::Left, |event, window, _| {
-                if event.click_count == 2 {
-                    window.titlebar_double_click();
-                } else {
-                    window.start_window_move();
-                }
-            })
             .child(
                 div()
                     .flex_1()
@@ -853,7 +845,7 @@ impl Render for Compose {
             .text_size(px(text::BODY))
             .text_color(p.text)
             .bg(p.background)
-            .child(self.render_title_bar(p, cx))
+            .child(self.render_title_bar(window, p, cx))
             .child(
                 div()
                     .flex_shrink_0()

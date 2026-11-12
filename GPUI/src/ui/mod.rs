@@ -23,7 +23,7 @@ use crate::avatars;
 use crate::controls::{
     ButtonKind, ControlSize, Tone, capsule, centered_note, field_frame, hairline, icon_avatar, icon_button,
     icon_label_button, island, list_row, mark_dot, notice, pill, popover, raised_capsule, row_layout, section_header,
-    tag, toast,
+    tag, title_bar, toast,
 };
 use crate::design::{self, Palette, icon as icon_size, layout, list as metrics, radius, space, stroke, text};
 use crate::format;
@@ -99,8 +99,12 @@ impl Render for MailApp {
                 begin.absolute().size_0()
             })
             // The window between the islands moves it, as a title bar does.
-            .child(title_bar("window").absolute().size_full())
-            .child(if self.sidebar_open { self.render_sidebar(p, cx).into_any_element() } else { self.render_rail(p, cx) })
+            .child(title_bar("window", window, cx).absolute().size_full())
+            .child(if self.sidebar_open {
+                self.render_sidebar(p, window, cx).into_any_element()
+            } else {
+                self.render_rail(p, window, cx)
+            })
             .child(
                 div()
                     .flex_1()
@@ -127,17 +131,6 @@ impl Render for MailApp {
             // Painted last: ends the frame a measurement times.
             .children(bench_end)
     }
-}
-
-/// Mouse-down in a region that moves the window, as a title bar does; a double click zooms it.
-fn title_bar(id: &'static str) -> Stateful<Div> {
-    div().id(id).on_mouse_down(MouseButton::Left, |event, window, _| {
-        if event.click_count == 2 {
-            window.titlebar_double_click();
-        } else {
-            window.start_window_move();
-        }
-    })
 }
 
 impl MailApp {
@@ -178,7 +171,7 @@ impl MailApp {
                         .into_any_element(),
                 ),
                 Layer::Reader(conversation) => {
-                    reader = Some((self.render_detail(conversation, two_pane, p, cx), shift));
+                    reader = Some((self.render_detail(conversation, two_pane, p, window, cx), shift));
                 }
             }
         }
@@ -246,7 +239,7 @@ impl MailApp {
             .occlude()
             .flex()
             .flex_col()
-            .child(self.render_list_header(p, cx))
+            .child(self.render_list_header(p, window, cx))
             .child(
                 div().flex_shrink_0().px(px(space::S12)).pb(px(space::S10)).child(
                     field_frame(search_focused, true, p)

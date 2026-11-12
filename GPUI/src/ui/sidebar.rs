@@ -41,7 +41,7 @@ enum Pick {
 impl MailApp {
     /// The sidebar, on the window: a top band that moves the window and hides the sidebar, then
     /// the tree under "Mailboxes", and Add Account… at its end.
-    pub(super) fn render_sidebar(&self, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_sidebar(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut rows: Vec<AnyElement> = Vec::new();
         for node in self.sidebar_nodes(cx) {
             rows.push(self.sidebar_row(node, p, cx));
@@ -60,7 +60,7 @@ impl MailApp {
             .flex()
             .flex_col()
             .child(
-                title_bar("sidebar-title")
+                title_bar("sidebar-title", window, cx)
                     .h(px(layout::SIDEBAR_TOP))
                     .flex_shrink_0()
                     .flex()
@@ -83,13 +83,15 @@ impl MailApp {
                     .overflow_y_scroll()
                     .px(px(space::S10))
                     .pb(px(space::S12))
+                    // A press on the rows or between them never moves the window.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .children(rows),
             )
     }
 
     /// The rail standing in for the hidden sidebar: a button that brings it back, then the unified
     /// mailboxes and Chat, each a glyph over its name.
-    pub(super) fn render_rail(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_rail(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let chat = self.chat.read(cx);
         let mut items: Vec<AnyElement> = Vec::new();
         for role in Role::UNIFIED {
@@ -132,12 +134,23 @@ impl MailApp {
             .flex_col()
             .items_center()
             .child(
-                title_bar("rail-title").w_full().pt(px(layout::RAIL_TOP)).pb(px(space::S8)).flex().justify_center().child(
+                title_bar("rail-title", window, cx).w_full().pt(px(layout::RAIL_TOP)).pb(px(space::S8)).flex().justify_center().child(
                     icon_button("show-sidebar", Icon::Sidebar, "Show Sidebar", true, p.muted, p)
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx))),
                 ),
             )
-            .child(div().id("rail").flex_1().min_h_0().w_full().overflow_y_scroll().px(px(space::S8)).children(items))
+            .child(
+                div()
+                    .id("rail")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .px(px(space::S8))
+                    // As in the sidebar, a press on the destinations never moves the window.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .children(items),
+            )
             .into_any_element()
     }
 

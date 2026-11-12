@@ -34,7 +34,9 @@ Linux differs from the Mac in:
   type spelled out (`to_css.rs`), which GPUI's `log` features make ambiguous. libc stays below
   0.2.190, which dropped the `ENOATTR` GPUI's tar reader (xattr 0.2) names.
 - Shortcuts: ⌘ is Ctrl (`secondary-` bindings), except the Mac's text navigation (⌘←, Emacs keys).
-- The window: the compositor draws its frame where it offers to; elsewhere the toolbar moves it.
+- The window: the compositor draws its frame where it offers to; elsewhere dragging the window
+  between the islands or their title rows moves it once the pointer has travelled a few points
+  with the button held (a click or tap there never does, MS-206); rows and controls never move it.
   The type is the desktop's sans-serif family (fontconfig). The back swipe takes the scroll as
   the compositor turns it for the person's scrolling direction.
 - Engine events reach the window through `Mailstream::subscribe_any_thread`: `subscribe` posts
@@ -48,7 +50,7 @@ Linux differs from the Mac in:
 | `src/state.rs` | `MailApp`: selection, lists served from memory for 90 s and reloaded on change events, paging, search, previews, layers over the list, key bindings |
 | `src/state/nav.rs`, `src/state/actions.rs` | Navigation (sources, bundles, the reader, refresh) and optimistic actions (archive, trash, restore, star, read, waiting, tags) that roll back on failure |
 | `src/ui/` | The window as islands (`mod.rs`): the sidebar tree and the rail that stands in for it (`sidebar.rs`), the list's title row and the conversation's floating toolbar (`toolbar.rs`), the lazy conversation list of two-line rows with Smart Inbox bundles pinned at its top and its "Waiting on you" group (`list.rs`), the reader's message cards with the reply card (`reader.rs`), the context menu (`menu.rs`) |
-| `src/controls.rs` | The shared controls every view composes (Flutter's `controls.dart`, `glass.dart`, `common.dart`): buttons, icon buttons and tooltips, capsules, islands, popovers, tags, pills, marks, list rows and their lifted card, notices, toasts, switches |
+| `src/controls.rs` | The shared controls every view composes (Flutter's `controls.dart`, `glass.dart`, `common.dart`): buttons, icon buttons and tooltips, capsules, islands, the title bars that move the window, popovers, tags, pills, marks, list rows and their lifted card, notices, toasts, switches |
 | `src/webview.rs` | macOS: HTML bodies in native `WKWebView`s laid over the reader: placed and clipped each frame, sized to their page, page scripts off, links opened in the browser, wheel events handed back to the reader |
 | `src/blitz_body.rs` | Linux: HTML bodies drawn by Blitz on the engine's pages thread, shown as tiles near the viewport; links open in the browser, a drag selects and Ctrl+C copies, inline parts go in as `data:` URLs |
 | `src/swipe.rs` | Two-finger back swipe over the bundle and reader layers, following the system's swipe-between-pages setting |

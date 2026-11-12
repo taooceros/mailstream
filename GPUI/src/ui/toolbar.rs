@@ -5,7 +5,12 @@
 use super::*;
 
 impl MailApp {
-    pub(super) fn render_list_header(&self, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_list_header(
+        &self,
+        p: &'static Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let bundle = self.open_bundle_members();
         let (title, subtitle): (SharedString, Option<SharedString>) = match (&bundle, &self.query) {
             (Some(bundle), _) => {
@@ -27,7 +32,7 @@ impl MailApp {
         };
         let loading = self.list().is_some_and(|list| list.loading);
         let can_go_back = bundle.is_some() || self.query.is_some();
-        title_bar("list-header")
+        title_bar("list-header", window, cx)
             .flex_shrink_0()
             .h(px(layout::HEADER_HEIGHT))
             .px(px(space::S10))
@@ -75,6 +80,7 @@ impl MailApp {
         conversation: &Conversation,
         two_pane: bool,
         p: &'static Palette,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         island(p.background, p)
@@ -83,7 +89,7 @@ impl MailApp {
             // The conversation keeps the keyboard; clicks never reach the list beneath.
             .occlude()
             .child(self.render_reader(conversation, p, cx))
-            .child(self.render_detail_toolbar(conversation, two_pane, p, cx))
+            .child(self.render_detail_toolbar(conversation, two_pane, p, window, cx))
             .into_any_element()
     }
 
@@ -94,6 +100,7 @@ impl MailApp {
         conversation: &Conversation,
         two_pane: bool,
         p: &'static Palette,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let can_archive = conversation.can_archive();
@@ -101,7 +108,7 @@ impl MailApp {
         let unread = conversation.unread;
         let starred = conversation.starred;
         let (close_icon, close_tip) = if two_pane { (Icon::Close, "Close (Esc)") } else { (Icon::Back, "Back (Esc)") };
-        title_bar("detail-toolbar")
+        title_bar("detail-toolbar", window, cx)
             .absolute()
             .top_0()
             .left_0()

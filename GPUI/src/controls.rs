@@ -1,14 +1,15 @@
 //! The app's shared controls, after Flutter's `controls.dart`, `glass.dart` and `common.dart`
 //! (MS-189–193, MS-200), drawn from the tokens in `design.rs` and used by every view: buttons,
-//! icon buttons and their tooltips, the capsules toolbar buttons sit on, islands, popovers, tags,
-//! pills, marks, the lifted card of a selected row, notices, toasts, switches, notes, the list's
-//! group titles and the search field's frame. A view composes these rather than restyling one.
+//! icon buttons and their tooltips, the capsules toolbar buttons sit on, islands, the title bars
+//! that move the window, popovers, tags, pills, marks, the lifted card of a selected row, notices,
+//! toasts, switches, notes, the list's group titles and the search field's frame. A view composes
+//! these rather than restyling one.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, AppContext, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Render, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div, linear_color_stop,
-    linear_gradient, px,
+    AnyElement, App, AppContext, Context, DispatchPhase, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
+    MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, Window, canvas, div, linear_color_stop, linear_gradient, px,
 };
 
 use crate::design::{
@@ -221,6 +222,60 @@ pub fn island(color: Hsla, p: &Palette) -> Div {
         .border(px(stroke::HAIRLINE))
         .border_color(p.island_rim)
         .shadow(p.island_shadow.clone())
+}
+
+/// How far the pointer travels with the button held before a press on a title bar moves the
+/// window; short of it the press stays a click (a tap on a touchpad wobbles a point or two).
+const WINDOW_MOVE_SLOP: f64 = 4.;
+
+/// A region that moves the window as a title bar does (the window between the islands, their
+/// title rows), a double click zooming it (the Mac). The window moves only once the pointer has
+/// travelled `WINDOW_MOVE_SLOP` with the button held, never on the press: on Linux the compositor
+/// takes the pointer for a move (`start_window_move`), so a move begun on the press turned every
+/// click and tap there into a drag of the window (MS-206). Controls and rows laid over one stop
+/// their presses, so dragging them never moves the window.
+pub fn title_bar(id: impl Into<ElementId>, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+    let id = id.into();
+    // Where the press that may move the window went down, until it is released or moves it.
+    let press = window.use_keyed_state(id.clone(), cx, |_, _| None::<Point<Pixels>>);
+    let arm = press.clone();
+    // The pointer is followed over the whole window, not only the region: it may leave a narrow
+    // one (the gap between islands) before it has travelled far enough.
+    let follow = canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            let release = press.clone();
+            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture {
+                    release.update(cx, |press, _| *press = None);
+                }
+            });
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                if phase != DispatchPhase::Capture {
+                    return;
+                }
+                let Some(start) = *press.read(cx) else { return };
+                let held = event.pressed_button == Some(MouseButton::Left);
+                if held && (event.position - start).magnitude() <= WINDOW_MOVE_SLOP {
+                    return;
+                }
+                press.update(cx, |press, _| *press = None);
+                if held {
+                    window.start_window_move();
+                }
+            });
+        },
+    );
+    div()
+        .id(id)
+        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            let double = event.click_count == 2;
+            arm.update(cx, |press, _| *press = (!double).then_some(event.position));
+            if double {
+                window.titlebar_double_click();
+            }
+        })
+        .child(follow.absolute().size_0())
 }
 
 /// A hairline rule across.
