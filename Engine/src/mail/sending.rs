@@ -15,8 +15,8 @@ use super::Mail;
 use crate::cache::SCHEME;
 use crate::commands::Arguments;
 use crate::mime::OutgoingMessage;
-use crate::model::{Address, Date, MailMessage, MailboxRole, MessageContent, unix_seconds};
-use crate::text::{self, Prefix, Subject};
+use crate::model::{Address, Date, MailMessage, MailboxRole, MessageContent};
+use crate::text;
 use crate::EngineError;
 
 /// What a reply goes out with, worked out before it is sent.
@@ -38,11 +38,7 @@ impl ReplyPlan {
     }
 }
 
-/// The subject of a reply to `subject`: unchanged when it already starts as a reply.
-pub(crate) fn reply_subject(subject: &str) -> String {
-    let raw = subject.trim();
-    if Subject::parse(raw).prefix == Some(Prefix::Reply) { raw.to_string() } else { format!("Re: {raw}") }
-}
+pub(crate) use crate::text::reply_subject;
 
 /// Recipients the way mail clients derive them: `Reply-To`, else `From`, or for one of the user's
 /// own messages its recipients; reply-all copies everyone else on the source except the user's
@@ -86,9 +82,7 @@ pub(crate) fn attribution(source: &MailMessage) -> String {
 }
 
 fn attribution_date(date: Date) -> String {
-    let seconds = unix_seconds(date);
-    let moment = chrono::DateTime::from_timestamp(seconds.floor() as i64, 0).unwrap_or_default();
-    moment.with_timezone(&chrono::Local).format("%a, %b %-d, %Y at %-I:%M\u{202F}%p").to_string()
+    crate::display::local(date).map(|moment| crate::display::full(&moment)).unwrap_or_default()
 }
 
 /// The line breaks of `CharacterSet.newlines`.

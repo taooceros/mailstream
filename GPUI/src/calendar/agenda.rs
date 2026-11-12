@@ -495,7 +495,10 @@ pub(super) fn guest_avatars(guests: &[&CalendarPerson], max: usize, ring: Hsla, 
             guests[..shown]
                 .iter()
                 .enumerate()
-                .map(|(slot, person)| disc(slot).child(avatars::avatar(&guest_address(person), size, p, cx))),
+                .map(|(slot, person)| {
+                    let address = guest_address(person);
+                    disc(slot).child(avatars::avatar(&address.email, &address.avatar(), size, p, cx))
+                }),
         )
         .when(rest > 0, |d| {
             d.child(

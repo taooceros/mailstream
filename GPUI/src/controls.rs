@@ -480,10 +480,10 @@ pub fn icon_avatar(glyph: Icon, color: Hsla, size: f32) -> Div {
         .child(icon(glyph, size * avatar_metrics::GLYPH, gpui::white()))
 }
 
-/// A person's initial in their hue on a wash of it (MS-192), where there is no picture. `key`
-/// picks the hue (a lowercased address, else a Chat id or a name).
-pub fn monogram(initial: SharedString, key: &str, size: f32, p: &Palette) -> Div {
-    let hue = design::avatar_color(key, p.dark);
+/// A person's initial in their hue on a wash of it (MS-192), where there is no picture: the
+/// engine's avatar for them (`mailstream::avatar`).
+pub fn monogram(avatar: &mailstream::Avatar, size: f32, p: &Palette) -> Div {
+    let hue = design::avatar_color(avatar.slot, p.dark);
     div()
         .flex_shrink_0()
         .size(px(size))
@@ -496,7 +496,7 @@ pub fn monogram(initial: SharedString, key: &str, size: f32, p: &Palette) -> Div
         .line_height(px(size * avatar_metrics::LETTER))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(hue)
-        .child(initial)
+        .child(SharedString::from(avatar.initial.clone()))
 }
 
 /// What a notice tells: `Action`, something to do (sign in again), in the indigo of "waiting on

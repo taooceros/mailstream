@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::component::input::{Escape, InputEvent, InputState};
@@ -26,7 +26,6 @@ use mailstream::{AutoReadLog, Change, Event, EventListener, OAuthClientInfo, Set
 use crate::controls::{ButtonKind, ControlSize, Tone, button, field_frame, icon_button, notice, pill, switch, tag};
 use crate::design::{self, Palette, radius, settings as metrics, stroke, text};
 use crate::engine::{MailError, engine};
-use crate::format;
 use crate::icons::{Icon, icon};
 use crate::input;
 
@@ -1442,11 +1441,10 @@ impl Settings {
             )
             .children(self.render_error(AUTO_READ_LOG, p))
             .into_any_element();
-        let now = Local::now();
         let rows = log.entries.iter().take(AUTO_READ_ROWS).enumerate().map(|(index, entry)| {
-            let marked = DateTime::parse_from_rfc3339(&entry.at)
-                .ok()
-                .map(|at| format!("marked {}", format::list_date(Some(at.with_timezone(&Utc)), now)));
+            let marked = Some(mailstream::list_date(Some(entry.at.clone())))
+                .filter(|date| !date.is_empty())
+                .map(|date| format!("marked {date}"));
             let detail = [
                 Some(if entry.category == "newsletter" { "Newsletter" } else { "Notification" }.to_owned()),
                 Some(
@@ -1513,7 +1511,7 @@ impl Settings {
         let refreshed = if status.loading {
             "Refreshing now".to_string()
         } else {
-            status.last_refresh.map_or("Not yet".into(), |at| format::message_date(Some(at), Local::now()))
+            status.last_refresh.map_or("Not yet".into(), |at| mailstream::message_date(Some(at.to_rfc3339())))
         };
         let tagging = match &status.tagging {
             mailstream::TaggingStatus { enabled: false, .. } => "Off".to_string(),

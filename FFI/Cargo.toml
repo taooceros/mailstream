@@ -22,6 +22,8 @@ thiserror = "2"
 # mail_html.rs: the links a click opens and the inline parts' `file:` URLs.
 url = "2"
 mailstream-engine = { path = "../Engine" }
+# display.rs: the local dates the engine's display rules label.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # html_page.rs's answers to Dart's async calls; the swift engine's replies too.
 futures-channel = "0.3"
 # html_page.rs (feature `blitz`): mail HTML laid out and drawn by Blitz (MS-147). No `svg` feature: usvg would

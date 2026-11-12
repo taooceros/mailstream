@@ -15,7 +15,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::Local;
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::component::input::{Escape, InputEvent, InputState};
@@ -32,7 +31,6 @@ use crate::calendar::{CalendarPane, CalendarToast};
 use crate::chat::ChatPane;
 use crate::compose::{ComposeColumn, ReplyBox};
 use crate::engine::{MailError, engine};
-use crate::format;
 use crate::frame_rate::FrameRateMeter;
 use crate::model::{Account, Category, Conversation, Listing, Mailbox, Message, Role};
 use crate::swipe::{BackSwipe, Preferences};
@@ -168,9 +166,8 @@ impl ListKey {
             }
         };
         let mut listing = Listing::from(listing);
-        let now = Local::now();
         for conversation in &mut listing.conversations {
-            conversation.prepare(now);
+            conversation.prepare();
         }
         Ok(listing)
     }
@@ -791,7 +788,6 @@ impl MailApp {
                 }
             }
         }
-        let now = Local::now();
         let mut items = Vec::with_capacity(pinned.len() + waiting.len() + rows.len() + 9);
         items.extend(pinned.into_iter().map(|category| {
             let members = members.remove(&category).unwrap_or_default();
@@ -801,12 +797,12 @@ impl MailApp {
             items.push(Item::Waiting(waiting.len()));
             items.extend(waiting.into_iter().map(Item::Row));
         }
-        let mut current: Option<String> = None;
+        let mut current: Option<&SharedString> = None;
         for index in rows {
             if sections {
-                let section = format::list_section(list.conversations[index].date, now);
-                if current.as_ref() != Some(&section) {
-                    items.push(Item::Section(section.clone().into()));
+                let section = &list.conversations[index].section;
+                if current != Some(section) {
+                    items.push(Item::Section(section.clone()));
                     current = Some(section);
                 }
             }
@@ -890,18 +886,17 @@ impl MailApp {
             cx,
             async move {
                 let thread = engine().show(arg, 200_000, true).await?;
-                let now = Local::now();
-                Ok::<_, MailError>(
-                    thread
-                        .messages
-                        .into_iter()
-                        .map(|message| {
-                            let mut message = Message::from(message);
-                            message.prepare(now);
-                            message
-                        })
-                        .collect::<Vec<_>>(),
-                )
+                let mut messages: Vec<Message> = thread
+                    .messages
+                    .into_iter()
+                    .map(|message| {
+                        let mut message = Message::from(message);
+                        message.prepare();
+                        message
+                    })
+                    .collect();
+                Message::divide(&mut messages);
+                Ok::<_, MailError>(messages)
             },
             move |this, result, cx| {
                 let Some(thread) = this.threads.get_mut(&id).filter(|thread| thread.request == request) else { return };
