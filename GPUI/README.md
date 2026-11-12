@@ -88,6 +88,12 @@ Linux differs from the Mac in:
   with the button held (a click or tap there never does, MS-206); rows and controls never move it.
   The type is the desktop's sans-serif family (fontconfig). The back swipe takes the scroll as
   the compositor turns it for the person's scrolling direction.
+- The window's material (MS-249): where the compositor blurs translucent windows (Hyprland with
+  `decoration:blur` on, KWin) the window asks for blur and paints its warm window color as a wash
+  over it, so the sidebar and the gaps between the islands are frosted glass; elsewhere (GNOME,
+  X11, Hyprland with blur off) it stays opaque, so the desktop never shows through sharp.
+  `src/blur.rs` asks at launch and switches the open window when Hyprland's configuration reloads
+  or the compositor's blur capability changes. `scripts/vhypr.py start NAME --blur` shows it.
 - Scrolling (Wayland): GPUI applies a wheel notch as one jump of three lines and stops a touchpad
   scroll dead when the fingers lift (on the Mac, macOS sends the trackpad's momentum itself).
   `vendor/gpui-fast-linux` is GPUI Fast's Linux platform 0.1.14 with one Wayland-only patch
@@ -133,7 +139,8 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 | `src/compose.rs`, `src/compose/` | The drafts (From picker, recipient completion, attachments, discard confirmation) in the compose column (`column.rs`: tabs, docked, swapped, floating or minimized), and the reader's reply card |
 | `src/settings.rs` | Settings as Flutter's (`settings.dart`, MS-214): accounts (sign in with your own OAuth client, prefilled with the last one; rename, remove), every setting of settings.json in Flutter's groups through the engine (`settings`, `set_setting`, `reset_setting`; re-read on its `Settings` event, the file's problems on top; the `flutter.*` keys stay out), tag sync per mail account, what auto-read marked read with undo, re-tagging, engine status |
 | `src/avatars.rs` | Contact photos from `mail.avatars`, cached in memory; initials otherwise |
-| `src/design.rs` | Flutter's style tokens (`Flutter/lib/ui/design.dart`): both palettes with their elevations, the type, radii, spacing, strokes, motion, list, mark, avatar, tag and notice metrics, avatar/topic/account/attachment colors, and what the window behind the islands is (`window_material`, `window_background`, `window_fill`: the Mac's Liquid Glass, or its blur under a wash of the window color before macOS 26; opaque elsewhere) |
+| `src/design.rs` | Flutter's style tokens (`Flutter/lib/ui/design.dart`): both palettes with their elevations, the type, radii, spacing, strokes, motion, list, mark, avatar, tag and notice metrics, avatar/topic/account/attachment colors, and what the window behind the islands is (`window_material`, `window_background`, `window_fill`: the Mac's Liquid Glass, or its blur under a wash of the window color before macOS 26; on Linux the compositor's blur under the same wash where it blurs, opaque where it doesn't) |
+| `src/blur.rs` | Linux: whether the desktop blurs behind a translucent window (Hyprland's `decoration:blur` over its IPC, followed when its configuration reloads; elsewhere the `ext_background_effect_manager_v1` blur capability or KWin's blur manager), which picks the window's material and switches the open window when it changes (MS-249) |
 | `src/glass.rs` | macOS 26: the window's Liquid Glass (`NSGlassEffectView`) under the transparent GPUI view, as Flutter's window, in the palette's warm `glass_tint` for the appearance (MS-242) |
 | `src/icons.rs`, `src/format.rs` | Material Symbols glyphs; dates and sizes |
 | `src/input.rs` | `field` / `area`: gpui-kit's one-line and multi-line text fields in the surrounding text style (see above) |

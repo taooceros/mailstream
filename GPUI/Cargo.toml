@@ -37,6 +37,12 @@ objc2-web-kit = { version = "0.3", default-features = false, features = ["std", 
 # functions become a loaded table, which both then read.
 fontique = { version = "0.12", default-features = false, features = ["fontconfig-dlopen"] }
 
+# Whether the desktop blurs behind the window (`blur.rs`, MS-249): the Wayland crates GPUI Fast's
+# Linux platform builds already, with its features.
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31.11"
+wayland-protocols = { version = "0.32.9", features = ["client", "staging", "unstable"] }
+
 # Stylo (Blitz's CSS engine) 0.22's derives leave an error type to inference that GPUI's build
 # makes ambiguous; `vendor/stylo_derive` is 0.22.0 with that one type spelled out (`to_css.rs`).
 # `vendor/gpui-fast-linux` is GPUI Fast's Linux platform 0.1.14 with smooth wheel steps and kinetic

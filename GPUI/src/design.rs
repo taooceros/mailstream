@@ -12,7 +12,7 @@ use gpui::{App, BoxShadow, Hsla, WindowAppearance, WindowBackgroundAppearance, p
 pub struct Palette {
     pub dark: bool,
     /// The window behind the islands, where the sidebar sits, where nothing shows through it; over
-    /// the older Mac's blur only a wash of it ([`window_fill`]).
+    /// a blur (an older Mac, a Linux desktop that blurs) only a wash of it ([`window_fill`]).
     pub window: Hsla,
     /// The tint of the Mac window's Liquid Glass (`glass.rs`, MS-242): warm, so the sidebar and
     /// the gaps read cosy rather than gray whatever the desktop behind them.
@@ -222,17 +222,22 @@ pub fn palette(appearance: WindowAppearance) -> &'static Palette {
     }
 }
 
-/// What the window behind the islands is made of, the one place that chooses it (MS-241, MS-242).
+/// What the window behind the islands is made of, the one place that chooses it (MS-241, MS-242,
+/// MS-249).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WindowMaterial {
-    /// [`Palette::window`], where the system offers neither (Linux).
+    /// [`Palette::window`], where the system offers neither: a Linux desktop that doesn't blur
+    /// behind windows, so the desktop never shows through sharp.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     Opaque,
     /// macOS 26's Liquid Glass under GPUI's view (`glass.rs`), as Flutter's window: the desktop
     /// shows through the sidebar and between the islands, in the system's glass, tinted for the
     /// appearance by the system.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Glass,
-    /// An older Mac: GPUI's blur of the desktop, under a wash ([`WINDOW_WASH`]).
+    /// The desktop blurred behind the window, under a wash ([`WINDOW_WASH`]): GPUI's blur on an
+    /// older Mac; on Linux the compositor's, where it blurs translucent windows (Hyprland's
+    /// `decoration:blur`, KWin; `blur.rs`).
     Blur,
 }
 
@@ -241,7 +246,11 @@ pub fn window_material() -> WindowMaterial {
     {
         if crate::glass::available() { WindowMaterial::Glass } else { WindowMaterial::Blur }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        if crate::blur::blurs() { WindowMaterial::Blur } else { WindowMaterial::Opaque }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         WindowMaterial::Opaque
     }
@@ -256,9 +265,9 @@ pub fn window_background() -> WindowBackgroundAppearance {
     }
 }
 
-/// How much of [`Palette::window`] lies over the older Mac's blur: GPUI's blur is the desktop
-/// alone, untinted, so without a wash of the appearance's own color a light desktop would sit
-/// under the dark mode's white sidebar text. The glass tints itself and takes none.
+/// How much of [`Palette::window`] lies over the blur: the blur is the desktop alone, untinted, so
+/// without a wash of the appearance's own color a light desktop would sit under the dark mode's
+/// white sidebar text. The glass tints itself and takes none.
 pub const WINDOW_WASH: f32 = 0.78;
 
 /// What the app paints behind the islands: [`Palette::window`] where the window is opaque,

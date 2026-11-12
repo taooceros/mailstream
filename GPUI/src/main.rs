@@ -18,6 +18,8 @@ macro_rules! secondary {
 
 mod avatars;
 mod bench;
+#[cfg(target_os = "linux")]
+mod blur;
 mod calendar;
 mod chat;
 mod compose;
@@ -83,6 +85,9 @@ fn main() {
         })
         .detach();
 
+        // Linux: whether the desktop blurs behind the window picks its material (`blur.rs`).
+        #[cfg(target_os = "linux")]
+        let blur = blur::init();
         let bounds = Bounds::centered(None, size(px(1240.), px(800.)), cx);
         let mut options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -117,6 +122,8 @@ fn main() {
             })
             .expect("the window opens");
         let app = app.expect("the window built its view");
+        #[cfg(target_os = "linux")]
+        blur::follow(blur, window.into(), cx);
         // Renames, sign-outs, added accounts and setting changes reload accounts and the list.
         let reload = app.downgrade();
         settings::init(

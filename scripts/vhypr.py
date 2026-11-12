@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A private Hyprland desktop for testing the Linux front ends without the user's screen (MS-204).
 
-Usage: python3 scripts/vhypr.py start NAME [--size WxH] [--scale S] [--hz HZ] [--dark]
+Usage: python3 scripts/vhypr.py start NAME [--size WxH] [--scale S] [--hz HZ] [--dark] [--blur] [--wallpaper]
        python3 scripts/vhypr.py run NAME -- COMMAND [ARG...]
        python3 scripts/vhypr.py shot NAME FILE [--class CLASS]
        python3 scripts/vhypr.py clients NAME
@@ -39,6 +39,10 @@ Everything in it is separate from the user's session:
   with optional modifiers: `Return`, `ctrl+k`, `ctrl+shift+Tab`, `alt+Left`, `super+q`.
 - `shot` saves a PNG of the whole output, or of the window whose class is CLASS (grim).
   Windows tile with no gaps, borders or rounding; one window fills the output.
+- Window blur (Hyprland's `decoration:blur`) is off unless `--blur` turns it on, to see a
+  translucent window as on a desktop that blurs (GPUI's frosted window, MS-249) and, without it,
+  its fallback. Nothing lies behind the windows but a flat color unless `--wallpaper` (implied by
+  `--blur`) shows Hyprland's own wallpaper, the anime mascot, which shows clearly through blur.
 
 `env NAME` prints the variables to reach the desktop yourself (WAYLAND_DISPLAY,
 HYPRLAND_INSTANCE_SIGNATURE for hyprctl, DBUS_SESSION_BUS_ADDRESS, the XDG folders). `stop`
@@ -162,11 +166,11 @@ CONFIG = """hl.monitor({{ output = "WAYLAND-1", disabled = true }})
 hl.monitor({{ output = "", mode = "{size}@{hz}", position = "0x0", scale = {scale} }})
 hl.config({{
     general = {{ gaps_in = 0, gaps_out = 0, border_size = 0 }},
-    decoration = {{ rounding = 0, blur = {{ enabled = false }}, shadow = {{ enabled = false }} }},
+    decoration = {{ rounding = 0, blur = {{ enabled = {blur} }}, shadow = {{ enabled = false }} }},
     animations = {{ enabled = false }},
     cursor = {{ inactive_timeout = 1 }},
-    misc = {{ disable_hyprland_logo = true, disable_splash_rendering = true, focus_on_activate = true,
-             disable_watchdog_warning = true }},
+    misc = {{ disable_hyprland_logo = {no_wallpaper}, force_default_wallpaper = 2, disable_splash_rendering = true,
+             focus_on_activate = true, disable_watchdog_warning = true }},
     debug = {{ enable_stdout_logs = true }},
 }})
 """
@@ -210,7 +214,9 @@ def start(args):
     info["portal"] = portal.pid
 
     config = here / "hyprland.lua"
-    config.write_text(CONFIG.format(size=args.size, scale=args.scale, hz=args.hz))
+    wallpaper = args.wallpaper or args.blur
+    config.write_text(CONFIG.format(size=args.size, scale=args.scale, hz=args.hz, blur=str(args.blur).lower(),
+                                    no_wallpaper=str(not wallpaper).lower()))
     # LIBSEAT_BACKEND=seatd (absent here) keeps it off the GPU's DRM device, which the user's
     # session holds: libseat's fallback would open /dev/dri/card* directly.
     env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE")}
@@ -243,7 +249,8 @@ def start(args):
         stop_all(name, info, keep=True)
         fail(f"the headless output did not come up ({created.stdout.strip()} {created.stderr.strip()}); "
              f"Hyprland's log: {here / 'hyprland.log'}")
-    print(f"desktop {name}: {args.size}@{args.hz} at scale {args.scale}, {'dark' if args.dark else 'light'}; "
+    print(f"desktop {name}: {args.size}@{args.hz} at scale {args.scale}, {'dark' if args.dark else 'light'}"
+          f"{', blur' if args.blur else ''}{', wallpaper' if wallpaper else ''}; "
           f"stop it with: python3 scripts/vhypr.py stop {name}")
     print_env(info, name)
 
@@ -527,6 +534,8 @@ def main():
     p.add_argument("--scale", default="1")
     p.add_argument("--hz", default="60")
     p.add_argument("--dark", action="store_true")
+    p.add_argument("--blur", action="store_true")
+    p.add_argument("--wallpaper", action="store_true")
     p.set_defaults(fn=start)
     p = verbs.add_parser("run")
     p.add_argument("name")
