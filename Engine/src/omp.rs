@@ -778,7 +778,7 @@ pub(crate) mod tests {
         let dir = std::env::temp_dir().join(format!("mailstream-omp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let environment: HashMap<String, String> =
-            [("PATH".to_string(), format!("{}:/usr/bin:/bin", dir.display()))].into_iter().collect();
+            [("PATH".to_string(), format!("{}:{}", dir.display(), crate::testkit::tools_path()))].into_iter().collect();
         let tools = Arc::new(Tools::fixed(environment));
         let tagger = Tagger::new(tools.clone(), dir.join("work"), dir.join("no-apple-tagger"));
         let options =
@@ -798,7 +798,7 @@ pub(crate) mod tests {
             ),
         );
         let tools = Arc::new(Tools::fixed(
-            [("PATH".to_string(), format!("{}:{}:/usr/bin:/bin", dir.display(), newer.display()))].into_iter().collect(),
+            [("PATH".to_string(), format!("{}:{}:{}", dir.display(), newer.display(), crate::testkit::tools_path()))].into_iter().collect(),
         ));
         let tagger_on_path = Tagger::new(tools, dir.join("work"), dir.join("no-apple-tagger"));
         let tags = tagger_on_path.tag(&[item("k", false)], &options("")).await.unwrap();
@@ -821,7 +821,8 @@ pub(crate) mod tests {
         let slow = dir.join("slow");
         script(&slow, &format!("echo $$ > {}/slow.pid; exec sleep 30", dir.display()));
         let started = std::time::Instant::now();
-        let error = run(&slow, &[], &HashMap::new(), None, false, Duration::from_millis(300)).await.err().unwrap();
+        let tools_only: HashMap<String, String> = [("PATH".to_string(), crate::testkit::tools_path())].into_iter().collect();
+        let error = run(&slow, &[], &tools_only, None, false, Duration::from_millis(300)).await.err().unwrap();
         assert_eq!(error, "slow timed out");
         assert!(started.elapsed() < Duration::from_secs(5));
         let pid: i32 = std::fs::read_to_string(dir.join("slow.pid")).unwrap().trim().parse().unwrap();
@@ -838,7 +839,7 @@ pub(crate) mod tests {
         // An omp on PATH that must never run.
         script(&dir.join("omp"), &format!("touch {}/omp-ran; exit 1", dir.display()));
         let tools = Arc::new(Tools::fixed(
-            [("PATH".to_string(), format!("{}:/usr/bin:/bin", dir.display()))].into_iter().collect(),
+            [("PATH".to_string(), format!("{}:{}", dir.display(), crate::testkit::tools_path()))].into_iter().collect(),
         ));
         let helper = dir.join(APPLE_TAGGER);
         let tagger = Tagger::new(tools, dir.join("work"), helper.clone());

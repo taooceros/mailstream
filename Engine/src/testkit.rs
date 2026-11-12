@@ -37,15 +37,32 @@ pub fn config(oauth: OAuthConfig) -> Config {
         endpoints: endpoints("http://127.0.0.1:9"),
         // No relay: no test registers push with a provider unless it sets a fake one.
         push: push::PushConfig::default(),
-        // A PATH without omp (the system's tools only): tagging runs only the fake omp a
-        // test names.
-        tool_environment: Some(HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())])),
+        // A PATH without omp (the tools the fake scripts use only): tagging runs only the fake
+        // omp a test names.
+        tool_environment: Some(HashMap::from([("PATH".to_string(), tools_path())])),
         // No Apple Intelligence: only a fake helper a test writes there runs.
         apple_tagger: root.join(omp::APPLE_TAGGER),
         avatar_web: Arc::new(avatars::tests::FakeWeb::default()),
         // The test of the socket turns it on.
         control_socket: false,
     }
+}
+
+/// A PATH holding just the folders of the tools the fake scripts run (`grep`, `head`, `sleep`,
+/// `touch`), each found on the tests' own PATH in a folder without an `omp`, so a child sees
+/// none of the user's: NixOS has no such tools in `/usr/bin` or `/bin`.
+pub fn tools_path() -> String {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut directories: Vec<std::path::PathBuf> = Vec::new();
+    for tool in ["grep", "head", "sleep", "touch"] {
+        let directory = std::env::split_paths(&path)
+            .find(|directory| directory.join(tool).is_file() && !directory.join("omp").exists())
+            .unwrap_or_else(|| panic!("no {tool} on PATH outside a folder holding omp"));
+        if !directories.contains(&directory) {
+            directories.push(directory);
+        }
+    }
+    std::env::join_paths(directories).unwrap().into_string().unwrap()
 }
 
 /// `config` with every provider and the token endpoint (`/token`) on `server`.
