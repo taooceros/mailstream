@@ -637,6 +637,86 @@ mod tests {
         assert_eq!(form_encoded([("scope", "openid https://x/y"), ("a", "b~c-d.e_f*")]), "scope=openid%20https%3A%2F%2Fx%2Fy&a=b~c-d.e_f%2A");
     }
 
+    #[test]
+    fn reads_google_and_graph_listings() {
+        let page: GooglePage<u32> = serde_json::from_str(r#"{"messages":[1,2],"nextPageToken":"t/1","resultSizeEstimate":2}"#).unwrap();
+        assert_eq!(page.next("https://x/m?q=a"), Some("https://x/m?q=a&pageToken=t%2F1".into()));
+        assert_eq!(page.items(), [1, 2]);
+        let page: GooglePage<u32> = serde_json::from_str(r#"{"otherContacts":[3],"nextPageToken":""}"#).unwrap();
+        assert_eq!((page.next("https://x/c"), page.items()), (None, vec![3]));
+        // Gmail's history page carries its history id beside the listing.
+        #[derive(Deserialize)]
+        struct History {
+            #[serde(flatten)]
+            records: GooglePage<u32>,
+            #[serde(rename = "historyId")]
+            history_id: String,
+        }
+        let page: History = serde_json::from_str(r#"{"history":[4],"nextPageToken":"n","historyId":"9"}"#).unwrap();
+        assert_eq!((page.history_id.as_str(), page.records.next("https://x/h?a=b")), ("9", Some("https://x/h?a=b&pageToken=n".into())));
+        assert_eq!(page.records.items(), [4]);
+        let page: GraphPage<u32> = serde_json::from_str(r#"{"value":[5],"@odata.nextLink":"https://g/next"}"#).unwrap();
+        assert_eq!((page.next("https://g/first"), page.items()), (Some("https://g/next".into()), vec![5]));
+    }
+
+    #[test]
+    fn splits_batch_answers() {
+        let body = "--b\r\nContent-Type: application/http\r\nContent-ID: <response-m2>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"id\":\"x\"}\r\n--b\r\nContent-ID: <response-m1>\r\n\r\nHTTP/1.1 404 Not Found\r\n\r\n{}\r\n--b\r\n\r\nHTTP/1.1 200 OK\r\n\r\n{}\r\n--b--\r\n";
+        let parts = multipart_parts(body.as_bytes(), "b");
+        assert_eq!(parts.len(), 2, "the part without a Content-ID is left out");
+        assert_eq!((parts[0].number, parts[0].status, String::from_utf8_lossy(&parts[0].body).trim()), (2, 200, "{\"id\":\"x\"}"));
+        assert_eq!((parts[1].number, parts[1].status), (1, 404));
+        let answer = serde_json::json!({ "responses": [
+            { "id": "2", "status": 429, "headers": { "retry-after": "3" } },
+            { "id": "1", "status": 200, "body": { "categories": ["A"] } },
+        ]});
+        let parts = json_parts(&answer);
+        assert_eq!((parts[0].number, parts[0].status, parts[0].retry_after, parts[0].body.is_empty()), (2, 429, Some(3.0), true));
+        assert_eq!((parts[1].number, parts[1].retry_after, parts[1].body.as_slice()), (1, None, br#"{"categories":["A"]}"#.as_slice()));
+    }
+
+    /// An `Api` whose account is never asked for a token: `batch` sends nothing itself.
+    fn tokenless_api() -> Api {
+        let keychain = crate::keychain::Keychain::new(format!("dev.mailstream.test.api.{}", crate::testkit::unique()));
+        let oauth = Arc::new(crate::oauth::OAuth::new(crate::oauth::OAuthConfig::default()));
+        let tokens = Tokens::new(keychain, oauth, crate::BuiltInClients::new(), std::collections::HashMap::new());
+        Api::graph("me@x.com", Arc::new(tokens))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn batches_send_again_only_what_was_throttled_or_unanswered() {
+        let api = tokenless_api();
+        let sent: std::sync::Mutex<Vec<Vec<(usize, &str)>>> = Default::default();
+        let send = |pending: Vec<(usize, &'static str)>| {
+            let attempt = sent.lock().unwrap().len();
+            sent.lock().unwrap().push(pending.clone());
+            async move {
+                let part = |number: usize, status: u16, retry_after: Option<f64>| Part { number, status, retry_after, body: b"{}".to_vec() };
+                Ok(match attempt {
+                    // a throttled for 2 s, b done, c unanswered.
+                    0 => vec![part(1, 429, Some(2.0)), part(2, 200, None)],
+                    // b answered again is no longer pending: left alone.
+                    1 => vec![part(2, 200, None), part(1, 200, None), part(3, 200, None)],
+                    // The next chunk: d fails for good, as servers errors do when not repeatable.
+                    _ => vec![part(1, 503, None)],
+                })
+            }
+        };
+        let mut answered = Vec::new();
+        let start = Instant::now();
+        let error = api
+            .batch(vec!["a", "b", "c", "d"], 3, "Microsoft Graph", false, send, |item, part| {
+                answered.push((item, part.status));
+                if part.status == 200 { Ok(()) } else { Err(ApiError::new(part.status, "failed")) }
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 503);
+        assert_eq!(answered, [("b", 200), ("a", 200), ("c", 200), ("d", 503)]);
+        assert_eq!(*sent.lock().unwrap(), [vec![(1, "a"), (2, "b"), (3, "c")], vec![(1, "a"), (3, "c")], vec![(1, "d")]]);
+        assert!(start.elapsed() >= Duration::from_secs(2), "waited the Retry-After");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn budgets_spend_and_pause() {
         let budget = QuotaBudget::new(60, 10, 2);

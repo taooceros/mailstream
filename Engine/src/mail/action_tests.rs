@@ -8,12 +8,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 
-use crate::fake::{FakeRequest, FakeServer, Reply};
-use crate::mail_tests::{
-    BASE_MS, call, encode, engine_for, gmail_batch, gmail_full, gmail_metadata, graph_message, header, ids, token_reply,
-    wait_until,
-};
-use crate::tests::cleanup;
+use crate::mail_tests::{BASE_MS, encode, gmail_batch, gmail_full, gmail_metadata, graph_message, header, ids};
+use crate::testkit::{FakeRequest, FakeServer, Reply, call, cleanup, engine_for, token_reply, wait_until};
 
 /// The requests that change mail, as the server got them.
 type Changes = Arc<Mutex<Vec<FakeRequest>>>;
@@ -259,12 +255,16 @@ fn changes_and_sends_outlook_mail_through_batches() {
                         if sub["id"] == "1" && refused.fetch_add(1, Ordering::SeqCst) == 0 {
                             return json!({ "id": sub["id"], "status": 429, "headers": { "Retry-After": "0" } });
                         }
+                        // Marking unread is refused for good: the change fails with Graph's message.
+                        if sub["body"] == json!({ "isRead": false }) {
+                            return json!({ "id": sub["id"], "status": 403, "body": { "error": { "message": "Access denied" } } });
+                        }
                         json!({ "id": sub["id"], "status": 200, "body": {} })
                     })
                     .collect();
                 return Reply::json(json!({ "responses": responses }));
             }
-            return Reply { status: 202, headers: vec![], body: vec![] };
+            return Reply::bytes(202, Vec::new());
         }
         let folder = |id: &str, name: &str| json!({ "id": id, "displayName": name, "childFolderCount": 0, "unreadItemCount": 1, "totalItemCount": 3 });
         match path.strip_prefix("/v1.0/").unwrap_or(path) {
@@ -315,6 +315,10 @@ fn changes_and_sends_outlook_mail_through_batches() {
                 "headers": { "Prefer": "IdType=\"ImmutableId\"", "Content-Type": "application/json" } })
     );
     assert_eq!(json_body(&sent[1])["requests"].as_array().unwrap().len(), 1);
+
+    let refused = call(&engine, "mail.read", json!({ "ids": [plan], "unread": true })).unwrap();
+    assert_eq!(refused["failed"], json!([{ "code": "failed", "id": plan, "message": "Access denied" }]));
+    assert_eq!(json_body(&changes(&changed)[0])["requests"][0]["body"], json!({ "isRead": false }));
 
     call(&engine, "mail.star", json!({ "ids": [plan] })).unwrap();
     let starred = json_body(&changes(&changed)[0]);

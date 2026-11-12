@@ -359,6 +359,13 @@ Reuse these instead of writing another copy:
 - Network: paging is `API.pages`, chunked batch requests with throttled retries are `API.batched`,
   status classification is `API.retry(status:body:)`; provider roots and OAuth scopes live in
   `Backend/Endpoints.swift`.
+- Rust engine network (`Engine/src/api.rs`): every HTTP client comes from `api::client` (accounts
+  and OAuth share `api::HTTP`); listings page through `api::pages` with `GooglePage`/`GraphPage`;
+  batch requests go through `Api::batch`, which sends again what was throttled or unanswered, with
+  `multipart_parts` (Gmail) or `json_parts` (Graph `$batch`) reading the answers; queries and forms
+  are `api::form_encoded`. OAuth scopes are the constants in `oauth.rs`.
+- Engine tests: engine folders, sign-ins, `call`/`wait_until` and the fake HTTP server are in
+  `Engine/src/testkit.rs`.
 - Disk: mail data (accounts, mailboxes, listings, content, tags, chat) lives in the Turso database
   behind `MailCache` (`MailDatabase`, `Support/SQLite.swift`), in Application Support/Mailstream/mail.db;
   `MailCache` queues its writes. Other JSON files are read and written with `JSONFile`.

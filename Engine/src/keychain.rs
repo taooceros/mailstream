@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn keeps_one_item_under_its_service() {
-        let keychain = Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::tests::unique()));
+        let keychain = Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::testkit::unique()));
         assert_eq!(keychain.load().unwrap(), SignIns::default());
         let mut sign_ins = SignIns::default();
         sign_ins.refresh_tokens.insert("a@b.c".into(), "one".into());

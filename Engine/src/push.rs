@@ -703,7 +703,7 @@ mod tests {
 
     #[test]
     fn reads_what_the_swift_engine_wrote() {
-        let file = std::env::temp_dir().join(format!("mailstream-push-{}-{}.json", std::process::id(), crate::tests::unique()));
+        let file = std::env::temp_dir().join(format!("mailstream-push-{}-{}.json", std::process::id(), crate::testkit::unique()));
         std::fs::write(
             &file,
             "{\n  \"a@outlook.com\" : {\n    \"expires\" : \"2025-11-10T12:00:00Z\",\n    \"id\" : \"sub\",\n    \"kind\" : \"graph\"\n  }\n}",

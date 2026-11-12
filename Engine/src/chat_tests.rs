@@ -8,24 +8,10 @@ use std::time::{Duration, Instant};
 use futures::executor::block_on;
 use serde_json::{Value, json};
 
-use crate::fake::{FakeRequest, FakeServer, Reply};
-use crate::keychain::{Keychain, SignIns};
-use crate::tests::{cleanup, config};
-use crate::{Config, Engine, OAuthClient, OAuthConfig, backend, gmail};
+use crate::testkit::{FakeRequest, FakeServer, Reply, call, cleanup, server_config, sign_in, wait_until, write_accounts};
+use crate::{Config, Engine};
 
 const ME: &str = "me@gmail.com";
-
-fn call(engine: &Engine, command: &str, args: Value) -> Result<Value, crate::EngineError> {
-    block_on(engine.call(command, args))
-}
-
-fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-    let start = Instant::now();
-    while !done() {
-        assert!(start.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
 
 fn user(id: &str, name: Option<&str>, email: Option<&str>) -> Value {
     json!({ "name": format!("users/{id}"), "displayName": name, "email": email, "type": "HUMAN" })
@@ -83,7 +69,7 @@ fn chat_reply(request: &FakeRequest, offline: &AtomicBool) -> Reply {
             }))
         }
         ("POST", "spaces/B/messages") => Reply::status(403, json!({ "error": { "message": "No permission" } })),
-        ("GET", "media/r/1") => Reply { status: 200, headers: vec![], body: b"PNG".to_vec() },
+        ("GET", "media/r/1") => Reply::bytes(200, b"PNG".to_vec()),
         _ => {
             let Some((space, rest)) = path.strip_prefix("spaces/").and_then(|rest| rest.split_once('/')) else {
                 return read_state(method, path, request);
@@ -138,33 +124,23 @@ fn messages(space: &str, older: bool) -> Reply {
     }
 }
 
-fn engine_for(server: &FakeServer) -> Config {
-    let mut config = config(OAuthConfig { token_endpoint: Some(format!("{}/token", server.base)), ..OAuthConfig::default() });
-    config.endpoints = backend::Endpoints {
-        gmail: gmail::GmailEndpoints {
-            root: format!("{}/gmail/v1/users/me/", server.base),
-            batch: format!("{}/batch/gmail/v1", server.base),
-        },
-        graph: format!("{}/v1.0/", server.base),
-        chat: format!("{}/chat/v1/", server.base),
-        people: format!("{}/people/v1/", server.base),
-        calendar: format!("{}/calendar/v3/", server.base),
-    };
-    std::fs::create_dir_all(&config.support_directory).unwrap();
+/// A folder on `server` with a Google account that reads chat, signed in, and an Outlook one
+/// without chat.
+fn config_for(server: &FakeServer) -> Config {
+    let config = server_config(server);
     let scopes = [
         "openid",
         "https://www.googleapis.com/auth/chat.messages.readonly",
         "https://www.googleapis.com/auth/chat.spaces.create",
     ];
-    let records = json!([
-        { "id": ME, "provider": "google", "label": "Personal", "scopes": scopes },
-        { "id": "me@outlook.com", "provider": "microsoft", "label": "Work", "scopes": ["openid"] },
-    ]);
-    std::fs::write(config.support_directory.join("accounts.json"), serde_json::to_vec(&records).unwrap()).unwrap();
-    let mut sign_ins = SignIns::default();
-    sign_ins.refresh_tokens.insert(ME.into(), "rt".into());
-    sign_ins.clients.insert(ME.into(), OAuthClient { id: "client".into(), secret: Some("secret".into()) });
-    Keychain::new(config.keychain_service.clone()).store(&sign_ins).unwrap();
+    write_accounts(
+        &config,
+        &[
+            json!({ "id": ME, "provider": "google", "label": "Personal", "scopes": scopes }),
+            json!({ "id": "me@outlook.com", "provider": "microsoft", "label": "Work", "scopes": ["openid"] }),
+        ],
+    );
+    sign_in(&config, &[ME]);
     config
 }
 
@@ -186,7 +162,7 @@ fn lists_opens_reads_sends_and_starts_chats() {
     let offline = Arc::new(AtomicBool::new(false));
     let switch = offline.clone();
     let server = FakeServer::start(move |request| chat_reply(request, &switch));
-    let config = engine_for(&server);
+    let config = config_for(&server);
     let engine = Engine::start(config.clone());
     let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
     let heard = events.clone();
@@ -301,7 +277,7 @@ fn signing_out_drops_the_account_and_its_messages() {
     let offline = Arc::new(AtomicBool::new(false));
     let switch = offline.clone();
     let server = FakeServer::start(move |request| chat_reply(request, &switch));
-    let config = engine_for(&server);
+    let config = config_for(&server);
     let engine = Engine::start(config.clone());
     wait_until("the spaces", || names(&spaces(&engine)).len() == 3);
     call(&engine, "chat.open", json!({ "account": ME, "space": "spaces/C" })).unwrap();
@@ -324,7 +300,7 @@ fn polls_every_chat_poll_seconds_and_refetches_only_what_changed() {
     let offline = Arc::new(AtomicBool::new(false));
     let switch = offline.clone();
     let server = FakeServer::start(move |request| chat_reply(request, &switch));
-    let config = engine_for(&server);
+    let config = config_for(&server);
     std::fs::write(config.support_directory.join("settings.json"), "{\n  \"chat.pollSeconds\" : 5\n}\n").unwrap();
     let engine = Engine::start(config.clone());
     wait_until("the spaces", || names(&spaces(&engine)).len() == 3);

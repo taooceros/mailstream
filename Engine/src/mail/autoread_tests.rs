@@ -8,9 +8,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::fake::{FakeRequest, FakeServer, Reply};
-use crate::mail_tests::{call, engine_for, gmail_batch, header, token_reply, wait_until};
-use crate::tests::cleanup;
+use crate::mail_tests::{gmail_batch, header};
+use crate::testkit::{FakeRequest, FakeServer, Reply, call, cleanup, engine_for, token_reply, wait_until};
 
 type Changes = Arc<Mutex<Vec<FakeRequest>>>;
 

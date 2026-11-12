@@ -9,10 +9,9 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::fake::{FakeServer, Reply};
-use crate::mail_tests::{BASE_MS, call, engine_for, gmail_batch, graph_message, header, token_reply, wait_until};
+use crate::mail_tests::{BASE_MS, gmail_batch, graph_message, header};
 use crate::tagging_tests::{counts, fake_omp};
-use crate::tests::cleanup;
+use crate::testkit::{FakeServer, Reply, call, cleanup, engine_for, token_reply, wait_until};
 
 /// The fake mailbox: user labels by id, each message's label ids, and the history since 100.
 struct Gmail {
@@ -117,7 +116,7 @@ fn server(gmail: Arc<Mutex<Gmail>>) -> FakeServer {
                     let remove: Vec<&str> = remove.iter().map(String::as_str).collect();
                     gmail.relabel(&id, &add, &remove);
                 }
-                Reply { status: 204, headers: vec![], body: vec![] }
+                Reply::bytes(204, Vec::new())
             }
             ("GET", "history") => {
                 let start: u64 = request.param("startHistoryId").unwrap().parse().unwrap();

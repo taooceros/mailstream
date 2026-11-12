@@ -47,7 +47,7 @@ pub mod text;
 mod threader;
 mod tokens;
 #[cfg(test)]
-mod fake;
+mod testkit;
 #[cfg(test)]
 mod mail_tests;
 #[cfg(test)]
@@ -597,60 +597,14 @@ fn provider(args: &Arguments) -> Result<Provider, EngineError> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
     use futures::executor::block_on;
 
     use super::*;
-    use crate::keychain::SignIns;
-    use crate::oauth::tests::{TokenServer, free_port, redirecting_browser};
-
-    /// A number no other test in this process gets, for temporary names.
-    pub(crate) fn unique() -> u64 {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    }
-
-    pub(crate) fn config(oauth: OAuthConfig) -> Config {
-        let name = format!("mailstream-engine-{}-{}", std::process::id(), unique());
-        let root = std::env::temp_dir().join(name.clone());
-        Config {
-            support_directory: root.join("support"),
-            cache_directory: root.join("caches"),
-            keychain_service: format!("dev.mailstream.test.{name}"),
-            built_in_clients: BuiltInClients::new(),
-            oauth,
-            // Nothing listens there: no test reaches a real provider.
-            endpoints: backend::Endpoints {
-                gmail: gmail::GmailEndpoints {
-                    root: "http://127.0.0.1:9/gmail/v1/users/me/".into(),
-                    batch: "http://127.0.0.1:9/batch/gmail/v1".into(),
-                },
-                graph: "http://127.0.0.1:9/v1.0/".into(),
-                chat: "http://127.0.0.1:9/chat/v1/".into(),
-                people: "http://127.0.0.1:9/people/v1/".into(),
-                calendar: "http://127.0.0.1:9/calendar/v3/".into(),
-            },
-            // No relay: no test registers push with a provider unless it sets a fake one.
-            push: push::PushConfig::default(),
-            // A PATH without omp (the system's tools only): tagging runs only the fake omp a
-            // test names.
-            tool_environment: Some(HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())])),
-            // No Apple Intelligence: only a fake helper a test writes there runs.
-            apple_tagger: root.join(omp::APPLE_TAGGER),
-            avatar_web: Arc::new(avatars::tests::FakeWeb::default()),
-            // The test of the socket turns it on.
-            control_socket: false,
-        }
-    }
-
-    pub(crate) fn cleanup(config: &Config) {
-        let _ = Keychain::new(config.keychain_service.clone()).store(&SignIns::default());
-        let _ = std::fs::remove_dir_all(config.support_directory.parent().unwrap());
-    }
+    use crate::testkit::{FakeServer, Reply, cleanup, config, free_port, redirecting_browser};
 
     #[test]
     fn answers_settings_commands_and_follows_the_file() {
@@ -680,7 +634,6 @@ pub(crate) mod tests {
 
     #[test]
     fn signs_in_renames_and_signs_out() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let id_token = format!(
             "e30.{}.sig",
             base64::Engine::encode(
@@ -688,13 +641,13 @@ pub(crate) mod tests {
                 br#"{"email":"Me@Outlook.com","name":"Me"}"#
             )
         );
-        let server = runtime.block_on(TokenServer::start(move |_| {
-            (200, format!(r#"{{"access_token":"at","expires_in":3599,"refresh_token":"rt","scope":"openid Mail.ReadWrite","id_token":"{id_token}"}}"#))
-        }));
+        let server = FakeServer::start(move |_| {
+            Reply::json(json!({ "access_token": "at", "expires_in": 3599, "refresh_token": "rt", "scope": "openid Mail.ReadWrite", "id_token": id_token }))
+        });
         let port = free_port();
         let oauth = OAuthConfig {
             redirect_port: port,
-            token_endpoint: Some(server.url.clone()),
+            token_endpoint: Some(format!("{}/token", server.base)),
             sign_in_timeout: Duration::from_secs(10),
             open_url: redirecting_browser(port, "code=c"),
         };

@@ -567,7 +567,7 @@ mod tests {
 
     fn temp() -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("mailstream-settings-{}-{}", std::process::id(), crate::tests::unique()));
+            std::env::temp_dir().join(format!("mailstream-settings-{}-{}", std::process::id(), crate::testkit::unique()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

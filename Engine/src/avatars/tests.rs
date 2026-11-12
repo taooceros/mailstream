@@ -10,10 +10,8 @@ use serde_json::{Value, json};
 use super::picture::tests::png;
 use super::web::{Page, Web};
 use super::*;
-use crate::fake::{FakeServer, Reply};
-use crate::keychain::{Keychain, SignIns};
-use crate::tests::{cleanup, config, unique};
-use crate::{Engine, OAuthClient, OAuthConfig};
+use crate::Engine;
+use crate::testkit::{FakeServer, Reply, cleanup, server_config, sign_in_all, unique};
 
 /// The public web as a table: URL → body, DNS name → TXT records. Everything else fails.
 #[derive(Default)]
@@ -235,25 +233,18 @@ fn contact_photos_come_first_and_the_directory_lists_everyone() {
         "/v1.0/me/contacts" => Reply::json(json!({
             "value": [{ "id": "c1", "displayName": "", "emailAddresses": [{ "name": "Bo", "address": "BO@corp.test" }] }],
         })),
-        "/v1.0/me/contacts/c1/photo/$value" => Reply { status: 200, headers: Vec::new(), body: png(64, 64, [8, 8, 8, 255]) },
+        "/v1.0/me/contacts/c1/photo/$value" => Reply::bytes(200, png(64, 64, [8, 8, 8, 255])),
         _ => Reply::status(404, json!({ "error": { "message": "not found" } })),
     });
-    let mut config = config(OAuthConfig { token_endpoint: Some(format!("{}/token", server.base)), ..OAuthConfig::default() });
-    config.endpoints.graph = format!("{}/v1.0/", server.base);
-    config.endpoints.people = format!("{}/people/v1/", server.base);
-    std::fs::create_dir_all(&config.support_directory).unwrap();
-    let records = json!([
-        { "id": "me@gmail.com", "provider": "google", "label": "me@gmail.com", "scopes": ["openid", directory::GOOGLE_CONTACTS] },
-        { "id": "me@outlook.com", "provider": "microsoft", "label": "me@outlook.com", "scopes": ["openid", directory::GRAPH_CONTACTS] },
-        { "id": "other@gmail.com", "provider": "google", "label": "other@gmail.com", "scopes": ["openid"] },
-    ]);
-    std::fs::write(config.support_directory.join("accounts.json"), serde_json::to_vec(&records).unwrap()).unwrap();
-    let mut sign_ins = SignIns::default();
-    for id in ["me@gmail.com", "me@outlook.com", "other@gmail.com"] {
-        sign_ins.refresh_tokens.insert(id.into(), "rt".into());
-        sign_ins.clients.insert(id.into(), OAuthClient { id: "client".into(), secret: Some("secret".into()) });
-    }
-    Keychain::new(config.keychain_service.clone()).store(&sign_ins).unwrap();
+    let mut config = server_config(&server);
+    sign_in_all(
+        &config,
+        &[
+            json!({ "id": "me@gmail.com", "provider": "google", "label": "me@gmail.com", "scopes": ["openid", directory::GOOGLE_CONTACTS] }),
+            json!({ "id": "me@outlook.com", "provider": "microsoft", "label": "me@outlook.com", "scopes": ["openid", directory::GRAPH_CONTACTS] }),
+            json!({ "id": "other@gmail.com", "provider": "google", "label": "other@gmail.com", "scopes": ["openid"] }),
+        ],
+    );
     // Google photos are fetched anonymously, at the drawn size.
     let web = Arc::new(FakeWeb::default());
     web.page("https://lh3.googleusercontent.com/a/ann=s96-c", png(50, 50, [5, 6, 7, 255]));

@@ -12,6 +12,9 @@ use crate::api::{self, ApiError, ErrorBody, Priority, Request};
 use crate::backend::Flag;
 use crate::mime::{self, OutgoingMessage};
 
+/// One message's sub-request: its id, method, path after the message and body.
+type Change<'a> = (String, &'a str, String, Option<Value>);
+
 impl Graph {
     pub async fn set_flag(&self, flag: Flag, on: bool, ids: &[String]) -> Result<(), ApiError> {
         let change = match flag {
@@ -36,7 +39,7 @@ impl Graph {
     pub async fn set_tags(&self, ids: &[String], add: &[String], remove: &[String]) -> Result<(), ApiError> {
         let fetches = ids.iter().map(|id| (id.clone(), "GET", "?$select=categories".to_string(), None)).collect();
         let current = self.send_batch(fetches).await?;
-        let updates: Vec<(String, &str, String, Option<Value>)> = ids
+        let updates: Vec<Change> = ids
             .iter()
             .filter_map(|id| {
                 let before: Vec<String> = current
@@ -70,8 +73,8 @@ impl Graph {
 
     /// `batch` with a method, path and body of its own per message (`(id, method, path, body)`);
     /// answers each message's successful sub-request's body, by message id.
-    async fn send_batch<'a>(&self, items: Vec<(String, &'a str, String, Option<Value>)>) -> Result<HashMap<String, Value>, ApiError> {
-        let send = |pending: Vec<(usize, (String, &'a str, String, Option<Value>))>| async move {
+    async fn send_batch<'a>(&self, items: Vec<Change<'a>>) -> Result<HashMap<String, Value>, ApiError> {
+        let send = |pending: Vec<(usize, Change<'a>)>| async move {
             let requests: Vec<Value> = pending
                 .into_iter()
                 .map(|(number, (id, method, path, body))| {

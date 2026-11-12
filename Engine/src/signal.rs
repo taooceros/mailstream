@@ -208,7 +208,7 @@ mod tests {
     #[tokio::test]
     async fn hears_posts_from_this_process() {
         let signal =
-            ProcessSignal::new(format!("dev.mailstream.test.signal.{}.{}", std::process::id(), crate::tests::unique()));
+            ProcessSignal::new(format!("dev.mailstream.test.signal.{}.{}", std::process::id(), crate::testkit::unique()));
         let mut posts = signal.posts().expect("the name registers");
         signal.post();
         signal.post();
@@ -228,7 +228,7 @@ mod tests {
     #[tokio::test]
     async fn hears_posts_from_another_process() {
         // What the Swift engine's `notify_post` does, from a process of its own.
-        let name = format!("dev.mailstream.test.signal.{}.{}", std::process::id(), crate::tests::unique());
+        let name = format!("dev.mailstream.test.signal.{}.{}", std::process::id(), crate::testkit::unique());
         let mut posts = ProcessSignal::new(name.clone()).posts().expect("notifyd registers the name");
         let status = std::process::Command::new("/usr/bin/notifyutil").args(["-p", &name]).status().unwrap();
         assert!(status.success());

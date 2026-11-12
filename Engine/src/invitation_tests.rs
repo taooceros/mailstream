@@ -8,12 +8,11 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 
 use crate::calendar_api::{local_day, local_midnight};
-use crate::fake::{FakeRequest, FakeServer, Reply};
-use crate::keychain::{Keychain, SignIns};
-use crate::mail_tests::{BASE_MS, call, encode, gmail_batch, graph_message, header, wait_until};
+use crate::mail_tests::{BASE_MS, encode, gmail_batch, graph_message, header};
 use crate::model::iso8601;
-use crate::tests::{cleanup, config};
-use crate::{Config, Engine, OAuthClient, OAuthConfig, backend, gmail};
+use crate::oauth::{GOOGLE_CALENDARS, GOOGLE_EVENTS};
+use crate::testkit::{FakeRequest, FakeServer, Reply, call, cleanup, server_config, sign_in_all, wait_until};
+use crate::{Config, Engine};
 
 const GOOGLE: &str = "me@gmail.com";
 const OUTLOOK: &str = "me@outlook.com";
@@ -29,39 +28,21 @@ fn ics_time(days: i64, hour: f64) -> String {
     at(days, hour).replace(['-', ':'], "")
 }
 
+/// An engine on `server` signed in to `accounts` (`(id, provider)`), each with mail and every
+/// calendar scope.
 fn engine_for(server: &FakeServer, accounts: &[(&str, &str)]) -> (Engine, Config) {
-    let mut config = config(OAuthConfig { token_endpoint: Some(format!("{}/token", server.base)), ..OAuthConfig::default() });
-    config.endpoints = backend::Endpoints {
-        gmail: gmail::GmailEndpoints {
-            root: format!("{}/gmail/v1/users/me/", server.base),
-            batch: format!("{}/batch/gmail/v1", server.base),
-        },
-        graph: format!("{}/v1.0/", server.base),
-        chat: format!("{}/chat/v1/", server.base),
-        people: format!("{}/people/v1/", server.base),
-        calendar: format!("{}/calendar/v3/", server.base),
-    };
-    std::fs::create_dir_all(&config.support_directory).unwrap();
+    let config = server_config(server);
     let records: Vec<Value> = accounts
         .iter()
         .map(|(id, provider)| {
             let scopes = match *provider {
-                "google" => json!([
-                    "openid", "https://mail.google.com/", "https://www.googleapis.com/auth/calendar.readonly",
-                    "https://www.googleapis.com/auth/calendar.events",
-                ]),
+                "google" => json!(["openid", "https://mail.google.com/", GOOGLE_CALENDARS, GOOGLE_EVENTS]),
                 _ => json!(["openid", "Mail.ReadWrite", "Calendars.ReadWrite"]),
             };
             json!({ "id": id, "provider": provider, "label": id, "scopes": scopes })
         })
         .collect();
-    std::fs::write(config.support_directory.join("accounts.json"), serde_json::to_vec(&records).unwrap()).unwrap();
-    let mut sign_ins = SignIns::default();
-    for (id, _) in accounts {
-        sign_ins.refresh_tokens.insert(id.to_string(), "rt".into());
-        sign_ins.clients.insert(id.to_string(), OAuthClient { id: "client".into(), secret: Some("secret".into()) });
-    }
-    Keychain::new(config.keychain_service.clone()).store(&sign_ins).unwrap();
+    sign_in_all(&config, &records);
     (Engine::start(config.clone()), config)
 }
 

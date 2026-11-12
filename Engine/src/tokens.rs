@@ -273,14 +273,14 @@ mod tests {
 
     use super::*;
     use crate::oauth::OAuthConfig;
-    use crate::oauth::tests::TokenServer;
+    use crate::testkit::{FakeServer, Reply};
 
     /// A Keychain item of its own, deleted when the test ends.
     struct TestKeychain(Keychain);
 
     impl TestKeychain {
         fn new() -> Self {
-            Self(Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::tests::unique())))
+            Self(Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::testkit::unique())))
         }
     }
 
@@ -317,36 +317,38 @@ mod tests {
         keychain.0.store(&sign_ins).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let counted = calls.clone();
-        let server = TokenServer::start(move |_| {
+        let server = FakeServer::start(move |_| {
             let call = counted.fetch_add(1, Ordering::SeqCst) + 1;
-            (200, format!(r#"{{"access_token":"at{call}","expires_in":3600,"refresh_token":"new"}}"#))
-        })
-        .await;
-        let shared = Arc::new(tokens(&keychain, &server.url, BuiltInClients::new()));
+            // Slow enough that concurrent callers overlap.
+            Reply::json(serde_json::json!({ "access_token": format!("at{call}"), "expires_in": 3600, "refresh_token": "new" }))
+                .after(Duration::from_millis(50))
+        });
+        let url = format!("{}/token", server.base);
+        let shared = Arc::new(tokens(&keychain, &url, BuiltInClients::new()));
         let (first, second) = tokio::join!(shared.token("m@x.com"), shared.token("m@x.com"));
         assert_eq!((first.unwrap(), second.unwrap()), ("at1".to_string(), "at1".to_string()));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         // Cached until it nears expiry; Microsoft's rotated refresh token went back to the item.
         assert_eq!(shared.token("m@x.com").await.unwrap(), "at1");
         assert_eq!(keychain.0.load().unwrap().refresh_tokens["m@x.com"], "new");
-        let form = server.forms.lock().unwrap()[0].clone();
+        let form = server.forms("/token")[0].clone();
         assert_eq!((form["grant_type"].as_str(), form["refresh_token"].as_str()), ("refresh_token", "old"));
         assert_eq!(form["client_id"], "ms-client");
         assert!(form["scope"].contains("offline_access"));
         // Signed in before calendars were asked for: Microsoft would refuse a refresh asking for them.
         assert!(!form["scope"].contains("Calendars"), "{}", form["scope"]);
         // Another process (or the next launch) redeems the rotated token.
-        let other = tokens(&keychain, &server.url, BuiltInClients::new());
+        let other = tokens(&keychain, &url, BuiltInClients::new());
         assert_eq!(other.token("m@x.com").await.unwrap(), "at2");
-        assert_eq!(server.forms.lock().unwrap()[1]["refresh_token"], "new");
+        assert_eq!(server.forms("/token")[1]["refresh_token"], "new");
         // An account whose sign-in granted calendars keeps them.
         let mut sign_ins = keychain.0.load().unwrap();
         sign_ins.refresh_tokens.insert("c@x.com".into(), "rc".into());
         sign_ins.clients.insert("c@x.com".into(), client("ms-client"));
         keychain.0.store(&sign_ins).unwrap();
-        let fresh = tokens(&keychain, &server.url, BuiltInClients::new());
+        let fresh = tokens(&keychain, &url, BuiltInClients::new());
         fresh.token("c@x.com").await.unwrap();
-        assert!(server.forms.lock().unwrap()[2]["scope"].contains("https://graph.microsoft.com/Calendars.ReadWrite"));
+        assert!(server.forms("/token")[2]["scope"].contains("https://graph.microsoft.com/Calendars.ReadWrite"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -356,18 +358,17 @@ mod tests {
         let mut sign_ins = SignIns::default();
         sign_ins.refresh_tokens.insert("g@x.com".into(), "rt".into());
         keychain.0.store(&sign_ins).unwrap();
-        let server = TokenServer::start(|_| {
-            (400, r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#.into())
-        })
-        .await;
+        let server = FakeServer::start(|_| {
+            Reply::status(400, serde_json::json!({ "error": "invalid_grant", "error_description": "Token has been expired or revoked." }))
+        });
         let built_in =
             BuiltInClients::from([(Provider::Google, OAuthClient { id: "built-in".into(), secret: Some("s".into()) })]);
-        let tokens = tokens(&keychain, &server.url, built_in);
+        let tokens = tokens(&keychain, &format!("{}/token", server.base), built_in);
         let error = tokens.token("g@x.com").await.unwrap_err();
         assert!(matches!(&error, TokenError::SignInAgain(_)), "{error:?}");
         assert_eq!(error.to_string(), "g@x.com needs to sign in again (Settings > Accounts).");
         assert_eq!(keychain.0.load().unwrap().clients["g@x.com"].id, "built-in");
-        assert_eq!(server.forms.lock().unwrap()[0]["client_secret"], "s");
+        assert_eq!(server.forms("/token")[0]["client_secret"], "s");
         // No refresh token at all, or an account not signed in.
         assert!(matches!(tokens.token("m@x.com").await, Err(TokenError::SignInAgain(_))));
         assert!(matches!(tokens.token("nobody@x.com").await, Err(TokenError::SignInAgain(_))));

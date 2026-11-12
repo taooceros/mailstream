@@ -11,10 +11,10 @@ use serde_json::{Value, json};
 
 use crate::Engine;
 use crate::cache::MailCache;
-use crate::mail_tests::{GmailCounters, call, engine_for, gmail_server, wait_until};
+use crate::mail_tests::{GmailCounters, gmail_server};
 use crate::omp::tests::script;
 use crate::tagging::{Category, ConversationTag};
-use crate::tests::cleanup;
+use crate::testkit::{call, cleanup, engine_for, wait_until};
 
 /// A fake omp answering every batch: its first conversation is people waiting on the user, the
 /// second people whose ask lapsed long ago, the third it skips, the rest are notifications.

@@ -3,7 +3,7 @@
 //! provider or the real relay.
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::executor::block_on;
 use futures::{SinkExt, StreamExt};
@@ -12,11 +12,10 @@ use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{Request as Handshake, Response as HandshakeResponse};
 
-use crate::fake::{FakeRequest, FakeServer, Reply};
-use crate::keychain::{Keychain, SignIns};
+use crate::keychain::Keychain;
 use crate::push::{PushConfig, PushTiming};
-use crate::tests::{cleanup, config};
-use crate::{Config, Engine, OAuthClient, OAuthConfig, backend, gmail};
+use crate::testkit::{FakeRequest, FakeServer, Reply, cleanup, mail_account, serve, server_config, sign_in_all, wait_until};
+use crate::{Config, Engine};
 
 /// A stand-in for `Push/worker.js`'s socket: answers `ping` with `pong` (unless `silent`), sends
 /// what `events` broadcasts to every socket, and closes them all on `drop_all`.
@@ -32,66 +31,49 @@ struct FakeRelay {
 
 impl FakeRelay {
     fn start() -> Self {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
         let connections = Arc::new(AtomicUsize::new(0));
         let authorizations = Arc::new(Mutex::new(Vec::new()));
         let silent = Arc::new(AtomicBool::new(false));
         let (events, _) = broadcast::channel(16);
         let (closes, _) = broadcast::channel(4);
-        let relay = Self {
-            base,
-            connections: connections.clone(),
-            authorizations: authorizations.clone(),
-            silent: silent.clone(),
-            events: events.clone(),
-            closes: closes.clone(),
-        };
-        std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-            runtime.block_on(async move {
-                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-                while let Ok((stream, _)) = listener.accept().await {
-                    let (connections, authorizations, silent) =
-                        (connections.clone(), authorizations.clone(), silent.clone());
-                    let (mut events, mut closes) = (events.subscribe(), closes.subscribe());
-                    tokio::spawn(async move {
-                        let seen = authorizations.clone();
-                        // tungstenite's callback type names its own (large) error response.
-                        #[allow(clippy::result_large_err)]
-                        let check = move |request: &Handshake, response: HandshakeResponse| {
-                            assert_eq!(request.uri().path(), "/socket");
-                            let authorization = request.headers().get("Authorization").and_then(|value| value.to_str().ok());
-                            seen.lock().unwrap().push(authorization.unwrap_or_default().to_string());
-                            Ok(response)
-                        };
-                        let Ok(socket) = tokio_tungstenite::accept_hdr_async(stream, check).await else { return };
-                        connections.fetch_add(1, Ordering::SeqCst);
-                        let (mut write, mut read) = socket.split();
-                        loop {
-                            tokio::select! {
-                                message = read.next() => match message {
-                                    Some(Ok(Message::Text(text))) if text.as_str() == "ping" => {
-                                        if !silent.load(Ordering::SeqCst) {
-                                            let _ = write.send(Message::text("pong")).await;
-                                        }
-                                    }
-                                    Some(Ok(_)) => {}
-                                    _ => return,
-                                },
-                                event = events.recv() => {
-                                    let Ok(event) = event else { return };
-                                    let _ = write.send(Message::text(event)).await;
+        let (counted, seen, quiet, sent, closing) =
+            (connections.clone(), authorizations.clone(), silent.clone(), events.clone(), closes.clone());
+        let base = serve(move |stream| {
+            let (connections, seen, silent) = (counted.clone(), seen.clone(), quiet.clone());
+            let (mut events, mut closes) = (sent.subscribe(), closing.subscribe());
+            async move {
+                // tungstenite's callback type names its own (large) error response.
+                #[allow(clippy::result_large_err)]
+                let check = move |request: &Handshake, response: HandshakeResponse| {
+                    assert_eq!(request.uri().path(), "/socket");
+                    let authorization = request.headers().get("Authorization").and_then(|value| value.to_str().ok());
+                    seen.lock().unwrap().push(authorization.unwrap_or_default().to_string());
+                    Ok(response)
+                };
+                let Ok(socket) = tokio_tungstenite::accept_hdr_async(stream, check).await else { return };
+                connections.fetch_add(1, Ordering::SeqCst);
+                let (mut write, mut read) = socket.split();
+                loop {
+                    tokio::select! {
+                        message = read.next() => match message {
+                            Some(Ok(Message::Text(text))) if text.as_str() == "ping" => {
+                                if !silent.load(Ordering::SeqCst) {
+                                    let _ = write.send(Message::text("pong")).await;
                                 }
-                                _ = closes.recv() => return,
                             }
+                            Some(Ok(_)) => {}
+                            _ => return,
+                        },
+                        event = events.recv() => {
+                            let Ok(event) = event else { return };
+                            let _ = write.send(Message::text(event)).await;
                         }
-                    });
+                        _ = closes.recv() => return,
+                    }
                 }
-            });
+            }
         });
-        relay
+        Self { base, connections, authorizations, silent, events, closes }
     }
 
     fn send(&self, event: Value) {
@@ -104,17 +86,7 @@ const TOPIC: &str = "projects/p/topics/t";
 /// A throwaway engine folder pointed at `server` and `relay`, signed in to `accounts` through a
 /// test Keychain item; push.json may be written before the engine starts on it.
 fn prepare(server: &FakeServer, relay: &FakeRelay, accounts: &[(&str, &str)]) -> Config {
-    let mut config = config(OAuthConfig { token_endpoint: Some(format!("{}/token", server.base)), ..OAuthConfig::default() });
-    config.endpoints = backend::Endpoints {
-        gmail: gmail::GmailEndpoints {
-            root: format!("{}/gmail/v1/users/me/", server.base),
-            batch: format!("{}/batch/gmail/v1", server.base),
-        },
-        graph: format!("{}/v1.0/", server.base),
-        chat: format!("{}/chat/v1/", server.base),
-        people: format!("{}/people/v1/", server.base),
-        calendar: format!("{}/calendar/v3/", server.base),
-    };
+    let mut config = server_config(server);
     config.push = PushConfig {
         url: Some(relay.base.clone()),
         token: Some("relay-token".into()),
@@ -129,27 +101,9 @@ fn prepare(server: &FakeServer, relay: &FakeRelay, accounts: &[(&str, &str)]) ->
             wake_check: Duration::from_secs(3600),
         },
     };
-    std::fs::create_dir_all(&config.support_directory).unwrap();
-    let records: Vec<Value> = accounts
-        .iter()
-        .map(|(id, provider)| json!({ "id": id, "provider": provider, "label": id, "scopes": ["openid", "mail"] }))
-        .collect();
-    std::fs::write(config.support_directory.join("accounts.json"), serde_json::to_vec(&records).unwrap()).unwrap();
-    let mut sign_ins = SignIns::default();
-    for (id, _) in accounts {
-        sign_ins.refresh_tokens.insert(id.to_string(), format!("rt-{id}"));
-        sign_ins.clients.insert(id.to_string(), OAuthClient { id: "client".into(), secret: Some("secret".into()) });
-    }
-    Keychain::new(config.keychain_service.clone()).store(&sign_ins).unwrap();
+    let records: Vec<Value> = accounts.iter().map(|(id, provider)| mail_account(id, provider)).collect();
+    sign_in_all(&config, &records);
     config
-}
-
-fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-    let start = Instant::now();
-    while !done() {
-        assert!(start.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 /// Graph with an inbox and sent mail, subscriptions that answer like Graph's, and Gmail's watch
@@ -332,8 +286,7 @@ fn renews_only_what_is_due_and_replaces_a_subscription_graph_forgot() {
 #[test]
 fn stays_idle_without_a_relay() {
     let server = provider_server();
-    let mut config = config(OAuthConfig { token_endpoint: Some(format!("{}/token", server.base)), ..OAuthConfig::default() });
-    config.endpoints.graph = format!("{}/v1.0/", server.base);
+    let config = server_config(&server);
     let engine = Engine::start(config.clone());
     std::thread::sleep(Duration::from_millis(300));
     assert!(!engine.core.push.is_connected());

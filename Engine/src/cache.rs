@@ -560,7 +560,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn keeps_listings_mailboxes_and_content() {
-        let directory = std::env::temp_dir().join(format!("mailstream-cache-{}-{}", std::process::id(), crate::tests::unique()));
+        let directory = std::env::temp_dir().join(format!("mailstream-cache-{}-{}", std::process::id(), crate::testkit::unique()));
         let cache = MailCache::new(directory.join("mail.db"), directory.join("files"));
         let key = MailboxKey::new("me@x.com", "INBOX");
         assert!(cache.load_listing(&key).await.is_none());

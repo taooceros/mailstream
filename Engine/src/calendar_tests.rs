@@ -8,12 +8,10 @@ use futures::executor::block_on;
 use serde_json::{Value, json};
 
 use crate::calendar_api::{local_day, local_midnight, local_zone};
-use crate::fake::{FakeRequest, FakeServer, Reply};
-use crate::keychain::{Keychain, SignIns};
-use crate::mail_tests::{call, wait_until};
 use crate::model::iso8601;
-use crate::tests::{cleanup, config};
-use crate::{Config, Engine, OAuthClient, OAuthConfig, backend, gmail};
+use crate::oauth::{GOOGLE_CALENDARS, GOOGLE_EVENTS};
+use crate::testkit::{FakeRequest, FakeServer, Reply, call, cleanup, server_config, sign_in_all, wait_until, write_accounts};
+use crate::{Config, Engine};
 
 const GOOGLE: &str = "me@gmail.com";
 const OUTLOOK: &str = "me@outlook.com";
@@ -99,32 +97,18 @@ fn graph_reply(request: &FakeRequest) -> Reply {
     }
 }
 
-fn engine_for(server: &FakeServer) -> Config {
-    let mut config = config(OAuthConfig { token_endpoint: Some(format!("{}/token", server.base)), ..OAuthConfig::default() });
-    config.endpoints = backend::Endpoints {
-        gmail: gmail::GmailEndpoints {
-            root: format!("{}/gmail/v1/users/me/", server.base),
-            batch: format!("{}/batch/gmail/v1", server.base),
-        },
-        graph: format!("{}/v1.0/", server.base),
-        chat: format!("{}/chat/v1/", server.base),
-        people: format!("{}/people/v1/", server.base),
-        calendar: format!("{}/calendar/v3/", server.base),
-    };
-    std::fs::create_dir_all(&config.support_directory).unwrap();
-    let google = ["openid", "https://mail.google.com/", "https://www.googleapis.com/auth/calendar.readonly"];
-    let records = json!([
-        { "id": GOOGLE, "provider": "google", "label": "Personal", "scopes": google },
-        { "id": OUTLOOK, "provider": "microsoft", "label": "Work", "scopes": ["openid", "Mail.ReadWrite", "Calendars.ReadWrite"] },
-        { "id": OLD, "provider": "google", "label": OLD, "scopes": ["openid", "https://mail.google.com/"] },
-    ]);
-    std::fs::write(config.support_directory.join("accounts.json"), serde_json::to_vec(&records).unwrap()).unwrap();
-    let mut sign_ins = SignIns::default();
-    for id in [GOOGLE, OUTLOOK, OLD] {
-        sign_ins.refresh_tokens.insert(id.into(), "rt".into());
-        sign_ins.clients.insert(id.into(), OAuthClient { id: "client".into(), secret: Some("secret".into()) });
-    }
-    Keychain::new(config.keychain_service.clone()).store(&sign_ins).unwrap();
+/// A folder on `server` with a Google and an Outlook account that read calendars and one Google
+/// account signed in before calendars were asked for, all signed in.
+fn config_for(server: &FakeServer) -> Config {
+    let config = server_config(server);
+    sign_in_all(
+        &config,
+        &[
+            json!({ "id": GOOGLE, "provider": "google", "label": "Personal", "scopes": ["openid", "https://mail.google.com/", GOOGLE_CALENDARS] }),
+            json!({ "id": OUTLOOK, "provider": "microsoft", "label": "Work", "scopes": ["openid", "Mail.ReadWrite", "Calendars.ReadWrite"] }),
+            json!({ "id": OLD, "provider": "google", "label": OLD, "scopes": ["openid", "https://mail.google.com/"] }),
+        ],
+    );
     config
 }
 
@@ -154,7 +138,7 @@ fn lists_every_accounts_events_from_the_cache_and_fetches_only_when_old_or_asked
         }
         if request.path.starts_with("/calendar/") { google_reply(request) } else { graph_reply(request) }
     });
-    let config = engine_for(&server);
+    let config = config_for(&server);
     let engine = Engine::start(config.clone());
     let heard = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
     let log = heard.clone();
@@ -400,15 +384,16 @@ fn adds_changes_and_deletes_the_accounts_own_events_and_keeps_the_copy_up_to_dat
         }
         if request.path.starts_with("/calendar/") { google_write_reply(request, &held_events) } else { graph_write_reply(request, &held_events) }
     });
-    let config = engine_for(&server);
+    let config = config_for(&server);
     // This Google sign-in may change events too.
-    let google = ["openid", "https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events"];
-    let records = json!([
-        { "id": GOOGLE, "provider": "google", "label": "Personal", "scopes": google },
-        { "id": OUTLOOK, "provider": "microsoft", "label": "Work", "scopes": ["openid", "Calendars.ReadWrite"] },
-        { "id": OLD, "provider": "google", "label": OLD, "scopes": ["openid", "https://mail.google.com/"] },
-    ]);
-    std::fs::write(config.support_directory.join("accounts.json"), serde_json::to_vec(&records).unwrap()).unwrap();
+    write_accounts(
+        &config,
+        &[
+            json!({ "id": GOOGLE, "provider": "google", "label": "Personal", "scopes": ["openid", GOOGLE_CALENDARS, GOOGLE_EVENTS] }),
+            json!({ "id": OUTLOOK, "provider": "microsoft", "label": "Work", "scopes": ["openid", "Calendars.ReadWrite"] }),
+            json!({ "id": OLD, "provider": "google", "label": OLD, "scopes": ["openid", "https://mail.google.com/"] }),
+        ],
+    );
     let engine = Engine::start(config.clone());
     let week = json!({ "from": local_day(-7), "days": 30 });
 

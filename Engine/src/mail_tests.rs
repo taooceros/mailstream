@@ -3,63 +3,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use futures::executor::block_on;
 use serde_json::{Value, json};
 
-use crate::fake::{FakeRequest, FakeServer, Reply};
-use crate::keychain::{Keychain, SignIns};
-use crate::tests::{cleanup, config};
-use crate::{Config, Engine, OAuthClient, OAuthConfig, backend, gmail};
+use crate::testkit::{FakeRequest, FakeServer, Reply, call, cleanup, engine_for, token_reply, wait_until};
+use crate::{Engine, OAuthConfig, gmail};
 
 pub(crate) const BASE_MS: i64 = 1_790_000_000_000;
-
-pub(crate) fn engine_for(server: &FakeServer, accounts: &[(&str, &str)]) -> (Engine, Config) {
-    let mut config = config(OAuthConfig { token_endpoint: Some(format!("{}/token", server.base)), ..OAuthConfig::default() });
-    config.endpoints = backend::Endpoints {
-        gmail: gmail::GmailEndpoints {
-            root: format!("{}/gmail/v1/users/me/", server.base),
-            batch: format!("{}/batch/gmail/v1", server.base),
-        },
-        graph: format!("{}/v1.0/", server.base),
-        chat: format!("{}/chat/v1/", server.base),
-        people: format!("{}/people/v1/", server.base),
-        calendar: format!("{}/calendar/v3/", server.base),
-    };
-    std::fs::create_dir_all(&config.support_directory).unwrap();
-    let records: Vec<Value> = accounts
-        .iter()
-        .map(|(id, provider)| json!({ "id": id, "provider": provider, "label": id, "scopes": ["openid", "mail"] }))
-        .collect();
-    std::fs::write(config.support_directory.join("accounts.json"), serde_json::to_vec(&records).unwrap()).unwrap();
-    let mut sign_ins = SignIns::default();
-    for (id, _) in accounts {
-        sign_ins.refresh_tokens.insert(id.to_string(), format!("rt-{id}"));
-        sign_ins.clients.insert(id.to_string(), OAuthClient { id: "client".into(), secret: Some("secret".into()) });
-    }
-    Keychain::new(config.keychain_service.clone()).store(&sign_ins).unwrap();
-    (Engine::start(config.clone()), config)
-}
-
-pub(crate) fn call(engine: &Engine, command: &str, args: Value) -> Result<Value, crate::EngineError> {
-    block_on(engine.call(command, args))
-}
-
-pub(crate) fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-    let start = Instant::now();
-    while !done() {
-        assert!(start.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-pub(crate) fn token_reply(calls: &AtomicUsize) -> Reply {
-    let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
-    Reply::json(json!({ "access_token": format!("at{call}"), "expires_in": 3600 }))
-}
 
 // MARK: - Gmail
 
@@ -163,7 +116,7 @@ pub(crate) fn gmail_batch(request: &FakeRequest, metadata: &HashMap<String, Valu
         ));
     }
     parts.push_str("--resp--\r\n");
-    Reply { status: 200, headers: vec![("Content-Type".into(), "multipart/mixed; boundary=resp".into())], body: parts.into_bytes() }
+    Reply::bytes(200, parts.into_bytes()).header("Content-Type", "multipart/mixed; boundary=resp")
 }
 
 pub(crate) struct GmailCounters {
@@ -330,7 +283,7 @@ fn lists_shows_and_searches_gmail_and_serves_the_cache_without_asking_again() {
 
     // Next launch, offline: mail.db and the content cache answer.
     let mut offline = config.clone();
-    offline.endpoints = crate::tests::config(OAuthConfig::default()).endpoints;
+    offline.endpoints = crate::testkit::config(OAuthConfig::default()).endpoints;
     offline.oauth.token_endpoint = Some("http://127.0.0.1:9/token".into());
     let engine = Engine::start(offline);
     wait_until("restored mailboxes", || call(&engine, "mailboxes", json!({})).unwrap()["me@gmail.com"].is_array());

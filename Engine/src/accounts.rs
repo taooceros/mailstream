@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn keeps_the_swift_format_and_labels() {
         let dir =
-            std::env::temp_dir().join(format!("mailstream-accounts-{}-{}", std::process::id(), crate::tests::unique()));
+            std::env::temp_dir().join(format!("mailstream-accounts-{}-{}", std::process::id(), crate::testkit::unique()));
         std::fs::create_dir_all(&dir).unwrap();
         let swift = "[\n  {\n    \"displayName\" : \"Me\",\n    \"id\" : \"me@x.com\",\n    \"label\" : \"Work\",\n    \"provider\" : \"google\",\n    \"scopes\" : [\n      \"https:\\/\\/mail.google.com\\/\",\n      \"https:\\/\\/www.googleapis.com\\/auth\\/chat.messages.readonly\"\n    ]\n  }\n]";
         std::fs::write(dir.join("accounts.json"), swift).unwrap();

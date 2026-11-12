@@ -190,7 +190,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
-    use crate::tests::{cleanup, config};
+    use crate::testkit::{cleanup, config};
     use crate::{Engine, OAuthConfig};
 
     /// One request over the socket, answered as text.

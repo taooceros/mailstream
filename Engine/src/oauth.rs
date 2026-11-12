@@ -568,10 +568,9 @@ async fn respond(connection: &mut TcpStream, status: &str, text: Option<&str>) -
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use std::sync::Mutex;
-
+mod tests {
     use super::*;
+    use crate::testkit::{FakeServer, Reply, free_port, redirecting_browser};
 
     #[test]
     fn answers_only_the_redirect_with_this_state() {
@@ -594,97 +593,19 @@ pub(crate) mod tests {
         assert_eq!((claims.email, claims.preferred_username.as_deref()), (None, Some("Me@Outlook.com")));
     }
 
-    /// A token endpoint on the loopback interface: answers each request with `respond(form)`,
-    /// keeping the forms it got.
-    pub(crate) struct TokenServer {
-        pub url: String,
-        pub forms: Arc<Mutex<Vec<HashMap<String, String>>>>,
-    }
-
-    impl TokenServer {
-        pub async fn start(
-            respond: impl Fn(&HashMap<String, String>) -> (u16, String) + Send + Sync + 'static,
-        ) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let url = format!("http://{}/token", listener.local_addr().unwrap());
-            let forms = Arc::new(Mutex::new(Vec::new()));
-            let (respond, kept) = (Arc::new(respond), forms.clone());
-            tokio::spawn(async move {
-                while let Ok((mut connection, _)) = listener.accept().await {
-                    let (respond, kept) = (respond.clone(), kept.clone());
-                    tokio::spawn(async move {
-                        let mut buffer = Vec::new();
-                        let mut chunk = [0u8; 4096];
-                        let form = loop {
-                            let count = connection.read(&mut chunk).await.unwrap();
-                            buffer.extend_from_slice(&chunk[..count]);
-                            let text = String::from_utf8_lossy(&buffer).into_owned();
-                            if let Some((head, body)) = text.split_once("\r\n\r\n") {
-                                let length = head
-                                    .lines()
-                                    .find_map(|line| {
-                                        line.to_lowercase()
-                                            .strip_prefix("content-length:")
-                                            .map(|n| n.trim().parse::<usize>().unwrap())
-                                    })
-                                    .unwrap_or(0);
-                                if body.len() >= length {
-                                    break body
-                                        .split('&')
-                                        .filter_map(|pair| pair.split_once('='))
-                                        .map(|(name, value)| {
-                                            (
-                                                name.to_string(),
-                                                percent_decode_str(value).decode_utf8_lossy().into_owned(),
-                                            )
-                                        })
-                                        .collect::<HashMap<_, _>>();
-                                }
-                            }
-                        };
-                        // Slow enough that concurrent callers overlap.
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        let (status, body) = respond(&form);
-                        kept.lock().unwrap().push(form);
-                        let reply = format!(
-                            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                            body.len()
-                        );
-                        connection.write_all(reply.as_bytes()).await.unwrap();
-                    });
-                }
-            });
-            Self { url, forms }
-        }
-    }
-
-    /// The browser's part: follows the sign-in page's redirect with the state it carries.
-    pub(crate) fn redirecting_browser(port: u16, query: &'static str) -> Arc<dyn Fn(&str) + Send + Sync> {
-        Arc::new(move |url: &str| {
-            let state = url.split('&').find_map(|pair| pair.strip_prefix("state=")).unwrap().to_string();
-            tokio::spawn(async move {
-                let mut connection = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-                let request = format!("GET /?{query}&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n");
-                connection.write_all(request.as_bytes()).await.unwrap();
-                let mut page = String::new();
-                connection.read_to_string(&mut page).await.unwrap();
-                assert!(page.starts_with("HTTP/1.1 200 OK"), "{page}");
-            });
-        })
-    }
-
     #[tokio::test]
     async fn signs_in_through_the_redirect() {
         let id_token =
             format!("e30.{}.sig", URL_SAFE_NO_PAD.encode(br#"{"email":"Person@Example.com","name":"Person"}"#));
-        let server = TokenServer::start(move |_| {
-            (200, format!(r#"{{"access_token":"at","expires_in":3599,"refresh_token":"rt","scope":"openid {GMAIL}","id_token":"{id_token}"}}"#))
-        })
-        .await;
+        let server = FakeServer::start(move |_| {
+            Reply::json(serde_json::json!({
+                "access_token": "at", "expires_in": 3599, "refresh_token": "rt", "scope": format!("openid {GMAIL}"), "id_token": id_token,
+            }))
+        });
         let port = free_port();
         let oauth = OAuth::new(OAuthConfig {
             redirect_port: port,
-            token_endpoint: Some(server.url.clone()),
+            token_endpoint: Some(format!("{}/token", server.base)),
             sign_in_timeout: Duration::from_secs(10),
             open_url: redirecting_browser(port, "code=the-code"),
         });
@@ -695,7 +616,7 @@ pub(crate) mod tests {
             ("person@example.com", Some("Person"), "rt")
         );
         assert_eq!(grant.scopes, vec!["openid".to_string(), GMAIL.to_string()]);
-        let form = server.forms.lock().unwrap()[0].clone();
+        let form = server.forms("/token")[0].clone();
         assert_eq!(form["grant_type"], "authorization_code");
         assert_eq!(form["code"], "the-code");
         assert_eq!(form["redirect_uri"], format!("http://localhost:{port}"));
@@ -714,9 +635,5 @@ pub(crate) mod tests {
         let error =
             oauth.sign_in(Provider::Microsoft, &OAuthClient { id: "c".into(), secret: None }).await.unwrap_err();
         assert_eq!(error.code, "timeout");
-    }
-
-    pub(crate) fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 }
