@@ -107,6 +107,8 @@ impl Render for MailApp {
             }
             _ => content,
         };
+        // The calendar's open event over the whole window, sidebar and all (MS-184).
+        let page = if self.calendar_view { self.calendar.update(cx, |pane, cx| pane.render_page(window, cx)) } else { None };
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -185,6 +187,7 @@ impl Render for MailApp {
                     .pb(px(layout::GAP))
                     .child(content),
             )
+            .children(page)
             .when_some(floating, |d, bounds| {
                 d.child(
                     div()

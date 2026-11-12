@@ -3,7 +3,8 @@
 //! the mail list while Calendar is selected. The agenda lists today on, under this week's days
 //! and the meeting about to start; the open event sits beside it (over it in a narrow window),
 //! answering its invitation through the account's calendar. In the week view it floats in a
-//! popover beside its card instead (MS-184).
+//! popover beside its card instead (MS-184). From either, the event's page covers the whole
+//! window (`render_page`), until Back or Esc returns to the view as it was.
 //!
 //! The engine fetches Google Calendar and Outlook every five minutes and keeps what it fetched in
 //! mail.db; the pane reads what it holds (a week back on) and reads it again on its `Calendar`
@@ -23,7 +24,7 @@ use std::time::{Duration, Instant};
 use chrono::{Days, Local, NaiveDate};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, ListAlignment,
+    App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, ListAlignment,
     ListOffset, ListState, ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, Styled, Subscription, Task,
     Window, actions, div, px, relative,
 };
@@ -37,7 +38,10 @@ use model::{Event, EventKey};
 
 actions!(
     calendar,
-    [Next, Previous, Later, Earlier, PageNext, PagePrevious, ShowAgenda, ShowDay, ShowWeek, Today, Back, Refresh, NewEvent]
+    [
+        Next, Previous, Later, Earlier, PageNext, PagePrevious, ShowAgenda, ShowDay, ShowWeek, Today, Back, Refresh, NewEvent,
+        ExpandEvent
+    ]
 );
 
 const CONTEXT: &str = "Calendar";
@@ -68,6 +72,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("w", ShowWeek, list),
         KeyBinding::new("t", Today, list),
         KeyBinding::new("escape", Back, list),
+        // The open event's page; in the week view the popover has the keyboard, and gpui-kit
+        // leaves Return in it to its controls unless bound there.
+        KeyBinding::new("enter", ExpandEvent, list),
+        KeyBinding::new("enter", ExpandEvent, Some("Calendar > PopoverContent")),
         KeyBinding::new(secondary!("["), Back, pane),
         KeyBinding::new(secondary!("r"), Refresh, pane),
         // Over the window's New Message while the calendar has focus.
@@ -126,6 +134,9 @@ pub struct CalendarPane {
     listed: bool,
     /// The event beside the calendar (in the week view, in a popover beside its card).
     opened: Option<EventKey>,
+    /// The open event covers the window (its page), over the view it was opened from, which
+    /// stays as it was beneath until the page goes back to it.
+    page: bool,
     /// Where the press that closed the week view's popover went down: the click it makes is the
     /// popover's, and starts no new event on the free time under it.
     dismissed_at: Option<Point<Pixels>>,
@@ -144,6 +155,8 @@ pub struct CalendarPane {
     week_booked: [i64; 7],
     agenda: ListState,
     detail_scroll: ScrollHandle,
+    /// The page's own: the pane beside the day view and agenda stays drawn beneath it.
+    page_scroll: ScrollHandle,
     view: View,
     /// The day the day view shows; the week view shows the week it is in.
     focus_day: NaiveDate,
@@ -201,6 +214,7 @@ impl CalendarPane {
             loading: false,
             listed: false,
             opened: None,
+            page: false,
             dismissed_at: None,
             refocus: false,
             answering: HashMap::new(),
@@ -211,6 +225,7 @@ impl CalendarPane {
             week_booked: [0; 7],
             agenda: ListState::new(0, ListAlignment::Top, px(400.)),
             detail_scroll: ScrollHandle::new(),
+            page_scroll: ScrollHandle::new(),
             view: View::Agenda,
             focus_day: Local::now().date_naive(),
             synced: None,
@@ -264,6 +279,7 @@ impl CalendarPane {
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         self.active = false;
         self.opened = None;
+        self.page = false;
         cx.notify();
     }
 
@@ -295,6 +311,7 @@ impl CalendarPane {
                     this.synced = agenda.synced.from.parse().ok().zip(agenda.synced.until.parse().ok());
                     if this.opened.as_ref().is_some_and(|key| this.event_index(key).is_none()) {
                         this.opened = None;
+                        this.page = false;
                     }
                     if let Some(key) = this.open_after.take_if(|key| this.events.iter().any(|event| &event.key == key)) {
                         this.open(key, cx);
@@ -378,12 +395,41 @@ impl CalendarPane {
         if self.opened.as_ref() != Some(&key) {
             self.opened = Some(key);
             self.detail_scroll = ScrollHandle::new();
+            self.page_scroll = ScrollHandle::new();
             cx.notify();
         }
     }
 
-    /// Closes the open event (⌘W, Esc, its close button); nothing else.
+    /// A click on an event (`event`): a double click opens its page, one opens it.
+    fn open_clicked(&mut self, key: EventKey, event: &ClickEvent, cx: &mut Context<Self>) {
+        if event.click_count() >= 2 { self.open_page(key, cx) } else { self.open(key, cx) }
+    }
+
+    /// `key`'s page over the whole window. The press that closed the week's popover on the way
+    /// (a double click's second) is spent, and the pane keeps the keyboard as the popover goes.
+    fn open_page(&mut self, key: EventKey, cx: &mut Context<Self>) {
+        self.open(key, cx);
+        self.dismissed_at = None;
+        if !self.page {
+            self.page = true;
+            self.refocus = true;
+            self.page_scroll = ScrollHandle::new();
+            cx.notify();
+        }
+    }
+
+    /// Back from the page to the view beneath, the event still open there (the week's popover
+    /// shows again and takes the keyboard).
+    fn close_page(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.page) {
+            self.refocus = true;
+            cx.notify();
+        }
+    }
+
+    /// Closes the open event (⌘W, Esc, its close button), its page with it; nothing else.
     pub fn close_event(&mut self, cx: &mut Context<Self>) {
+        self.page = false;
         if self.opened.take().is_some() {
             self.refocus = self.view == View::Week;
             cx.notify();
@@ -392,7 +438,7 @@ impl CalendarPane {
 
     /// The week view's popover for `key` closed itself: a press outside it (`at`) or Esc (none).
     fn popover_closed(&mut self, key: &EventKey, at: Option<Point<Pixels>>, cx: &mut Context<Self>) {
-        if self.opened.as_ref() == Some(key) {
+        if self.opened.as_ref() == Some(key) && !self.page {
             self.dismissed_at = at;
             self.close_event(cx);
         }
@@ -465,7 +511,7 @@ impl CalendarPane {
 
     /// Agenda, Day or Week; the day and week views keep the hours scrolled to.
     fn set_view(&mut self, view: View, cx: &mut Context<Self>) {
-        if self.view != view {
+        if self.view != view && !self.page {
             // The week shows no pane beside it: an event opened elsewhere may not be in it.
             if view == View::Week {
                 self.close_event(cx);
@@ -524,6 +570,9 @@ impl CalendarPane {
 
     /// Back to today, scrolled to now: the agenda's top, the timeline's current hours.
     fn today(&mut self, _: &Today, _: &mut Window, cx: &mut Context<Self>) {
+        if self.page {
+            return;
+        }
         if self.view == View::Week {
             self.close_event(cx);
         }
@@ -536,11 +585,22 @@ impl CalendarPane {
         cx.notify();
     }
 
+    /// Esc and ⌘[: the page back to its view, else the open event closed.
     fn back(&mut self, _: &Back, _: &mut Window, cx: &mut Context<Self>) {
-        if self.opened.is_some() {
+        if self.page {
+            self.close_page(cx);
+        } else if self.opened.is_some() {
             self.close_event(cx);
         } else {
             cx.propagate();
+        }
+    }
+
+    /// Return: the open event's page.
+    fn expand_event(&mut self, _: &ExpandEvent, _: &mut Window, cx: &mut Context<Self>) {
+        match self.opened.clone() {
+            Some(key) if !self.page => self.open_page(key, cx),
+            _ => cx.propagate(),
         }
     }
 
@@ -595,6 +655,7 @@ impl Render for CalendarPane {
             .on_action(cx.listener(Self::back))
             .on_action(cx.listener(Self::refresh))
             .on_action(cx.listener(Self::new_event))
+            .on_action(cx.listener(Self::expand_event))
             .relative()
             .size_full()
             .flex()

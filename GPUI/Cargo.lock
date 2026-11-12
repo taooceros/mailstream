@@ -5246,6 +5246,7 @@ dependencies = [
  "futures",
  "gpui-kit",
  "image",
+ "linkify",
  "mailstream",
  "mailstream-engine",
  "objc2 0.6.5",

@@ -10,7 +10,8 @@
 //!
 //! The week view opens an event in gpui-kit's popover beside its card (MS-184), not in the pane
 //! beside the calendar: on the side of the card with more of the week, under an all-day bar. A
-//! press outside it, Esc or another week closes it; the day view keeps the pane.
+//! press outside it, Esc or another week closes it; the day view keeps the pane. A double click
+//! on a card or bar opens the event's page over the whole window, in either view.
 
 use std::time::Instant;
 
@@ -184,7 +185,8 @@ impl CalendarPane {
     /// The day view's next day or the week view's next week (`step` 1), or the one before (-1);
     /// the new page slides in from that side.
     pub(super) fn page(&mut self, step: i64, cx: &mut Context<Self>) {
-        if self.view == View::Agenda {
+        // The event's page covers the days: they stay as they were until it goes back.
+        if self.view == View::Agenda || self.page {
             return;
         }
         self.close_week_popover(cx);
@@ -227,6 +229,10 @@ impl CalendarPane {
 
     /// A scroll event over the grid, in the capture phase: true when the page swipe took it.
     fn feed_swipe(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) -> bool {
+        // A swipe over the event's page scrolls the page.
+        if self.page {
+            return false;
+        }
         let width = self.page_width.get().max(1.);
         match self.swipe.feed(event, self.view != View::Agenda) {
             Step::Pass => false,
@@ -318,10 +324,10 @@ impl CalendarPane {
             self.scroll_timeline_to((now.hour() * 60 + now.minute()) as f32);
         }
         let unsynced = self.synced.filter(|(from, until)| current.days.iter().any(|day| day < from || day >= until));
-        // The week's open event, for the popover of the first of its cards drawn; the window's
-        // height less the popovers' margin is all it may take.
+        // The week's open event, for the popover of the first of its cards drawn (none while its
+        // page covers the week); the window's height less the popovers' margin is all it may take.
         let room = f32::from(window.viewport_size().height) - 2. * space::S8;
-        let mut floating = (self.view == View::Week)
+        let mut floating = (self.view == View::Week && !self.page)
             .then(|| self.opened.as_ref().and_then(|key| self.event_index(key)))
             .flatten()
             .map(|index| self.render_popover(index, room, p, cx));
@@ -881,7 +887,8 @@ impl CalendarPane {
     /// gpui-kit's popover (MS-184), which a press on it opens and which shows `floating` (the
     /// open event's panel, taken by the first of its triggers drawn) with its `anchor` corner
     /// against it, `POPOVER_GAP` off; a press outside it or Esc closes it. Elsewhere a click opens
-    /// the event in the pane. Either way the press never reaches the free time under it.
+    /// the event in the pane. Either way a double click opens its page, and the press never
+    /// reaches the free time under it.
     fn opener(
         &self,
         trigger: Stateful<Div>,
@@ -892,13 +899,16 @@ impl CalendarPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = key.clone();
+        let clicked = key.clone();
+        let trigger = trigger.on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            // The week's popover opens on the press; its second (a double click's) closed it.
+            if this.view != View::Week || event.click_count() >= 2 {
+                this.open_clicked(clicked.clone(), event, cx);
+            }
+        }));
         if self.view != View::Week {
-            return trigger
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    this.open(key.clone(), cx);
-                }))
-                .into_any_element();
+            return trigger.into_any_element();
         }
         let content = if self.opened.as_ref() == Some(&key) { floating.take() } else { None };
         let pane = cx.entity().downgrade();
@@ -1037,15 +1047,26 @@ impl CalendarPane {
 mod tests {
     use chrono::{Days, Local, NaiveDate};
     use gpui::{
-        Bounds, Entity, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
-        VisualTestContext, point, px, size,
+        AppContext as _, Bounds, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
+        ParentElement, Pixels, Point, Render, ScrollDelta, ScrollEvent, ScrollSource, Styled, TestAppContext, TouchPhase,
+        VisualTestContext, Window, div, point, px, size,
     };
 
     use super::super::model::{self, tests::timed};
     use super::super::{CalendarPane, Pan, View};
 
+    /// The window as the app's draws the calendar: the pane, and its open event's page over it.
+    struct Host(Entity<CalendarPane>);
+
+    impl Render for Host {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let page = self.0.update(cx, |pane, cx| pane.render_page(window, cx));
+            div().relative().size_full().child(self.0.clone()).children(page)
+        }
+    }
+
     /// The calendar's week view of this week in a window 1400 wide, with an hour on its Saturday
-    /// (`saturday`) and today.
+    /// (`saturday`) and today; the calendar has the keyboard.
     fn week_view(cx: &mut TestAppContext) -> (Entity<CalendarPane>, &mut VisualTestContext) {
         // The pane draws gpui-kit's buttons, which read the kit's theme.
         cx.update(|cx| {
@@ -1053,16 +1074,18 @@ mod tests {
             crate::design::sync_kit_theme(gpui::WindowAppearance::Light, cx);
             super::super::bind_keys(cx);
         });
-        let (pane, cx) = cx.add_window_view(|window, cx| CalendarPane::new(window, cx));
+        let (host, cx) = cx.add_window_view(|window, cx| Host(cx.new(|cx| CalendarPane::new(window, cx))));
+        let pane = host.read_with(cx, |host, _| host.0.clone());
         cx.simulate_resize(size(px(1400.), px(900.)));
         let today = Local::now().date_naive();
         let saturday = model::week_of(today) + Days::new(6);
-        pane.update(cx, |pane, cx| {
+        pane.update_in(cx, |pane, window, cx| {
             pane.events = vec![timed("today", today, (10, 0), (11, 0)), timed("saturday", saturday, (10, 0), (11, 0))];
             pane.events.sort_by_key(|event| event.start);
             pane.listed = true;
             pane.view = View::Week;
             pane.rebuild(today);
+            window.focus(&pane.focus, cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -1097,6 +1120,31 @@ mod tests {
     /// A click at `at`, then the frames it brings.
     fn click(cx: &mut VisualTestContext, at: Point<Pixels>) {
         cx.simulate_click(at, Modifiers::default());
+        cx.run_until_parked();
+    }
+
+    /// Two presses at `at` as a double click makes them, then the frames they bring.
+    fn double_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
+        for click_count in 1..=2 {
+            let (button, modifiers) = (MouseButton::Left, Modifiers::default());
+            cx.simulate_event(MouseDownEvent { button, position: at, modifiers, click_count, first_mouse: false });
+            cx.simulate_event(MouseUpEvent { button, position: at, modifiers, click_count });
+        }
+        cx.run_until_parked();
+    }
+
+    fn click_on(cx: &mut VisualTestContext, selector: &'static str) {
+        let at = bounds(cx, selector).center();
+        click(cx, at);
+    }
+
+    fn double_click_on(cx: &mut VisualTestContext, selector: &'static str) {
+        let at = bounds(cx, selector).center();
+        double_click(cx, at);
+    }
+
+    fn key(cx: &mut VisualTestContext, keys: &str) {
+        cx.simulate_keystrokes(keys);
         cx.run_until_parked();
     }
 
@@ -1223,6 +1271,77 @@ mod tests {
             source: ScrollSource::Pointer,
         });
         assert_eq!(shown(&pane, cx).0, week);
+    }
+
+    #[gpui::test]
+    fn a_double_click_opens_the_page_over_the_window_and_esc_goes_back_to_the_popover(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        let band = bounds(cx, "timeline-band");
+        double_click_on(cx, "card:saturday");
+        assert_eq!(opened(&pane, cx).as_deref(), Some("saturday"));
+        let page = bounds(cx, "calendar-page");
+        assert_eq!(page.size, size(px(1400.), px(900.)), "the page covers the whole window: {page:?}");
+        assert!(cx.debug_bounds("calendar-popover").is_none(), "the popover gives way to it");
+        // The week's keys don't page the week beneath.
+        let (week, _) = shown(&pane, cx);
+        key(cx, "right");
+        assert_eq!(shown(&pane, cx).0, week);
+        // A sideways swipe over it doesn't either.
+        let at = page.center();
+        cx.simulate_event(touchpad(at, TouchPhase::Started, 0., 0.));
+        for _ in 0..10 {
+            cx.simulate_event(touchpad(at, TouchPhase::Moved, -50., 0.));
+        }
+        cx.simulate_event(touchpad(at, TouchPhase::Ended, 0., 0.));
+        assert!(matches!(shown(&pane, cx), (day, Pan::Rest) if day == week));
+
+        key(cx, "escape");
+        assert!(cx.debug_bounds("calendar-page").is_none(), "Esc went back");
+        assert_eq!(opened(&pane, cx).as_deref(), Some("saturday"), "to the event's popover, as it was");
+        bounds(cx, "calendar-popover");
+        assert_eq!(bounds(cx, "timeline-band"), band, "the week as it was");
+        key(cx, "escape");
+        assert_eq!(opened(&pane, cx), None);
+        assert!(cx.debug_bounds("calendar-popover").is_none());
+    }
+
+    #[gpui::test]
+    fn return_or_the_expand_button_opens_the_page_and_back_returns(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        click_on(cx, "card:today");
+        bounds(cx, "calendar-popover");
+        key(cx, "enter");
+        bounds(cx, "calendar-page");
+        click_on(cx, "calendar-page-back");
+        assert!(cx.debug_bounds("calendar-page").is_none(), "Back went back");
+        assert_eq!(opened(&pane, cx).as_deref(), Some("today"));
+
+        click_on(cx, "calendar-expand");
+        bounds(cx, "calendar-page");
+        assert!(cx.debug_bounds("calendar-popover").is_none());
+        // ↓ takes the page to the week's next event.
+        key(cx, "down");
+        assert_eq!(opened(&pane, cx).as_deref(), Some("saturday"));
+        bounds(cx, "calendar-page");
+        key(cx, "escape");
+        assert!(cx.debug_bounds("calendar-page").is_none());
+        assert_eq!(opened(&pane, cx).as_deref(), Some("saturday"));
+    }
+
+    #[gpui::test]
+    fn the_day_view_opens_the_page_from_its_pane(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        key(cx, "d");
+        click_on(cx, "card:today");
+        assert_eq!(opened(&pane, cx).as_deref(), Some("today"));
+        assert!(cx.debug_bounds("calendar-page").is_none(), "a click opens the pane");
+        key(cx, "enter");
+        bounds(cx, "calendar-page");
+        key(cx, "escape");
+        assert!(cx.debug_bounds("calendar-page").is_none());
+        assert_eq!(opened(&pane, cx).as_deref(), Some("today"), "back to the pane");
+        double_click_on(cx, "card:today");
+        bounds(cx, "calendar-page");
     }
 }
 

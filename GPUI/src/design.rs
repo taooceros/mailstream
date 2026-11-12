@@ -561,6 +561,12 @@ pub mod layout {
     pub const RAIL_TOP: f32 = 36.0;
     #[cfg(not(target_os = "macos"))]
     pub const RAIL_TOP: f32 = 8.0;
+    /// Room before a toolbar along the window's top edge from its leading corner, for the Mac's
+    /// traffic lights.
+    #[cfg(target_os = "macos")]
+    pub const TRAFFIC_LIGHTS: f32 = 64.0;
+    #[cfg(not(target_os = "macos"))]
+    pub const TRAFFIC_LIGHTS: f32 = 0.0;
     /// The list's title row, and the band at the top of a detail pane its toolbar floats in.
     pub const HEADER_HEIGHT: f32 = 56.0;
     /// A capsule of toolbar buttons: a `icon::BUTTON` control and its padding.
@@ -667,6 +673,13 @@ pub mod calendar {
     pub const POPOVER_WIDTH: f32 = 360.0;
     pub const POPOVER_HEIGHT: f32 = 560.0;
     pub const POPOVER_GAP: f32 = 8.0;
+    /// The event's page over the whole window (MS-184): its column `PAGE_WIDTH` wide at most,
+    /// its title `PAGE_TITLE`; from a window `PAGE_SIDE_BY_SIDE` wide the guests take a column
+    /// `PAGE_SIDE` wide beside the details and notes.
+    pub const PAGE_WIDTH: f32 = 980.0;
+    pub const PAGE_TITLE: f32 = 28.0;
+    pub const PAGE_SIDE: f32 = 320.0;
+    pub const PAGE_SIDE_BY_SIDE: f32 = 900.0;
 }
 
 /// The house easing curve (Flutter's `Motion.curve`), `cubic-bezier(0.05, 0.7, 0.1, 1)`: a strong

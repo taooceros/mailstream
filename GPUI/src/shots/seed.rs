@@ -15,7 +15,9 @@
 //!   list folds into bundles. Every conversation carries its AI tag, so nothing is tagged
 //!   during a run.
 //! - Chat: a direct message, a group and a space, the group's recent messages.
-//! - The calendars: this week's meetings around today, the design review among them.
+//! - The calendars: this week's meetings around today, the design review among them; it and
+//!   Sprint planning (which Sam organizes, so it can be edited) carry a place, notes with links,
+//!   a link to the provider's page and guests with every kind of answer.
 //! - Sender pictures: two senders have one; everyone else has a cached miss, so nothing is
 //!   looked up on the web.
 //!
@@ -547,9 +549,24 @@ fn write_calendar(cache: &MailCache) {
     for day in -7..=7 {
         events.push(event("Standup", (day, 9, 30), 15., Some("accepted")));
     }
+    let mut planning = event("Sprint planning", (0, 11, 0), 90., Some("organizer"));
+    planning["location"] = json!("Room 2A");
+    planning["link"] = json!("https://calendar.google.com/calendar/event?eid=planning");
+    planning["notes"] = json!(
+        "Pick the sprint's work from the board: https://board.example.com/sprint-24\n\n\
+         Bring estimates for your tickets. Can't make it? Tell jordan.park@northwind.example."
+    );
+    planning["attendees"] = json!([
+        { "name": ME, "email": GMAIL, "response": "accepted" },
+        { "name": JORDAN.0, "email": JORDAN.1, "response": "accepted" },
+        { "name": DEVON.0, "email": DEVON.1, "response": "tentative" },
+        { "name": PRIYA.0, "email": PRIYA.1, "response": "accepted" },
+        { "name": RILEY.0, "email": RILEY.1, "response": "declined" },
+        { "name": TAYLOR.0, "email": TAYLOR.1, "response": "needsAction" },
+    ]);
     events.extend([
         event("1:1 with Jordan", (-1, 14, 0), 30., Some("accepted")),
-        event("Sprint planning", (0, 11, 0), 90., Some("organizer")),
+        planning,
         event("Lunch", (0, 12, 30), 45., None),
         event("Interview: frontend", (0, 15, 0), 60., Some("needsAction")),
         event("Customer call", (1, 11, 0), 30., Some("tentative")),
@@ -560,10 +577,21 @@ fn write_calendar(cache: &MailCache) {
         "id": "design-review", "calendar": "work", "title": "Design review", "start": start, "end": end,
         "location": "Room 4B", "uid": "design-review@northwind.example", "response": "needsAction", "mine": false,
         "organizer": person(MORGAN), "meetingUrl": "https://meet.example.com/design-review",
+        "link": "https://calendar.google.com/calendar/event?eid=design-review",
+        "notes": "We'll walk through the new onboarding flow and settle the open questions.\n\n\
+                  Mockups: https://www.figma.com/file/onboarding-v3\n\
+                  Spec: https://docs.example.com/onboarding-spec\n\n\
+                  1. Welcome screen copy\n2. Account linking\n3. Empty states\n\n\
+                  Questions before then to morgan.lee@northwind.example.",
     });
     review["attendees"] = json!([
         { "name": MORGAN.0, "email": MORGAN.1, "response": "accepted" },
         { "name": ME, "email": GMAIL, "response": "needsAction" },
+        { "name": ALEX.0, "email": ALEX.1, "response": "accepted" },
+        { "name": PRIYA.0, "email": PRIYA.1, "response": "tentative" },
+        { "name": XIAOMING.0, "email": XIAOMING.1, "response": "accepted" },
+        { "name": DANA.0, "email": DANA.1, "response": "declined" },
+        { "name": EVAN.0, "email": EVAN.1, "response": "needsAction" },
     ]);
     events.push(review);
     let copy = json!({

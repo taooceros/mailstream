@@ -219,7 +219,7 @@ impl CalendarPane {
                         .shadow(p.card_shadow.clone())
                         .cursor_pointer()
                         .hover(move |s| s.shadow(raised.clone()))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(key.clone(), cx)))
+                        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.open_clicked(key.clone(), event, cx)))
                         .child(mark_dot(p.accent))
                         .child(
                             div()
@@ -420,7 +420,7 @@ impl CalendarPane {
             .when_some(trailing, |d, trailing| d.child(div().flex_shrink_0().w(px(space::S8))).child(trailing));
         list_row(ElementId::Name(format!("event:{}:{}:{}:{day}", key.account, key.calendar, key.id).into()), selected, false, p)
             .h(px(metrics::ROW_HEIGHT))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(key.clone(), cx)))
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.open_clicked(key.clone(), event, cx)))
             .child(content)
             .into_any_element()
     }

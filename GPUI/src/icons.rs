@@ -36,6 +36,7 @@ icons! {
     Disclosure => "chevron_right",
     Download => "download",
     Draft => "draft",
+    Expand => "open_in_full",
     Dock => "right_panel_open",
     Float => "picture_in_picture",
     Folder => "folder",
