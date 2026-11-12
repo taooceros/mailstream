@@ -270,9 +270,13 @@ The code agent:
 1. Tests its change in the real app before landing: a release or debug build from its own
    checkout (never an `/Applications` copy; it doesn't install), over synthetic data (no
    accounts or personal mail, like the fixtures `GPUI/README.md` and `Flutter/README.md` list),
-   driven with computer helpers; no sending mail, nothing destructive. It takes every
-   screenshot or recording the change needs, UI states in light and dark (launching the
-   executable with `-AppleInterfaceStyle Dark` shows it dark), and attaches them to the issue.
+   no sending mail, nothing destructive. It takes every screenshot or recording the change
+   needs, UI states in light and dark, and attaches them to the issue. GPUI on the Mac goes
+   through `python3 scripts/shots.py` (MS-243; its header has the commands): one run builds the
+   app, fills a synthetic home, plays a script of clicks, keys and shots in light and dark and,
+   with `--upload MS-<n>`, prints the Markdown for the comment; no screen or computer use, so
+   it works with the Mac locked. Other front ends (and recordings) are driven with computer
+   helpers (launching the executable with `-AppleInterfaceStyle Dark` shows it dark).
    On Linux it runs the app only in a private Hyprland desktop of its own, `python3
    scripts/vhypr.py start <name> [--dark]` (the script's header has every verb: `run`, `shot`,
    `click`, `drag`, `scroll`, `type`, `key`, `appearance`, `stop`), never on the user's screen,

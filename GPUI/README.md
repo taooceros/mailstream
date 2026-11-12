@@ -65,6 +65,18 @@ On the Mac, `-AppleInterfaceStyle Dark` (or `Light`) after the executable shows 
 appearance without changing the system's, for screenshots: AppKit ignores that argument for an
 app's appearance, so `main.rs` applies it; a launch without it follows the system.
 
+Delivery screenshots need no screen (MS-243): `python3 scripts/shots.py SCRIPT` builds the app
+with the `shots` feature, starts it over a synthetic home (`Engine/examples/shots_home.rs`) in
+light and then dark, plays SCRIPT (clicks, scrolls, keys, typing, waits, window sizes) into the
+window and saves each `shot NAME` as `shots/NAME-light.png` and `NAME-dark.png`; `--upload MS-123`
+puts them in Linear's private storage and prints the Markdown (the script's header has every
+option). `src/shots.rs` takes the commands from a folder (`MAILSTREAM_SHOTS`) and renders the
+window with GPUI's `render_to_image`, which draws the frame offscreen as the GPU would show it:
+it works with the Mac locked or the window covered, and input reaches only this window. The
+feature turns on GPUI's `test-support` (where `render_to_image` lives), so shipped builds leave
+it out; a build without it says so when `MAILSTREAM_SHOTS` is set. On Linux `scripts/vhypr.py`
+takes the screenshots: GPUI Fast's Linux renderer has no `render_to_image`.
+
 HTML bodies are drawn by Blitz, the engine's renderer (`src/blitz_body.rs`, as in Flutter's
 reader), on every platform: the build turns on the FFI crate's `blitz` feature, with one
 adjustment for GPUI's dependency graph: `vendor/stylo_derive` is Stylo's derive crate 0.22.0 with
@@ -134,6 +146,7 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 | `src/icons.rs`, `src/format.rs` | Material Symbols glyphs; dates and sizes |
 | `src/input.rs` | `field` / `area`: gpui-kit's one-line and multi-line text fields in the surrounding text style (see above) |
 | `src/bench.rs` | The frame measurement `scripts/bench.sh gpui` runs (`MAILSTREAM_BENCH=scroll`): the list scrolls itself and every frame's start and render-to-paint time is logged. The window runs in the background, so it opens without GPUI Fast's limit of about 30 fps for a window that isn't key |
+| `src/shots.rs` | With the `shots` feature and `MAILSTREAM_SHOTS=<folder>`: commands read from `<folder>/cmd` (size, pointer, clicks, scrolls, keys, typing, waits, appearance) fed to the window as the platform's input, and `shot FILE` rendering the window to a PNG once it stops changing; answers in `<folder>/done`. `scripts/shots.py` drives it |
 | `src/updater.rs` | Mac only: starts Sparkle from the bundle's Frameworks and adds the two update items to the application menu |
 
 Keys (⌘ is Ctrl on Linux): ↑/↓ or J/K move (in the reader they page through conversations),

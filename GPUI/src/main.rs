@@ -32,6 +32,7 @@ mod icons;
 mod input;
 mod model;
 mod settings;
+mod shots;
 mod split;
 mod state;
 mod swipe;
@@ -101,8 +102,10 @@ fn main() {
         };
         // GPUI Fast draws a window that isn't the key window at about 30 fps unless input is
         // arriving. The measurement runs in the background on purpose and scrolls by itself, so
-        // it lifts that limit to see what the window does at the display's rate.
-        if bench::requested() {
+        // it lifts that limit to see what the window does at the display's rate; screenshots
+        // (`shots.rs`) run in the background too and feed their own input.
+        let background = bench::requested() || shots::requested();
+        if background {
             options.inactive_frame_interval = None;
         }
         // In gpui-kit's root, which hosts the kit's tooltips, menus and popovers over the app; its
@@ -133,12 +136,14 @@ fn main() {
                 }
                 let (focus, bench) = app.read_with(cx, |app, _| (app.focus.clone(), app.bench.is_some()));
                 window.focus(&focus, cx);
-                // A measurement runs beside the user's work without taking the foreground.
-                if !bench {
+                // A measurement or a screenshot run goes on beside the user's work without taking
+                // the foreground.
+                if !bench && !background {
                     cx.activate(true);
                 }
             })
             .ok();
+        shots::start(window.into(), cx);
     });
 }
 

@@ -18,6 +18,11 @@ url = "2"
 image = { version = "0.25", default-features = false }
 base64 = "0.22"
 
+[features]
+# Screenshots and scripted input without the screen (`src/shots.rs`, `scripts/shots.py`, MS-243):
+# GPUI's `render_to_image` comes with its `test-support`, which the shipped app leaves out.
+shots = ["gpui/test-support", "image/png"]
+
 # Tests that draw views in a test window and feed them input as the platform would (the
 # calendar's two-finger paging, MS-212).
 [dev-dependencies]
