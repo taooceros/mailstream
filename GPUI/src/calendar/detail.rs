@@ -1,10 +1,12 @@
 //! The open event's island (Flutter's `CalendarEventPane`): its calendar, title and when; a bar
 //! answering the invitation (Going, Maybe, Decline) beside Join for its call; where; the guests
 //! two to a row with their answers; its notes. Its toolbar closes it and opens the event in the
-//! provider's web calendar.
+//! provider's web calendar. The week view shows the same event in a popover beside its card
+//! instead (MS-184, `render_popover`).
 
 use chrono::Local;
 use gpui::prelude::FluentBuilder;
+use gpui::component::button::Button;
 use gpui::{
     AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, InteractiveElement, IntoElement,
     ParentElement, StatefulInteractiveElement, Styled, Window, div, px, relative,
@@ -16,10 +18,10 @@ use super::agenda::{dot_color, guest_address};
 use super::model;
 use crate::avatars;
 use crate::controls::{
-    ButtonKind, ControlSize, capsule, hairline, icon_button, icon_label_button, island, mark_dot, pill, title_bar,
-    tooltip,
+    ButtonKind, ControlSize, capsule, hairline, icon_button, icon_label_button, island, mark_dot, pill, popover,
+    title_bar, tooltip,
 };
-use crate::design::{Palette, calendar as metrics, icon as icon_size, layout, radius, space, text};
+use crate::design::{self, Palette, calendar as metrics, icon as icon_size, layout, radius, space, text};
 use crate::format;
 use crate::icons::{Icon, icon};
 
@@ -38,9 +40,68 @@ impl CalendarPane {
             .size_full()
             // The event keeps the keyboard; clicks never reach the list beneath.
             .occlude()
-            .child(self.render_event(index, p, cx))
+            .child(self.render_event(index, false, p, cx))
             .child(self.render_toolbar(index, two_pane, p, window, cx))
             .into_any_element()
+    }
+
+    /// The week view's open event, floating beside its card (MS-184): the pane's event under a
+    /// row of its actions, on the popovers' panel, as tall as it needs up to `POPOVER_HEIGHT` or
+    /// `room` (its notes and guests scrolling past that). It is drawn after the window, so it
+    /// sets the pane's text style again.
+    pub(super) fn render_popover(&self, index: usize, room: f32, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        popover(p)
+            .debug_selector(|| "calendar-popover".into())
+            .w(px(metrics::POPOVER_WIDTH))
+            .max_h(px(metrics::POPOVER_HEIGHT.min(room)))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .font_family(design::ui_font())
+            .text_size(px(text::BODY))
+            .text_color(p.text)
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px(px(space::S8))
+                    .pt(px(space::S8))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S2))
+                    .child(div().flex_1())
+                    .children(self.edit_buttons(index, p, cx).into_iter().flatten())
+                    .children(self.link_button(index, p))
+                    .child(
+                        icon_button("calendar-popover-close", Icon::Close, "Close (Esc)", true, p.glyph)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_event(cx))),
+                    ),
+            )
+            .child(self.render_event(index, true, p, cx))
+            .into_any_element()
+    }
+
+    /// Edit and Delete, for an event the account organizes on a calendar it can write.
+    fn edit_buttons(&self, index: usize, p: &'static Palette, cx: &mut Context<Self>) -> Option<[Button; 2]> {
+        let event = &self.events[index];
+        if !event.item.editable {
+            return None;
+        }
+        let (edit, delete) = (event.key.clone(), event.key.clone());
+        Some([
+            icon_button("calendar-edit", Icon::Compose, "Edit", true, p.glyph)
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.edit_event(&edit, window, cx))),
+            icon_button("calendar-delete", Icon::Delete, "Delete", true, p.glyph)
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.confirm_delete(&delete, window, cx))),
+        ])
+    }
+
+    /// Opens the event in the provider's web calendar.
+    fn link_button(&self, index: usize, p: &'static Palette) -> Option<Button> {
+        let event = &self.events[index];
+        let link = event.item.link.clone()?;
+        let microsoft = self.account_of(event).is_some_and(|account| account.provider == "microsoft");
+        let tip = if microsoft { "Open in Outlook" } else { "Open in Google Calendar" };
+        Some(icon_button("calendar-link", Icon::OpenInWindow, tip, true, p.glyph).on_click(move |_, _, cx| cx.open_url(&link)))
     }
 
     /// Floats over the top of the event: ✕ closes it beside the list, ‹ goes back to the list it
@@ -53,8 +114,6 @@ impl CalendarPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let event = &self.events[index];
-        let microsoft = self.account_of(event).is_some_and(|account| account.provider == "microsoft");
         let (close_icon, close_tip) = if two_pane { (Icon::Close, "Close (Esc)") } else { (Icon::Back, "Back (Esc)") };
         title_bar("calendar-detail-toolbar", window, cx)
             .absolute()
@@ -71,32 +130,13 @@ impl CalendarPane {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_event(cx))),
             ))
             .child(div().flex_1())
-            .when(event.item.editable, |d| {
-                let (edit, delete) = (event.key.clone(), event.key.clone());
-                d.child(
-                    capsule(p)
-                        .child(
-                            icon_button("calendar-edit", Icon::Compose, "Edit", true, p.glyph)
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.edit_event(&edit, window, cx))),
-                        )
-                        .child(
-                            icon_button("calendar-delete", Icon::Delete, "Delete", true, p.glyph)
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.confirm_delete(&delete, window, cx))),
-                        ),
-                )
-            })
-            .when_some(event.item.link.clone(), |d, link| {
-                let tip = if microsoft { "Open in Outlook" } else { "Open in Google Calendar" };
-                d.child(capsule(p).child(
-                    icon_button("calendar-link", Icon::OpenInWindow, tip, true, p.glyph)
-                        .on_click(move |_, _, cx| cx.open_url(&link)),
-                ))
-            })
+            .when_some(self.edit_buttons(index, p, cx), |d, buttons| d.child(capsule(p).children(buttons)))
+            .when_some(self.link_button(index, p), |d, link| d.child(capsule(p).child(link)))
     }
 
     /// The bar under the title: the answers (or the account's part, when it cannot answer from
     /// here) and Join; none when there is neither.
-    fn action_bar(&self, index: usize, p: &'static Palette, cx: &mut Context<Self>) -> Option<Div> {
+    fn action_bar(&self, index: usize, floating: bool, p: &'static Palette, cx: &mut Context<Self>) -> Option<Div> {
         let event = &self.events[index];
         let reply = self.reply(event);
         let url = event.item.meeting_url.clone();
@@ -117,7 +157,7 @@ impl CalendarPane {
                 .bg(p.fill)
                 .map(|d| {
                     if reply.answerable {
-                        d.child(self.reply_switch(index, reply, "detail", p, cx))
+                        d.child(self.reply_switch(index, reply, if floating { "popover" } else { "detail" }, p, cx))
                     } else if !part.is_empty() {
                         d.child(div().px(px(space::S6)).text_color(p.muted).font_weight(FontWeight::MEDIUM).child(part))
                     } else {
@@ -134,8 +174,9 @@ impl CalendarPane {
         )
     }
 
-    /// The event, scrolling under the toolbar.
-    fn render_event(&self, index: usize, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The event, scrolling under the pane's toolbar, or under the popover's actions and no taller
+    /// than the room the popover leaves it (`floating`).
+    fn render_event(&self, index: usize, floating: bool, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let event = &self.events[index];
         let item = &event.item;
         let line = |glyph: Icon, child: AnyElement| {
@@ -159,15 +200,18 @@ impl CalendarPane {
             Local::now(),
         );
         let guests = model::event_guests(item);
-        let actions = self.action_bar(index, p, cx);
+        let actions = self.action_bar(index, floating, p, cx);
         div()
-            .id("calendar-event")
-            .size_full()
+            .id(if floating { "calendar-popover-event" } else { "calendar-event" })
             .overflow_y_scroll()
             .track_scroll(&self.detail_scroll)
-            .pt(px(layout::HEADER_HEIGHT + space::S8))
-            .px(px(space::S24))
-            .pb(px(space::S24))
+            .map(|d| {
+                if floating {
+                    d.min_h_0().flex_shrink_1().pt(px(space::S2)).px(px(space::S16)).pb(px(space::S16))
+                } else {
+                    d.size_full().pt(px(layout::HEADER_HEIGHT + space::S8)).px(px(space::S24)).pb(px(space::S24))
+                }
+            })
             .flex()
             .flex_col()
             .child(

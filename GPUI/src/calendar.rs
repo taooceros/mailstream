@@ -2,7 +2,8 @@
 //! every account's events through the in-process engine's `calendar_*` methods, shown instead of
 //! the mail list while Calendar is selected. The agenda lists today on, under this week's days
 //! and the meeting about to start; the open event sits beside it (over it in a narrow window),
-//! answering its invitation through the account's calendar.
+//! answering its invitation through the account's calendar. In the week view it floats in a
+//! popover beside its card instead (MS-184).
 //!
 //! The engine fetches Google Calendar and Outlook every five minutes and keeps what it fetched in
 //! mail.db; the pane reads what it holds (a week back on) and reads it again on its `Calendar`
@@ -23,8 +24,8 @@ use chrono::{Days, Local, NaiveDate};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, ListAlignment,
-    ListOffset, ListState, ParentElement, Render, ScrollHandle, SharedString, Styled, Subscription, Task, Window, actions,
-    div, px, relative,
+    ListOffset, ListState, ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, Styled, Subscription, Task,
+    Window, actions, div, px, relative,
 };
 use mailstream::CalendarAccount;
 
@@ -123,8 +124,13 @@ pub struct CalendarPane {
     loading: bool,
     /// `calendar_events` answered once: until then no events is not "nothing planned".
     listed: bool,
-    /// The event beside the calendar.
+    /// The event beside the calendar (in the week view, in a popover beside its card).
     opened: Option<EventKey>,
+    /// Where the press that closed the week view's popover went down: the click it makes is the
+    /// popover's, and starts no new event on the free time under it.
+    dismissed_at: Option<Point<Pixels>>,
+    /// The popover closed while it may have held the keyboard: the pane takes it back as it draws.
+    refocus: bool,
     /// Answers on their way to the calendar, by event, until it takes them.
     answering: HashMap<EventKey, &'static str>,
     /// A read is under way; `read_again` asks for one more when it lands.
@@ -195,6 +201,8 @@ impl CalendarPane {
             loading: false,
             listed: false,
             opened: None,
+            dismissed_at: None,
+            refocus: false,
             answering: HashMap::new(),
             reading: false,
             read_again: false,
@@ -366,6 +374,7 @@ impl CalendarPane {
     }
 
     pub fn open(&mut self, key: EventKey, cx: &mut Context<Self>) {
+        self.refocus = false;
         if self.opened.as_ref() != Some(&key) {
             self.opened = Some(key);
             self.detail_scroll = ScrollHandle::new();
@@ -376,7 +385,16 @@ impl CalendarPane {
     /// Closes the open event (⌘W, Esc, its close button); nothing else.
     pub fn close_event(&mut self, cx: &mut Context<Self>) {
         if self.opened.take().is_some() {
+            self.refocus = self.view == View::Week;
             cx.notify();
+        }
+    }
+
+    /// The week view's popover for `key` closed itself: a press outside it (`at`) or Esc (none).
+    fn popover_closed(&mut self, key: &EventKey, at: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+        if self.opened.as_ref() == Some(key) {
+            self.dismissed_at = at;
+            self.close_event(cx);
         }
     }
 
@@ -448,6 +466,10 @@ impl CalendarPane {
     /// Agenda, Day or Week; the day and week views keep the hours scrolled to.
     fn set_view(&mut self, view: View, cx: &mut Context<Self>) {
         if self.view != view {
+            // The week shows no pane beside it: an event opened elsewhere may not be in it.
+            if view == View::Week {
+                self.close_event(cx);
+            }
             self.view = view;
             self.pan = Pan::Rest;
             cx.notify();
@@ -502,6 +524,9 @@ impl CalendarPane {
 
     /// Back to today, scrolled to now: the agenda's top, the timeline's current hours.
     fn today(&mut self, _: &Today, _: &mut Window, cx: &mut Context<Self>) {
+        if self.view == View::Week {
+            self.close_event(cx);
+        }
         self.focus_day = Local::now().date_naive();
         self.pan = Pan::Rest;
         match self.view {
@@ -544,11 +569,16 @@ impl Render for CalendarPane {
         if self.listed && self.built_for != Some(today) {
             self.rebuild(today);
         }
+        if std::mem::take(&mut self.refocus) {
+            window.focus(&self.focus, cx);
+        }
         let two_pane = f32::from(window.viewport_size().width) >= layout::TWO_PANE_WIDTH;
         let list = self.render_list_island(today, p, window, cx);
-        let detail = self.opened.clone().and_then(|key| self.event_index(&key)).map(|index| {
-            self.render_detail(index, two_pane, p, window, cx)
-        });
+        // The week view floats the open event beside its card (`grid.rs`).
+        let detail = (self.view != View::Week)
+            .then(|| self.opened.clone().and_then(|key| self.event_index(&key)))
+            .flatten()
+            .map(|index| self.render_detail(index, two_pane, p, window, cx));
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)

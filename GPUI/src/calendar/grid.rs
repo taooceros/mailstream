@@ -7,19 +7,26 @@
 //! The days page as one: a two-finger sideways swipe drags them 1:1, the gutter's hours staying
 //! put, and past a third of the width or flicked they go on to the next page, else back; ← and →
 //! slide the next page in. The pages either side are drawn only while they move.
+//!
+//! The week view opens an event in gpui-kit's popover beside its card (MS-184), not in the pane
+//! beside the calendar: on the side of the card with more of the week, under an all-day bar. A
+//! press outside it, Esc or another week closes it; the day view keeps the pane.
 
 use std::time::Instant;
 
 use chrono::{DateTime, Days, Local, NaiveDate, Timelike};
 use gpui::prelude::FluentBuilder;
+use gpui::base::Selectable;
+use gpui::component::popover::Popover;
 use gpui::{
-    App, ClickEvent, Context, DispatchPhase, Div, ElementId, FontWeight, HighlightStyle, Hsla, InteractiveElement,
-    IntoElement, ParentElement, PathBuilder, ScrollEvent, StatefulInteractiveElement, Styled, StyledText, Window, canvas,
-    div, linear_color_stop, linear_gradient, point, px, relative,
+    Anchor, AnyElement, App, ClickEvent, Context, DispatchPhase, Div, ElementId, FontWeight, HighlightStyle, Hsla,
+    InteractiveElement, IntoElement, ParentElement, PathBuilder, RenderOnce, ScrollEvent, Stateful,
+    StatefulInteractiveElement, StyleRefinement, Styled, StyledText, Window, canvas, div, linear_color_stop,
+    linear_gradient, point, px, relative,
 };
 
 use super::agenda::{dot_color, guest_avatars};
-use super::model::{self, AllDayPlacement, Event, Look, Placement};
+use super::model::{self, AllDayPlacement, Event, EventKey, Look, Placement};
 use super::{CalendarPane, Pan, View};
 use crate::controls::{Tone, mark_dot, notice, tag};
 use crate::design::{self, Palette, calendar as metrics, motion, space, stroke, text};
@@ -180,10 +187,18 @@ impl CalendarPane {
         if self.view == View::Agenda {
             return;
         }
+        self.close_week_popover(cx);
         self.move_focus(step);
         let width = self.page_width.get();
         self.pan = Pan::Settle { from: step as f32 * width, start: Instant::now() };
         cx.notify();
+    }
+
+    /// Another week takes the open event's popover away with the one it was in.
+    fn close_week_popover(&mut self, cx: &mut Context<Self>) {
+        if self.view == View::Week {
+            self.close_event(cx);
+        }
     }
 
     fn move_focus(&mut self, step: i64) {
@@ -227,6 +242,7 @@ impl CalendarPane {
                     // Dragged left: the next page; right: the one before. It goes on from where
                     // the fingers left it.
                     let step = if offset < 0. { 1 } else { -1 };
+                    self.close_week_popover(cx);
                     self.move_focus(step);
                     offset + step as f32 * width
                 } else {
@@ -302,6 +318,13 @@ impl CalendarPane {
             self.scroll_timeline_to((now.hour() * 60 + now.minute()) as f32);
         }
         let unsynced = self.synced.filter(|(from, until)| current.days.iter().any(|day| day < from || day >= until));
+        // The week's open event, for the popover of the first of its cards drawn; the window's
+        // height less the popovers' margin is all it may take.
+        let room = f32::from(window.viewport_size().height) - 2. * space::S8;
+        let mut floating = (self.view == View::Week)
+            .then(|| self.opened.as_ref().and_then(|key| self.event_index(key)))
+            .flatten()
+            .map(|index| self.render_popover(index, room, p, cx));
 
         let header = div().flex_shrink_0().h(px(metrics::HEADER_HEIGHT)).flex().child(div().flex_shrink_0().w(px(metrics::GUTTER))).child(
             div().flex_1().h_full().relative().overflow_hidden().child(strip(pan, pages.iter().map(|(offset, page)| {
@@ -345,7 +368,7 @@ impl CalendarPane {
                 )
                 .child(
                     div().flex_1().h_full().relative().overflow_hidden().child(strip(pan, pages.iter().map(|(offset, page)| {
-                        let bars = self.render_all_day_bars(page, now, p, cx);
+                        let bars = self.render_all_day_bars(page, now, &mut floating, p, cx);
                         place(
                             *offset,
                             div().child(
@@ -474,7 +497,9 @@ impl CalendarPane {
                                 pan,
                                 pages
                                     .iter()
-                                    .map(|(offset, page)| place(*offset, self.render_timeline(page, today, now, (width, reach), p, cx))),
+                                    .map(|(offset, page)| {
+                                        place(*offset, self.render_timeline(page, today, now, (width, reach), &mut floating, p, cx))
+                                    }),
                             )),
                     ),
             );
@@ -531,6 +556,7 @@ impl CalendarPane {
         today: NaiveDate,
         now: DateTime<Local>,
         (width, reach): (f32, f32),
+        floating: &mut Option<AnyElement>,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -559,6 +585,8 @@ impl CalendarPane {
         // Half a gap from the day's line on the left, a whole one before the next day's.
         let room = column - 1.5 * gap;
         for (i, (placed, conflicts)) in page.timed.iter().zip(&page.conflicts).enumerate() {
+            // The popover on the side with more of the week (the middle day's on its left).
+            let side = if 2 * i + 1 < count { Anchor::LeftCenter } else { Anchor::RightCenter };
             let mut cards = div().absolute().top_0().bottom_0().left(px(gap / 2.)).right(px(gap));
             for (placement, &conflict) in placed.iter().zip(conflicts) {
                 let columns = placement.columns as f32;
@@ -579,7 +607,7 @@ impl CalendarPane {
                         .child(
                             shares(placement.span)
                                 .flex()
-                                .child(self.render_card(placement, conflict, (card_width, card_height), now, p, cx))
+                                .child(self.render_card(placement, conflict, (card_width, card_height), now, (side, &mut *floating), p, cx))
                                 .child(div().flex_shrink_0().w(px(trailing))),
                         )
                         .child(shares(placement.columns - placement.column - placement.span)),
@@ -591,6 +619,14 @@ impl CalendarPane {
                 // A click on free time there: a new event from the quarter hour under it.
                 let top = self.band_top.clone();
                 column.on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    // The press closed the open event's popover: that is all it does.
+                    let down = match event {
+                        ClickEvent::Mouse(click) => Some(click.down.position),
+                        _ => None,
+                    };
+                    if this.dismissed_at.take().is_some_and(|at| Some(at) == down) {
+                        return;
+                    }
                     let y = f32::from(event.position().y) - top.get() - metrics::INSET;
                     let minutes = ((y / PER_MINUTE).floor() as i64).div_euclid(15) * 15;
                     let minutes = minutes.clamp(0, DAY_MINUTES as i64 - 15);
@@ -644,9 +680,10 @@ impl CalendarPane {
         conflict: bool,
         (width, height): (f32, f32),
         now: DateTime<Local>,
+        (side, floating): (Anchor, &mut Option<AnyElement>),
         p: &'static Palette,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let event = &self.events[placement.event];
         let item = &event.item;
         let look = model::look(event, now);
@@ -796,20 +833,16 @@ impl CalendarPane {
         };
         let key = event.key.clone();
         let raised = p.raised_shadow.clone();
+        let id = format!("card:{}:{}:{}:{}", key.account, key.calendar, key.id, placement.top);
         let card = div()
-            .id(ElementId::Name(format!("card:{}:{}:{}:{}", key.account, key.calendar, key.id, placement.top).into()))
+            .id(ElementId::Name(id.clone().into()))
             .debug_selector(|| format!("card:{}", key.id))
             .flex_1()
             .min_w_0()
             .h_full()
             .overflow_hidden()
             .rounded(px(metrics::CARD_RADIUS))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                // Not the free time under it.
-                cx.stop_propagation();
-                this.open(key.clone(), cx);
-            }));
+            .cursor_pointer();
         let card = if selected {
             card.bg(linear_gradient(180., linear_color_stop(p.lifted_card[0], 0.), linear_color_stop(p.lifted_card[1], 1.)))
                 .border(px(stroke::RIM))
@@ -840,7 +873,50 @@ impl CalendarPane {
         // The content as wide as the card was last measured: its lines are cut to fit (…) only
         // in a box of known width. The card itself always fills its place; a frame after the
         // width changes, the content follows.
-        card.child(content.w(px(width.max(0.))))
+        let card = card.child(content.w(px(width.max(0.))));
+        self.opener(card, id, &event.key, side, floating, cx)
+    }
+
+    /// `trigger` (an event's card or all-day bar) opening its event: in the week view under
+    /// gpui-kit's popover (MS-184), which a press on it opens and which shows `floating` (the
+    /// open event's panel, taken by the first of its triggers drawn) with its `anchor` corner
+    /// against it, `POPOVER_GAP` off; a press outside it or Esc closes it. Elsewhere a click opens
+    /// the event in the pane. Either way the press never reaches the free time under it.
+    fn opener(
+        &self,
+        trigger: Stateful<Div>,
+        id: String,
+        key: &EventKey,
+        anchor: Anchor,
+        floating: &mut Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = key.clone();
+        if self.view != View::Week {
+            return trigger
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.open(key.clone(), cx);
+                }))
+                .into_any_element();
+        }
+        let content = if self.opened.as_ref() == Some(&key) { floating.take() } else { None };
+        let pane = cx.entity().downgrade();
+        Popover::new(ElementId::Name(format!("popover:{id}").into()))
+            .appearance(false)
+            .anchor(anchor)
+            .offset(px(metrics::POPOVER_GAP))
+            .trigger_style(StyleRefinement::default().flex_1().min_w_0().h_full())
+            .trigger(Trigger(trigger.into_any_element()))
+            .open(content.is_some())
+            .on_open_change(move |&open, window, cx| {
+                // Esc closes it with the pointer anywhere; only a press is where it went down.
+                let at = (!window.last_input_was_keyboard()).then(|| window.mouse_position());
+                pane.update(cx, |this, cx| if open { this.open(key.clone(), cx) } else { this.popover_closed(&key, at, cx) })
+                    .ok();
+            })
+            .children(content)
+            .into_any_element()
     }
 
     /// The all-day row's bars of `page`: each tinted with its calendar's color, lifted when open,
@@ -849,6 +925,7 @@ impl CalendarPane {
         &self,
         page: &Page,
         now: DateTime<Local>,
+        floating: &mut Option<AnyElement>,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
@@ -871,10 +948,11 @@ impl CalendarPane {
                     event.item.title,
                     if after { " ›" } else { "" }
                 );
-                let key = event.key.clone();
+                let key = &event.key;
                 let raised = p.raised_shadow.clone();
+                let id = format!("bar:{}:{}:{}:{first_day}", key.account, key.calendar, key.id);
                 let bar = div()
-                    .id(ElementId::Name(format!("bar:{}:{}:{}:{first_day}", key.account, key.calendar, key.id).into()))
+                    .id(ElementId::Name(id.clone().into()))
                     .flex_1()
                     .min_w_0()
                     .h_full()
@@ -890,7 +968,6 @@ impl CalendarPane {
                             d.bg(face).hover(move |s| s.shadow(raised.clone()))
                         }
                     })
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(key.clone(), cx)))
                     .child(
                         div()
                             .min_w_0()
@@ -914,7 +991,7 @@ impl CalendarPane {
                         shares(placed.last - placed.first + 1)
                             .flex()
                             .child(div().flex_shrink_0().w(px(1.)))
-                            .child(bar)
+                            .child(self.opener(bar, id, key, Anchor::TopCenter, floating, cx))
                             .child(div().flex_shrink_0().w(px(1.))),
                     )
                     .child(shares(days - 1 - placed.last))
@@ -960,7 +1037,7 @@ impl CalendarPane {
 mod tests {
     use chrono::{Days, Local, NaiveDate};
     use gpui::{
-        Bounds, Entity, Modifiers, Pixels, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
+        Bounds, Entity, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
         VisualTestContext, point, px, size,
     };
 
@@ -974,6 +1051,7 @@ mod tests {
         cx.update(|cx| {
             gpui::init(cx);
             crate::design::sync_kit_theme(gpui::WindowAppearance::Light, cx);
+            super::super::bind_keys(cx);
         });
         let (pane, cx) = cx.add_window_view(|window, cx| CalendarPane::new(window, cx));
         cx.simulate_resize(size(px(1400.), px(900.)));
@@ -1012,23 +1090,82 @@ mod tests {
         pane.read_with(cx, |pane, _| (pane.focus_day, pane.pan))
     }
 
+    fn opened(pane: &Entity<CalendarPane>, cx: &mut VisualTestContext) -> Option<String> {
+        pane.read_with(cx, |pane, _| pane.opened.as_ref().map(|key| key.id.to_string()))
+    }
+
+    /// A click at `at`, then the frames it brings.
+    fn click(cx: &mut VisualTestContext, at: Point<Pixels>) {
+        cx.simulate_click(at, Modifiers::default());
+        cx.run_until_parked();
+    }
+
     #[gpui::test]
-    fn an_open_event_narrowing_the_list_keeps_the_whole_week_in_it(cx: &mut TestAppContext) {
-        let (pane, cx) = week_view(cx);
+    fn a_narrower_band_keeps_the_whole_week_in_it(cx: &mut TestAppContext) {
+        let (_, cx) = week_view(cx);
         let wide = bounds(cx, "timeline-band");
         assert!(wide.contains(&bounds(cx, "card:saturday").center()));
         // One frame at the new width: what the pane last measured is the old one.
-        pane.update(cx, |pane, cx| {
-            let key = pane.events.iter().find(|event| event.item.id == "today").unwrap().key.clone();
-            pane.open(key, cx);
-        });
+        cx.simulate_resize(size(px(800.), px(900.)));
         let band = bounds(cx, "timeline-band");
-        assert!(band.size.width < wide.size.width * 0.6, "the open event takes most of the room");
+        assert!(band.size.width < wide.size.width * 0.6, "the band narrowed with the window");
         let saturday = bounds(cx, "card:saturday");
         assert!(
             saturday.left() > band.left() + band.size.width * 6. / 7. - px(1.) && saturday.right() <= band.right(),
             "Saturday's card sits in the last seventh of the band: {saturday:?} in {band:?}"
         );
+    }
+
+    #[gpui::test]
+    fn a_click_on_an_event_floats_it_beside_its_card_and_esc_closes_it(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        let band = bounds(cx, "timeline-band");
+        let card = bounds(cx, "card:saturday");
+        click(cx, card.center());
+        assert_eq!(opened(&pane, cx).as_deref(), Some("saturday"));
+        let popover = bounds(cx, "calendar-popover");
+        assert_eq!(bounds(cx, "timeline-band"), band, "no pane beside the week narrows it");
+        assert!(
+            popover.right() <= card.left() && popover.right() >= card.left() - px(16.),
+            "the last day's event floats just left of its card: {popover:?} beside {card:?}"
+        );
+        assert!(popover.top() < card.bottom() && popover.bottom() > card.top(), "level with it");
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(opened(&pane, cx), None);
+        assert!(cx.debug_bounds("calendar-popover").is_none(), "Esc closed it");
+        // The calendar has the keyboard back.
+        cx.simulate_keystrokes("t");
+        assert!(pane.update_in(cx, |pane, window, _| pane.focus.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn a_press_outside_or_another_week_closes_the_popover(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        let today = bounds(cx, "card:today");
+        click(cx, today.center());
+        assert_eq!(opened(&pane, cx).as_deref(), Some("today"));
+        let popover = bounds(cx, "calendar-popover");
+        // Free time on the other side of the week from the popover.
+        let band = bounds(cx, "timeline-band");
+        let free = if popover.left() > today.left() {
+            point(band.left() + px(10.), today.top() - px(30.))
+        } else {
+            point(band.right() - px(10.), today.top() - px(30.))
+        };
+        click(cx, free);
+        assert_eq!(opened(&pane, cx), None, "a press outside closes it");
+        assert!(cx.debug_bounds("calendar-popover").is_none());
+
+        click(cx, today.center());
+        assert_eq!(opened(&pane, cx).as_deref(), Some("today"));
+        let (week, _) = shown(&pane, cx);
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+        assert_eq!(shown(&pane, cx).0, week + Days::new(7));
+        assert_eq!(opened(&pane, cx), None, "the next week closes it");
+        assert!(cx.debug_bounds("calendar-popover").is_none());
     }
 
     #[gpui::test]
@@ -1110,4 +1247,25 @@ fn hatch(color: Hsla) -> impl IntoElement {
     )
     .absolute()
     .inset_0()
+}
+
+/// An event's card or bar as the trigger gpui-kit's popover asks for: the popover's open state
+/// shows on it through `CalendarPane::opened`, so it takes no part in that.
+#[derive(IntoElement)]
+struct Trigger(AnyElement);
+
+impl RenderOnce for Trigger {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        self.0
+    }
+}
+
+impl Selectable for Trigger {
+    fn selected(self, _: bool) -> Self {
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        false
+    }
 }

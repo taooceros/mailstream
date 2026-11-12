@@ -619,6 +619,12 @@ pub mod calendar {
     pub const NOW_PILL: f32 = 16.0;
     pub const NOW_LINE: f32 = 1.5;
     pub const DASH: f32 = 3.0;
+    /// The week view's open event, floating beside its card (MS-184): `POPOVER_WIDTH` wide, at
+    /// most `POPOVER_HEIGHT` tall (less in a short window, its notes and guests scrolling), and
+    /// `POPOVER_GAP` off the card.
+    pub const POPOVER_WIDTH: f32 = 360.0;
+    pub const POPOVER_HEIGHT: f32 = 560.0;
+    pub const POPOVER_GAP: f32 = 8.0;
 }
 
 /// The house easing curve (Flutter's `Motion.curve`), `cubic-bezier(0.05, 0.7, 0.1, 1)`: a strong
