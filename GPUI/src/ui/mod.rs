@@ -432,9 +432,12 @@ fn resize_gap(drag: ResizeColumn, p: &'static Palette) -> Stateful<Div> {
         .on_drag(drag, |_, _, _, cx| cx.new(|_| EmptyView))
         .child(
             div()
+                .id("compose-grip")
                 .w(px(compose_metrics::GRIP_WIDTH))
                 .h(px(compose_metrics::GRIP_HEIGHT))
                 .rounded_full()
-                .group_hover("compose-gap", |s| s.bg(p.line)),
+                // As the list's gap (`split::grip`, MS-232): `line` vanishes into the light window.
+                .group_hover("compose-gap", |s| s.bg(p.muted.opacity(0.35)))
+                .group_active("compose-gap", |s| s.bg(p.muted.opacity(0.6))),
         )
 }
