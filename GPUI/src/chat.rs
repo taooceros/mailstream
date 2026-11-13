@@ -16,13 +16,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use gpui::component::input::{Escape, InputEvent, InputState};
+use gpui::base::input::{InputBaseState, MultiLineMode};
+use gpui::component::input::{Enter, Escape, InputEvent, InputState, TextareaState};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable, FontStyle,
-    FontWeight, HighlightStyle, ImgResourceLoader, InteractiveElement, InteractiveText, IntoElement, KeyBinding,
-    ListAlignment, ListState, ObjectFit, ParentElement, Render, Resource, ScrollStrategy, SharedString,
-    StatefulInteractiveElement, StrikethroughStyle, Styled, StyledImage, StyledText, Subscription,
+    AnyElement, App, AppContext, ClickEvent, Context, Div, ElementId, Entity, EntityInputHandler as _, FocusHandle,
+    Focusable, FontStyle, FontWeight, HighlightStyle, ImgResourceLoader, InteractiveElement, InteractiveText,
+    IntoElement, KeyBinding, ListAlignment, ListState, ObjectFit, ParentElement, Render, Resource, ScrollStrategy,
+    SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled, StyledImage, StyledText, Subscription,
     UniformListScrollHandle, Window, actions, div, img, list, px, relative, uniform_list,
 };
 
@@ -36,9 +37,10 @@ use crate::icons::{Icon, icon};
 use crate::engine::{MailError, engine};
 use crate::input;
 
-actions!(chat, [Back, Next, Previous, Open, NewChat, Refresh]);
+actions!(chat, [Back, Next, Previous, Open, NewChat, Refresh, FormatBold, FormatItalic, FormatStrike, FormatCode]);
 
 const CONTEXT: &str = "Chat";
+const COMPOSER_CONTEXT: &str = "ChatComposer";
 /// Typing pauses this long before people are looked up.
 const SEARCH_DELAY: Duration = Duration::from_millis(120);
 const SUGGESTIONS: u32 = 8;
@@ -49,6 +51,7 @@ pub fn bind_keys(cx: &mut App) {
     // Single keys act on the list, never while a field has focus; a field's Escape closes it.
     let list = Some("Chat && !Input");
     let pane = Some(CONTEXT);
+    let composer = Some("ChatComposer > Input");
     cx.bind_keys([
         KeyBinding::new("escape", Back, list),
         KeyBinding::new(secondary!("["), Back, pane),
@@ -59,6 +62,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", Open, list),
         KeyBinding::new(secondary!("n"), NewChat, pane),
         KeyBinding::new(secondary!("r"), Refresh, pane),
+        KeyBinding::new(secondary!("b"), FormatBold, composer),
+        KeyBinding::new(secondary!("i"), FormatItalic, composer),
+        KeyBinding::new(secondary!("shift-x"), FormatStrike, composer),
+        KeyBinding::new(secondary!("e"), FormatCode, composer),
     ]);
 }
 
@@ -720,7 +727,7 @@ struct NewChatForm {
 
 pub struct ChatPane {
     focus: FocusHandle,
-    composer: Entity<InputState>,
+    composer: Entity<TextareaState>,
     people_input: Entity<InputState>,
     /// Why the space list failed to load, until a load succeeds.
     failure: Option<SharedString>,
@@ -770,7 +777,12 @@ impl Focusable for ChatPane {
 
 impl ChatPane {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let composer = cx.new(|cx| InputState::new(window, cx).placeholder("Message"));
+        let composer = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("Message")
+                .auto_grow(metrics::COMPOSER_MIN_ROWS, metrics::COMPOSER_MAX_ROWS)
+                .submit_on_enter(true)
+        });
         let people_input = cx.new(|cx| InputState::new(window, cx).placeholder("Name or email address"));
         let subscriptions = vec![
             cx.subscribe_in(&composer, window, Self::on_composer_event),
@@ -1246,7 +1258,7 @@ impl ChatPane {
             thread: thread.clone(),
             thread_reply: thread.is_some(),
             mine: true,
-            body: Body::new(&mailstream::chat_body(text.clone(), Msg::names(log)), false),
+            body: Body::new(&mailstream::chat_draft_body(text.clone(), Msg::names(log)), false),
             attachments: Vec::new(),
             status: Status::Sending,
             draft: Some((text.clone(), thread.clone())),
@@ -1310,10 +1322,22 @@ impl ChatPane {
         cx.notify();
     }
 
-    fn on_composer_event(&mut self, _: &Entity<InputState>, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if let InputEvent::PressEnter { secondary: false, .. } = event {
+    fn on_composer_event(
+        &mut self,
+        composer: &Entity<TextareaState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let InputEvent::PressEnter { shift: false, .. } = event
+            && !composer.update(cx, |input, cx| input.marked_text_range(window, cx).is_some())
+        {
             self.send(window, cx);
         }
+    }
+
+    fn format_composer(&mut self, marker: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |input, cx| wrap_selection(input, marker, window, cx));
     }
 
     /// Esc in the composer leaves the thread it replies in, else closes the space.
@@ -2022,26 +2046,48 @@ impl ChatPane {
                 .child(
                     div()
                         .id("chat-composer")
-                        .h(px(metrics::COMPOSER_HEIGHT))
-                        .px(px(12.))
+                        .key_context(COMPOSER_CONTEXT)
+                        .min_h(px(metrics::COMPOSER_HEIGHT))
+                        .pl(px(12. - input::AREA_INSET))
+                        .pr(px(12.))
+                        .py(px(metrics::COMPOSER_PADDING_Y))
                         .flex()
-                        .items_center()
+                        .items_end()
                         .gap(px(8.))
                         .rounded(px(radius::CARD))
                         .bg(p.chip)
                         .text_size(px(text::READING))
+                        .line_height(relative(1.55))
                         .cursor_text()
                         .on_click(move |_, window, cx| window.focus(&composer.focus_handle(cx), cx))
                         .on_action(cx.listener(Self::composer_escape))
-                        .child(div().flex_1().min_w_0().child(input::field(&self.composer)))
-                        .child(div().flex_shrink_0().text_size(px(text::CAPTION)).text_color(p.faint).child("↩")),
+                        .on_action(cx.listener(|_, action: &Enter, _, cx| {
+                            if action.shift {
+                                cx.propagate();
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &FormatBold, window, cx| this.format_composer("*", window, cx)))
+                        .on_action(cx.listener(|this, _: &FormatItalic, window, cx| this.format_composer("_", window, cx)))
+                        .on_action(cx.listener(|this, _: &FormatStrike, window, cx| this.format_composer("~", window, cx)))
+                        .on_action(cx.listener(|this, _: &FormatCode, window, cx| this.format_composer("`", window, cx)))
+                        .child(div().flex_1().min_w_0().child(input::area(&self.composer)))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .h(px(text::READING * 1.55))
+                                .flex()
+                                .items_center()
+                                .text_size(px(text::CAPTION))
+                                .text_color(p.faint)
+                                .child("↩"),
+                        ),
                 )
                 .child(
                     div()
                         .pt(px(4.))
                         .text_size(px(text::CAPTION))
                         .text_color(p.faint)
-                        .child(format!("Message {title} · Return sends · Esc goes back")),
+                        .child(format!("Message {title} · Return sends · Shift+Return newline · Esc goes back")),
                 ),
         )
         .into_any_element()
@@ -2202,6 +2248,257 @@ impl ChatPane {
                 ),
             )
             .into_any_element()
+    }
+}
+
+/// Wraps (or unwraps) the active selection in Google Chat `marker` (`*`, `_`, `~`, `` ` ``);
+/// generic over `MultiLineMode` so a future highlighter-backed `EditorState` shares it as-is.
+fn wrap_selection<M: MultiLineMode>(
+    input: &mut InputBaseState<M>,
+    marker: &str,
+    window: &mut Window,
+    cx: &mut Context<InputBaseState<M>>,
+) {
+    if input.marked_text_range(window, cx).is_some() {
+        return;
+    }
+    let range = input.selected_range();
+    let full = input.text().to_string();
+    let m = marker.len();
+    if range.is_empty() {
+        let pos = range.start;
+        if pos >= m && full.get(pos - m..pos) == Some(marker) && full.get(pos..pos + m) == Some(marker) {
+            input.set_selected_range(pos - m..pos + m, cx);
+            input.replace("", window, cx);
+            input.set_selected_range(pos - m..pos - m, cx);
+            return;
+        }
+        input.replace(format!("{marker}{marker}"), window, cx);
+        input.set_selected_range(pos + m..pos + m, cx);
+        return;
+    }
+    let selected = &full[range.clone()];
+    if range.start >= m && full.get(range.start - m..range.start) == Some(marker) && full.get(range.end..range.end + m) == Some(marker) {
+        let unwrapped = selected.to_owned();
+        let start = range.start - m;
+        let end = range.end - m;
+        input.set_selected_range(range.start - m..range.end + m, cx);
+        input.replace(unwrapped, window, cx);
+        input.set_selected_range(start..end, cx);
+    } else if selected.len() > 2 * m
+        && selected.starts_with(marker)
+        && selected.ends_with(marker)
+        && !selected[m..selected.len() - m].contains(marker)
+    {
+        let inner = selected[m..selected.len() - m].to_owned();
+        let start = range.start;
+        let end = start + inner.len();
+        input.replace(inner, window, cx);
+        input.set_selected_range(start..end, cx);
+    } else {
+        let wrapped = format!("{marker}{selected}{marker}");
+        let start = range.start + m;
+        let end = range.end + m;
+        input.replace(wrapped, window, cx);
+        input.set_selected_range(start..end, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    struct ComposerHarness {
+        composer: Entity<TextareaState>,
+        sent: Vec<String>,
+        _subscription: Subscription,
+    }
+
+    impl ComposerHarness {
+        fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+            let composer = cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .placeholder("Message")
+                    .auto_grow(metrics::COMPOSER_MIN_ROWS, metrics::COMPOSER_MAX_ROWS)
+                    .submit_on_enter(true)
+            });
+            let subscription = cx.subscribe_in(&composer, window, |this, composer, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { shift: false, .. } = event
+                    && !composer.update(cx, |input, cx| input.marked_text_range(window, cx).is_some())
+                {
+                    let text = composer.read(cx).value().trim().to_owned();
+                    if !text.is_empty() {
+                        this.sent.push(text);
+                        composer.update(cx, |input, cx| input.clean(window, cx));
+                    }
+                }
+            });
+            Self { composer, sent: Vec::new(), _subscription: subscription }
+        }
+    }
+
+    impl Render for ComposerHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .key_context(CONTEXT)
+                .child(
+                    div()
+                        .key_context(COMPOSER_CONTEXT)
+                        .on_action(cx.listener(|_, action: &Enter, _, cx| {
+                            if action.shift {
+                                cx.propagate();
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &FormatBold, window, cx| {
+                            this.composer.update(cx, |input, cx| wrap_selection(input, "*", window, cx));
+                        }))
+                        .on_action(cx.listener(|this, _: &FormatItalic, window, cx| {
+                            this.composer.update(cx, |input, cx| wrap_selection(input, "_", window, cx));
+                        }))
+                        .on_action(cx.listener(|this, _: &FormatStrike, window, cx| {
+                            this.composer.update(cx, |input, cx| wrap_selection(input, "~", window, cx));
+                        }))
+                        .on_action(cx.listener(|this, _: &FormatCode, window, cx| {
+                            this.composer.update(cx, |input, cx| wrap_selection(input, "`", window, cx));
+                        }))
+                        .child(input::area(&self.composer)),
+                )
+        }
+    }
+
+    fn with_composer(
+        cx: &mut TestAppContext,
+        run: impl FnOnce(Entity<ComposerHarness>, Entity<TextareaState>, &mut gpui::VisualTestContext),
+    ) {
+        cx.update(|cx| {
+            gpui::init(cx);
+            design::sync_kit_theme(gpui::WindowAppearance::Light, cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(ComposerHarness::new);
+        let composer = view.read_with(cx, |h, _| h.composer.clone());
+        composer.update_in(cx, |input, window, cx| input.focus(window, cx));
+        cx.run_until_parked();
+        run(view, composer, cx);
+    }
+
+    #[gpui::test]
+    fn enter_sends_shift_enter_inserts_newline_and_grows(cx: &mut TestAppContext) {
+        with_composer(cx, |view, composer, cx| {
+            composer.update_in(cx, |input, window, cx| input.set_value("hello", window, cx));
+            composer.update_in(cx, |input, _, cx| input.set_selected_range(5..5, cx));
+            cx.run_until_parked();
+
+            let single_height = composer.read_with(cx, |input, _| input.input_bounds().size.height);
+            cx.simulate_keystrokes("shift-enter");
+            cx.run_until_parked();
+            composer.update_in(cx, |input, window, cx| input.insert("world", window, cx));
+            cx.run_until_parked();
+
+            assert_eq!(composer.read_with(cx, |input, _| input.value().to_string()), "hello\nworld");
+            assert!(view.read_with(cx, |h, _| h.sent.is_empty()));
+            let two_line_height = composer.read_with(cx, |input, _| input.input_bounds().size.height);
+            assert!(two_line_height > single_height, "composer should grow on newline: {two_line_height:?} vs {single_height:?}");
+
+            // Growing past COMPOSER_MAX_ROWS caps the height and scrolls instead.
+            for _ in 0..8 {
+                cx.simulate_keystrokes("shift-enter");
+            }
+            cx.run_until_parked();
+            let capped_height = composer.read_with(cx, |input, _| input.input_bounds().size.height);
+            composer.update_in(cx, |input, _, _| {
+                assert!(input.display_map().wrap_row_count() > metrics::COMPOSER_MAX_ROWS);
+            });
+            cx.simulate_keystrokes("shift-enter");
+            cx.run_until_parked();
+            assert_eq!(composer.read_with(cx, |input, _| input.input_bounds().size.height), capped_height);
+
+            // Plain Enter sends and clears.
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            assert_eq!(view.read_with(cx, |h, _| h.sent.len()), 1);
+            assert!(view.read_with(cx, |h, _| h.sent[0].starts_with("hello\nworld")));
+            assert_eq!(composer.read_with(cx, |input, _| input.value().to_string()), "");
+        });
+    }
+
+    #[gpui::test]
+    fn enter_never_sends_while_ime_composing(cx: &mut TestAppContext) {
+        with_composer(cx, |view, composer, cx| {
+            composer.update_in(cx, |input, window, cx| {
+                input.replace_and_mark_text_in_range(None, "nihao", None, window, cx);
+                assert!(input.marked_text_range(window, cx).is_some());
+            });
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            assert!(view.read_with(cx, |h, _| h.sent.is_empty()));
+            assert_eq!(composer.read_with(cx, |input, _| input.value().to_string()), "nihao");
+
+            // Committing IME composition clears marked text; Enter then sends.
+            composer.update_in(cx, |input, window, cx| {
+                input.replace_text_in_range(None, "你好", window, cx);
+                assert!(input.marked_text_range(window, cx).is_none());
+            });
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            assert_eq!(view.read_with(cx, |h, _| h.sent.clone()), vec!["你好"]);
+        });
+    }
+
+    #[gpui::test]
+    fn formatting_shortcuts_wrap_and_toggle_selection(cx: &mut TestAppContext) {
+        with_composer(cx, |_, composer, cx| {
+            composer.update_in(cx, |input, window, cx| input.set_value("hello 你好", window, cx));
+            composer.update_in(cx, |input, _, cx| input.set_selected_range(0..5, cx));
+            cx.run_until_parked();
+
+            cx.simulate_keystrokes(secondary!("b"));
+            cx.run_until_parked();
+            assert_eq!(composer.read_with(cx, |input, _| input.value().to_string()), "*hello* 你好");
+            assert_eq!(composer.read_with(cx, |input, _| input.selected_range()), 1..6);
+
+            cx.simulate_keystrokes(secondary!("i"));
+            cx.run_until_parked();
+            assert_eq!(composer.read_with(cx, |input, _| input.value().to_string()), "*_hello_* 你好");
+
+            // Pressing Cmd+I again unwraps the inner underscore.
+            cx.simulate_keystrokes(secondary!("i"));
+            cx.run_until_parked();
+            assert_eq!(composer.read_with(cx, |input, _| input.value().to_string()), "*hello* 你好");
+
+            // Wrapping CJK text and testing Cmd+Shift+X and Cmd+E.
+            let end = composer.read_with(cx, |input, _| input.text().len());
+            let cjk_start = end - "你好".len();
+            composer.update_in(cx, |input, _, cx| input.set_selected_range(cjk_start..end, cx));
+            cx.simulate_keystrokes(secondary!("shift-x"));
+            cx.run_until_parked();
+            assert_eq!(composer.read_with(cx, |input, _| input.value().to_string()), "*hello* ~你好~");
+
+            // Empty selection inserts paired markers with cursor inside.
+            composer.update_in(cx, |input, window, cx| input.set_value("", window, cx));
+            cx.simulate_keystrokes(secondary!("e"));
+            cx.run_until_parked();
+            assert_eq!(composer.read_with(cx, |input, _| input.value().to_string()), "``");
+            assert_eq!(composer.read_with(cx, |input, _| input.selected_range()), 1..1);
+            cx.simulate_keystrokes(secondary!("e"));
+            cx.run_until_parked();
+            assert_eq!(composer.read_with(cx, |input, _| input.value().to_string()), "");
+        });
+    }
+
+    #[test]
+    fn pending_body_uses_google_chat_syntax() {
+        let blocks = mailstream::chat_draft_body("*bold* _it_ ~gone~ `code`\nnext".into(), Default::default());
+        let body = Body::new(&blocks, false);
+        assert_eq!(body.pieces.len(), 1);
+        let inline = &body.pieces[0].inline;
+        assert_eq!(inline.text.as_ref(), "bold it gone code\nnext");
+        assert!(inline.marks.iter().any(|(_, m)| m.bold));
+        assert!(inline.marks.iter().any(|(_, m)| m.italic));
+        assert!(inline.marks.iter().any(|(_, m)| m.strike));
+        assert!(inline.marks.iter().any(|(_, m)| m.code));
     }
 }
 

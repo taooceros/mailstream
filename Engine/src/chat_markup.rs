@@ -88,6 +88,224 @@ pub fn parse(markup: &str, name: &dyn Fn(&str) -> Option<String>) -> Vec<ChatBlo
     builder.blocks
 }
 
+/// `text` in Google Chat's input syntax (`*bold*`, `_italic_`, `~strike~`, `` `code` ``,
+/// ```` ```code``` ````, `<url|label>`, `<users/…>`, bare URLs, single line breaks preserved) laid
+/// out for a local pending message before the server returns `formattedText`.
+pub fn parse_input(text: &str, name: &dyn Fn(&str) -> Option<String>) -> Vec<ChatBlock> {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut blocks = Vec::new();
+    let mut pos = 0;
+    while pos < normalized.len() {
+        let Some(rel_open) = normalized[pos..].find("```") else {
+            push_input_prose(&normalized[pos..], name, &mut blocks);
+            break;
+        };
+        let open = pos + rel_open;
+        let Some(rel_close) = normalized[open + 3..].find("```") else {
+            push_input_prose(&normalized[pos..], name, &mut blocks);
+            break;
+        };
+        let close = open + 3 + rel_close;
+        push_input_prose(&normalized[pos..open], name, &mut blocks);
+        let code = &normalized[open + 3..close];
+        let code = code.strip_prefix('\n').unwrap_or(code);
+        let code = code.strip_suffix('\n').unwrap_or(code);
+        let mut block = ChatBlock::new(ChatBlockKind::Code);
+        block.spans.push(ChatSpan { text: code.to_string(), style: ChatStyle { code: true, ..ChatStyle::default() } });
+        blocks.push(block);
+        pos = close + 3;
+    }
+    blocks
+}
+
+fn push_input_prose(prose: &str, name: &dyn Fn(&str) -> Option<String>, blocks: &mut Vec<ChatBlock>) {
+    let mut start = 0;
+    let bytes = prose.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            let mut j = i;
+            while j < bytes.len() && bytes[j] == b'\n' {
+                j += 1;
+            }
+            if j - i >= 2 {
+                push_input_paragraph(&prose[start..i], name, blocks);
+                start = j;
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    push_input_paragraph(&prose[start..], name, blocks);
+}
+
+fn push_input_paragraph(raw: &str, name: &dyn Fn(&str) -> Option<String>, blocks: &mut Vec<ChatBlock>) {
+    let para = raw.trim_matches('\n');
+    if para.trim().is_empty() {
+        return;
+    }
+    let mut spans = Vec::new();
+    parse_input_inline(para, &ChatStyle::default(), name, &mut spans);
+    trim_end(&mut spans);
+    if let Some(first) = spans.first_mut() {
+        let trimmed = first.text.trim_start().len();
+        first.text.drain(..first.text.len() - trimmed);
+    }
+    spans.retain(|span| !span.text.is_empty());
+    if !spans.is_empty() {
+        let mut block = ChatBlock::new(ChatBlockKind::Paragraph);
+        block.spans = spans;
+        blocks.push(block);
+    }
+}
+
+fn push_input_span(spans: &mut Vec<ChatSpan>, text: &str, style: &ChatStyle) {
+    if text.is_empty() {
+        return;
+    }
+    match spans.last_mut() {
+        Some(last) if &last.style == style => last.text.push_str(text),
+        _ => spans.push(ChatSpan { text: text.to_string(), style: style.clone() }),
+    }
+}
+
+fn can_open_delim(text: &str, at: usize, delim: char) -> bool {
+    let prev = text[..at].chars().next_back();
+    let next = text[at + delim.len_utf8()..].chars().next();
+    prev.is_none_or(|c| !c.is_ascii_alphanumeric() && c != delim)
+        && next.is_some_and(|c| !c.is_whitespace() && c != delim)
+}
+
+fn can_close_delim(text: &str, at: usize, delim: char) -> bool {
+    let prev = text[..at].chars().next_back();
+    let next = text[at + delim.len_utf8()..].chars().next();
+    prev.is_some_and(|c| !c.is_whitespace() && c != delim)
+        && next.is_none_or(|c| !c.is_ascii_alphanumeric() && c != delim)
+}
+
+fn find_closing_delim(text: &str, from: usize, delim: char) -> Option<usize> {
+    let line_end = text[from..].find('\n').map_or(text.len(), |n| from + n);
+    let mut i = from;
+    while i < line_end {
+        let rest = &text[i..line_end];
+        if rest.starts_with('`')
+            && let Some(rel_close) = rest[1..].find('`')
+            && rel_close > 0
+        {
+            i += 1 + rel_close + 1;
+            continue;
+        }
+        if rest.starts_with('<')
+            && let Some(cap) = TOKEN.captures(rest)
+            && cap.get(0).is_some_and(|m| m.start() == 0)
+        {
+            i += cap.get(0).unwrap().end();
+            continue;
+        }
+        if (rest.starts_with("http://") || rest.starts_with("https://"))
+            && let Some(link) = LinkFinder::new().kinds(&[LinkKind::Url]).links(rest).next()
+            && link.start() == 0
+        {
+            let end = i + link.end();
+            if link.as_str().ends_with(delim) && can_close_delim(text, end - 1, delim) {
+                return Some(end - 1);
+            }
+            i = end;
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        if ch == delim && can_close_delim(text, i, delim) {
+            return Some(i);
+        }
+        i += ch.len_utf8();
+    }
+    None
+}
+
+fn parse_input_inline(
+    text: &str,
+    style: &ChatStyle,
+    name: &dyn Fn(&str) -> Option<String>,
+    out: &mut Vec<ChatSpan>,
+) {
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
+        if rest.starts_with('`') {
+            let line_end = rest[1..].find('\n').map_or(rest.len(), |n| 1 + n);
+            if let Some(rel_close) = rest[1..line_end].find('`')
+                && rel_close > 0
+            {
+                push_input_span(out, &rest[1..1 + rel_close], &ChatStyle { code: true, ..style.clone() });
+                i += 1 + rel_close + 1;
+                continue;
+            }
+        }
+        if rest.starts_with('<')
+            && let Some(cap) = TOKEN.captures(rest)
+            && cap.get(0).is_some_and(|m| m.start() == 0)
+        {
+            match (cap.get(1), cap.get(3)) {
+                (Some(url), _) => {
+                    let label = cap.get(2).map(|m| m.as_str()).filter(|s| !s.is_empty());
+                    let linked = ChatStyle { link: Some(url.as_str().into()), ..style.clone() };
+                    push_input_span(out, label.unwrap_or(url.as_str()), &linked);
+                }
+                (None, Some(user)) => {
+                    let resolved = if user.as_str() == "users/all" { Some("all".to_string()) } else { name(user.as_str()) };
+                    push_input_span(
+                        out,
+                        &format!("@{}", resolved.unwrap_or_else(|| "someone".into())),
+                        &ChatStyle { mention: true, ..ChatStyle::default() },
+                    );
+                }
+                _ => {}
+            }
+            i += cap.get(0).unwrap().end();
+            continue;
+        }
+        if style.link.is_none()
+            && (rest.starts_with("http://") || rest.starts_with("https://"))
+            && let Some(link) = LinkFinder::new().kinds(&[LinkKind::Url]).links(rest).next()
+            && link.start() == 0
+        {
+            let linked = ChatStyle { link: Some(link.as_str().to_string()), ..style.clone() };
+            push_input_span(out, link.as_str(), &linked);
+            i += link.end();
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        if matches!(ch, '*' | '_' | '~')
+            && can_open_delim(text, i, ch)
+            && let Some(close) = find_closing_delim(text, i + 1, ch)
+        {
+            let inner_style = match ch {
+                '*' => ChatStyle { bold: true, ..style.clone() },
+                '_' => ChatStyle { italic: true, ..style.clone() },
+                '~' => ChatStyle { strike: true, ..style.clone() },
+                _ => unreachable!(),
+            };
+            parse_input_inline(&text[i + 1..close], &inner_style, name, out);
+            i = close + 1;
+            continue;
+        }
+        let mut next = i + ch.len_utf8();
+        while next < text.len() {
+            let tail = &text[next..];
+            let b = tail.as_bytes()[0];
+            if matches!(b, b'`' | b'<' | b'*' | b'_' | b'~')
+                || (style.link.is_none() && (tail.starts_with("http://") || tail.starts_with("https://")))
+            {
+                break;
+            }
+            next += tail.chars().next().unwrap().len_utf8();
+        }
+        push_input_span(out, &text[i..next], style);
+        i = next;
+    }
+}
+
 /// One line for list previews: the text without its markup, mentions as "@", whitespace runs as
 /// one space.
 pub fn plain(markup: &str) -> String {
@@ -565,5 +783,58 @@ mod tests {
         assert_eq!(plain("*sure*"), "sure");
         assert_eq!(plain("see [the doc](https://x.com/a) and https://y.com"), "see the doc and https://y.com");
         assert_eq!(plain("see <https://x.com/doc|the doc>, <https://y.com|y> and <users/2>"), "see the doc, y and @");
+    }
+
+    #[test]
+    fn google_chat_input_matches_server_formatting() {
+        let blocks = parse_input(
+            "*bold* and _it_ ~gone~ `x` *_both_* https://c.example/a_b~c.\nsame para\n\n```\nlet a = 1;\n```\n\nnext para",
+            &names,
+        );
+        assert_eq!(blocks.len(), 3);
+        let bold = ChatStyle { bold: true, ..ChatStyle::default() };
+        let italic = ChatStyle { italic: true, ..ChatStyle::default() };
+        let strike = ChatStyle { strike: true, ..ChatStyle::default() };
+        let code = ChatStyle { code: true, ..ChatStyle::default() };
+        let both = ChatStyle { bold: true, italic: true, ..ChatStyle::default() };
+        let link = |url: &str| ChatStyle { link: Some(url.into()), ..ChatStyle::default() };
+        assert_eq!(
+            texts(&blocks[0]),
+            [
+                ("bold", bold.clone()),
+                (" and ", ChatStyle::default()),
+                ("it", italic),
+                (" ", ChatStyle::default()),
+                ("gone", strike),
+                (" ", ChatStyle::default()),
+                ("x", code),
+                (" ", ChatStyle::default()),
+                ("both", both),
+                (" ", ChatStyle::default()),
+                ("https://c.example/a_b~c", link("https://c.example/a_b~c")),
+                (".\nsame para", ChatStyle::default()),
+            ]
+        );
+        assert_eq!(blocks[1].kind, ChatBlockKind::Code);
+        assert_eq!(blocks[1].spans[0].text, "let a = 1;");
+        assert_eq!(blocks[2].kind, ChatBlockKind::Paragraph);
+        assert_eq!(texts(&blocks[2]), [("next para", ChatStyle::default())]);
+
+        let literal = parse_input("snake_case_name and 2 * 3 * 4 and 1. item and **plain**", &names);
+        assert_eq!(
+            texts(&literal[0]),
+            [("snake_case_name and 2 * 3 * 4 and 1. item and **plain**", ChatStyle::default())]
+        );
+
+        let cjk = parse_input("你好*粗体*世界 *https://a.example*", &names);
+        assert_eq!(
+            texts(&cjk[0]),
+            [
+                ("你好", ChatStyle::default()),
+                ("粗体", bold),
+                ("世界 ", ChatStyle::default()),
+                ("https://a.example", ChatStyle { bold: true, link: Some("https://a.example".into()), ..ChatStyle::default() }),
+            ]
+        );
     }
 }

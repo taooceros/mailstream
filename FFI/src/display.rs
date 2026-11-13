@@ -151,3 +151,10 @@ pub fn chat_runs(entries: Vec<ChatRunEntry>) -> Vec<ChatRun> {
 pub fn chat_body(markup: String, names: HashMap<String, String>) -> Vec<ChatBlock> {
     chat_markup::parse(&markup, &|id| names.get(id).cloned())
 }
+
+/// A pending chat message's text in Google Chat input syntax (`*bold*`, `_italic_`, `~strike~`,
+/// `` `code` ``, ```` ```code``` ````) laid out before the server returns `formattedText`.
+#[uniffi::export]
+pub fn chat_draft_body(text: String, names: HashMap<String, String>) -> Vec<ChatBlock> {
+    chat_markup::parse_input(&text, &|id| names.get(id).cloned())
+}
