@@ -44,7 +44,7 @@ impl MailApp {
             .gap(px(space::S10))
             .when(can_go_back, |d| {
                 d.child(capsule(p).child(icon_button("back", Icon::Back, "Back (Esc)", true, p.glyph).on_click(
-                    cx.listener(|this, _: &ClickEvent, window, cx| this.back(&Back, window, cx)),
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.list_back(window, cx)),
                 )))
             })
             .child(

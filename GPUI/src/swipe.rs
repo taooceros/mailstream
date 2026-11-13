@@ -569,6 +569,19 @@ mod tests {
     }
 
     #[test]
+    fn a_click_that_wobbles_never_closes_the_page() {
+        // Within the slop the press stays a click.
+        let mut mouse = MouseDrag::default();
+        let steps = drag(&mut mouse, true, &[(103., 101.), (101., 102.)], 4);
+        assert!(steps.iter().all(|step| matches!(step, Step::Pass)), "a click, whatever the hand did");
+        // Just past it and let go fast, it springs back: a flick closes only past 20 points.
+        let steps = drag(&mut mouse, true, &[(106., 100.), (112., 100.)], 4);
+        let Step::Release { offset, velocity } = steps[2] else { panic!("the page followed the pointer") };
+        assert!(velocity > 400.0);
+        assert_eq!(settle(offset, velocity, 900.0), (false, 0.0));
+    }
+
+    #[test]
     fn a_pointer_resting_before_it_lets_go_flicks_nothing() {
         let mut mouse = MouseDrag::default();
         let start = Instant::now();

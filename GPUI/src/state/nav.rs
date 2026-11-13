@@ -202,12 +202,19 @@ impl MailApp {
         }
     }
 
-    /// Lays a layer over the others; `animate` slides it in from the right.
+    /// Lays a layer over the others; `animate` slides it in from the right. A bundle goes under a
+    /// conversation open beside the list, which stays open over it (MS-307).
     fn push_layer(&mut self, layer: Layer, animate: bool) {
         self.finish_closing();
+        let at = match layer {
+            Layer::Bundle(_) => {
+                self.layers.iter().position(|layer| matches!(layer, Layer::Reader(_))).unwrap_or(self.layers.len())
+            }
+            Layer::Reader(_) => self.layers.len(),
+        };
         self.slide_layer = Some(layer.id());
         self.slide = if animate { Slide::opening() } else { Slide::Rest };
-        self.layers.push(layer);
+        self.layers.insert(at, layer);
     }
 
     /// A layer still sliding off goes now, so what follows acts on what stays.
@@ -425,11 +432,13 @@ impl MailApp {
             }) else {
                 return;
             };
-            self.highlight = Some(id.to_owned());
+            // A conversation open beside the list stays open beside the bundle (MS-307), and its
+            // row in the list stays the one picked.
+            if self.reader().is_none() {
+                self.highlight = Some(id.to_owned());
+            }
             self.bundle_highlight = None;
             self.bundle_scroll = list_state(0);
-            // A conversation open beside the list closes with it.
-            self.layers.retain(|layer| matches!(layer, Layer::Bundle(_)));
             self.push_layer(Layer::Bundle(category), animate);
             cx.notify();
             return;
@@ -437,8 +446,10 @@ impl MailApp {
         let Some(conversation) = self.list().and_then(|l| l.conversations.iter().find(|c| c.id == id)).cloned() else {
             return;
         };
-        if self.open_bundle().is_some() {
+        if let Some(category) = self.open_bundle() {
             self.bundle_highlight = Some(id.to_owned());
+            // The list under the bundle points at the bundle the open conversation is in.
+            self.highlight = Some(format!("bundle:{}", category.as_str()));
         } else {
             self.highlight = Some(id.to_owned());
         }
@@ -465,23 +476,38 @@ impl MailApp {
     pub fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_closing();
         // No pointer: the top layer goes, whatever lies under the pointer (MS-299).
-        if let Some(top) = self.layers.last().map(Layer::id) {
-            let index = self.layers.len() - 1;
-            let travel = self.travel(index);
-            if travel <= 0.0 {
-                self.layers.pop();
-            } else {
-                // It slides off to the right, like a swipe that went all the way.
-                let from = if self.sliding() == Some(index) { self.current_offset() } else { 0. };
-                self.slide_layer = Some(top);
-                self.slide = Slide::settle(from, travel, true);
-            }
+        if !self.layers.is_empty() {
+            self.slide_off(self.layers.len() - 1);
         } else if self.query.is_some() {
             self.search.update(cx, |search, cx| search.clean(window, cx));
             self.end_search(cx);
         }
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// The list's ‹ (its title row): the open bundle goes, a conversation beside the list staying
+    /// open (MS-307); without a bundle, as Back.
+    pub fn list_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_closing();
+        let Some(index) = self.layers.iter().rposition(|layer| matches!(layer, Layer::Bundle(_))) else {
+            return self.back(&Back, window, cx);
+        };
+        self.slide_off(index);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Layer `index` slides off to the right, like a swipe that went all the way, and closes.
+    fn slide_off(&mut self, index: usize) {
+        let travel = self.travel(index);
+        if travel <= 0.0 {
+            self.layers.remove(index);
+            return;
+        }
+        let from = if self.sliding() == Some(index) { self.current_offset() } else { 0. };
+        self.slide_layer = Some(self.layers[index].id());
+        self.slide = Slide::settle(from, travel, true);
     }
 
     pub fn toggle_fold(&mut self, message: &str, cx: &mut Context<Self>) {
