@@ -277,9 +277,10 @@ it is handed over; it is not moved mid-way.
   and builds land in the root `target/` (`target/release/mailstream-gpui`,
   `target/release/libmailstream.dylib`). Flutter's Linux runner (`Flutter/linux/runner`) stays
   outside it: only Flutter's CMake build compiles it.
-- The default checkout keeps a warm `target/` of `main` (and `.turso/`) that every new checkout
-  starts from and keeps (MS-151, MS-152, MS-159), so a checkout's first build of any
-  configuration below recompiles only the repo's own crates. `warm-build.py` builds `ffi.py`'s
+- The default checkout keeps a warm `target/` (and `.turso/`) that every new checkout starts from
+  and keeps (MS-151, MS-152, MS-159), so a checkout's first build of any configuration below
+  recompiles only the repo's crates that changed since that build (cargo goes by modification
+  times, which a checkout keeps for files it didn't change). `warm-build.py` builds `ffi.py`'s
   release, and on the Mac every member's tests (`cargo test -p MEMBER --no-run`, found from the
   workspace, so a new crate is covered) and GPUI in release, release with `shots` and debug
   (MS-273); on Linux the engine's tests. Cargo builds a dependency once per set of features the
@@ -290,7 +291,10 @@ it is handed over; it is not moved mid-way.
   variables: C build scripts rebuild everything above them when those differ from the warm
   build's. Run release engine builds through `ffi.py`. Never delete the default checkout's build
   folders. Only `python3 scripts/warm-build.py` builds there: it fetches `main`, moves the default
-  checkout's empty change onto it (unlocking its source for the run) and builds.
+  checkout's empty change onto it (unlocking its source for the run) and builds, but only when
+  what the dependencies are built from (lock file, manifests, vendored crates, toolchain, its own
+  build scripts) changed since its last build or that build is 12 hours old (MS-325; `--force`
+  builds anyway).
 - Run anything that may take over a minute (a cold cargo build, `ffi.py`, `install.sh`, a Swift
   release build, `bench.sh`) as one blocking eval cell, not `bash`: Python
   `subprocess.run(…, capture_output=True, text=True)` with the cell's `timeout` set (up to 3600),
