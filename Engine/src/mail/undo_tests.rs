@@ -85,6 +85,61 @@ fn undoes_gmail_actions_on_the_server_too() {
     cleanup(&config);
 }
 
+/// A multi-selection (MS-305): an action on several conversations asks Gmail once, and one undo
+/// takes all of them back with one request.
+#[test]
+fn acts_on_many_conversations_in_one_request_and_undoes_them_in_one_step() {
+    let changed: Changes = Arc::default();
+    let server = gmail_server(changed.clone());
+    let (engine, config) = engine_for(&server, &[("me@gmail.com", "google")]);
+    let unread = || call(&engine, "mailboxes", json!({})).unwrap()["me@gmail.com"][0]["unread"].clone();
+    wait_until("counts", || unread() == json!(3));
+    call(&engine, "mail.list", json!({ "limit": 10 })).unwrap();
+    let cached = || ids(&call(&engine, "mail.list", json!({ "cached": true, "limit": 10 })).unwrap());
+    // Two unread security alerts (i02, then i01), i03, and i05, starred already.
+    let picked = ["me@gmail.com|i02@x", "me@gmail.com|i03@x", "me@gmail.com|i05@x"];
+    changes(&changed);
+
+    // Starred together: one batchModify; undo unstars only what the star changed, again at once.
+    let starred = call(&engine, "mail.star", json!({ "ids": picked })).unwrap();
+    assert_eq!(starred["done"], json!(picked));
+    let sent = changes(&changed);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(json_body(&sent[0]), json!({ "ids": ["i01", "i03", "i05"], "addLabelIds": ["STARRED"], "removeLabelIds": [] }));
+    let undone = call(&engine, "mail.undo", json!({})).unwrap();
+    // i05 was starred already: nothing of it to take back.
+    assert_eq!(undone, json!({ "step": starred["undo"], "action": "star", "done": &picked[..2], "failed": [] }));
+    let sent = changes(&changed);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(json_body(&sent[0]), json!({ "ids": ["i01", "i03"], "addLabelIds": [], "removeLabelIds": ["STARRED"] }));
+
+    // Archived together: one request, all three leave the list and the unread alerts the count;
+    // one undo files them all back in the inbox with one request.
+    let archived = call(&engine, "mail.archive", json!({ "ids": picked })).unwrap();
+    assert_eq!(archived["done"], json!(picked));
+    let sent = changes(&changed);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(json_body(&sent[0]), json!({ "ids": ["i02", "i01", "i03", "i05"], "addLabelIds": [], "removeLabelIds": ["INBOX"] }));
+    assert!(picked.iter().all(|id| !cached().contains(&id.to_string())));
+    assert_eq!(unread(), 1);
+    let undone = call(&engine, "mail.undo", json!({ "step": archived["undo"] })).unwrap();
+    assert_eq!(undone, json!({ "step": archived["undo"], "action": "archive", "done": picked, "failed": [] }));
+    let sent = changes(&changed);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(json_body(&sent[0]), json!({ "ids": ["i02", "i01", "i03", "i05"], "addLabelIds": ["INBOX"], "removeLabelIds": [] }));
+    assert!(picked.iter().all(|id| cached().contains(&id.to_string())));
+    assert_eq!(unread(), 3);
+
+    // A refused request fails every conversation it carried and changes none of them.
+    let refused = call(&engine, "mail.read", json!({ "ids": ["me@gmail.com|i03@x", "me@gmail.com|i04@x"], "unread": true }));
+    let refused = refused.unwrap();
+    assert_eq!(refused["done"], json!([]));
+    assert_eq!(refused["failed"].as_array().unwrap().len(), 2);
+    assert_eq!(call(&engine, "mail.undo", json!({})).unwrap_err().code, "nothing");
+    drop(engine);
+    cleanup(&config);
+}
+
 /// Outlook with Bob's plan (g1, and g3 unread) in the inbox, answering moves and flag changes
 /// in `$batch`; marking unread is refused.
 fn graph_server(changed: Changes) -> FakeServer {

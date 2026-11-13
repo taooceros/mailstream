@@ -123,15 +123,18 @@ fn changes_trashes_and_sends_gmail_mail() {
     call(&engine, "mail.star", json!({ "ids": [lunch], "off": true })).unwrap();
     assert_eq!(json_body(&changes(&changed)[0]), json!({ "ids": ["s0"], "addLabelIds": [], "removeLabelIds": ["STARRED"] }));
 
-    // A refused change is rolled back and listed; unknown ids are listed too, the rest go on.
+    // A refused change is rolled back and listed for every conversation its request carried (one
+    // batchModify for all of them, MS-305); unknown ids are listed too.
     let refused = "me@gmail.com|i04@x";
     let answer = call(&engine, "mail.star", json!({ "ids": [refused, "nope", "me@gmail.com|i03@x"] })).unwrap();
-    assert_eq!(answer["done"], json!(["me@gmail.com|i03@x"]));
+    assert_eq!(answer["done"], json!([]));
     assert_eq!(answer["failed"][0], json!({ "id": refused, "code": "failed", "message": "Invalid label change" }));
     assert_eq!(answer["failed"][1]["code"], "unknown_conversation");
+    assert_eq!(answer["failed"][2], json!({ "id": "me@gmail.com|i03@x", "code": "failed", "message": "Invalid label change" }));
+    assert_eq!(answer.get("undo"), None);
     let cached = call(&engine, "mail.list", json!({ "cached": true, "limit": 10 })).unwrap();
     assert_eq!(conversation(&cached, refused)["starred"], false);
-    assert_eq!(conversation(&cached, "me@gmail.com|i03@x")["starred"], true);
+    assert_eq!(conversation(&cached, "me@gmail.com|i03@x")["starred"], false);
     assert_eq!(call(&engine, "mail.read", json!({ "ids": [] })).unwrap_err().code, "usage");
     changes(&changed);
 

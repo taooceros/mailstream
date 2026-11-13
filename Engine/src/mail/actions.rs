@@ -3,7 +3,10 @@
 //! at once in the listings (and mail.db and the unread counts), then goes to the provider; a
 //! refused flag change is rolled back, a refused move fetches the lists afresh, and either is
 //! reported. Commands take conversation ids and list which ones failed rather than stopping.
-//! Each command that changed anything is one step `mail.undo` can take back (`undo.rs`).
+//! However many conversations a command names (a multi-selection, MS-305), it asks the provider
+//! once per mailbox and destination, not once per conversation: a refused request fails every
+//! conversation that had messages in it. Each command that changed anything is one step
+//! `mail.undo` can take back (`undo.rs`).
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -19,10 +22,45 @@ use crate::commands::Arguments;
 use crate::model::{Conversation, DISTANT_PAST, Envelope, MailMessage, Mailbox, MailboxKey, MailboxRole, MessageRef};
 use crate::EngineError;
 
-/// What a command keeps of a conversation it acted on.
-enum Outcome {
-    Remember(Conversation),
-    Forget,
+/// One conversation's part of an action, before anything is asked of the provider.
+struct Plan {
+    known: Known,
+    /// The messages whose flag changes (read, star).
+    flags: Vec<MailMessage>,
+    /// The messages that move, and the id of the mailbox they go to.
+    moves: Option<(Vec<MailMessage>, String)>,
+    /// The messages deleted for good.
+    deletes: Vec<MailMessage>,
+}
+
+/// `targets` not in `destination` yet, moving there; none when all are.
+fn moving_to(targets: Vec<MailMessage>, destination: &Mailbox) -> Option<(Vec<MailMessage>, String)> {
+    let targets: Vec<MailMessage> = targets.into_iter().filter(|message| message.mailbox() != destination.id).collect();
+    (!targets.is_empty()).then(|| (targets, destination.id.clone()))
+}
+
+/// The request for mailbox `key`'s `ids` carries `message`.
+fn carried(message: &MailMessage, key: &MailboxKey, ids: &[String]) -> bool {
+    *message.key == *key && ids.iter().any(|id| id == message.id())
+}
+
+/// The requests of a change to many conversations at once (one per mailbox, and destination)
+/// the provider refused, with the messages each carried, so each conversation learns how its
+/// part went.
+#[derive(Default)]
+pub(super) struct Refusals(Vec<(MailboxKey, Vec<String>, EngineError)>);
+
+impl Refusals {
+    /// The refusal of the first request that carried one of `messages`.
+    pub(super) fn of(&self, messages: &[MailMessage]) -> Result<(), EngineError> {
+        let refused = self.0.iter().find(|(key, ids, _)| messages.iter().any(|message| carried(message, key, ids)));
+        refused.map_or(Ok(()), |(_, _, error)| Err(error.clone()))
+    }
+
+    /// The first refusal.
+    pub(super) fn first(self) -> Result<(), EngineError> {
+        self.0.into_iter().next().map_or(Ok(()), |(_, _, error)| Err(error))
+    }
 }
 
 impl Envelope {
@@ -62,7 +100,7 @@ pub(super) fn refs(messages: &[MailMessage]) -> HashSet<MessageRef> {
 
 /// Message ids by the mailbox they list under; mail still being sent from here (`pending`) is
 /// not the provider's to change yet.
-pub(super) fn by_mailbox(messages: &[MailMessage]) -> Vec<(MailboxKey, Vec<String>)> {
+fn by_mailbox(messages: &[MailMessage]) -> Vec<(MailboxKey, Vec<String>)> {
     let mut groups: Vec<(MailboxKey, Vec<String>)> = Vec::new();
     for message in messages.iter().filter(|message| !pending::is_local(message.id())) {
         let key = (*message.key).clone();
@@ -90,11 +128,6 @@ fn flag_change(targets: &[MailMessage], flag: Flag, on: bool) -> Vec<Change> {
     if messages.is_empty() { Vec::new() } else { vec![Change::Flag { messages, flag, on }] }
 }
 
-/// The first failure of `results`, after all of them finished.
-pub(super) fn first_failure(results: Vec<Result<(), EngineError>>) -> Result<(), EngineError> {
-    results.into_iter().find(Result::is_err).unwrap_or(Ok(()))
-}
-
 impl Mail {
     /// `mail.read`, `mail.star`, `mail.archive`, `mail.trash` and `mail.restore`:
     /// `{"done": [id…], "failed": [{id, code, message}], "undo": step}` over the request's ids,
@@ -113,99 +146,186 @@ impl Mail {
             "mail.trash" => UndoAction::Trash,
             _ => UndoAction::Restore,
         };
+        let plans: Vec<(String, Result<Plan, EngineError>)> = ids
+            .into_iter()
+            .map(|id| {
+                let plan = self.known(&id).and_then(|known| self.plan(action, args, known));
+                (id, plan)
+            })
+            .collect();
+
+        // Every conversation's requests at once.
+        let planned = || plans.iter().filter_map(|(_, plan)| plan.as_ref().ok());
+        let flagged: Vec<MailMessage> = planned().flat_map(|plan| plan.flags.iter().cloned()).collect();
+        let moves: Vec<(Vec<MailMessage>, String)> = planned().filter_map(|plan| plan.moves.clone()).collect();
+        let deleted: Vec<MailMessage> = planned().flat_map(|plan| plan.deletes.iter().cloned()).collect();
+        let flag = match action {
+            UndoAction::Read => Some((Flag::Seen, true)),
+            UndoAction::Unread => Some((Flag::Seen, false)),
+            UndoAction::Star => Some((Flag::Flagged, true)),
+            UndoAction::Unstar => Some((Flag::Flagged, false)),
+            _ => None,
+        };
+        // What setting the flags changes, before they are set.
+        let flag_changes: Vec<Vec<Change>> = plans
+            .iter()
+            .map(|(_, plan)| match (plan, flag) {
+                (Ok(plan), Some((flag, on))) => flag_change(&plan.flags, flag, on),
+                _ => Vec::new(),
+            })
+            .collect();
+        let flags = async {
+            let Some((flag, on)) = flag.filter(|_| !flagged.is_empty()) else { return Refusals::default() };
+            if flag == Flag::Seen {
+                self.adjust_unread(&flagged, if on { -1 } else { 1 });
+            }
+            self.set_flags(flagged.clone(), flag, on).await
+        };
+        let (flags, moved, deleted) = tokio::join!(flags, self.move_all(&moves, false), self.delete_all(&deleted));
+
         let mut done: Vec<String> = Vec::new();
         let mut failed: Vec<BatchFailure> = Vec::new();
         let mut acted: Vec<(Known, Vec<Change>)> = Vec::new();
-        for id in ids {
-            let outcome = match self.known(&id) {
-                Ok(known) => self.act_on(command, args, &known).await.map(|(outcome, changes)| {
-                    acted.push((known, changes));
-                    outcome
-                }),
-                Err(error) => Err(error),
-            };
-            match outcome {
-                Ok(outcome) => {
-                    let mut state = self.state();
-                    match outcome {
-                        Outcome::Remember(conversation) => {
-                            if let Some(known) = state.known.get_mut(&id) {
-                                known.conversation = conversation;
-                            }
-                        }
-                        Outcome::Forget => {
-                            if state.known.remove(&id).is_some() {
-                                state.known_order.retain(|known| *known != id);
-                            }
-                        }
-                    }
-                    done.push(id);
+        for ((id, plan), mut changes) in plans.into_iter().zip(flag_changes) {
+            let plan = plan.and_then(|plan| {
+                flags.of(&plan.flags)?;
+                moved.of(plan.moves.as_ref().map_or(&[][..], |(messages, _)| messages))?;
+                deleted.of(&plan.deletes)?;
+                Ok(plan)
+            });
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(error) => {
+                    failed.push(BatchFailure::of(&id, &error));
+                    continue;
                 }
-                Err(error) => failed.push(BatchFailure::of(&id, &error)),
+            };
+            let conversation = &plan.known.conversation;
+            if let Some((messages, to)) = &plan.moves {
+                changes.push(Change::Moved { messages: messages.clone(), to: to.clone() });
             }
+            if action == UndoAction::Archive {
+                changes.push(Change::Started(self.archive_started(conversation)));
+            }
+            let kept = match flag {
+                Some((flag, on)) => {
+                    // Read and unread show on the whole conversation; a star on the message starred.
+                    let shown = if flag == Flag::Seen || !on { &conversation.messages[..] } else { &plan.flags[..] };
+                    Some(updating(conversation, &refs(shown), |envelope| envelope.set_flag(flag, on)))
+                }
+                None => None,
+            };
+            let mut state = self.state();
+            match kept {
+                Some(conversation) => {
+                    if let Some(known) = state.known.get_mut(&id) {
+                        known.conversation = conversation;
+                    }
+                }
+                None => {
+                    if state.known.remove(&id).is_some() {
+                        state.known_order.retain(|known| *known != id);
+                    }
+                }
+            }
+            drop(state);
+            acted.push((plan.known, changes));
+            done.push(id);
         }
         let undo = self.record(action, acted);
         Ok(answers::json(&BatchResult { done, failed, undo }))
     }
 
-    /// One conversation's part of `act`: what to keep of it, and what changed, for undo.
-    async fn act_on(
-        self: &Arc<Self>,
-        command: &str,
-        args: &Arguments,
-        known: &Known,
-    ) -> Result<(Outcome, Vec<Change>), EngineError> {
+    /// What `action` asks of the provider for one conversation, or why it can't be done to it.
+    fn plan(&self, action: UndoAction, args: &Arguments, known: Known) -> Result<Plan, EngineError> {
         let conversation = &known.conversation;
-        match command {
-            "mail.read" => {
-                let unread = args.bool("unread");
-                let changes = self.set_read(conversation, !unread).await?;
-                let all = refs(&conversation.messages);
-                let kept = updating(conversation, &all, |envelope| envelope.set_flag(Flag::Seen, !unread));
-                Ok((Outcome::Remember(kept), changes))
+        let mut plan = Plan { flags: Vec::new(), moves: None, deletes: Vec::new(), known: known.clone() };
+        match action {
+            UndoAction::Read | UndoAction::Unread => plan.flags = Self::read_targets(conversation, action == UndoAction::Read),
+            // Starring stars the latest message; unstarring every starred one.
+            UndoAction::Star => plan.flags = vec![conversation.latest().clone()],
+            UndoAction::Unstar => {
+                plan.flags = conversation.messages.iter().filter(|message| message.envelope.is_flagged()).cloned().collect();
             }
-            "mail.star" => {
-                let off = args.bool("off");
-                let changes = self.set_flagged(conversation, !off).await?;
-                let changed =
-                    if off { refs(&conversation.messages) } else { refs(std::slice::from_ref(conversation.latest())) };
-                let kept = updating(conversation, &changed, |envelope| envelope.set_flag(Flag::Flagged, !off));
-                Ok((Outcome::Remember(kept), changes))
-            }
-            "mail.archive" => Ok((Outcome::Forget, self.archive(conversation, &known.primary).await?)),
-            "mail.trash" => {
+            UndoAction::Archive => plan.moves = self.archive_plan(conversation, &known.primary)?,
+            UndoAction::Trash => {
                 let trash = Self::mailbox_with_role(&self.state(), &conversation.account, MailboxRole::Trash).cloned();
-                if let Some(trash) = trash
-                    && conversation.messages.iter().any(|message| message.mailbox() == trash.id)
-                    && !args.bool("yes")
-                {
+                let Some(trash) = trash else {
+                    let error = ApiError::new(0, "No trash mailbox found.");
+                    self.report(&error, Some(&conversation.account));
+                    return Err(EngineError::failed(error.message));
+                };
+                let (in_trash, elsewhere): (Vec<MailMessage>, Vec<MailMessage>) =
+                    conversation.messages.iter().cloned().partition(|message| message.mailbox() == trash.id);
+                if !in_trash.is_empty() && !args.bool("yes") {
                     return Err(EngineError::new(
                         "confirm",
                         format!("{} is already in the trash, so it would be deleted for good. Re-run with --yes.", conversation.id),
                     ));
                 }
-                Ok((Outcome::Forget, self.trash(conversation).await?))
+                // Mail already in the trash is deleted for good, which undo cannot take back.
+                plan.deletes = in_trash;
+                let moving: Vec<MailMessage> = elsewhere.into_iter().filter(|message| message.role != MailboxRole::Drafts).collect();
+                plan.moves = moving_to(moving, &trash);
             }
-            "mail.restore" => Ok((Outcome::Forget, self.restore(conversation).await?)),
-            _ => unreachable!("{command} is an action"),
+            UndoAction::Restore => {
+                // The messages in the trash or junk go to the inbox.
+                let inbox = Self::mailbox_with_role(&self.state(), &conversation.account, MailboxRole::Inbox).cloned();
+                let Some(inbox) = inbox else {
+                    return Err(EngineError::failed(format!("{} has no inbox.", conversation.account)));
+                };
+                let targets: Vec<MailMessage> = conversation
+                    .messages
+                    .iter()
+                    .filter(|message| matches!(message.role, MailboxRole::Trash | MailboxRole::Junk))
+                    .cloned()
+                    .collect();
+                if targets.is_empty() {
+                    return Err(EngineError::failed(format!("Nothing in {} is in the trash or junk.", conversation.id)));
+                }
+                plan.moves = moving_to(targets, &inbox);
+            }
+            UndoAction::Tag => unreachable!("tags are not an action"),
         }
+        Ok(plan)
+    }
+
+    /// The messages listed from `primary` that sit in an inbox-like mailbox, to the archive. A
+    /// conversation the user started is only marked archived (`act`): the user's own sent mail
+    /// left behind doesn't list in the inbox as a conversation they started, and one that is
+    /// nothing but that leaves the inbox with nothing to move.
+    fn archive_plan(
+        &self,
+        conversation: &Conversation,
+        primary: &HashSet<MailboxKey>,
+    ) -> Result<Option<(Vec<MailMessage>, String)>, EngineError> {
+        if started::started_key(conversation).is_some() {
+            return Ok(None);
+        }
+        let Some(target) = self.archive_mailbox(&conversation.account) else {
+            return Err(EngineError::failed(format!("{} has no archive mailbox.", conversation.account)));
+        };
+        let targets: Vec<MailMessage> = conversation
+            .messages
+            .iter()
+            .filter(|message| {
+                primary.contains(&*message.key)
+                    && !matches!(
+                        message.role,
+                        MailboxRole::Sent | MailboxRole::All | MailboxRole::Archive | MailboxRole::Trash | MailboxRole::Drafts
+                    )
+            })
+            .cloned()
+            .collect();
+        if targets.is_empty() {
+            return Err(EngineError::failed(format!("Nothing in {} is in a mailbox Archive moves from.", conversation.id)));
+        }
+        Ok(moving_to(targets, &target))
     }
 
     // MARK: - Mutations
 
-    /// Marks every unread message read, or the latest message not sent by the user unread.
-    async fn set_read(self: &Arc<Self>, conversation: &Conversation, read: bool) -> Result<Vec<Change>, EngineError> {
-        let targets = Self::read_targets(conversation, read);
-        if targets.is_empty() {
-            return Ok(Vec::new());
-        }
-        let changes = flag_change(&targets, Flag::Seen, read);
-        self.adjust_unread(&targets, if read { -1 } else { 1 });
-        self.mutate_flags(targets, Flag::Seen, read).await?;
-        Ok(changes)
-    }
-
-    /// The messages `set_read` changes.
+    /// The messages `mail.read` changes: every unread one, or the latest not sent by the user.
     fn read_targets(conversation: &Conversation, read: bool) -> Vec<MailMessage> {
         if read {
             conversation.messages.iter().filter(|message| !message.envelope.is_seen()).cloned().collect()
@@ -234,31 +354,96 @@ impl Mail {
         Ok(())
     }
 
-    /// Stars the latest message, or unstars every starred one.
-    async fn set_flagged(self: &Arc<Self>, conversation: &Conversation, flagged: bool) -> Result<Vec<Change>, EngineError> {
-        let targets: Vec<MailMessage> = if flagged {
-            vec![conversation.latest().clone()]
-        } else {
-            conversation.messages.iter().filter(|message| message.envelope.is_flagged()).cloned().collect()
-        };
-        let changes = flag_change(&targets, Flag::Flagged, flagged);
-        self.mutate_flags(targets, Flag::Flagged, flagged).await?;
-        Ok(changes)
+    /// `set_flags`, failing with its first refusal.
+    pub(super) async fn mutate_flags(self: &Arc<Self>, targets: Vec<MailMessage>, flag: Flag, add: bool) -> Result<(), EngineError> {
+        self.set_flags(targets, flag, add).await.first()
     }
 
-    pub(super) async fn mutate_flags(self: &Arc<Self>, targets: Vec<MailMessage>, flag: Flag, add: bool) -> Result<(), EngineError> {
-        let changed = refs(&targets);
-        self.update_envelopes(&changed, |envelope| envelope.set_flag(flag, add));
+    /// Sets `flag` on `targets` (`add`) or takes it off, shown at once, with one request per
+    /// mailbox; a refused request's messages are set back.
+    pub(super) async fn set_flags(self: &Arc<Self>, targets: Vec<MailMessage>, flag: Flag, add: bool) -> Refusals {
+        self.update_envelopes(&refs(&targets), |envelope| envelope.set_flag(flag, add));
         let requests = by_mailbox(&targets).into_iter().map(|(key, ids)| {
-            let changed = &changed;
-            self.provider_request(
-                key.account,
-                false,
-                async move |backend: Arc<Backend>| backend.set_flag(flag, add, &ids).await,
-                move || self.update_envelopes(changed, |envelope| envelope.set_flag(flag, !add)),
-            )
+            let sent: HashSet<MessageRef> =
+                targets.iter().filter(|message| carried(message, &key, &ids)).map(MailMessage::message_ref).collect();
+            let sending = ids.clone();
+            async move {
+                let result = self
+                    .provider_request(
+                        key.account.clone(),
+                        false,
+                        async move |backend: Arc<Backend>| backend.set_flag(flag, add, &sending).await,
+                        || self.update_envelopes(&sent, |envelope| envelope.set_flag(flag, !add)),
+                    )
+                    .await;
+                result.err().map(|error| (key, ids, error))
+            }
         });
-        first_failure(futures::future::join_all(requests).await)
+        Refusals(futures::future::join_all(requests).await.into_iter().flatten().collect())
+    }
+
+    /// Moves each of `moves` (messages, the id of the mailbox of their account they go to) with
+    /// one request per mailbox and destination, taking them out of their listings at once.
+    /// `back` (undo) moves them from that mailbox to the ones they were listed in instead,
+    /// showing them there at once; a refused request takes its messages out again.
+    pub(super) async fn move_all(self: &Arc<Self>, moves: &[(Vec<MailMessage>, String)], back: bool) -> Refusals {
+        let all: Vec<MailMessage> = moves.iter().flat_map(|(messages, _)| messages.iter().cloned()).collect();
+        if all.is_empty() {
+            return Refusals::default();
+        }
+        if back {
+            self.insert_envelopes(&all);
+        } else {
+            self.remove_envelopes(&all);
+        }
+        let mut groups: Vec<(MailboxKey, String, Vec<String>)> = Vec::new();
+        for (messages, other) in moves {
+            for (key, ids) in by_mailbox(messages) {
+                match groups.iter_mut().find(|(known, mailbox, _)| *known == key && mailbox == other) {
+                    Some((_, _, grouped)) => grouped.extend(ids),
+                    None => groups.push((key, other.clone(), ids)),
+                }
+            }
+        }
+        let requests = groups.into_iter().map(|(key, other, ids)| {
+            let returned: Vec<MailMessage> = all.iter().filter(|message| carried(message, &key, &ids)).cloned().collect();
+            let (from, to) = if back { (other, key.mailbox.clone()) } else { (key.mailbox.clone(), other) };
+            let sending = ids.clone();
+            async move {
+                let result = self
+                    .provider_request(
+                        key.account.clone(),
+                        true,
+                        async move |backend: Arc<Backend>| backend.move_to(&sending, &from, &to).await,
+                        || {
+                            if back {
+                                self.remove_envelopes(&returned);
+                            }
+                        },
+                    )
+                    .await;
+                result.err().map(|error| (key, ids, error))
+            }
+        });
+        Refusals(futures::future::join_all(requests).await.into_iter().flatten().collect())
+    }
+
+    /// Deletes `messages` (in the trash) for good, with one request per mailbox.
+    async fn delete_all(self: &Arc<Self>, messages: &[MailMessage]) -> Refusals {
+        if messages.is_empty() {
+            return Refusals::default();
+        }
+        self.remove_envelopes(messages);
+        let requests = by_mailbox(messages).into_iter().map(|(key, ids)| {
+            let sending = ids.clone();
+            async move {
+                let result = self
+                    .provider_request(key.account.clone(), true, async move |backend: Arc<Backend>| backend.delete(&sending).await, || {})
+                    .await;
+                result.err().map(|error| (key, ids, error))
+            }
+        });
+        Refusals(futures::future::join_all(requests).await.into_iter().flatten().collect())
     }
 
     /// One request for a change already shown. A refusal (signing out included) is rolled back,
@@ -290,110 +475,6 @@ impl Mail {
         Self::mailbox_with_role(&state, account, MailboxRole::Archive)
             .or_else(|| Self::mailbox_with_role(&state, account, MailboxRole::All))
             .cloned()
-    }
-
-    /// Moves the messages listed from `primary` that sit in an inbox-like mailbox to the archive.
-    /// The user's own sent mail left behind doesn't list in the inbox as a conversation they
-    /// started, and one that is nothing but that leaves the inbox with nothing to move.
-    async fn archive(
-        self: &Arc<Self>,
-        conversation: &Conversation,
-        primary: &HashSet<MailboxKey>,
-    ) -> Result<Vec<Change>, EngineError> {
-        if started::started_key(conversation).is_some() {
-            return Ok(vec![Change::Started(self.archive_started(conversation))]);
-        }
-        let Some(target) = self.archive_mailbox(&conversation.account) else {
-            return Err(EngineError::failed(format!("{} has no archive mailbox.", conversation.account)));
-        };
-        let targets: Vec<MailMessage> = conversation
-            .messages
-            .iter()
-            .filter(|message| {
-                primary.contains(&*message.key)
-                    && !matches!(
-                        message.role,
-                        MailboxRole::Sent | MailboxRole::All | MailboxRole::Archive | MailboxRole::Trash | MailboxRole::Drafts
-                    )
-            })
-            .cloned()
-            .collect();
-        if targets.is_empty() {
-            return Err(EngineError::failed(format!("Nothing in {} is in a mailbox Archive moves from.", conversation.id)));
-        }
-        let mut changes = self.move_messages(targets, &target).await?;
-        changes.push(Change::Started(self.archive_started(conversation)));
-        Ok(changes)
-    }
-
-    /// Moves the conversation to the trash; messages already there are deleted for good, which
-    /// undo cannot take back.
-    async fn trash(self: &Arc<Self>, conversation: &Conversation) -> Result<Vec<Change>, EngineError> {
-        let trash = Self::mailbox_with_role(&self.state(), &conversation.account, MailboxRole::Trash).cloned();
-        let Some(trash) = trash else {
-            let error = ApiError::new(0, "No trash mailbox found.");
-            self.report(&error, Some(&conversation.account));
-            return Err(EngineError::failed(error.message));
-        };
-        let (in_trash, elsewhere): (Vec<MailMessage>, Vec<MailMessage>) =
-            conversation.messages.iter().cloned().partition(|message| message.mailbox() == trash.id);
-        let elsewhere: Vec<MailMessage> = elsewhere.into_iter().filter(|message| message.role != MailboxRole::Drafts).collect();
-        let moving = self.move_messages(elsewhere, &trash);
-        let deleting = async {
-            if in_trash.is_empty() {
-                return Ok(());
-            }
-            self.remove_envelopes(&in_trash);
-            let ids: Vec<String> = in_trash.iter().map(|message| message.id().to_string()).collect();
-            self.provider_request(trash.account.clone(), true, async move |backend: Arc<Backend>| backend.delete(&ids).await, || {})
-                .await
-        };
-        let (moved, deleted) = tokio::join!(moving, deleting);
-        let changes = moved?;
-        deleted?;
-        Ok(changes)
-    }
-
-    /// Moves the conversation's messages in the trash or junk to the inbox.
-    async fn restore(self: &Arc<Self>, conversation: &Conversation) -> Result<Vec<Change>, EngineError> {
-        let inbox = Self::mailbox_with_role(&self.state(), &conversation.account, MailboxRole::Inbox).cloned();
-        let Some(inbox) = inbox else {
-            return Err(EngineError::failed(format!("{} has no inbox.", conversation.account)));
-        };
-        let targets: Vec<MailMessage> = conversation
-            .messages
-            .iter()
-            .filter(|message| matches!(message.role, MailboxRole::Trash | MailboxRole::Junk))
-            .cloned()
-            .collect();
-        if targets.is_empty() {
-            return Err(EngineError::failed(format!("Nothing in {} is in the trash or junk.", conversation.id)));
-        }
-        self.move_messages(targets, &inbox).await
-    }
-
-    /// Moves `targets` to `destination`; answers the move, for undo.
-    async fn move_messages(
-        self: &Arc<Self>,
-        targets: Vec<MailMessage>,
-        destination: &Mailbox,
-    ) -> Result<Vec<Change>, EngineError> {
-        let targets: Vec<MailMessage> = targets.into_iter().filter(|message| message.mailbox() != destination.id).collect();
-        if targets.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.remove_envelopes(&targets);
-        let requests = by_mailbox(&targets).into_iter().map(|(key, ids)| {
-            let to = destination.id.clone();
-            self.provider_request(
-                key.account.clone(),
-                true,
-                async move |backend: Arc<Backend>| backend.move_to(&ids, &key.mailbox, &to).await,
-                || {},
-            )
-        });
-        first_failure(futures::future::join_all(requests).await)?;
-        Ok(vec![Change::Moved { messages: targets, to: destination.id.clone() }])
     }
 
     // MARK: - Listings

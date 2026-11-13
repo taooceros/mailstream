@@ -2,7 +2,8 @@
 //! `mail.trash`, `mail.restore`, `mail.tag`) and changed anything is one step, which its answer
 //! names (`undo`), and `mail.undo` takes back the latest step or the one named. Taking back works
 //! as the actions do (`actions.rs`): it shows at once in the listings, the counts and the tags, then
-//! goes to the provider, and a refusal is rolled back and reported. Moved mail goes back to the
+//! goes to the provider (a step over many conversations, one request per mailbox), and a refusal
+//! is rolled back and reported. Moved mail goes back to the
 //! mailbox it was listed in (Gmail gets that label back or leaves the trash; Outlook moves it back
 //! to its folder), flags are set back on the messages the action changed, conversations the user
 //! started list again once their archive is taken back, and corrected tags return to what they
@@ -11,17 +12,17 @@
 //! Steps live in memory for this run, the newest `LIMIT` of them; mail deleted for good (`mail.trash
 //! --yes` on mail in the trash) does not come back. Auto-read's own undo (`mail.autoread.undo`,
 //! `autoread.rs`) is a different thing: a lasting log of its background passes, each conversation
-//! of which can be marked unread again. Both change flags through `mutate_flags`.
+//! of which can be marked unread again. Both change flags through `set_flags`.
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use super::actions::{by_mailbox, first_failure, refs, updating};
+use super::actions::{refs, updating};
 use super::started::Marked;
 use super::{Known, Mail, remember};
 use crate::answers::{self, BatchFailure, UndoAction, Undone};
-use crate::backend::{Backend, Flag};
+use crate::backend::Flag;
 use crate::commands::Arguments;
 use crate::model::{Conversation, MailMessage};
 use crate::tagging::ConversationTag;
@@ -111,11 +112,57 @@ impl Mail {
                 None => EngineError::new("nothing", "Nothing to undo."),
             });
         };
+        // Tags and the marks of conversations the user started, each conversation's own.
+        let local: Vec<Result<(), EngineError>> = step.conversations.iter().map(|(_, changes)| self.take_back_here(changes)).collect();
+        // The flags and moves of every conversation at once, one request per mailbox.
+        let all = || step.conversations.iter().flat_map(|(_, changes)| changes);
+        let mut flags: Vec<(Flag, bool)> = Vec::new();
+        for change in all() {
+            if let Change::Flag { flag, on, .. } = change
+                && !flags.contains(&(*flag, *on))
+            {
+                flags.push((*flag, *on));
+            }
+        }
+        let flagged = flags.into_iter().map(|(flag, on)| {
+            let messages: Vec<MailMessage> = all()
+                .filter_map(|change| match change {
+                    Change::Flag { messages, flag: changed, on: was } if (*changed, *was) == (flag, on) => Some(messages),
+                    _ => None,
+                })
+                .flatten()
+                .cloned()
+                .collect();
+            async move {
+                if flag == Flag::Seen {
+                    self.adjust_unread(&messages, if on { 1 } else { -1 });
+                }
+                self.set_flags(messages, flag, !on).await
+            }
+        });
+        let moves: Vec<(Vec<MailMessage>, String)> = all()
+            .filter_map(|change| match change {
+                Change::Moved { messages, to } => Some((messages.clone(), to.clone())),
+                _ => None,
+            })
+            .collect();
+        let (flagged, moved) = tokio::join!(futures::future::join_all(flagged), self.move_all(&moves, true));
+
         let mut done: Vec<String> = Vec::new();
         let mut failed: Vec<BatchFailure> = Vec::new();
-        for (known, changes) in &step.conversations {
+        for ((known, changes), local) in step.conversations.iter().zip(local) {
             let id = &known.conversation.id;
-            match self.take_back(changes).await {
+            let result = local.and_then(|()| {
+                for change in changes {
+                    match change {
+                        Change::Flag { messages, .. } => flagged.iter().try_for_each(|refusals| refusals.of(messages))?,
+                        Change::Moved { messages, .. } => moved.of(messages)?,
+                        Change::Started(_) | Change::Tag { .. } => {}
+                    }
+                }
+                Ok(())
+            });
+            match result {
                 Ok(()) => {
                     self.remember_taken_back(known, changes);
                     done.push(id.clone());
@@ -126,41 +173,19 @@ impl Mail {
         Ok(answers::json(&Undone { step: step.id, action: step.action, done, failed }))
     }
 
-    /// Takes back one conversation's changes, the last made first; the first refusal stops it.
-    async fn take_back(self: &Arc<Self>, changes: &[Change]) -> Result<(), EngineError> {
+    /// Takes back what one conversation's changes did here alone: the marks of a conversation
+    /// the user started, and tags.
+    fn take_back_here(&self, changes: &[Change]) -> Result<(), EngineError> {
         for change in changes.iter().rev() {
             match change {
-                Change::Flag { messages, flag, on } => {
-                    if *flag == Flag::Seen {
-                        self.adjust_unread(messages, if *on { 1 } else { -1 });
-                    }
-                    self.mutate_flags(messages.clone(), *flag, !on).await?;
-                }
-                Change::Moved { messages, to } => self.move_back(messages, to).await?,
                 Change::Started(marked) => self.unarchive_started(marked),
                 Change::Tag { conversation, before } => {
                     self.tagging.put_back(conversation, before.clone()).map_err(EngineError::failed)?
                 }
+                Change::Flag { .. } | Change::Moved { .. } => {}
             }
         }
         Ok(())
-    }
-
-    /// Moves `messages` from mailbox `from` back to the mailboxes they were listed in, showing
-    /// them there at once.
-    async fn move_back(self: &Arc<Self>, messages: &[MailMessage], from: &str) -> Result<(), EngineError> {
-        self.insert_envelopes(messages);
-        let requests = by_mailbox(messages).into_iter().map(|(key, ids)| {
-            let back: Vec<MailMessage> = messages.iter().filter(|message| *message.key == key).cloned().collect();
-            let from = from.to_string();
-            self.provider_request(
-                key.account.clone(),
-                true,
-                async move |backend: Arc<Backend>| backend.move_to(&ids, &from, &key.mailbox).await,
-                move || self.remove_envelopes(&back),
-            )
-        });
-        first_failure(futures::future::join_all(requests).await)
     }
 
     /// What commands remember of a conversation taken back: its flags as they are again, and
