@@ -73,6 +73,9 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+from repo import clone_tree  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 LINUX = platform.system() == "Linux"
 # The shots build, copied aside so a later default build in the same target can't stand in for it.
@@ -84,7 +87,7 @@ def fail(message):
 
 
 def target_outside():
-    """Linux: the workspace's target as a symlink outside the ovnfs mount (MS-201) when the
+    """The workspace's target as a symlink outside the ovnfs mount (MS-201, MS-320) when the
     checkout has none yet, seeded from the newest other checkout's build so a first build doesn't
     start cold."""
     inside = ROOT / "target"
@@ -98,7 +101,7 @@ def target_outside():
         if others:
             newest = max(others, key=lambda path: (path / "release").stat().st_mtime)
             print(f"shots: starting the build from {newest}", file=sys.stderr)
-            subprocess.run(["cp", "-a", "--reflink=auto", str(newest), str(outside)], check=True)
+            clone_tree(newest, outside)
         else:
             outside.mkdir(parents=True)
     inside.symlink_to(outside, target_is_directory=True)
@@ -171,8 +174,7 @@ def main():
 
     commands = []
     if not args.no_build:
-        if LINUX:
-            target_outside()
+        target_outside()
         # Under the machine's compile limit (scripts/capped: Linux's capped slice, MS-268; the
         # Mac's compile budget, MS-260).
         commands.append("(cd GPUI && ../scripts/capped cargo build --release --features shots)")

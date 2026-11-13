@@ -10,23 +10,24 @@ It runs `ovnfs new ~/projects/mailstream --name NAME`, checks that the repo's `.
 effect (frozen() below), makes the checkout jj workspace NAME of the default checkout's repository
 (graft() below), then runs `jj git fetch` and `jj new main` in it and prints its path.
 
-`.o2/ovnfs.yml` makes the warm build's folders (every `target/`, `.turso/`) `source`, so ovnfs
-captures them when the checkout opens (APFS clones) instead of serving the default checkout's
-live: a later build or delete there no longer reaches the checkout, and cargo can't keep an
-artifact built from other source (MS-152). It hides the default checkout's `.jj`. No `--rev`:
-ovnfs v0.3.0 serves ignored files of a `--rev` checkout live whatever the rules say; the default
-checkout is clean on `main` anyway (it is locked, and only warm-build.py moves it), and `jj new
-main` brings the checkout to `main`'s tip.
+`.o2/ovnfs.yml` makes `.turso/` (and any crate-level `target/`) `source`, so ovnfs captures it when
+the checkout opens (APFS clones) instead of serving the default checkout's live: a later build or
+delete there no longer reaches the checkout, and cargo can't keep an artifact built from other
+source (MS-152). It hides the default checkout's `.jj`. No `--rev`: ovnfs v0.3.0 serves ignored
+files of a `--rev` checkout live whatever the rules say; the default checkout is clean on `main`
+anyway (it is locked, and only warm-build.py moves it), and `jj new main` brings the checkout to
+`main`'s tip.
 
-On Linux the cargo target folders live outside the checkout (MS-201): ovnfs's FUSE mount answers a
-directory listing with the sizes files had when the directory was opened, and the kernel takes them
-over newer writes, so a file just written reads as empty or cut short for a second
-(https://github.com/stencil-hq/ovnfs/issues/48). Every rustc lists `target/*/deps` as it starts
-while others write objects there, and cargo builds in the mount fail ("failed to map object file:
-memory map must have a non-zero length"). unmount_target() below gives the cargo workspace (MS-279)
-its target folder in ~/.cache/mailstream-checkouts/NAME/target, starting as a reflink copy of the
-default checkout's warm build (btrfs: no copying, no extra disk), and makes the checkout's `target`
-a symlink to it; `rm` deletes it.
+The cargo workspace's target folder (MS-279) lives outside the checkout on every machine, and the
+rules hide the root `target` from ovnfs. unmount_target() below gives the checkout
+~/.cache/mailstream-checkouts/NAME/target, starting as a copy-on-write clone of the default
+checkout's warm build (APFS or btrfs: seconds, no extra disk), and makes the checkout's `target`
+a symlink to it; `rm` deletes it. On Linux (MS-201), ovnfs's FUSE mount answered a directory
+listing with the sizes files had when the directory was opened, so a file just written read as
+empty for a second (https://github.com/stencil-hq/ovnfs/issues/48) and cargo builds in the mount
+failed ("memory map must have a non-zero length"). On the Mac (MS-320), the warm build's ~50,000
+files (~40 GB, most of the capture) as `source` grew every checkout's base and upper index and
+the daemon's node tables with them: the daemon reached 6-9 GB of memory.
 
 Every checkout shares the default checkout's jj repository (MS-179): commits, bookmarks, the
 operation log and each checkout's working copy (`NAME@`) show in every checkout at once, without
@@ -49,21 +50,22 @@ import tempfile
 from pathlib import Path
 
 sys.dont_write_bytecode = True
-from repo import ROOT, default_checkout, jj, ovnfs, run  # noqa: E402
+from repo import ROOT, clone_tree, default_checkout, jj, ovnfs, run  # noqa: E402
 
-BUILD = ["target", ".turso"]
 TARGETS = Path.home() / ".cache/mailstream-checkouts"
 
 
 def frozen(checkout):
     """Whether a checkout (an `ovnfs --json ls` entry) keeps the build folders it opened with:
-    opened without `--rev` (ovnfs keeps a `revision-index` in the base of a `--rev` one) and with
-    the build folders `source` and `.jj` hidden."""
+    opened without `--rev` (ovnfs keeps a `revision-index` in the base of a `--rev` one), `.turso`
+    `source`, `target` hidden (its own outside the mount) or, in checkouts opened before MS-320,
+    `source`, and `.jj` hidden."""
     if (Path(ovnfs("status")["state"]) / "bases" / checkout["base"] / "revision-index").exists():
         return False
     def kind(path):
         return ovnfs("explain", checkout["name"], path)["class"]
-    return kind(".jj") == "hidden" and all(kind(path) == "source" for path in BUILD)
+    return (kind(".jj") == "hidden" and kind(".turso") == "source"
+            and kind("target") in ("hidden", "source"))
 
 
 def workspaces(source):
@@ -118,8 +120,8 @@ def main():
         sys.exit("checkout: the default checkout has no .o2/ovnfs.yml freezing the build folders "
                  "yet (the next scripts/warm-build.py there brings it); removed " + checkout["name"])
     capture = opened["capture"]
-    print(f"Opened {path}: {capture['files']} files ({capture['bytes'] / 1e9:.1f} GB, build "
-          f"folders included) in {capture['seconds']:.1f} s", flush=True)
+    print(f"Opened {path}: {capture['files']} files ({capture['bytes'] / 1e9:.1f} GB, .turso "
+          f"included) in {capture['seconds']:.1f} s", flush=True)
     try:
         set_up(source, path, checkout["name"])
     except BaseException:
@@ -128,16 +130,16 @@ def main():
 
 
 def unmount_target(source, path, name):
-    """Linux: replaces the workspace's target folder in the checkout with a symlink to one outside
-    the FUSE mount, started from the default checkout's warm build (header). Folders a checkout of
-    the same name left behind without `rm` are deleted first: the ovnfs name was free."""
+    """Gives the checkout a `target` symlink to a folder outside the mount, started from the
+    default checkout's warm build (header). Folders a checkout of the same name left behind
+    without `rm` are deleted first: the ovnfs name was free."""
     outside = TARGETS / name
     shutil.rmtree(outside, ignore_errors=True)
     outside.mkdir(parents=True)
     target = outside / "target"
     warm = source / "target"
     if warm.is_dir():
-        run("cp", "-a", "--reflink=auto", str(warm), str(target))
+        clone_tree(warm, target)
     else:
         target.mkdir()
     inside = path / "target"
@@ -154,9 +156,8 @@ def set_up(source, path, name):
         jj("restore", cwd=path)
     jj("git", "fetch", cwd=path)
     jj("new", "main", cwd=path)
-    if sys.platform == "linux":
-        # After `jj new main`, whose .gitignore also ignores the symlinks.
-        unmount_target(source, path, name)
+    # After `jj new main`, whose .gitignore also ignores the symlink.
+    unmount_target(source, path, name)
     print(path, "at main", jj("log", "--no-graph", "-r", "main",
                               "-T", 'commit_id.short() ++ " " ++ description.first_line()', cwd=path))
 

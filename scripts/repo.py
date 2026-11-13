@@ -38,6 +38,13 @@ def jj(*args, cwd=ROOT):
     return run("jj", "--no-pager", *args, cwd=cwd)
 
 
+def clone_tree(source, destination):
+    """Copies folder `source` to `destination` (which must not exist) as a copy-on-write clone,
+    modification times kept for cargo: APFS clones on macOS, reflinks (btrfs) on Linux."""
+    flags = ["-c", "-R", "-p"] if sys.platform == "darwin" else ["-a", "--reflink=auto"]
+    run("cp", *flags, str(source), str(destination))
+
+
 def ovnfs(*args):
     return json.loads(run("ovnfs", "--json", *args))
 

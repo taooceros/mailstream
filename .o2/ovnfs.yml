@@ -1,7 +1,10 @@
 # ovnfs rules for checkouts of this repository (frozen into each checkout when it opens; see
-# .omp/skills/ovnfs/SKILL.md). The warm build's folders are source, so a checkout keeps the build
-# it opened with instead of reading the default checkout's live (MS-152); jj's store stays out of
-# the capture, and scripts/checkout.py makes each checkout a jj workspace of it (MS-179).
+# .omp/skills/ovnfs/SKILL.md). Cargo's `target` folders stay out of ovnfs (a bare name matches at
+# any depth): scripts/checkout.py gives each checkout the workspace's own outside the mount,
+# cloned from the warm build (MS-201, MS-320). `.turso` is source, so a checkout keeps the build it
+# opened with instead of reading the default checkout's live (MS-152); jj's store stays out of the
+# capture, and scripts/checkout.py makes each checkout a jj workspace of it (MS-179).
 rules: |
   hidden  .jj
-  source  ignored & (**/target | **/target/** | .turso | .turso/**)
+  hidden  target | target/**
+  source  ignored & (.turso | .turso/**)
