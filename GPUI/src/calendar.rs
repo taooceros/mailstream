@@ -553,7 +553,7 @@ impl CalendarPane {
             width if width > 0. => width,
             _ => f32::from(window.viewport_size().width),
         };
-        self.close.advance(width, window).unwrap_or_else(|| {
+        self.close.advance(width, window, cx).unwrap_or_else(|| {
             if page { self.close_page(cx) } else { self.close_event(cx) }
             0.
         })

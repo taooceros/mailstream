@@ -27,6 +27,7 @@ mod controls;
 mod design;
 mod engine;
 mod format;
+mod frame_clock;
 mod frame_rate;
 #[cfg(target_os = "macos")]
 mod glass;
@@ -92,9 +93,10 @@ fn main() {
         #[cfg(target_os = "linux")]
         let blur = blur::init();
         let mut options = window_options(Bounds::centered(None, size(px(1240.), px(800.)), cx));
-        // GPUI Fast draws a window that isn't the key window at about 30 fps unless input is
-        // arriving. The measurement runs in the background on purpose and scrolls by itself, so
-        // it lifts that limit to see what the window does at the display's rate.
+        // GPUI Fast draws a window that isn't the key window (or in Low Power Mode) at about 30 fps
+        // unless input is arriving or a slide asks for the display's rate (`frame_clock.rs`,
+        // MS-293). The measurement runs in the background on purpose and scrolls by itself, so it
+        // lifts that limit to see what the window does at the display's rate.
         if bench::requested() {
             options.inactive_frame_interval = None;
         }

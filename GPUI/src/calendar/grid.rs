@@ -30,6 +30,7 @@ use super::{CalendarPane, Pan, View};
 use crate::controls::{Tone, mark_dot, notice, tag};
 use crate::design::{self, Palette, calendar as metrics, motion, space, stroke, text};
 use crate::icons::{Icon, icon};
+use crate::frame_clock;
 use crate::swipe::{self, Step};
 
 /// Minutes in a day by the clock.
@@ -190,7 +191,7 @@ impl CalendarPane {
         self.close_week_popover(cx);
         self.move_focus(step);
         let width = self.page_width.get();
-        self.pan = Pan::Settle { from: step as f32 * width, velocity: 0., start: swipe::now() };
+        self.pan = Pan::Settle { from: step as f32 * width, velocity: 0., start: frame_clock::now() };
         cx.notify();
     }
 
@@ -208,16 +209,17 @@ impl CalendarPane {
 
     /// Where the pages sit now, called while rendering: advances a slide and asks for the next
     /// frame while it moves.
-    fn current_pan(&mut self, window: &mut Window) -> f32 {
-        match self.pan {
+    fn current_pan(&mut self, window: &mut Window, cx: &App) -> f32 {
+        match &mut self.pan {
             Pan::Rest => 0.,
-            Pan::Drag(offset) => offset,
+            Pan::Drag(offset) => *offset,
             Pan::Settle { from, velocity, start } => {
-                let (offset, arrived) = motion::PAGING.at(from, 0., velocity, swipe::since(start));
+                let elapsed = frame_clock::elapsed(start, window, cx);
+                let (offset, arrived) = motion::PAGING.at(*from, 0., *velocity, elapsed);
                 if arrived {
                     self.pan = Pan::Rest;
                 } else {
-                    window.request_animation_frame();
+                    window.request_animation_frame_at_display_rate();
                 }
                 offset
             }
@@ -252,12 +254,12 @@ impl CalendarPane {
                     offset
                 };
                 // At the speed the fingers left it (MS-289, MS-290).
-                self.pan = Pan::Settle { from, velocity, start: swipe::now() };
+                self.pan = Pan::Settle { from, velocity, start: frame_clock::now() };
                 cx.notify();
                 true
             }
             Step::Cancel(offset) => {
-                self.pan = Pan::Settle { from: offset, velocity: 0., start: swipe::now() };
+                self.pan = Pan::Settle { from: offset, velocity: 0., start: frame_clock::now() };
                 cx.notify();
                 true
             }
@@ -306,7 +308,7 @@ impl CalendarPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        let pan = self.current_pan(window);
+        let pan = self.current_pan(window, cx);
         // The pages' width as last measured, for what follows a card's width (its content) and
         // not its place; before the first layout, the window's less the gutter.
         let measured = self.page_width.get();

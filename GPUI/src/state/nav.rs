@@ -215,7 +215,7 @@ impl MailApp {
 
     /// Where the top layer sits in a content area `width` wide, called while rendering: advances
     /// the slide, asks for the next frame while it moves, and drops a layer that slid off.
-    pub fn top_offset(&mut self, width: f32, window: &mut Window) -> f32 {
+    pub fn top_offset(&mut self, width: f32, window: &mut Window, cx: &App) -> f32 {
         self.content_width = width;
         let Some(top) = self.layers.last().map(Layer::id) else {
             self.slide = Slide::Rest;
@@ -225,7 +225,7 @@ impl MailApp {
             self.slide_layer = Some(top);
             self.slide = Slide::Rest;
         }
-        self.slide.advance(width, window).unwrap_or_else(|| {
+        self.slide.advance(width, window, cx).unwrap_or_else(|| {
             self.layers.pop();
             self.slide_layer = None;
             0.0

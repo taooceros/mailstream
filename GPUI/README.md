@@ -28,6 +28,14 @@ Anything else a render reads (a `Cell`, a thread-local, the time) needs `cx.noti
 `window.refresh()` when it changes; Blitz's pages refresh the window as their tiles arrive.
 `GPUI_VIEW_RETENTION=0` draws every frame from scratch, to tell a stale view from a bug.
 
+Slides and the calendar's paging move by their frame's time on the display's refresh grid
+(`src/frame_clock.rs`, MS-293), so every step is one refresh at 60 Hz and 120 Hz, and ask for
+their frames at the display's rate: GPUI Fast otherwise draws an inactive window, or any window in
+Low Power Mode, at 30 fps. Both need `vendor/gpui-fast`, GPUI Fast's core 0.1.14 with two
+additions to `src/window.rs` marked "Mailstream patch" (`Window::frame_signal_at`,
+`Window::request_animation_frame_at_display_rate`); moving to a newer GPUI Fast means vendoring it
+again with them.
+
 The controls are gpui-kit's components where the kit has one (MS-226): buttons and icon buttons
 (`controls::button`, `icon_button`), their tooltips (`controls::tooltip`), switches, text fields,
 segmented controls (`controls::segmented` / `segment`: the kit's small segmented `TabBar`), tags
@@ -154,6 +162,7 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 | `src/webview.rs` | macOS, the reader's WebView renderer: HTML bodies in native `WKWebView`s laid over the reader: placed and clipped each frame, sized to their page, the engine's page and page script (style sheet, quote fold), page scripts off, links the engine allows opened in the browser, wheel events handed back to the reader |
 | `src/blitz_body.rs` | HTML bodies drawn by Blitz on the engine's pages thread (the default renderer everywhere), shown as tiles near the viewport, quoted history as a page of its own; links the engine allows open in the browser, a drag selects and ⌘C (Ctrl+C) copies |
 | `src/swipe.rs` | Dragging a page (bundle, reader, the calendar's event and its page) off to close it: the two-finger back swipe, following the system's swipe-between-pages setting, and the mouse's sideways drag (MS-266), on one state machine and one slide |
+| `src/frame_clock.rs` | The slides' and calendar paging's clock: each window's frames on its display's refresh grid, timed from when the platform asked for them (MS-293) |
 | `src/chat.rs` | `ChatPane`: Google Chat spaces (older pages load near the list's end, `chat_more`), a space's log (bottom-aligned, runs and day dividers, markup and links, uploaded pictures shown in it once `chat_attachment` downloads them, other files and videos as tiles in their kind's color that open in the system's default app), sending, earlier pages, threads, New Chat completing the account's Chat partners (`chat_people`) before contacts; the engine keeps the open space (`chat_open`) and the pane re-reads the list and the space on its `Chat`/`ChatMessages` events. `MAILSTREAM_CHAT_FIXTURE=<file.json>` shows a synthetic chat without an account (the module's `fixture` says what the file holds) |
 | `src/calendar.rs`, `src/calendar/` | `CalendarPane` (MS-211): every account's events from `calendar_events` (a week back on, read again on the engine's `Calendar` event), shown instead of the mail list while Calendar is selected. `agenda.rs`: the list island (this week's days on a strip with their booked hours, the meeting about to start with Join, notices for accounts to sign in again or whose fetch failed, the days from today with their events; Going / Maybe / Decline on unanswered invitations, through `calendar_respond`); `detail.rs`: the open event beside it (over it in a narrow window) with its answer, Join, guests and notes, or in the week view in gpui-kit's popover beside its card, closed by a press outside it, Esc or another week (MS-184); and its page over the whole window (the popover's or pane's expand button, a double click on the event or Return), with the call's address, every guest's address and answer and the notes' links, Back or Esc returning to the view as it was (MS-184); `model.rs`: the agenda's days, the Up Next meeting, how a day's timed events sit side by side and the hours they book |
 | `src/compose.rs`, `src/compose/` | The drafts (From picker, recipient completion, attachments, discard confirmation) in the compose column (`column.rs`: tabs, docked, swapped, floating or minimized), and the reader's reply card |

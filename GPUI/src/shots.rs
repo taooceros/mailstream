@@ -33,7 +33,7 @@
 //!                            from now on that provider's requests are answered as usual, never
 //!                            (each times out after the engine's 30 s) or with a 503: an account
 //!                            that can't connect (MS-278); `key secondary-shift-n` asks again
-//! freeze                     stop the pages' clock (`swipe.rs`, MS-289): a page opened, closed
+//! freeze                     stop the pages' clock (`frame_clock.rs`, MS-289): a page opened, closed
 //!                            or let go from now on stays where it starts, until `film`
 //! film NAME COUNT [FPS]      move the stopped clock on 1/FPS s (default 60) a frame and save
 //!                            COUNT frames, DIR/NAME-000-light.png on, the first where it stands;
@@ -83,7 +83,7 @@ pub fn appearance() -> Option<WindowAppearance> {
 /// The pages' clock while a script films them (`freeze` to `thaw`); None: real time.
 static FILM: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// The pages' clock while a script films them (`swipe.rs`).
+/// The pages' clock while a script films them (`frame_clock.rs`).
 pub fn film_clock() -> Option<Instant> {
     *FILM.lock().expect("the film clock")
 }

@@ -281,7 +281,7 @@ impl MailApp {
         };
         let reader_on_top = matches!(self.layers.last(), Some(Layer::Reader(_)));
         let travel = if two_pane && reader_on_top { mail - split_list } else { mail };
-        let offset = self.top_offset(travel, window);
+        let offset = self.top_offset(travel, window, cx);
         let top = self.layers.len().saturating_sub(1);
         // What the top layer covers sits back and darkens under it, as the pages' motion says, and
         // comes forward as it slides off (MS-289); a conversation beside the list covers nothing.

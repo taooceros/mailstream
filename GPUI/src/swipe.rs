@@ -30,6 +30,7 @@ use gpui::{
 
 use crate::controls::WINDOW_MOVE_SLOP;
 use crate::design::motion;
+use crate::frame_clock::{self, now, since};
 
 pub enum Step {
     /// Not a back swipe: deliver the event as usual.
@@ -310,27 +311,37 @@ impl Slide {
         Slide::Settle { from, to, velocity: 0., start: now(), back }
     }
 
-    /// Where a page `width` wide sits now, and whether its motion has arrived.
-    fn place(&self, width: f32) -> (f32, bool) {
+    /// Where a page `width` wide sits `elapsed` seconds into its motion, and whether the motion
+    /// has arrived.
+    fn place(&self, width: f32, elapsed: f32) -> (f32, bool) {
         match *self {
             Slide::Rest => (0., true),
             Slide::Drag(offset) => (offset, true),
-            Slide::Opening(start) => motion::PAGE.at(width, 0., 0., since(start)),
-            Slide::Settle { from, to, velocity, start, .. } => motion::PAGE.at(from, to, velocity, since(start)),
+            Slide::Opening(_) => motion::PAGE.at(width, 0., 0., elapsed),
+            Slide::Settle { from, to, velocity, .. } => motion::PAGE.at(from, to, velocity, elapsed),
         }
     }
 
     /// How far right of its place a page `width` wide sits now, without advancing anything.
     pub fn offset(&self, width: f32) -> f32 {
-        self.place(width).0
+        let elapsed = match *self {
+            Slide::Opening(start) | Slide::Settle { start, .. } => since(start),
+            Slide::Rest | Slide::Drag(_) => 0.,
+        };
+        self.place(width, elapsed).0
     }
 
-    /// Where a page `width` wide sits, called while drawing it: asks for the next frame while it
-    /// moves and comes to rest on arrival. None once it has slid off: the page closes.
-    pub fn advance(&mut self, width: f32, window: &mut Window) -> Option<f32> {
-        let (offset, arrived) = self.place(width);
+    /// Where a page `width` wide sits, called while drawing it, by the frame's time
+    /// (`frame_clock`): asks for the next frame at the display's rate while it moves and comes to
+    /// rest on arrival. None once it has slid off: the page closes.
+    pub fn advance(&mut self, width: f32, window: &mut Window, cx: &App) -> Option<f32> {
+        let elapsed = match self {
+            Slide::Opening(start) | Slide::Settle { start, .. } => frame_clock::elapsed(start, window, cx),
+            Slide::Rest | Slide::Drag(_) => 0.,
+        };
+        let (offset, arrived) = self.place(width, elapsed);
         if !arrived {
-            window.request_animation_frame();
+            window.request_animation_frame_at_display_rate();
             return Some(offset);
         }
         match *self {
@@ -360,22 +371,6 @@ impl Slide {
         };
         true
     }
-}
-
-/// Now, for the slides (and the calendar's paging): in the screenshot mode the clock a script
-/// films them by while it does (`shots.rs`, `freeze`), so each frame shows the moment it stands
-/// for.
-pub fn now() -> Instant {
-    #[cfg(feature = "shots")]
-    if let Some(now) = crate::shots::film_clock() {
-        return now;
-    }
-    Instant::now()
-}
-
-/// Seconds since `start` by the slides' clock.
-pub fn since(start: Instant) -> f32 {
-    now().saturating_duration_since(start).as_secs_f32()
 }
 
 /// Where released fingers send a page `width` wide: past a third of the width, or flicked
