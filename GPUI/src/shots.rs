@@ -42,6 +42,12 @@
 //!                            logs what each frame took to draw and their mean, median and max
 //!                            past the first (MS-292)
 //! thaw                       run the pages' clock in real time again
+//! misspelled FROM TO         the Mac's spell checker finds the focused field's text FROM..TO
+//!                            (UTF-16 offsets) misspelled (MS-318; the field opts in to text
+//!                            checking, `text_checking.rs`): the field underlines it
+//! predict AT TEXT            the Mac predicts the rest of the line, TEXT, at offset AT of the
+//!                            focused field, which draws it after the caret if the caret is there;
+//!                            a click forgets both, as the platform checks again
 //! accounts mail|all          what the synthetic accounts' sign-ins granted: mail alone, as a
 //!                            sign-in now asks (MS-306), or everything (the default); applies
 //!                            before the window opens, wherever the line is. Connecting a
@@ -59,15 +65,16 @@
 //! menus, the Mac's WebView renderer (Blitz draws every body, as on Linux), native file and
 //! print dialogs, opening links, drag and drop from outside, the touchpad's momentum.
 
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use gpui::test::TestWindowExt;
 use gpui::{
-    AnyWindowHandle, Bounds, HeadlessAppContext, InputEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, OperatingSystem, Pixels, Point, ScrollDelta, ScrollEvent, TouchPhase, Window,
-    WindowAppearance, point, px, size,
+    AnyWindowHandle, Bounds, HeadlessAppContext, InlinePrediction, InputEvent, Keystroke, Modifiers, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, OperatingSystem, Pixels, Point, ScrollDelta, ScrollEvent,
+    TextAssistance, TouchPhase, Window, WindowAppearance, point, px, size,
 };
 
 mod seed;
@@ -186,7 +193,7 @@ impl Shots {
         })
         .ok();
 
-        let mut run = Run { cx, window, main: window, appearance: if self.dark { "dark" } else { "light" }, out: self.out, pointer: point(px(0.), px(0.)) };
+        let mut run = Run { cx, window, main: window, appearance: if self.dark { "dark" } else { "light" }, out: self.out, pointer: point(px(0.), px(0.)), assistance: TextAssistance::default() };
         run.pass(START);
         let mut failed = false;
         for (line, command) in commands {
@@ -281,6 +288,8 @@ enum Command {
     Thaw,
     /// The accounts were granted mail alone (`true`) or everything.
     Accounts(bool),
+    Misspelled(Range<usize>),
+    Predict(usize, String),
 }
 
 impl Command {
@@ -332,6 +341,11 @@ impl Command {
                 Command::Keys(keys)
             }
             "type" if !rest.is_empty() => Command::Type(rest.into()),
+            "misspelled" => Command::Misspelled(number(0)? as usize..number(1)? as usize),
+            "predict" => match rest.split_once(char::is_whitespace) {
+                Some((_, text)) => Command::Predict(number(0)? as usize, text.trim_start().into()),
+                None => return Err("predict: an offset, then the text".into()),
+            },
             "size" => Command::Size(number(0)?, number(1)?),
             "toast" if !rest.is_empty() => Command::Toast(rest.into()),
             "window" if rest == "other" || rest == "main" => Command::Window(rest == "other"),
@@ -378,6 +392,8 @@ struct Run {
     appearance: &'static str,
     out: PathBuf,
     pointer: Point<Pixels>,
+    /// What `misspelled` and `predict` had the platform find so far.
+    assistance: TextAssistance,
 }
 
 impl Run {
@@ -490,6 +506,8 @@ impl Run {
                 return Ok(());
             }
             Command::Click(position, button, count, modifiers) => {
+                // The platform checks a field's text again after a click.
+                self.assistance = TextAssistance::default();
                 self.pointer_to(position, None);
                 for click_count in 1..=count {
                     self.event(MouseDownEvent { button, position, modifiers, click_count, first_mouse: false });
@@ -527,6 +545,16 @@ impl Run {
                 }
             }
             Command::Type(text) => self.on_window(|window, cx| window.input(&text, cx)),
+            Command::Misspelled(word) => {
+                self.assistance.misspellings.push(word);
+                let assistance = self.assistance.clone();
+                self.on_window(|window, _| window.simulate_text_assistance(assistance));
+            }
+            Command::Predict(offset, text) => {
+                self.assistance.prediction = Some(InlinePrediction { offset, text });
+                let assistance = self.assistance.clone();
+                self.on_window(|window, _| window.simulate_text_assistance(assistance));
+            }
             Command::Size(width, height) => self.on_window(|window, cx| {
                 window.resize(size(px(width), px(height)));
                 window.bounds_changed(cx);

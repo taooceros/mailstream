@@ -40,6 +40,7 @@ mod settings;
 mod split;
 mod state;
 mod swipe;
+mod text_checking;
 mod ui;
 #[cfg(target_os = "macos")]
 mod updater;
@@ -81,7 +82,7 @@ fn main() {
         init(cx);
         #[cfg(target_os = "macos")]
         set_dock_icon();
-        cx.set_menus(menus());
+        cx.set_menus(menus(cx));
         #[cfg(target_os = "macos")]
         updater::start();
         cx.on_window_closed(|cx, _| {
@@ -135,6 +136,8 @@ fn init(cx: &mut App) {
     compose::bind_keys(cx);
     state::bind_keys(cx);
     blitz_body::bind_keys(cx);
+    // Last: its Tab and Esc in fields come before the views' own (`text_checking::init`).
+    text_checking::init(cx, |cx| cx.set_menus(menus(cx)));
     cx.on_action(|_: &Quit, cx| cx.quit());
 }
 
@@ -221,7 +224,19 @@ fn appearance_from_arguments() {
 
 /// The menu bar (`AppDelegate.buildMenu`). Items dispatch to the focused window's handlers, so
 /// they show the shortcuts bound in `state::bind_keys`.
-fn menus() -> Vec<Menu> {
+fn menus(cx: &App) -> Vec<Menu> {
+    let mut edit = vec![
+        MenuItem::os_action("Cut", Cut, OsAction::Cut),
+        MenuItem::os_action("Copy", Copy, OsAction::Copy),
+        MenuItem::os_action("Paste", Paste, OsAction::Paste),
+        MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
+        MenuItem::separator(),
+    ];
+    // Only the Mac checks text (`text_checking`).
+    if cfg!(target_os = "macos") {
+        edit.extend([text_checking::menu(cx), MenuItem::separator()]);
+    }
+    edit.push(MenuItem::action("Find", FocusSearch));
     vec![
         Menu::new("Mailstream").items([
             MenuItem::action("Settings…", settings::ShowSettings),
@@ -229,14 +244,7 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Quit Mailstream", Quit),
         ]),
         Menu::new("File").items([MenuItem::action("New Message", NewMessage), MenuItem::action("New Chat", NewChat)]),
-        Menu::new("Edit").items([
-            MenuItem::os_action("Cut", Cut, OsAction::Cut),
-            MenuItem::os_action("Copy", Copy, OsAction::Copy),
-            MenuItem::os_action("Paste", Paste, OsAction::Paste),
-            MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
-            MenuItem::separator(),
-            MenuItem::action("Find", FocusSearch),
-        ]),
+        Menu::new("Edit").items(edit),
         Menu::new("View").items([
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
             MenuItem::action("Back", Back),

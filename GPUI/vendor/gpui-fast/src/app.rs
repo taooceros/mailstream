@@ -55,9 +55,9 @@ use crate::{
     PlatformKeyboardLayout, PlatformKeyboardMapper, Point, PowerMode, Priority, PromptBuilder,
     PromptButton, PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle,
     Reservation, ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer,
-    SystemNotification, SystemNotificationResponse, Task, TextRenderingMode, TextSystem,
-    ThermalState, Window, WindowAppearance, WindowButtonLayout, WindowHandle, WindowId,
-    WindowInvalidator, WindowingRequest,
+    SystemNotification, SystemNotificationResponse, Task, TextCheckingSettings,
+    TextInputStateChange, TextRenderingMode, TextSystem, ThermalState, Window, WindowAppearance,
+    WindowButtonLayout, WindowHandle, WindowId, WindowInvalidator, WindowingRequest,
     colors::{Colors, GlobalColors},
     hash, init_app_menus,
 };
@@ -1358,6 +1358,27 @@ impl App {
             callback(cx);
             true
         }))
+    }
+
+    /// The user's text checking preferences (Mailstream patch, MS-318).
+    pub fn text_checking_settings(&self) -> TextCheckingSettings {
+        self.platform.text_checking_settings()
+    }
+
+    /// Changes the user's text checking preferences; every window checks its text input again.
+    pub fn set_text_checking_settings(&mut self, settings: TextCheckingSettings) {
+        self.platform.set_text_checking_settings(settings);
+        self.defer(|cx| {
+            for window in cx.windows() {
+                window
+                    .update(cx, |_, window, _| {
+                        window
+                            .platform_window
+                            .text_input_state_changed(TextInputStateChange::ContentChanged)
+                    })
+                    .ok();
+            }
+        });
     }
 
     /// Gracefully quit the application via the platform's standard routine.

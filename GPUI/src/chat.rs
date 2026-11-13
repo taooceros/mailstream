@@ -1016,7 +1016,8 @@ impl ChatPane {
                 .searchable(false)
                 .scroll_beyond_last_line(Some(0))
                 .placeholder(placeholder)
-                .submit_on_enter(true);
+                .submit_on_enter(true)
+                .autocorrect(true);
             state.set_highlighter_factory(markup_highlighter_factory(MarkupFlavor::GoogleChat), cx);
             state.set_highlighter("google-chat", cx);
             state

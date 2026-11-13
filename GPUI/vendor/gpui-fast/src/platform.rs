@@ -632,6 +632,14 @@ pub trait Platform: 'static {
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout>;
     fn keyboard_mapper(&self) -> Rc<dyn PlatformKeyboardMapper>;
     fn on_keyboard_layout_change(&self, callback: Box<dyn FnMut()>);
+
+    /// The user's text checking preferences, shared by every window (Mailstream patch, MS-318).
+    fn text_checking_settings(&self) -> TextCheckingSettings {
+        TextCheckingSettings::default()
+    }
+
+    /// Changes the user's text checking preferences.
+    fn set_text_checking_settings(&self, _settings: TextCheckingSettings) {}
 }
 
 /// A handle to a platform's display, e.g. a monitor or laptop screen.
@@ -1452,6 +1460,24 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
 
     /// Inform the operating system that the text input state has changed
     fn text_input_state_changed(&self, _change: TextInputStateChange) {}
+
+    /// Registers the callback that receives what the platform's text checking found in the
+    /// focused text input, whenever that changes (Mailstream patch, MS-318).
+    fn on_text_assistance(&self, _callback: Box<dyn FnMut(crate::FocusId, TextAssistance)>) {}
+
+    /// Stops showing the current inline prediction until the platform predicts another.
+    fn dismiss_inline_prediction(&self) {}
+
+    /// The spell checker's suggestions for the misspelled `word`.
+    fn spelling_guesses(&self, _word: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Stops reporting `word` as misspelled in this window.
+    fn ignore_spelling(&self, _word: &str) {}
+
+    /// Adds `word` to the user's spelling dictionary.
+    fn learn_spelling(&self, _word: &str) {}
 
     fn play_system_bell(&self) {}
 
@@ -2569,6 +2595,40 @@ pub struct TextInputConfiguration {
     pub suggestions: bool,
     /// The action advertised on a software keyboard's confirm ("enter") key.
     pub input_action: TextInputAction,
+}
+
+/// What the platform's text checking found in the focused text input (Mailstream patch, MS-318).
+/// Offsets are UTF-16 code units, as everywhere in [`InputHandler`]. Inputs draw it
+/// themselves: [`crate::Window::text_assistance`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TextAssistance {
+    /// The text the platform predicts at the caret, if any.
+    pub prediction: Option<InlinePrediction>,
+    /// The misspelled words, in document order.
+    pub misspellings: Vec<Range<usize>>,
+}
+
+/// Text predicted at the caret (macOS inline predictive text). Inputs draw `text` dimmed after
+/// the caret while it is still at `offset`, insert it when the user accepts it (Tab) and call
+/// [`crate::Window::dismiss_inline_prediction`] when the user declines it (Escape).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlinePrediction {
+    /// The caret offset the prediction continues from.
+    pub offset: usize,
+    /// The text to insert at `offset`.
+    pub text: String,
+}
+
+/// The user's text checking preferences (Edit ▸ Spelling and Grammar on macOS). They apply to
+/// text inputs whose [`TextInputConfiguration`] enables suggestions or autocorrect.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextCheckingSettings {
+    /// Underline misspelled words while typing.
+    pub check_spelling_while_typing: bool,
+    /// Correct a misspelled word when the user finishes typing it.
+    pub correct_spelling_automatically: bool,
+    /// Predict the rest of the word or the next word at the caret.
+    pub inline_predictions: bool,
 }
 
 /// Automatic capitalization applied by software keyboards.

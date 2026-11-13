@@ -4,29 +4,42 @@
 //! them itself (`controls::field_frame`) or not at all. Their key context is `Input` (`!Input`
 //! keeps single-key bindings out of them). The kit emits `Change` and
 //! `PressEnter`; Esc reaches the view as the kit's `Escape` action, and a view that needs other
-//! keys inside its fields binds them in `"<its context> > Input"`, after the kit's own.
+//! keys inside its fields binds them in `"<its context> > Input"`, after the kit's own. Fields
+//! built with the kit's `.autocorrect(true)` also show the Mac's text checking
+//! (`text_checking`).
 
 use gpui::base::input::{InputBaseState, MultiLineMode};
 use gpui::component::Sizable;
 use gpui::component::input::{Editor, EditorState, Input, InputState};
-use gpui::{App, Context, DefiniteLength, Entity, EntityInputHandler, IntoElement, ParentElement, RenderOnce, Styled, Window, div, px, relative};
+use gpui::{
+    App, Context, DefiniteLength, Entity, EntityInputHandler, IntoElement, ParentElement, RenderOnce, Styled, Window,
+    div, px, relative,
+};
 
-use crate::design;
+use crate::{design, text_checking};
 
 /// A one-line field filling its row, as tall as a line of the text around it.
 #[derive(IntoElement)]
-pub struct Field(Input);
+pub struct Field {
+    input: Input,
+    state: Entity<InputState>,
+}
 
 pub fn field(state: &Entity<InputState>) -> Field {
-    Field(Input::new(state).appearance(false))
+    Field { input: Input::new(state).appearance(false), state: state.clone() }
 }
 
 impl RenderOnce for Field {
-    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let style = window.text_style();
         let line_height = window.line_height();
         // The kit sizes the field's text and height by its own scale; take the surrounding text's.
-        Styled::h(self.0.text_size(style.font_size).line_height(style.line_height).p_0().gap_0(), line_height)
+        let input = Styled::h(self.input.text_size(style.font_size).line_height(style.line_height).p_0().gap_0(), line_height);
+        if !text_checking::enabled(&self.state, cx) {
+            return input.into_any_element();
+        }
+        let input = input.context_menu(text_checking::context_menu(&self.state));
+        text_checking::checked(input, &self.state, style.font(), window).w_full().h(line_height).into_any_element()
     }
 }
 
@@ -74,7 +87,8 @@ impl MarkupEditor {
 
 impl RenderOnce for MarkupEditor {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let style = window.text_style();
+        let mut style = window.text_style();
+        style.font_family = design::ui_font().into();
         let line_height = window.line_height();
         let height = self.height.or_else(|| {
             self.auto_grow.map(|(min_rows, max_rows)| {
@@ -87,9 +101,20 @@ impl RenderOnce for MarkupEditor {
             .font_family(design::ui_font())
             .text_size(style.font_size)
             .line_height(style.line_height);
+        if !text_checking::enabled(&self.state, cx) {
+            return match height {
+                Some(h) => div().w_full().h(h).overflow_hidden().child(editor.h(h)).into_any_element(),
+                None => editor.into_any_element(),
+            };
+        }
+        let editor = editor.context_menu(text_checking::context_menu(&self.state));
         match height {
-            Some(h) => div().w_full().h(h).overflow_hidden().child(editor.h(h)).into_any_element(),
-            None => editor.into_any_element(),
+            Some(h) => text_checking::checked(editor.h(h), &self.state, style.font(), window)
+                .w_full()
+                .h(h)
+                .overflow_hidden()
+                .into_any_element(),
+            None => text_checking::checked(editor, &self.state, style.font(), window).w_full().into_any_element(),
         }
     }
 }

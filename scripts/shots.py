@@ -42,6 +42,10 @@ are window points from its top left (a PNG's pixels halved: shots are drawn at 2
                                logs each frame's draw time (CPU: build, layout, paint) and a
                                summary past the first, to compare a motion's cost (MS-292)
     thaw                       run the pages' clock in real time again
+    misspelled FROM TO         the Mac's spell checker finds the focused field's text FROM..TO
+                               (UTF-16) misspelled: a field that checks text underlines it (MS-318)
+    predict AT TEXT            the Mac predicts TEXT at offset AT of the focused field, drawn
+                               after its caret while the caret is there
     accounts mail|all          what the synthetic accounts were granted: mail alone (as a sign-in
                                asks now, MS-306) or everything (default); read before the window
                                opens. Connecting a service is allowed at once, with no browser

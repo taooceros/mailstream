@@ -256,7 +256,7 @@ impl Compose {
         let to = cx.new(|cx| InputState::new(window, cx));
         let cc = cx.new(|cx| InputState::new(window, cx));
         let bcc = cx.new(|cx| InputState::new(window, cx));
-        let subject = cx.new(|cx| InputState::new(window, cx).placeholder("Subject"));
+        let subject = cx.new(|cx| InputState::new(window, cx).placeholder("Subject").autocorrect(true));
         let body = cx.new(|cx| {
             let mut state = EditorState::new(window, cx)
                 .line_number(false)
@@ -266,7 +266,8 @@ impl Compose {
                 .smart_indent(false)
                 .folding(false)
                 .indent_guides(false)
-                .placeholder("Write in Markdown…");
+                .placeholder("Write in Markdown…")
+                .autocorrect(true);
             state.set_highlighter_factory(markup_highlighter_factory(MarkupFlavor::Markdown), cx);
             state.set_highlighter("markdown", cx);
             state
@@ -1087,7 +1088,8 @@ impl ReplyBox {
                 .smart_indent(false)
                 .folding(false)
                 .indent_guides(false)
-                .placeholder(if all { "Reply to everyone in Markdown…" } else { "Reply in Markdown…" });
+                .placeholder(if all { "Reply to everyone in Markdown…" } else { "Reply in Markdown…" })
+                .autocorrect(true);
             state.set_highlighter_factory(markup_highlighter_factory(MarkupFlavor::Markdown), cx);
             state.set_highlighter("markdown", cx);
             state
