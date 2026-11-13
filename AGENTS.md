@@ -177,8 +177,11 @@ Linear every minute and returns only once it has claimed something. Each line it
 what the session needs to hand the work out (an issue's title, state, labels, project, parent,
 creator and the start of its description; a comment's issue title and body; the script's header
 lists every field), so the session doesn't read issues on Linear itself (MS-174). The session
-hands the issues it claims, and the user's comments, to subagents, then starts it again. It keeps
-RUNNING_FILE a JSON array of its running agent ids, rewritten whenever one starts or finishes;
+hands the issues it claims, and the user's comments, to subagents, then starts it again. It does
+not report progress in its chat unless the user asks there: what agents did, questions and
+decisions go on the Linear issues (which already carry the full reports), so after each wake the
+session only acts. It keeps RUNNING_FILE a JSON array of its running agent ids, rewritten whenever
+one starts or finishes;
 the script re-reads it each pass. The script's header says what it claims and how the session
 picks the agent. Each time before it starts the script again, the session runs `python3
 scripts/warm-build.py` in the default checkout ([Building](#building)).
