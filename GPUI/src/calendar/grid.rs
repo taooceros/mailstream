@@ -227,7 +227,7 @@ impl CalendarPane {
     }
 
     /// A scroll event over the grid, in the capture phase: true when the page swipe took it.
-    fn feed_swipe(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) -> bool {
+    fn feed_swipe(&mut self, event: &ScrollEvent, _: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) -> bool {
         // A swipe over the event's page, or the pane over the days, is theirs (`feed_close_swipe`).
         if self.page || self.pane_covers {
             return false;

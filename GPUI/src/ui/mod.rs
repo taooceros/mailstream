@@ -42,7 +42,7 @@ use crate::split::{self, ResizeList};
 use crate::swipe;
 use crate::model::{AccountExt, CategoryExt, ConversationExt, MailboxExt, RoleExt, ShownMessage, UNIFIED};
 use crate::state::{
-    Archive, Back, CONTEXT, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh, Removal, Reply,
+    Archive, Back, Beside, CONTEXT, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh, Removal, Reply,
     ReplyAll, Restore, Source, Star, ThreadState, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
 };
 #[cfg(target_os = "macos")]
@@ -279,13 +279,22 @@ impl MailApp {
                 (share.clamp(layout::MIN_LIST, layout::MIN_LIST.max(mail - layout::GAP - layout::MIN_DETAIL)), mail, None)
             }
         };
-        let reader_on_top = matches!(self.layers.last(), Some(Layer::Reader(_)));
-        let travel = if two_pane && reader_on_top { mail - split_list } else { mail };
-        let offset = self.top_offset(travel, window, cx);
-        let top = self.layers.len().saturating_sub(1);
-        // What the top layer covers sits back and darkens under it, as the pages' motion says, and
-        // comes forward as it slides off (MS-289); a conversation beside the list covers nothing.
-        let (beneath, dim) = if self.layers.is_empty() || (two_pane && reader_on_top) {
+        // Where the layers rest beside each other, for the gestures and the slide (MS-299).
+        let inset = between.map_or(0., |(column, _, _)| column + layout::GAP);
+        self.content_width = mail;
+        self.beside = two_pane.then(|| Beside {
+            list: split_list,
+            edge: split_list + layout::GAP + inset,
+            travel: mail - split_list,
+        });
+        // The sliding layer: the top one, or one a gesture took beneath a conversation beside the
+        // list (MS-299); the layers over it rest.
+        let (sliding, offset) = self.slide_offset(window, cx).unwrap_or((0, 0.));
+        let reader_beside = two_pane && matches!(self.layers.get(sliding), Some(Layer::Reader(_)));
+        let travel = if self.layers.is_empty() { mail } else { self.travel(sliding) };
+        // What the sliding layer covers sits back and darkens under it, as the pages' motion says,
+        // and comes forward as it slides off (MS-289); a conversation beside the list covers nothing.
+        let (beneath, dim) = if self.layers.is_empty() || reader_beside {
             (0., 0.)
         } else {
             design::motion::beneath(1. - offset.abs() / travel.max(1.), travel, p.dark)
@@ -294,16 +303,16 @@ impl MailApp {
         let mut bundles: Vec<AnyElement> = Vec::new();
         let mut reader: Option<(AnyElement, f32)> = None;
         for (index, layer) in self.layers.iter().enumerate() {
-            let shift = if index == top {
+            let shift = if index == sliding {
                 offset
-            } else if reader_on_top {
+            } else if index > sliding || reader_beside {
                 0.
             } else {
                 beneath
             };
             match layer {
                 Layer::Bundle(category) => {
-                    if index == top && dim > 0. {
+                    if index == sliding && dim > 0. {
                         bundles.push(scrim(dim, 0.).into_any_element());
                     }
                     bundles.push(
@@ -329,7 +338,7 @@ impl MailApp {
                 }
             }
         }
-        let rows_shift = if reader_on_top { 0. } else { beneath };
+        let rows_shift = if reader_beside { 0. } else { beneath };
 
         // Two-finger back swipe: scroll events are seen in the capture phase, before the lists
         // and the reader scroll with them, so a horizontal swipe is never eaten by a scroll view.
@@ -342,7 +351,7 @@ impl MailApp {
         // slide ends (the list's share while the conversation slides in or is dragged, the whole
         // width while it slides off) and the island's edge moves over it, clipping it: its rows
         // lay out and shape their text once as the slide starts, not every frame (MS-292).
-        let laid_out = (two_pane && reader.is_some()).then(|| if self.closing() { mail } else { split_list });
+        let laid_out = (two_pane && reader.is_some()).then(|| if self.closing_reader() { mail } else { split_list });
         let list = self.render_list_island(bundles, rows_shift, laid_out, p, window, cx);
         let content = div().relative().size_full().child(swipe).child(drag_under.absolute().size_0());
         let content = match reader {
@@ -350,7 +359,7 @@ impl MailApp {
             // the conversation keeps its width, so its text does not reflow as it moves, and so
             // does the list's content (`laid_out`).
             Some((detail, shift)) if two_pane => {
-                let split = (1. - shift / travel.max(1.)).clamp(0., 1.);
+                let split = (1. - shift / (mail - split_list).max(1.)).clamp(0., 1.);
                 let list_width = mail + (split_list - mail) * split;
                 let content = content
                     .child(list.absolute().left_0().top_0().bottom_0().w(px(list_width)))

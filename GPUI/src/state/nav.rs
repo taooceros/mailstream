@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::swipe::{Pointer, Step};
-use gpui::{DismissEvent, ScrollEvent};
+use gpui::{DismissEvent, ScrollEvent, TouchPhase};
 
 impl MailApp {
     /// Mail is in view: neither Chat nor the calendar is.
@@ -154,7 +154,7 @@ impl MailApp {
     }
 
     pub fn open_bundle(&self) -> Option<Category> {
-        self.live_layers().iter().rev().find_map(|l| match l {
+        self.live_layers().rev().find_map(|l| match l {
             Layer::Bundle(category) => Some(*category),
             Layer::Reader(_) => None,
         })
@@ -173,19 +173,30 @@ impl MailApp {
         })
     }
 
-    /// The layers that stay: all but one sliding off after a back.
-    pub fn live_layers(&self) -> &[Layer] {
-        if self.closing() { &self.layers[..self.layers.len() - 1] } else { &self.layers }
+    /// The layers that stay: all but one sliding off after a back, bottom to top.
+    pub fn live_layers(&self) -> impl DoubleEndedIterator<Item = &Layer> {
+        let closing = self.closing().then(|| self.slide_layer.clone()).flatten();
+        self.layers.iter().filter(move |layer| closing.as_ref() != Some(&layer.id()))
     }
 
-    /// The top layer is sliding off and goes when it arrives.
+    /// Where the layer `slide` belongs to lies in `layers`.
+    pub fn sliding(&self) -> Option<usize> {
+        let id = self.slide_layer.as_ref()?;
+        self.layers.iter().position(|layer| &layer.id() == id)
+    }
+
+    /// A layer is sliding off and goes when it arrives.
     pub fn closing(&self) -> bool {
-        matches!(self.slide, Slide::Settle { back: true, .. })
-            && self.layers.last().map(Layer::id).as_ref() == self.slide_layer.as_ref()
+        matches!(self.slide, Slide::Settle { back: true, .. }) && self.sliding().is_some()
+    }
+
+    /// The conversation beside the list is the layer sliding off.
+    pub fn closing_reader(&self) -> bool {
+        self.closing() && matches!(self.sliding().map(|index| &self.layers[index]), Some(Layer::Reader(_)))
     }
 
     pub fn reader(&self) -> Option<&Conversation> {
-        match self.live_layers().last() {
+        match self.live_layers().next_back() {
             Some(Layer::Reader(conversation)) => Some(conversation),
             _ => None,
         }
@@ -199,51 +210,87 @@ impl MailApp {
         self.layers.push(layer);
     }
 
-    /// A layer still sliding off goes now, so what follows acts on what lies beneath.
+    /// A layer still sliding off goes now, so what follows acts on what stays.
     fn finish_closing(&mut self) {
         if self.closing() {
-            self.layers.pop();
+            if let Some(index) = self.sliding() {
+                self.layers.remove(index);
+            }
             self.slide = Slide::Rest;
             self.slide_layer = None;
         }
     }
 
-    /// How far right of its place the top layer sits now, without advancing anything.
+    /// How far layer `index` travels between in and out, as last laid out: beside the list, the
+    /// conversation the room it takes and a bundle under it the list's island; otherwise the list
+    /// island's width.
+    pub fn travel(&self, index: usize) -> f32 {
+        match (self.beside, &self.layers[index]) {
+            (Some(beside), Layer::Reader(_)) => beside.travel,
+            (Some(beside), Layer::Bundle(_)) if self.layers[index..].iter().any(|l| matches!(l, Layer::Reader(_))) => {
+                beside.list
+            }
+            _ => self.content_width,
+        }
+    }
+
+    /// How far right of its place the sliding layer sits now, without advancing anything.
     fn current_offset(&self) -> f32 {
-        self.slide.offset(self.content_width)
+        self.sliding().map_or(0., |index| self.slide.offset(self.travel(index)))
     }
 
-    /// Where the top layer sits in a content area `width` wide, called while rendering: advances
-    /// the slide, asks for the next frame while it moves, and drops a layer that slid off.
-    pub fn top_offset(&mut self, width: f32, window: &mut Window, cx: &App) -> f32 {
-        self.content_width = width;
-        let Some(top) = self.layers.last().map(Layer::id) else {
+    /// Which layer slides, and how far right of its place it sits, called while rendering with
+    /// the layout's widths (`content_width`, `beside`): advances the slide, asks for the next
+    /// frame while it moves, and drops a layer that slid off.
+    pub fn slide_offset(&mut self, window: &mut Window, cx: &App) -> Option<(usize, f32)> {
+        if self.layers.is_empty() {
             self.slide = Slide::Rest;
-            return 0.0;
-        };
-        if self.slide_layer.as_ref() != Some(&top) {
-            self.slide_layer = Some(top);
-            self.slide = Slide::Rest;
-        }
-        self.slide.advance(width, window, cx).unwrap_or_else(|| {
-            self.layers.pop();
             self.slide_layer = None;
-            0.0
-        })
+            return None;
+        }
+        let index = match self.sliding() {
+            Some(index) => index,
+            None => {
+                self.slide_layer = self.layers.last().map(Layer::id);
+                self.slide = Slide::Rest;
+                self.layers.len() - 1
+            }
+        };
+        let travel = self.travel(index);
+        match self.slide.advance(travel, window, cx) {
+            Some(offset) => Some((index, offset)),
+            None => {
+                self.layers.remove(index);
+                self.slide_layer = self.layers.last().map(Layer::id);
+                self.layers.last().map(|_| (self.layers.len() - 1, 0.))
+            }
+        }
     }
 
-    /// A scroll event in the content area, in the capture phase: true when the back swipe took it.
-    pub fn feed_swipe(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) -> bool {
-        let can_start = !self.live_layers().is_empty() && self.context_menu.is_none();
+    /// A scroll event in the content area (`at`, from its top left), in the capture phase: true
+    /// when the back swipe took it. A swipe closes the layer under the fingers (MS-299).
+    pub fn feed_swipe(&mut self, event: &ScrollEvent, at: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        if event.touch_phase == TouchPhase::Started {
+            self.gesture_layer = self.layer_under(f32::from(at.x));
+        }
+        let can_start = self.gesture_layer.is_some() && self.context_menu.is_none();
         let step = self.swipe.feed(event, can_start);
         self.follow(step, cx)
     }
 
-    /// A single left press on layer `layer` at `at`: a sideways drag from there may close it, when
-    /// it is the top one (MS-266, `swipe.rs`).
+    /// The layer a gesture at `x` (from the content area's left) closes (MS-299).
+    fn layer_under(&self, x: f32) -> Option<SharedString> {
+        let live: Vec<&Layer> = self.live_layers().collect();
+        let readers: Vec<bool> = live.iter().map(|layer| matches!(layer, Layer::Reader(_))).collect();
+        gesture_target(&readers, self.beside.map(|beside| beside.edge), x).map(|index| live[index].id())
+    }
+
+    /// A single left press on layer `layer` at `at`: a sideways drag from there closes it, the
+    /// layer under the pointer, whichever lies on top (MS-266, MS-299).
     pub fn press_layer(&mut self, layer: &SharedString, at: Point<Pixels>) {
-        let top = self.live_layers().last().is_some_and(|top| &top.id() == layer);
-        self.drag.press(at, top && self.context_menu.is_none());
+        let live = self.live_layers().any(|live| &live.id() == layer);
+        self.gesture_layer = live.then(|| layer.clone());
+        self.drag.press(at, live && self.context_menu.is_none());
     }
 
     /// The mouse after a press on a layer, in the capture phase: true when the drag took it.
@@ -252,14 +299,15 @@ impl MailApp {
         self.follow(step, cx)
     }
 
-    /// The top layer follows a swipe's or a drag's step: true when the gesture took the event.
+    /// The gesture's layer follows a swipe's or a drag's step: true when the gesture took the event.
     fn follow(&mut self, step: Step, cx: &mut Context<Self>) -> bool {
         let moves = !matches!(step, Step::Pass | Step::Consume);
-        if matches!(step, Step::Drag(_)) {
+        if matches!(step, Step::Drag(_)) && self.slide_layer != self.gesture_layer {
             self.finish_closing();
-            self.slide_layer = self.layers.last().map(Layer::id);
+            self.slide_layer = self.gesture_layer.clone();
         }
-        let took = self.slide.follow(step, self.content_width);
+        let Some(index) = self.sliding() else { return !matches!(step, Step::Pass) };
+        let took = self.slide.follow(step, self.travel(index));
         if moves {
             cx.notify();
         }
@@ -416,14 +464,17 @@ impl MailApp {
 
     pub fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_closing();
-        if let Some(top) = self.layers.last() {
-            if self.content_width <= 0.0 {
+        // No pointer: the top layer goes, whatever lies under the pointer (MS-299).
+        if let Some(top) = self.layers.last().map(Layer::id) {
+            let index = self.layers.len() - 1;
+            let travel = self.travel(index);
+            if travel <= 0.0 {
                 self.layers.pop();
             } else {
-                // The top layer slides off to the right, like a swipe that went all the way.
-                let from = self.current_offset();
-                self.slide_layer = Some(top.id());
-                self.slide = Slide::settle(from, self.content_width, true);
+                // It slides off to the right, like a swipe that went all the way.
+                let from = if self.sliding() == Some(index) { self.current_offset() } else { 0. };
+                self.slide_layer = Some(top);
+                self.slide = Slide::settle(from, travel, true);
             }
         } else if self.query.is_some() {
             self.search.update(cx, |search, cx| search.clean(window, cx));
@@ -469,5 +520,38 @@ impl MailApp {
         } else if self.reader().is_some() {
             self.back(&Back, window, cx);
         }
+    }
+}
+
+/// The layer a close gesture at `x` (from the content area's left) takes, of `readers` (the live
+/// layers bottom to top, true for a conversation) with a conversation beside the list starting at
+/// `beside` (MS-299): over that conversation, it; over the list's island, the bundle on it, or
+/// none; otherwise (one pane, every layer covering the list's island) the top one.
+fn gesture_target(readers: &[bool], beside: Option<f32>, x: f32) -> Option<usize> {
+    let top = readers.len().checked_sub(1)?;
+    match beside {
+        Some(edge) if readers[top] && x < edge => readers.iter().rposition(|reader| !reader),
+        _ => Some(top),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gesture_target;
+
+    #[test]
+    fn a_gesture_closes_the_layer_under_the_pointer() {
+        // A bundle with a conversation beside the list, which ends at 400.
+        let bundle_and_reader = [false, true];
+        assert_eq!(gesture_target(&bundle_and_reader, Some(400.), 120.), Some(0), "over the bundle");
+        assert_eq!(gesture_target(&bundle_and_reader, Some(400.), 600.), Some(1), "over the conversation");
+        // A conversation beside the bare list: over the list, nothing to close.
+        assert_eq!(gesture_target(&[true], Some(400.), 120.), None);
+        assert_eq!(gesture_target(&[true], Some(400.), 600.), Some(0));
+        // A bundle alone, beside nothing.
+        assert_eq!(gesture_target(&[false], None, 120.), Some(0));
+        // One pane: the conversation covers the bundle and the list.
+        assert_eq!(gesture_target(&bundle_and_reader, None, 120.), Some(1));
+        assert_eq!(gesture_target(&[], Some(400.), 120.), None);
     }
 }

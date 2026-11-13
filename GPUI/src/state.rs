@@ -279,6 +279,18 @@ impl Layer {
     }
 }
 
+/// Where a conversation beside the list's island rests (two panes), in the content area's
+/// points from its left edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Beside {
+    /// The list island's width: how far a bundle over it travels.
+    pub list: f32,
+    /// Where the conversation's island starts.
+    pub edge: f32,
+    /// How far the conversation travels between in and out.
+    pub travel: f32,
+}
+
 pub enum ThreadState {
     Loading,
     Loaded(Rc<[ShownMessage]>),
@@ -411,15 +423,19 @@ pub struct MailApp {
     /// The user opened the sidebar while the column folded it.
     pub sidebar_beside_compose: bool,
     pub swipe: BackSwipe,
-    /// A mouse drag on the top layer (MS-266).
+    /// A mouse drag on a layer (MS-266).
     pub drag: MouseDrag,
-    /// How the top layer sits over what lies beneath.
+    /// How the sliding layer sits over what lies beneath.
     pub slide: Slide,
-    /// The top layer `slide` belongs to; a different top layer rests.
+    /// The layer `slide` belongs to: the top one, or the one a gesture took under the pointer
+    /// (MS-299); a layer gone or replaced takes the top one at rest.
     pub slide_layer: Option<SharedString>,
-    /// How far the top layer travels between in and out, as last laid out: the list island's
-    /// width for a layer over it, the room the conversation takes beside the list.
+    /// The layer the gesture in progress closes: the one under the pointer as it began (MS-299).
+    pub gesture_layer: Option<SharedString>,
+    /// How far a layer over the list's island travels between in and out, as last laid out.
     pub content_width: f32,
+    /// A conversation beside the list, as last laid out (two panes).
+    pub beside: Option<Beside>,
     pub context_menu: Option<ContextMenu>,
     /// The reader's renderer, for this run (the Mac).
     #[cfg(target_os = "macos")]
@@ -526,7 +542,9 @@ impl MailApp {
             drag: MouseDrag::default(),
             slide: Slide::Rest,
             slide_layer: None,
+            gesture_layer: None,
             content_width: 0.0,
+            beside: None,
             context_menu: None,
             #[cfg(target_os = "macos")]
             renderer: Renderer::from_name(std::env::var("MAILSTREAM_READER_RENDERER").ok().as_deref()),

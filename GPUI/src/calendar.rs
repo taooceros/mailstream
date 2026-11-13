@@ -514,7 +514,7 @@ impl CalendarPane {
     }
 
     /// A scroll event over the top surface, in the capture phase: true when the swipe took it.
-    fn feed_close_swipe(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) -> bool {
+    fn feed_close_swipe(&mut self, event: &ScrollEvent, _: Point<Pixels>, cx: &mut Context<Self>) -> bool {
         let step = self.close_swipe.feed(event, self.top_surface().is_some());
         self.follow_close(step, cx)
     }

@@ -391,9 +391,12 @@ pub fn settle(offset: f32, velocity: f32, width: f32) -> (bool, f32) {
 }
 
 /// Hands `host` the scroll events over the element it is drawn as (laid over a page or the
-/// pages), in the capture phase, before any scroll view under them scrolls with them;
-/// `feed` answers true when the swipe took one.
-pub fn scroll_capture<T: 'static>(host: Entity<T>, feed: fn(&mut T, &ScrollEvent, &mut Context<T>) -> bool) -> Canvas<()> {
+/// pages), in the capture phase, before any scroll view under them scrolls with them, with where
+/// it points from the element's top left; `feed` answers true when the swipe took one.
+pub fn scroll_capture<T: 'static>(
+    host: Entity<T>,
+    feed: fn(&mut T, &ScrollEvent, Point<Pixels>, &mut Context<T>) -> bool,
+) -> Canvas<()> {
     canvas(
         |_, _, _| (),
         move |bounds: Bounds<Pixels>, _, window, _| {
@@ -401,7 +404,8 @@ pub fn scroll_capture<T: 'static>(host: Entity<T>, feed: fn(&mut T, &ScrollEvent
                 if phase != DispatchPhase::Capture || !bounds.contains(&event.position) {
                     return;
                 }
-                if host.update(cx, |this, cx| feed(this, event, cx)) {
+                let at = event.position - bounds.origin;
+                if host.update(cx, |this, cx| feed(this, event, at, cx)) {
                     cx.stop_propagation();
                 }
             });
