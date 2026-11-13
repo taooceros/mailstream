@@ -47,7 +47,11 @@ impl MailApp {
     pub(super) fn render_sidebar(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut rows: Vec<AnyElement> = Vec::new();
         for node in self.sidebar_nodes(cx) {
+            let is_calendar = node.key.as_ref() == "calendar";
             rows.push(self.sidebar_row(node, p, cx));
+            if is_calendar && self.calendar_view {
+                rows.extend(self.calendar.update(cx, |pane, cx| pane.render_sidebar_section(p, cx)));
+            }
         }
         rows.push(
             destination("add-account".into(), 0, false, p)
@@ -267,6 +271,11 @@ impl MailApp {
             tooltip: None,
             problem: None,
         });
+        // While Calendar is in view, its own "Calendars" section takes the place of the mail
+        // accounts below (`render_sidebar`).
+        if self.calendar_view {
+            return nodes;
+        }
         let section: SharedString = "section:accounts".into();
         let open = self.expanded.contains(&section);
         nodes.push(Node {

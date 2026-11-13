@@ -218,46 +218,95 @@ impl CalendarPane {
     /// (shared or subscribed), with a color swatch checkbox per calendar, inline access hints,
     /// Show/Hide all and hover Solo ("Only").
     fn render_calendar_list(&self, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        popover(p)
+            .id("calendar-list")
+            .debug_selector(|| "calendar-list".into())
+            .w(px(metrics::LIST_WIDTH))
+            .max_h(px(metrics::LIST_HEIGHT))
+            .overflow_y_scroll()
+            .p(px(space::S6))
+            .pb(px(space::S8))
+            .text_size(px(text::BODY))
+            .text_color(p.text)
+            .children(self.calendar_list_rows("calendar", false, p, cx))
+    }
+
+    /// The "Calendars" section in the window's left sidebar while Calendar is in view.
+    pub fn render_sidebar_section(&self, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows = self.calendar_list_rows("sidebar-calendar", true, p, cx);
+        (!rows.is_empty()).then(|| {
+            div()
+                .id("sidebar-calendars")
+                .debug_selector(|| "sidebar-calendars".into())
+                .mt(px(space::S6))
+                .mb(px(space::S4))
+                .flex()
+                .flex_col()
+                .children(rows)
+                .into_any_element()
+        })
+    }
+
+    fn calendar_list_rows(
+        &self,
+        prefix: &str,
+        sidebar: bool,
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let granted: Vec<(usize, &mailstream::CalendarAccount)> = self
             .accounts
             .iter()
             .enumerate()
             .filter(|(_, account)| account.granted && !account.calendars.is_empty())
             .collect();
+        if granted.is_empty() {
+            return Vec::new();
+        }
         let total: usize = granted.iter().map(|(_, a)| a.calendars.len()).sum();
         let shown: usize = granted.iter().flat_map(|(_, a)| &a.calendars).filter(|c| c.shown).count();
         let all_shown = shown == total;
         let several_accounts = granted.len() > 1;
 
         let mut rows: Vec<AnyElement> = Vec::new();
+        let show_all_id = format!("{prefix}-show-all");
+        let show_all_sel = show_all_id.clone();
         rows.push(
             div()
-                .h(px(metrics::LIST_ROW))
+                .h(px(if sidebar { 24. } else { metrics::LIST_ROW }))
                 .px(px(space::S8))
                 .flex()
                 .items_center()
                 .gap(px(space::S6))
-                .child(icon(Icon::Layers, icon_size::ROW, p.glyph))
-                .child(div().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).child("Calendars"))
-                .child(div().text_size(px(text::CAPTION)).text_color(p.muted).child(format!("{shown} of {total}")))
+                .when(!sidebar, |d| d.child(icon(Icon::Layers, icon_size::ROW, p.glyph)))
+                .child(
+                    div()
+                        .text_size(px(if sidebar { text::CAPTION } else { text::FOOTNOTE }))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(if sidebar { p.muted } else { p.text })
+                        .child("Calendars"),
+                )
+                .child(div().text_size(px(text::CAPTION)).text_color(p.muted).child(format!("{shown}/{total}")))
                 .child(div().flex_1())
                 .child(
                     button(
-                        "calendar-show-all",
+                        ElementId::Name(show_all_id.into()),
                         if all_shown { "Hide all" } else { "Show all" },
                         ButtonKind::Plain(p.accent),
                         ControlSize::Small,
                         true,
                         p,
                     )
-                    .debug_selector(|| "calendar-show-all".into())
+                    .debug_selector(move || show_all_sel.clone())
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_all_calendars(!all_shown, cx))),
                 )
                 .into_any_element(),
         );
 
-        for (index, account) in granted {
-            rows.push(div().my(px(space::S4)).child(hairline(p)).into_any_element());
+        for (pos, (index, account)) in granted.into_iter().enumerate() {
+            if !sidebar || pos > 0 {
+                rows.push(div().my(px(space::S4)).child(hairline(p)).into_any_element());
+            }
             let account_title = if !account.label.is_empty() && account.label != account.id {
                 format!("{} · {}", account.label, account.id)
             } else {
@@ -283,10 +332,10 @@ impl CalendarPane {
                             .text_color(p.text)
                             .child(account_title),
                     )
-                    .when(several_accounts && account.calendars.len() > 1, |d| {
+                    .when(!sidebar && several_accounts && account.calendars.len() > 1, |d| {
                         d.child(
                             button(
-                                ElementId::Name(format!("calendar-account-all:{account_id}").into()),
+                                ElementId::Name(format!("{prefix}-account-all:{account_id}").into()),
                                 if account_all { "Hide all" } else { "Show all" },
                                 ButtonKind::Plain(p.muted),
                                 ControlSize::Small,
@@ -340,7 +389,7 @@ impl CalendarPane {
                     let solo = (total > 1).then(|| {
                         let is_solo = shown == 1 && calendar_shown;
                         let (solo_account, solo_calendar) = (account_id.clone(), calendar_id.clone());
-                        let solo_sel = format!("calendar-only:{account_id}:{calendar_id}");
+                        let solo_sel = format!("{prefix}-only:{account_id}:{calendar_id}");
                         button(
                             ElementId::Name(solo_sel.clone().into()),
                             if is_solo { "All" } else { "Only" },
@@ -356,7 +405,7 @@ impl CalendarPane {
                         }))
                         .into_any_element()
                     });
-                    let row_sel = format!("calendar-shown:{account_id}:{calendar_id}");
+                    let row_sel = format!("{prefix}-shown:{account_id}:{calendar_id}");
                     rows.push(
                         swatch_row(
                             ElementId::Name(row_sel.clone().into()),
@@ -376,17 +425,7 @@ impl CalendarPane {
                 }
             }
         }
-        popover(p)
-            .id("calendar-list")
-            .debug_selector(|| "calendar-list".into())
-            .w(px(metrics::LIST_WIDTH))
-            .max_h(px(metrics::LIST_HEIGHT))
-            .overflow_y_scroll()
-            .p(px(space::S6))
-            .pb(px(space::S8))
-            .text_size(px(text::BODY))
-            .text_color(p.text)
-            .children(rows)
+        rows
     }
 
     /// This week's seven days: today raised on a card, the others over a bar as long as their

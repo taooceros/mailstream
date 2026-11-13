@@ -500,6 +500,7 @@ impl MailApp {
             // Chat accounts and unread counts feed the sidebar.
             cx.observe(&chat, |_, _, cx| cx.notify()),
             cx.subscribe(&calendar, |this, _, toast: &CalendarToast, cx| this.show_toast(toast.0.clone(), cx)),
+            cx.observe(&calendar, |_, _, cx| cx.notify()),
             // The column's placement and width lay the window out.
             cx.observe(&compose, |_, _, cx| cx.notify()),
             cx.subscribe_in(&compose, window, Self::on_compose_event),
