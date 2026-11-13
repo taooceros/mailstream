@@ -4,10 +4,10 @@
 # `members`.
 [workspace]
 members = ["Engine", "FFI", "FFI/bindgen", "GPUI"]
-# Not members: GPUI's patched copies of crates.io crates ([patch.crates-io] below), and Flutter's
-# Linux runner, which only Flutter's CMake build compiles, with a target folder of its own in
-# Flutter/build (Flutter/linux/runner/CMakeLists.txt).
-exclude = ["GPUI/vendor", "Flutter/linux/runner"]
+# Not members: the patched copies of crates.io crates ([patch.crates-io] below) in GPUI/vendor and
+# Engine/vendor, and Flutter's Linux runner, which only Flutter's CMake build compiles, with a
+# target folder of its own in Flutter/build (Flutter/linux/runner/CMakeLists.txt).
+exclude = ["GPUI/vendor", "Engine/vendor", "Flutter/linux/runner"]
 resolver = "3"
 
 # Stylo (Blitz's CSS engine) 0.22's derives leave an error type to inference that GPUI's build
@@ -28,10 +28,20 @@ resolver = "3"
 # Its test (`test_display_rate_animation_frames_skip_the_inactive_limit`) runs only in a copy outside
 # this workspace, `--features profiler,test-support`, with the published crate's tests that read
 # files it doesn't ship (in `style.rs`, `svg_renderer.rs`, `platform.rs`) taken out.
+# `Engine/vendor/h2` is h2 0.4.20 (HTTP/2 under reqwest) with hyperium/h2 PR #972 (MS-297, in
+# `src/proto/streams/counts.rs`, marked "Mailstream patch"): 0.4.20 accepts 100 empty DATA frames
+# over a connection's life and then closes it with `too_many_data_frames`, and Google's front end
+# sends padding-only frames on every few dozen KB of a body, so a pooled Gmail connection failed
+# its requests in flight ("error decoding response body") after a few dozen answers. With the
+# patch each frame's data beyond 256 bytes earns empty frames back, up to the same 100. Drop the
+# copy once an h2 release carries the fix. Its unit tests run in a copy outside this workspace
+# (`cargo test --all-features --lib -- --skip hpack::test::fixture`: the crate ships no fixtures);
+# `api::tests::http2_connections_outlast_empty_data_frames` checks it from the engine.
 [patch.crates-io]
 stylo_derive = { path = "GPUI/vendor/stylo_derive" }
 gpui-fast = { path = "GPUI/vendor/gpui-fast" }
 gpui-fast-linux = { path = "GPUI/vendor/gpui-fast-linux" }
+h2 = { path = "Engine/vendor/h2" }
 gpui-fast-wgpu = { path = "GPUI/vendor/gpui-fast-wgpu" }
 
 # Debug builds with optimized dependencies, as GPUI had them on its own; one profile for every

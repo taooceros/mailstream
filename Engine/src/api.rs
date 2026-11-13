@@ -743,4 +743,32 @@ mod tests {
         budget.spend(1, Priority::Interactive).await;
         assert!(paused.elapsed() >= Duration::from_secs(5));
     }
+
+    /// Google's front end (`server: ESF`) follows full DATA frames with padding-only ones, which
+    /// carry no data. h2 0.4.20 took at most 100 of those over a connection's life, then closed
+    /// it with `too_many_data_frames`, failing what was in flight ("error decoding response body",
+    /// MS-297); the patched copy in `Engine/vendor/h2` lets data earn them back. One connection
+    /// here answers 150 requests, each with an empty frame between its data and its end.
+    #[tokio::test]
+    async fn http2_connections_outlast_empty_data_frames() {
+        const BODY: usize = 1024;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut connection = h2::server::handshake(socket).await.unwrap();
+            while let Some(Ok((_, mut respond))) = connection.accept().await {
+                let mut body = respond.send_response(http::Response::new(()), false).unwrap();
+                body.send_data(vec![b'x'; BODY].into(), false).unwrap();
+                body.send_data(bytes::Bytes::new(), false).unwrap();
+                body.send_data(bytes::Bytes::new(), true).unwrap();
+            }
+        });
+        let client = reqwest::Client::builder().http2_prior_knowledge().build().unwrap();
+        for request in 1..=150 {
+            let response = client.get(format!("http://{address}/")).send().await.unwrap();
+            let body = response.bytes().await.unwrap_or_else(|error| panic!("request {request}: {error:?}"));
+            assert_eq!(body.len(), BODY);
+        }
+    }
 }

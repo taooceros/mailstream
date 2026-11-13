@@ -64,3 +64,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
+# An HTTP/2 server on the loopback interface for `api::tests` (MS-297); the same h2 reqwest
+# runs on, so it is the root manifest's patched copy.
+h2 = "0.4"
+http = "1"
+bytes = "1"
