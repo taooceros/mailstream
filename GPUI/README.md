@@ -66,10 +66,12 @@ body takes focus from a field (MS-231). Placeholders take the kit's `muted_foreg
 Always start it through `run.sh`. On macOS the engine reads the sign-ins from the Keychain item
 that macOS pins to Mailstream's signature (identifier `dev.mailstream.Mailstream`, the Apple
 Development team). `run.sh` signs the binary with `scripts/sign.sh` and refuses to start it unless
-`codesign` shows that identifier and a team. A binary signed any other way (`cargo run` leaves an
-ad hoc signature) makes macOS ask for the Keychain, and "Always Allow" there re-pins the item to
-that one build, so the app and every other host get asked again. Linux keeps the sign-ins in a
-file only the user reads (`~/.local/share/Mailstream`), so nothing is signed there.
+`codesign` shows that identifier and a team. The engine leaves that item alone in a binary signed
+any other way (`cargo build` and `cargo run` leave an ad hoc signature): its accounts' requests
+fail with a Keychain error instead, since reading the item there would make macOS ask for the
+keychain password, and approving would re-pin it to that one build so the installed apps ask next
+(MS-296). `scripts/bench.sh gpui` signs the binary it runs the same way. Linux keeps the
+sign-ins in a file only the user reads (`~/.local/share/Mailstream`), so nothing is signed there.
 
 On the Mac, `-AppleInterfaceStyle Dark` (or `Light`) after the executable shows the app in that
 appearance without changing the system's, for screenshots: AppKit ignores that argument for an

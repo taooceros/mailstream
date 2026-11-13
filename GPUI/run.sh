@@ -1,9 +1,9 @@
 #!/bin/sh
 # Builds the GPUI front end with the engine it links and runs it; on the Mac it signs it like the
 # app first. The engine reads the sign-ins from the Keychain item macOS pins to Mailstream's
-# signature; a binary signed any other way makes macOS ask, and "Always Allow" there re-pins the
-# item to that one build. So on the Mac this refuses to start a binary that did not get the app's
-# signature. Linux keeps the sign-ins in a file of the user's (Engine/src/keychain.rs) and needs
+# signature and leaves it alone in a binary signed any other way (Engine/src/keychain.rs), so
+# on the Mac this refuses to start a binary that did not get the app's signature. Linux keeps
+# the sign-ins in a file of the user's (Engine/src/keychain.rs) and needs
 # no signature; on NixOS run it inside `devenv shell`, which provides the libraries GPUI loads.
 # Usage: [CONFIG=release] GPUI/run.sh
 #   CONFIG=release builds the engine and the window optimized.

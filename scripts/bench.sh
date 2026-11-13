@@ -48,6 +48,11 @@ if [ ! -x "$BINARY" ]; then
   echo "error: no release build at $BINARY" >&2
   exit 1
 fi
+# The engine reads the saved sign-ins only in a build signed as the app (Engine/src/keychain.rs,
+# MS-296); cargo leaves GPUI's signed ad hoc.
+if [ "$FRONTEND" = gpui ]; then
+  ./scripts/sign.sh "$BINARY"
+fi
 
 HELPER=${TMPDIR:-/tmp}/mailstream-vdisplay
 if [ ! -x "$HELPER" ] || [ scripts/vdisplay.m -nt "$HELPER" ]; then

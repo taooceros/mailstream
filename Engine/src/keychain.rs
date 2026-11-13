@@ -4,6 +4,15 @@
 //! than per account. Items from before clients were stored hold a bare object of refresh token
 //! by account id.
 //!
+//! macOS pins that item to Mailstream's signature (code identifier `dev.mailstream.Mailstream`,
+//! the Apple Development team; `scripts/sign.sh`). Any other build that reads or writes it (a
+//! `cargo build`, a benchmark or test binary, all signed ad hoc) makes macOS ask for the login
+//! keychain's password, and approving re-pins the item to that one build, so every installed app
+//! asks next (MS-296). So only a process signed as the app touches the item under [`SERVICE`];
+//! others get [`KeychainError`] without macOS being asked. And once the person refuses a prompt
+//! for a service, the process doesn't ask about it again until it restarts: every token refresh
+//! used to bring the prompt straight back.
+//!
 //! Windows has no such item: the same JSON is one file, `<service>.signins` in
 //! `%LOCALAPPDATA%\Mailstream`, sealed with DPAPI for the signed-in Windows user (Credential
 //! Manager caps an item at 2.5 KB, less than a few Microsoft refresh tokens).
@@ -20,8 +29,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::oauth::OAuthClient;
 
-/// The service the apps' sign-ins live under. Tests use another one: an unsigned test binary
-/// reading this item makes macOS ask the person for access.
+/// The service the apps' sign-ins live under. Tests and benchmarks use their own: only a build
+/// signed as the app reads this one.
 pub const SERVICE: &str = "dev.mailstream.Mailstream.oauth";
 
 /// What the item keeps, by account id and provider.
@@ -101,13 +110,16 @@ impl Keychain {
 mod apple {
     // Security's status constants (`errSecSuccess`) are matched by their C names.
     #![allow(non_upper_case_globals)]
+    use std::sync::{LazyLock, Mutex};
+
     use core_foundation::base::{CFType, TCFType};
     use core_foundation::boolean::CFBoolean;
     use core_foundation::data::CFData;
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::string::CFString;
     use core_foundation_sys::base::{CFTypeRef, OSStatus};
-    use security_framework_sys::base::{SecCopyErrorMessageString, errSecItemNotFound, errSecSuccess};
+    use security_framework_sys::base::{SecCopyErrorMessageString, errSecAuthFailed, errSecItemNotFound, errSecSuccess};
+    use security_framework_sys::code_signing::{SecCodeCheckValidity, SecCodeCopySelf, SecRequirementCreateWithString};
     use security_framework_sys::item::{
         kSecAttrAccount, kSecAttrLabel, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecReturnData,
         kSecValueData,
@@ -118,23 +130,63 @@ mod apple {
 
     const ACCOUNT: &str = "refresh-tokens";
     const LABEL: &str = "Mailstream sign-ins";
+    /// What a process must be signed as to touch the item under [`SERVICE`]: the identifier
+    /// `scripts/sign.sh` gives every host of the engine, with an Apple-issued certificate.
+    const APP_REQUIREMENT: &str = r#"identifier "dev.mailstream.Mailstream" and anchor apple generic"#;
+    /// The person cancelled or denied the prompt (`errSecUserCanceled`).
+    const errSecUserCanceled: OSStatus = -128;
+
+    /// Services whose prompt the person refused, with Security's answer, for this process.
+    static REFUSED: Mutex<BTreeMap<String, OSStatus>> = Mutex::new(BTreeMap::new());
 
     /// A failed Keychain call.
     #[derive(Clone, Debug)]
-    pub struct KeychainError(OSStatus);
+    pub enum KeychainError {
+        /// Security's status.
+        Status(OSStatus),
+        /// This build isn't signed as the app, so it left the apps' item alone.
+        NotTheApp,
+    }
 
     impl fmt::Display for KeychainError {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            let status = match self {
+                Self::Status(status) => *status,
+                Self::NotTheApp => {
+                    return formatter.write_str(
+                        "Keychain: this build isn't signed as Mailstream (scripts/sign.sh), so it leaves the saved \
+                         sign-ins alone rather than make macOS ask for the keychain password",
+                    );
+                }
+            };
             let reason = unsafe {
-                let message = SecCopyErrorMessageString(self.0, std::ptr::null_mut());
+                let message = SecCopyErrorMessageString(status, std::ptr::null_mut());
                 if message.is_null() { None } else { Some(CFString::wrap_under_create_rule(message).to_string()) }
             };
             match reason {
                 Some(reason) => write!(formatter, "Keychain: {reason}"),
-                None => write!(formatter, "Keychain: OSStatus {}", self.0),
+                None => write!(formatter, "Keychain: OSStatus {status}"),
             }
         }
     }
+
+    /// Whether this process is signed as the app ([`APP_REQUIREMENT`]).
+    static SIGNED_AS_APP: LazyLock<bool> = LazyLock::new(|| unsafe {
+        let mut code = std::ptr::null_mut();
+        if SecCodeCopySelf(0, &mut code) != errSecSuccess || code.is_null() {
+            return false;
+        }
+        let _code = CFType::wrap_under_create_rule(code as CFTypeRef);
+        let text = CFString::new(APP_REQUIREMENT);
+        let mut requirement = std::ptr::null_mut();
+        if SecRequirementCreateWithString(text.as_concrete_TypeRef(), 0, &mut requirement) != errSecSuccess
+            || requirement.is_null()
+        {
+            return false;
+        }
+        let _requirement = CFType::wrap_under_create_rule(requirement as CFTypeRef);
+        SecCodeCheckValidity(code, 0, requirement) == errSecSuccess
+    });
 
     impl Keychain {
         pub fn new(service: impl Into<String>) -> Self {
@@ -143,6 +195,7 @@ mod apple {
 
         /// The stored sign-ins; empty when there are none.
         pub(super) fn load_item(&self) -> Result<SignIns, KeychainError> {
+            self.may_ask()?;
             let mut query = self.base();
             unsafe {
                 query.push((CFString::wrap_under_get_rule(kSecReturnData), CFBoolean::true_value().into_CFType()));
@@ -159,19 +212,20 @@ mod apple {
                     Ok(value.downcast::<CFData>().map(|data| SignIns::decode(data.bytes())).unwrap_or_default())
                 }
                 errSecItemNotFound => Ok(SignIns::default()),
-                status => Err(KeychainError(status)),
+                status => Err(self.failed(status)),
             }
         }
 
         /// Replaces the stored sign-ins; with no refresh token and no remembered client left the item
         /// is deleted.
         pub(super) fn store_item(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
+            self.may_ask()?;
             let base = CFDictionary::from_CFType_pairs(&self.base());
             if sign_ins.refresh_tokens.is_empty() && sign_ins.last_clients.is_empty() {
                 let deleted = unsafe { SecItemDelete(base.as_concrete_TypeRef()) };
                 return match deleted {
                     errSecSuccess | errSecItemNotFound => Ok(()),
-                    status => Err(KeychainError(status)),
+                    status => Err(self.failed(status)),
                 };
             }
             let data = CFData::from_buffer(&sign_ins.encode());
@@ -189,11 +243,31 @@ mod apple {
                     let item = CFDictionary::from_CFType_pairs(&item);
                     match unsafe { SecItemAdd(item.as_concrete_TypeRef(), std::ptr::null_mut()) } {
                         errSecSuccess => Ok(()),
-                        status => Err(KeychainError(status)),
+                        status => Err(self.failed(status)),
                     }
                 }
-                status => Err(KeychainError(status)),
+                status => Err(self.failed(status)),
             }
+        }
+
+        /// Refuses, before macOS gets to ask, what would only bring a prompt: the apps' item in a
+        /// build not signed as the app, and a service whose prompt the person already refused.
+        fn may_ask(&self) -> Result<(), KeychainError> {
+            if self.service == SERVICE && !*SIGNED_AS_APP {
+                return Err(KeychainError::NotTheApp);
+            }
+            match REFUSED.lock().expect("refused lock").get(&self.service) {
+                Some(status) => Err(KeychainError::Status(*status)),
+                None => Ok(()),
+            }
+        }
+
+        /// The error for `status`, remembering a refused prompt.
+        fn failed(&self, status: OSStatus) -> KeychainError {
+            if status == errSecUserCanceled || status == errSecAuthFailed {
+                REFUSED.lock().expect("refused lock").insert(self.service.clone(), status);
+            }
+            KeychainError::Status(status)
         }
 
         fn base(&self) -> Vec<(CFString, CFType)> {
@@ -207,6 +281,30 @@ mod apple {
                     (CFString::wrap_under_get_rule(kSecAttrAccount), CFString::new(ACCOUNT).into_CFType()),
                 ]
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn builds_not_signed_as_the_app_leave_its_item_alone() {
+            // Test binaries are signed ad hoc: neither call may reach Security, which would ask.
+            assert!(!*SIGNED_AS_APP);
+            let apps = Keychain::new(SERVICE);
+            assert!(matches!(apps.load_item(), Err(KeychainError::NotTheApp)));
+            assert!(matches!(apps.store_item(&SignIns::default()), Err(KeychainError::NotTheApp)));
+        }
+
+        #[test]
+        fn a_refused_prompt_is_not_asked_again() {
+            let keychain = Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::testkit::unique()));
+            let other = Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::testkit::unique()));
+            keychain.failed(errSecUserCanceled);
+            assert!(matches!(keychain.load_item(), Err(KeychainError::Status(errSecUserCanceled))));
+            assert!(matches!(keychain.store_item(&SignIns::default()), Err(KeychainError::Status(errSecUserCanceled))));
+            assert_eq!(other.load_item().unwrap(), SignIns::default());
         }
     }
 }
