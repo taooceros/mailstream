@@ -601,11 +601,19 @@ pub mod list {
 }
 
 /// Marks (MS-190): an account or a topic is a `DOT` of its color; unread is an `UNREAD` accent dot
-/// in an `UNREAD_SLOT` wide column before the avatar.
+/// in an `UNREAD_SLOT` wide column before the avatar; a calendar's color swatch checkbox is
+/// `SWATCH` square (`controls::swatch_check`), and overlapping color dots (`controls::color_dots`)
+/// are `STACK_DOT` across.
 pub mod marks {
     pub const DOT: f32 = 6.0;
     pub const UNREAD: f32 = 7.0;
     pub const UNREAD_SLOT: f32 = 16.0;
+    pub const SWATCH: f32 = 14.0;
+    pub const SWATCH_STROKE: f32 = 1.5;
+    pub const SWATCH_CHECK: f32 = 11.0;
+    pub const STACK_DOT: f32 = 8.0;
+    pub const STACK_STEP: f32 = 0.68;
+    pub const STACK_RING: f32 = 1.5;
 }
 
 /// Avatars (MS-192): a person's picture, else their initial in their hue at `LETTER` of the
@@ -771,10 +779,11 @@ pub mod calendar {
     pub const POPOVER_HEIGHT: f32 = 560.0;
     pub const POPOVER_GAP: f32 = 8.0;
     /// The list of calendars to show or hide (MS-302): `LIST_WIDTH` wide, at most `LIST_HEIGHT`
-    /// tall (scrolling past it), a calendar to each `LIST_ROW`.
-    pub const LIST_WIDTH: f32 = 300.0;
+    /// tall (scrolling past it), a calendar to each `LIST_ROW` under `LIST_GROUP` subheaders.
+    pub const LIST_WIDTH: f32 = 288.0;
     pub const LIST_HEIGHT: f32 = 480.0;
-    pub const LIST_ROW: f32 = 40.0;
+    pub const LIST_ROW: f32 = 28.0;
+    pub const LIST_GROUP: f32 = 20.0;
     /// The event's page over the whole window (MS-184): its column `PAGE_WIDTH` wide at most,
     /// its title `PAGE_TITLE`; from a window `PAGE_SIDE_BY_SIDE` wide the guests take a column
     /// `PAGE_SIDE` wide beside the details and notes.

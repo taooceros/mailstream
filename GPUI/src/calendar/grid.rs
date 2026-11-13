@@ -1124,6 +1124,12 @@ mod tests {
         click(cx, at);
     }
 
+    fn hover_on(cx: &mut VisualTestContext, selector: &'static str) {
+        let at = bounds(cx, selector).center();
+        cx.simulate_mouse_move(at, None, Modifiers::default());
+        cx.run_until_parked();
+    }
+
     fn double_click_on(cx: &mut VisualTestContext, selector: &'static str) {
         let at = bounds(cx, selector).center();
         double_click(cx, at);
@@ -1431,6 +1437,82 @@ mod tests {
         slide_done(&pane, cx);
         assert_eq!(opened(&pane, cx).as_deref(), Some("saturday"));
         assert_eq!(bounds(cx, "calendar-popover"), popover);
+    }
+
+    #[gpui::test]
+    fn the_calendar_list_toggles_solos_and_restores_calendars(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        let cal = |id: &str, name: &str, primary: bool, access: &str, shown: bool| mailstream::CalendarInfo {
+            id: id.into(),
+            name: name.into(),
+            color: Some("#4285f4".into()),
+            primary,
+            writable: access == "owner" || access == "writer",
+            access: access.into(),
+            selected: shown,
+            hidden: false,
+            shown,
+        };
+        pane.update_in(cx, |pane, _, cx| {
+            pane.accounts = vec![
+                mailstream::CalendarAccount {
+                    id: "sam@example.com".into(),
+                    label: "sam@example.com".into(),
+                    provider: mailstream::Provider::Google,
+                    granted: true,
+                    writable: true,
+                    loading: false,
+                    problem: None,
+                    fetched: None,
+                    calendars: vec![
+                        cal("work", "Work", true, "owner", true),
+                        cal("jordan", "Jordan Park", false, "reader", true),
+                        cal("holidays", "Holidays", false, "reader", false),
+                    ],
+                },
+                mailstream::CalendarAccount {
+                    id: "sam@contoso.example".into(),
+                    label: "sam@contoso.example".into(),
+                    provider: mailstream::Provider::Microsoft,
+                    granted: true,
+                    writable: true,
+                    loading: false,
+                    problem: None,
+                    fetched: None,
+                    calendars: vec![cal("outlook", "Calendar", true, "owner", true)],
+                },
+            ];
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let states = |pane: &Entity<CalendarPane>, cx: &mut VisualTestContext| -> Vec<bool> {
+            pane.read_with(cx, |pane, _| {
+                pane.accounts.iter().flat_map(|a| a.calendars.iter().map(|c| c.shown)).collect()
+            })
+        };
+
+        click_on(cx, "calendar-list-button");
+        bounds(cx, "calendar-list");
+        assert_eq!(states(&pane, cx), vec![true, true, false, true]);
+
+        // Clicking the unchecked Holidays row turns it on.
+        click_on(cx, "calendar-shown:sam@example.com:holidays");
+        assert_eq!(states(&pane, cx), vec![true, true, true, true]);
+
+        // Soloing Jordan's calendar on hover hides the others; clicking its solo button again restores all.
+        hover_on(cx, "calendar-shown:sam@example.com:jordan");
+        click_on(cx, "calendar-only:sam@example.com:jordan");
+        assert_eq!(states(&pane, cx), vec![false, true, false, false]);
+        hover_on(cx, "calendar-shown:sam@example.com:jordan");
+        click_on(cx, "calendar-only:sam@example.com:jordan");
+        assert_eq!(states(&pane, cx), vec![true, true, true, true]);
+
+        // Hide all, then Show all.
+        click_on(cx, "calendar-show-all");
+        assert_eq!(states(&pane, cx), vec![false, false, false, false]);
+        click_on(cx, "calendar-show-all");
+        assert_eq!(states(&pane, cx), vec![true, true, true, true]);
     }
 }
 

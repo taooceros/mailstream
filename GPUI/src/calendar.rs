@@ -758,21 +758,102 @@ impl CalendarPane {
         });
     }
 
-    /// Shows or hides `calendar` of `account`: its switch moves at once; the engine keeps the
-    /// choice, fetches what it lacks and says the calendar changed, which reads the events again.
-    fn show_calendar(&mut self, account: &str, calendar: &str, shown: bool, cx: &mut Context<Self>) {
-        let info = self.accounts.iter_mut().find(|a| a.id == account).and_then(|a| a.calendars.iter_mut().find(|c| c.id == calendar));
-        let Some(info) = info else { return };
-        info.shown = shown;
-        let name = info.name.clone();
-        let (account, calendar) = (account.to_owned(), calendar.to_owned());
-        self.background(cx, async move { engine().calendar_show(account, calendar, shown).await }, move |this, result, cx| {
-            if let Err(error) = result {
-                this.toast(format!("Could not {} {name}: {error}", if shown { "show" } else { "hide" }), cx);
-                this.reload(cx);
+    /// Shows or hides each `(account, calendar, shown)` in `changes`: the checkboxes update at
+    /// once; the engine keeps the choices, fetches what it lacks and says the calendar changed,
+    /// which reads the events again.
+    fn show_calendars(&mut self, changes: Vec<(String, String, bool)>, cx: &mut Context<Self>) {
+        let mut pending = Vec::new();
+        for (account, calendar, shown) in changes {
+            let info = self
+                .accounts
+                .iter_mut()
+                .find(|a| a.id == account)
+                .and_then(|a| a.calendars.iter_mut().find(|c| c.id == calendar));
+            let Some(info) = info else { continue };
+            if info.shown == shown {
+                continue;
             }
-        });
+            info.shown = shown;
+            pending.push((account, calendar, info.name.clone(), shown));
+        }
+        if pending.is_empty() {
+            return;
+        }
+        if self.active {
+            self.background(
+                cx,
+                async move {
+                    for (account, calendar, name, shown) in pending {
+                        if let Err(error) = engine().calendar_show(account, calendar, shown).await {
+                            return Err((name, shown, error));
+                        }
+                    }
+                    Ok(())
+                },
+                |this, result, cx| {
+                    if let Err((name, shown, error)) = result {
+                        this.toast(format!("Could not {} {name}: {error}", if shown { "show" } else { "hide" }), cx);
+                        this.reload(cx);
+                    }
+                    cx.notify();
+                },
+            );
+        }
         cx.notify();
+    }
+
+    /// Shows or hides `calendar` of `account`.
+    fn show_calendar(&mut self, account: &str, calendar: &str, shown: bool, cx: &mut Context<Self>) {
+        self.show_calendars(vec![(account.to_owned(), calendar.to_owned(), shown)], cx);
+    }
+
+    /// Shows or hides every calendar of every granted account.
+    fn set_all_calendars(&mut self, shown: bool, cx: &mut Context<Self>) {
+        let changes = self
+            .accounts
+            .iter()
+            .filter(|a| a.granted)
+            .flat_map(|a| a.calendars.iter().map(move |c| (a.id.clone(), c.id.clone(), shown)))
+            .collect();
+        self.show_calendars(changes, cx);
+    }
+
+    /// Shows or hides every calendar of `account`.
+    fn set_account_calendars(&mut self, account: &str, shown: bool, cx: &mut Context<Self>) {
+        let changes = self
+            .accounts
+            .iter()
+            .find(|a| a.id == account && a.granted)
+            .into_iter()
+            .flat_map(|a| a.calendars.iter().map(move |c| (a.id.clone(), c.id.clone(), shown)))
+            .collect();
+        self.show_calendars(changes, cx);
+    }
+
+    /// Shows only `calendar` of `account` across all accounts, or restores all when it is already
+    /// the only one shown.
+    fn solo_calendar(&mut self, account: &str, calendar: &str, cx: &mut Context<Self>) {
+        let already_solo = self
+            .accounts
+            .iter()
+            .filter(|a| a.granted)
+            .flat_map(|a| a.calendars.iter().map(move |c| (a.id.as_str(), c.id.as_str(), c.shown)))
+            .all(|(acc, cal, shown)| shown == (acc == account && cal == calendar));
+        if already_solo {
+            self.set_all_calendars(true, cx);
+            return;
+        }
+        let changes = self
+            .accounts
+            .iter()
+            .filter(|a| a.granted)
+            .flat_map(|a| {
+                a.calendars
+                    .iter()
+                    .map(move |c| (a.id.clone(), c.id.clone(), a.id == account && c.id == calendar))
+            })
+            .collect();
+        self.show_calendars(changes, cx);
     }
 
     /// ⌘N: a new event from the next full hour.

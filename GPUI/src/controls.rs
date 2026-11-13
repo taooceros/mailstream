@@ -19,7 +19,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     Anchor, AnyElement, AnyView, App, DispatchPhase, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
     MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString, Stateful,
-    Styled, Window, canvas, div, hsla, linear_color_stop, linear_gradient, px,
+    StatefulInteractiveElement, Styled, Window, canvas, div, hsla, linear_color_stop, linear_gradient, px,
 };
 
 use crate::design::{
@@ -138,6 +138,42 @@ pub fn icon_button(id: impl Into<ElementId>, glyph: Icon, tip: impl Into<SharedS
         .child(icon(glyph, icon_size::TOOLBAR, if enabled { color } else { design::tint(color, 0.35) }))
 }
 
+
+/// A labeled button inside a toolbar [`capsule`] (`MailCapsuleButton`): `icon::BUTTON` tall and
+/// fully round like [`icon_button`], with an optional `leading` mark (such as [`color_dots`]),
+/// `label`, and an optional `detail` count at its end; `active` (its popover open) holds the
+/// selection wash.
+pub fn capsule_button(
+    id: impl Into<ElementId>,
+    leading: Option<AnyElement>,
+    label: impl Into<SharedString>,
+    detail: Option<SharedString>,
+    active: bool,
+    enabled: bool,
+    p: &Palette,
+) -> Button {
+    let ink = if active { p.text } else { p.glyph };
+    kit_button(Button::new(id).ghost(), enabled)
+        .h(px(icon_size::BUTTON))
+        .px(px(space::S10))
+        .rounded_full()
+        .when(active, |b| b.bg(p.selection))
+        .when(!enabled, |b| b.opacity(0.4))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S6))
+                .text_size(px(text::FOOTNOTE))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(ink)
+                .children(leading)
+                .child(label.into())
+                .when_some(detail, |d, detail| {
+                    d.child(div().text_size(px(text::CAPTION)).text_color(p.muted).child(detail))
+                }),
+        )
+}
 /// What every button of the app shares on top of the kit's: out of the Tab order (the app's
 /// buttons are clicked, as before the kit), a pointing hand while it can be clicked, and a press
 /// that never reaches the title bar under it, so it can't move the window.
@@ -358,6 +394,122 @@ pub fn segment(label: impl Into<SharedString>, glyph: Option<(Icon, Hsla)>, colo
 /// An account or a topic: a dot of its color, the one mark for them (MS-190).
 pub fn mark_dot(color: Hsla) -> Div {
     div().flex_shrink_0().size(px(marks::DOT)).rounded_full().bg(color)
+}
+
+/// Overlapping dots of `colors` (up to `max`), each ringed in `ring` (the surface under them);
+/// an empty outline dot when `colors` is empty.
+pub fn color_dots(colors: &[Hsla], max: usize, ring: Hsla, p: &Palette) -> Div {
+    let size = marks::STACK_DOT;
+    if colors.is_empty() {
+        return div()
+            .flex_shrink_0()
+            .size(px(size))
+            .rounded_full()
+            .border(px(marks::SWATCH_STROKE))
+            .border_color(p.faint);
+    }
+    let step = (size * marks::STACK_STEP).round();
+    let ring_width = marks::STACK_RING;
+    let shown = colors.len().min(max.max(1));
+    div()
+        .relative()
+        .flex_shrink_0()
+        .w(px(step * (shown - 1) as f32 + size))
+        .h(px(size))
+        .children(colors[..shown].iter().copied().enumerate().map(|(slot, color)| {
+            div()
+                .absolute()
+                .left(px(slot as f32 * step - ring_width))
+                .top(px(-ring_width))
+                .size(px(size + 2. * ring_width))
+                .p(px(ring_width))
+                .rounded_full()
+                .bg(ring)
+                .child(div().size_full().rounded_full().bg(color))
+        }))
+}
+
+/// A color swatch that is also a checkbox (`SwatchCheck`): a rounded square in `color`, filled
+/// with a check mark when `checked`, an outline of `color` when off.
+pub fn swatch_check(checked: bool, color: Hsla, p: &Palette) -> Div {
+    div()
+        .flex_shrink_0()
+        .size(px(marks::SWATCH))
+        .rounded(px(radius::SMALL))
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(checked, |d| d.bg(color).child(icon(Icon::Check, marks::SWATCH_CHECK, p.on_accent)))
+        .when(!checked, |d| d.border(px(marks::SWATCH_STROKE)).border_color(color))
+}
+
+/// A compact single-line check row (`SwatchRow`): a [`swatch_check`] in `color` before `label`,
+/// an optional `meta` note at its end, and an optional `hover_action` that appears at the end
+/// while the pointer is over the row (hiding `meta` so the label never shifts). Chain `.on_click`.
+pub fn swatch_row(
+    id: impl Into<ElementId>,
+    checked: bool,
+    color: Hsla,
+    label: impl Into<SharedString>,
+    meta: Option<SharedString>,
+    hover_action: Option<AnyElement>,
+    p: &Palette,
+) -> Stateful<Div> {
+    let has_hover = hover_action.is_some();
+    let overlay = meta.is_some() && has_hover;
+    own_presses(
+        div()
+            .id(id)
+            .group("swatch-row")
+            .h(px(design::calendar::LIST_ROW))
+            .px(px(space::S8))
+            .flex()
+            .items_center()
+            .gap(px(space::S8))
+            .rounded(px(radius::CONTROL))
+            .cursor_pointer()
+            .hover(|s| s.bg(p.hover))
+            .active(|s| s.bg(p.pressed)),
+    )
+    .child(swatch_check(checked, color, p))
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(px(text::BODY))
+            .font_weight(if checked { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+            .text_color(if checked { p.text } else { p.muted })
+            .child(label.into()),
+    )
+    .when(meta.is_some() || has_hover, |d| {
+        d.child(
+            div()
+                .relative()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_end()
+                .when_some(meta, |d, meta| {
+                    d.child(
+                        div()
+                            .text_size(px(text::CAPTION))
+                            .text_color(p.muted)
+                            .when(has_hover, |d| d.group_hover("swatch-row", |s| s.invisible()))
+                            .child(meta),
+                    )
+                })
+                .when_some(hover_action, |d, action| {
+                    d.child(
+                        div()
+                            .when(overlay, |d| d.absolute().right_0())
+                            .invisible()
+                            .group_hover("swatch-row", |s| s.visible())
+                            .child(action),
+                    )
+                }),
+        )
+    })
 }
 
 /// The column before a list row's avatar: an accent dot while the row is unread, a little right

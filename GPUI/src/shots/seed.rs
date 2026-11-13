@@ -797,7 +797,15 @@ fn write_calendar(cache: &MailCache) {
         hiring,
         jordan("j4", "Roadmap draft", (-1, 10, 0), 120.),
     ];
-    // A holiday calendar Sam subscribed to and left off, shown with its switch.
+    let personal = vec![
+        json!({ "id": "p1", "calendar": "personal", "title": "Evening run", "start": at(-1, 17, 30), "end": at(-1, 18, 15), "mine": true }),
+        json!({ "id": "p2", "calendar": "personal", "title": "Book club", "start": at(1, 18, 0), "end": at(1, 19, 0), "mine": true }),
+    ];
+    let team = vec![json!({
+        "id": "t1", "calendar": "design-team", "title": "Design critique", "start": at(1, 14, 0), "end": at(1, 14, 45),
+        "organizer": person(DEVON), "mine": false,
+    })];
+    // A holiday calendar Sam subscribed to and left off, shown with its swatch checkbox.
     let holidays = vec![json!({
         "id": "h1", "calendar": "holidays", "title": "Founders' Day", "start": at(1, 0, 0), "end": at(2, 0, 0), "allDay": true,
         "startDay": day(1), "endDay": day(2),
@@ -808,21 +816,39 @@ fn write_calendar(cache: &MailCache) {
         "calendars": [
             { "id": "work", "name": "Work", "color": "#4285f4", "primary": true, "writable": true, "access": "owner",
               "selected": true, "shown": true },
+            { "id": "personal", "name": "Personal", "color": "#33b679", "writable": true, "access": "owner",
+              "selected": true, "shown": true },
+            { "id": "design-team", "name": "Design team", "color": "#f4511e", "writable": true, "access": "writer",
+              "selected": true, "shown": true },
             { "id": JORDAN.1, "name": JORDAN.0, "color": "#8e24aa", "access": "reader", "selected": true, "shown": true },
             { "id": "holidays", "name": "Holidays", "color": "#0b8043", "access": "reader", "shown": false },
         ],
-        "parts": { "work": part(events), (JORDAN.1): part(jordans), "holidays": part(holidays) },
+        "parts": {
+            "work": part(events),
+            "personal": part(personal),
+            "design-team": part(team),
+            (JORDAN.1): part(jordans),
+            "holidays": part(holidays),
+        },
     });
     cache.save_calendar(&parse(copy), GMAIL);
     let outlook = json!({
         "fetched": now(), "format": 2,
-        "calendars": [{ "id": "calendar", "name": "Calendar", "color": "#e67c73", "primary": true, "writable": true,
-                        "access": "owner", "selected": true, "shown": true }],
-        "parts": { "calendar": part(vec![
-            json!({ "id": "o1", "calendar": "calendar", "title": "Budget review", "start": at(1, 13, 30), "end": at(1, 14, 30), "mine": true }),
-            json!({ "id": "o2", "calendar": "calendar", "title": "Team offsite", "start": at(2, 0, 0), "end": at(4, 0, 0), "allDay": true,
-                    "startDay": day(2), "endDay": day(4), "mine": true }),
-        ]) },
+        "calendars": [
+            { "id": "calendar", "name": "Calendar", "color": "#e67c73", "primary": true, "writable": true,
+              "access": "owner", "selected": true, "shown": true },
+            { "id": DANA.1, "name": DANA.0, "color": "#7986cb", "access": "freeBusyReader", "selected": true, "shown": true },
+        ],
+        "parts": {
+            "calendar": part(vec![
+                json!({ "id": "o1", "calendar": "calendar", "title": "Budget review", "start": at(1, 13, 30), "end": at(1, 14, 30), "mine": true }),
+                json!({ "id": "o2", "calendar": "calendar", "title": "Team offsite", "start": at(2, 0, 0), "end": at(4, 0, 0), "allDay": true,
+                        "startDay": day(2), "endDay": day(4), "mine": true }),
+            ]),
+            (DANA.1): part(vec![
+                json!({ "id": "d1", "calendar": DANA.1, "title": "Busy", "start": at(0, 16, 30), "end": at(0, 17, 15), "mine": true }),
+            ]),
+        },
     });
     cache.save_calendar(&parse(outlook), OUTLOOK);
 }

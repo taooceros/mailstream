@@ -22,8 +22,9 @@ use super::model::{self, ReplyState};
 use super::{CalendarPane, Entry, Refresh, Today, View};
 use crate::avatars;
 use crate::controls::{
-    ButtonKind, ControlSize, Tone, button, capsule, icon_button, icon_label_button, island, list_row, mark_dot,
-    notice, popover, section_header, segment, segmented, switch, tag, title_bar, tooltip,
+    ButtonKind, ControlSize, Tone, button, capsule, capsule_button, color_dots, hairline, icon_button,
+    icon_label_button, island, list_row, mark_dot, notice, popover, segment, segmented, swatch_row, tag, title_bar,
+    tooltip,
 };
 use crate::design::{self, Palette, calendar as metrics, icon as icon_size, layout, list as rows, space, stroke, text};
 use crate::icons::{Icon, icon};
@@ -117,6 +118,7 @@ impl CalendarPane {
                     .child(
                         capsule(p)
                             .child(self.calendar_list_button(p, cx))
+                            .child(div().w(px(stroke::HAIRLINE)).h(px(16.)).mx(px(space::S2)).bg(p.line))
                             .child(
                                 icon_button("calendar-new", Icon::AddDraft, "New event", self.can_create(), p.glyph)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.create_event(None, window, cx))),
@@ -163,17 +165,34 @@ impl CalendarPane {
             )
     }
 
-    /// Calendars: the list of every account's calendars, under the button that opens it.
+    /// Calendars: the list of every account's calendars, under the capsule button that shows
+    /// their active color dots and count.
     fn calendar_list_button(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let listed = self.accounts.iter().any(|account| account.granted && !account.calendars.is_empty());
+        let mut colors = Vec::new();
+        let mut total = 0usize;
+        for (index, account) in self.accounts.iter().enumerate().filter(|(_, account)| account.granted) {
+            for calendar in &account.calendars {
+                total += 1;
+                if calendar.shown {
+                    let color = model::hex_color(calendar.color.as_deref()).unwrap_or_else(|| design::account_color(index));
+                    colors.push(dot_color(color, p));
+                }
+            }
+        }
+        let listed = total > 0;
+        let shown = colors.len();
+        let detail = listed.then(|| {
+            if shown < total { format!("{shown}/{total}").into() } else { total.to_string().into() }
+        });
+        let leading = Some(color_dots(&colors, 4, p.capsule, p).into_any_element());
         // The app's buttons keep their presses from what is under them, the popover's own
         // trigger included: the button opens it, and the popover closes it (a press outside, Esc).
-        let trigger = icon_button("calendar-list", Icon::Layers, "Calendars", listed, p.glyph).on_click(cx.listener(
-            |this, _: &ClickEvent, _, cx| {
+        let trigger = capsule_button("calendar-list", leading, "Calendars", detail, self.calendar_list, listed, p)
+            .debug_selector(|| "calendar-list-button".into())
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.calendar_list = !this.calendar_list;
                 cx.notify();
-            },
-        ));
+            }));
         if !listed {
             return trigger.into_any_element();
         }
@@ -195,48 +214,166 @@ impl CalendarPane {
             .into_any_element()
     }
 
-    /// Each account's calendars under its name: its own first, then others' (shared with it or
-    /// subscribed to), each in its color with what the account may do on it, and a switch that
-    /// shows or hides its events.
+    /// Each account's calendars grouped into "My calendars" (owned) and "Other calendars"
+    /// (shared or subscribed), with a color swatch checkbox per calendar, inline access hints,
+    /// Show/Hide all and hover Solo ("Only").
     fn render_calendar_list(&self, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut sections = Vec::new();
-        for (index, account) in self.accounts.iter().enumerate().filter(|(_, account)| account.granted) {
-            let mut calendars: Vec<&CalendarInfo> = account.calendars.iter().collect();
-            calendars.sort_by_key(|calendar| (!calendar.primary, !calendar.owned(), calendar.name.to_lowercase()));
-            let title = if account.label != account.id { format!("{} · {}", account.label, account.id) } else { account.id.clone() };
-            sections.push(section_header(title, None, p).into_any_element());
-            for calendar in calendars {
-                let color = model::hex_color(calendar.color.as_deref()).unwrap_or_else(|| design::account_color(index));
-                let note = match calendar.access.as_str() {
-                    _ if calendar.primary => Some("Your calendar"),
-                    _ if calendar.owned() => None,
-                    "freeBusyReader" => Some("Free and busy times only"),
-                    _ if calendar.writable => Some("You can edit"),
-                    _ => Some("Read only"),
-                };
-                let (account_id, calendar_id, shown) = (account.id.clone(), calendar.id.clone(), calendar.shown);
-                sections.push(
+        let granted: Vec<(usize, &mailstream::CalendarAccount)> = self
+            .accounts
+            .iter()
+            .enumerate()
+            .filter(|(_, account)| account.granted && !account.calendars.is_empty())
+            .collect();
+        let total: usize = granted.iter().map(|(_, a)| a.calendars.len()).sum();
+        let shown: usize = granted.iter().flat_map(|(_, a)| &a.calendars).filter(|c| c.shown).count();
+        let all_shown = shown == total;
+        let several_accounts = granted.len() > 1;
+
+        let mut rows: Vec<AnyElement> = Vec::new();
+        rows.push(
+            div()
+                .h(px(metrics::LIST_ROW))
+                .px(px(space::S8))
+                .flex()
+                .items_center()
+                .gap(px(space::S6))
+                .child(icon(Icon::Layers, icon_size::ROW, p.glyph))
+                .child(div().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).child("Calendars"))
+                .child(div().text_size(px(text::CAPTION)).text_color(p.muted).child(format!("{shown} of {total}")))
+                .child(div().flex_1())
+                .child(
+                    button(
+                        "calendar-show-all",
+                        if all_shown { "Hide all" } else { "Show all" },
+                        ButtonKind::Plain(p.accent),
+                        ControlSize::Small,
+                        true,
+                        p,
+                    )
+                    .debug_selector(|| "calendar-show-all".into())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_all_calendars(!all_shown, cx))),
+                )
+                .into_any_element(),
+        );
+
+        for (index, account) in granted {
+            rows.push(div().my(px(space::S4)).child(hairline(p)).into_any_element());
+            let account_title = if !account.label.is_empty() && account.label != account.id {
+                format!("{} · {}", account.label, account.id)
+            } else {
+                account.id.clone()
+            };
+            let account_all = account.calendars.iter().all(|c| c.shown);
+            let account_id = account.id.clone();
+            rows.push(
+                div()
+                    .h(px(metrics::LIST_ROW - 2.))
+                    .px(px(space::S8))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S6))
+                    .child(mark_dot(design::account_color(index)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(text::FOOTNOTE))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.text)
+                            .child(account_title),
+                    )
+                    .when(several_accounts && account.calendars.len() > 1, |d| {
+                        d.child(
+                            button(
+                                ElementId::Name(format!("calendar-account-all:{account_id}").into()),
+                                if account_all { "Hide all" } else { "Show all" },
+                                ButtonKind::Plain(p.muted),
+                                ControlSize::Small,
+                                true,
+                                p,
+                            )
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.set_account_calendars(&account_id, !account_all, cx);
+                            })),
+                        )
+                    })
+                    .into_any_element(),
+            );
+
+            let mut mine: Vec<&CalendarInfo> = account.calendars.iter().filter(|c| c.owned()).collect();
+            mine.sort_by_key(|c| (!c.primary, c.name.to_lowercase()));
+            let mut others: Vec<&CalendarInfo> = account.calendars.iter().filter(|c| !c.owned()).collect();
+            others.sort_by_key(|c| (!c.writable, c.name.to_lowercase()));
+
+            for (group_title, group) in [("My calendars", mine), ("Other calendars", others)] {
+                if group.is_empty() {
+                    continue;
+                }
+                rows.push(
                     div()
-                        .h(px(metrics::LIST_ROW))
+                        .h(px(metrics::LIST_GROUP))
                         .px(px(space::S8))
                         .flex()
-                        .items_center()
-                        .gap(px(space::S10))
-                        .child(mark_dot(dot_color(color, p)))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .child(div().truncate().child(calendar.name.clone()))
-                                .children(note.map(|note| div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(note))),
-                        )
-                        .child(switch(ElementId::Name(format!("calendar-shown:{account_id}:{calendar_id}").into()), shown).on_click(
-                            cx.listener(move |this, _: &bool, _, cx| this.show_calendar(&account_id, &calendar_id, !shown, cx)),
-                        ))
+                        .items_end()
+                        .pb(px(space::S2))
+                        .text_size(px(text::TAG))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.muted)
+                        .child(group_title)
                         .into_any_element(),
                 );
+                for calendar in group {
+                    let color = dot_color(
+                        model::hex_color(calendar.color.as_deref()).unwrap_or_else(|| design::account_color(index)),
+                        p,
+                    );
+                    let meta: Option<SharedString> = match calendar.access.as_str() {
+                        _ if calendar.primary && account.calendars.len() > 1 => Some("Primary".into()),
+                        _ if calendar.owned() => None,
+                        "freeBusyReader" => Some("Busy only".into()),
+                        _ if calendar.writable => Some("Shared".into()),
+                        _ => Some("Read only".into()),
+                    };
+                    let (account_id, calendar_id, calendar_shown) =
+                        (account.id.clone(), calendar.id.clone(), calendar.shown);
+                    let solo = (total > 1).then(|| {
+                        let is_solo = shown == 1 && calendar_shown;
+                        let (solo_account, solo_calendar) = (account_id.clone(), calendar_id.clone());
+                        let solo_sel = format!("calendar-only:{account_id}:{calendar_id}");
+                        button(
+                            ElementId::Name(solo_sel.clone().into()),
+                            if is_solo { "All" } else { "Only" },
+                            ButtonKind::Secondary,
+                            ControlSize::Small,
+                            true,
+                            p,
+                        )
+                        .debug_selector(move || solo_sel.clone())
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.solo_calendar(&solo_account, &solo_calendar, cx);
+                        }))
+                        .into_any_element()
+                    });
+                    let row_sel = format!("calendar-shown:{account_id}:{calendar_id}");
+                    rows.push(
+                        swatch_row(
+                            ElementId::Name(row_sel.clone().into()),
+                            calendar_shown,
+                            color,
+                            calendar.name.clone(),
+                            meta,
+                            solo,
+                            p,
+                        )
+                        .debug_selector(move || row_sel.clone())
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.show_calendar(&account_id, &calendar_id, !calendar_shown, cx);
+                        }))
+                        .into_any_element(),
+                    );
+                }
             }
         }
         popover(p)
@@ -249,7 +386,7 @@ impl CalendarPane {
             .pb(px(space::S8))
             .text_size(px(text::BODY))
             .text_color(p.text)
-            .children(sections)
+            .children(rows)
     }
 
     /// This week's seven days: today raised on a card, the others over a bar as long as their
