@@ -13,7 +13,10 @@ impl MailApp {
         p: &'static Palette,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
+        if self.selection().is_some() {
+            return self.render_selection_bar(p, window, cx).into_any_element();
+        }
         let bundle = self.open_bundle_members();
         let (title, subtitle): (SharedString, Option<SharedString>) = match (&bundle, &self.query) {
             (Some(bundle), _) => {
@@ -74,6 +77,77 @@ impl MailApp {
                     .child(icon_button("compose", Icon::Compose, "New Message", true, p.glyph).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.new_message(&NewMessage, window, cx)),
                     )),
+            )
+            .into_any_element()
+    }
+
+    /// The list's title row while conversations are picked (MS-305): ✕ ends the selection, then
+    /// how many are picked and the actions that apply to all of them, each one call to the
+    /// engine and one undo step.
+    fn render_selection_bar(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let picked = self.selected_conversations();
+        let any = |test: fn(&Conversation) -> bool| picked.iter().any(test);
+        let (read_icon, read_tip) = if any(|c| c.unread) { (Icon::MarkRead, "Mark as Read (U)") } else { (Icon::MarkUnread, "Mark as Unread (U)") };
+        let (star_icon, star_tip, star_color) =
+            if picked.iter().all(|c| c.starred) { (Icon::Starred, "Unstar (S)", p.star) } else { (Icon::Star, "Star (S)", p.glyph) };
+        let waiting = picked.iter().filter(|c| c.can_mark_waiting()).map(|c| c.waiting).reduce(|a, b| a || b);
+        let filing = if any(Conversation::can_archive) {
+            Some(("selection-archive", Icon::Archive, "Archive (E)", Removal::Archive))
+        } else if any(Conversation::can_restore) {
+            Some(("selection-restore", Icon::Restore, "Move to Inbox", Removal::Restore))
+        } else {
+            None
+        };
+        title_bar("list-header", window, cx)
+            .flex_shrink_0()
+            .h(px(layout::HEADER_HEIGHT))
+            .px(px(space::S10))
+            .flex()
+            .items_center()
+            .gap(px(space::S10))
+            .child(capsule(p).child(icon_button("selection-clear", Icon::Close, "Clear Selection (Esc)", true, p.glyph).on_click(
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.clear_selection(cx);
+                }),
+            )))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(text::PANE_TITLE))
+                    .font_weight(FontWeight::BOLD)
+                    .child(format!("{} selected", picked.len())),
+            )
+            .child(
+                capsule(p)
+                    .when_some(filing, |d, (id, glyph, tip, removal)| {
+                        d.child(icon_button(id, glyph, tip, true, p.glyph).on_click(cx.listener(
+                            move |this, _: &ClickEvent, window, cx| match removal {
+                                Removal::Restore => this.restore(&Restore, window, cx),
+                                _ => this.archive(&Archive, window, cx),
+                            },
+                        )))
+                    })
+                    .child(icon_button("selection-trash", Icon::Delete, "Move to Trash (⌫)", true, p.glyph).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.trash(&Trash, window, cx)),
+                    ))
+                    .child(icon_button("selection-read", read_icon, read_tip, true, p.glyph).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_read(&ToggleRead, window, cx)),
+                    ))
+                    .child(icon_button("selection-star", star_icon, star_tip, true, star_color).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.star(&Star, window, cx)),
+                    ))
+                    .when_some(waiting, |d, waiting| {
+                        let (glyph, tip, color) = if waiting {
+                            (Icon::Resolve, "Resolve (D)", p.waiting)
+                        } else {
+                            (Icon::Waiting, "Mark as Waiting on You (D)", p.glyph)
+                        };
+                        d.child(icon_button("selection-waiting", glyph, tip, true, color).on_click(
+                            cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_waiting(&ToggleWaiting, window, cx)),
+                        ))
+                    }),
             )
     }
 

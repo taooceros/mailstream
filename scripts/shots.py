@@ -20,7 +20,8 @@ are window points from its top left (a PNG's pixels halved: shots are drawn at 2
 
     wait MS                    let MS pass (data arriving, animations)
     shot NAME                  save NAME-light.png / NAME-dark.png
-    click X Y [right|double]   click there
+    click X Y [right|double] [secondary|shift|alt]...
+                               click there, holding those keys (secondary: ⌘ / Ctrl)
     move X Y                   hover there
     drag X1 Y1 X2 Y2 [hold]    drag (`hold`: the button stays down, for a shot mid-drag)
     release                    let go of a held drag

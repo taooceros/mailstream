@@ -352,6 +352,10 @@ impl MailApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A row outside the selection is acted on alone (MS-305).
+        if self.selection().is_some_and(|selection| !selection.contains(&id)) {
+            self.selection.clear();
+        }
         let Some(menu) = self.build_context_menu(&id, window, cx) else { return };
         let dismissed = cx.subscribe_in(&menu, window, |this, menu, _: &DismissEvent, window, cx| {
             if this.context_menu.as_ref().is_some_and(|open| &open.menu == menu) {
@@ -370,8 +374,10 @@ impl MailApp {
         }
     }
 
+    /// ↑/↓: the highlight moves to the row before or after, alone (MS-305: it ends a selection).
     fn step(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_closing();
+        self.clear_selection(cx);
         let (lines, in_bundle) = self.active_lines();
         if lines.is_empty() {
             return;
@@ -411,6 +417,7 @@ impl MailApp {
         if self.reader().is_some() {
             return;
         }
+        self.clear_selection(cx);
         let current = if self.open_bundle().is_some() { &self.bundle_highlight } else { &self.highlight };
         if let Some(id) = current.clone() {
             self.activate(&id, window, cx);
@@ -468,12 +475,16 @@ impl MailApp {
         // Loaded already: it opens where its messages say now.
         self.pin_opening(&conversation.id);
         if unread {
-            self.set_unread(&conversation, false, cx);
+            self.set_unread(std::slice::from_ref(&conversation), false, cx);
         }
         cx.notify();
     }
 
+    /// Esc: ends a selection (MS-305), else the top layer goes, else the search.
     pub fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
+        if self.clear_selection(cx) {
+            return;
+        }
         self.finish_closing();
         // No pointer: the top layer goes, whatever lies under the pointer (MS-299).
         if !self.layers.is_empty() {

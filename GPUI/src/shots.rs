@@ -16,7 +16,9 @@
 //! ```text
 //! wait MS                    let MS of real time pass, drawing frames (data, animations)
 //! shot NAME                  save DIR/NAME-light.png (or -dark) of the whole window, at 2x
-//! click X Y [right|double]   move the pointer there and click
+//! click X Y [right|double] [secondary|shift|alt]...
+//!                            move the pointer there and click, holding those keys (secondary:
+//!                            ⌘ on the Mac, Ctrl elsewhere)
 //! move X Y                   move the pointer there (hover)
 //! drag X1 Y1 X2 Y2 [hold]    press at X1 Y1, move to X2 Y2, release (`hold`: keep the button
 //!                            down, for a shot mid-drag, until `release`)
@@ -254,7 +256,7 @@ fn data_folder() -> PathBuf {
 enum Command {
     Wait(Duration),
     Shot(String),
-    Click(Point<Pixels>, MouseButton, usize),
+    Click(Point<Pixels>, MouseButton, usize, Modifiers),
     Move(Point<Pixels>),
     Drag(Point<Pixels>, Point<Pixels>, bool),
     Release,
@@ -285,13 +287,20 @@ impl Command {
             "shot" if !rest.is_empty() && !rest.contains(['/', '\\']) => Command::Shot(rest.into()),
             "shot" => return Err("shot: give a file name without folders".into()),
             "click" => {
-                let (button, count) = match words.get(2).copied() {
-                    None => (MouseButton::Left, 1),
-                    Some("right") => (MouseButton::Right, 1),
-                    Some("double") => (MouseButton::Left, 2),
-                    Some(other) => return Err(format!("click: {other} is neither right nor double")),
-                };
-                Command::Click(spot(0)?, button, count)
+                let (mut button, mut count, mut modifiers) = (MouseButton::Left, 1, Modifiers::default());
+                for word in words.iter().skip(2) {
+                    match *word {
+                        "right" => button = MouseButton::Right,
+                        "double" => count = 2,
+                        // ⌘ on the Mac, Ctrl elsewhere, as `key secondary-…`.
+                        "secondary" if cfg!(target_os = "macos") => modifiers.platform = true,
+                        "secondary" => modifiers.control = true,
+                        "shift" => modifiers.shift = true,
+                        "alt" => modifiers.alt = true,
+                        other => return Err(format!("click: {other} is none of right, double, secondary, shift, alt")),
+                    }
+                }
+                Command::Click(spot(0)?, button, count, modifiers)
             }
             "move" => Command::Move(spot(0)?),
             "drag" => match words.get(4).copied() {
@@ -466,10 +475,9 @@ impl Run {
                 }
                 return Ok(());
             }
-            Command::Click(position, button, count) => {
+            Command::Click(position, button, count, modifiers) => {
                 self.pointer_to(position, None);
                 for click_count in 1..=count {
-                    let modifiers = Modifiers::default();
                     self.event(MouseDownEvent { button, position, modifiers, click_count, first_mouse: false });
                     self.event(MouseUpEvent { button, position, modifiers, click_count });
                 }

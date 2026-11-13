@@ -84,19 +84,19 @@ impl MailApp {
 
     fn render_item(&self, ix: usize, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let Some(list) = self.list() else { return div().into_any_element() };
-        let rule = self.next_row(ix).is_some_and(|next| self.highlight.as_ref() != Some(&next));
+        let rule = self.next_row(ix).is_some_and(|next| !self.row_selected(&next, false));
         match &self.items[ix] {
             Item::Section(title) => section_header(title.clone(), None, p).into_any_element(),
             Item::Waiting(count) => section_header("Waiting on you", Some(*count), p).into_any_element(),
             Item::Row(index) => {
                 let conversation = &list.conversations[*index];
-                let selected = self.highlight.as_ref() == Some(&conversation.id);
+                let selected = self.row_selected(&conversation.id, false);
                 self.render_row(conversation, selected, rule, p, cx)
             }
             Item::Bundle(bundle) => {
                 let newest = &list.conversations[bundle.members[0]];
                 let id = format!("bundle:{}", bundle.category.as_str());
-                let selected = self.highlight.as_ref() == Some(&id);
+                let selected = self.row_selected(&id, false);
                 let unread = bundle.unread > 0;
                 let color = design::category_color(bundle.category, p);
                 let count = if unread { format!("{} new", bundle.unread) } else { bundle.members.len().to_string() };
@@ -113,7 +113,9 @@ impl MailApp {
                     .text_color(p.muted)
                     .child(format!("{}  —  {}", bundle.senders, bundle.subject));
                 list_row(ElementId::Name(id.clone().into()), selected, rule, p)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate(&id, window, cx)))
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        this.click_row(&id, event.modifiers(), window, cx)
+                    }))
                     .child(row_layout(
                         unread,
                         icon_avatar(Icon::for_category(bundle.category), color, metrics::AVATAR),
@@ -147,7 +149,13 @@ impl MailApp {
         } else {
             conversation.senders()
         };
-        let photo = avatars::avatar(&conversation.avatar_email(), &conversation.avatar, metrics::AVATAR, p, cx);
+        // A picked row (MS-305) shows a check where its avatar was.
+        let picked = self.selection().is_some_and(|selection| selection.contains(&conversation.id));
+        let photo = if picked {
+            icon_avatar(Icon::Check, p.accent, metrics::AVATAR).into_any_element()
+        } else {
+            avatars::avatar(&conversation.avatar_email(), &conversation.avatar, metrics::AVATAR, p, cx).into_any_element()
+        };
         let hovered = self.hovered_row.as_ref() == Some(&id);
         let menu_open = self.context_menu.as_ref().is_some_and(|menu| menu.id == id);
 
@@ -238,7 +246,7 @@ impl MailApp {
                     this.open_context_menu(menu_id.clone(), event.position, window, cx);
                 }),
             )
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate(&id, window, cx)))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| this.click_row(&id, event.modifiers(), window, cx)))
             .child(row_layout(conversation.unread, photo, title, meta, subtitle, marks, p))
             .when(hovered, |d| d.child(self.render_row_actions(conversation, p, cx)))
             .into_any_element()
@@ -262,7 +270,7 @@ impl MailApp {
                         cx.listener(move |this, _: &ClickEvent, _, cx| {
                             cx.stop_propagation();
                             if let Some(c) = this.conversation(&resolve) {
-                                this.set_waiting(&c, false, cx);
+                                this.set_waiting(&[c], false, cx);
                             }
                         }),
                     ))
@@ -273,9 +281,9 @@ impl MailApp {
                             cx.stop_propagation();
                             let Some(c) = this.conversation(&file) else { return };
                             if c.can_archive() {
-                                this.remove(c, Removal::Archive, window, cx);
+                                this.remove(vec![c], Removal::Archive, window, cx);
                             } else if c.can_restore() {
-                                this.remove(c, Removal::Restore, window, cx);
+                                this.remove(vec![c], Removal::Restore, window, cx);
                             }
                         },
                     )))
@@ -284,7 +292,7 @@ impl MailApp {
                     move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         if let Some(c) = this.conversation(&trash) {
-                            this.remove(c, Removal::Trash, window, cx);
+                            this.remove(vec![c], Removal::Trash, window, cx);
                         }
                     },
                 )))
@@ -292,7 +300,8 @@ impl MailApp {
                     move |this, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
                         if let Some(c) = this.conversation(&read) {
-                            this.set_unread(&c, !c.unread, cx);
+                            let unread = !c.unread;
+                            this.set_unread(&[c], unread, cx);
                         }
                     },
                 )))
@@ -300,7 +309,8 @@ impl MailApp {
                     move |this, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
                         if let Some(c) = this.conversation(&star) {
-                            this.set_starred(&c, !c.starred, cx);
+                            let starred = !c.starred;
+                            this.set_starred(&[c], starred, cx);
                         }
                     },
                 ))),
@@ -329,8 +339,8 @@ impl MailApp {
                     return div().into_any_element();
                 };
                 let next = bundle.members.get(row + 1).and_then(|&ix| list.conversations.get(ix)).map(|c| &c.id);
-                let rule = next.is_some_and(|next| this.bundle_highlight.as_ref() != Some(next));
-                let selected = this.bundle_highlight.as_ref() == Some(&conversation.id);
+                let rule = next.is_some_and(|next| !this.row_selected(next, true));
+                let selected = this.row_selected(&conversation.id, true);
                 div().px(px(metrics::INSET)).child(this.render_row(conversation, selected, rule, p, cx)).into_any_element()
             }),
         )

@@ -1,5 +1,5 @@
 //! The row's right-click menu (`ConversationListViewController.menu`): reply and forward, read and star toggles,
-//! "Waiting on you", then filing. It is gpui-kit's `PopupMenu` (MS-226), built as it opens, its entries drawn
+//! "Waiting on you", then filing; on a picked row, what applies to every picked conversation (MS-305). It is gpui-kit's `PopupMenu` (MS-226), built as it opens, its entries drawn
 //! in the app's row (the glyph in the secondary label before the title, in the body text); the kit
 //! steps through them with the arrows, runs one with Return and closes on Escape or a press outside.
 
@@ -23,26 +23,36 @@ impl MailApp {
         cx: &mut Context<Self>,
     ) -> Option<Entity<PopupMenu>> {
         let conversation = self.conversation(id)?;
+        // On a picked row, the menu acts on every picked conversation (MS-305).
+        let targets = match self.selection() {
+            Some(selection) if selection.contains(id) => self.selected_conversations(),
+            _ => vec![conversation],
+        };
+        let all = |test: fn(&Conversation) -> bool| targets.iter().all(test);
+        let any = |test: fn(&Conversation) -> bool| targets.iter().any(test);
 
-        let mut groups: Vec<Vec<Entry>> = vec![vec![
-            Entry { glyph: Icon::Reply, title: "Reply", run: |this, w, cx| this.reply(&Reply, w, cx) },
-            Entry { glyph: Icon::ReplyAll, title: "Reply All", run: |this, w, cx| this.reply_all(&ReplyAll, w, cx) },
-            Entry { glyph: Icon::Forward, title: "Forward", run: |this, w, cx| this.forward(&Forward, w, cx) },
-        ]];
+        let mut groups: Vec<Vec<Entry>> = Vec::new();
+        if targets.len() == 1 {
+            groups.push(vec![
+                Entry { glyph: Icon::Reply, title: "Reply", run: |this, w, cx| this.reply(&Reply, w, cx) },
+                Entry { glyph: Icon::ReplyAll, title: "Reply All", run: |this, w, cx| this.reply_all(&ReplyAll, w, cx) },
+                Entry { glyph: Icon::Forward, title: "Forward", run: |this, w, cx| this.forward(&Forward, w, cx) },
+            ]);
+        }
         groups.push(vec![
-            if conversation.unread {
+            if any(|c| c.unread) {
                 Entry { glyph: Icon::MarkRead, title: "Mark as Read", run: |this, w, cx| this.toggle_read(&ToggleRead, w, cx) }
             } else {
                 Entry { glyph: Icon::MarkUnread, title: "Mark as Unread", run: |this, w, cx| this.toggle_read(&ToggleRead, w, cx) }
             },
-            if conversation.starred {
+            if all(|c| c.starred) {
                 Entry { glyph: Icon::Starred, title: "Unstar", run: |this, w, cx| this.star(&Star, w, cx) }
             } else {
                 Entry { glyph: Icon::Star, title: "Star", run: |this, w, cx| this.star(&Star, w, cx) }
             },
         ]);
-        if conversation.can_mark_waiting() {
-            groups.push(vec![if conversation.waiting {
+        if any(Conversation::can_mark_waiting) {
+            groups.push(vec![if targets.iter().filter(|c| c.can_mark_waiting()).any(|c| c.waiting) {
                 Entry { glyph: Icon::Resolve, title: "Resolve", run: |this, w, cx| this.toggle_waiting(&ToggleWaiting, w, cx) }
             } else {
                 Entry {
@@ -53,10 +63,10 @@ impl MailApp {
             }]);
         }
         let mut filing = Vec::new();
-        if conversation.can_archive() {
+        if any(Conversation::can_archive) {
             filing.push(Entry { glyph: Icon::Archive, title: "Archive", run: |this, w, cx| this.archive(&Archive, w, cx) });
         }
-        if conversation.can_restore() {
+        if any(Conversation::can_restore) {
             filing.push(Entry {
                 glyph: Icon::Restore,
                 title: "Move to Inbox",

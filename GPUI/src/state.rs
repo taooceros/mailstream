@@ -5,10 +5,12 @@
 mod actions;
 mod invitations;
 mod nav;
+mod selection;
 mod split;
 
 pub use actions::Removal;
 pub use invitations::InvitationCard;
+pub use selection::Selection;
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -21,7 +23,7 @@ use gpui::component::input::{Escape, InputEvent, InputState};
 use gpui::component::menu::PopupMenu;
 use gpui::{
     AnyWindowHandle, App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, ListAlignment, ListOffset,
-    ListState, Pixels,
+    ListState, Modifiers, Pixels,
     Point, ScrollHandle, SharedString, Subscription, Task, Window, actions, px,
 };
 use mailstream::{Account, Category, Change, Conversation, Event, EventListener, ListQuery, Listing, Mailbox, MailboxRole};
@@ -40,6 +42,9 @@ actions!(
     [
         Next,
         Previous,
+        ExtendNext,
+        ExtendPrevious,
+        SelectAll,
         Open,
         Back,
         Close,
@@ -76,6 +81,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", Next, list),
         KeyBinding::new("k", Previous, list),
         KeyBinding::new("up", Previous, list),
+        KeyBinding::new("shift-down", ExtendNext, list),
+        KeyBinding::new("shift-up", ExtendPrevious, list),
+        KeyBinding::new(secondary!("a"), SelectAll, list),
         KeyBinding::new("enter", Open, list),
         KeyBinding::new("space", Open, list),
         KeyBinding::new("escape", Back, list),
@@ -386,6 +394,8 @@ pub struct MailApp {
     /// `bundle:<category>`.
     pub highlight: Option<String>,
     pub bundle_highlight: Option<String>,
+    /// Conversations picked together (MS-305); `selection()` reads the list on screen's.
+    selection: Selection,
     pub layers: Vec<Layer>,
     pub threads: HashMap<String, ThreadEntry>,
     /// Folded messages the user opened.
@@ -528,6 +538,7 @@ impl MailApp {
             hovered_message: None,
             thread_requests: 0,
             removing: HashSet::new(),
+            selection: Selection::default(),
             previews_asking: false,
             previews_again: false,
             window: window.window_handle(),
@@ -911,6 +922,7 @@ impl MailApp {
             Some(item_ix) => ListOffset { item_ix, offset_in_item: top.offset_in_item },
             None => ListOffset::default(),
         });
+        self.trim_selection();
     }
 
     /// Drops a bundle layer whose bundle is gone, and keeps open readers' conversations current:

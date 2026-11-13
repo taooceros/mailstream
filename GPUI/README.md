@@ -157,7 +157,7 @@ Flutter's, the bundle carries no OAuth clients or push settings: the engine read
 | `src/engine.rs` | The one in-process `Mailstream` engine, started at launch |
 | `src/model.rs` | What the app adds to the engine's answer types, which it uses as the crate hands them over (MS-238): its titles for mailboxes and bundles (Junk, where the engine says Spam), sidebar badges, and the reader's `ShownMessage` (folded quotes, recipients as "me", attachment tiles, the HTML body), prepared once per answer off the main thread |
 | `src/state.rs` | `MailApp`: selection, lists served from memory for 90 s and reloaded on change events, paging, search, previews, layers over the list, key bindings |
-| `src/state/nav.rs`, `src/state/actions.rs` | Navigation (sources, bundles, the reader, refresh) and optimistic actions (archive, trash, restore, star, read, waiting, tags) that roll back on failure |
+| `src/state/nav.rs`, `src/state/actions.rs`, `src/state/selection.rs` | Navigation (sources, bundles, the reader, refresh), optimistic actions (archive, trash, restore, star, read, waiting, tags) on one conversation or several at once that roll back on failure, and picking several (MS-305) |
 | `src/state/invitations.rs` | Meeting invitations in the reader (MS-210): each card asks the account's calendar for the event and the answer (`calendar_invitation`, again on every `Calendar` event) and answers there (`calendar_respond`) |
 | `src/ui/` | The window as islands (`mod.rs`): the sidebar tree and the rail that stands in for it (`sidebar.rs`), the list's title row and the conversation's floating toolbar, with a scrim behind it and the subject between its capsules once the conversation scrolls under it (`toolbar.rs`), the lazy conversation list of two-line rows with Smart Inbox bundles pinned at its top and its "Waiting on you" group (`list.rs`), the reader's message cards and chat log with the reply card, opening a single mail at its top and a thread at the head of its first unread message, else its last; each message's recipients with the user as "me", opening to its full From/To/Cc/Date, its unread dot and star, a sender's messages within the hour joined in the log (the engine's `chat_runs`), the log's hover Reply / Reply All / Forward answering the message under the pointer, and attachments as two-line tiles (kind mark or thumbnail, size and type, Save) with an invitation's calendar file left to its card (MS-257) (`reader.rs`) and a meeting invitation's card with Accept / Tentative / Decline (`invitation.rs`), the context menu (`menu.rs`) |
 | `src/controls.rs` | The shared controls every view composes (Flutter's `controls.dart`, `glass.dart`, `common.dart`): buttons, icon buttons, capsule buttons, tooltips, switches, segmented controls, tags and toasts (gpui-kit's, see above), capsules, islands, the title bars that move the window, popovers, pills, marks, overlapping color dots, swatch checkboxes and check rows, list rows and their lifted card, notices |
@@ -185,7 +185,12 @@ Return or Space opens, Esc or ⌘[ goes back, E or ⌃⌘A archives, ⌫ trashes
 engine takes it back, on the server too; the toast after each offers Undo), R or ⌘R replies, A or ⇧⌘R replies to all, F
 or ⇧⌘F forwards, ⌘N writes a new message (a new chat in Chat), ⌘W closes the open conversation (or
 Chat's open space or New Chat form, or the calendar's open event), / or ⌘F searches, ⇧⌘N
-refreshes, ⌃⌘S toggles the sidebar, ⌘, opens Settings. In the calendar ↑/↓ or J/K open the next or
+refreshes, ⌃⌘S toggles the sidebar, ⌘, opens Settings. Several conversations are picked as in
+Mail (MS-305): ⌘-click adds or drops one, ⇧-click or ⇧↑/↓ selects the run from the last one
+clicked, ⌘A picks every conversation of the list (or the open bundle), Esc picks none; the
+list's title row then shows how many and their actions, the keys and the right-click menu act on
+all of them, and the engine does each as one action (one request per mailbox) that one Undo
+takes back. In the calendar ↑/↓ or J/K open the next or
 previous event, Return opens the open one's page over the window (Esc goes back) and ⌘R refreshes it. In a draft ⌘Return sends, ⌘W closes it (asking first when
 something was written), Esc closes one with nothing written or hands the keyboard back to the
 list and conversation, and ⇧⌘A attaches files; in the reply card ⇧⌘O moves the reply to the
