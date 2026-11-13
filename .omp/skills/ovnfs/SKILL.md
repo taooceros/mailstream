@@ -6,18 +6,21 @@ description: Isolated copy-on-write checkouts of any folder or git repository wi
 ## In this repository (Mailstream): read first
 
 This file is upstream's skill, vendored from
-https://github.com/stencil-hq/ovnfs/blob/fcf20a8a84fcbbcbff58853ce9d0bff25d14c414/skills/ovnfs/SKILL.md
-(2026-11-08); everything from `# ovnfs` on is its text unchanged. The installed ovnfs is v0.3.0,
-older than those docs: it has no `ovnfs config` verb (edit `.o2/ovnfs.yml` by hand).
+https://github.com/stencil-hq/ovnfs/blob/ef1dea8f06242ff9fa066e7db1ab530ee64dcb06/skills/ovnfs/SKILL.md
+(v0.5.2, 2026-11-13); everything from `# ovnfs` on is its text unchanged. The installed ovnfs is
+v0.5.2 (MS-321; `ovnfs update` then `ovnfs restart` upgrades it).
 
 - Open your checkout with `python3 ~/projects/mailstream/scripts/checkout.py NAME`, from any
   folder. It runs plain `ovnfs new` on the default checkout `~/projects/mailstream`, checks that
   the repo's rules took effect, makes the checkout jj workspace NAME of the default checkout's
   repository, runs `jj git fetch` and `jj new main` there and prints the path. Don't open one
   with `ovnfs new` yourself, and never with `--rev`.
-- ovnfs knows only git (https://github.com/stencil-hq/ovnfs/issues/37), and jj adds a workspace
-  only in an empty folder, so `checkout.py` adds it in an empty temporary folder and moves its
-  `.jj` into the checkout (MS-179; its header has the details). Every checkout then shares one jj
+- ovnfs v0.5 makes a checkout of a jj repository a jj workspace itself
+  (https://github.com/stencil-hq/ovnfs/issues/37), but through `jj workspace add --no-colocate`,
+  which this machine's jj (0.45.1) doesn't have: `ovnfs new` warns "is no jj workspace" and opens
+  the checkout without one. So `checkout.py` still adds the workspace itself, in an empty
+  temporary folder (jj adds one only in an empty folder), and moves its `.jj` into the checkout
+  (MS-179; its header has the details). Every checkout then shares one jj
   repository: commits, bookmarks, working copies and the operation log show in all of them at
   once (AGENTS.md, Version control, for the rules that follow). The checkout's `.git` is ovnfs's
   private git directory as captured; it goes stale, so use jj there, not git.
@@ -59,7 +62,8 @@ An ovnfs checkout is a copy-on-write view of a folder, served from one mount
 takes about a second at any size and copies nothing. Writes stay in the
 checkout, and the folder is written only when you `apply`. In a git repository
 the checkout gets a private git directory, so commits made inside it stay
-there.
+there. In a jj repository it is also a jj workspace of that repository, named
+after the checkout: use `jj` inside it directly, never `jj git init`.
 
 When you need a second copy of a folder, open an ovnfs checkout instead of
 `git worktree add`, `git clone` or `cp -r`, unless the user asks for one of

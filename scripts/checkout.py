@@ -30,13 +30,15 @@ a symlink to it; `rm` deletes it.
 
 Every checkout shares the default checkout's jj repository (MS-179): commits, bookmarks, the
 operation log and each checkout's working copy (`NAME@`) show in every checkout at once, without
-a fetch or push. ovnfs knows only git (https://github.com/stencil-hq/ovnfs/issues/37) and jj adds
-a workspace only in an empty folder, so graft() adds it in an empty temporary folder and moves its
-`.jj` into the checkout, pointing `.jj/repo` at the default checkout's repository. jj doesn't
-document this: after upgrading jj, test it again (two fresh checkouts: `jj st` clean in each, a
-commit made in one shows in the other's `jj log`). `jj workspace list` shows the temporary folder
-as the workspace's path. The checkout's `.git` (ovnfs's private git directory) stays as captured
-and goes stale: use jj there, not git.
+a fetch or push. ovnfs v0.5 makes such a workspace itself only with a jj that has `jj workspace
+add --no-colocate` (this machine's 0.45.1 doesn't: `ovnfs new` warns and makes none, MS-321), and
+jj adds a workspace only in an empty folder, so graft() adds it in an empty temporary folder and
+moves its `.jj` into the checkout, pointing `.jj/repo` at the default checkout's repository. jj
+doesn't document this: after upgrading jj, test it again (two fresh checkouts: `jj st` clean in
+each, a commit made in one shows in the other's `jj log`); a jj with `--no-colocate` makes ovnfs
+add workspace NAME first, which graft() then collides with. `jj workspace list` shows the
+temporary folder as the workspace's path. The checkout's `.git` (ovnfs's private git directory)
+stays as captured and goes stale: use jj there, not git.
 
 `rm NAME` forgets workspace NAME, runs `ovnfs rm NAME` and deletes its target folders outside the
 mount; any of them may be gone already."""
