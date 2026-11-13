@@ -9,16 +9,13 @@
 //! it came from (Esc), Edit, Delete and the provider's page. The expand button of the popover or
 //! the pane, a double click on the event or Return opens it.
 
-use std::ops::Range;
-
 use chrono::Local;
 use gpui::prelude::FluentBuilder;
 use gpui::component::button::Button;
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, HighlightStyle, InteractiveElement, InteractiveText,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledText, Window, div, px, relative,
+    AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement, StatefulInteractiveElement, Styled, Window, div, px, relative,
 };
-use linkify::{LinkFinder, LinkKind};
 use mailstream::CalendarPerson;
 
 use super::agenda::{dot_color, guest_address};
@@ -26,7 +23,7 @@ use super::model;
 use super::{CalendarPane, View};
 use crate::avatars;
 use crate::controls::{
-    ButtonKind, ControlSize, capsule, hairline, icon_button, icon_label_button, island, mark_dot, own_presses, pill,
+    ButtonKind, ControlSize, capsule, hairline, icon_button, icon_label_button, island, linked_text, mark_dot, pill,
     popover, scrim, title_bar, tooltip,
 };
 use crate::design::{self, Palette, calendar as metrics, icon as icon_size, layout, radius, space, text};
@@ -204,14 +201,14 @@ impl CalendarPane {
             .flex()
             .flex_col()
             .when_some(item.location.clone(), |d, location| {
-                d.child(detail_line(Icon::Location, linked_text("calendar-page-location", &location, p), p))
+                d.child(detail_line(Icon::Location, linked_text("calendar-page-location", location, p), p))
             })
             .when_some(item.meeting_url.clone(), |d, url| {
                 let call = div()
                     .flex()
                     .flex_col()
                     .child(div().font_weight(FontWeight::MEDIUM).child(format!("{} call", model::meeting_label(&url))))
-                    .child(div().text_size(px(text::FOOTNOTE)).child(linked_text("calendar-page-call", &url, p)));
+                    .child(div().text_size(px(text::FOOTNOTE)).child(linked_text("calendar-page-call", url, p)));
                 d.child(detail_line(Icon::Video, call.into_any_element(), p))
             });
         let guests = self.guests_section(index, if side_by_side { 1 } else { 2 }, true, p, cx);
@@ -477,7 +474,7 @@ impl CalendarPane {
                 .child(
                     div()
                         .line_height(px(text::BODY * 1.45))
-                        .child(linked_text(format!("calendar-notes:{}", surface.name()), notes, p)),
+                        .child(linked_text(format!("calendar-notes:{}", surface.name()), notes.to_owned(), p)),
                 )
                 .when_some(cut, |d, cut| {
                     d.child(div().pt(px(space::S8)).text_size(px(text::FOOTNOTE)).text_color(p.muted).child(cut))
@@ -505,7 +502,7 @@ impl CalendarPane {
             .flex_col()
             .child(self.event_head(index, surface, p, cx))
             .when_some(item.location.clone(), |d, location| {
-                d.child(detail_line(Icon::Location, linked_text(format!("calendar-location:{}", surface.name()), &location, p), p))
+                d.child(detail_line(Icon::Location, linked_text(format!("calendar-location:{}", surface.name()), location, p), p))
             })
             .children(self.guests_section(index, 2, false, p, cx))
             .children(self.notes_section(index, surface, p))
@@ -521,38 +518,6 @@ fn detail_line(glyph: Icon, child: AnyElement, p: &Palette) -> Div {
         .gap(px(space::S10))
         .child(div().pt(px(1.)).child(icon(glyph, icon_size::ROW, p.muted)))
         .child(div().flex_1().min_w_0().child(child))
-}
-
-/// `text` with its web addresses and mail addresses in the links' color (as Chat's), a click on
-/// one opening it in the browser or the mail app. Presses on text with links are its own: no
-/// drag of the pane or the page starts there (MS-266).
-fn linked_text(id: impl Into<ElementId>, text: &str, p: &Palette) -> AnyElement {
-    let (ranges, targets) = links(text);
-    let link = HighlightStyle { color: Some(p.accent), ..HighlightStyle::default() };
-    let styled = StyledText::new(SharedString::from(text.to_owned())).with_highlights(ranges.iter().map(|range| (range.clone(), link)));
-    if ranges.is_empty() {
-        return styled.into_any_element();
-    }
-    let text = InteractiveText::new(id, styled).on_click(ranges, move |index, _, cx| {
-        if let Some(target) = targets.get(index) {
-            cx.open_url(target);
-        }
-    });
-    own_presses(div()).child(text).into_any_element()
-}
-
-/// Where `text`'s web and mail addresses are, and what each opens (`mailto:` for a mail address).
-fn links(text: &str) -> (Vec<Range<usize>>, Vec<String>) {
-    LinkFinder::new()
-        .links(text)
-        .map(|link| {
-            let target = match link.kind() {
-                LinkKind::Email => format!("mailto:{}", link.as_str()),
-                _ => link.as_str().to_owned(),
-            };
-            (link.start()..link.end(), target)
-        })
-        .unzip()
 }
 
 /// A guest on the open event: their avatar, name, and part (Organizer) and answer; the answers
@@ -605,12 +570,12 @@ fn guest_card(person: &CalendarPerson, organizer: bool, address_shown: bool, p: 
 
 #[cfg(test)]
 mod tests {
-    use super::links;
+    use crate::controls::text_links;
 
     #[test]
     fn notes_link_their_web_and_mail_addresses() {
         let notes = "Agenda: https://docs.example.com/plan?x=1. Questions to ana@example.com, not example.com";
-        let (ranges, targets) = links(notes);
+        let (ranges, targets) = text_links(notes);
         assert_eq!(targets, ["https://docs.example.com/plan?x=1", "mailto:ana@example.com"]);
         assert_eq!(&notes[ranges[0].clone()], "https://docs.example.com/plan?x=1");
         assert_eq!(&notes[ranges[1].clone()], "ana@example.com");

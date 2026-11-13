@@ -8,6 +8,8 @@
 //! click), notes, the list's group titles and the search field's frame. A view composes these
 //! rather than restyling one.
 
+use std::ops::Range;
+
 use gpui::component::button::{Button, ButtonVariants};
 use gpui::component::notification::Notification;
 use gpui::component::switch::Switch;
@@ -17,11 +19,13 @@ use gpui::component::tooltip::Tooltip;
 use gpui::component::{Disableable, Sizable};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Anchor, AnyElement, AnyView, App, DispatchPhase, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
-    MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Window, canvas, div, hsla, linear_color_stop, linear_gradient, px,
+    Anchor, AnyElement, AnyView, App, DispatchPhase, Div, ElementId, FontWeight, HighlightStyle, Hsla,
+    InteractiveElement, InteractiveText, IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
+    Point, SharedString, Stateful, StatefulInteractiveElement, Styled, StyledText, Window, canvas, div, hsla,
+    linear_color_stop, linear_gradient, px,
 };
-
+use linkify::{LinkFinder, LinkKind};
+use mailstream::is_mail_link;
 use crate::design::{
     self, Palette, avatar as avatar_metrics, icon as icon_size, layout, list as metrics, marks, notice as notice_metrics,
     radius, space, stroke, tag as tag_metrics, text,
@@ -832,4 +836,77 @@ pub fn field_frame(focused: bool, capsule: bool, p: &Palette) -> Div {
             }])
         })
         .when(!focused, |d| d.border(px(stroke::HAIRLINE)).border_color(p.border))
+}
+
+/// Where `text`'s web and mail addresses are, and what each opens (`mailto:` for a mail address),
+/// keeping only links the reader allows (`mailstream::is_mail_link`).
+pub fn text_links(text: &str) -> (Vec<Range<usize>>, Vec<String>) {
+    if !text.contains(['.', ':']) {
+        return (Vec::new(), Vec::new());
+    }
+    LinkFinder::new()
+        .links(text)
+        .filter_map(|link| {
+            let target = match link.kind() {
+                LinkKind::Email => format!("mailto:{}", link.as_str()),
+                _ => link.as_str().to_owned(),
+            };
+            is_mail_link(&target).then_some((link.start()..link.end(), target))
+        })
+        .unzip()
+}
+
+/// `text` with its web and mail addresses in the links' color (as Chat's), a click on one opening
+/// it in the browser or the mail app. Presses on text with links are its own: no drag of the
+/// pane or the page starts there (MS-266).
+pub fn linked_text(id: impl Into<ElementId>, text: impl Into<SharedString>, p: &Palette) -> AnyElement {
+    let text = text.into();
+    let (ranges, targets) = text_links(&text);
+    if ranges.is_empty() {
+        return StyledText::new(text).into_any_element();
+    }
+    let link = HighlightStyle { color: Some(p.accent), ..HighlightStyle::default() };
+    let styled = StyledText::new(text).with_highlights(ranges.iter().map(|range| (range.clone(), link)));
+    let text = InteractiveText::new(id, styled).on_click(ranges, move |index, _, cx| {
+        if let Some(target) = targets.get(index) {
+            cx.open_url(target);
+        }
+    });
+    own_presses(div()).child(text).into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::text_links;
+
+    #[test]
+    fn detects_allowed_web_and_mail_links_only() {
+        let sample = "See https://example.com/a?x=1 and http://example.org, email ana@example.com or mailto:bob@example.com, not example.com or notes.md.";
+        let (ranges, targets) = text_links(sample);
+        assert_eq!(
+            targets,
+            ["https://example.com/a?x=1", "http://example.org", "mailto:ana@example.com", "mailto:bob@example.com"]
+        );
+        assert_eq!(&sample[ranges[0].clone()], "https://example.com/a?x=1");
+        assert_eq!(&sample[ranges[1].clone()], "http://example.org");
+        assert_eq!(&sample[ranges[2].clone()], "ana@example.com");
+        assert_eq!(&sample[ranges[3].clone()], "bob@example.com");
+    }
+
+    #[test]
+    fn filters_disallowed_schemes_and_credentials() {
+        let sample = "file:///etc/passwd ftp://example.com/a javascript:alert(1) https://user:secret@example.com/ https://ok.example.com/path";
+        let (ranges, targets) = text_links(sample);
+        assert_eq!(targets, ["https://ok.example.com/path"]);
+        assert_eq!(&sample[ranges[0].clone()], "https://ok.example.com/path");
+    }
+
+    #[test]
+    fn keeps_utf8_byte_boundaries_around_cjk_text() {
+        let sample = "请查看文档 https://example.com/plan 与 sam@example.com";
+        let (ranges, targets) = text_links(sample);
+        assert_eq!(targets, ["https://example.com/plan", "mailto:sam@example.com"]);
+        assert_eq!(&sample[ranges[0].clone()], "https://example.com/plan");
+        assert_eq!(&sample[ranges[1].clone()], "sam@example.com");
+    }
 }

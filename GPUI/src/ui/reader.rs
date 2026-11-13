@@ -7,7 +7,7 @@
 use gpui::{FocusHandle, Hsla, ObjectFit, Rgba, ScrollDelta, StyledImage, img, point};
 
 use super::*;
-use crate::controls::tooltip;
+use crate::controls::{linked_text, tooltip};
 use crate::design::{AttachmentKind, marks, reader as metrics_reader};
 use crate::state::{ReaderPin, ReaderTop};
 
@@ -390,9 +390,12 @@ impl MailApp {
                 .flex_col()
                 .text_size(px(text::READING))
                 .line_height(relative(text::READING_LEADING))
-                .when(!message.shown.is_empty(), |d| d.child(text_runs(&message.shown, p)))
+                .when(!message.shown.is_empty(), |d| d.child(text_runs(&format!("body:{}", message.id), &message.shown, p)))
                 .when_some(message.quoted.clone(), |d, quoted| {
-                    d.child(self.render_fold(&message.id, open, div().text_color(p.muted).child(quoted), p, cx))
+                    let content = div()
+                        .text_color(p.muted)
+                        .child(linked_text(ElementId::Name(format!("body-quoted:{}", message.id).into()), quoted, p));
+                    d.child(self.render_fold(&message.id, open, content, p, cx))
                 })
                 .into_any_element(),
         )
@@ -639,15 +642,16 @@ fn day_divider(label: SharedString, p: &Palette) -> Div {
 }
 
 /// A text body's runs (`format::runs`): what was written, and its quotes in place behind a rule,
-/// muted.
-fn text_runs(runs: &[format::Run], p: &'static Palette) -> Div {
-    div().flex().flex_col().gap(px(space::S8)).children(runs.iter().map(|run| match run {
-        format::Run::Text(text) => div().child(text.clone()),
-        format::Run::Quote(inner) => text_runs(inner, p)
+/// muted; web and mail addresses in both highlight and open on click.
+fn text_runs(prefix: &str, runs: &[format::Run], p: &'static Palette) -> Div {
+    div().flex().flex_col().gap(px(space::S8)).children(runs.iter().enumerate().map(|(index, run)| match run {
+        format::Run::Text(text) => linked_text(ElementId::Name(format!("{prefix}:{index}").into()), text.clone(), p),
+        format::Run::Quote(inner) => text_runs(&format!("{prefix}:{index}"), inner, p)
             .border_l(px(metrics_reader::QUOTE_RULE))
             .border_color(p.line)
             .pl(px(metrics_reader::QUOTE_INDENT))
-            .text_color(p.muted),
+            .text_color(p.muted)
+            .into_any_element(),
     }))
 }
 
@@ -695,4 +699,75 @@ fn web_body(id: SharedString, html: SharedString, open: bool) -> AnyElement {
     let height = webview::height(&id).unwrap_or(40.);
     let body = canvas(|_, _, _| {}, move |bounds, _, window, _| webview::paint(&id, &html, open, bounds, window));
     body.w_full().h(px(height)).into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{
+        Context, InteractiveElement, Modifiers, ParentElement, Render, Styled, TestAppContext, VisualTestContext,
+        Window, div, px,
+    };
+
+    use super::text_runs;
+    use crate::design::{self, text};
+    use crate::format;
+
+    struct RunsHost {
+        plain: Vec<format::Run>,
+        body: Vec<format::Run>,
+        quote: Vec<format::Run>,
+        nested: Vec<format::Run>,
+    }
+
+    impl Render for RunsHost {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+            let p = design::palette(window.appearance());
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap(px(8.))
+                .p(px(16.))
+                .font_family(design::ui_font())
+                .text_size(px(text::READING))
+                .text_color(p.text)
+                .child(div().debug_selector(|| "plain-run".into()).child(text_runs("plain", &self.plain, p)))
+                .child(div().debug_selector(|| "body-link".into()).child(text_runs("body", &self.body, p)))
+                .child(div().debug_selector(|| "quote-email".into()).child(text_runs("quote", &self.quote, p)))
+                .child(div().debug_selector(|| "nested-link".into()).child(text_runs("nested", &self.nested, p)))
+        }
+    }
+
+    #[gpui::test]
+    fn clicking_links_in_text_and_quoted_runs_opens_allowed_targets(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui::init(cx);
+            design::sync_kit_theme(gpui::WindowAppearance::Light, cx);
+        });
+        let (_, cx) = cx.add_window_view(|_, _| RunsHost {
+            plain: format::runs("just plain prose, not example.com"),
+            body: format::runs("https://example.com/spec"),
+            quote: format::runs("> ana@example.com"),
+            nested: format::runs(">> http://nested.example.com/path"),
+        });
+        let click_selector = |cx: &mut VisualTestContext, selector: &'static str| {
+            cx.run_until_parked();
+            let bounds = cx.debug_bounds(selector).expect(selector);
+            cx.simulate_click(bounds.center(), Modifiers::default());
+            cx.run_until_parked();
+        };
+
+        click_selector(cx, "plain-run");
+        assert_eq!(cx.opened_url(), None);
+
+        click_selector(cx, "body-link");
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/spec"));
+
+        click_selector(cx, "quote-email");
+        assert_eq!(cx.opened_url().as_deref(), Some("mailto:ana@example.com"));
+
+        click_selector(cx, "nested-link");
+        assert_eq!(cx.opened_url().as_deref(), Some("http://nested.example.com/path"));
+    }
 }

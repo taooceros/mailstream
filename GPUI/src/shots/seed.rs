@@ -274,8 +274,8 @@ fn mail() -> Vec<(Mail, Option<Value>)> {
     inline.unread = true;
     inline.starred = true;
     inline.text = Some(
-        "Replying inline:\n\n> Can we move this to the 24th? QA needs the weekend.\n\nYes, QA confirmed \
-         the 24th works. I moved the date in the tracker.\n\n> I'll take the onboarding flow.\n\nGreat, \
+        "Replying inline:\n\n> Can we move this to the 24th? QA needs the weekend (see https://qa.example.com/q4 or qa@northwind.example).\n\nYes, QA confirmed \
+         the 24th works. I moved the date in the tracker (https://tracker.example.com/q4) and copied devon@northwind.example.\n\n> I'll take the onboarding flow.\n\nGreat, \
          you're assigned. Can you send the first draft by Wednesday?\n\nDevon"
             .into(),
     );
