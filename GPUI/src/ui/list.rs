@@ -35,7 +35,8 @@ impl MailApp {
     }
 
     /// The accounts of the list on screen that can't connect (MS-278), on one line over its rows,
-    /// which keep what the engine holds; a click tries every account again.
+    /// which keep what the engine holds; a click tries every account again, its × hides it until
+    /// the message changes (MS-322).
     pub(super) fn render_account_notice(&self, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         let failing: Vec<(&Account, &SharedString)> = self
             .accounts
@@ -51,6 +52,10 @@ impl MailApp {
             1 => format!("{} can't connect: {problem}", account.title()),
             count => format!("{count} accounts can't connect"),
         };
+        if self.dismissed_account_notice.as_deref() == Some(message.as_str()) {
+            return None;
+        }
+        let dismissed = message.clone();
         Some(
             div()
                 .flex_shrink_0()
@@ -68,7 +73,14 @@ impl MailApp {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(p.accent)
                                 .child("Try Again"),
-                        ),
+                        )
+                        .child(notice_close("account-notice-close", p).on_click(cx.listener(
+                            move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.dismissed_account_notice = Some(dismissed.clone());
+                                cx.notify();
+                            },
+                        ))),
                 )
                 .into_any_element(),
         )

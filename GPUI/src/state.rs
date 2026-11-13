@@ -385,6 +385,9 @@ pub struct MailApp {
     pub mailboxes: HashMap<String, Vec<Mailbox>>,
     /// The accounts that can't connect just now, and why (the engine's `status`, MS-278).
     pub account_problems: HashMap<String, SharedString>,
+    /// The account notice's message when the user closed it (MS-322): it stays hidden until the
+    /// message changes.
+    pub dismissed_account_notice: Option<String>,
     pub source: Source,
     pub query: Option<SharedString>,
     pub lists: HashMap<ListKey, List>,
@@ -521,6 +524,7 @@ impl MailApp {
             accounts: Vec::new(),
             mailboxes: HashMap::new(),
             account_problems: HashMap::new(),
+            dismissed_account_notice: None,
             source: Source::Unified(MailboxRole::Inbox),
             query: None,
             lists: HashMap::new(),

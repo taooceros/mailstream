@@ -720,6 +720,18 @@ pub fn notice(tone: Tone, title: Option<SharedString>, message: impl Into<Shared
     )
 }
 
+/// The × at the end of a compact notice (MS-322): it dismisses the notice until what it says
+/// changes. The caller adds the click, which should stop there rather than reach the notice's own.
+pub fn notice_close(id: impl Into<ElementId>, p: &Palette) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .rounded_full()
+        .cursor_pointer()
+        .hover(|s| s.bg(p.hover))
+        .child(icon(Icon::Close, icon_size::INLINE, p.muted))
+}
+
 /// What every toast is, so a new one takes the place of the one shown.
 struct AppToast;
 

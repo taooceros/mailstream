@@ -23,8 +23,8 @@ use super::{CalendarPane, Entry, Refresh, Today, View};
 use crate::avatars;
 use crate::controls::{
     ButtonKind, ControlSize, Tone, button, capsule, capsule_button, color_dots, hairline, icon_button,
-    icon_label_button, island, list_row, mark_dot, notice, popover, segment, segmented, swatch_row, tag, title_bar,
-    tooltip,
+    icon_label_button, island, list_row, mark_dot, notice, notice_close, popover, segment, segmented, swatch_row, tag,
+    title_bar, tooltip,
 };
 use crate::design::{self, Palette, calendar as metrics, icon as icon_size, layout, list as rows, space, stroke, text};
 use crate::icons::{Icon, icon};
@@ -553,9 +553,10 @@ impl CalendarPane {
     }
 
     /// An account whose calendar cannot show: its calendar is not connected (Connect asks the
-    /// provider in the browser, MS-306), or its last fetch failed.
-    fn render_notice(&self, account: usize, p: &'static Palette, cx: &mut Context<Self>) -> Div {
-        let account = &self.accounts[account];
+    /// provider in the browser, MS-306), or its last fetch failed. Its × closes it until that
+    /// changes (MS-322).
+    fn render_notice(&self, index: usize, p: &'static Palette, cx: &mut Context<Self>) -> Div {
+        let account = &self.accounts[index];
         let failed = account.problem.clone().filter(|_| account.granted);
         let title = if account.label.is_empty() { account.id.clone() } else { account.label.clone() };
         let (tone, message) = match &failed {
@@ -579,7 +580,11 @@ impl CalendarPane {
                     )
                     .when(idle, |b| b.on_click(cx.listener(move |this, _, _, cx| this.connect_calendar(id.clone(), cx)))),
                 )
-            }),
+            })
+            .child(
+                notice_close(ElementId::Name(format!("calendar-notice-close:{}", account.id).into()), p)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.dismiss_account_notice(index, cx))),
+            ),
         )
     }
 

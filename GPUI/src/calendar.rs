@@ -21,7 +21,7 @@ mod grid;
 pub mod model;
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -57,6 +57,12 @@ const DAYS: i64 = 60;
 const PAST_DAYS: i64 = 7;
 /// How often the calendar follows the clock (the Up Next card, the time line, a new day).
 const CLOCK: Duration = Duration::from_secs(15);
+
+/// What an account's agenda notice says (not connected, or why its fetch failed), so a closed one
+/// comes back once that changes (MS-322).
+fn notice_key(account: &CalendarAccount) -> String {
+    format!("{}\n{}\n{}", account.id, account.granted, account.problem.as_deref().unwrap_or_default())
+}
 
 pub fn bind_keys(cx: &mut App) {
     // Google Calendar's keys, as mail takes Gmail's; never while a field has focus. The window's
@@ -131,6 +137,12 @@ pub struct CalendarPane {
     accounts: Vec<CalendarAccount>,
     /// The account whose calendar is being connected in the browser (MS-306).
     connecting: Option<String>,
+    /// The day and week views' notice line when the user closed it (MS-322): it stays hidden
+    /// until its message changes.
+    dismissed_notice: Option<String>,
+    /// The agenda's account notices the user closed, by `notice_key`: each stays hidden until
+    /// what it says changes.
+    dismissed_accounts: HashSet<String>,
     /// This computer's time zone, as the engine names it, which the editor's times are in.
     time_zone: String,
     /// A saved new event, opened once a read brings it.
@@ -230,6 +242,8 @@ impl CalendarPane {
             active: false,
             accounts: Vec::new(),
             connecting: None,
+            dismissed_notice: None,
+            dismissed_accounts: HashSet::new(),
             time_zone: String::new(),
             open_after: None,
             events: Vec::new(),
@@ -380,7 +394,7 @@ impl CalendarPane {
         let days = model::agenda_days(&self.events, today);
         let mut entries = Vec::with_capacity(self.accounts.len() + days.len() * 4);
         for (index, account) in self.accounts.iter().enumerate() {
-            if !account.granted || account.problem.is_some() {
+            if (!account.granted || account.problem.is_some()) && !self.dismissed_accounts.contains(&notice_key(account)) {
                 entries.push(Entry::Notice(index));
             }
         }
@@ -411,6 +425,14 @@ impl CalendarPane {
             self.agenda.scroll_to(top);
         }
         self.built_for = Some(today);
+    }
+
+    /// Closes an account's agenda notice until what it says changes (MS-322).
+    fn dismiss_account_notice(&mut self, account: usize, cx: &mut Context<Self>) {
+        let key = notice_key(&self.accounts[account]);
+        self.dismissed_accounts.insert(key);
+        self.rebuild(Local::now().date_naive());
+        cx.notify();
     }
 
     /// Accounts whose sign-in grants calendar access.

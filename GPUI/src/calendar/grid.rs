@@ -27,7 +27,7 @@ use gpui::{
 use super::agenda::{dot_color, guest_avatars};
 use super::model::{self, AllDayPlacement, Event, EventKey, Look, Placement};
 use super::{CalendarPane, Pan, View};
-use crate::controls::{Tone, mark_dot, notice, tag};
+use crate::controls::{Tone, mark_dot, notice, notice_close, tag};
 use crate::design::{self, Palette, calendar as metrics, motion, space, stroke, text};
 use crate::icons::{Icon, icon};
 use crate::frame_clock;
@@ -997,7 +997,7 @@ impl CalendarPane {
     }
 
     /// The day and week views' one line for the accounts whose calendar cannot show; a click
-    /// opens the agenda, which has each one's notice.
+    /// opens the agenda, which has each one's notice; its × hides it until the message changes.
     pub(super) fn render_notice_line(&self, p: &'static Palette, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let notices: Vec<&mailstream::CalendarAccount> =
             self.accounts.iter().filter(|account| !account.granted || account.problem.is_some()).collect();
@@ -1009,6 +1009,10 @@ impl CalendarPane {
         } else {
             format!("{} accounts cannot show their calendars", notices.len())
         };
+        if self.dismissed_notice.as_deref() == Some(message.as_str()) {
+            return None;
+        }
+        let dismissed = message.clone();
         Some(
             div().flex_shrink_0().px(px(space::S12)).pb(px(space::S6)).child(
                 notice(if failed { Tone::Error } else { Tone::Action }, None, message, true, p)
@@ -1022,7 +1026,14 @@ impl CalendarPane {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(p.accent)
                             .child("Show in Agenda"),
-                    ),
+                    )
+                    .child(notice_close("calendar-notice-close", p).on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.dismissed_notice = Some(dismissed.clone());
+                            cx.notify();
+                        },
+                    ))),
             )
             .into_any_element(),
         )
