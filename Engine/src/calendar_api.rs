@@ -1,8 +1,10 @@
-//! Google Calendar and Outlook calendars (Microsoft Graph) as the calendar store reads them: an
-//! account's calendars, and their events within a window with recurring ones expanded into
-//! occurrences (Google's `singleEvents`, Graph's `calendarView`). Both answer the same
-//! [`CalendarEvent`]s, which mail.db keeps as they are. Adding, changing and deleting events is
-//! in [`write`].
+//! Google Calendar and Outlook calendars (Microsoft Graph) as the calendar store reads them: every
+//! calendar in an account's list (its own and those shared with it or subscribed to), and each
+//! one's events within a window with recurring ones expanded into occurrences (Google's
+//! `singleEvents`, Graph's `calendarView`). A Google calendar fetched once is then asked only
+//! for what changed since (its sync token). Both answer the same [`CalendarEvent`]s, which
+//! mail.db keeps as they are, per calendar ([`CalendarPart`]). Adding, changing and deleting
+//! events is in [`write`].
 use chrono::{Local, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -24,6 +26,8 @@ pub const GOOGLE_ROOT: &str = "https://www.googleapis.com/calendar/v3/";
 const PAGES: usize = 20;
 /// Longest description kept per event.
 const NOTES_LIMIT: usize = 4000;
+/// The title of an event without one.
+const UNTITLED: &str = "(No title)";
 
 /// One of an account's calendars.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
@@ -41,6 +45,52 @@ pub struct CalendarInfo {
     /// `canEdit`).
     #[serde(default)]
     pub writable: bool,
+    /// The account's access as Google names it: `owner`, `writer`,
+    /// `writerWithoutPrivateAccess`, `reader` or `freeBusyReader` (times only, no details). For
+    /// Graph: `owner` for the account's own calendars, `writer` or `reader` for others'.
+    #[serde(default)]
+    pub access: String,
+    /// Ticked in the provider's own list (Google's `selected`; every Graph calendar).
+    #[serde(default)]
+    pub selected: bool,
+    /// Hidden from the provider's own list (Google's `hidden`).
+    #[serde(default)]
+    pub hidden: bool,
+    /// Its events are fetched and shown: as the person chose here (`calendar.show`), else as
+    /// the provider shows it (the account's own calendar, and those ticked and not hidden).
+    #[serde(default)]
+    pub shown: bool,
+}
+
+impl CalendarInfo {
+    /// The account's own (its primary one and others it made), not someone else's shared with
+    /// it or subscribed to: answers to invitations on it are the account's.
+    pub fn owned(&self) -> bool {
+        self.primary || self.access == "owner"
+    }
+}
+
+/// One calendar's events from `from` up to, not including, `until` (local days, `2026-11-08`),
+/// as last fetched, with Google's token for asking only what changed since.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CalendarPart {
+    pub from: String,
+    pub until: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<String>,
+    pub events: Vec<CalendarEvent>,
+}
+
+impl CalendarPart {
+    /// No events, fetched again whole next time.
+    pub fn empty(from: &str, until: &str) -> Self {
+        Self { from: from.into(), until: until.into(), sync: None, events: Vec::new() }
+    }
+}
+
+/// Earliest first, all-day events first on their day.
+pub fn sort_events(events: &mut [CalendarEvent]) {
+    events.sort_by(|a, b| a.start.total_cmp(&b.start).then_with(|| b.all_day.cmp(&a.all_day)));
 }
 
 /// An organizer or attendee.
@@ -110,12 +160,20 @@ pub struct CalendarEvent {
 }
 
 impl CalendarEvent {
+    /// Whether it touches `start`…`end` (one without length: starts within it).
+    pub fn overlaps(&self, start: Date, end: Date) -> bool {
+        if self.end > self.start { self.end > start && self.start < end } else { self.start >= start && self.start < end }
+    }
+
     /// As `calendar.events` answers it, with its account, its calendar's name and color, and
-    /// whether the account may change it.
+    /// whether the account may change it. Its answer is the account's own on its own calendars
+    /// (and on one the provider found without naming a calendar, `None`); on someone else's it
+    /// is that person's.
     pub fn item(&self, account: &str, calendar: Option<&CalendarInfo>, editable: bool) -> CalendarItem {
         let event = self.clone();
         CalendarItem {
             account: account.into(),
+            own: calendar.is_none_or(CalendarInfo::owned),
             calendar: event.calendar,
             calendar_name: calendar.map(|calendar| calendar.name.clone()),
             color: calendar.and_then(|calendar| calendar.color.clone()),
@@ -140,13 +198,6 @@ impl CalendarEvent {
             editable,
         }
     }
-}
-
-/// An account's calendars and their events from `start` to `end`.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Fetched {
-    pub calendars: Vec<CalendarInfo>,
-    pub events: Vec<CalendarEvent>,
 }
 
 /// `2026-11-08`'s local midnight.
@@ -200,12 +251,33 @@ pub struct CalendarRemote<'a> {
 }
 
 impl CalendarRemote<'_> {
-    /// Every calendar the account shows and their events overlapping `start`…`end`.
-    pub async fn fetch(&self, start: Date, end: Date) -> Result<Fetched, ApiError> {
+    /// Every calendar in the account's list, each `shown` as the provider shows it.
+    pub async fn calendars(&self) -> Result<Vec<CalendarInfo>, ApiError> {
         match self.provider {
-            Provider::Google => self.google(start, end).await,
-            Provider::Microsoft => self.graph(start, end).await,
+            Provider::Google => self.google_calendars().await,
+            Provider::Microsoft => self.graph_calendars().await,
         }
+    }
+
+    /// `calendar`'s events touching the local days `from` up to, not including, `until`. With
+    /// `previous`, Google's copy of the same days with its sync token, only what changed since
+    /// is asked for and applied to it (all of it again when Google no longer takes the token).
+    pub async fn events(
+        &self,
+        calendar: &CalendarInfo,
+        from: &str,
+        until: &str,
+        previous: Option<CalendarPart>,
+    ) -> Result<CalendarPart, ApiError> {
+        let start = local_midnight(from).unwrap_or_else(now);
+        let end = local_midnight(until).unwrap_or(start);
+        let mut part = match self.provider {
+            Provider::Google => self.google_events(calendar, start, end, previous.filter(|part| part.from == from && part.until == until)).await?,
+            Provider::Microsoft => CalendarPart { sync: None, events: self.graph_events(&calendar.id, start, end).await?, ..CalendarPart::default() },
+        };
+        (part.from, part.until) = (from.into(), until.into());
+        sort_events(&mut part.events);
+        Ok(part)
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, request: Request) -> Result<T, ApiError> {
@@ -229,107 +301,139 @@ impl CalendarRemote<'_> {
         Ok(found.unwrap_or_default())
     }
 
-    /// Fetches each calendar's events; a calendar the account may no longer read (shared ones
-    /// taken back) is left out rather than failing the rest.
-    async fn each_calendar<F, Fut>(&self, calendars: &[CalendarInfo], events: F) -> Result<Vec<CalendarEvent>, ApiError>
-    where
-        F: Fn(CalendarInfo) -> Fut,
-        Fut: Future<Output = Result<Vec<CalendarEvent>, ApiError>>,
-    {
-        let results = futures::future::join_all(calendars.iter().cloned().map(events)).await;
-        let mut found = Vec::new();
-        for result in results {
-            match result {
-                Ok(events) => found.extend(events),
-                Err(error) if matches!(error.status, 403 | 404) => {}
+    // MARK: Google
+
+    async fn google_calendars(&self) -> Result<Vec<CalendarInfo>, ApiError> {
+        let first = api::url(self.google, "users/me/calendarList", &[("maxResults", "250")]);
+        let entries = self.all::<GooglePage<GoogleCalendar>>(first, None).await?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| {
+                let primary = entry.primary == Some(true);
+                let (selected, hidden) = (entry.selected == Some(true), entry.hidden == Some(true));
+                let access = entry.access_role.unwrap_or_default();
+                CalendarInfo {
+                    name: non_empty(entry.summary_override)
+                        .or_else(|| non_empty(entry.summary))
+                        .unwrap_or_else(|| entry.id.clone()),
+                    id: entry.id,
+                    color: non_empty(entry.background_color),
+                    primary,
+                    writable: matches!(access.as_str(), "owner" | "writer" | "writerWithoutPrivateAccess"),
+                    access,
+                    selected,
+                    hidden,
+                    // As Google Calendar shows it: the primary one and those ticked in its list.
+                    shown: primary || (selected && !hidden),
+                }
+            })
+            .collect())
+    }
+
+    async fn google_events(
+        &self,
+        calendar: &CalendarInfo,
+        start: Date,
+        end: Date,
+        previous: Option<CalendarPart>,
+    ) -> Result<CalendarPart, ApiError> {
+        let path = format!("calendars/{}/events", api::percent_encoded(&calendar.id));
+        // Only free and busy times: Google names no event.
+        let busy = calendar.access == "freeBusyReader";
+        let event = |item: GoogleEvent| {
+            let mut event = item.event(&calendar.id)?;
+            if busy && event.title == UNTITLED {
+                event.title = "Busy".into();
+            }
+            Some(event)
+        };
+        if let Some(mut part) = previous
+            && let Some(token) = part.sync.take()
+        {
+            // The token stands for the same query: expanded occurrences, no time bounds.
+            let first = api::url(self.google, &path, &[("syncToken", token.as_str()), ("singleEvents", "true"), ("maxResults", "2500")]);
+            match self.google_pages(first).await {
+                Ok((changes, sync)) => {
+                    for change in changes {
+                        // A deleted series takes its occurrences along.
+                        let cancelled = change.status.as_deref() == Some("cancelled");
+                        let id = change.id.clone();
+                        part.events.retain(|kept| kept.id != id && !(cancelled && kept.series.as_deref() == Some(id.as_str())));
+                        if let Some(changed) = event(change).filter(|changed| changed.overlaps(start, end)) {
+                            part.events.push(changed);
+                        }
+                    }
+                    part.sync = sync;
+                    return Ok(part);
+                }
+                // The token expired: everything again.
+                Err(error) if error.status == 410 => {}
                 Err(error) => return Err(error),
             }
         }
-        found.sort_by(|a, b| a.start.total_cmp(&b.start).then_with(|| b.all_day.cmp(&a.all_day)));
-        Ok(found)
+        let (time_min, time_max) = (iso8601(start), iso8601(end));
+        let first = api::url(
+            self.google,
+            &path,
+            &[("timeMin", time_min.as_str()), ("timeMax", time_max.as_str()), ("singleEvents", "true"), ("maxResults", "2500")],
+        );
+        let (items, sync) = self.google_pages(first).await?;
+        Ok(CalendarPart { sync, events: items.into_iter().filter_map(event).collect(), ..CalendarPart::default() })
     }
 
-    // MARK: Google
-
-    async fn google(&self, start: Date, end: Date) -> Result<Fetched, ApiError> {
-        let first = api::url(self.google, "users/me/calendarList", &[("minAccessRole", "reader"), ("maxResults", "250")]);
-        let entries = self.all::<GooglePage<GoogleCalendar>>(first, None).await?;
-        // The calendars Google Calendar shows: the primary one and those ticked in its list.
-        let calendars: Vec<CalendarInfo> = entries
-            .into_iter()
-            .filter(|entry| entry.primary == Some(true) || (entry.selected == Some(true) && entry.hidden != Some(true)))
-            .map(|entry| CalendarInfo {
-                name: non_empty(entry.summary_override)
-                    .or_else(|| non_empty(entry.summary))
-                    .unwrap_or_else(|| entry.id.clone()),
-                id: entry.id,
-                color: non_empty(entry.background_color),
-                primary: entry.primary == Some(true),
-                writable: matches!(entry.access_role.as_deref(), Some("owner" | "writer")),
-            })
-            .collect();
-        let (time_min, time_max) = (iso8601(start), iso8601(end));
-        let events = self
-            .each_calendar(&calendars, |calendar| {
-                let (time_min, time_max) = (time_min.clone(), time_max.clone());
-                async move {
-                    let path = format!("calendars/{}/events", api::percent_encoded(&calendar.id));
-                    let first = api::url(
-                        self.google,
-                        &path,
-                        &[
-                            ("timeMin", time_min.as_str()),
-                            ("timeMax", time_max.as_str()),
-                            ("singleEvents", "true"),
-                            ("orderBy", "startTime"),
-                            ("maxResults", "2500"),
-                        ],
-                    );
-                    let items = self.all::<GooglePage<GoogleEvent>>(first, None).await?;
-                    Ok(items.into_iter().filter_map(|item| item.event(&calendar.id)).collect())
-                }
-            })
-            .await?;
-        Ok(Fetched { calendars, events })
+    /// Every event of the listing from `first` (at most `PAGES` pages) and the sync token its
+    /// last page gives (none when it was cut short).
+    async fn google_pages(&self, first: String) -> Result<(Vec<GoogleEvent>, Option<String>), ApiError> {
+        let mut items = Vec::new();
+        let mut url = first.clone();
+        for _ in 0..PAGES {
+            let page: GoogleEvents = self.get(Request::get(url)).await?;
+            items.extend(page.items.unwrap_or_default());
+            match non_empty(page.next_page_token) {
+                Some(token) => url = format!("{first}&pageToken={}", api::percent_encoded(&token)),
+                None => return Ok((items, non_empty(page.next_sync_token))),
+            }
+        }
+        Ok((items, None))
     }
 
     // MARK: Graph
 
-    async fn graph(&self, start: Date, end: Date) -> Result<Fetched, ApiError> {
+    async fn graph_calendars(&self) -> Result<Vec<CalendarInfo>, ApiError> {
         let first =
-            api::url(self.graph, "me/calendars", &[("$top", "100"), ("$select", "id,name,hexColor,isDefaultCalendar,canEdit")]);
+            api::url(self.graph, "me/calendars", &[("$top", "100"), ("$select", "id,name,hexColor,isDefaultCalendar,canEdit,owner")]);
         let found = self.all::<GraphPage<GraphCalendar>>(first, None).await?;
-        let calendars: Vec<CalendarInfo> = found
+        Ok(found
             .into_iter()
-            .map(|calendar| CalendarInfo {
-                name: non_empty(calendar.name).unwrap_or_else(|| calendar.id.clone()),
-                id: calendar.id,
-                color: non_empty(calendar.hex_color),
-                primary: calendar.is_default_calendar == Some(true),
-                writable: calendar.can_edit == Some(true),
-            })
-            .collect();
-        let (from, to) = (iso8601(start), iso8601(end));
-        let events = self
-            .each_calendar(&calendars, |calendar| {
-                let (from, to) = (from.clone(), to.clone());
-                async move {
-                    let first = api::url(
-                        self.graph,
-                        &format!("me/calendars/{}/calendarView", api::percent_encoded(&calendar.id)),
-                        &[
-                            ("startDateTime", from.as_str()),
-                            ("endDateTime", to.as_str()),
-                            ("$top", "250"),
-                            ("$select", GRAPH_EVENT_FIELDS),
-                        ],
-                    );
-                    let items = self.all::<GraphPage<GraphEvent>>(first, Some("outlook.timezone=\"UTC\"")).await?;
-                    Ok(items.into_iter().filter_map(|item| item.event(&calendar.id)).collect())
+            .map(|calendar| {
+                let primary = calendar.is_default_calendar == Some(true);
+                let writable = calendar.can_edit == Some(true);
+                let owner = calendar.owner.and_then(|owner| owner.address);
+                let owned = primary || owner.is_none_or(|owner| owner.eq_ignore_ascii_case(&self.api.account));
+                CalendarInfo {
+                    name: non_empty(calendar.name).unwrap_or_else(|| calendar.id.clone()),
+                    id: calendar.id,
+                    color: non_empty(calendar.hex_color),
+                    primary,
+                    writable,
+                    access: (if owned { "owner" } else if writable { "writer" } else { "reader" }).into(),
+                    selected: true,
+                    hidden: false,
+                    shown: true,
                 }
             })
-            .await?;
-        Ok(Fetched { calendars, events })
+            .collect())
+    }
+
+    async fn graph_events(&self, calendar: &str, start: Date, end: Date) -> Result<Vec<CalendarEvent>, ApiError> {
+        let (from, to) = (iso8601(start), iso8601(end));
+        let first = api::url(
+            self.graph,
+            &format!("me/calendars/{}/calendarView", api::percent_encoded(calendar)),
+            &[("startDateTime", from.as_str()), ("endDateTime", to.as_str()), ("$top", "250"), ("$select", GRAPH_EVENT_FIELDS)],
+        );
+        let items = self.all::<GraphPage<GraphEvent>>(first, Some("outlook.timezone=\"UTC\"")).await?;
+        Ok(items.into_iter().filter_map(|item| item.event(calendar)).collect())
     }
 
     // MARK: Invitations
@@ -490,7 +594,7 @@ pub fn graph_invitation(message: &Value) -> Option<Invitation> {
     Some(Invitation {
         method: method.into(),
         uid: None,
-        title: non_empty(message["subject"].as_str().map(String::from)).unwrap_or_else(|| "(No title)".into()),
+        title: non_empty(message["subject"].as_str().map(String::from)).unwrap_or_else(|| UNTITLED.into()),
         start,
         end,
         all_day: start_day.is_some(),
@@ -506,6 +610,15 @@ pub fn graph_invitation(message: &Value) -> Option<Invitation> {
 
 // MARK: - Google's answers
 
+/// A page of a calendar's events, the last one with the token for asking what changed since.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleEvents {
+    items: Option<Vec<GoogleEvent>>,
+    next_page_token: Option<String>,
+    next_sync_token: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GoogleCalendar {
@@ -516,7 +629,7 @@ struct GoogleCalendar {
     primary: Option<bool>,
     selected: Option<bool>,
     hidden: Option<bool>,
-    /// `owner`, `writer`, `reader` or `freeBusyReader`.
+    /// `owner`, `writer`, `writerWithoutPrivateAccess`, `reader` or `freeBusyReader`.
     access_role: Option<String>,
 }
 
@@ -611,7 +724,7 @@ impl GoogleEvent {
         Some(CalendarEvent {
             id: self.id,
             calendar: calendar.to_string(),
-            title: non_empty(self.summary).unwrap_or_else(|| "(No title)".into()),
+            title: non_empty(self.summary).unwrap_or_else(|| UNTITLED.into()),
             start: start_value,
             end: end_value.max(start_value),
             all_day: start_day.is_some(),
@@ -647,6 +760,8 @@ struct GraphCalendar {
     hex_color: Option<String>,
     is_default_calendar: Option<bool>,
     can_edit: Option<bool>,
+    /// Whose it is: another's for calendars shared with the account.
+    owner: Option<GraphAddress>,
 }
 
 #[derive(Deserialize)]
@@ -782,7 +897,7 @@ impl GraphEvent {
         Some(CalendarEvent {
             id: self.id,
             calendar: calendar.to_string(),
-            title: non_empty(self.subject).unwrap_or_else(|| "(No title)".into()),
+            title: non_empty(self.subject).unwrap_or_else(|| UNTITLED.into()),
             start,
             end: end.max(start),
             all_day,

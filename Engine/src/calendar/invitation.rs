@@ -68,8 +68,9 @@ impl CalendarStore {
         Ok(json)
     }
 
-    /// The event `invitation` names in `record`'s calendar, with that calendar: from the
-    /// fetched copy, else as the provider last answered within [`FRESH`], else asked now.
+    /// The event `invitation` names in `record`'s own calendar, with that calendar: from the
+    /// fetched copy, else as the provider last answered within [`FRESH`], else asked now. Not
+    /// from others' calendars it shows: the same meeting there carries their answer.
     async fn find(
         &self,
         record: &AccountRecord,
@@ -79,7 +80,7 @@ impl CalendarStore {
         {
             let state = self.state();
             if let Some(copy) = state.accounts.get(&record.id).and_then(|account| account.copy.as_ref())
-                && let Some(event) = matching(&copy.events, invitation)
+                && let Some(event) = matching(copy.own_events(), invitation)
             {
                 let calendar = copy.calendars.iter().find(|calendar| calendar.id == event.calendar).cloned();
                 return Ok((Some(event.clone()), calendar));
@@ -124,6 +125,20 @@ impl CalendarStore {
                 format!("Would answer {response} to event {event} for {account}, telling its organizer. Re-run with --yes."),
             ));
         }
+        // Answering on someone else's calendar would answer as them.
+        let own = {
+            let state = self.state();
+            let copy = state.accounts.get(&account).and_then(|entry| entry.copy.as_ref());
+            if let Some(info) = copy.and_then(|copy| copy.calendars.iter().find(|info| info.id == calendar))
+                && !info.owned()
+            {
+                return Err(EngineError::new(
+                    "read_only",
+                    format!("{} is not {account}'s own calendar; only its owner answers its invitations.", info.name),
+                ));
+            }
+            copy.and_then(|copy| copy.own_calendar().map(String::from))
+        };
         self.remote(&api, record.provider)
             .respond(&calendar, &event, &response)
             .await
@@ -148,7 +163,11 @@ impl CalendarStore {
                 }
             }
         }
-        self.changed(&account, |copy| copy.events.iter_mut().for_each(answered));
+        self.changed(&account, |copy| {
+            if let Some(part) = own.and_then(|own| copy.parts.get_mut(&own)) {
+                part.events.iter_mut().for_each(answered);
+            }
+        });
         Ok(json!({ "responded": response }))
     }
 }

@@ -37,7 +37,7 @@ impl CalendarStore {
             return Ok((calendar, None));
         }
         let id = args.required("id")?;
-        let event = copy.events.iter().find(|event| event.calendar == calendar.id && event.id == id).cloned().ok_or_else(|| {
+        let event = copy.parts.get(&calendar.id).and_then(|part| part.events.iter().find(|event| event.id == id)).cloned().ok_or_else(|| {
             EngineError::new("not_found", format!("No event {id} on {}; `mailstream calendar events` lists them.", calendar.name))
         })?;
         Ok((calendar, Some(event)))
@@ -101,16 +101,22 @@ impl CalendarStore {
             (_, Some(event)) => {
                 remote.delete(&calendar.id, &event.id).await.map_err(provider)?;
                 let id = event.id.clone();
-                self.changed(account, |copy| copy.events.retain(|kept| !(kept.calendar == calendar.id && kept.id == id)));
+                self.changed(account, |copy| {
+                    if let Some(part) = copy.parts.get_mut(&calendar.id) {
+                        part.events.retain(|kept| kept.id != id);
+                    }
+                });
                 return Ok(json!({ "deleted": true }));
             }
             _ => unreachable!("a change has its event"),
         };
         let answer = answers::json(&saved.item(account, Some(&calendar), editable(&record, Some(&calendar), &saved)));
         self.changed(account, move |copy| {
-            copy.events.retain(|kept| !(kept.calendar == saved.calendar && kept.id == saved.id));
-            let at = copy.events.partition_point(|kept| kept.start < saved.start);
-            copy.events.insert(at, saved);
+            // A calendar not fetched yet keeps it until its first fetch, which fetches it whole.
+            let events = &mut copy.parts.entry(saved.calendar.clone()).or_default().events;
+            events.retain(|kept| kept.id != saved.id);
+            let at = events.partition_point(|kept| kept.start < saved.start);
+            events.insert(at, saved);
         });
         Ok(answer)
     }

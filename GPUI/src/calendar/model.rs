@@ -271,10 +271,12 @@ pub fn booked_minutes(events: &[Event], placements: &[Placement]) -> i64 {
     minutes
 }
 
-/// Which of a day's placed events clash: two the account is committed to (it accepted, organizes
-/// it, or it has no guests) whose times overlap, not merely their drawn heights.
+/// Which of a day's placed events clash: two on the account's own calendars it is committed to
+/// (it accepted, organizes it, or it has no guests) whose times overlap, not merely their drawn
+/// heights. Others' calendars (shared, subscribed) clash with nothing.
 pub fn day_conflicts(events: &[Event], placements: &[Placement]) -> Vec<bool> {
-    let committed = |event: &Event| matches!(event.item.response.as_deref(), None | Some("accepted" | "organizer"));
+    let committed =
+        |event: &Event| event.item.own && matches!(event.item.response.as_deref(), None | Some("accepted" | "organizer"));
     let mut out = vec![false; placements.len()];
     for (i, a) in placements.iter().enumerate() {
         let first = &events[a.event];
@@ -364,7 +366,7 @@ pub fn look(event: &Event, now: DateTime<Local>) -> Look {
         Look::Declined
     } else if event.end <= now {
         Look::Past
-    } else if matches!(event.item.response.as_deref(), Some("needsAction" | "tentative")) {
+    } else if event.item.own && matches!(event.item.response.as_deref(), Some("needsAction" | "tentative")) {
         Look::Invited
     } else {
         Look::Upcoming
@@ -485,7 +487,8 @@ pub fn reply_state(item: &CalendarItem, account: Option<&CalendarAccount>, sendi
     let response = item.response.as_deref();
     let answered = REPLIES.iter().map(|(value, _)| *value).find(|value| Some(*value) == response);
     let guest = response == Some("needsAction") || answered.is_some();
-    let answerable = guest && account.is_some_and(|account| account.granted && account.writable);
+    // On someone else's calendar the answer is theirs.
+    let answerable = guest && item.own && account.is_some_and(|account| account.granted && account.writable);
     ReplyState {
         answerable,
         chosen: sending.or(answered),
@@ -583,6 +586,7 @@ pub(super) mod tests {
             series: None,
             mine: false,
             editable: false,
+            own: true,
         }
     }
 

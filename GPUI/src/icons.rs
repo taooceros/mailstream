@@ -43,6 +43,7 @@ icons! {
     Forward => "forward",
     Inbox => "inbox",
     Label => "label",
+    Layers => "layers",
     Location => "location_on",
     Newsletter => "newspaper_fill",
     Notification => "notifications_fill",

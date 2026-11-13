@@ -698,7 +698,8 @@ impl CalendarPane {
             Some("needsAction") => Some("Invited"),
             _ => None,
         }
-        .filter(|_| fit != Fit::Line && width >= 150. && !flat);
+        // On someone else's calendar the answer is theirs, not the account's.
+        .filter(|_| item.own && fit != Fit::Line && width >= 150. && !flat);
         let trailing = div()
             .flex_shrink_0()
             .flex()

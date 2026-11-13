@@ -21,6 +21,8 @@ pub struct CalendarAccount {
     pub problem: Option<String>,
     /// When its events were fetched (RFC 3339).
     pub fetched: Option<String>,
+    /// Every calendar in its list, its own and others' (shared or subscribed); only those
+    /// `shown` have events here.
     pub calendars: Vec<CalendarInfo>,
 }
 
@@ -84,6 +86,11 @@ pub struct CalendarItem {
     /// `calendar.invitation`'s JSON.)
     #[serde(default)]
     pub editable: bool,
+    /// On one of the account's own calendars, so `response` is its own answer, which
+    /// `calendar.respond` gives. On someone else's (shared with it or subscribed to) the answer
+    /// is theirs, which only they give.
+    #[serde(default)]
+    pub own: bool,
 }
 
 /// Every account and the events of the days asked for, earliest first.

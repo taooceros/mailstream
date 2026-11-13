@@ -581,6 +581,16 @@ pub const COMMANDS: &[Spec] = &[
         &[ACCOUNT],
     ),
     Spec::new(
+        "calendar.show",
+        Handler::Calendar,
+        "Shows one of an account's calendars (its own, or one shared with it or subscribed to; `calendars` from `calendar events`) in the calendar, fetching its events, or hides it; the choice is kept, over the provider's own.",
+        &[
+            ACCOUNT_ADDRESS,
+            Argument::new("calendar", Kind::String, "Calendar id from `calendar events`.").required(),
+            Argument::new("off", Kind::Bool, "Hide it instead."),
+        ],
+    ),
+    Spec::new(
         "calendar.invitation",
         Handler::Calendar,
         "The meeting invitation a message carries (an .ics part, an Outlook meeting request), whether its account may read and change its calendar, and the event it names there with the account's answer; `target` and `calendar` are what `calendar respond` takes.",

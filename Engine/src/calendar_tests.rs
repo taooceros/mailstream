@@ -33,7 +33,8 @@ fn google_reply(request: &FakeRequest) -> Reply {
             { "id": "gone@group", "summary": "Gone", "selected": true },
         ]})),
         "calendars/me@gmail.com/events" => {
-            assert_eq!((request.param("singleEvents"), request.param("orderBy")), (Some("true"), Some("startTime")));
+            // No order: Google gives a sync token only to queries it could repeat with one.
+            assert_eq!((request.param("singleEvents"), request.param("orderBy")), (Some("true"), None));
             assert!(request.param("timeMin").is_some_and(|time| time.ends_with('Z')));
             Reply::json(json!({ "items": [
                 {
@@ -153,8 +154,13 @@ fn lists_every_accounts_events_from_the_cache_and_fetches_only_when_old_or_asked
     let accounts = list["accounts"].as_array().unwrap();
     let granted: Vec<(&str, bool)> = accounts.iter().map(|a| (a["id"].as_str().unwrap(), a["granted"].as_bool().unwrap())).collect();
     assert_eq!(granted, [(GOOGLE, true), (OUTLOOK, true), (OLD, false)]);
-    let names: Vec<&str> = accounts[0]["calendars"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["Me", "Team", "Gone"], "the unticked calendar is left out");
+    let names: Vec<(&str, bool)> =
+        accounts[0]["calendars"].as_array().unwrap().iter().map(|c| (c["name"].as_str().unwrap(), c["shown"].as_bool().unwrap())).collect();
+    assert_eq!(names, [("Me", true), ("Team", true), ("Hidden", false), ("Gone", true)], "the unticked calendar is listed, not shown");
+    assert!(
+        !server.requests.lock().unwrap().iter().any(|request| request.path.contains("hidden@group")),
+        "a calendar not shown is not fetched"
+    );
     assert_eq!(list["loading"], json!(false));
     assert_eq!(list["synced"], json!({ "from": local_day(-7), "until": local_day(61) }), "a week back to 60 days on is fetched");
 
@@ -513,6 +519,170 @@ fn adds_changes_and_deletes_the_accounts_own_events_and_keeps_the_copy_up_to_dat
         listed.sort();
         listed == now_listed
     });
+    drop(engine);
+    cleanup(&config);
+}
+
+const ANN: &str = "ann@x.com";
+const HOLIDAYS: &str = "holidays@group";
+
+/// The requests for `calendar`'s events so far: whole (with times) and by sync token.
+fn event_requests(server: &FakeServer, calendar: &str) -> (usize, Vec<String>) {
+    let path = format!("/calendar/v3/calendars/{calendar}/events");
+    let requests = server.requests.lock().unwrap();
+    let asked: Vec<&FakeRequest> = requests.iter().filter(|request| request.path == path).collect();
+    let tokens = asked.iter().filter_map(|request| request.param("syncToken").map(String::from)).collect::<Vec<_>>();
+    (asked.len() - tokens.len(), tokens)
+}
+
+fn calendar_of<'a>(list: &'a Value, id: &str) -> &'a Value {
+    list["accounts"][0]["calendars"].as_array().unwrap().iter().find(|calendar| calendar["id"] == id).unwrap()
+}
+
+#[test]
+fn shows_others_calendars_read_only_in_their_colours_and_syncs_each_by_its_token() {
+    // Ann's calendar, shared read-only: the standup (with Ann's answer) and her focus time;
+    // after `changed`, the focus time is gone and a dentist visit added.
+    let changed = Arc::new(AtomicBool::new(false));
+    let expired = Arc::new(AtomicBool::new(false));
+    let (after, gone) = (changed.clone(), expired.clone());
+    let server = FakeServer::start(move |request| {
+        if request.path == "/token" {
+            return Reply::json(json!({ "access_token": "at", "expires_in": 3600 }));
+        }
+        let path = request.path.strip_prefix("/calendar/v3/").unwrap_or_default();
+        let token = request.param("syncToken");
+        if path.ends_with("/events") {
+            assert_eq!(request.param("singleEvents"), Some("true"));
+            assert_eq!(request.param("timeMin").is_some(), token.is_none(), "a sync token stands for the whole query: {path}");
+        }
+        let standup = |me: &str, answer: &str| {
+            json!({ "id": "standup", "summary": "Standup", "iCalUID": "standup@x.com",
+                    "start": { "dateTime": at(1, 10.0) }, "end": { "dateTime": at(1, 10.5) },
+                    "organizer": { "email": "bo@x.com" },
+                    "attendees": [{ "email": me, "self": true, "responseStatus": answer }, { "email": "bo@x.com", "organizer": true }] })
+        };
+        let focus = json!({ "id": "focus", "summary": "Focus", "start": { "dateTime": at(1, 13.0) }, "end": { "dateTime": at(1, 15.0) },
+                            "organizer": { "email": ANN, "self": true } });
+        let dentist = json!({ "id": "dentist", "summary": "Dentist", "start": { "dateTime": at(2, 9.0) }, "end": { "dateTime": at(2, 10.0) },
+                              "organizer": { "email": ANN, "self": true } });
+        let changed = after.load(Ordering::SeqCst);
+        match (path, token) {
+            ("users/me/calendarList", _) => Reply::json(json!({ "items": [
+                { "id": GOOGLE, "summary": GOOGLE, "backgroundColor": "#9fe1e7", "primary": true, "selected": true, "accessRole": "owner" },
+                { "id": ANN, "summary": ANN, "summaryOverride": "Ann Lee", "backgroundColor": "#f83a22", "selected": true, "accessRole": "reader" },
+                { "id": HOLIDAYS, "summary": "Holidays", "backgroundColor": "#16a765", "accessRole": "reader" },
+                { "id": "boss@x.com", "summary": "Boss", "selected": true, "hidden": true, "accessRole": "freeBusyReader" },
+            ]})),
+            ("calendars/me@gmail.com/events", None) => {
+                Reply::json(json!({ "items": [standup(GOOGLE, "needsAction")], "nextSyncToken": "me-1" }))
+            }
+            ("calendars/me@gmail.com/events", Some(_)) => Reply::json(json!({ "items": [], "nextSyncToken": "me-1" })),
+            ("calendars/ann@x.com/events", None) => {
+                let last = if changed { dentist } else { focus };
+                Reply::json(json!({ "items": [standup(ANN, "accepted"), last], "nextSyncToken": "ann-1" }))
+            }
+            ("calendars/ann@x.com/events", Some("ann-1")) if changed => Reply::json(json!({
+                "items": [{ "id": "focus", "status": "cancelled" }, dentist], "nextSyncToken": "ann-2",
+            })),
+            ("calendars/ann@x.com/events", Some("ann-1")) => Reply::json(json!({ "items": [], "nextSyncToken": "ann-1" })),
+            // A token Google no longer takes.
+            ("calendars/ann@x.com/events", Some(_)) if gone.load(Ordering::SeqCst) => {
+                Reply::status(410, json!({ "error": { "message": "Sync token is no longer valid" } }))
+            }
+            ("calendars/ann@x.com/events", Some(token)) => Reply::json(json!({ "items": [], "nextSyncToken": token })),
+            ("calendars/holidays@group/events", None) => Reply::json(json!({
+                "items": [{ "id": "day", "summary": "Holiday", "start": { "date": local_day(3) }, "end": { "date": local_day(4) } }],
+                "nextSyncToken": "h-1",
+            })),
+            ("calendars/holidays@group/events", Some(_)) => Reply::json(json!({ "items": [], "nextSyncToken": "h-1" })),
+            _ => Reply::status(404, json!({ "error": { "message": "No such path" } })),
+        }
+    });
+    let config = server_config(&server);
+    let scopes = ["openid", "https://mail.google.com/", GOOGLE_CALENDARS, GOOGLE_EVENTS];
+    sign_in_all(&config, &[json!({ "id": GOOGLE, "provider": "google", "label": "Personal", "scopes": scopes })]);
+    let engine = Engine::start(config.clone());
+    let week = json!({ "from": local_day(-7), "days": 30 });
+
+    // Both shown calendars' events, each in its calendar's colour; only the account's own
+    // answer can be given.
+    wait_until("both calendars' events", || titles(&events(&engine, week.clone())).len() == 3);
+    let list = events(&engine, week.clone());
+    assert_eq!(titles(&list), ["Standup", "Standup", "Focus"]);
+    let of = |calendar: &str, title: &str| {
+        list["events"].as_array().unwrap().iter().find(|event| event["calendar"] == calendar && event["title"] == title).unwrap().clone()
+    };
+    let (mine, anns, focus) = (of(GOOGLE, "Standup"), of(ANN, "Standup"), of(ANN, "Focus"));
+    assert_eq!((mine["response"].as_str(), mine["own"].as_bool(), mine["color"].as_str()), (Some("needsAction"), Some(true), Some("#9fe1e7")));
+    assert_eq!((anns["response"].as_str(), anns["own"].as_bool(), anns["color"].as_str()), (Some("accepted"), Some(false), Some("#f83a22")));
+    assert_eq!((focus["calendarName"].as_str(), focus["mine"].as_bool(), focus["editable"].as_bool()), (Some("Ann Lee"), Some(true), Some(false)));
+    let calendars: Vec<(&str, &str, bool, bool, bool, bool)> = list["accounts"][0]["calendars"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            let flag = |name: &str| c[name].as_bool().unwrap();
+            (c["name"].as_str().unwrap(), c["access"].as_str().unwrap(), flag("selected"), flag("hidden"), flag("writable"), flag("shown"))
+        })
+        .collect();
+    assert_eq!(
+        calendars,
+        [
+            (GOOGLE, "owner", true, false, true, true),
+            ("Ann Lee", "reader", true, false, false, true),
+            ("Holidays", "reader", false, false, false, false),
+            ("Boss", "freeBusyReader", true, true, false, false),
+        ]
+    );
+    assert_eq!(event_requests(&server, HOLIDAYS), (0, vec![]), "calendars not shown are not fetched");
+    assert_eq!(event_requests(&server, "boss@x.com"), (0, vec![]));
+
+    // Nothing answers or changes Ann's events from here.
+    let answer = json!({ "account": GOOGLE, "calendar": ANN, "event": "standup", "response": "declined", "yes": true });
+    assert_eq!(call(&engine, "calendar.respond", answer).unwrap_err().code, "read_only");
+    let delete = json!({ "account": GOOGLE, "calendar": ANN, "id": "focus", "yes": true });
+    assert_eq!(call(&engine, "calendar.delete", delete).unwrap_err().code, "read_only");
+
+    // A refresh asks each calendar only for what changed since its last fetch.
+    changed.store(true, Ordering::SeqCst);
+    call(&engine, "calendar.refresh", json!({ "account": GOOGLE })).unwrap();
+    wait_until("Ann's changes", || titles(&events(&engine, week.clone())) == ["Standup", "Standup", "Dentist"]);
+    assert_eq!(event_requests(&server, ANN), (1, vec!["ann-1".to_string()]));
+    assert_eq!(event_requests(&server, GOOGLE), (1, vec!["me-1".to_string()]));
+
+    // Turning the holidays on fetches them alone whole; turning Ann off hides hers at once and
+    // fetches them no more.
+    call(&engine, "calendar.show", json!({ "account": GOOGLE, "calendar": HOLIDAYS })).unwrap();
+    wait_until("the holidays", || titles(&events(&engine, week.clone())).contains(&"Holiday".to_string()));
+    assert_eq!(event_requests(&server, HOLIDAYS), (1, vec![]));
+    assert_eq!(event_requests(&server, ANN), (1, vec!["ann-1".to_string(), "ann-2".to_string()]), "the others by their tokens");
+    call(&engine, "calendar.show", json!({ "account": GOOGLE, "calendar": ANN, "off": true })).unwrap();
+    assert_eq!(titles(&events(&engine, week.clone())), ["Standup", "Holiday"]);
+    wait_until("the fetch to settle", || events(&engine, week.clone())["loading"] == json!(false));
+    call(&engine, "calendar.refresh", json!({ "account": GOOGLE })).unwrap();
+    wait_until("the refresh", || event_requests(&server, HOLIDAYS).1.len() == 1);
+    wait_until("the fetch to settle", || events(&engine, week.clone())["loading"] == json!(false));
+    assert_eq!(event_requests(&server, ANN).1.len(), 2, "a hidden calendar is not fetched");
+    assert_eq!(call(&engine, "calendar.show", json!({ "account": GOOGLE, "calendar": "nope" })).unwrap_err().code, "not_found");
+
+    // The choices outlive a restart, and so does each calendar's copy.
+    block_on(engine.core.calendar.flush());
+    drop(engine);
+    let engine = Engine::start(config.clone());
+    wait_until("the cached calendars", || titles(&events(&engine, week.clone())) == ["Standup", "Holiday"]);
+    let list = events(&engine, week.clone());
+    assert_eq!((calendar_of(&list, ANN)["shown"].as_bool(), calendar_of(&list, HOLIDAYS)["shown"].as_bool()), (Some(false), Some(true)));
+
+    // Ann's again: her copy paints at once; Google no longer takes its token, so it is fetched whole.
+    call(&engine, "calendar.show", json!({ "account": GOOGLE, "calendar": ANN })).unwrap();
+    assert_eq!(titles(&events(&engine, week.clone())), ["Standup", "Standup", "Dentist", "Holiday"]);
+    expired.store(true, Ordering::SeqCst);
+    call(&engine, "calendar.refresh", json!({ "account": GOOGLE })).unwrap();
+    wait_until("Ann's whole fetch", || event_requests(&server, ANN).0 == 2);
+    assert_eq!(event_requests(&server, ANN).1, ["ann-1", "ann-2", "ann-2"]);
+    wait_until("the fetch to settle", || events(&engine, week.clone())["loading"] == json!(false));
+    assert_eq!(titles(&events(&engine, week.clone())), ["Standup", "Standup", "Dentist", "Holiday"]);
     drop(engine);
     cleanup(&config);
 }

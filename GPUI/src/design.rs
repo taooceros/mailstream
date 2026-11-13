@@ -770,6 +770,11 @@ pub mod calendar {
     pub const POPOVER_WIDTH: f32 = 360.0;
     pub const POPOVER_HEIGHT: f32 = 560.0;
     pub const POPOVER_GAP: f32 = 8.0;
+    /// The list of calendars to show or hide (MS-302): `LIST_WIDTH` wide, at most `LIST_HEIGHT`
+    /// tall (scrolling past it), a calendar to each `LIST_ROW`.
+    pub const LIST_WIDTH: f32 = 300.0;
+    pub const LIST_HEIGHT: f32 = 480.0;
+    pub const LIST_ROW: f32 = 40.0;
     /// The event's page over the whole window (MS-184): its column `PAGE_WIDTH` wide at most,
     /// its title `PAGE_TITLE`; from a window `PAGE_SIDE_BY_SIDE` wide the guests take a column
     /// `PAGE_SIDE` wide beside the details and notes.

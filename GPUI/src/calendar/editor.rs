@@ -265,7 +265,8 @@ impl EventEditor {
             if !(account.granted && account.writable) {
                 continue;
             }
-            for calendar in account.calendars.iter().filter(|c| c.writable) {
+            // Those shown: an event on a hidden one would not show.
+            for calendar in account.calendars.iter().filter(|c| c.writable && c.shown) {
                 let label = if many_accounts && calendar.name != account.id {
                     format!("{} · {}", calendar.name, account.id)
                 } else {
@@ -759,7 +760,7 @@ impl Render for EventEditor {
 impl CalendarPane {
     /// Some account may add events to one of its calendars.
     pub(super) fn can_create(&self) -> bool {
-        self.accounts.iter().any(|account| account.granted && account.writable && account.calendars.iter().any(|c| c.writable))
+        self.accounts.iter().any(|account| account.granted && account.writable && account.calendars.iter().any(|c| c.writable && c.shown))
     }
 
     /// Opens the editor for a new event from `start` (an hour long), the next full hour without one.

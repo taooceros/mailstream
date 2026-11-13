@@ -23,7 +23,9 @@
 //! - Chat: a direct message, a group and a space, the group's recent messages.
 //! - The calendars: this week's meetings around today, the design review among them; it and
 //!   Sprint planning (which Sam organizes, so it can be edited) carry a place, notes with links,
-//!   a link to the provider's page and guests with every kind of answer.
+//!   a link to the provider's page and guests with every kind of answer. Jordan's calendar,
+//!   shared with Sam read-only, shows beside Sam's in its own color; a holiday calendar Sam
+//!   subscribed to is listed but off (MS-302).
 //! - Sender pictures: two senders have one; everyone else has a cached miss, so nothing is
 //!   looked up on the web.
 //!
@@ -776,19 +778,51 @@ fn write_calendar(cache: &MailCache) {
         { "name": EVAN.0, "email": EVAN.1, "response": "needsAction" },
     ]);
     events.push(review);
+    // Jordan's calendar, shared with Sam read-only (MS-302): Jordan's own meetings, one of them
+    // with Sam (Jordan's answer, not Sam's), in Jordan's color.
+    let jordan = |id: &str, title: &str, (day, hour, minute): (i64, u32, u32), minutes: f64| {
+        let start = at(day, hour, minute);
+        json!({ "id": id, "calendar": JORDAN.1, "title": title, "start": start, "end": start + minutes * 60.,
+                "organizer": person(JORDAN), "mine": true })
+    };
+    let mut hiring = jordan("j3", "Hiring sync", (1, 15, 0), 45.);
+    hiring["response"] = json!("organizer");
+    hiring["attendees"] = json!([
+        { "name": JORDAN.0, "email": JORDAN.1, "response": "accepted" },
+        { "name": PRIYA.0, "email": PRIYA.1, "response": "needsAction" },
+    ]);
+    let jordans = vec![
+        jordan("j1", "Focus time", (0, 13, 30), 90.),
+        jordan("j2", "Dentist", (2, 9, 0), 60.),
+        hiring,
+        jordan("j4", "Roadmap draft", (-1, 10, 0), 120.),
+    ];
+    // A holiday calendar Sam subscribed to and left off, shown with its switch.
+    let holidays = vec![json!({
+        "id": "h1", "calendar": "holidays", "title": "Founders' Day", "start": at(1, 0, 0), "end": at(2, 0, 0), "allDay": true,
+        "startDay": day(1), "endDay": day(2),
+    })];
+    let part = |events: Vec<Value>| json!({ "from": day(-7), "until": day(61), "events": events });
     let copy = json!({
-        "fetched": now(), "format": 1, "events": events,
-        "calendars": [{ "id": "work", "name": "Work", "color": "#4285f4", "primary": true, "writable": true }],
+        "fetched": now(), "format": 2,
+        "calendars": [
+            { "id": "work", "name": "Work", "color": "#4285f4", "primary": true, "writable": true, "access": "owner",
+              "selected": true, "shown": true },
+            { "id": JORDAN.1, "name": JORDAN.0, "color": "#8e24aa", "access": "reader", "selected": true, "shown": true },
+            { "id": "holidays", "name": "Holidays", "color": "#0b8043", "access": "reader", "shown": false },
+        ],
+        "parts": { "work": part(events), (JORDAN.1): part(jordans), "holidays": part(holidays) },
     });
     cache.save_calendar(&parse(copy), GMAIL);
     let outlook = json!({
-        "fetched": now(), "format": 1,
-        "calendars": [{ "id": "calendar", "name": "Calendar", "color": "#e67c73", "primary": true, "writable": true }],
-        "events": [
-            { "id": "o1", "calendar": "calendar", "title": "Budget review", "start": at(1, 13, 30), "end": at(1, 14, 30), "mine": true },
-            { "id": "o2", "calendar": "calendar", "title": "Team offsite", "start": at(2, 0, 0), "end": at(4, 0, 0), "allDay": true,
-              "startDay": day(2), "endDay": day(4), "mine": true },
-        ],
+        "fetched": now(), "format": 2,
+        "calendars": [{ "id": "calendar", "name": "Calendar", "color": "#e67c73", "primary": true, "writable": true,
+                        "access": "owner", "selected": true, "shown": true }],
+        "parts": { "calendar": part(vec![
+            json!({ "id": "o1", "calendar": "calendar", "title": "Budget review", "start": at(1, 13, 30), "end": at(1, 14, 30), "mine": true }),
+            json!({ "id": "o2", "calendar": "calendar", "title": "Team offsite", "start": at(2, 0, 0), "end": at(4, 0, 0), "allDay": true,
+                    "startDay": day(2), "endDay": day(4), "mine": true }),
+        ]) },
     });
     cache.save_calendar(&parse(outlook), OUTLOOK);
 }

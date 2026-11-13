@@ -553,6 +553,12 @@ commands! {
     /// Fetches every calendar account's events now.
     fn calendar_refresh() = "calendar.refresh" {};
 
+    /// Shows `calendar` of `account` (any in [`CalendarAccount::calendars`], others' shared or
+    /// subscribed ones too) or hides it; the engine keeps the choice and fetches what it lacks.
+    fn calendar_show(account: String, calendar: String, shown: bool) = "calendar.show" {
+        "account": account, "calendar": calendar, "off": !shown
+    };
+
     /// The invitation `message` of conversation `id` carries and the event it names in the
     /// account's calendar, with the account's answer; [`Event::Calendar`] follows changes.
     fn calendar_invitation(id: String, message: String) -> InvitationStatus = "calendar.invitation" {

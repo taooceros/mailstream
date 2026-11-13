@@ -10,7 +10,9 @@
 //!
 //! The engine fetches Google Calendar and Outlook every five minutes and keeps what it fetched in
 //! mail.db; the pane reads what it holds (a week back on) and reads it again on its `Calendar`
-//! event, so the calendar shows at once and nothing waits on the network.
+//! event, so the calendar shows at once and nothing waits on the network. Every calendar in each
+//! account's list is there, others' (shared or subscribed) in their own colors and read-only;
+//! the header's Calendars list shows or hides each (`calendar_show`, MS-302).
 
 mod agenda;
 mod detail;
@@ -146,6 +148,8 @@ pub struct CalendarPane {
     dismissed_at: Option<Point<Pixels>>,
     /// The popover closed while it may have held the keyboard: the pane takes it back as it draws.
     refocus: bool,
+    /// The list of calendars to show or hide is open under its button.
+    calendar_list: bool,
     /// Answers on their way to the calendar, by event, until it takes them.
     answering: HashMap<EventKey, &'static str>,
     /// A read is under way; `read_again` asks for one more when it lands.
@@ -232,6 +236,7 @@ impl CalendarPane {
             page: false,
             dismissed_at: None,
             refocus: false,
+            calendar_list: false,
             answering: HashMap::new(),
             reading: false,
             read_again: false,
@@ -301,6 +306,7 @@ impl CalendarPane {
         self.active = false;
         self.opened = None;
         self.page = false;
+        self.calendar_list = false;
         cx.notify();
     }
 
@@ -750,6 +756,23 @@ impl CalendarPane {
                 this.toast(format!("Could not refresh the calendar: {error}"), cx);
             }
         });
+    }
+
+    /// Shows or hides `calendar` of `account`: its switch moves at once; the engine keeps the
+    /// choice, fetches what it lacks and says the calendar changed, which reads the events again.
+    fn show_calendar(&mut self, account: &str, calendar: &str, shown: bool, cx: &mut Context<Self>) {
+        let info = self.accounts.iter_mut().find(|a| a.id == account).and_then(|a| a.calendars.iter_mut().find(|c| c.id == calendar));
+        let Some(info) = info else { return };
+        info.shown = shown;
+        let name = info.name.clone();
+        let (account, calendar) = (account.to_owned(), calendar.to_owned());
+        self.background(cx, async move { engine().calendar_show(account, calendar, shown).await }, move |this, result, cx| {
+            if let Err(error) = result {
+                this.toast(format!("Could not {} {name}: {error}", if shown { "show" } else { "hide" }), cx);
+                this.reload(cx);
+            }
+        });
+        cx.notify();
     }
 
     /// ⌘N: a new event from the next full hour.

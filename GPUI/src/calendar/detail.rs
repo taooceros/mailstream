@@ -273,6 +273,15 @@ impl CalendarPane {
         ])
     }
 
+    /// The event is on someone else's calendar the account may only read.
+    fn read_only_calendar(&self, event: &model::Event) -> bool {
+        !event.item.own
+            && self
+                .account_of(event)
+                .and_then(|account| account.calendars.iter().find(|calendar| calendar.id == event.item.calendar))
+                .is_some_and(|calendar| !calendar.writable)
+    }
+
     /// Opens the event in the provider's web calendar.
     fn link_button(&self, index: usize, p: &'static Palette) -> Option<Button> {
         let event = &self.events[index];
@@ -329,15 +338,18 @@ impl CalendarPane {
     }
 
     /// The bar under the title: the answers (or the account's part, when it cannot answer from
-    /// here) and Join; none when there is neither.
+    /// here; on someone else's calendar, that person's) and Join; none when there is neither.
     fn action_bar(&self, index: usize, surface: Surface, p: &'static Palette, cx: &mut Context<Self>) -> Option<Div> {
         let event = &self.events[index];
         let reply = self.reply(event);
         let url = event.item.meeting_url.clone();
+        let owner = event.item.calendar_name.as_deref().unwrap_or(&event.item.calendar);
         let part = match event.item.response.as_deref() {
-            Some("organizer") => "You organize this",
-            Some(response) if !reply.answerable => model::response_label(Some(response)),
-            _ => "",
+            Some("organizer") if !event.item.own => format!("{owner} organizes this"),
+            Some(response) if !event.item.own => format!("{owner}: {}", model::response_label(Some(response))),
+            Some("organizer") => "You organize this".to_owned(),
+            Some(response) if !reply.answerable => model::response_label(Some(response)).to_owned(),
+            _ => String::new(),
         };
         if !reply.answerable && part.is_empty() && url.is_none() {
             return None;
@@ -394,7 +406,8 @@ impl CalendarPane {
                     .flex_wrap()
                     .gap(px(space::S6))
                     .child(pill(calendar_label, Some(mark_dot(dot_color(self.event_color(event), p)).into_any_element()), p))
-                    .when(item.series.is_some(), |d| d.child(pill("Repeats", None, p))),
+                    .when(item.series.is_some(), |d| d.child(pill("Repeats", None, p)))
+                    .when(self.read_only_calendar(event), |d| d.child(pill("Read only", None, p))),
             )
             .child(
                 div()

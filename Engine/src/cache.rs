@@ -20,6 +20,7 @@ use tokio::sync::{OnceCell, mpsc, oneshot};
 use turso::Value as SqlValue;
 
 use crate::calendar::CalendarCopy;
+use crate::calendar_api::CalendarPart;
 use crate::chat_model::{ChatAccount, ChatMessagePage, ChatSpaceKey, ChatSpaceList};
 use crate::model::{Account, Envelope, Mailbox, MailboxKey, MessageContent, MessageRef};
 use crate::signal::ProcessSignal;
@@ -536,16 +537,44 @@ impl MailCache {
 
     // MARK: Calendars
 
-    /// An account's calendars and events as last fetched.
+    /// An account's calendars and each one's events as last fetched: the list in one row, each
+    /// calendar's events in a row of their own.
     pub async fn load_calendar(&self, account: &str) -> Option<CalendarCopy> {
-        self.read(Table::Calendars, &hash(&[account])).await
+        let mut copy: CalendarCopy = self.read(Table::Calendars, &hash(&[account])).await?;
+        for calendar in &copy.calendars {
+            if let Some(part) = self.read::<CalendarPart>(Table::Calendars, &hash(&[account, &calendar.id])).await {
+                copy.parts.insert(calendar.id.clone(), part);
+            }
+        }
+        Some(copy)
     }
 
+    /// The list and every calendar's events.
     pub fn save_calendar(&self, copy: &CalendarCopy, account: &str) {
-        self.write(copy, Table::Calendars, hash(&[account]));
+        self.save_calendar_list(copy, account);
+        for (calendar, part) in &copy.parts {
+            self.save_calendar_part(part, account, calendar);
+        }
     }
 
-    pub fn remove_calendar(&self, account: &str) {
+    /// The list alone: the calendars, which show, when fetched.
+    pub fn save_calendar_list(&self, copy: &CalendarCopy, account: &str) {
+        self.write(&copy.list_row(), Table::Calendars, hash(&[account]));
+    }
+
+    pub fn save_calendar_part(&self, part: &CalendarPart, account: &str, calendar: &str) {
+        self.write(part, Table::Calendars, hash(&[account, calendar]));
+    }
+
+    pub fn remove_calendar_part(&self, account: &str, calendar: &str) {
+        let _ = self.writes.send(Write::Remove { table: Table::Calendars, key: hash(&[account, calendar]) });
+    }
+
+    /// The list and the events of `calendars`.
+    pub fn remove_calendar<'a>(&self, account: &str, calendars: impl Iterator<Item = &'a str>) {
+        for calendar in calendars {
+            self.remove_calendar_part(account, calendar);
+        }
         let _ = self.writes.send(Write::Remove { table: Table::Calendars, key: hash(&[account]) });
     }
 }
