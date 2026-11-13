@@ -2,24 +2,22 @@
 """Linux (NixOS): installs affected, already-installed front ends from a clean private checkout at
 `main` (MS-224), as scripts/install.sh does on the Mac; install.sh hands Linux runs to this script.
 
-Usage: scripts/install.sh gpui|flutter [gpui|flutter]   (or python3 scripts/install-linux.py …)
+Usage: scripts/install.sh gpui   (or python3 scripts/install-linux.py gpui)
+flutter is refused: the Flutter front end is paused (MS-300); ~/.local/opt/mailstream stays as last
+installed.
 
-Installed front ends, each a folder under ~/.local/opt:
+Installed front end, a folder under ~/.local/opt:
 - gpui: ~/.local/opt/mailstream-gpui/ holds the release binary `mailstream-gpui` and the launcher
   `mailstream-gpui.sh`, which sets LD_LIBRARY_PATH to the devenv shell's (GPUI dlopens Vulkan,
   Wayland and fontconfig; NixOS has no global library path) and starts it. The desktop entry
   ~/.local/share/applications/dev.mailstream.MailstreamGPUI.desktop starts the launcher.
-- flutter: ~/.local/opt/mailstream/ holds `flutter build linux --release`'s bundle (`mailstream_ui`,
-  the `mailstream` command line beside it, lib/, data/); ~/.local/bin/mailstream links to the
-  command line.
-Each folder keeps its config.json (OAuth clients; the engine reads it beside the executable) and
+The folder keeps its config.json (OAuth clients; the engine reads it beside the executable) and
 AppIcon.png, gets the built commit in `revision`, and a `nix-env` profile holding the devenv shell
 the build used, so a nix garbage collection keeps the libraries the binaries load.
 
 Builds run in `devenv shell`. Cargo can't build inside the ovnfs mount (MS-201), so the cargo
-workspace's `target` (MS-279) and Flutter/build become symlinks to
-~/.cache/mailstream-checkouts/<checkout>/ (where scripts/checkout.py puts them; `checkout.py rm`
-deletes them) unless they are symlinks already.
+workspace's `target` (MS-279) becomes a symlink to ~/.cache/mailstream-checkouts/<checkout>/target
+(where scripts/checkout.py puts it; `checkout.py rm` deletes it) unless it is a symlink already.
 The running installed copy is stopped (SIGTERM, never forced) and the folder swapped; the previous
 one stays in ~/.cache/mailstream-install/previous-<folder> until the next install. Then check each
 install: `revision` equals main, and the binary stays up 30 s in a scripts/vhypr.py desktop
@@ -41,8 +39,6 @@ LOCK = Path("/tmp/mailstream-release-install.lock")
 FRONTENDS = {
     "gpui": {"folder": OPT / "mailstream-gpui", "executable": "mailstream-gpui",
              "outside": ["target"], "icon": "GPUI/assets/AppIcon.png"},
-    "flutter": {"folder": OPT / "mailstream", "executable": "mailstream_ui",
-                "outside": ["target", "Flutter/build"], "icon": "Resources/AppIcon.png"},
 }
 DESKTOP = HOME / ".local/share/applications/dev.mailstream.MailstreamGPUI.desktop"
 
@@ -80,17 +76,13 @@ def move_outside(relative):
 
 
 def build(frontend):
-    """Builds `frontend` in devenv shell; returns the folder to install."""
-    if frontend == "gpui":
-        devenv("cd GPUI && cargo build --release")
-        staged = Path(os.path.realpath(ROOT / "target")) / "release/mailstream-gpui-install"
-        shutil.rmtree(staged, ignore_errors=True)
-        staged.mkdir()
-        shutil.copy2(ROOT / "target/release/mailstream-gpui", staged / "mailstream-gpui")
-        return staged
-    devenv('CONFIG=release DART_OUT="$PWD/Flutter/packages/mailstream/lib/src" python3 scripts/ffi.py'
-           " && cd Flutter && flutter pub get && flutter build linux --release")
-    return ROOT / "Flutter/build/linux/x64/release/bundle"
+    """Builds `frontend` (gpui) in devenv shell; returns the folder to install."""
+    devenv("cd GPUI && cargo build --release")
+    staged = Path(os.path.realpath(ROOT / "target")) / "release/mailstream-gpui-install"
+    shutil.rmtree(staged, ignore_errors=True)
+    staged.mkdir()
+    shutil.copy2(ROOT / "target/release/mailstream-gpui", staged / "mailstream-gpui")
+    return staged
 
 
 def stop(executable):
@@ -162,20 +154,16 @@ def install(frontend, built, revision, ld_library_path, shell):
             "Comment=Mail, chat and calendar for Gmail and Outlook (GPUI)\n"
             f"Exec={folder / 'mailstream-gpui.sh'}\nIcon={folder / 'AppIcon.png'}\n"
             "Terminal=false\nCategories=Network;Email;\nStartupWMClass=dev.mailstream.MailstreamGPUI\n")
-    else:
-        link = HOME / ".local/bin/mailstream"
-        if link.is_symlink() or not link.exists():
-            link.parent.mkdir(parents=True, exist_ok=True)
-            link.unlink(missing_ok=True)
-            link.symlink_to(folder / "mailstream")
     print(f"Installed {folder} at {revision}; previous folder kept at {previous}.", flush=True)
 
 
 def main():
     targets = sys.argv[1:]
     if not targets:
-        fail("choose affected installed front ends: gpui, flutter (see AGENTS.md)")
+        fail("choose affected installed front ends: gpui (see AGENTS.md)")
     for frontend in targets:
+        if frontend == "flutter":
+            fail("Flutter is paused (MS-300): no Flutter installs; ~/.local/opt/mailstream stays as it is")
         if frontend not in FRONTENDS:
             fail(f"unknown front end on Linux: {frontend}")
         spec = FRONTENDS[frontend]

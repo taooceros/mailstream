@@ -1,20 +1,22 @@
 #!/bin/sh
 # Install affected, already-installed front ends from a clean private checkout at main.
-# Usage: scripts/install.sh native|flutter|gpui [native|flutter|gpui ...]
+# Usage: scripts/install.sh native|gpui [native|gpui ...]
+# flutter is refused: the Flutter front end is paused (MS-300); /Applications/Mailstream Flutter.app
+# stays as last installed.
 # Then check each installed app: revision, signature, launch (AGENTS.md, Release delivery).
-# On Linux it runs scripts/install-linux.py (gpui, flutter into ~/.local/opt; MS-224).
+# On Linux it runs scripts/install-linux.py (gpui into ~/.local/opt; MS-224).
 set -eu
 cd "$(dirname "$0")/.."
 [ "$(uname)" = Linux ] && exec python3 scripts/install-linux.py "$@"
 
 fail() { echo "install: $*" >&2; exit 1; }
 if [ "$#" -eq 0 ]; then
-  fail "choose affected installed front ends: native, flutter, gpui (see AGENTS.md)"
+  fail "choose affected installed front ends: native, gpui (see AGENTS.md)"
 fi
 for frontend in "$@"; do
   case "$frontend" in
     native) name=Mailstream ;;
-    flutter) name='Mailstream Flutter' ;;
+    flutter) fail "Flutter is paused (MS-300): no Flutter installs; Mailstream Flutter.app stays as it is" ;;
     gpui) name='Mailstream GPUI' ;;
     *) fail "unknown front end: $frontend" ;;
   esac
@@ -42,13 +44,6 @@ for frontend in "$@"; do
       CONFIG=release ./scripts/bundle.sh
       app="build/$name.app"
       ;;
-    flutter)
-      name='Mailstream Flutter'
-      executable='Mailstream Flutter'
-      CONFIG=release DART_OUT="$PWD/Flutter/packages/mailstream/lib/src" python3 scripts/ffi.py
-      (cd Flutter && flutter pub get && ../scripts/capped flutter build macos --release)
-      app="Flutter/build/macos/Build/Products/Release/$name.app"
-      ;;
     gpui)
       name='Mailstream GPUI'
       executable=mailstream-gpui
@@ -57,13 +52,13 @@ for frontend in "$@"; do
       app="build/$name.app"
       ;;
   esac
-  # An interrupted flutter build can exit 0 and leave a bundle without its executable.
+  # An interrupted build can exit 0 and leave a bundle without its executable.
   [ -x "$app/Contents/MacOS/$executable" ] || fail "$app has no executable $executable; build failed"
   # The engine reads OAuth clients and push settings from the host's Info.plist; bundle.sh
-  # already added them to Mailstream.app. Mailstream Flutter and GPUI read them from the support
-  # directory's config.json instead, as the public signed updates they install from CI must.
+  # already added them to Mailstream.app. Mailstream GPUI reads them from the support directory's
+  # config.json instead, as the public signed updates it installs from CI must.
   case "$frontend" in
-    flutter|gpui) ./scripts/app-config.sh "$HOME/Library/Application Support/Mailstream/config.json" ;;
+    gpui) ./scripts/app-config.sh "$HOME/Library/Application Support/Mailstream/config.json" ;;
   esac
   # MSInstalledRevision, signature and the shared team, as CI's signed updates get them.
   ./scripts/release-sign.sh "$app" "$revision"
@@ -97,14 +92,6 @@ for frontend in "$@"; do
   fi
   codesign --verify --deep --strict "$destination"
   echo "Installed $destination at $revision (release, shared signature)."
-  # The mailstream command line ships in Mailstream Flutter; a ~/.local/bin/mailstream link into
-  # an installed Mailstream app moves to it.
-  link="$HOME/.local/bin/mailstream"
-  if [ "$frontend" = flutter ] && [ -L "$link" ] &&
-    case "$(readlink "$link")" in /Applications/Mailstream*.app/*) true ;; *) false ;; esac; then
-    ln -sfn "$destination/Contents/MacOS/mailstream" "$link"
-    echo "$link -> $destination/Contents/MacOS/mailstream"
-  fi
   echo "Check this /Applications copy: MSInstalledRevision, codesign, launch (AGENTS.md)."
   echo "Previous bundle retained at $previous until those checks pass."
 done

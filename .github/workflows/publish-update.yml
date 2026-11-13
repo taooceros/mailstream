@@ -1,27 +1,12 @@
-name: Publish signed Flutter update
+name: Publish signed Flutter update (paused)
 
-# Every push to main that changes the Flutter app or the engine it links builds, signs and
-# publishes a Sparkle update to the `updates` release, which installed copies of Mailstream
-# Flutter check (Flutter/README.md). The `updates` environment holds the signing material and
-# admits main only; it needs no approval. The ad-hoc rolling nightly is never an update feed.
+# Flutter is paused (MS-300): pushes no longer publish its updates, so installed copies of
+# Mailstream Flutter stay on the last one published. Run it by hand (workflow_dispatch) only once
+# the user resumes Flutter; it then builds, signs and publishes a Sparkle update to the `updates`
+# release, which installed copies check (Flutter/README.md). The `updates` environment holds the
+# signing material and admits main only; it needs no approval. The ad-hoc rolling nightly is
+# never an update feed.
 on:
-  push:
-    branches: [main]
-    paths:
-      - Flutter/**
-      - Engine/**
-      - FFI/**
-      - Cargo.toml
-      - Cargo.lock
-      - scripts/ffi.py
-      - scripts/sign.sh
-      - scripts/release-sign.sh
-      - scripts/ci-publish.sh
-      - scripts/sparkle.sh
-      - scripts/prepare-update.py
-      - scripts/publish-update.py
-      - scripts/verify-update.swift
-      - .github/workflows/publish-update.yml
   workflow_dispatch:
     inputs:
       channel:
@@ -31,8 +16,8 @@ on:
         default: prerelease
         options: [prerelease, stable]
 
-# One publication at a time, in push order: a newer push waits for the running one, and only
-# the newest waiting push runs after it.
+# One publication at a time: a newer run waits for the running one, and only the newest waiting
+# run follows it.
 concurrency:
   group: publish-update
   cancel-in-progress: false

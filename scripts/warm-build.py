@@ -4,12 +4,13 @@ new ovnfs checkout starts from as its own `target/` and `.turso/` (MS-151): the 
 (`scripts/turso.sh`) and the repository's one cargo workspace (MS-279; its members are the root
 Cargo.toml's) into `target/`, in every configuration the scripts and agents build it. Cargo
 unifies dependencies' features per build, over the packages it selects, so each configuration is
-built the way its users run it: the release engine, command line, Apple Intelligence tagger and
-Dart binding generator (`CONFIG=release scripts/ffi.py`); on the Mac every member's tests (`cargo
-test -p MEMBER --no-run`, as `cargo test` in its folder) and GPUI in release (install.sh,
-bench.sh), release with `shots` (shots.py) and debug (GPUI/run.sh; MS-273); on Linux, where GPUI
-builds in `devenv shell`, the engine's tests. A crate added to the workspace gets its tests
-warmed with no change here; a new build configuration (a feature, a profile) is a new step.
+built the way its users run it: the release engine, command line and Apple Intelligence tagger
+(`CONFIG=release scripts/ffi.py`); on the Mac every member's tests (`cargo test -p MEMBER
+--no-run`, as `cargo test` in its folder) and GPUI in release (install.sh, bench.sh), release
+with `shots` (shots.py) and debug (GPUI/run.sh; MS-273); on Linux, where GPUI builds in `devenv
+shell`, the engine's tests. Flutter is paused (MS-300): neither its Dart bindings nor their
+generator (`FFI/bindgen`) are built. A crate added to the workspace gets its tests warmed with
+no change here; a new build configuration (a feature, a profile) is a new step.
 Crate-level `*/target` folders, from before the workspace, are deleted. On the Mac it first
 installs main's compile budget (`scripts/build-budget.py install`, MS-260). It builds without the
 toolchain variables scripts/repo.py drops on macOS (SDKROOT, CPATH, …): agents' shells don't set
@@ -23,15 +24,13 @@ open ovnfs checkout of it froze these folders when it opened (scripts/checkout.p
 build they opened with): any other (opened with `ovnfs new` by hand, `--rev` or before MS-152)
 reads them live, so a build under it can hand it artifacts built from other source (MS-152), and
 it exits 1 instead. --allow names such a checkout that builds nothing and may stay. Tracked files
-end as `main` has them and nothing else in the tree changes (the Dart bindings go to a temporary
-folder). It unlocks the default checkout's source for its run and locks it again when it ends,
+end as `main` has them and nothing else in the tree changes. It unlocks the default checkout's source for its run and locks it again when it ends,
 failed or not (scripts/source_lock.py, MS-156)."""
 import argparse
 import json
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -116,12 +115,16 @@ def remove_stale():
         print(f"Deleted {stale.relative_to(ROOT)}", flush=True)
 
 
+# Flutter's Dart binding generator: Flutter is paused (MS-300), so nothing builds it.
+PAUSED = {"mailstream-bindgen"}
+
+
 def members():
-    """The workspace's member packages, by name."""
+    """The workspace's member packages, by name, without PAUSED."""
     metadata = json.loads(subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"],
                                          cwd=ROOT, check=True, text=True, capture_output=True).stdout)
     return sorted(package["name"] for package in metadata["packages"]
-                  if package["id"] in metadata["workspace_members"])
+                  if package["id"] in metadata["workspace_members"] and package["name"] not in PAUSED)
 
 
 def build(open_before):
@@ -131,34 +134,33 @@ def build(open_before):
     started = time.monotonic()
     # The Mac's compile budget (MS-260) as main has it: its rustc wrapper in ~/.cargo/config.toml.
     subprocess.run([sys.executable, "scripts/build-budget.py", "install"], cwd=ROOT, check=True)
-    with tempfile.TemporaryDirectory(prefix="mailstream-warm-dart-") as dart:
-        steps = [
-            # ffi.py caps its own cargo.
-            ("turso.sh", capped(["sh", "scripts/turso.sh"]), {}),
-            ("ffi.py", [sys.executable, "scripts/ffi.py"], {"CONFIG": "release", "DART_OUT": dart}),
+    steps = [
+        # ffi.py caps its own cargo.
+        ("turso.sh", capped(["sh", "scripts/turso.sh"]), {}),
+        ("ffi.py", [sys.executable, "scripts/ffi.py"], {"CONFIG": "release"}),
+    ]
+    if sys.platform == "darwin":
+        steps += [(f"{member} tests", capped(["cargo", "test", "-p", member, "--no-run"]), {})
+                  for member in members()]
+        # GPUI as its scripts build it (MS-273): release for install.sh, bench.sh and
+        # gpui-bundle.sh, release with `shots` for scripts/shots.py, debug for GPUI/run.sh.
+        gpui = ["cargo", "build", "-p", "mailstream-gpui"]
+        steps += [
+            ("GPUI release", capped([*gpui, "--release"]), {}),
+            ("GPUI shots", capped([*gpui, "--release", "--features", "shots"]), {}),
+            ("GPUI debug", capped(gpui), {}),
         ]
-        if sys.platform == "darwin":
-            steps += [(f"{member} tests", capped(["cargo", "test", "-p", member, "--no-run"]), {})
-                      for member in members()]
-            # GPUI as its scripts build it (MS-273): release for install.sh, bench.sh and
-            # gpui-bundle.sh, release with `shots` for scripts/shots.py, debug for GPUI/run.sh.
-            gpui = ["cargo", "build", "-p", "mailstream-gpui"]
-            steps += [
-                ("GPUI release", capped([*gpui, "--release"]), {}),
-                ("GPUI shots", capped([*gpui, "--release", "--features", "shots"]), {}),
-                ("GPUI debug", capped(gpui), {}),
-            ]
-        else:
-            steps.append(("engine tests", capped(["cargo", "test", "-p", "mailstream-engine", "--no-run"]), {}))
-        failed = []
-        for name, command, extra in steps:
-            step = time.monotonic()
-            # A step that fails (a member's tests not compiling on main) leaves the others warm:
-            # every step still runs, and the run fails at the end naming it.
-            code = subprocess.run(command, cwd=ROOT, env=build_env(**extra)).returncode
-            print(f"{name}: {time.monotonic() - step:.0f} s" + (f", FAILED ({code})" if code else ""), flush=True)
-            if code:
-                failed.append(name)
+    else:
+        steps.append(("engine tests", capped(["cargo", "test", "-p", "mailstream-engine", "--no-run"]), {}))
+    failed = []
+    for name, command, extra in steps:
+        step = time.monotonic()
+        # A step that fails (a member's tests not compiling on main) leaves the others warm:
+        # every step still runs, and the run fails at the end naming it.
+        code = subprocess.run(command, cwd=ROOT, env=build_env(**extra)).returncode
+        print(f"{name}: {time.monotonic() - step:.0f} s" + (f", FAILED ({code})" if code else ""), flush=True)
+        if code:
+            failed.append(name)
     print(f"Warm build done in {time.monotonic() - started:.0f} s; " +
           ", ".join(f"{path} {size(path)}" for path in OUTPUT))
 

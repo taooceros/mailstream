@@ -1,12 +1,11 @@
 name: Windows
 
-# Mailstream Flutter on Windows x64 with the Rust engine in it: the engine's tests, an end-to-end
-# smoke test of the UniFFI crate's DLL (mailstream.dll), the Flutter app built with it and started
-# to a screenshot. No accounts, secrets or private mail.
+# The Rust engine on Windows x64: the engine's tests and an end-to-end smoke test of the UniFFI
+# crate's DLL (mailstream.dll). No accounts, secrets or private mail. Windows work is paused with
+# Flutter, its only front end (MS-300): this runs only by hand, and no longer builds or launches
+# the Flutter app (the steps that did are in this file's history). The engine's tests fail on
+# Windows (MS-295).
 on:
-  push:
-    branches: [main, 'ms91/**']
-  pull_request:
   workflow_dispatch:
 
 concurrency:
@@ -52,74 +51,3 @@ jobs:
       - name: Smoke test
         if: ${{ !cancelled() }}
         run: target/release/examples/smoke.exe
-
-      - name: Dart bindings
-        if: ${{ !cancelled() }}
-        run: cargo run -q -p mailstream-bindgen -- target/release/mailstream.dll --out-dir Flutter/packages/mailstream/lib/src
-
-      - uses: subosito/flutter-action@v2
-        if: ${{ !cancelled() }}
-        with:
-          channel: stable
-          cache: true
-
-      - name: Flutter (release)
-        if: ${{ !cancelled() }}
-        run: cd Flutter && flutter build windows --release
-
-      # Without accounts: the app starts, opens its window and stays up; the screenshot shows it.
-      - name: Launch and screenshot
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          $app = "Flutter\build\windows\x64\runner\Release"
-          Get-ChildItem $app -Filter *.dll | Select-Object -ExpandProperty Name
-          $process = Start-Process -FilePath "$app\mailstream_ui.exe" -PassThru `
-            -RedirectStandardOutput launch.out.txt -RedirectStandardError launch.err.txt
-          Start-Sleep -Seconds 30
-          if ($process.HasExited) { Get-Content launch.out.txt, launch.err.txt; throw "The app exited with $($process.ExitCode)" }
-          Add-Type -AssemblyName System.Drawing, System.Windows.Forms
-          Add-Type @"
-          using System; using System.Runtime.InteropServices;
-          public static class Win {
-            [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-            public struct RECT { public int Left, Top, Right, Bottom; }
-          }
-          "@
-          $process.Refresh()
-          $window = $process.MainWindowHandle
-          Write-Host "Window: '$($process.MainWindowTitle)' handle $window, $([math]::Round($process.WorkingSet64 / 1MB)) MB"
-          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-          if ($window -ne [IntPtr]::Zero) {
-            [Win]::SetForegroundWindow($window) | Out-Null
-            Start-Sleep -Seconds 2
-            $rect = New-Object Win+RECT
-            [Win]::GetWindowRect($window, [ref]$rect) | Out-Null
-            $bounds = New-Object System.Drawing.Rectangle $rect.Left, $rect.Top, ($rect.Right - $rect.Left), ($rect.Bottom - $rect.Top)
-          }
-          $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
-          $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-          $graphics.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, $bitmap.Size)
-          $bitmap.Save("windows-launch.png")
-          Stop-Process -Id $process.Id
-          Get-Content launch.out.txt, launch.err.txt
-          if ($window -eq [IntPtr]::Zero) { throw "The app runs but showed no window" }
-
-      - name: Package
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          if (Test-Path Flutter\build\windows\x64\runner\Release) {
-            Compress-Archive -Path Flutter\build\windows\x64\runner\Release\* -DestinationPath Mailstream-Flutter-Windows.zip
-          }
-
-      - uses: actions/upload-artifact@v7
-        if: ${{ !cancelled() }}
-        with:
-          name: Mailstream-Flutter-Windows-${{ github.sha }}
-          path: |
-            Mailstream-Flutter-Windows.zip
-            windows-launch.png
-            launch.*.txt
-          retention-days: 14

@@ -3,11 +3,18 @@
 ## Current focus: GPUI
 
 - Product work, new features and UI acceptance go to `GPUI/` unless the user names another
-  front end (MS-240; until then it was Flutter). The AppKit and Flutter front ends stay (not
-  deprecated) and keep working through engine changes, but don't grow their features or port
-  new GPUI features to them. Issues the user files for Flutter (by name, its `flutter` Area or
-  a Flutter project) are still Flutter work, and so is Windows, where Flutter is the only front
-  end.
+  front end (MS-240; until then it was Flutter). The AppKit front end stays (not deprecated) and
+  keeps working through engine changes, but doesn't grow its features or get new GPUI features
+  ported to it.
+- Flutter is paused (MS-300): `Flutter/` stays in the repo, but nobody works on it, nothing
+  builds, installs or publishes it, and engine changes no longer update it or keep it compiling
+  (its Dart bindings and `lib/backend/models.dart` may fall behind the FFI). The installed
+  `Mailstream Flutter.app` stays as it is and gets no more updates. Windows, where Flutter is the
+  only front end, is paused with it: no Flutter work for Windows, and its CI
+  (`.github/workflows/windows.yml`) runs only by hand. An older open issue for Flutter or
+  Flutter on Windows (its `flutter` Area, a Flutter or Windows project) is not a request to
+  resume: ask the user ([Working an issue](#working-an-issue)). Only the user resumes either, by
+  saying so.
 
 ## Version control: jj
 
@@ -57,11 +64,12 @@ Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` 
   `linear-poll.py watch` locks it again whenever anything there is writable. A `jj` command that
   rewrites its working copy fails there and leaves it stale; the script's header says how to
   recover.
-- One line: every front end (the AppKit app, `GPUI/`, `Flutter/`) and the engine they share
-  (`Sources/MailstreamKit`, `FFI/`) live on `main`, and every checkout starts from it and lands
-  on it; `ms-<n>` bookmarks live only until their issue lands; the
-  `gpui-ui` and `flutter-ui` bookmarks are history and take no new commits. An engine change
-  updates every front end that calls what it changed, in the same change.
+- One line: every front end (the AppKit app, `GPUI/`, the paused `Flutter/`) and the engine
+  they share (`Sources/MailstreamKit`, `FFI/`) live on `main`, and every checkout starts from it
+  and lands on it; `ms-<n>` bookmarks live only until their issue lands; the `gpui-ui` and
+  `flutter-ui` bookmarks are history and take no new commits. An engine change updates the
+  AppKit app and GPUI where they call what it changed, in the same change; not Flutter (paused,
+  MS-300).
 - The repo is public: never commit secrets, tokens, OAuth client files or personal mail data.
 
 ## Work tracking: Linear
@@ -233,7 +241,7 @@ machine; agents write the name in backticks (`` `@omp` ``), since Linear rejects
 Linux does the work unless it is Mac-specific (MS-254). Mac-specific means it needs macOS:
 macOS packaging and signing, installing to `/Applications`, `bench.sh` benchmarks, Mac menus and
 shortcuts, the AppKit app, Liquid Glass. The Mac poller keeps those; every other `MS` issue it
-claims (GPUI, Flutter, the engine, tooling) gets `linux` and `omp` and goes to `` `@linux-omp` ``
+claims (GPUI, the engine, tooling) gets `linux` and `omp` and goes to `` `@linux-omp` ``
 with a comment saying so, unworked. An issue already being worked on the Mac stays there until
 it is handed over; it is not moved mid-way.
 
@@ -246,7 +254,7 @@ it is handed over; it is not moved mid-way.
   wrapper.
 - Every compile runs under the machine's limit for all agents together. Prefix builds and tests
   you run yourself with `scripts/capped` (from the repo root: `scripts/capped cargo test`,
-  `scripts/capped devenv shell -- cargo test`, `scripts/capped flutter build macos`);
+  `scripts/capped devenv shell -- cargo test`);
   `ffi.py`, `warm-build.py`, `shots.py`, `install.sh`, `install-linux.py`, `bundle.sh` and
   `GPUI/run.sh` already build through it, and a `capped` inside a capped build runs straight
   through. Cheap commands (jj, rg, reading files) don't need it.
@@ -280,8 +288,8 @@ it is handed over; it is not moved mid-way.
   build's. Run release engine builds through `ffi.py`. Never delete the default checkout's build
   folders. Only `python3 scripts/warm-build.py` builds there: it fetches `main`, moves the default
   checkout's empty change onto it (unlocking its source for the run) and builds.
-- Run anything that may take over a minute (a cold cargo build, `ffi.py`, `install.sh`, `flutter
-  build`, a Swift release build, `bench.sh`) as one blocking eval cell, not `bash`: Python
+- Run anything that may take over a minute (a cold cargo build, `ffi.py`, `install.sh`, a Swift
+  release build, `bench.sh`) as one blocking eval cell, not `bash`: Python
   `subprocess.run(…, capture_output=True, text=True)` with the cell's `timeout` set (up to 3600),
   printing the exit code and the output's last lines. A `bash` call moves to the background after
   60 s, and `wait` then hands back a still-running snapshot every ~10 s, each one a full request
@@ -294,17 +302,17 @@ it is handed over; it is not moved mid-way.
   (seconds per edit). A release build (`scripts/bundle.sh`, `CONFIG=release`) re-optimizes the
   whole module single-threaded, ~30 s per edit; build it only to check performance or ship.
 - All Swift code is in the `MailstreamKit` target (`Sources/MailstreamKit`); the `Mailstream`
-  executable only calls `MailstreamApp.main()`. GPUI and Flutter run the Rust engine (`Engine/`)
+  executable only calls `MailstreamApp.main()`. GPUI runs the Rust engine (`Engine/`)
   through the UniFFI crate in `FFI/`, which `scripts/ffi.py` builds; the Swift engine stays only
   for Mailstream.app until MS-120. New commands go in the Rust engine's command table
   (`Engine/src/commands.rs`, naming the `Handler` that answers them, whose `run` gets the arm)
   and the Swift `CommandSpec`/`ControlService` while both exist, then get a typed method in
   `FFI/src/lib.rs`: one entry in its `commands!` list, which the build checks against the table.
-  GPUI uses that crate directly, Flutter through the Dart binding `ffi.py` generates
-  (`Flutter/README.md`). What a command answers is a type in `Engine/src/answers/` (MS-238),
-  which the FFI hands over as it is: front ends use those types and keep only extensions of
-  their own (GPUI's `GPUI/src/model.rs`, Flutter's `lib/backend/models.dart`), so a field added
-  there reaches every front end.
+  GPUI uses that crate directly; the paused Flutter used it through the Dart binding `ffi.py`
+  generates with `DART_OUT` (`Flutter/README.md`), which nothing builds now (MS-300). What a
+  command answers is a type in `Engine/src/answers/` (MS-238), which the FFI hands over as it
+  is: front ends use those types and keep only extensions of their own (GPUI's
+  `GPUI/src/model.rs`), so a field added there reaches GPUI.
 - The engine keeps the state every front end shares (the open chat space and its history, as for
   the native reader); front ends re-read it on the engine's change events.
 - Test only what you changed: build, then exercise the parts your change touches (the view, flow
@@ -317,15 +325,17 @@ Finished fixes reach the machine that did them as signed release builds, never D
 batches (MS-159): `/Applications` on the Mac, `~/.local/opt` on Linux (MS-224, below).
 All testing happens before that (MS-176): each code agent checks its own change in the real app,
 and one cheap agent then installs `main`'s tip for every issue waiting and checks only that the
-install worked. Separately, each push to `main` that touches the GPUI or Flutter app or the
-engine publishes a signed update of that app without approval, which its installed copy installs
-by itself (`GPUI/README.md`, `Flutter/README.md`); the batch install still runs for each issue.
+install worked. Separately, each push to `main` that touches the GPUI app or the engine
+publishes a signed update of GPUI without approval, which its installed copy installs by itself
+(`GPUI/README.md`); the batch install still runs for each issue. Flutter's signed updates are
+paused with it (MS-300): `.github/workflows/publish-update.yml` runs only by hand, and no CI job
+builds Flutter.
 
 The code agent:
 
 1. Tests its change in the real app before landing: a release or debug build from its own
    checkout (never an `/Applications` copy; it doesn't install), over synthetic data (no
-   accounts or personal mail, like the fixtures `GPUI/README.md` and `Flutter/README.md` list);
+   accounts or personal mail, like the fixtures `GPUI/README.md` lists);
    no sending mail, nothing destructive. It takes every screenshot or recording the change
    needs, UI states in light and dark, and attaches them to the issue.
    - GPUI, on the Mac and Linux: `python3 scripts/shots.py SCRIPT --upload` in its checkout
@@ -336,8 +346,8 @@ The code agent:
      computer use: it works with the screen locked. Add to the seed what the change needs to
      show.
    - What shots.py can't show (the real compositor or Liquid Glass behind the window, a real
-     sign-in, the Mac's WebView renderer, menus, motion), and Flutter: the real app driven with
-     computer helpers. On the Mac, launching the executable with `-AppleInterfaceStyle Dark`
+     sign-in, the Mac's WebView renderer, menus, motion): the real app driven with computer
+     helpers. On the Mac, launching the executable with `-AppleInterfaceStyle Dark`
      shows it dark. On Linux only in a private Hyprland desktop of its own, `python3
      scripts/vhypr.py start <name> [--dark]` (the script's header has every verb: `run`,
      `shot`, `click`, `drag`, `scroll`, `type`, `key`, `appearance`, `stop`), never on the
@@ -346,11 +356,10 @@ The code agent:
      twice on 11-11, resetting the GPU and crashing the user's session.
 2. Lands its `ms-<n>` bookmark on live `main` with `python3 scripts/land.py MS-<n>` ([Version
    control](#version-control-jj)), which keeps other agents' changes.
-3. Picks the targets: `gpui` (`Mailstream GPUI.app`) by default; `flutter` (`Mailstream
-   Flutter.app`) or `native` (`Mailstream.app`) only when the user asks or its installed
-   behavior is directly affected; never an app that isn't installed yet. On Linux: `gpui`
-   (`~/.local/opt/mailstream-gpui`) and `flutter` (`~/.local/opt/mailstream`), each when the
-   change reaches it (an engine change reaches both). Tooling-only changes
+3. Picks the targets: `gpui` (`Mailstream GPUI.app`) by default; `native` (`Mailstream.app`)
+   only when the user asks or its installed behavior is directly affected; never an app that
+   isn't installed yet. On Linux: `gpui` (`~/.local/opt/mailstream-gpui`). Never `flutter`:
+   Flutter is paused (MS-300) and `install.sh` refuses it. Tooling-only changes
    install nothing (In Review directly, [Finish](#working-an-issue)). Changes to deployment
    itself (`install.sh`, `install-linux.py`, signing, updates) exercise the real path: their own
    agent installs them as below.
@@ -388,8 +397,8 @@ The batch install agent (one per `install` line of the poller, [Polling session]
 
 ## Performance: 120 fps
 
-The front ends aim at 120 fps. Measure only on the Mac, with `scripts/bench.sh flutter|gpui
-[RUNS]` on a release build (setup, scenario and log format in its header and
+The front ends aim at 120 fps. Measure only on the Mac, with `scripts/bench.sh gpui [RUNS]` on
+a release build (setup, scenario and log format in its header and
 `scripts/frame-stats.swift`). A
 run passes when at most 1% of vsyncs drop and the interval p99 is at most 12.5 ms (1.5 frames).
 Report 3 runs with their load; work over 8.3 ms shows where time goes. New scenarios get their own

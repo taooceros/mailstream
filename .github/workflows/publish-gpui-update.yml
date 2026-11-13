@@ -2,8 +2,8 @@ name: Publish signed GPUI update
 
 # Every push to main that changes the GPUI app or the engine it links builds, signs and
 # publishes a Sparkle update of Mailstream GPUI (MS-219) to the `updates` release, beside
-# Mailstream Flutter's but with its own feed, appcast-gpui.xml (GPUI/README.md). Same
-# environment, keys and checks as publish-update.yml.
+# Mailstream Flutter's (paused since MS-300) but with its own feed, appcast-gpui.xml
+# (GPUI/README.md). Same environment, keys and checks as publish-update.yml.
 on:
   push:
     branches: [main]
@@ -32,8 +32,8 @@ on:
         default: prerelease
         options: [prerelease, stable]
 
-# One GPUI publication at a time, in push order; Flutter's runs beside it (separate feed and
-# archives).
+# One GPUI publication at a time, in push order; Flutter's, when run by hand, runs beside it
+# (separate feed and archives).
 concurrency:
   group: publish-gpui-update
   cancel-in-progress: false

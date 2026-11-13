@@ -58,7 +58,8 @@ jobs:
           path: Mailstream.dmg
           retention-days: 14
 
-  # The GPUI and Flutter front ends, from the same commit, so the prerelease carries all three apps.
+  # The GPUI front end, from the same commit, so the prerelease carries both apps. Flutter is
+  # paused (MS-300): no job builds it.
   gpui:
     if: github.event_name != 'pull_request'
     runs-on: macos-26
@@ -95,51 +96,9 @@ jobs:
           path: Mailstream-GPUI.dmg
           retention-days: 14
 
-  flutter:
-    if: github.event_name != 'pull_request'
-    runs-on: macos-26
-    timeout-minutes: 60
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ffi-cargo-workspace-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml', 'Engine/Cargo.toml') }}
-          restore-keys: ffi-cargo-workspace-${{ runner.os }}-
-
-      - name: Engine, command line and Dart bindings (release)
-        run: CONFIG=release DART_OUT=$PWD/Flutter/packages/mailstream/lib/src python3 scripts/ffi.py
-
-      - name: Flutter (release)
-        run: cd Flutter && flutter build macos --release
-
-      - name: Disk image
-        run: |
-          mkdir -p build/dmg
-          cp -R "Flutter/build/macos/Build/Products/Release/Mailstream Flutter.app" build/dmg/
-          ln -s /Applications build/dmg/Applications
-          hdiutil create -volname "Mailstream Flutter" -srcfolder build/dmg -fs HFS+ -format UDZO -ov Mailstream-Flutter.dmg
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: Mailstream-Flutter-${{ github.sha }}
-          path: Mailstream-Flutter.dmg
-          retention-days: 14
-
   # One rolling prerelease, "nightly", replaced by every build of main.
   prerelease:
-    needs: [build, gpui, flutter]
+    needs: [build, gpui]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     permissions:
@@ -160,11 +119,11 @@ jobs:
       - name: Publish
         run: |
           SHORT=$(printf '%s' "$GITHUB_SHA" | cut -c1-8)
-          NOTES="Built from $GITHUB_SHA by run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID: Mailstream.dmg, Mailstream-GPUI.dmg and Mailstream-Flutter.dmg.
+          NOTES="Built from $GITHUB_SHA by run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID: Mailstream.dmg and Mailstream-GPUI.dmg.
 
           Signed ad hoc and built without OAuth clients or push settings: they open, but signing in needs a build from \`scripts/bundle.sh\` (or each front end's README) on a set-up Mac. After dragging an app to Applications, run \`xattr -dr com.apple.quarantine \"/Applications/<app name>.app\"\` before the first launch."
           # Delete the old release and tag, then publish again at this commit, so the tag,
           # the date and the asset all match the newest build.
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$TAG" Mailstream.dmg Mailstream-GPUI.dmg Mailstream-Flutter.dmg --prerelease --target "$GITHUB_SHA" \
+          gh release create "$TAG" Mailstream.dmg Mailstream-GPUI.dmg --prerelease --target "$GITHUB_SHA" \
             --title "Nightly ($SHORT)" --notes "$NOTES"

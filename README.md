@@ -75,15 +75,16 @@ Designed after macOS Liquid Glass with Dia's floating islands, Mailstream delive
 
 | Platform | Target | Requirements |
 | :--- | :--- | :--- |
-| **macOS** | `Mailstream Flutter.app` | macOS 26 or later (Apple Silicon) |
-| **Windows** | `mailstream_ui.exe` | Windows 11 / Windows 10 (x64) |
-| **Linux** | `mailstream_ui` | Build from source (x64 or arm64, GTK 3): see `Flutter/README.md` ▸ Linux |
+| **macOS** | `Mailstream GPUI.app` | macOS 26 or later (Apple Silicon) |
+| **Linux** | `mailstream-gpui` | Build from source: see `GPUI/README.md` |
 
-Pre-built binaries are generated on every push to `main` via GitHub Actions (`.github/workflows/build.yml`). You can download the latest nightly disk images (`Mailstream-Flutter.dmg` / Windows release zip) from the repository's Actions artifacts or Releases.
+The Flutter front end (`Flutter/`, the only one on Windows) is paused (MS-300): it stays in the repository, but CI no longer builds or publishes it, and its signed updates have stopped.
+
+Pre-built binaries are generated on every push to `main` via GitHub Actions (`.github/workflows/build.yml`). You can download the latest nightly disk images (`Mailstream-GPUI.dmg`, `Mailstream.dmg`) from the repository's Actions artifacts or Releases.
 
 > **macOS Note**: When downloading ad-hoc signed nightly builds, remove the quarantine flag prior to first launch:
 > ```sh
-> xattr -dr com.apple.quarantine "/Applications/Mailstream Flutter.app"
+> xattr -dr com.apple.quarantine "/Applications/Mailstream GPUI.app"
 > ```
 
 ---
@@ -163,7 +164,7 @@ Mailstream decouples front-end presentation from core email synchronisation and 
 ```
 ┌────────────────────────────────────────────────────────┐
 │                   Desktop Front Ends                   │
-│    GPUI (Primary)    │   Flutter Desktop   │   AppKit  │
+│    GPUI (Primary)    │  Flutter (paused)   │   AppKit  │
 └───────────────────────────┬────────────────────────────┘
                             │ UniFFI / FFI Layer
 ┌───────────────────────────▼────────────────────────────┐
@@ -180,7 +181,7 @@ Mailstream decouples front-end presentation from core email synchronisation and 
 
 | Layer | Key Components | Role |
 | :--- | :--- | :--- |
-| **Flutter UI** | `Flutter/lib/` | High-performance desktop UI featuring macOS Liquid Glass styling, multi-column navigation, Dia's floating islands, and an HTML reader drawn by Blitz (WebKit on its renderer switch). |
+| **Flutter UI** (paused, MS-300) | `Flutter/lib/` | High-performance desktop UI featuring macOS Liquid Glass styling, multi-column navigation, Dia's floating islands, and an HTML reader drawn by Blitz (WebKit on its renderer switch). |
 | **FFI Bridge** | `FFI/` | Rust UniFFI crate exposing typed async APIs, models, and real-time Darwin change notifications to Dart and C hosts. |
 | **Rust Engine** | `Engine/` | Core business logic running on Tokio: account synchronization, Turso SQLite database management, OAuth token refresh, MIME serialization, and Unix domain socket control server. |
 | **Turso DB** | `Support/SQLite.swift`, `.turso/` | Embedded Turso database engine running multi-process WAL mode (`mail.db-tshm`) for concurrent UI and background process reads. |
@@ -226,7 +227,9 @@ The relay receives webhook calls from Gmail Pub/Sub and Microsoft Graph, forward
 - **Windows**: Windows 11/10 x64, Visual Studio 2022 (C++ desktop workload), Flutter, Rust.
 - **Linux**: Flutter, Rust (rustup), clang/libclang, CMake, Ninja, pkg-config, and GTK 3, GLib and fontconfig development files (`devenv shell` provides all but Rust). Build steps: `Flutter/README.md` ▸ Linux. The GPUI front end also needs Wayland or X11 (xcb), xkbcommon and the Vulkan loader, which `devenv shell` provides too: `devenv shell -- GPUI/run.sh` (`GPUI/README.md`).
 
-### Build Steps (macOS Flutter)
+### Build Steps (macOS Flutter, paused)
+
+Flutter is paused (MS-300): these steps are kept for when it resumes; engine changes no longer keep it compiling, and `scripts/install.sh` refuses `flutter`.
 
 ```sh
 # 1. Build the Turso embedded SQLite library (first-time only)
@@ -241,9 +244,9 @@ flutter build macos --release
 ../scripts/sign.sh "build/macos/Build/Products/Release/Mailstream Flutter.app"
 ```
 
-To install directly to `/Applications`:
+To install the GPUI front end directly to `/Applications` (`GPUI/README.md`):
 ```sh
-./scripts/install.sh flutter
+./scripts/install.sh gpui
 ```
 
 ---
