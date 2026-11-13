@@ -352,7 +352,7 @@ impl CalendarStore {
                 {
                     return Err(EngineError::new(
                         "no_calendar",
-                        format!("{id} has not granted calendar access; sign in to it again."),
+                        format!("{id} has not connected its calendar (Settings > Accounts)."),
                     ));
                 }
                 self.fetch_due(|name| only.as_deref().is_none_or(|only| only == name));
@@ -369,7 +369,7 @@ impl CalendarStore {
         {
             let mut state = self.state();
             let entry = state.accounts.get_mut(account).ok_or_else(|| {
-                EngineError::new("no_calendar", format!("{account} has not granted calendar access; sign in to it again."))
+                EngineError::new("no_calendar", format!("{account} has not connected its calendar (Settings > Accounts)."))
             })?;
             let copy = entry.copy.as_mut().ok_or_else(unknown)?;
             let info = copy.calendars.iter_mut().find(|info| info.id == calendar).ok_or_else(unknown)?;

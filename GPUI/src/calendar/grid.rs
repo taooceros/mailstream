@@ -1005,7 +1005,7 @@ impl CalendarPane {
         let failed = notices.iter().any(|account| account.granted && account.problem.is_some());
         let message = if notices.len() == 1 {
             let label = if first.label.is_empty() { &first.id } else { &first.label };
-            if failed { format!("{label}: could not update") } else { format!("{label}: sign in again to show its calendar") }
+            if failed { format!("{label}: could not update") } else { format!("{label}: calendar not connected") }
         } else {
             format!("{} accounts cannot show their calendars", notices.len())
         };

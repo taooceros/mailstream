@@ -42,6 +42,9 @@ are window points from its top left (a PNG's pixels halved: shots are drawn at 2
                                logs each frame's draw time (CPU: build, layout, paint) and a
                                summary past the first, to compare a motion's cost (MS-292)
     thaw                       run the pages' clock in real time again
+    accounts mail|all          what the synthetic accounts were granted: mail alone (as a sign-in
+                               asks now, MS-306) or everything (default); read before the window
+                               opens. Connecting a service is allowed at once, with no browser
 
 The window opens at --size (default 1240x800, the app's) with the inbox loaded. Each input lets
 0.6 s pass. Shot first, then click: open `NAME-light.png` to find where things are.

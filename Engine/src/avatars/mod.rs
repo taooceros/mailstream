@@ -31,6 +31,7 @@ use self::picture::Style;
 use self::web::Web;
 use crate::api::{self, Api, Priority, Request};
 use crate::commands::Arguments;
+use crate::oauth::{GOOGLE_CONTACTS, GOOGLE_DIRECTORY, GRAPH_CONTACTS};
 use crate::{EngineError, Provider};
 
 /// The row size: rows and the reader draw at most 34 pt, so 96 px covers Retina.
@@ -574,8 +575,8 @@ pub(crate) fn photo_accounts(records: &[crate::accounts::AccountRecord], api: im
         .filter_map(|record| {
             let has = |scope: &str| record.scopes.iter().any(|granted| granted == scope);
             let directory = match record.provider {
-                Provider::Google if has(directory::GOOGLE_CONTACTS) => has(directory::GOOGLE_DIRECTORY),
-                Provider::Microsoft if has(directory::GRAPH_CONTACTS) => false,
+                Provider::Google if has(GOOGLE_CONTACTS) => has(GOOGLE_DIRECTORY),
+                Provider::Microsoft if has(GRAPH_CONTACTS) => false,
                 _ => return None,
             };
             Some(PhotoAccount { name: record.id.clone(), provider: record.provider, directory, api: api(&record.id)? })

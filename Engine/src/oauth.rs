@@ -24,51 +24,100 @@ pub enum Provider {
 }
 
 const GMAIL: &str = "https://mail.google.com/";
-const GOOGLE_SCOPES: &[&str] = &[
-    "openid",
-    "email",
-    "profile",
-    GMAIL,
-    "https://www.googleapis.com/auth/contacts.readonly",
-    "https://www.googleapis.com/auth/contacts.other.readonly",
-    "https://www.googleapis.com/auth/directory.readonly",
+/// What sign-in asks for: the account and its mail, nothing more (MS-306). The rest is a
+/// [`Service`] the person connects later.
+const GOOGLE_MAIL: &[&str] = &["openid", "email", "profile", GMAIL];
+pub const GOOGLE_CONTACTS: &str = "https://www.googleapis.com/auth/contacts.readonly";
+pub const GOOGLE_DIRECTORY: &str = "https://www.googleapis.com/auth/directory.readonly";
+const GOOGLE_CONTACT_SCOPES: &[&str] =
+    &[GOOGLE_CONTACTS, "https://www.googleapis.com/auth/contacts.other.readonly", GOOGLE_DIRECTORY];
+/// The scope that makes a Google account a chat account.
+pub const GOOGLE_CHAT: &str = "https://www.googleapis.com/auth/chat.messages.readonly";
+/// The scope that lets an account start direct messages and group chats (`spaces.setup`).
+pub const GOOGLE_CHAT_CREATE: &str = "https://www.googleapis.com/auth/chat.spaces.create";
+const GOOGLE_CHAT_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/chat.spaces.readonly",
-    "https://www.googleapis.com/auth/chat.spaces.create",
-    "https://www.googleapis.com/auth/chat.messages.readonly",
+    GOOGLE_CHAT_CREATE,
+    GOOGLE_CHAT,
     "https://www.googleapis.com/auth/chat.messages.create",
     "https://www.googleapis.com/auth/chat.memberships.readonly",
     "https://www.googleapis.com/auth/chat.users.readstate",
-    // Calendars and their events (the calendar view), and answering invitations and editing
-    // events, asked for together so later calendar features need no second consent.
-    GOOGLE_CALENDARS,
-    GOOGLE_EVENTS,
 ];
+/// Calendars and their events (the calendar view), and answering invitations and editing events.
+const GOOGLE_CALENDAR_SCOPES: &[&str] = &[GOOGLE_CALENDARS, GOOGLE_EVENTS];
 pub const GOOGLE_CALENDARS: &str = "https://www.googleapis.com/auth/calendar.readonly";
 pub const GOOGLE_EVENTS: &str = "https://www.googleapis.com/auth/calendar.events";
-const MICROSOFT_SCOPES: &[&str] = &[
+const MICROSOFT_MAIL: &[&str] = &[
     "openid",
     "email",
     "profile",
     "offline_access",
     "https://graph.microsoft.com/User.Read",
-    "https://graph.microsoft.com/Mail.ReadWrite",
+    MICROSOFT_MAIL_READ_WRITE,
     "https://graph.microsoft.com/Mail.Send",
-    "https://graph.microsoft.com/Contacts.Read",
-    MICROSOFT_CALENDARS,
 ];
+const MICROSOFT_MAIL_READ_WRITE: &str = "https://graph.microsoft.com/Mail.ReadWrite";
+pub const GRAPH_CONTACTS: &str = "https://graph.microsoft.com/Contacts.Read";
 pub const MICROSOFT_CALENDARS: &str = "https://graph.microsoft.com/Calendars.ReadWrite";
 /// The read-only calendar scope accounts signed in before Mailstream edited events were granted.
 pub const MICROSOFT_CALENDARS_READ: &str = "https://graph.microsoft.com/Calendars.Read";
-/// Scopes sign-in asks for that accounts signed in before them never granted. Microsoft refuses
-/// a refresh that asks for more than the sign-in granted, so a refresh asks for these only when
-/// the account's grant has them.
-const MICROSOFT_LATER_SCOPES: &[&str] = &[MICROSOFT_CALENDARS];
 
 /// Whether `granted` (an account's scopes as the provider listed them, with or without Graph's
 /// `https://graph.microsoft.com/` prefix) holds `scope`.
 pub fn has_scope(granted: &[String], scope: &str) -> bool {
     let short = |scope: &str| scope.trim_end_matches('/').rsplit('/').next().unwrap_or(scope).to_lowercase();
     granted.iter().any(|candidate| candidate == scope || short(candidate) == short(scope))
+}
+
+/// What an account may use beyond mail. Sign-in asks for none of them: each is a second consent
+/// for the account (`accounts.connect`) when the person turns it on, so an organization that lets
+/// people allow mail alone, or a person who unticks a box, still gets a working mail account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Service {
+    /// Contact photos and the Workspace directory.
+    Contacts,
+    /// Google Chat.
+    Chat,
+    /// The calendar view, invitations and editing events.
+    Calendar,
+}
+
+impl Service {
+    /// In the order accounts list them.
+    pub const ALL: [Self; 3] = [Self::Contacts, Self::Chat, Self::Calendar];
+
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|service| service.as_str() == name)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Contacts => "contacts",
+            Self::Chat => "chat",
+            Self::Calendar => "calendar",
+        }
+    }
+
+    /// The scopes connecting it asks `provider` for; none when the provider has no such service.
+    pub fn scopes(self, provider: Provider) -> &'static [&'static str] {
+        match (provider, self) {
+            (Provider::Google, Self::Contacts) => GOOGLE_CONTACT_SCOPES,
+            (Provider::Google, Self::Chat) => GOOGLE_CHAT_SCOPES,
+            (Provider::Google, Self::Calendar) => GOOGLE_CALENDAR_SCOPES,
+            (Provider::Microsoft, Self::Contacts) => &[GRAPH_CONTACTS],
+            (Provider::Microsoft, Self::Chat) => &[],
+            (Provider::Microsoft, Self::Calendar) => &[MICROSOFT_CALENDARS],
+        }
+    }
+}
+
+/// Connecting a service to an account already signed in: whose sign-in it extends, and what that
+/// sign-in granted so far.
+#[derive(Clone, Copy, Debug)]
+pub struct Connect<'a> {
+    pub account: &'a str,
+    pub granted: &'a [String],
+    pub service: Service,
 }
 
 impl Provider {
@@ -101,39 +150,72 @@ impl Provider {
         }
     }
 
-    /// Requested at sign-in.
-    pub fn scopes(self) -> &'static [&'static str] {
+    /// Requested at sign-in: the account and its mail.
+    fn mail_scopes(self) -> &'static [&'static str] {
         match self {
-            Self::Google => GOOGLE_SCOPES,
-            Self::Microsoft => MICROSOFT_SCOPES,
+            Self::Google => GOOGLE_MAIL,
+            Self::Microsoft => MICROSOFT_MAIL,
         }
+    }
+
+    /// The scope without which an account has no mail.
+    fn mail_scope(self) -> &'static str {
+        match self {
+            Self::Google => GMAIL,
+            Self::Microsoft => MICROSOFT_MAIL_READ_WRITE,
+        }
+    }
+
+    /// What a sign-in asks for. Connecting a service asks Google for the account and that
+    /// service, as `include_granted_scopes` keeps the rest; Microsoft's consent covers what it
+    /// names, so it names everything the account keeps too.
+    fn requested_scopes(self, connect: Option<Connect<'_>>) -> Vec<&'static str> {
+        let Some(connect) = connect else { return self.mail_scopes().to_vec() };
+        let mut scopes = match self {
+            Self::Google => vec!["openid", "email"],
+            Self::Microsoft => self.refresh_scopes(connect.granted),
+        };
+        for scope in connect.service.scopes(self) {
+            if !scopes.contains(scope) {
+                scopes.push(scope);
+            }
+        }
+        scopes
+    }
+
+    /// What a Microsoft refresh asks for: mail and the services the account's grant has.
+    /// Microsoft refuses a refresh that asks for more than was granted.
+    fn refresh_scopes(self, granted: &[String]) -> Vec<&'static str> {
+        let optional = Service::ALL.into_iter().flat_map(|service| service.scopes(self).iter().copied());
+        let mut scopes = self.mail_scopes().to_vec();
+        scopes.extend(optional.filter(|scope| has_scope(granted, scope)));
+        scopes
     }
 
     /// Authorization parameters beyond the standard ones: Google issues a refresh token only with
-    /// offline access and consent; Microsoft lets the person pick which account.
-    fn authorize_extras(self) -> &'static [(&'static str, &'static str)] {
-        match self {
-            Self::Google => &[("access_type", "offline"), ("prompt", "consent"), ("include_granted_scopes", "true")],
-            Self::Microsoft => &[("prompt", "select_account")],
+    /// offline access and consent, and keeps earlier grants with `include_granted_scopes`;
+    /// Microsoft lets the person pick which account, unless a connect names it.
+    fn authorize_extras(self, connect: Option<Connect<'_>>) -> Vec<(&'static str, String)> {
+        let mut extras: Vec<(&'static str, String)> = match self {
+            Self::Google => vec![
+                ("access_type", "offline".into()),
+                ("prompt", "consent".into()),
+                ("include_granted_scopes", "true".into()),
+            ],
+            Self::Microsoft if connect.is_none() => vec![("prompt", "select_account".into())],
+            Self::Microsoft => Vec::new(),
+        };
+        if let Some(connect) = connect {
+            extras.push(("login_hint", connect.account.into()));
         }
+        extras
     }
 
-    /// Microsoft's token endpoint takes the scopes again; Google's ignores them. A sign-in
-    /// (`granted` None) asks for every scope; a refresh only for those the account's grant has.
-    fn token_extras(self, granted: Option<&[String]>) -> Vec<(&'static str, String)> {
+    /// Microsoft's token endpoint takes the scopes again; Google's ignores them.
+    fn token_extras(self, scopes: &[&str]) -> Vec<(&'static str, String)> {
         match self {
             Self::Google => Vec::new(),
-            Self::Microsoft => {
-                let scopes: Vec<&str> = self
-                    .scopes()
-                    .iter()
-                    .copied()
-                    .filter(|scope| {
-                        granted.is_none_or(|granted| !MICROSOFT_LATER_SCOPES.contains(scope) || has_scope(granted, scope))
-                    })
-                    .collect();
-                vec![("scope", scopes.join(" "))]
-            }
+            Self::Microsoft => vec![("scope", scopes.join(" "))],
         }
     }
 }
@@ -270,23 +352,31 @@ impl OAuth {
     }
 
     /// Opens the provider's sign-in page once the redirect listener is up, waits (up to five
-    /// minutes) for the redirect, then redeems the code with `client`.
-    pub async fn sign_in(&self, provider: Provider, client: &OAuthClient) -> Result<Grant, OAuthError> {
+    /// minutes) for the redirect, then redeems the code with `client`. A new sign-in asks for
+    /// mail; `connect` adds a service to an account signed in already, and fails when the person
+    /// picked another account.
+    pub async fn sign_in(
+        &self,
+        provider: Provider,
+        client: &OAuthClient,
+        connect: Option<Connect<'_>>,
+    ) -> Result<Grant, OAuthError> {
         let verifier = random_token();
         let state = random_token();
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         let redirect = self.redirect();
+        let requested = provider.requested_scopes(connect);
         let mut parameters: BTreeMap<&str, String> = BTreeMap::from([
             ("client_id", client.id.clone()),
             ("redirect_uri", redirect.clone()),
             ("response_type", "code".into()),
-            ("scope", provider.scopes().join(" ")),
+            ("scope", requested.join(" ")),
             ("state", state.clone()),
             ("code_challenge", challenge),
             ("code_challenge_method", "S256".into()),
         ]);
-        for (name, value) in provider.authorize_extras() {
-            parameters.entry(name).or_insert_with(|| (*value).into());
+        for (name, value) in provider.authorize_extras(connect) {
+            parameters.entry(name).or_insert(value);
         }
         let url = format!("{}?{}", provider.authorize_url(), crate::api::form_encoded(&parameters));
 
@@ -300,7 +390,7 @@ impl OAuth {
             ("redirect_uri", redirect),
             ("code_verifier", verifier),
         ]);
-        let response = self.exchange(form, provider, client, None).await?;
+        let response = self.exchange(form, provider, client, &requested).await?;
         let Some(refresh_token) = response.refresh_token.clone() else {
             return Err(OAuthError::new("response", "The sign-in did not grant offline access; try again."));
         };
@@ -313,10 +403,29 @@ impl OAuth {
         let Some(id) = email else {
             return Err(OAuthError::new("response", "The sign-in did not say which account it was for."));
         };
-        let scopes = match &response.scope {
+        if let Some(connect) = connect
+            && id != connect.account
+        {
+            return Err(OAuthError::new(
+                "wrong_account",
+                format!("You signed in as {id}; pick {} to connect it.", connect.account),
+            ));
+        }
+        // Google lets the person untick what they don't allow; `scope` says what they did.
+        let scopes: Vec<String> = match &response.scope {
             Some(scope) => scope.split(' ').filter(|scope| !scope.is_empty()).map(String::from).collect(),
-            None => provider.scopes().iter().map(|scope| scope.to_string()).collect(),
+            None => {
+                let earlier = connect.map(|connect| connect.granted.to_vec()).unwrap_or_default();
+                let asked = requested.iter().map(|scope| scope.to_string()).filter(|scope| !earlier.contains(scope));
+                earlier.iter().cloned().chain(asked).collect()
+            }
         };
+        if connect.is_none() && !has_scope(&scopes, provider.mail_scope()) {
+            return Err(OAuthError::new(
+                "no_mail",
+                "Mailstream needs access to your mail: sign in again and allow it to read, send and organize mail.",
+            ));
+        }
         Ok(Grant {
             id,
             name: claims.and_then(|claims| claims.name),
@@ -338,23 +447,23 @@ impl OAuth {
     ) -> Result<TokenResponse, OAuthError> {
         let form =
             BTreeMap::from([("grant_type", "refresh_token".to_string()), ("refresh_token", refresh_token.to_string())]);
-        self.exchange(form, provider, client, Some(granted)).await
+        self.exchange(form, provider, client, &provider.refresh_scopes(granted)).await
     }
 
     /// POSTs `form` (plus the client credentials) to the token endpoint. Failures answer
-    /// `{"error": …, "error_description": …}`. `granted`: a refresh's scopes, None at sign-in.
+    /// `{"error": …, "error_description": …}`. `scopes`: what Microsoft is asked for again.
     async fn exchange(
         &self,
         mut form: BTreeMap<&'static str, String>,
         provider: Provider,
         client: &OAuthClient,
-        granted: Option<&[String]>,
+        scopes: &[&str],
     ) -> Result<TokenResponse, OAuthError> {
         form.entry("client_id").or_insert_with(|| client.id.clone());
         if let Some(secret) = client.secret.as_ref().filter(|secret| !secret.is_empty()) {
             form.entry("client_secret").or_insert_with(|| secret.clone());
         }
-        for (name, value) in provider.token_extras(granted) {
+        for (name, value) in provider.token_extras(scopes) {
             form.entry(name).or_insert(value);
         }
         let url = self.config.token_endpoint.as_deref().unwrap_or(provider.token_url());
@@ -610,7 +719,7 @@ mod tests {
             open_url: redirecting_browser(port, "code=the-code"),
         });
         let client = OAuthClient { id: "client".into(), secret: Some("secret".into()) };
-        let grant = oauth.sign_in(Provider::Google, &client).await.unwrap();
+        let grant = oauth.sign_in(Provider::Google, &client, None).await.unwrap();
         assert_eq!(
             (grant.id.as_str(), grant.name.as_deref(), grant.refresh_token.as_str()),
             ("person@example.com", Some("Person"), "rt")
@@ -633,7 +742,88 @@ mod tests {
             open_url: Arc::new(|_| {}),
         });
         let error =
-            oauth.sign_in(Provider::Microsoft, &OAuthClient { id: "c".into(), secret: None }).await.unwrap_err();
+            oauth.sign_in(Provider::Microsoft, &OAuthClient { id: "c".into(), secret: None }, None).await.unwrap_err();
         assert_eq!(error.code, "timeout");
+    }
+
+    /// The query of each sign-in page opened, before redirecting as `redirecting_browser` does.
+    type Opened = Arc<std::sync::Mutex<Vec<HashMap<String, String>>>>;
+
+    fn recording_browser(port: u16) -> (Opened, Arc<dyn Fn(&str) + Send + Sync>) {
+        let opened = Opened::default();
+        let (kept, redirect) = (opened.clone(), redirecting_browser(port, "code=c"));
+        let browser = Arc::new(move |url: &str| {
+            let query = reqwest::Url::parse(url).unwrap().query_pairs().into_owned().collect();
+            kept.lock().unwrap().push(query);
+            redirect(url);
+        });
+        (opened, browser)
+    }
+
+    /// A token answer for `email` that granted `scope`.
+    fn granted(email: &str, scope: &str) -> serde_json::Value {
+        let claims = serde_json::json!({ "email": email });
+        let id_token = format!("e30.{}.sig", URL_SAFE_NO_PAD.encode(claims.to_string()));
+        serde_json::json!({ "access_token": "at", "expires_in": 3599, "refresh_token": "rt", "scope": scope, "id_token": id_token })
+    }
+
+    #[tokio::test]
+    async fn asks_for_mail_first_and_connects_services_later() {
+        let calendar = format!("openid email {GMAIL} {GOOGLE_CALENDARS} {GOOGLE_EVENTS}");
+        let answers = std::sync::Mutex::new(vec![
+            granted("me@gmail.com", "openid email"),
+            granted("other@gmail.com", &calendar),
+            granted("me@gmail.com", &calendar),
+            granted("me@gmail.com", &format!("openid email {GMAIL}")),
+        ]);
+        let server = FakeServer::start(move |_| Reply::json(answers.lock().unwrap().remove(0)));
+        let port = free_port();
+        let (opened, browser) = recording_browser(port);
+        let oauth = OAuth::new(OAuthConfig {
+            redirect_port: port,
+            token_endpoint: Some(format!("{}/token", server.base)),
+            sign_in_timeout: Duration::from_secs(10),
+            open_url: browser,
+        });
+        let client = OAuthClient { id: "client".into(), secret: Some("secret".into()) };
+        // Sign-in asks for mail alone; one that leaves mail unticked is no account.
+        let error = oauth.sign_in(Provider::Google, &client, None).await.unwrap_err();
+        assert_eq!(error.code, "no_mail");
+        let first = opened.lock().unwrap()[0].clone();
+        assert_eq!(first["scope"], format!("openid email profile {GMAIL}"));
+        assert_eq!(first["prompt"], "consent");
+        assert!(!first.contains_key("login_hint"));
+
+        let earlier = vec!["openid".to_string(), GMAIL.to_string()];
+        let connect = Connect { account: "me@gmail.com", granted: &earlier, service: Service::Calendar };
+        // Another account picked in the browser connects nothing.
+        let error = oauth.sign_in(Provider::Google, &client, Some(connect)).await.unwrap_err();
+        assert_eq!(error.code, "wrong_account");
+        let grant = oauth.sign_in(Provider::Google, &client, Some(connect)).await.unwrap();
+        let asked = opened.lock().unwrap()[2].clone();
+        assert_eq!(asked["scope"], format!("openid email {GOOGLE_CALENDARS} {GOOGLE_EVENTS}"));
+        assert_eq!((asked["include_granted_scopes"].as_str(), asked["login_hint"].as_str()), ("true", "me@gmail.com"));
+        assert!(has_scope(&grant.scopes, GOOGLE_EVENTS) && has_scope(&grant.scopes, GMAIL));
+
+        // Unticked in Google's consent: the grant says so, and the account keeps working.
+        let chat = Connect { account: "me@gmail.com", granted: &grant.scopes, service: Service::Chat };
+        let grant = oauth.sign_in(Provider::Google, &client, Some(chat)).await.unwrap();
+        assert!(!has_scope(&grant.scopes, GOOGLE_CHAT));
+    }
+
+    #[test]
+    fn asks_microsoft_for_what_the_account_keeps() {
+        let microsoft = Provider::Microsoft;
+        let signed_in = microsoft.requested_scopes(None);
+        assert!(signed_in.contains(&MICROSOFT_MAIL_READ_WRITE) && signed_in.contains(&"offline_access"));
+        assert!(!signed_in.contains(&GRAPH_CONTACTS) && !signed_in.contains(&MICROSOFT_CALENDARS));
+        assert_eq!(microsoft.authorize_extras(None), vec![("prompt", "select_account".to_string())]);
+        // As Graph lists them: without the prefix.
+        let granted: Vec<String> = ["Mail.ReadWrite", "Mail.Send", "User.Read", "Contacts.Read"].map(String::from).into();
+        assert_eq!(microsoft.refresh_scopes(&granted), [MICROSOFT_MAIL, &[GRAPH_CONTACTS]].concat());
+        let connect = Connect { account: "me@outlook.com", granted: &granted, service: Service::Calendar };
+        assert_eq!(microsoft.requested_scopes(Some(connect)), [MICROSOFT_MAIL, &[GRAPH_CONTACTS, MICROSOFT_CALENDARS]].concat());
+        assert_eq!(microsoft.authorize_extras(Some(connect)), vec![("login_hint", "me@outlook.com".to_string())]);
+        assert!(Service::Chat.scopes(microsoft).is_empty());
     }
 }

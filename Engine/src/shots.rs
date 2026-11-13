@@ -13,10 +13,16 @@
 //! user started were answered (Gmail's threads, Graph's messages of a conversation, in batches):
 //! never, so they list in the inbox. Calendar and Chat changes are refused too.
 //!
+//! Sign-ins and connecting a service (`accounts.connect`, MS-306) go through [`consent`] instead
+//! of a browser: it allows everything asked, as a person ticking every box would, and redirects
+//! back at once, so the screens after a sign-in can be shot. No browser opens.
+//!
 //! [`set_outage`] makes one provider never answer, or fail, for screenshots of an account that
 //! can't connect while the others go on (MS-278).
-use std::path::Path;
-use std::sync::{LazyLock, Mutex, OnceLock};
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -31,6 +37,13 @@ use crate::{Config, OAuthClient, Provider, push};
 pub const SERVICE: &str = "dev.mailstream.Mailstream.shots";
 
 static PROVIDER: OnceLock<FakeServer> = OnceLock::new();
+/// The engine's data folder, whose accounts.json says what each account was granted so far.
+static SUPPORT: OnceLock<PathBuf> = OnceLock::new();
+/// The last sign-in [`consent`] allowed: the account (`login_hint`, else a new one) and the
+/// scopes asked for.
+static CONSENTED: Mutex<Option<(String, String)>> = Mutex::new(None);
+/// The account a sign-in without `login_hint` (a new account) signs in to.
+const NEW_ACCOUNT: &str = "new@example.com";
 static LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static OUTAGES: Mutex<Vec<(Provider, Outage)>> = Mutex::new(Vec::new());
 
@@ -68,6 +81,7 @@ pub fn start(support: &Path) {
         signed_in.clients.insert(record.id, OAuthClient { id: "shots".into(), secret: None });
     }
     *SIGN_INS.lock().expect("sign-ins lock") = signed_in;
+    SUPPORT.set(support.to_path_buf()).ok();
     PROVIDER.set(FakeServer::start(answer)).ok();
 }
 
@@ -78,7 +92,56 @@ pub(crate) fn config(mut config: Config) -> Config {
     config.oauth.token_endpoint = Some(format!("{}/token", server.base));
     config.endpoints = fake_server::endpoints(&server.base);
     config.push = push::PushConfig::default();
+    config.oauth.open_url = Arc::new(consent);
+    // A port of its own, so a run never meets the app's sign-in or another run's.
+    config.oauth.redirect_port =
+        std::net::TcpListener::bind(("127.0.0.1", 0)).and_then(|listener| listener.local_addr()).map_or(0, |address| address.port());
     config
+}
+
+/// The screenshot mode's browser: allows the sign-in page at `url` everything it asks and
+/// redirects to the engine's listener with a code, which the stand-in's token endpoint redeems
+/// ([`token`]).
+fn consent(url: &str) {
+    let Ok(url) = reqwest::Url::parse(url) else { return };
+    let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
+    let account = query.get("login_hint").cloned().unwrap_or_else(|| NEW_ACCOUNT.into());
+    *CONSENTED.lock().expect("consent lock") = Some((account, query.get("scope").cloned().unwrap_or_default()));
+    let Some(port) = query.get("redirect_uri").and_then(|uri| reqwest::Url::parse(uri).ok()?.port()) else { return };
+    let state = query.get("state").cloned().unwrap_or_default();
+    std::thread::spawn(move || {
+        if let Ok(mut connection) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            let request = format!("GET /?code=shots&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            let _ = connection.write_all(request.as_bytes());
+            let _ = std::io::Read::read_to_end(&mut connection, &mut Vec::new());
+        }
+    });
+}
+
+/// The token endpoint: a refresh gets an access token; a sign-in's code what [`consent`]
+/// allowed on top of what the account had (Google's `include_granted_scopes`), with an id token
+/// naming the account.
+fn token(request: &FakeRequest) -> Reply {
+    if request.form().get("grant_type").map(String::as_str) != Some("authorization_code") {
+        return Reply::json(json!({ "access_token": "shots", "expires_in": 3600 }));
+    }
+    let Some((account, asked)) = CONSENTED.lock().expect("consent lock").take() else {
+        return Reply::status(400, json!({ "error": "invalid_grant", "error_description": "No sign-in to redeem." }));
+    };
+    let had = SUPPORT.get().and_then(|support| Accounts::new(support).record(&account)).map(|record| record.scopes);
+    let mut scopes = had.unwrap_or_default();
+    for scope in asked.split(' ').filter(|scope| !scope.is_empty()) {
+        if !scopes.iter().any(|known| known == scope) {
+            scopes.push(scope.to_string());
+        }
+    }
+    // As a consent that asks for no profile: no name, so the account keeps its own.
+    let claims = json!({ "email": account }).to_string();
+    let id_token = format!("e30.{}.sig", base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, claims));
+    Reply::json(json!({
+        "access_token": "shots", "expires_in": 3600, "refresh_token": format!("shots-{account}"),
+        "scope": scopes.join(" "), "id_token": id_token,
+    }))
 }
 
 /// What the provider answered so far, one line per request (`200 POST /gmail/v1/…`), a Graph
@@ -104,7 +167,7 @@ fn answer(request: &FakeRequest) -> Reply {
     }
     let mut lines = Vec::new();
     let reply = match (method, path) {
-        ("POST", "/token") => Reply::json(json!({ "access_token": "shots", "expires_in": 3600 })),
+        ("POST", "/token") => token(request),
         ("POST", "/upload/gmail/v1/users/me/messages/send") => Reply::json(json!({ "id": "shots-sent" })),
         ("POST", _) if path.starts_with("/gmail/v1/users/me/messages/") => Reply::json(json!({})),
         ("POST", "/v1.0/me/sendMail") => Reply::bytes(202, Vec::new()),

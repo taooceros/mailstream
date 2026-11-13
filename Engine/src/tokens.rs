@@ -202,6 +202,14 @@ impl Tokens {
         Ok(last.or_else(|| self.built_in(provider)))
     }
 
+    /// The client `account`'s refresh token came from, which a further consent for it must use
+    /// too: the one stored with it, else the build's (tokens from before clients were stored).
+    pub fn client(&self, account: &str, provider: Provider) -> Result<Option<OAuthClient>, TokenError> {
+        let mut state = self.state.lock().expect("tokens lock");
+        let stored = state.stored(&self.keychain)?.clients.get(account).cloned();
+        Ok(stored.or_else(|| self.built_in(provider)))
+    }
+
     /// Forgets `token` after a provider refused it (401), so the next `token` refreshes.
     pub fn reject(&self, token: &str, account: &str) {
         let mut state = self.state.lock().expect("tokens lock");

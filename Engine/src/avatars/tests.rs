@@ -240,8 +240,8 @@ fn contact_photos_come_first_and_the_directory_lists_everyone() {
     sign_in_all(
         &config,
         &[
-            json!({ "id": "me@gmail.com", "provider": "google", "label": "me@gmail.com", "scopes": ["openid", directory::GOOGLE_CONTACTS] }),
-            json!({ "id": "me@outlook.com", "provider": "microsoft", "label": "me@outlook.com", "scopes": ["openid", directory::GRAPH_CONTACTS] }),
+            json!({ "id": "me@gmail.com", "provider": "google", "label": "me@gmail.com", "scopes": ["openid", crate::oauth::GOOGLE_CONTACTS] }),
+            json!({ "id": "me@outlook.com", "provider": "microsoft", "label": "me@outlook.com", "scopes": ["openid", crate::oauth::GRAPH_CONTACTS] }),
             json!({ "id": "other@gmail.com", "provider": "google", "label": "other@gmail.com", "scopes": ["openid"] }),
         ],
     );

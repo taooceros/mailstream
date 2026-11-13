@@ -312,6 +312,15 @@ pub const COMMANDS: &[Spec] = &[
         ],
     ),
     Spec::new(
+        "accounts.connect",
+        Handler::Core,
+        "Lets a signed-in account use one more service: opens the provider's consent page for it in the browser and waits (up to 5 minutes). Sign-in asks only for mail; contacts, chat (Google) and calendar are connected this way.",
+        &[
+            ACCOUNT_ADDRESS,
+            Argument::new("service", Kind::Choice(&["contacts", "chat", "calendar"]), "Service to allow.").positional(),
+        ],
+    ),
+    Spec::new(
         "accounts.remove",
         Handler::Core,
         "Signs an account out and deletes its saved sign-in. Mail on the server is untouched.",
@@ -567,7 +576,7 @@ pub const COMMANDS: &[Spec] = &[
     Spec::new(
         "calendar.events",
         Handler::Calendar,
-        "Calendars: every account with its calendars (or that it must sign in again to grant calendar access), and the events from its calendars on the days asked for, earliest first, as last fetched (every five minutes), with the days fetched (`synced`: a week back to 60 days on); other days hold no events.",
+        "Calendars: every account with its calendars (or that its calendar is not connected: `accounts connect ACCOUNT calendar`), and the events from its calendars on the days asked for, earliest first, as last fetched (every five minutes), with the days fetched (`synced`: a week back to 60 days on); other days hold no events.",
         &[
             ACCOUNT,
             Argument::new("from", Kind::String, "The first day, as 2026-11-08 (default: today)."),

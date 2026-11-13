@@ -701,6 +701,12 @@ pub struct ChatPane {
     reload: bool,
     chat_accounts: Vec<Account>,
     accounts: Vec<ChatAccountInfo>,
+    /// With no chat account: the Google accounts that could connect Chat (MS-306), as
+    /// `ChatAccountInfo`s.
+    chat_offers: Vec<ChatAccountInfo>,
+    /// The account whose Chat is being connected in the browser, and why the last try failed.
+    connecting: Option<SharedString>,
+    connect_failure: Option<SharedString>,
     /// Every signed-in account in sidebar order, for account colors.
     account_order: Vec<SharedString>,
     spaces: Vec<Space>,
@@ -751,6 +757,9 @@ impl ChatPane {
             reload: false,
             chat_accounts: Vec::new(),
             accounts: Vec::new(),
+            chat_offers: Vec::new(),
+            connecting: None,
+            connect_failure: None,
             account_order: Vec::new(),
             spaces: Vec::new(),
             more: false,
@@ -784,6 +793,11 @@ impl ChatPane {
         // Selecting Chat fetches every account's spaces now, as the native app does.
         self.refresh(&Refresh, window, cx);
         cx.notify();
+    }
+
+    /// Whether the sidebar lists Chat: an account uses it, or a Google account could connect it.
+    pub fn shown(&self) -> bool {
+        !self.accounts.is_empty() || !self.chat_offers.is_empty()
     }
 
     pub fn accounts(&self) -> &[ChatAccountInfo] {
@@ -825,6 +839,25 @@ impl ChatPane {
         }
     }
 
+    /// Asks `account`'s provider, in the browser, to let Mailstream use its Google Chat
+    /// (MS-306); the engine's chat list changes once the person allows it.
+    fn connect_chat(&mut self, account: SharedString, cx: &mut Context<Self>) {
+        if self.connecting.is_some() {
+            return;
+        }
+        self.connecting = Some(account.clone());
+        self.connect_failure = None;
+        cx.notify();
+        self.background(cx, async move { engine().connect_account(account.to_string(), "chat".into()).await }, |this, result, cx| {
+            this.connecting = None;
+            match result {
+                Ok(_) => this.load_spaces(cx),
+                Err(error) => this.connect_failure = Some(format!("Could not connect Chat: {error}").into()),
+            }
+            cx.notify();
+        });
+    }
+
     // MARK: - Spaces
 
     fn load_spaces(&mut self, cx: &mut Context<Self>) {
@@ -855,7 +888,17 @@ impl ChatPane {
                         .ok()
                         .map(|list| list.into_iter().map(|a| SharedString::from(a.id)).collect::<Vec<_>>())
                 };
-                Ok::<_, MailError>((accounts, spaces, order, more))
+                // No chat account: which accounts could connect Chat.
+                let offers: Vec<ChatAccountInfo> = if accounts.is_empty() {
+                    let list = engine().accounts().await.unwrap_or_default();
+                    list.into_iter()
+                        .filter(|a| a.connectable.iter().any(|s| s == "chat"))
+                        .map(|a| ChatAccountInfo { id: a.id.into(), label: a.label.into() })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                Ok::<_, MailError>((accounts, spaces, order, more, offers))
             },
             |this, result, cx| {
                 this.loading = false;
@@ -863,8 +906,9 @@ impl ChatPane {
                     this.load_spaces(cx);
                 }
                 match result {
-                    Ok((accounts, spaces, order, more)) => {
+                    Ok((accounts, spaces, order, more, offers)) => {
                         this.failure = None;
+                        this.chat_offers = offers;
                         this.loaded = true;
                         this.more = more;
                         if let Some(order) = order {
@@ -1514,7 +1558,24 @@ impl ChatPane {
         } else if !self.loaded {
             centered_note("Loading chats…", p).into_any_element()
         } else if self.accounts.is_empty() {
-            centered_note("No Google Chat accounts. Sign in to a Google account with Chat access in Mailstream's settings.", p)
+            let idle = self.connecting.is_none();
+            let note = if self.chat_offers.is_empty() {
+                "No Google Chat accounts. Add a Google account in Settings to use Chat."
+            } else {
+                "Google Chat is not connected. Connect it for an account to see its conversations here."
+            };
+            centered_note(note, p)
+                .children(self.chat_offers.iter().map(|offer| {
+                    let id = offer.id.clone();
+                    let label = if self.connecting.as_ref() == Some(&offer.id) {
+                        "Waiting for Browser…".to_owned()
+                    } else {
+                        format!("Connect Chat for {}…", offer.label)
+                    };
+                    button(ElementId::Name(format!("connect-chat:{}", offer.id).into()), label, ButtonKind::Secondary, ControlSize::Small, idle, p)
+                        .when(idle, |b| b.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.connect_chat(id.clone(), cx))))
+                }))
+                .when_some(self.connect_failure.clone(), |d, failure| d.child(div().text_center().text_color(p.danger).child(failure)))
                 .into_any_element()
         } else if self.visible.is_empty() {
             centered_note("No conversations yet.", p)
@@ -1966,7 +2027,7 @@ impl ChatPane {
             None if form.starting => ("Starting…".into(), None),
             None if count > 1 => (format!("Starts a group chat with these {count} people.").into(), None),
             None if !can_start => (
-                "This account can only reopen direct messages it has; sign in again to start new chats.".into(),
+                "This account can only reopen direct messages it has; connect Chat in full (Settings › Accounts) to start new chats.".into(),
                 Some(Tone::Action),
             ),
             None => ("Opens your direct message with this person, or starts one.".into(), None),

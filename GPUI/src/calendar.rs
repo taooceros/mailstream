@@ -114,8 +114,8 @@ pub struct CalendarToast(pub SharedString);
 
 /// One line of the agenda.
 enum Entry {
-    /// An account whose calendar cannot show (an index into `accounts`): it must sign in again
-    /// for calendar access, or its last fetch failed.
+    /// An account whose calendar cannot show (an index into `accounts`): its calendar is not
+    /// connected, or its last fetch failed.
     Notice(usize),
     Day { day: NaiveDate, title: SharedString, summary: SharedString },
     /// An index into `events`, under the day it is listed on.
@@ -129,6 +129,8 @@ pub struct CalendarPane {
     /// Calendar is in view instead of mail.
     active: bool,
     accounts: Vec<CalendarAccount>,
+    /// The account whose calendar is being connected in the browser (MS-306).
+    connecting: Option<String>,
     /// This computer's time zone, as the engine names it, which the editor's times are in.
     time_zone: String,
     /// A saved new event, opened once a read brings it.
@@ -227,6 +229,7 @@ impl CalendarPane {
             focus: cx.focus_handle(),
             active: false,
             accounts: Vec::new(),
+            connecting: None,
             time_zone: String::new(),
             open_after: None,
             events: Vec::new(),
@@ -291,6 +294,24 @@ impl CalendarPane {
 
     fn toast(&self, text: String, cx: &mut Context<Self>) {
         cx.emit(CalendarToast(text.into()));
+    }
+
+    /// Asks `account`'s provider, in the browser, to let Mailstream read and edit its calendar
+    /// (MS-306); its events come once the person allows it.
+    fn connect_calendar(&mut self, account: String, cx: &mut Context<Self>) {
+        if self.connecting.is_some() {
+            return;
+        }
+        self.connecting = Some(account.clone());
+        cx.notify();
+        self.background(cx, async move { engine().connect_account(account, "calendar".into()).await }, |this, result, cx| {
+            this.connecting = None;
+            match result {
+                Ok(_) => this.reload(cx),
+                Err(error) => this.toast(format!("Could not connect the calendar: {error}"), cx),
+            }
+            cx.notify();
+        });
     }
 
     /// The calendar comes into view, from what the engine holds (it fetches what got old itself).
@@ -375,7 +396,7 @@ impl CalendarPane {
             entries.push(Entry::Note(if self.has_calendars() {
                 format!("Nothing on your calendars in the next {DAYS} days").into()
             } else {
-                "No account has calendar access yet. Sign in again to show its calendar here.".into()
+                "No calendar is connected yet. Connect an account's calendar to show it here.".into()
             }));
         }
         for (slot, day) in model::week_days(model::week_of(today)).into_iter().enumerate() {

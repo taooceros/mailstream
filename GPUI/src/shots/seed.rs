@@ -179,9 +179,10 @@ impl Mail {
 }
 
 /// Writes the synthetic data into `support` (the engine's data folder) and `caches`.
-pub fn write(support: &Path, caches: &Path) {
+/// `mail_only`: the accounts' sign-ins granted mail alone, as a sign-in asks now (MS-306).
+pub fn write(support: &Path, caches: &Path, mail_only: bool) {
     std::fs::create_dir_all(support).expect("the data folder");
-    write_accounts(support);
+    write_accounts(support, mail_only);
     // Tagging stays on, or the list shows no tags; every conversation has one already, and this
     // `omp` doesn't exist, so a run never tags anything with the person's own.
     let settings = json!({ "aiTagging.ompPath": "/nonexistent/shots-omp" });
@@ -198,7 +199,7 @@ pub fn write(support: &Path, caches: &Path) {
     });
 }
 
-fn write_accounts(support: &Path) {
+fn write_accounts(support: &Path, mail_only: bool) {
     let google = [
         "openid",
         "email",
@@ -216,6 +217,8 @@ fn write_accounts(support: &Path) {
         "https://graph.microsoft.com/Mail.ReadWrite",
         "https://graph.microsoft.com/Calendars.ReadWrite",
     ];
+    // Mail alone: what each provider lists for a sign-in that asks for nothing more.
+    let (google, microsoft) = if mail_only { (&google[..4], &microsoft[..5]) } else { (&google[..], &microsoft[..]) };
     let accounts = json!([
         { "id": GMAIL, "provider": "google", "label": GMAIL, "displayName": ME, "scopes": google },
         { "id": OUTLOOK, "provider": "microsoft", "label": OUTLOOK, "displayName": ME, "scopes": microsoft },

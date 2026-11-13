@@ -125,7 +125,7 @@ impl MailApp {
                     .into_any_element(),
             );
         }
-        if !chat.accounts().is_empty() {
+        if chat.shown() {
             let count = chat.unread(None) as u32;
             items.push(
                 rail_item("chat", Icon::Chat, "Chat", count, self.chat_view.is_some(), p)
@@ -223,7 +223,7 @@ impl MailApp {
 
         // Google Chat, for accounts signed in to it: one node, expanding into accounts when there are several.
         let chat = self.chat.read(cx);
-        if !chat.accounts().is_empty() {
+        if chat.shown() {
             let key: SharedString = "chat".into();
             let several = chat.accounts().len() > 1;
             let open = several && self.expanded.contains(&key);

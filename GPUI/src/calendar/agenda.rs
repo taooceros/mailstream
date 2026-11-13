@@ -3,8 +3,8 @@
 //! switch, MS-302), New event and Refresh over
 //! the views' bar (Agenda, Day, Week; previous page, Today, next page), then the agenda (this
 //! week's days on a strip, today raised and the others over a bar of the hours they book; the
-//! meeting about to start on one card with Join; notices for accounts to sign in again or whose
-//! fetch failed; each day from today with its events under its header), or the day or week view
+//! meeting about to start on one card with Join; notices for accounts whose calendar is not
+//! connected or whose fetch failed; each day from today with its events under its header), or the day or week view
 //! (`grid.rs`).
 
 use chrono::{DateTime, Local, NaiveDate};
@@ -29,7 +29,6 @@ use crate::controls::{
 use crate::design::{self, Palette, calendar as metrics, icon as icon_size, layout, list as rows, space, stroke, text};
 use crate::icons::{Icon, icon};
 use mailstream::Address;
-use crate::settings::ShowSettings;
 
 /// A guest as the address their avatar is drawn for.
 pub(super) fn guest_address(person: &CalendarPerson) -> Address {
@@ -516,7 +515,7 @@ impl CalendarPane {
 
     fn render_entry(&self, ix: usize, now: DateTime<Local>, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let line = match &self.entries[ix] {
-            Entry::Notice(account) => self.render_notice(*account, p).into_any_element(),
+            Entry::Notice(account) => self.render_notice(*account, p, cx).into_any_element(),
             Entry::Day { title, summary, .. } => div()
                 .h(px(rows::SECTION_HEIGHT))
                 .flex()
@@ -553,29 +552,32 @@ impl CalendarPane {
         div().px(px(rows::INSET)).child(line).into_any_element()
     }
 
-    /// An account whose calendar cannot show: sign in again (in Settings) for calendar access,
-    /// or its last fetch failed.
-    fn render_notice(&self, account: usize, p: &'static Palette) -> Div {
+    /// An account whose calendar cannot show: its calendar is not connected (Connect asks the
+    /// provider in the browser, MS-306), or its last fetch failed.
+    fn render_notice(&self, account: usize, p: &'static Palette, cx: &mut Context<Self>) -> Div {
         let account = &self.accounts[account];
         let failed = account.problem.clone().filter(|_| account.granted);
         let title = if account.label.is_empty() { account.id.clone() } else { account.label.clone() };
         let (tone, message) = match &failed {
             Some(problem) => (Tone::Error, format!("Could not update: {problem}")),
-            None => (Tone::Action, "Sign in again to allow calendar access.".to_owned()),
+            None => (Tone::Action, "Connect this account's calendar to show its events here.".to_owned()),
         };
         // As tall as its message wraps to: the list measures each line.
         div().py(px(space::S4)).px(px(space::S12 - rows::INSET)).child(
             notice(tone, Some(title.into()), message, false, p).when(failed.is_none(), |d| {
+                let waiting = self.connecting.as_ref() == Some(&account.id);
+                let idle = self.connecting.is_none();
+                let id = account.id.clone();
                 d.child(
                     button(
-                        ElementId::Name(format!("sign-in:{}", account.id).into()),
-                        "Sign In…",
+                        ElementId::Name(format!("connect-calendar:{}", account.id).into()),
+                        if waiting { "Waiting for Browser…" } else { "Connect Calendar…" },
                         ButtonKind::Secondary,
                         ControlSize::Small,
-                        true,
+                        idle,
                         p,
                     )
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ShowSettings), cx)),
+                    .when(idle, |b| b.on_click(cx.listener(move |this, _, _, cx| this.connect_calendar(id.clone(), cx)))),
                 )
             }),
         )

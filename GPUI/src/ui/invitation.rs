@@ -38,7 +38,7 @@ fn why_not(status: Option<&InvitationStatus>, cancelled: bool) -> Option<String>
     }
     let status = status?;
     if !status.granted || !status.editable {
-        return Some(format!("Sign in to {} again (Settings › Accounts) to answer from here.", status.account));
+        return Some(format!("Connect Calendar for {} (Settings › Accounts) to answer from here.", status.account));
     }
     if let Some(problem) = &status.problem {
         return Some(format!("Could not read the calendar: {problem}"));

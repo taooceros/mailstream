@@ -114,7 +114,7 @@ impl CalendarStore {
             return Err(EngineError::usage("response must be accepted, tentative or declined."));
         }
         let record = self.accounts.record(&account).filter(AccountRecord::can_edit_calendars).ok_or_else(|| {
-            EngineError::new("no_calendar", format!("{account} has not granted changing its calendar; sign in to it again."))
+            EngineError::new("no_calendar", format!("{account} has not allowed changing its calendar; connect Calendar for it (Settings > Accounts)."))
         })?;
         let api = self.mail.api(&account).ok_or_else(|| {
             EngineError::new("signed_out", format!("{account} needs to sign in again (Settings > Accounts)."))

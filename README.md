@@ -209,7 +209,7 @@ scripts/setup.sh
 ### 2. Microsoft Entra ID (Outlook & Microsoft 365)
 1. Register an application in [Microsoft Entra ID](https://entra.microsoft.com/) supporting personal and organizational accounts.
 2. Add Web redirect URI: `http://localhost:49152`.
-3. Add delegated Microsoft Graph permissions: `User.Read`, `Mail.ReadWrite`, `Mail.Send`, `Contacts.Read`, and `Calendars.ReadWrite`.
+3. Add delegated Microsoft Graph permissions: `User.Read`, `Mail.ReadWrite`, `Mail.Send`, `Contacts.Read`, and `Calendars.ReadWrite`. Signing in asks only for the mail ones; contacts and the calendar are asked for when you connect them for an account (Settings ▸ Accounts), as are Google's contacts, Chat and calendar.
 4. Generate a client secret.
 
 ### 3. Push Relay (Cloudflare Worker)

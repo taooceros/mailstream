@@ -30,8 +30,9 @@ use crate::chat_model::{
 use crate::commands::Arguments;
 use crate::mail::Mail;
 use crate::model::{DISTANT_PAST, Date, iso8601, now};
+use crate::oauth::{GOOGLE_CHAT_CREATE, Service, has_scope};
 use crate::settings::{Setting, Settings};
-use crate::{EngineError, Events, Provider};
+use crate::{EngineError, Events};
 
 const SPACES_PAGE: usize = 60;
 const MESSAGES_PAGE: usize = 100;
@@ -39,10 +40,6 @@ const MESSAGES_PAGE: usize = 100;
 const RECENT_LIMIT: usize = 20;
 /// Messages kept on disk per recent space.
 const CACHED_MESSAGES: usize = 150;
-/// The scope that makes a Google account a chat account.
-const CHAT_SCOPE: &str = "https://www.googleapis.com/auth/chat.messages.readonly";
-/// The scope that lets an account start direct messages and group chats (`spaces.setup`).
-const CREATE_SCOPE: &str = "https://www.googleapis.com/auth/chat.spaces.create";
 
 
 struct Listing {
@@ -145,7 +142,7 @@ pub struct Chat {
 }
 
 fn is_chat(record: &AccountRecord) -> bool {
-    record.provider == Provider::Google && record.scopes.iter().any(|scope| scope == CHAT_SCOPE)
+    record.has(Service::Chat)
 }
 
 fn failed(error: &ApiError) -> EngineError {
@@ -823,9 +820,10 @@ impl Chat {
     // MARK: - Starting
 
     /// Whether `account`'s sign-in lets it create direct messages and group chats; accounts
-    /// signed in before Mailstream asked for that can only reopen the direct messages they have.
+    /// signed in before Mailstream asked for that, or whose person unticked it, can only reopen
+    /// the direct messages they have.
     fn can_start_chats(&self, account: &str) -> bool {
-        self.accounts.record(account).is_some_and(|record| record.scopes.iter().any(|scope| scope == CREATE_SCOPE))
+        self.accounts.record(account).is_some_and(|record| has_scope(&record.scopes, GOOGLE_CHAT_CREATE))
     }
 
     /// People `account` chats with, most recently active first: the other members of its

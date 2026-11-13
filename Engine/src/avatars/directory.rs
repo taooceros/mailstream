@@ -91,10 +91,6 @@ pub struct PhotoAccount {
     pub api: Arc<Api>,
 }
 
-pub const GOOGLE_CONTACTS: &str = "https://www.googleapis.com/auth/contacts.readonly";
-pub const GOOGLE_DIRECTORY: &str = "https://www.googleapis.com/auth/directory.readonly";
-pub const GRAPH_CONTACTS: &str = "https://graph.microsoft.com/Contacts.Read";
-
 /// Contact photos and people found in one account.
 pub type Found = (BTreeMap<String, PhotoSource>, Vec<DirectoryPerson>);
 

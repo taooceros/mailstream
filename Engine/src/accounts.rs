@@ -7,7 +7,10 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::answers;
-use crate::oauth::{GOOGLE_CALENDARS, GOOGLE_EVENTS, Grant, MICROSOFT_CALENDARS, MICROSOFT_CALENDARS_READ, Provider, has_scope};
+use crate::oauth::{
+    GOOGLE_CALENDARS, GOOGLE_CHAT, GOOGLE_CONTACTS, GOOGLE_EVENTS, GRAPH_CONTACTS, Grant, MICROSOFT_CALENDARS,
+    MICROSOFT_CALENDARS_READ, Provider, Service, has_scope,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountRecord {
@@ -26,23 +29,41 @@ pub struct AccountRecord {
 impl AccountRecord {
     /// The account as `accounts.*` commands answer it.
     pub fn answer(&self) -> answers::Account {
-        let scopes = self.scopes.join(" ").to_lowercase();
-        let mut services: Vec<String> =
-            ["mail", "contacts", "chat"].into_iter().filter(|service| scopes.contains(service)).map(String::from).collect();
-        if self.has_calendars() {
-            services.push("calendar".into());
-        }
+        let mail = self.scopes.join(" ").to_lowercase().contains("mail");
+        let services = Service::ALL.into_iter().filter(|service| self.has(*service)).map(|service| service.as_str());
+        let connectable = Service::ALL
+            .into_iter()
+            .filter(|service| {
+                let scopes = service.scopes(self.provider);
+                !scopes.is_empty() && !scopes.iter().all(|scope| has_scope(&self.scopes, scope))
+            })
+            .map(|service| service.as_str().to_string())
+            .collect();
         answers::Account {
             id: self.id.clone(),
             label: self.label.clone(),
             provider: self.provider,
             name: self.display_name.clone(),
-            services,
+            services: mail.then_some("mail").into_iter().chain(services).map(String::from).collect(),
+            connectable,
+        }
+    }
+
+    /// Whether its sign-in lets it use `service`, perhaps not all of it (reading calendars
+    /// without editing them, reading chats without starting new ones).
+    pub fn has(&self, service: Service) -> bool {
+        match service {
+            Service::Contacts => match self.provider {
+                Provider::Google => has_scope(&self.scopes, GOOGLE_CONTACTS),
+                Provider::Microsoft => has_scope(&self.scopes, GRAPH_CONTACTS),
+            },
+            Service::Chat => self.provider == Provider::Google && has_scope(&self.scopes, GOOGLE_CHAT),
+            Service::Calendar => self.has_calendars(),
         }
     }
 
     /// Whether its sign-in lets it read its calendars: those signed in before Mailstream asked
-    /// for them must sign in again.
+    /// for them, or since without connecting Calendar, must connect it first.
     pub fn has_calendars(&self) -> bool {
         match self.provider {
             Provider::Google => has_scope(&self.scopes, GOOGLE_CALENDARS),
@@ -95,8 +116,9 @@ impl Accounts {
         Ok(Some(renamed))
     }
 
-    /// Records a completed sign-in. Signing in to an account already here replaces its name and
-    /// scopes and keeps its label.
+    /// Records a completed sign-in. Signing in to an account already here replaces its scopes
+    /// and keeps its label, and its name unless the sign-in gave one (connecting a service asks
+    /// for no profile).
     pub fn signed_in(&self, provider: Provider, grant: &Grant) -> Result<AccountRecord, String> {
         let mut records = self.records.lock().expect("accounts lock");
         let mut record = AccountRecord {
@@ -109,6 +131,9 @@ impl Accounts {
         match records.iter_mut().find(|existing| existing.id == record.id) {
             Some(existing) => {
                 record.label = existing.label.clone();
+                if record.display_name.is_none() {
+                    record.display_name = existing.display_name.clone();
+                }
                 *existing = record.clone();
             }
             None => records.push(record.clone()),
@@ -151,13 +176,15 @@ mod tests {
         let accounts = Accounts::new(&dir);
         let me = accounts.record("me@x.com").unwrap();
         assert_eq!(me.answer().services, ["mail", "chat"]);
+        // Chat only in part (it can read, not start chats): still offered.
+        assert_eq!(me.answer().connectable, ["contacts", "chat", "calendar"]);
         // A rename to the same label writes the same bytes back.
         accounts.rename("me@x.com", "  Work ").unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("accounts.json")).unwrap(), swift);
         assert_eq!(accounts.rename("me@x.com", " ").unwrap().unwrap().label, "me@x.com");
         assert_eq!(accounts.rename("other@x.com", "x").unwrap(), None);
         accounts.rename("me@x.com", "Work").unwrap();
-        // Signing in again keeps the label and takes the new name and scopes.
+        // Signing in again keeps the label and takes the new scopes; with no name, the name too.
         let grant = Grant {
             id: "me@x.com".into(),
             name: None,
@@ -167,7 +194,7 @@ mod tests {
             expires_in: 3600,
         };
         let record = accounts.signed_in(Provider::Google, &grant).unwrap();
-        assert_eq!((record.label.as_str(), record.display_name.as_deref()), ("Work", None));
+        assert_eq!((record.label.as_str(), record.display_name.as_deref()), ("Work", Some("Me")));
         assert_eq!(Accounts::new(&dir).list(), vec![record]);
         assert!(accounts.remove("me@x.com").unwrap());
         assert_eq!(std::fs::read_to_string(dir.join("accounts.json")).unwrap(), "[\n\n]");

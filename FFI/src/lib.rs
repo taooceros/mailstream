@@ -418,6 +418,13 @@ commands! {
         "provider": provider, "client-id": client_id, "client-secret": client_secret
     };
 
+    /// Lets `account` use `service` (`contacts`, `chat`, `calendar`): the provider's consent page
+    /// for it opens in the browser, and this waits (up to 5 minutes) for the person to finish.
+    /// The account as it is then; `not_granted` when the person did not allow it after all.
+    fn connect_account(account: String, service: String) -> Account = "accounts.connect" {
+        "account": account, "service": service
+    };
+
     /// Signs the account out and deletes its saved sign-in; mail on the server stays. `confirm`
     /// is the person's go-ahead.
     fn remove_account(account: String, confirm: bool) = "accounts.remove" { "account": account, "yes": confirm };

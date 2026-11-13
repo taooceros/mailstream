@@ -242,6 +242,13 @@ struct ClientForm {
     _subscriptions: [Subscription; 2],
 }
 
+/// A sign-in waiting in the browser: a new account with `provider`, or one more service for an
+/// account (`connecting`: its address and the service).
+struct Waiting {
+    provider: Provider,
+    connecting: Option<(String, String)>,
+}
+
 struct Settings {
     on_changed: Rc<dyn Fn(&mut App)>,
     accounts: Option<Result<Vec<Account>, MailError>>,
@@ -255,8 +262,8 @@ struct Settings {
     /// The account whose removal waits for confirmation.
     confirming: Option<String>,
     client: Option<ClientForm>,
-    /// The provider being signed in to, and the attempt it belongs to.
-    signing_in: Option<Provider>,
+    /// The sign-in in the browser being waited for, and the attempt it belongs to.
+    signing_in: Option<Waiting>,
     attempt: u64,
     retag_started: bool,
     note: Option<Note>,
@@ -713,7 +720,7 @@ impl Settings {
     fn sign_in(&mut self, provider: Provider, client_id: String, client_secret: Option<String>, cx: &mut Context<Self>) {
         self.attempt += 1;
         let attempt = self.attempt;
-        self.signing_in = Some(provider);
+        self.signing_in = Some(Waiting { provider, connecting: None });
         self.note = None;
         cx.notify();
         self.background(
@@ -735,6 +742,31 @@ impl Settings {
                 }
             },
         );
+    }
+
+    /// Asks `account`'s provider, in the browser, to let it use `service` too (MS-306).
+    fn connect(&mut self, account: &Account, service: String, cx: &mut Context<Self>) {
+        self.attempt += 1;
+        let attempt = self.attempt;
+        let id = account.id.clone();
+        self.signing_in = Some(Waiting { provider: account.provider, connecting: Some((id.clone(), service.clone())) });
+        self.note = None;
+        cx.notify();
+        let title = service_title(&service);
+        self.background(cx, async move { engine().connect_account(id, service).await }, move |this, result, cx| {
+            if this.attempt != attempt {
+                return;
+            }
+            this.signing_in = None;
+            match result {
+                Ok(account) => {
+                    this.note = Some(Note { text: format!("{title} connected for {}.", account.id).into(), error: false });
+                    this.load_accounts(cx);
+                    this.changed(cx);
+                }
+                Err(error) => this.fail(error.to_string(), cx),
+            }
+        });
     }
 
     fn stop_waiting(&mut self, cx: &mut Context<Self>) {
@@ -793,18 +825,19 @@ impl Settings {
             }
         };
 
-        let add: AnyElement = match self.signing_in {
-            Some(provider) => div()
+        let add: AnyElement = match &self.signing_in {
+            Some(waiting) => div()
                 .flex()
                 .items_center()
                 .gap(px(10.))
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(px(text::FOOTNOTE))
-                        .text_color(p.muted)
-                        .child(format!("Waiting for the {} sign-in in your browser…", provider.name())),
-                )
+                .child(div().flex_1().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(match &waiting.connecting {
+                    Some((account, service)) => format!(
+                        "Waiting for {} to allow {} for {account} in your browser…",
+                        waiting.provider.name(),
+                        service_title(service)
+                    ),
+                    None => format!("Waiting for the {} sign-in in your browser…", waiting.provider.name()),
+                }))
                 .child(
                     button("stop-waiting", "Stop Waiting", ButtonKind::Secondary, ControlSize::Regular, true, p)
                         .on_click(cx.listener(|this, _, _, cx| this.stop_waiting(cx))),
@@ -835,7 +868,8 @@ impl Settings {
             .gap(px(8.))
             .child(heading("Accounts", p))
             .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
-                "Mailstream signs in to Google and Microsoft in your browser, with an OAuth client you registered.",
+                "Mailstream signs in to Google and Microsoft in your browser, with an OAuth client you registered. \
+                 Signing in asks only for mail; connect contacts, chat or calendar for an account when you want them.",
             ))
             .child(body)
             .child(add)
@@ -999,7 +1033,36 @@ impl Settings {
                     .gap(px(2.))
                     .child(title)
                     .child(div().text_size(px(text::CAPTION)).text_color(p.muted).truncate().child(detail.join(" · ")))
-                    .child(div().flex().gap(px(4.)).children(row.services.iter().map(|s| tag(service_title(s), None, p)))),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(4.))
+                            .children(row.services.iter().map(|s| tag(service_title(s), None, p).into_any_element()))
+                            .children(row.connectable.iter().map(|service| {
+                                let idle = self.signing_in.is_none();
+                                let partly = row.services.contains(service);
+                                let label = if partly {
+                                    format!("Allow Full {}", service_title(service))
+                                } else {
+                                    format!("Connect {}…", service_title(service))
+                                };
+                                let (account, service) = (row.clone(), service.clone());
+                                button(
+                                    ElementId::Name(format!("connect:{}:{service}", row.id).into()),
+                                    label,
+                                    ButtonKind::Plain(p.accent),
+                                    ControlSize::Small,
+                                    idle,
+                                    p,
+                                )
+                                .when(idle, |b| {
+                                    b.on_click(cx.listener(move |this, _, _, cx| this.connect(&account, service.clone(), cx)))
+                                })
+                                .into_any_element()
+                            })),
+                    ),
             )
             .child(actions);
 

@@ -82,7 +82,7 @@ use serde_json::{Map, Value, json};
 use crate::accounts::{AccountRecord, Accounts};
 use crate::commands::{Arguments, Handler};
 use crate::keychain::Keychain;
-use crate::oauth::OAuth;
+use crate::oauth::{Connect, Grant, OAuth, Service};
 pub use crate::oauth::{BuiltInClients, OAuthClient, OAuthConfig, Provider};
 use crate::settings::Settings;
 use crate::tokens::Tokens;
@@ -514,6 +514,7 @@ impl Core {
                 })))
             }
             "accounts.add" => self.add_account(args).await,
+            "accounts.connect" => self.connect_account(args).await,
             "accounts.remove" => {
                 let record = self.record(args)?;
                 if !args.bool("yes") {
@@ -595,18 +596,55 @@ impl Core {
             return Err(EngineError::usage("Google needs the client secret too: --client-secret."));
         }
         let client = OAuthClient { id, secret: secret.filter(|secret| !secret.is_empty()) };
-        let grant = self.oauth.sign_in(provider, &client).await.map_err(|error| EngineError::failed(error.message))?;
+        let grant = self.oauth.sign_in(provider, &client, None).await.map_err(|error| EngineError::failed(error.message))?;
+        let record = self.signed_in(provider, &client, &grant)?;
+        Ok(answers::json(&record.answer()))
+    }
+
+    /// Asks the provider, in the browser, to let `account` use one more service, with the client
+    /// its sign-in came from, and keeps what the person allowed. `not_granted` when that was not
+    /// the service after all (unticked in Google's consent).
+    async fn connect_account(&self, args: &Arguments) -> Result<Value, EngineError> {
+        let record = self.record(args)?;
+        let name = args.required("service")?;
+        let service = Service::named(&name)
+            .filter(|service| !service.scopes(record.provider).is_empty())
+            .ok_or_else(|| EngineError::usage(format!("{} accounts have no {name}.", record.provider.as_str())))?;
+        let client = self
+            .tokens
+            .client(&record.id, record.provider)
+            .map_err(|error| EngineError::failed(error.to_string()))?
+            .ok_or_else(|| EngineError::failed(format!("{} needs to sign in again (Settings > Accounts).", record.id)))?;
+        let connect = Connect { account: &record.id, granted: &record.scopes, service };
+        let grant = self
+            .oauth
+            .sign_in(record.provider, &client, Some(connect))
+            .await
+            .map_err(|error| EngineError::failed(error.message))?;
+        let connected = self.signed_in(record.provider, &client, &grant)?;
+        if !connected.has(service) {
+            return Err(EngineError::new(
+                "not_granted",
+                format!("{} was not allowed {name} access; connect it again and leave its boxes ticked.", record.id),
+            ));
+        }
+        Ok(answers::json(&connected.answer()))
+    }
+
+    /// Keeps a completed sign-in (its tokens, then the account) and tells everything that
+    /// depends on what the accounts may use.
+    fn signed_in(&self, provider: Provider, client: &OAuthClient, grant: &Grant) -> Result<AccountRecord, EngineError> {
         let signed_in = tokens::SignedIn { provider, scopes: grant.scopes.clone() };
         self.tokens
-            .install(&grant.id, signed_in, &client, &grant.refresh_token, &grant.access_token, grant.expires_in)
+            .install(&grant.id, signed_in, client, &grant.refresh_token, &grant.access_token, grant.expires_in)
             .map_err(|error| EngineError::failed(error.to_string()))?;
-        let record = self.accounts.signed_in(provider, &grant).map_err(EngineError::failed)?;
+        let record = self.accounts.signed_in(provider, grant).map_err(EngineError::failed)?;
         self.events.emit("accounts");
         self.mail.accounts_changed();
         self.push.check();
         self.chat.accounts_changed();
         self.calendar.accounts_changed();
-        Ok(answers::json(&record.answer()))
+        Ok(record)
     }
 }
 
@@ -660,8 +698,14 @@ mod tests {
                 br#"{"email":"Me@Outlook.com","name":"Me"}"#
             )
         );
+        // Sign-in grants mail; connecting Calendar later grants that too.
+        let answered = std::sync::atomic::AtomicUsize::new(0);
         let server = FakeServer::start(move |_| {
-            Reply::json(json!({ "access_token": "at", "expires_in": 3599, "refresh_token": "rt", "scope": "openid Mail.ReadWrite", "id_token": id_token }))
+            let (scope, refresh_token) = match answered.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 => ("openid Mail.ReadWrite", "rt"),
+                _ => ("openid Mail.ReadWrite Calendars.ReadWrite", "rt2"),
+            };
+            Reply::json(json!({ "access_token": "at", "expires_in": 3599, "refresh_token": refresh_token, "scope": scope, "id_token": id_token }))
         });
         let port = free_port();
         let oauth = OAuthConfig {
@@ -684,7 +728,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             added,
-            json!({ "id": "me@outlook.com", "label": "me@outlook.com", "provider": "microsoft", "name": "Me", "services": ["mail"] })
+            json!({ "id": "me@outlook.com", "label": "me@outlook.com", "provider": "microsoft", "name": "Me", "services": ["mail"], "connectable": ["contacts", "calendar"] })
         );
         assert_eq!(events.recv_timeout(Duration::from_secs(5)), Ok("accounts"));
         assert_eq!(
@@ -700,6 +744,19 @@ mod tests {
         assert_eq!(error.code, "unknown_account");
         let keychain = Keychain::new(config.keychain_service.clone());
         assert_eq!(keychain.load().unwrap().refresh_tokens["me@outlook.com"], "rt");
+        let error = block_on(engine.call("accounts.connect", json!({ "account": "me@outlook.com", "service": "chat" })))
+            .unwrap_err();
+        assert_eq!(error.code, "usage");
+        let connected =
+            block_on(engine.call("accounts.connect", json!({ "account": "me@outlook.com", "service": "calendar" })))
+                .unwrap();
+        assert_eq!((&connected["services"], &connected["connectable"]), (&json!(["mail", "calendar"]), &json!(["contacts"])));
+        // Same client, the label kept, the new refresh token stored, Calendars asked of the token endpoint.
+        assert_eq!(connected["label"], json!("Home"));
+        assert_eq!(keychain.load().unwrap().refresh_tokens["me@outlook.com"], "rt2");
+        let form = server.forms("/token")[1].clone();
+        assert_eq!(form["client_id"], "ms");
+        assert!(form["scope"].contains("Calendars.ReadWrite") && !form["scope"].contains("Contacts"), "{}", form["scope"]);
         block_on(engine.call("accounts.remove", json!({ "account": "me@outlook.com", "yes": true }))).unwrap();
         assert_eq!(block_on(engine.call("accounts.list", json!({}))).unwrap(), json!([]));
         assert!(keychain.load().unwrap().refresh_tokens.is_empty());

@@ -47,8 +47,12 @@ pub struct Account {
     pub provider: Provider,
     /// The person's name from the provider.
     pub name: Option<String>,
-    /// What the sign-in grants: `mail`, `contacts`, `chat`, `calendar`.
+    /// What the sign-in grants: `mail`, `contacts`, `chat`, `calendar` (some of it, when the
+    /// person allowed only part).
     pub services: Vec<String>,
+    /// Services the provider offers that the sign-in does not fully grant, in the same order:
+    /// `accounts.connect` asks for them.
+    pub connectable: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]

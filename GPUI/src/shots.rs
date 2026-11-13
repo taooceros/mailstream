@@ -42,6 +42,10 @@
 //!                            logs what each frame took to draw and their mean, median and max
 //!                            past the first (MS-292)
 //! thaw                       run the pages' clock in real time again
+//! accounts mail|all          what the synthetic accounts' sign-ins granted: mail alone, as a
+//!                            sign-in now asks (MS-306), or everything (the default); applies
+//!                            before the window opens, wherever the line is. Connecting a
+//!                            service (Settings, the calendar's notice) is allowed at once
 //! ```
 //!
 //! Every input command then lets `SETTLE` pass. The window opens at `--size` (default 1240×800,
@@ -150,7 +154,11 @@ impl Shots {
         APPEARANCE.set(if self.dark { WindowAppearance::Dark } else { WindowAppearance::Light }).ok();
         let home = data_folder();
         let support = mailstream_engine::support_directory();
-        seed::write(&support, &mailstream_engine::cache_directory());
+        let mail_only = commands.iter().rev().find_map(|(_, command)| match command {
+            Command::Accounts(mail_only) => Some(*mail_only),
+            _ => None,
+        });
+        seed::write(&support, &mailstream_engine::cache_directory(), mail_only.unwrap_or(false));
         // Before the engine starts: its accounts sign in to a stand-in provider, so changes
         // (marking read, archive, star, send) succeed.
         mailstream_engine::shots::start(&support);
@@ -271,6 +279,8 @@ enum Command {
     Freeze,
     Film(String, usize, f32),
     Thaw,
+    /// The accounts were granted mail alone (`true`) or everything.
+    Accounts(bool),
 }
 
 impl Command {
@@ -341,6 +351,8 @@ impl Command {
                 };
                 Command::Provider(provider, outage)
             }
+            "accounts" if rest == "mail" || rest == "all" => Command::Accounts(rest == "mail"),
+            "accounts" => return Err("accounts: mail or all".into()),
             "freeze" => Command::Freeze,
             "thaw" => Command::Thaw,
             "film" if !words.is_empty() && !words[0].contains(['/', '\\']) => {
@@ -432,6 +444,8 @@ impl Run {
                 mailstream_engine::shots::set_outage(provider, outage);
                 return Ok(());
             }
+            // Read before the window opened.
+            Command::Accounts(_) => return Ok(()),
             Command::Shot(name) => {
                 self.pass(FRAME);
                 return self.save(&name);

@@ -49,7 +49,7 @@ impl CalendarStore {
         if !record.has_calendars() || !record.can_edit_calendars() {
             return Err(EngineError::new(
                 "no_calendar",
-                format!("{account} has not granted changing its calendar; sign in to it again."),
+                format!("{account} has not allowed changing its calendar; connect Calendar for it (Settings > Accounts)."),
             ));
         }
         let (calendar, event) = self.target(account, command, args)?;

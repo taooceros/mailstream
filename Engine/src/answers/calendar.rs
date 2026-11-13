@@ -10,8 +10,8 @@ pub struct CalendarAccount {
     pub id: String,
     pub label: String,
     pub provider: Provider,
-    /// Whether its sign-in grants calendar access; accounts signed in before Mailstream asked
-    /// for it must sign in again.
+    /// Whether its sign-in grants calendar access; until the person connects Calendar for it
+    /// (`accounts.connect`), it has none.
     pub granted: bool,
     /// Whether its sign-in lets it add, change and delete events.
     #[serde(default)]
@@ -155,7 +155,7 @@ pub struct InvitationStatus {
     pub invitation: Option<MeetingInvitation>,
     /// Whether the account's sign-in grants calendar access.
     pub granted: bool,
-    /// Whether it may answer (change events); accounts signed in before must sign in again.
+    /// Whether it may answer (change events): Calendar is connected in full.
     pub editable: bool,
     /// The event, with the account's answer (`response`); none when the calendar lacks it.
     pub event: Option<CalendarItem>,
