@@ -79,6 +79,7 @@ pub(super) fn gmail_server(changed: Changes) -> FakeServer {
                 Reply::json(json!({ "messages": items, "resultSizeEstimate": ids.len() }))
             }
             "labels/INBOX" => Reply::json(json!({ "messagesTotal": 6, "messagesUnread": 3 })),
+            "messages/i00/attachments/att1" => Reply::json(json!({ "data": encode("%PDF") })),
             other => match other.strip_prefix("messages/") {
                 Some(id) if request.param("format") == Some("full") => Reply::json(gmail_full(id)),
                 _ => Reply::status(404, json!({ "error": { "message": "Not Found" } })),
@@ -203,9 +204,9 @@ fn changes_trashes_and_sends_gmail_mail() {
     let body = upload.text();
     assert!(body.contains("Content-Type: application/json; charset=UTF-8\r\n\r\n{}\r\n"), "{body}");
     assert!(body.contains("Content-Type: message/rfc822\r\n\r\nFrom: Me Gmail <me@gmail.com>\r\nTo: Ann <ann@x.com>\r\nCc: cy@x.com\r\nSubject: Hello\r\n"));
+    assert!(body.contains("Content-Type: multipart/alternative;"));
     assert!(body.contains("Hi Ann =F0=9F=91=8B") && body.contains(&STANDARD.encode("attached words")));
     assert!(body.contains("Content-Type: text/plain;\r\n name=\"notes.txt\""));
-
     // A reply goes to the other side of the latest message (here the user's own reply, so its
     // recipient), threaded under it.
     // The fake keeps listing the archived message in the inbox, so it threads with the reply again.
@@ -355,8 +356,182 @@ fn changes_and_sends_outlook_mail_through_batches() {
     assert_eq!((sent[0].path.as_str(), sent[0].header("Content-Type")), ("/v1.0/me/sendMail", Some("text/plain")));
     let mime = String::from_utf8(STANDARD.decode(&sent[0].body).unwrap()).unwrap();
     assert!(mime.starts_with("From: Me Outlook <me@outlook.com>\r\nTo: bob@x.com\r\nSubject: =?UTF-8?B?"), "{mime}");
+    assert!(mime.contains("Content-Type: multipart/alternative;"), "{mime}");
     assert!(!mime.contains("Bcc"));
     let _ = encode;
+    drop(engine);
+    cleanup(&config);
+}
+
+/// Decodes the base64 `text/html` part from a rendered MIME message.
+fn html_part(mime: &str) -> String {
+    let (_, rest) = mime.split_once("Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n").unwrap();
+    let encoded = rest.split("\r\n--").next().unwrap().replace("\r\n", "");
+    String::from_utf8(STANDARD.decode(encoded).unwrap()).unwrap()
+}
+
+#[test]
+fn sends_multipart_new_mail_and_forwards_for_gmail_and_graph() {
+    // Gmail: new mail with link + forward of HTML message (with mscid inline image) and plain message.
+    let changed: Changes = Arc::default();
+    let server = gmail_server(changed.clone());
+    let (engine, config) = engine_for(&server, &[("me@gmail.com", "google")]);
+    wait_until("inbox", || call(&engine, "mail.list", json!({})).is_ok_and(|v| v["conversations"].as_array().is_some_and(|c| !c.is_empty())));
+    changes(&changed);
+
+    // New mail includes multipart/alternative with auto-linked URL and email, keeping text/plain exact.
+    call(
+        &engine,
+        "mail.send",
+        json!({
+            "from": "me@gmail.com",
+            "to": ["bob@x.com"],
+            "subject": "Links",
+            "body": "Visit https://example.com\n\nPing ann@x.com",
+            "yes": true,
+        }),
+    )
+    .unwrap();
+    let upload = changes(&changed).pop().unwrap().text();
+    assert!(upload.contains("Content-Type: multipart/alternative;"), "{upload}");
+    assert!(upload.contains("Visit https://example.com\r\n\r\nPing ann@x.com\r\n"), "{upload}");
+    let html = html_part(&upload);
+    assert!(html.contains("<div>Visit <a href=\"https://example.com\">https://example.com</a></div>"), "{html}");
+    assert!(html.contains("<div><br></div>"), "{html}");
+    assert!(html.contains("<div>Ping <a href=\"mailto:ann@x.com\">ann@x.com</a></div>"), "{html}");
+
+    // Forward Gmail HTML message `i00` inside `lunch` conversation.
+    let lunch = "me@gmail.com|i00@x";
+    let err = call(&engine, "mail.send", json!({ "from": "me@gmail.com", "to": ["bob@x.com"], "subject": "Fwd: Lunch?", "body": "Hi", "forward-message": "i00", "yes": true })).unwrap_err();
+    assert_eq!(err.code, "usage");
+    let err = call(&engine, "mail.send", json!({ "from": "me@gmail.com", "to": ["bob@x.com"], "subject": "Fwd: Lunch?", "body": "Hi", "forward": "me@gmail.com|nope@x", "yes": true })).unwrap_err();
+    assert_eq!(err.code, "unknown_conversation");
+
+    let prefilled = "FYI https://menu.example\n\n---------- Forwarded message ---------\nFrom: Ann <ann@x.com>\nSubject: Lunch?\nTo: Me <me@gmail.com>\n\nHi, lunch at noon?";
+    call(
+        &engine,
+        "mail.send",
+        json!({
+            "from": "me@gmail.com",
+            "to": ["bob@x.com"],
+            "subject": "Fwd: Lunch?",
+            "body": prefilled,
+            "forward": lunch,
+            "forward-message": "i00",
+            "yes": true,
+        }),
+    )
+    .unwrap();
+    let fwd_upload = changes(&changed).pop().unwrap().text();
+    assert!(fwd_upload.contains("Content-Type: multipart/alternative;"), "{fwd_upload}");
+    assert!(fwd_upload.contains("FYI https://menu.example\r\n\r\n---------- Forwarded message ---------"), "{fwd_upload}");
+    assert!(!fwd_upload.contains("In-Reply-To:"), "{fwd_upload}");
+    let fwd_html = html_part(&fwd_upload);
+    assert!(fwd_html.contains("<div>FYI <a href=\"https://menu.example\">https://menu.example</a></div>"), "{fwd_html}");
+    assert!(fwd_html.contains("<div class=\"gmail_quote\">"), "{fwd_html}");
+    assert!(fwd_html.contains("<p>Hi, lunch </p>"), "{fwd_html}");
+    assert!(!fwd_html.contains("mscid:"), "{fwd_html}");
+
+    // Forward plain-text message `i03`: no `.gmail_quote`, linkified HTML lines.
+    let topic = "me@gmail.com|i03@x";
+    let plain_fwd = "Look at www.security.example\n\n---------- Forwarded message ---------\nFrom: Person 3 <p3@x.com>\n\nBody of i03";
+    call(
+        &engine,
+        "mail.send",
+        json!({
+            "from": "me@gmail.com",
+            "to": ["bob@x.com"],
+            "subject": "Fwd: Security alert",
+            "body": plain_fwd,
+            "forward": topic,
+            "yes": true,
+        }),
+    )
+    .unwrap();
+    let plain_upload = changes(&changed).pop().unwrap().text();
+    assert!(plain_upload.contains("Content-Type: multipart/alternative;"), "{plain_upload}");
+    let plain_html = html_part(&plain_upload);
+    assert!(!plain_html.contains("gmail_quote"), "{plain_html}");
+    assert!(plain_html.contains("<a href=\"http://www.security.example\">www.security.example</a>"), "{plain_html}");
+    drop(engine);
+    cleanup(&config);
+
+    // Graph: new mail and forward of HTML message (with file: inline image dropped).
+    let changed: Changes = Arc::default();
+    let record = changed.clone();
+    let tokens = AtomicUsize::new(0);
+    let server = FakeServer::start(move |request| {
+        let path = request.path.as_str();
+        if path == "/token" {
+            return token_reply(&tokens);
+        }
+        if request.method == "POST" {
+            record.lock().unwrap().push(request.clone());
+            if path == "/v1.0/$batch" {
+                let batch: Value = serde_json::from_slice(&request.body).unwrap();
+                let responses: Vec<Value> = batch["requests"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|sub| json!({ "id": sub["id"], "status": 200, "body": {} }))
+                    .collect();
+                return Reply::json(json!({ "responses": responses }));
+            }
+            return Reply::bytes(202, Vec::new());
+        }
+        let folder = |id: &str, name: &str| json!({ "id": id, "displayName": name, "childFolderCount": 0, "unreadItemCount": 1, "totalItemCount": 1 });
+        match path.strip_prefix("/v1.0/").unwrap_or(path) {
+            "me" => Reply::json(json!({ "displayName": "Me Outlook", "mail": "me@outlook.com" })),
+            "me/mailFolders" => Reply::json(json!({ "value": [folder("F-inbox", "Inbox"), folder("F-sent", "Sent Items")] })),
+            "me/mailFolders/F-inbox/messages" => Reply::json(json!({ "value": [graph_message("g1", "c1", ("Bob", "bob@x.com"), "Report", 0)] })),
+            "me/mailFolders/F-sent/messages" => Reply::json(json!({ "value": [] })),
+            other => {
+                if other == "me/mailFolders/inbox" {
+                    return Reply::json(json!({ "id": "F-inbox" }));
+                }
+                if other == "me/mailFolders/sentitems" {
+                    return Reply::json(json!({ "id": "F-sent" }));
+                }
+                if other == "me/messages/g1" {
+                    return Reply::json(json!({
+                        "body": {
+                            "contentType": "html",
+                            "content": "<html><body><p>Quarterly <b>numbers</b></p><img src=\"file:///tmp/inline.png\"></body></html>"
+                        }
+                    }));
+                }
+                Reply::status(404, json!({ "error": { "message": "Not found" } }))
+            }
+        }
+    });
+    let (engine, config) = engine_for(&server, &[("me@outlook.com", "microsoft")]);
+    wait_until("outlook inbox", || call(&engine, "mail.list", json!({})).is_ok_and(|v| v["conversations"].as_array().is_some_and(|c| !c.is_empty())));
+    changes(&changed);
+
+    let report = "me@outlook.com|g1@outlook";
+    call(
+        &engine,
+        "mail.send",
+        json!({
+            "from": "me@outlook.com",
+            "to": ["carol@x.com"],
+            "subject": "Fwd: Report",
+            "body": "See https://contoso.example",
+            "forward": report,
+            "yes": true,
+        }),
+    )
+    .unwrap();
+    let sent = changes(&changed);
+    assert_eq!(sent[0].path, "/v1.0/me/sendMail");
+    let mime = String::from_utf8(STANDARD.decode(&sent[0].body).unwrap()).unwrap();
+    assert!(mime.contains("Content-Type: multipart/alternative;"), "{mime}");
+    assert!(mime.contains("See https://contoso.example\r\n\r\n---------- Forwarded message ---------"), "{mime}");
+    let graph_html = html_part(&mime);
+    assert!(graph_html.contains("<div>See <a href=\"https://contoso.example\">https://contoso.example</a></div>"), "{graph_html}");
+    assert!(graph_html.contains("<div class=\"gmail_quote\">"), "{graph_html}");
+    assert!(graph_html.contains("<p>Quarterly <b>numbers</b></p>"), "{graph_html}");
+    assert!(!graph_html.contains("file:///"), "{graph_html}");
     drop(engine);
     cleanup(&config);
 }

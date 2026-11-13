@@ -239,9 +239,8 @@ pub struct Forwarded<'a> {
     pub text: &'a str,
 }
 
-/// The body a forward starts with, as Gmail writes it: a forwarded-message header, then the
-/// message's text.
-pub fn forward_body(message: &Forwarded<'_>) -> String {
+/// The header block a forward starts with, as Gmail writes it.
+pub fn forward_header(message: &Forwarded<'_>) -> String {
     let list = |addresses: &[Address]| addresses.iter().map(written).collect::<Vec<_>>().join(", ");
     let mut header = vec!["---------- Forwarded message ---------".to_string(), format!("From: {}", list(message.from))];
     if let Some(date) = &message.date {
@@ -252,7 +251,13 @@ pub fn forward_body(message: &Forwarded<'_>) -> String {
     if !message.cc.is_empty() {
         header.push(format!("Cc: {}", list(message.cc)));
     }
-    let header = header.join("\n");
+    header.join("\n")
+}
+
+/// The body a forward starts with, as Gmail writes it: a forwarded-message header, then the
+/// message's text.
+pub fn forward_body(message: &Forwarded<'_>) -> String {
+    let header = forward_header(message);
     let text = message.text.trim();
     if text.is_empty() { header } else { format!("{header}\n\n{text}") }
 }

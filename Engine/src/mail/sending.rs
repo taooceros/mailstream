@@ -1,8 +1,8 @@
 //! `mail.send` and `mail.reply`, as the Swift engine's `ControlService` and `MailStore`
-//! (`Store/Replies.swift`) do them: new plain-text mail with attachments, and replies that work
+//! (`Store/Replies.swift`) do them: new mail and forwards with attachments, and replies that work
 //! out their recipients, subject and quote the way mail clients do, threaded under the message
-//! replied to, with an HTML alternative quoting its HTML as Gmail lays it out. Both need `yes`;
-//! without it the error says what would be sent.
+//! replied to, all with an HTML alternative (quoting the original HTML as Gmail lays it out).
+//! Both need `yes`; without it the error says what would be sent.
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -100,32 +100,96 @@ pub(crate) fn quote(text: &str) -> String {
     body.split('\n').map(|line| if line.starts_with('>') { format!(">{line}") } else { format!("> {line}") }).collect::<Vec<_>>().join("\n")
 }
 
-/// The HTML alternative of a reply, laid out the way Gmail does so recipients' clients fold the
-/// quote.
-pub(crate) fn reply_html(reply: &str, attribution: &str, source: Option<&MessageContent>) -> String {
-    let written = reply
-        .replace("\r\n", "\n")
+const FORWARD_MARKER: &str = "---------- Forwarded message ---------";
+
+/// Written plain text as HTML lines with links turned into anchors.
+fn lines_html(text: &str) -> String {
+    text.replace("\r\n", "\n")
         .split('\n')
         .map(|line| if line.is_empty() { "<div><br></div>".to_string() } else { format!("<div>{}</div>", text::linkify(line)) })
         .collect::<Vec<_>>()
-        .join("\n");
-    let mut html = format!("<!doctype html><html><head><meta charset=\"utf-8\"></head><body>\n<div dir=\"auto\">{written}</div>\n");
-    let quote = match source {
+        .join("\n")
+}
+
+fn quote_html(source: Option<&MessageContent>) -> Option<String> {
+    match source {
         Some(MessageContent { html: Some(body), .. }) => Some(body_contents(body)),
         Some(MessageContent { text: Some(body), .. }) => {
             Some(format!("<div style=\"white-space:pre-wrap\">{}</div>", text::plain_to_html(body)))
         }
         _ => None,
-    };
-    if let Some(quote) = quote {
+    }
+}
+
+fn html_document(written: &str, quoted: Option<(&str, String)>) -> String {
+    let written = lines_html(written);
+    let mut html = format!("<!doctype html><html><head><meta charset=\"utf-8\"></head><body>\n<div dir=\"auto\">{written}</div>\n");
+    if let Some((attribution, quote)) = quoted {
+        let attr = attribution
+            .replace("\r\n", "\n")
+            .split('\n')
+            .map(text::escape_html)
+            .collect::<Vec<_>>()
+            .join("<br>");
         html.push_str(&format!(
-            "<br><div class=\"gmail_quote\"><div dir=\"ltr\" class=\"gmail_attr\">{}<br></div>\n\
+            "<br><div class=\"gmail_quote\"><div dir=\"ltr\" class=\"gmail_attr\">{attr}<br></div>\n\
              <blockquote class=\"gmail_quote\" style=\"margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\
-             {quote}\n</blockquote></div>\n",
-            text::escape_html(attribution)
+             {quote}\n</blockquote></div>\n"
         ));
     }
     html + "</body></html>\n"
+}
+
+/// The HTML alternative of a reply, laid out the way Gmail does so recipients' clients fold the
+/// quote.
+pub(crate) fn reply_html(reply: &str, attribution: &str, source: Option<&MessageContent>) -> String {
+    html_document(reply, quote_html(source).map(|quote| (attribution, quote)))
+}
+
+/// Plain-text and HTML bodies for a forward of `source`: keeps `body` as `text/plain` when it
+/// already carries the forwarded quote block (as compose prefills it), otherwise appends the
+/// plain-text quote; when `source` had HTML, quotes its HTML in `.gmail_quote` (dropping inline
+/// `mscid:`/`file:` images).
+fn forward_bodies(body: &str, source: &MailMessage, content: Option<&MessageContent>) -> (String, String) {
+    let cc = content.map(|c| c.cc.as_slice()).unwrap_or(&[]);
+    let plain_source = content
+        .and_then(|c| c.text.as_deref())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .or_else(|| content.and_then(|c| c.html.as_deref()).map(text::strip_html))
+        .unwrap_or_default();
+    let forwarded = crate::display::Forwarded {
+        from: &source.envelope.from,
+        to: &source.envelope.to,
+        cc,
+        date: source.envelope.date.and_then(crate::display::local),
+        subject: &source.envelope.subject,
+        text: &plain_source,
+    };
+    let normalized = body.replace("\r\n", "\n");
+    let has_marker = normalized.contains(FORWARD_MARKER);
+    let text = if has_marker {
+        body.to_string()
+    } else {
+        let quoted = crate::display::forward_body(&forwarded);
+        if body.is_empty() { quoted } else { format!("{body}\n\n{quoted}") }
+    };
+    let html = match content.and_then(|c| c.html.as_deref()) {
+        Some(orig_html) => {
+            let quote = body_contents(orig_html);
+            if let Some((before, after)) = normalized.split_once(FORWARD_MARKER) {
+                let written = before.trim_end_matches('\n');
+                let block = format!("{FORWARD_MARKER}{after}");
+                let attr = block.split("\n\n").next().unwrap_or(&block);
+                html_document(written, Some((attr, quote)))
+            } else {
+                let attr = crate::display::forward_header(&forwarded);
+                html_document(body, Some((&attr, quote)))
+            }
+        }
+        None => html_document(&text, None),
+    };
+    (text, html)
 }
 
 /// The inside of `<body>`, without images of inline parts: those are not re-attached, so they
@@ -136,7 +200,7 @@ fn body_contents(html: &str) -> String {
     static FRAME: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(?i)<head[^>]*>[\s\S]*?</head>|<!doctype[^>]*>|</?html[^>]*>").unwrap());
     static INLINE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(&format!(r#"(?i)<img[^>]*src\s*=\s*["']?{SCHEME}:[^>]*>"#)).unwrap());
+        LazyLock::new(|| Regex::new(&format!(r#"(?i)<img\b[^>]*\bsrc\s*=\s*["']?(?:{SCHEME}|file):[^>]*>"#)).unwrap());
     let inner = match OPEN.find(html) {
         Some(open) => {
             let rest = &html[open.end()..];
@@ -180,6 +244,30 @@ impl Mail {
         if to.is_empty() {
             return Err(EngineError::usage("--to needs at least one address."));
         }
+        let forward = match args.string("forward") {
+            Some(id) => {
+                let conversation = self.lookup(&id)?;
+                let source = match args.string("forward-message") {
+                    Some(message) => conversation
+                        .messages
+                        .iter()
+                        .find(|m| m.envelope.id == message)
+                        .ok_or_else(|| EngineError::usage(format!("Message {message} is not in the conversation.")))?,
+                    None => conversation
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.role != MailboxRole::Drafts)
+                        .unwrap_or_else(|| conversation.latest()),
+                }
+                .clone();
+                Some(source)
+            }
+            None if args.string("forward-message").is_some() => {
+                return Err(EngineError::usage("--forward-message requires --forward."));
+            }
+            None => None,
+        };
         let (subject, body) = (args.required("subject")?, args.required("body")?);
         let attachments = files(&args.list("attachments").unwrap_or_default(), "attachments")?;
         let attached = match attachments.len() {
@@ -195,7 +283,14 @@ impl Mail {
                 emails(&everyone)
             )));
         }
-        let message = self.outgoing(&from, None, to.clone(), cc, bcc, subject.clone(), body, None, attachments).await;
+        let (text, html) = match &forward {
+            Some(source) => {
+                let content = self.contents.load(&source.message_ref(), self.backend(source.account())).await.ok();
+                forward_bodies(&body, source, content.as_deref())
+            }
+            None => (body.clone(), html_document(&body, None)),
+        };
+        let message = self.outgoing(&from, None, to.clone(), cc, bcc, subject.clone(), text, Some(html), attachments).await;
         self.deliver(&message, &from).await?;
         Ok(sent(Sent { from, to: texts(&to), subject }))
     }
@@ -381,4 +476,104 @@ fn files(paths: &[String], argument: &str) -> Result<Vec<PathBuf>, EngineError> 
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Envelope, MailboxKey};
+
+    fn sample_source() -> MailMessage {
+        let key = Arc::new(MailboxKey::new("me@x.com", "INBOX"));
+        let envelope = Arc::new(Envelope {
+            id: "m1".into(),
+            thread: Some("t1".into()),
+            message_id: Some("m1@x.com".into()),
+            in_reply_to: Vec::new(),
+            flags: Default::default(),
+            subject: "Q4 plan".into(),
+            from: vec![Address::new(Some("Jordan".into()), "jordan@x.com")],
+            to: vec![Address::new(Some("Sam".into()), "me@x.com")],
+            date: Some(783_800_000.0),
+            size: 100,
+            has_attachment: None,
+            tags: Default::default(),
+        });
+        MailMessage { key, envelope, role: MailboxRole::Inbox }
+    }
+
+    #[test]
+    fn html_document_linkifies_lines_and_preserves_blank_lines() {
+        let html = html_document("See https://example.com\n\nWrite bob@x.com <ok>", None);
+        assert_eq!(
+            html,
+            "<!doctype html><html><head><meta charset=\"utf-8\"></head><body>\n\
+             <div dir=\"auto\"><div>See <a href=\"https://example.com\">https://example.com</a></div>\n\
+             <div><br></div>\n\
+             <div>Write <a href=\"mailto:bob@x.com\">bob@x.com</a> &lt;ok&gt;</div></div>\n\
+             </body></html>\n"
+        );
+    }
+
+    #[test]
+    fn body_contents_drops_mscid_and_file_inline_images() {
+        let raw = "<html><head><style>p{}</style></head><body>\
+            <p>Keep <img src=\"https://example.com/a.png\"></p>\
+            <img src=\"mscid://m1/0.png\">\
+            <img alt=\"local\" src='file:///tmp/x.png'>\
+            <IMG SRC=FILE:///var/folders/y.jpg>\
+            </body></html>";
+        assert_eq!(body_contents(raw), "<p>Keep <img src=\"https://example.com/a.png\"></p>");
+    }
+
+    #[test]
+    fn forward_bodies_handles_html_and_plain_sources() {
+        let source = sample_source();
+        let html_content = MessageContent {
+            html: Some("<body><p>Hello <b>Sam</b></p><img src=\"mscid://m1/logo.png\"><img src=\"file:///tmp/a.png\"></body>".into()),
+            text: Some("Hello Sam".into()),
+            cc: Vec::new(),
+            reply_to: Vec::new(),
+            references: Vec::new(),
+            attachments: Vec::new(),
+            snippet: String::new(),
+            invitation: None,
+        };
+        let prefilled = "FYI https://example.com\n\n---------- Forwarded message ---------\nFrom: Jordan <jordan@x.com>\nSubject: Q4 plan\nTo: Sam <me@x.com>\n\nHello Sam";
+        let (plain, html) = forward_bodies(prefilled, &source, Some(&html_content));
+        assert_eq!(plain, prefilled);
+        assert!(html.contains("<div dir=\"auto\"><div>FYI <a href=\"https://example.com\">https://example.com</a></div></div>"), "{html}");
+        assert!(html.contains("<div dir=\"ltr\" class=\"gmail_attr\">---------- Forwarded message ---------<br>From: Jordan &lt;jordan@x.com&gt;<br>Subject: Q4 plan<br>To: Sam &lt;me@x.com&gt;<br></div>"), "{html}");
+        assert!(html.contains("<p>Hello <b>Sam</b></p>"), "{html}");
+        assert!(!html.contains("mscid:") && !html.contains("file:///"), "{html}");
+
+        // Bare forward without intro text.
+        let bare = "\n\n---------- Forwarded message ---------\nFrom: Jordan <jordan@x.com>\n\nHello Sam";
+        let (plain_bare, html_bare) = forward_bodies(bare, &source, Some(&html_content));
+        assert_eq!(plain_bare, bare);
+        assert!(html_bare.contains("<div dir=\"auto\"><div><br></div></div>\n<br><div class=\"gmail_quote\">"), "{html_bare}");
+
+        // CLI forward without prefilled marker adds plain-text quote and HTML quote.
+        let (cli_plain, cli_html) = forward_bodies("Take a look", &source, Some(&html_content));
+        assert!(cli_plain.starts_with("Take a look\n\n---------- Forwarded message ---------\nFrom: Jordan <jordan@x.com>"), "{cli_plain}");
+        assert!(cli_plain.ends_with("\n\nHello Sam"), "{cli_plain}");
+        assert!(cli_html.contains("<div>Take a look</div>") && cli_html.contains("<p>Hello <b>Sam</b></p>"), "{cli_html}");
+
+        // Plain-text-only source produces linkified line HTML without a redundant .gmail_quote block.
+        let plain_content = MessageContent {
+            html: None,
+            text: Some("See www.example.org".into()),
+            cc: Vec::new(),
+            reply_to: Vec::new(),
+            references: Vec::new(),
+            attachments: Vec::new(),
+            snippet: String::new(),
+            invitation: None,
+        };
+        let plain_prefilled = "FYI\n\n---------- Forwarded message ---------\nFrom: Jordan <jordan@x.com>\n\nSee www.example.org";
+        let (plain_only_text, plain_only_html) = forward_bodies(plain_prefilled, &source, Some(&plain_content));
+        assert_eq!(plain_only_text, plain_prefilled);
+        assert!(!plain_only_html.contains("gmail_quote"), "{plain_only_html}");
+        assert!(plain_only_html.contains("<a href=\"http://www.example.org\">www.example.org</a>"), "{plain_only_html}");
+    }
 }

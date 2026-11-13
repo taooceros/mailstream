@@ -118,6 +118,12 @@ pub struct Draft {
     pub body: String,
     /// Full paths of the files to attach.
     pub attachments: Vec<String>,
+    /// Conversation id when forwarding a message, so the engine quotes its HTML body.
+    #[uniffi(default = None)]
+    pub forward: Option<String>,
+    /// Message id within `forward` (`Message::id`); `None` quotes its latest.
+    #[uniffi(default = None)]
+    pub forward_message: Option<String>,
 }
 
 /// Optional edits to the engine's reply plan. `None` keeps the default; an empty value clears it.
@@ -499,11 +505,12 @@ commands! {
     /// too; `nothing` when none is left.
     fn undo(step: Option<u64>) -> Undone = "mail.undo" { "step": step };
 
-    /// Sends `draft` as a new plain-text message with its attachments. Sends at once: `confirm` is the person's
+    /// Sends `draft` with its attachments. Sends at once: `confirm` is the person's
     /// go-ahead; without it the engine only answers what it would send (`confirm`).
     fn send(draft: Draft, confirm: bool) -> Sent = "mail.send" {
         "from": draft.from, "to": draft.to, "cc": draft.cc, "bcc": draft.bcc,
-        "subject": draft.subject, "body": draft.body, "attachments": draft.attachments, "yes": confirm
+        "subject": draft.subject, "body": draft.body, "attachments": draft.attachments,
+        "forward": draft.forward, "forward-message": draft.forward_message, "yes": confirm
     };
 
     /// Fetches new mail and counts now.

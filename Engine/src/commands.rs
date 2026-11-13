@@ -462,7 +462,7 @@ pub const COMMANDS: &[Spec] = &[
     Spec::new(
         "mail.send",
         Handler::Mail,
-        "Sends a new plain-text message, with files attached if given.",
+        "Sends a message, with files attached if given.",
         &[
             Argument::new("from", Kind::String, "Sending account (its address).").required(),
             Argument::new("to", Kind::List, "Recipients.").required(),
@@ -470,6 +470,8 @@ pub const COMMANDS: &[Spec] = &[
             Argument::new("bcc", Kind::List, "Bcc recipients."),
             Argument::new("subject", Kind::String, "Subject.").required(),
             Argument::new("body", Kind::String, "Plain-text body; `-` reads standard input.").required(),
+            Argument::new("forward", Kind::String, "Conversation id of a message being forwarded; quotes it when given."),
+            Argument::new("forward-message", Kind::String, "Message of the forwarded conversation to quote rather than its latest."),
             ATTACHMENTS,
             YES,
         ],

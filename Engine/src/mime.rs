@@ -24,7 +24,7 @@ pub struct OutgoingMessage {
     pub bcc: Vec<Address>,
     pub subject: String,
     pub text: String,
-    /// An HTML alternative of `text`, when the reply quotes HTML.
+    /// An HTML alternative of `text`.
     pub html: Option<String>,
     pub attachments: Vec<PathBuf>,
     pub in_reply_to: Option<String>,
@@ -411,5 +411,34 @@ mod tests {
         assert_eq!(mime_type("PNG").as_deref(), Some("image/png"));
         assert_eq!(mime_type("xyz"), None);
         assert_eq!(mime_type(""), None);
+    }
+
+    #[test]
+    fn renders_multipart_alternative_and_mixed_with_attachments() {
+        let message = OutgoingMessage {
+            from: address(Some("Ann"), "ann@x.com"),
+            to: vec![address(None, "bob@x.com")],
+            subject: "Links".into(),
+            text: "See https://example.com".into(),
+            html: Some("<!doctype html><html><body><div>See <a href=\"https://example.com\">https://example.com</a></div></body></html>\n".into()),
+            ..OutgoingMessage::default()
+        };
+        let rendered = String::from_utf8(render_at(&message, "D", "id@mailstream.local", &mut numbered()).unwrap()).unwrap();
+        assert!(rendered.contains("Content-Type: multipart/alternative; boundary=\"=_ms_00000000000000000000000000000001\""), "{rendered}");
+        assert!(rendered.contains("Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nSee https://example.com\r\n"), "{rendered}");
+        let encoded_html = String::from_utf8(base64_lines(message.html.as_ref().unwrap().as_bytes())).unwrap();
+        assert!(rendered.contains(&format!("Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n{encoded_html}\r\n")), "{rendered}");
+        assert!(rendered.ends_with("--=_ms_00000000000000000000000000000001--\r\n"), "{rendered}");
+
+        let dir = std::env::temp_dir().join(format!("mailstream-mime-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.txt");
+        std::fs::write(&path, "hello").unwrap();
+        let with_attachment = OutgoingMessage { attachments: vec![path], ..message };
+        let mixed = String::from_utf8(render_at(&with_attachment, "D", "id@mailstream.local", &mut numbered()).unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(mixed.contains("Content-Type: multipart/mixed; boundary=\"=_ms_00000000000000000000000000000002\""), "{mixed}");
+        assert!(mixed.contains("Content-Type: multipart/alternative; boundary=\"=_ms_00000000000000000000000000000001\""), "{mixed}");
+        assert!(mixed.contains("Content-Disposition: attachment;\r\n filename=\"note.txt\""), "{mixed}");
     }
 }

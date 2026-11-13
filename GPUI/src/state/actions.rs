@@ -261,7 +261,13 @@ impl MailApp {
         let Some(ThreadState::Loaded(messages)) = self.threads.get(id).map(|t| &t.state) else { return };
         let Some(source) = messages.iter().find(|m| Some(m.id.as_str()) == message).or(messages.last()) else { return };
         let quoted = source.forwarded(&conversation.subject).into();
-        let mode = ComposeMode::Forward { from: conversation.account.clone(), subject: conversation.subject.clone(), quoted };
+        let mode = ComposeMode::Forward {
+            from: conversation.account.clone(),
+            conversation: conversation.id.clone(),
+            message: source.id.clone(),
+            subject: conversation.subject.clone(),
+            quoted,
+        };
         let accounts = self.accounts.clone();
         self.compose.update(cx, |column, cx| column.queue(mode, accounts, cx));
     }

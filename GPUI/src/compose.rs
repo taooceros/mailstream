@@ -73,7 +73,7 @@ pub fn bind_keys(cx: &mut App) {
 /// and `cc` are who the engine will send it to, unless they are edited.
 pub enum ComposeMode {
     New { from: Option<String> },
-    Forward { from: String, subject: String, quoted: SharedString },
+    Forward { from: String, conversation: String, message: String, subject: String, quoted: SharedString },
     Reply(MovedReply),
 }
 
@@ -189,6 +189,8 @@ struct Compose {
     /// The conversation a moved reply answers, the message in it (else its latest), and whether
     /// it answers everyone: sent with `mail.reply`, which keeps the thread and quotes the original.
     reply: Option<(String, Option<String>, bool)>,
+    /// The conversation and message a forward quotes, so the engine sends its HTML quote too.
+    forward: Option<(String, String)>,
     picking_from: bool,
     to: Entity<InputState>,
     cc: Entity<InputState>,
@@ -230,14 +232,15 @@ impl Compose {
         let body = cx.new(|cx| TextareaState::new(window, cx));
 
         let mut attachments = Attachments::default();
-        let mut reply = None;
+        let (mut reply, mut forward) = (None, None);
         let (mut initial_to, mut initial_cc, mut text) = (String::new(), String::new(), String::new());
         let (from, from_locked, initial_subject, initial_body) = match mode {
             ComposeMode::New { from } => {
                 let from = from.or_else(|| accounts.first().map(|account| account.id.clone()));
                 (from, false, SharedString::default(), SharedString::default())
             }
-            ComposeMode::Forward { from, subject, quoted } => {
+            ComposeMode::Forward { from, conversation, message, subject, quoted } => {
+                forward = Some((conversation, message));
                 (Some(from), true, mailstream::forward_subject(subject.to_string()).into(), format!("\n\n{quoted}").into())
             }
             ComposeMode::Reply(moved) => {
@@ -295,6 +298,7 @@ impl Compose {
             from,
             from_locked,
             reply,
+            forward,
             picking_from: false,
             to,
             cc,
@@ -644,7 +648,25 @@ impl Compose {
                 };
                 Outgoing::Reply { id: conversation.to_string(), body, all, overrides }
             }
-            None => Outgoing::Message(mailstream::Draft { from: from.to_string(), to, cc, bcc, subject, body, attachments }),
+            None => {
+                let (forward, forward_message) = self
+                    .forward
+                    .as_ref()
+                    .filter(|_| body.contains("---------- Forwarded message ---------"))
+                    .map(|(conversation, message)| (Some(conversation.clone()), Some(message.clone())))
+                    .unwrap_or((None, None));
+                Outgoing::Message(mailstream::Draft {
+                    from: from.to_string(),
+                    to,
+                    cc,
+                    bcc,
+                    subject,
+                    body,
+                    attachments,
+                    forward,
+                    forward_message,
+                })
+            }
         };
         self.status = Status::Sending;
         cx.notify();
