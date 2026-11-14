@@ -316,8 +316,9 @@ impl Conversation {
         let date = local_iso(self.date.as_deref());
         self.when = date.map(|date| labels.list(&date)).unwrap_or_default();
         self.section = date.map_or_else(|| "Older".into(), |date| labels.section(&date));
-        self.avatar = match (&self.from, self.participants.first()) {
-            (Some(from), _) => Avatar::of(from),
+        let avatar_address = self.peer.as_ref().or(self.from.as_ref());
+        self.avatar = match (avatar_address, self.participants.first()) {
+            (Some(address), _) => Avatar::of(address),
             (None, Some(name)) => Avatar::new(name, name),
             (None, None) => Avatar::new("", "?"),
         };

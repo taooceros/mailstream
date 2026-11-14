@@ -1379,6 +1379,16 @@ impl Mail {
             date: conversation.latest_date.map(iso8601),
             from: latest.envelope.from.first().cloned(),
             from_me: latest.is_from_user(&own),
+            peer: latest.is_from_user(&own).then(|| {
+                conversation
+                    .messages
+                    .iter()
+                    .rev()
+                    .flat_map(|message| message.envelope.from.iter())
+                    .chain(latest.envelope.to.iter())
+                    .find(|address| !own.contains(&address.normalized_email()))
+                    .cloned()
+            }).flatten(),
             participants,
             message_count: conversation.messages.len() as u32,
             unread: conversation.is_unread,

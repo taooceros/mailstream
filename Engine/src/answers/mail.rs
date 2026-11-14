@@ -32,6 +32,10 @@ pub struct Conversation {
     /// The user wrote the latest message: lists name its sender `me`.
     #[serde(default)]
     pub from_me: bool,
+    /// When `from_me` is true, the other party's address so lists show their avatar, not mine.
+    #[serde(skip)]
+    #[uniffi(default)]
+    pub peer: Option<Address>,
     /// Senders' names, `me` for the user's own addresses.
     pub participants: Vec<String>,
     pub message_count: u32,

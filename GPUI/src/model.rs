@@ -136,7 +136,10 @@ impl ConversationExt for Conversation {
     }
 
     fn avatar_email(&self) -> SharedString {
-        self.from.as_ref().map_or_else(|| self.sender_name(), |from| from.email.clone().into())
+        self.peer
+            .as_ref()
+            .or(self.from.as_ref())
+            .map_or_else(|| self.sender_name(), |address| address.email.clone().into())
     }
 
     fn time(&self) -> Option<DateTime<Utc>> {
