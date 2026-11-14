@@ -14,16 +14,18 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
+use gpui::component::Disableable;
 use gpui::component::input::{Escape, InputEvent, InputState};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, AnyWindowHandle, App, AppContext, Bounds, Context, Div, ElementId, Entity, Focusable, FontWeight, Global,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, StatefulInteractiveElement,
-    Styled, Subscription, TitlebarOptions, Window, WeakEntity, WindowBounds, WindowOptions, actions, div, px, size,
+    AnyElement, AnyWindowHandle, App, AppContext, Bounds, ClipboardItem, Context, Div, ElementId, Entity, Focusable,
+    FontWeight, Global, InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, TitlebarOptions, Window, WeakEntity, WindowBounds, WindowOptions,
+    actions, div, px, size,
 };
 use mailstream::{
-    Account, AutoReadLog, AutoReadReason, Category, Change, Event, EventListener, OAuthClientInfo, Provider, SettingEntry,
-    SettingValue,
+    Account, AutoReadLog, AutoReadReason, Category, Change, DeviceSyncStatus, Event, EventListener, OAuthClientInfo,
+    Provider, SettingEntry, SettingValue, SyncDevice,
 };
 
 use crate::controls::{ButtonKind, ControlSize, Tone, button, field_frame, icon_button, notice, pill, switch, tag};
@@ -249,15 +251,32 @@ struct Waiting {
     connecting: Option<(String, String)>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SyncBusy {
+    Toggle,
+    Pair,
+    Join,
+    Reset,
+    Now,
+}
+
 struct Settings {
     on_changed: Rc<dyn Fn(&mut App)>,
     accounts: Option<Result<Vec<Account>, MailError>>,
     status: Option<Status>,
+    device_sync: Option<DeviceSyncStatus>,
     settings: Option<Result<mailstream::Settings, MailError>>,
     auto_read: Option<AutoReadLog>,
     fields: HashMap<String, Field>,
     /// Why the last write of a setting (or undoing auto-read) failed, by key.
     errors: HashMap<String, SharedString>,
+    join_input: Option<Entity<InputState>>,
+    join_subscription: Option<Subscription>,
+    sync_ticket: Option<String>,
+    ticket_copied: bool,
+    sync_confirm_reset: bool,
+    sync_busy: Option<SyncBusy>,
+    sync_error: Option<SharedString>,
     renaming: Option<Rename>,
     /// The account whose removal waits for confirmation.
     confirming: Option<String>,
@@ -276,10 +295,18 @@ impl Settings {
             on_changed,
             accounts: None,
             status: None,
+            device_sync: None,
             settings: None,
             auto_read: None,
             fields: HashMap::new(),
             errors: HashMap::new(),
+            join_input: None,
+            join_subscription: None,
+            sync_ticket: None,
+            ticket_copied: false,
+            sync_confirm_reset: false,
+            sync_busy: None,
+            sync_error: None,
             renaming: None,
             confirming: None,
             client: None,
@@ -294,6 +321,7 @@ impl Settings {
         };
         this.load_accounts(cx);
         this.load_status(cx);
+        this.load_device_sync(cx);
         this.load_settings(cx);
         this.load_auto_read(cx);
         this
@@ -328,6 +356,9 @@ impl Settings {
         if batch.iter().any(|e| matches!(e, Event::Settings | Event::Accounts | Event::Sync | Event::Problems)) {
             self.load_status(cx);
         }
+        if batch.contains(&Event::DeviceSync) {
+            self.load_device_sync(cx);
+        }
     }
 
     fn load_accounts(&self, cx: &mut Context<Self>) {
@@ -344,6 +375,16 @@ impl Settings {
     fn load_status(&self, cx: &mut Context<Self>) {
         self.background(cx, async { engine().status().await.ok().map(Status::from) }, |this, status, cx| {
             this.status = status;
+            cx.notify();
+        });
+    }
+
+    fn load_device_sync(&self, cx: &mut Context<Self>) {
+        self.background(cx, async { engine().sync_status().await }, |this, result, cx| {
+            match result {
+                Ok(status) => this.device_sync = Some(status),
+                Err(error) => this.sync_error = Some(error.to_string().into()),
+            }
             cx.notify();
         });
     }
@@ -531,6 +572,168 @@ impl Settings {
         self.write(key.to_owned(), Some(value), cx);
     }
 
+
+    // MARK: Device sync
+
+    fn ensure_join_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.join_input.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Paste DocTicket from another device"));
+        let subscription = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { secondary: false, .. } = event {
+                this.join_sync(window, cx);
+            }
+        });
+        self.join_input = Some(input);
+        self.join_subscription = Some(subscription);
+    }
+
+    fn run_sync<F>(&mut self, busy: SyncBusy, work: F, after: impl FnOnce(&mut Self) + 'static, cx: &mut Context<Self>)
+    where
+        F: Future<Output = Result<DeviceSyncStatus, MailError>> + Send + 'static,
+    {
+        self.sync_busy = Some(busy);
+        self.sync_error = None;
+        cx.notify();
+        self.background(cx, work, move |this, result, cx| {
+            this.sync_busy = None;
+            match result {
+                Ok(status) => {
+                    this.device_sync = Some(status);
+                    after(this);
+                    this.changed(cx);
+                }
+                Err(error) => {
+                    this.sync_error = Some(error.to_string().into());
+                }
+            }
+            cx.notify();
+        });
+    }
+
+    fn toggle_device_sync(&mut self, enable: bool, cx: &mut Context<Self>) {
+        if self.sync_busy.is_some() {
+            return;
+        }
+        self.sync_confirm_reset = false;
+        if !enable {
+            self.sync_ticket = None;
+            self.ticket_copied = false;
+        }
+        self.run_sync(
+            SyncBusy::Toggle,
+            async move {
+                if enable { engine().sync_enable().await } else { engine().sync_disable().await }
+            },
+            |_| {},
+            cx,
+        );
+    }
+
+    fn pair_device(&mut self, cx: &mut Context<Self>) {
+        if self.sync_busy.is_some() {
+            return;
+        }
+        let needs_enable = self.device_sync.as_ref().is_none_or(|status| !status.enabled);
+        self.sync_busy = Some(SyncBusy::Pair);
+        self.sync_confirm_reset = false;
+        self.sync_error = None;
+        self.ticket_copied = false;
+        cx.notify();
+        self.background(
+            cx,
+            async move {
+                if needs_enable {
+                    engine().sync_enable().await?;
+                }
+                let ticket = engine().sync_pair_ticket().await?;
+                let status = engine().sync_status().await?;
+                Ok::<_, MailError>((status, ticket.ticket))
+            },
+            |this, result, cx| {
+                this.sync_busy = None;
+                match result {
+                    Ok((status, ticket)) => {
+                        this.device_sync = Some(status);
+                        this.sync_ticket = Some(ticket);
+                    }
+                    Err(error) => {
+                        this.sync_error = Some(error.to_string().into());
+                    }
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    fn copy_sync_ticket(&mut self, cx: &mut Context<Self>) {
+        let Some(ticket) = self.sync_ticket.clone() else { return };
+        cx.write_to_clipboard(ClipboardItem::new_string(ticket));
+        self.ticket_copied = true;
+        cx.notify();
+    }
+
+    fn join_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sync_busy.is_some() {
+            return;
+        }
+        let Some(input) = self.join_input.clone() else { return };
+        let ticket = input.read(cx).value().trim().to_string();
+        if ticket.is_empty() {
+            self.sync_error = Some("Paste a DocTicket from another device to join its sync group.".into());
+            cx.notify();
+            return;
+        }
+        self.sync_busy = Some(SyncBusy::Join);
+        self.sync_confirm_reset = false;
+        self.sync_error = None;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { engine().sync_join(ticket).await }).await;
+            this.update_in(cx, |this, window, cx| {
+                this.sync_busy = None;
+                match result {
+                    Ok(status) => {
+                        this.device_sync = Some(status);
+                        this.sync_ticket = None;
+                        this.ticket_copied = false;
+                        input.update(cx, |input, cx| input.clean(window, cx));
+                        this.changed(cx);
+                    }
+                    Err(error) => {
+                        this.sync_error = Some(error.to_string().into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn sync_now(&mut self, cx: &mut Context<Self>) {
+        if self.sync_busy.is_some() {
+            return;
+        }
+        self.run_sync(SyncBusy::Now, async { engine().sync_now().await }, |_| {}, cx);
+    }
+
+    fn reset_sync_group(&mut self, cx: &mut Context<Self>) {
+        if self.sync_busy.is_some() {
+            return;
+        }
+        self.sync_confirm_reset = false;
+        self.run_sync(
+            SyncBusy::Reset,
+            async { engine().sync_reset(true).await },
+            |this| {
+                this.sync_ticket = None;
+                this.ticket_copied = false;
+            },
+            cx,
+        );
+    }
     fn retag(&mut self, cx: &mut Context<Self>) {
         self.retag_started = true;
         cx.notify();
@@ -781,6 +984,7 @@ impl Settings {
 impl Render for Settings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_fields(window, cx);
+        self.ensure_join_input(window, cx);
         let p = design::palette(window.appearance());
         div()
             .id("settings")
@@ -795,6 +999,7 @@ impl Render for Settings {
             .flex_col()
             .gap(px(16.))
             .child(self.render_accounts(p, window, cx))
+            .child(self.render_device_sync(p, window, cx))
             .children(self.render_settings(p, window, cx))
             .child(self.render_status(p))
     }
@@ -1550,6 +1755,347 @@ impl Settings {
                 .child(div().flex_1().min_w_0().text_color(color.unwrap_or(p.text)).child(value))
         })))
     }
+
+    fn render_device_sync(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let section = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(heading("Device sync", p))
+            .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
+                "Syncs trusted senders, auto-read, and AI tagging preferences directly between your devices \
+                 with iroh. Off until enabled or paired, so Mailstream does not connect to a relay on its own.",
+            ));
+        let Some(status) = &self.device_sync else {
+            return section
+                .child(note("Loading device sync…", p))
+                .when_some(self.sync_error.clone(), |d, error| {
+                    d.child(div().text_size(px(text::FOOTNOTE)).text_color(p.danger).child(error))
+                });
+        };
+
+        let available = status.available;
+        let interactive = available && self.sync_busy.is_none();
+        let grouped = status.namespace.is_some();
+        let enabled = status.enabled;
+
+        let status_line = if !available {
+            "Unavailable while another Mailstream process on this machine holds device sync.".to_owned()
+        } else if enabled {
+            match &status.last_sync {
+                Some(at) => format!("On · Last synced {}", mailstream::message_date(Some(at.clone()))),
+                None if status.devices.len() > 1 => "On · Paired".to_owned(),
+                None => "On · Waiting for another device to join".to_owned(),
+            }
+        } else if status.paused {
+            "Paused · Local changes wait until you turn sync back on.".to_owned()
+        } else {
+            "Off · Not connected to any relay or sync group.".to_owned()
+        };
+
+        let toggle_row = div()
+            .px(px(14.))
+            .py(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Cross-device settings sync"))
+                    .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(status_line)),
+            )
+            .child(
+                switch("device-sync-toggle", enabled)
+                    .disabled(!interactive)
+                    .when(interactive, |s| {
+                        s.on_click(cx.listener(move |this, _: &bool, _, cx| this.toggle_device_sync(!enabled, cx)))
+                    }),
+            )
+            .into_any_element();
+
+        let this_device = status
+            .endpoint_id
+            .as_ref()
+            .and_then(|id| status.devices.iter().find(|device| &device.id == id));
+        let this_title = this_device.map_or_else(|| "This device".to_owned(), |device| device.name.clone());
+        let this_detail = match (this_device, &status.endpoint_id) {
+            (Some(device), Some(id)) => format!("{} · ID {}", platform_label(&device.platform), short_id(id)),
+            (None, Some(id)) => format!("{} · ID {}", platform_label(std::env::consts::OS), short_id(id)),
+            (_, None) => "Endpoint ID appears once device sync opens.".to_owned(),
+        };
+        let sync_now_label = if self.sync_busy == Some(SyncBusy::Now) { "Syncing…" } else { "Sync Now" };
+        let sync_now_enabled = interactive && enabled;
+        let this_row = div()
+            .px(px(14.))
+            .py(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(div().font_weight(FontWeight::MEDIUM).truncate().child(this_title))
+                    .child(div().text_size(px(text::CAPTION)).text_color(p.muted).truncate().child(this_detail)),
+            )
+            .child(
+                button("sync-now", sync_now_label, ButtonKind::Secondary, ControlSize::Regular, sync_now_enabled, p)
+                    .when(sync_now_enabled, |b| b.on_click(cx.listener(|this, _, _, cx| this.sync_now(cx)))),
+            )
+            .into_any_element();
+
+        let mut rows = vec![toggle_row, this_row];
+
+        if grouped {
+            let peers: Vec<&SyncDevice> =
+                status.devices.iter().filter(|device| Some(&device.id) != status.endpoint_id.as_ref()).collect();
+            let devices_row = div()
+                .px(px(14.))
+                .py(px(10.))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(div().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(p.muted).child("Paired devices"))
+                .when(peers.is_empty(), |d| {
+                    d.child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
+                        "No other devices paired yet. Create a pairing ticket below or paste one from another device.",
+                    ))
+                })
+                .children(peers.into_iter().map(|peer| {
+                    let seen = mailstream::message_date(Some(peer.last_seen.clone()));
+                    let meta = format!("{} · ID {} · Last synced {seen}", platform_label(&peer.platform), short_id(&peer.id));
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(div().font_weight(FontWeight::MEDIUM).truncate().child(peer.name.clone()))
+                        .child(div().text_size(px(text::CAPTION)).text_color(p.muted).truncate().child(meta))
+                }))
+                .into_any_element();
+            rows.push(devices_row);
+        }
+
+        let pair_block: AnyElement = match &self.sync_ticket {
+            Some(ticket) => div()
+                .p(px(10.))
+                .rounded(px(radius::CONTROL))
+                .border_1()
+                .border_color(p.line)
+                .bg(p.background)
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(div().font_weight(FontWeight::MEDIUM).child("Pairing ticket"))
+                .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
+                    "Paste this DocTicket on your other device and click Join. Both devices need to be online \
+                     at the same time once to complete the initial sync.",
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h(px(26.))
+                                .px(px(8.))
+                                .flex()
+                                .items_center()
+                                .rounded(px(radius::SMALL))
+                                .border_1()
+                                .border_color(p.line)
+                                .bg(p.fill)
+                                .font_family(design::mono_font())
+                                .text_size(px(text::CAPTION))
+                                .child(div().min_w_0().flex_1().truncate().child(ticket.clone())),
+                        )
+                        .child(
+                            button(
+                                "copy-sync-ticket",
+                                if self.ticket_copied { "Copied" } else { "Copy" },
+                                ButtonKind::Primary,
+                                ControlSize::Small,
+                                true,
+                                p,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.copy_sync_ticket(cx))),
+                        )
+                        .child(
+                            button("done-sync-ticket", "Done", ButtonKind::Secondary, ControlSize::Small, true, p).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.sync_ticket = None;
+                                    this.ticket_copied = false;
+                                    cx.notify();
+                                }),
+                            ),
+                        ),
+                )
+                .into_any_element(),
+            None => {
+                let pair_label = if self.sync_busy == Some(SyncBusy::Pair) { "Creating…" } else { "Pair Another Device" };
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().font_weight(FontWeight::MEDIUM).child("Pair another device"))
+                            .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
+                                "Generates a DocTicket to share with your other device. Both devices need to be \
+                                 online together once to finish the first sync.",
+                            )),
+                    )
+                    .child(
+                        button("pair-device", pair_label, ButtonKind::Secondary, ControlSize::Regular, interactive, p)
+                            .when(interactive, |b| b.on_click(cx.listener(|this, _, _, cx| this.pair_device(cx)))),
+                    )
+                    .into_any_element()
+            }
+        };
+
+        let join_label = if self.sync_busy == Some(SyncBusy::Join) { "Joining…" } else { "Join" };
+        let join_row = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
+                "Or paste a DocTicket from a device already in a sync group:",
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .when_some(self.join_input.as_ref(), |d, input| {
+                        let focused = input.focus_handle(cx).is_focused(window);
+                        d.child(
+                            field_frame(focused, false, p)
+                                .overflow_hidden()
+                                .flex_1()
+                                .min_w_0()
+                                .h(px(26.))
+                                .px(px(8.))
+                                .child(div().flex_1().min_w_0().child(input::field(input))),
+                        )
+                    })
+                    .child(
+                        button("join-sync", join_label, ButtonKind::Secondary, ControlSize::Regular, interactive, p)
+                            .when(interactive, |b| b.on_click(cx.listener(|this, _, window, cx| this.join_sync(window, cx)))),
+                    ),
+            );
+
+        rows.push(
+            div()
+                .px(px(14.))
+                .py(px(10.))
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .child(pair_block)
+                .child(join_row)
+                .into_any_element(),
+        );
+
+        if grouped {
+            let reset_row = if self.sync_confirm_reset {
+                div()
+                    .m(px(10.))
+                    .p(px(12.))
+                    .rounded(px(radius::CONTROL))
+                    .bg(design::tint(p.danger, design::notice::TINT))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Reset sync group?"))
+                    .child(div().text_size(px(text::CAPTION)).text_color(p.muted).child(
+                        "Starts a new sync group carrying over your current synced settings. If an old device \
+                         was lost, resetting stops it from receiving future changes until paired again.",
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(6.))
+                            .child(
+                                button("reset-sync-cancel", "Cancel", ButtonKind::Secondary, ControlSize::Regular, true, p)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.sync_confirm_reset = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                button(
+                                    "reset-sync-confirm",
+                                    if self.sync_busy == Some(SyncBusy::Reset) { "Resetting…" } else { "Reset Sync Group" },
+                                    ButtonKind::Destructive,
+                                    ControlSize::Regular,
+                                    interactive,
+                                    p,
+                                )
+                                .when(interactive, |b| b.on_click(cx.listener(|this, _, _, cx| this.reset_sync_group(cx)))),
+                            ),
+                    )
+                    .into_any_element()
+            } else {
+                div()
+                    .px(px(14.))
+                    .py(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().font_weight(FontWeight::MEDIUM).child("Reset sync group"))
+                            .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
+                                "If a paired device is lost, reset the group so it can no longer receive future updates.",
+                            )),
+                    )
+                    .child(
+                        button("reset-sync", "Reset Sync Group…", ButtonKind::Plain(p.danger), ControlSize::Small, interactive, p)
+                            .when(interactive, |b| {
+                                b.on_click(cx.listener(|this, _, _, cx| {
+                                    this.sync_confirm_reset = true;
+                                    cx.notify();
+                                }))
+                            }),
+                    )
+                    .into_any_element()
+            };
+            rows.push(reset_row);
+        }
+
+        let problem_notice = status.problem.as_ref().map(|problem| {
+            let tone = if available { Tone::Error } else { Tone::Action };
+            notice(tone, None, problem.clone(), false, p)
+        });
+
+        section
+            .children(problem_notice)
+            .children(group(rows, p))
+            .when_some(self.sync_error.clone(), |d, error| {
+                d.child(div().text_size(px(text::FOOTNOTE)).text_color(p.danger).child(error))
+            })
+    }
 }
 
 // MARK: - Pieces
@@ -1602,4 +2148,23 @@ fn service_title(service: &str) -> String {
         other => other,
     }
     .to_owned()
+}
+
+fn short_id(id: &str) -> String {
+    let count = id.chars().count();
+    if count <= 14 {
+        return id.to_owned();
+    }
+    let head: String = id.chars().take(8).collect();
+    let tail: String = id.chars().skip(count - 4).collect();
+    format!("{head}…{tail}")
+}
+
+fn platform_label(platform: &str) -> &str {
+    match platform {
+        "macos" => "macOS",
+        "linux" => "Linux",
+        "windows" => "Windows",
+        other => other,
+    }
 }

@@ -21,13 +21,22 @@
 //!
 //! [`set_outage`] makes one provider never answer, or fail, for screenshots of an account that
 //! can't connect while the others go on (MS-278).
+//!
+//! Device sync (`sync.*`, MS-361) has no network here: [`device_sync`] answers it from memory,
+//! starting off with no group. Enabling starts a group of this device alone, any ticket without
+//! whitespace joins a group with a second device, and a reset leaves this one alone again, so
+//! the Settings window's states can be shot.
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+
+use crate::answers::{self, DeviceSyncStatus, SyncDevice, SyncTicket};
+use crate::commands::Arguments;
+use crate::{EngineError, Events, model};
 
 use crate::accounts::Accounts;
 use crate::fake_server::{self, FakeRequest, FakeServer, Reply};
@@ -403,5 +412,123 @@ fn normalize_google_times(event: &mut Value) {
                 }
             }
         }
+    }
+}
+
+#[derive(Default)]
+struct DeviceSyncMock {
+    grouped: bool,
+    paused: bool,
+    joined_peer: bool,
+    last_sync_secs: Option<f64>,
+}
+
+static DEVICE_SYNC: LazyLock<Mutex<DeviceSyncMock>> = LazyLock::new(Default::default);
+
+fn now_unix() -> f64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64()
+}
+
+impl DeviceSyncMock {
+    fn status(&self) -> DeviceSyncStatus {
+        let now = now_unix();
+        let this_id = "shot7e4d9a1c8b2f0e6a3d5c".to_string();
+        let mut devices = Vec::new();
+        if self.grouped {
+            devices.push(SyncDevice {
+                id: this_id.clone(),
+                name: "Workstation".into(),
+                platform: std::env::consts::OS.into(),
+                last_seen: model::iso8601(model::date_from_unix(now)),
+            });
+            if self.joined_peer {
+                devices.push(SyncDevice {
+                    id: "shot9b8c7d6e5f4a3b2c1d0e".into(),
+                    name: "Sam's MacBook Pro".into(),
+                    platform: "macos".into(),
+                    last_seen: model::iso8601(model::date_from_unix(now - 120.0)),
+                });
+            }
+        }
+        DeviceSyncStatus {
+            available: true,
+            enabled: self.grouped && !self.paused,
+            paused: self.paused,
+            endpoint_id: Some(this_id),
+            namespace: self.grouped.then(|| "shotgroup0123456789abcdef".into()),
+            devices,
+            last_sync: self.last_sync_secs.map(|s| model::iso8601(model::date_from_unix(s))),
+            problem: None,
+        }
+    }
+}
+
+/// Handles `sync.*` commands in `--shots` mode with an in-memory sync group (MS-361).
+pub(crate) fn device_sync(command: &str, args: &Arguments, events: &Events) -> Result<Value, EngineError> {
+    let mut mock = DEVICE_SYNC.lock().expect("device sync mock lock");
+    let now = now_unix();
+    match command {
+        "sync.status" => Ok(answers::json(&mock.status())),
+        "sync.enable" => {
+            mock.grouped = true;
+            mock.paused = false;
+            events.emit("deviceSync");
+            Ok(answers::json(&mock.status()))
+        }
+        "sync.disable" => {
+            mock.paused = true;
+            events.emit("deviceSync");
+            Ok(answers::json(&mock.status()))
+        }
+        "sync.pair_ticket" => {
+            if !mock.grouped {
+                return Err(EngineError::new("no_group", "Device sync is not enabled yet."));
+            }
+            Ok(answers::json(&SyncTicket {
+                ticket: "docaaacaaqaaaaa3x7q4m2n8p5r9t2v6w4y8z3b5c7d9f2h4j6k8m2p4q6s8u".into(),
+            }))
+        }
+        "sync.join" => {
+            let ticket = args.required("ticket")?;
+            let trimmed = ticket.trim();
+            if trimmed.is_empty() || trimmed.contains(char::is_whitespace) {
+                return Err(EngineError::failed("Not a device sync ticket: expected a DocTicket."));
+            }
+            mock.grouped = true;
+            mock.paused = false;
+            mock.joined_peer = true;
+            mock.last_sync_secs = Some(now);
+            events.emit("deviceSync");
+            Ok(answers::json(&mock.status()))
+        }
+        "sync.reset" => {
+            if !args.bool("yes") {
+                return Err(EngineError::new(
+                    "confirm",
+                    "Would create a new sync group and drop older devices until paired again (local settings stay). Re-run with --yes.",
+                ));
+            }
+            mock.grouped = true;
+            mock.paused = false;
+            mock.joined_peer = false;
+            mock.last_sync_secs = Some(now);
+            events.emit("deviceSync");
+            Ok(answers::json(&mock.status()))
+        }
+        "sync.now" => {
+            if !mock.grouped {
+                return Err(EngineError::new("no_group", "Device sync is not enabled yet."));
+            }
+            if mock.paused {
+                return Err(EngineError::new(
+                    "paused",
+                    "Device sync is paused; enable it first (`mailstream sync enable`).",
+                ));
+            }
+            mock.last_sync_secs = Some(now);
+            events.emit("deviceSync");
+            Ok(answers::json(&mock.status()))
+        }
+        _ => unreachable!("{command} is a sync command"),
     }
 }

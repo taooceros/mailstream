@@ -110,7 +110,7 @@ impl Setting {
             Self::AiTaggingEnabled => (
                 Kind::Bool,
                 json!(true),
-                "Sort the inbox into People, Notifications, Newsletters and Invitations with AI, and flag mail waiting on your reply or action.",
+                "Sort the inbox into People, Notifications, Newsletters and Invitations with AI, and flag mail waiting on your reply or action. Synced across paired devices when Device sync is on.",
             ),
             Self::AiTaggingBackend => (
                 Kind::Choice(&["omp", "apple"]),
@@ -137,12 +137,12 @@ impl Setting {
             Self::AiTaggingLocalOnlyAccounts => (
                 Kind::Addresses,
                 json!([]),
-                "Accounts whose AI tags stay on this device. Every other Gmail and Outlook account's tags sync with the server both ways, so your other devices show them and don't tag that mail again: as labels or categories named People, Notifications, Newsletters, Invitations and Waiting on you (an existing one of that name is used, in any case), and topic labels as Mailstream/<topic>. Labels are never deleted.",
+                "Accounts whose AI tags stay on this device. Every other Gmail and Outlook account's tags sync with the server both ways, so your other devices show them and don't tag that mail again: as labels or categories named People, Notifications, Newsletters, Invitations and Waiting on you (an existing one of that name is used, in any case), and topic labels as Mailstream/<topic>. Labels are never deleted. Synced across paired devices when Device sync is on.",
             ),
             Self::TrustedSenders => (
                 Kind::Addresses,
                 json!([]),
-                "Senders whose remote images and fonts always load, besides your own addresses and people you wrote to.",
+                "Senders whose remote images and fonts always load, besides your own addresses and people you wrote to. Synced across paired devices when Device sync is on.",
             ),
             Self::PollSeconds => (Kind::Int(15, 3600), json!(90), "Mail polling interval while push is not connected."),
             Self::PushPollSeconds => {
@@ -182,12 +182,12 @@ impl Setting {
             Self::AutoReadEnabled => (
                 Kind::Bool,
                 json!(false),
-                "Mark stale notifications and newsletters (ads, promotions) read on their own, as AI tagging sorts them: unread ones older than autoRead.days, and a newsletter once its sender sends a newer one. Never mail waiting on you, starred mail, people, invitations or threads you wrote in. Mailstream Flutter offers Undo.",
+                "Mark stale notifications and newsletters (ads, promotions) read on their own, as AI tagging sorts them: unread ones older than autoRead.days, and a newsletter once its sender sends a newer one. Never mail waiting on you, starred mail, people, invitations or threads you wrote in. Mailstream Flutter offers Undo. Synced across paired devices when Device sync is on.",
             ),
             Self::AutoReadDays => (
                 Kind::Int(1, 90),
                 json!(3),
-                "Days an unread notification or newsletter waits before auto-read marks it read.",
+                "Days an unread notification or newsletter waits before auto-read marks it read. Synced across paired devices when Device sync is on.",
             ),
         }
     }

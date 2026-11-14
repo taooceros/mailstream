@@ -536,17 +536,25 @@ impl Core {
             Handler::Calendar => self.calendar.run(command, &args).await,
             Handler::Sync => match &self.device_sync {
                 Some(device_sync) => device_sync.run(command, &args).await,
-                None if command == "sync.status" => Ok(answers::json(&answers::DeviceSyncStatus {
-                    available: false,
-                    enabled: false,
-                    paused: false,
-                    endpoint_id: None,
-                    namespace: None,
-                    devices: Vec::new(),
-                    last_sync: None,
-                    problem: Some("Device sync is disabled in this mode.".into()),
-                })),
-                None => Err(EngineError::new("unavailable", "Device sync is disabled in this mode.")),
+                None => {
+                    #[cfg(feature = "shots")]
+                    if shots::running() {
+                        return shots::device_sync(command, &args, &self.events);
+                    }
+                    match command {
+                        "sync.status" => Ok(answers::json(&answers::DeviceSyncStatus {
+                            available: false,
+                            enabled: false,
+                            paused: false,
+                            endpoint_id: None,
+                            namespace: None,
+                            devices: Vec::new(),
+                            last_sync: None,
+                            problem: Some("Device sync is disabled in this mode.".into()),
+                        })),
+                        _ => Err(EngineError::new("unavailable", "Device sync is disabled in this mode.")),
+                    }
+                }
             },
         }
     }
