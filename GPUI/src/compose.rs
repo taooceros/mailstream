@@ -1301,6 +1301,7 @@ impl Render for ReplyBox {
             )
             .child(
                 div()
+                    .debug_selector(|| "reply-editor-frame".into())
                     .pl(px(metrics::REPLY_PADDING - AREA_INSET))
                     .pr(px(metrics::REPLY_PADDING - AREA_INSET))
                     .py(px(8.))
@@ -1308,12 +1309,7 @@ impl Render for ReplyBox {
                     .line_height(relative(editor::LEADING))
                     .text_color(p.text)
                     .when(sending, |d| d.opacity(metrics::SENT_TEXT_OPACITY))
-                    .child({
-                        let rows = (self.text.read(cx).text().chars().filter(|&c| c == '\n').count() + 1)
-                            .clamp(metrics::REPLY_MIN_ROWS, metrics::REPLY_MAX_ROWS);
-                        let reply_height = rows as f32 * text::READING * editor::LEADING + AREA_INSET * 2.0;
-                        input::editor(&self.text).height(reply_height)
-                    }),
+                    .child(input::editor(&self.text).auto_grow(metrics::REPLY_MIN_ROWS, metrics::REPLY_MAX_ROWS)),
             )
             .when_some(attached, |d, attached| d.child(div().px(px(metrics::REPLY_PADDING)).pb(px(8.)).child(attached)))
             .child(
@@ -1514,5 +1510,53 @@ mod tests {
         cx.simulate_appearance_change(WindowAppearance::Dark);
         cx.run_until_parked();
         assert_eq!(parsed_in.borrow().last(), Some(&WindowAppearance::Dark));
+    }
+
+    /// A single long paragraph without `\n` wraps and grows the reply box up to `REPLY_MAX_ROWS`.
+    #[gpui::test]
+    fn reply_grows_on_wrapped_paragraph_and_caps_at_max_rows(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui::component::init(cx);
+            design::sync_kit_theme(WindowAppearance::Light, cx);
+        });
+        let (reply, cx) = cx.add_window_view(|window, cx| {
+            ReplyBox::new("conversation".into(), None, false, "someone@example.com".into(), window, cx)
+        });
+        cx.run_until_parked();
+        let text = reply.read_with(cx, |r, _| r.text.clone());
+        let empty_height = cx.debug_bounds("reply-editor-frame").unwrap().size.height;
+
+        // ~6-8 wrapped lines in the default test window width, with zero newline characters.
+        let medium = "word ".repeat(140);
+        assert!(!medium.contains('\n'));
+        text.update_in(cx, |state, window, cx| state.set_value(&medium, window, cx));
+        cx.run_until_parked();
+        let wrapped_rows = text.read_with(cx, |state, _| state.display_map().wrap_row_count());
+        assert!(
+            wrapped_rows > metrics::REPLY_MIN_ROWS && wrapped_rows < metrics::REPLY_MAX_ROWS,
+            "expected {wrapped_rows} wrapped rows between {} and {}",
+            metrics::REPLY_MIN_ROWS,
+            metrics::REPLY_MAX_ROWS,
+        );
+        let medium_height = cx.debug_bounds("reply-editor-frame").unwrap().size.height;
+        assert!(
+            medium_height > empty_height,
+            "reply should grow on wrapped text: {medium_height:?} vs {empty_height:?}",
+        );
+
+        // Exceeding REPLY_MAX_ROWS caps the height and does not grow further.
+        let long = "word ".repeat(1000);
+        assert!(!long.contains('\n'));
+        text.update_in(cx, |state, window, cx| state.set_value(&long, window, cx));
+        cx.run_until_parked();
+        let max_rows = text.read_with(cx, |state, _| state.display_map().wrap_row_count());
+        assert!(max_rows > metrics::REPLY_MAX_ROWS, "expected > {} wrapped rows, got {max_rows}", metrics::REPLY_MAX_ROWS);
+        let capped_height = cx.debug_bounds("reply-editor-frame").unwrap().size.height;
+        assert!(capped_height > medium_height, "reply should keep growing up to max rows");
+
+        let longer = "word ".repeat(1500);
+        text.update_in(cx, |state, window, cx| state.set_value(&longer, window, cx));
+        cx.run_until_parked();
+        assert_eq!(cx.debug_bounds("reply-editor-frame").unwrap().size.height, capped_height);
     }
 }

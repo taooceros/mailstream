@@ -13,7 +13,7 @@ use gpui::component::Sizable;
 use gpui::component::input::{Editor, EditorState, Input, InputState};
 use gpui::{
     App, Context, DefiniteLength, Entity, EntityInputHandler, IntoElement, ParentElement, RenderOnce, Styled, Window,
-    div, px, relative,
+    div, relative,
 };
 
 use crate::{design, text_checking};
@@ -69,12 +69,6 @@ impl MarkupEditor {
     /// Fills the parent's height and scrolls inside it.
     pub fn full(mut self) -> Self {
         self.height = Some(relative(1.).into());
-        self
-    }
-
-    /// Fixes the editor's height (for auto-growing inline cards).
-    pub fn height(mut self, height: f32) -> Self {
-        self.height = Some(px(height).into());
         self
     }
 
