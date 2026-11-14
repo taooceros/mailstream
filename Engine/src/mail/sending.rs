@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use regex::Regex;
 use serde_json::{Value, json};
 use unicode_segmentation::UnicodeSegmentation;
@@ -121,9 +122,237 @@ fn quote_html(source: Option<&MessageContent>) -> Option<String> {
     }
 }
 
-fn html_document(written: &str, quoted: Option<(&str, String)>) -> String {
-    let written = lines_html(written);
-    let mut html = format!("<!doctype html><html><head><meta charset=\"utf-8\"></head><body>\n<div dir=\"auto\">{written}</div>\n");
+fn heading_level(level: HeadingLevel) -> u8 {
+    match level {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
+    }
+}
+
+fn is_safe_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('/') {
+        return true;
+    }
+    match trimmed.split_once(':') {
+        Some((scheme, _)) if !scheme.contains(['/', '?', '#']) => {
+            matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https" | "mailto")
+        }
+        _ => true,
+    }
+}
+
+fn is_safe_image_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    match trimmed.split_once(':') {
+        Some((scheme, _)) => matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https"),
+        None => false,
+    }
+}
+
+struct PendingImage {
+    url: String,
+    title: String,
+    alt: String,
+}
+
+/// Written Markdown text rendered as clean HTML, with bare URLs and email addresses linkified.
+pub(crate) fn markdown_to_html(text: &str) -> String {
+    if text.trim().is_empty() {
+        return String::new();
+    }
+    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let parser = Parser::new_ext(text, options);
+    let mut out = String::with_capacity(text.len() * 2);
+    let mut in_code_block = false;
+    let mut link_stack: Vec<bool> = Vec::new();
+    let mut in_table_head = false;
+    let mut in_table_body = false;
+    let mut pending_image: Option<PendingImage> = None;
+
+    for event in parser {
+        match event {
+            Event::Start(tag) => {
+                if pending_image.is_some() {
+                    continue;
+                }
+                match tag {
+                    Tag::Paragraph => out.push_str("<p>"),
+                    Tag::Heading { level, .. } => {
+                        out.push_str(&format!("<h{}>", heading_level(level)));
+                    }
+                    Tag::BlockQuote(_) => out.push_str("<blockquote>\n"),
+                    Tag::CodeBlock(kind) => {
+                        in_code_block = true;
+                        match kind {
+                            CodeBlockKind::Fenced(lang) => {
+                                let lang = lang.split_whitespace().next().unwrap_or("");
+                                if lang.is_empty() {
+                                    out.push_str("<pre><code>");
+                                } else {
+                                    out.push_str(&format!("<pre><code class=\"language-{}\">", text::escape_html(lang)));
+                                }
+                            }
+                            CodeBlockKind::Indented => out.push_str("<pre><code>"),
+                        }
+                    }
+                    Tag::List(None) => out.push_str("<ul>\n"),
+                    Tag::List(Some(1)) => out.push_str("<ol>\n"),
+                    Tag::List(Some(start)) => out.push_str(&format!("<ol start=\"{start}\">\n")),
+                    Tag::Item => out.push_str("<li>"),
+                    Tag::Emphasis => out.push_str("<em>"),
+                    Tag::Strong => out.push_str("<strong>"),
+                    Tag::Strikethrough => out.push_str("<del>"),
+                    Tag::Link { dest_url, title, .. } => {
+                        let safe = is_safe_url(&dest_url);
+                        link_stack.push(safe);
+                        if safe {
+                            out.push_str(&format!("<a href=\"{}\"", text::escape_html(&dest_url)));
+                            if !title.is_empty() {
+                                out.push_str(&format!(" title=\"{}\"", text::escape_html(&title)));
+                            }
+                            out.push('>');
+                        }
+                    }
+                    Tag::Image { dest_url, title, .. } => {
+                        pending_image = Some(PendingImage {
+                            url: dest_url.into_string(),
+                            title: title.into_string(),
+                            alt: String::new(),
+                        });
+                    }
+                    Tag::Table(_) => {
+                        in_table_body = false;
+                        out.push_str("<table>\n");
+                    }
+                    Tag::TableHead => {
+                        in_table_head = true;
+                        out.push_str("<thead>\n<tr>\n");
+                    }
+                    Tag::TableRow => {
+                        if !in_table_body {
+                            in_table_body = true;
+                            out.push_str("<tbody>\n");
+                        }
+                        out.push_str("<tr>\n");
+                    }
+                    Tag::TableCell => {
+                        out.push_str(if in_table_head { "<th>" } else { "<td>" });
+                    }
+                    _ => {}
+                }
+            }
+            Event::End(tag_end) => {
+                if matches!(tag_end, TagEnd::Image) {
+                    if let Some(img) = pending_image.take() {
+                        if is_safe_image_url(&img.url) {
+                            out.push_str(&format!(
+                                "<img src=\"{}\" alt=\"{}\"",
+                                text::escape_html(&img.url),
+                                text::escape_html(&img.alt)
+                            ));
+                            if !img.title.is_empty() {
+                                out.push_str(&format!(" title=\"{}\"", text::escape_html(&img.title)));
+                            }
+                            out.push('>');
+                        } else {
+                            out.push_str(&text::escape_html(&img.alt));
+                        }
+                    }
+                    continue;
+                }
+                if pending_image.is_some() {
+                    continue;
+                }
+                match tag_end {
+                    TagEnd::Paragraph => out.push_str("</p>\n"),
+                    TagEnd::Heading(level) => {
+                        out.push_str(&format!("</h{}>\n", heading_level(level)));
+                    }
+                    TagEnd::BlockQuote(_) => out.push_str("</blockquote>\n"),
+                    TagEnd::CodeBlock => {
+                        in_code_block = false;
+                        out.push_str("</code></pre>\n");
+                    }
+                    TagEnd::List(ordered) => out.push_str(if ordered { "</ol>\n" } else { "</ul>\n" }),
+                    TagEnd::Item => out.push_str("</li>\n"),
+                    TagEnd::Emphasis => out.push_str("</em>"),
+                    TagEnd::Strong => out.push_str("</strong>"),
+                    TagEnd::Strikethrough => out.push_str("</del>"),
+                    TagEnd::Link => {
+                        if link_stack.pop() == Some(true) {
+                            out.push_str("</a>");
+                        }
+                    }
+                    TagEnd::TableCell => out.push_str(if in_table_head { "</th>\n" } else { "</td>\n" }),
+                    TagEnd::TableHead => {
+                        in_table_head = false;
+                        out.push_str("</tr>\n</thead>\n");
+                    }
+                    TagEnd::TableRow => out.push_str("</tr>\n"),
+                    TagEnd::Table => {
+                        if in_table_body {
+                            in_table_body = false;
+                            out.push_str("</tbody>\n");
+                        }
+                        out.push_str("</table>\n");
+                    }
+                    _ => {}
+                }
+            }
+            Event::Text(t) => {
+                if let Some(img) = &mut pending_image {
+                    img.alt.push_str(&t);
+                } else if in_code_block || link_stack.iter().any(|&open| open) {
+                    out.push_str(&text::escape_html(&t));
+                } else {
+                    out.push_str(&text::linkify(&t));
+                }
+            }
+            Event::Code(t) => {
+                if let Some(img) = &mut pending_image {
+                    img.alt.push_str(&t);
+                } else {
+                    out.push_str(&format!("<code>{}</code>", text::escape_html(&t)));
+                }
+            }
+            Event::Html(h) | Event::InlineHtml(h) => {
+                if let Some(img) = &mut pending_image {
+                    img.alt.push_str(&h);
+                } else {
+                    out.push_str(&text::escape_html(&h));
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                if let Some(img) = &mut pending_image {
+                    img.alt.push(' ');
+                } else {
+                    out.push_str("<br>\n");
+                }
+            }
+            Event::Rule => out.push_str("<hr>\n"),
+            Event::TaskListMarker(checked) => {
+                out.push_str(if checked {
+                    "<input type=\"checkbox\" disabled checked> "
+                } else {
+                    "<input type=\"checkbox\" disabled> "
+                });
+            }
+            Event::FootnoteReference(name) | Event::InlineMath(name) | Event::DisplayMath(name) => {
+                out.push_str(&text::escape_html(&name));
+            }
+        }
+    }
+    out.trim_end_matches('\n').to_string()
+}
+
+fn html_document_with(written_html: String, quoted: Option<(&str, String)>) -> String {
+    let written_html = if written_html.is_empty() { "<div><br></div>".to_string() } else { written_html };
+    let mut html = format!("<!doctype html><html><head><meta charset=\"utf-8\"></head><body>\n<div dir=\"auto\">{written_html}</div>\n");
     if let Some((attribution, quote)) = quoted {
         let attr = attribution
             .replace("\r\n", "\n")
@@ -140,10 +369,24 @@ fn html_document(written: &str, quoted: Option<(&str, String)>) -> String {
     html + "</body></html>\n"
 }
 
+fn html_document(written: &str, quoted: Option<(&str, String)>) -> String {
+    html_document_with(lines_html(written), quoted)
+}
+
+fn markdown_document(written: &str, quoted: Option<(&str, String)>) -> String {
+    html_document_with(markdown_to_html(written), quoted)
+}
+
 /// The HTML alternative of a reply, laid out the way Gmail does so recipients' clients fold the
 /// quote.
 pub(crate) fn reply_html(reply: &str, attribution: &str, source: Option<&MessageContent>) -> String {
     html_document(reply, quote_html(source).map(|quote| (attribution, quote)))
+}
+
+/// The HTML alternative of a Markdown reply, laid out the way Gmail does so recipients' clients
+/// fold the quote.
+pub(crate) fn reply_markdown_html(reply: &str, attribution: &str, source: Option<&MessageContent>) -> String {
+    markdown_document(reply, quote_html(source).map(|quote| (attribution, quote)))
 }
 
 /// Plain-text and HTML bodies for a forward of `source`: keeps `body` as `text/plain` when it
@@ -181,13 +424,24 @@ fn forward_bodies(body: &str, source: &MailMessage, content: Option<&MessageCont
                 let written = before.trim_end_matches('\n');
                 let block = format!("{FORWARD_MARKER}{after}");
                 let attr = block.split("\n\n").next().unwrap_or(&block);
-                html_document(written, Some((attr, quote)))
+                markdown_document(written, Some((attr, quote)))
             } else {
                 let attr = crate::display::forward_header(&forwarded);
-                html_document(body, Some((&attr, quote)))
+                markdown_document(body, Some((&attr, quote)))
             }
         }
-        None => html_document(&text, None),
+        None => {
+            let written_html = if let Some((before, after)) = normalized.split_once(FORWARD_MARKER) {
+                let written = markdown_to_html(before.trim_end_matches('\n'));
+                let block = lines_html(&format!("{FORWARD_MARKER}{after}"));
+                if written.is_empty() { block } else { format!("{written}\n<div><br></div>\n{block}") }
+            } else {
+                let written = markdown_to_html(body);
+                let quoted = lines_html(&crate::display::forward_body(&forwarded));
+                if written.is_empty() { quoted } else { format!("{written}\n<div><br></div>\n{quoted}") }
+            };
+            html_document_with(written_html, None)
+        }
     };
     (text, html)
 }
@@ -288,7 +542,7 @@ impl Mail {
                 let content = self.contents.load(&source.message_ref(), self.backend(source.account())).await.ok();
                 forward_bodies(&body, source, content.as_deref())
             }
-            None => (body.clone(), html_document(&body, None)),
+            None => (body.clone(), markdown_document(&body, None)),
         };
         let message = self.outgoing(&from, None, to.clone(), cc, bcc, subject.clone(), text, Some(html), attachments).await;
         self.deliver(&message, &from).await?;
@@ -338,7 +592,7 @@ impl Mail {
             )));
         }
         let content = self.contents.load(&source.message_ref(), self.backend(&account)).await.ok();
-        let html = reply_html(&body, &plan.attribution, content.as_deref());
+        let html = reply_markdown_html(&body, &plan.attribution, content.as_deref());
         let message = self
             .outgoing(
                 &account,
@@ -542,7 +796,7 @@ mod tests {
         let prefilled = "FYI https://example.com\n\n---------- Forwarded message ---------\nFrom: Jordan <jordan@x.com>\nSubject: Q4 plan\nTo: Sam <me@x.com>\n\nHello Sam";
         let (plain, html) = forward_bodies(prefilled, &source, Some(&html_content));
         assert_eq!(plain, prefilled);
-        assert!(html.contains("<div dir=\"auto\"><div>FYI <a href=\"https://example.com\">https://example.com</a></div></div>"), "{html}");
+        assert!(html.contains("<div dir=\"auto\"><p>FYI <a href=\"https://example.com\">https://example.com</a></p></div>"), "{html}");
         assert!(html.contains("<div dir=\"ltr\" class=\"gmail_attr\">---------- Forwarded message ---------<br>From: Jordan &lt;jordan@x.com&gt;<br>Subject: Q4 plan<br>To: Sam &lt;me@x.com&gt;<br></div>"), "{html}");
         assert!(html.contains("<p>Hello <b>Sam</b></p>"), "{html}");
         assert!(!html.contains("mscid:") && !html.contains("file:///"), "{html}");
@@ -557,7 +811,7 @@ mod tests {
         let (cli_plain, cli_html) = forward_bodies("Take a look", &source, Some(&html_content));
         assert!(cli_plain.starts_with("Take a look\n\n---------- Forwarded message ---------\nFrom: Jordan <jordan@x.com>"), "{cli_plain}");
         assert!(cli_plain.ends_with("\n\nHello Sam"), "{cli_plain}");
-        assert!(cli_html.contains("<div>Take a look</div>") && cli_html.contains("<p>Hello <b>Sam</b></p>"), "{cli_html}");
+        assert!(cli_html.contains("<p>Take a look</p>") && cli_html.contains("<p>Hello <b>Sam</b></p>"), "{cli_html}");
 
         // Plain-text-only source produces linkified line HTML without a redundant .gmail_quote block.
         let plain_content = MessageContent {
@@ -575,5 +829,25 @@ mod tests {
         assert_eq!(plain_only_text, plain_prefilled);
         assert!(!plain_only_html.contains("gmail_quote"), "{plain_only_html}");
         assert!(plain_only_html.contains("<a href=\"http://www.example.org\">www.example.org</a>"), "{plain_only_html}");
+    }
+
+    #[test]
+    fn markdown_to_html_renders_formatting_lists_links_and_code() {
+        let md = "# Heading\n\n**Bold**, *italic*, ~~strike~~, and `inline <code/>`.\n\n- First item\n- Second item\n\n1. Step one\n2. Step two\n\n> Quoted line\n\n[Mailstream](https://example.com) and bare https://bare.example\n\n```rust\nlet x = 1 < 2;\n```";
+        let html = markdown_to_html(md);
+        assert!(html.contains("<h1>Heading</h1>"), "{html}");
+        assert!(html.contains("<strong>Bold</strong>, <em>italic</em>, <del>strike</del>, and <code>inline &lt;code/&gt;</code>."), "{html}");
+        assert!(html.contains("<ul>\n<li>First item</li>\n<li>Second item</li>\n</ul>"), "{html}");
+        assert!(html.contains("<ol>\n<li>Step one</li>\n<li>Step two</li>\n</ol>"), "{html}");
+        assert!(html.contains("<blockquote>\n<p>Quoted line</p>\n</blockquote>"), "{html}");
+        assert!(html.contains("<a href=\"https://example.com\">Mailstream</a>"), "{html}");
+        assert!(html.contains("<a href=\"https://bare.example\">https://bare.example</a>"), "{html}");
+        assert!(html.contains("<pre><code class=\"language-rust\">let x = 1 &lt; 2;\n</code></pre>"), "{html}");
+
+        // Unsafe link schemes are stripped while keeping text; inline HTML is escaped.
+        let unsafe_md = "[click](javascript:alert(1)) <script>bad</script>";
+        let unsafe_html = markdown_to_html(unsafe_md);
+        assert!(!unsafe_html.contains("javascript:"), "{unsafe_html}");
+        assert!(unsafe_html.contains("click &lt;script&gt;bad&lt;/script&gt;"), "{unsafe_html}");
     }
 }

@@ -229,7 +229,7 @@ impl Compose {
         let cc = cx.new(|cx| InputState::new(window, cx));
         let bcc = cx.new(|cx| InputState::new(window, cx));
         let subject = cx.new(|cx| InputState::new(window, cx).placeholder("Subject"));
-        let body = cx.new(|cx| TextareaState::new(window, cx));
+        let body = cx.new(|cx| TextareaState::new(window, cx).placeholder("Write in Markdown…"));
 
         let mut attachments = Attachments::default();
         let (mut reply, mut forward) = (None, None);
@@ -1023,7 +1023,7 @@ impl ReplyBox {
     ) -> Self {
         let text = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder(if all { "Reply to everyone…" } else { "Reply…" })
+                .placeholder(if all { "Reply to everyone in Markdown…" } else { "Reply in Markdown…" })
                 .auto_grow(metrics::REPLY_MIN_ROWS, metrics::REPLY_MAX_ROWS)
         });
         let focus = text.focus_handle(cx);

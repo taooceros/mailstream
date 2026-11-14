@@ -396,9 +396,8 @@ fn sends_multipart_new_mail_and_forwards_for_gmail_and_graph() {
     assert!(upload.contains("Content-Type: multipart/alternative;"), "{upload}");
     assert!(upload.contains("Visit https://example.com\r\n\r\nPing ann@x.com\r\n"), "{upload}");
     let html = html_part(&upload);
-    assert!(html.contains("<div>Visit <a href=\"https://example.com\">https://example.com</a></div>"), "{html}");
-    assert!(html.contains("<div><br></div>"), "{html}");
-    assert!(html.contains("<div>Ping <a href=\"mailto:ann@x.com\">ann@x.com</a></div>"), "{html}");
+    assert!(html.contains("<p>Visit <a href=\"https://example.com\">https://example.com</a></p>"), "{html}");
+    assert!(html.contains("<p>Ping <a href=\"mailto:ann@x.com\">ann@x.com</a></p>"), "{html}");
 
     // Forward Gmail HTML message `i00` inside `lunch` conversation.
     let lunch = "me@gmail.com|i00@x";
@@ -427,7 +426,7 @@ fn sends_multipart_new_mail_and_forwards_for_gmail_and_graph() {
     assert!(fwd_upload.contains("FYI https://menu.example\r\n\r\n---------- Forwarded message ---------"), "{fwd_upload}");
     assert!(!fwd_upload.contains("In-Reply-To:"), "{fwd_upload}");
     let fwd_html = html_part(&fwd_upload);
-    assert!(fwd_html.contains("<div>FYI <a href=\"https://menu.example\">https://menu.example</a></div>"), "{fwd_html}");
+    assert!(fwd_html.contains("<p>FYI <a href=\"https://menu.example\">https://menu.example</a></p>"), "{fwd_html}");
     assert!(fwd_html.contains("<div class=\"gmail_quote\">"), "{fwd_html}");
     assert!(fwd_html.contains("<p>Hi, lunch </p>"), "{fwd_html}");
     assert!(!fwd_html.contains("mscid:"), "{fwd_html}");
@@ -528,10 +527,58 @@ fn sends_multipart_new_mail_and_forwards_for_gmail_and_graph() {
     assert!(mime.contains("Content-Type: multipart/alternative;"), "{mime}");
     assert!(mime.contains("See https://contoso.example\r\n\r\n---------- Forwarded message ---------"), "{mime}");
     let graph_html = html_part(&mime);
-    assert!(graph_html.contains("<div>See <a href=\"https://contoso.example\">https://contoso.example</a></div>"), "{graph_html}");
+    assert!(graph_html.contains("<p>See <a href=\"https://contoso.example\">https://contoso.example</a></p>"), "{graph_html}");
     assert!(graph_html.contains("<div class=\"gmail_quote\">"), "{graph_html}");
     assert!(graph_html.contains("<p>Quarterly <b>numbers</b></p>"), "{graph_html}");
     assert!(!graph_html.contains("file:///"), "{graph_html}");
+    drop(engine);
+    cleanup(&config);
+}
+
+#[test]
+fn sends_markdown_as_html_and_preserves_plain_text_for_new_mail_and_reply() {
+    let changed: Changes = Arc::default();
+    let server = gmail_server(changed.clone());
+    let (engine, config) = engine_for(&server, &[("me@gmail.com", "google")]);
+    wait_until("inbox", || call(&engine, "mail.list", json!({})).is_ok_and(|v| v["conversations"].as_array().is_some_and(|c| !c.is_empty())));
+    changes(&changed);
+
+    let md_body = "**Agenda**\n\n- *Item* 1\n- [Docs](https://docs.example)\n\n```sh\necho hi\n```";
+    call(
+        &engine,
+        "mail.send",
+        json!({
+            "from": "me@gmail.com",
+            "to": ["bob@x.com"],
+            "subject": "Markdown mail",
+            "body": md_body,
+            "yes": true,
+        }),
+    )
+    .unwrap();
+    let upload = changes(&changed).pop().unwrap().text();
+    assert!(upload.contains("Content-Type: multipart/alternative;"), "{upload}");
+    assert!(upload.contains("**Agenda**\r\n\r\n- *Item* 1"), "{upload}");
+    let html = html_part(&upload);
+    assert!(html.contains("<p><strong>Agenda</strong></p>"), "{html}");
+    assert!(html.contains("<ul>\n<li><em>Item</em> 1</li>\n<li><a href=\"https://docs.example\">Docs</a></li>\n</ul>"), "{html}");
+    assert!(html.contains("<pre><code class=\"language-sh\">echo hi\n</code></pre>"), "{html}");
+
+    call(
+        &engine,
+        "mail.reply",
+        json!({
+            "id": "me@gmail.com|i00@x",
+            "body": "Looks **good** -- see `main.rs`.",
+            "yes": true,
+        }),
+    )
+    .unwrap();
+    let reply_upload = changes(&changed).pop().unwrap().text();
+    assert!(reply_upload.contains("Looks **good** -- see `main.rs`."), "{reply_upload}");
+    let reply_html = html_part(&reply_upload);
+    assert!(reply_html.contains("<p>Looks <strong>good</strong> -- see <code>main.rs</code>.</p>"), "{reply_html}");
+    assert!(reply_html.contains("<div class=\"gmail_quote\">"), "{reply_html}");
     drop(engine);
     cleanup(&config);
 }
