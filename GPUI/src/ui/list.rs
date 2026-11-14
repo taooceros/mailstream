@@ -30,6 +30,9 @@ impl MailApp {
                 if !beneath && ix + 20 >= this.items.len() {
                     this.load_more(PagedView::List, this.items.len(), cx);
                 }
+                if !beneath && this.query.is_some() {
+                    this.row_drawn(ix, cx);
+                }
                 // The list's own padding stops at its top and bottom; rows step in by hand.
                 div().px(px(metrics::INSET)).child(this.render_item(ix, beneath, p, cx)).into_any_element()
             }),

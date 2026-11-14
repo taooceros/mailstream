@@ -113,6 +113,7 @@ impl MailApp {
         self.push_layer(Layer::Search, true);
         self.highlight = None;
         self.list_scroll = list_state(0);
+        self.drawn_rows.clear();
         self.rebuild_items();
         self.load_list(self.key(), false, cx);
         if fresh && let Some(beneath) = self.beneath.as_ref().map(Beneath::key) {

@@ -103,9 +103,11 @@ impl Backend {
     }
 
     /// Messages anywhere but spam and trash matching `query` in the provider's own syntax.
-    pub async fn search(&self, query: &str, page_size: usize) -> Result<Vec<SearchHit>, ApiError> {
+    /// `quick`: Gmail leaves the attachment check of messages it hasn't shown before for later
+    /// (Outlook's answer carries it anyway).
+    pub async fn search(&self, query: &str, page_size: usize, quick: bool) -> Result<Vec<SearchHit>, ApiError> {
         match self {
-            Self::Gmail(gmail) => gmail.search(query, page_size).await,
+            Self::Gmail(gmail) => gmail.search(query, page_size, quick).await,
             Self::Graph(graph) => graph.search(query, page_size).await,
         }
     }

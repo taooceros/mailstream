@@ -283,11 +283,13 @@ impl Gmail {
     }
 
     /// No label filter: Gmail then searches everything but spam and trash, as its web search does.
-    pub async fn search(&self, query: &str, page_size: usize) -> Result<Vec<SearchHit>, ApiError> {
+    /// `quick` leaves out the attachment check of messages not seen before (MS-352): they show no
+    /// paperclip until a later search or listing checks them.
+    pub async fn search(&self, query: &str, page_size: usize, quick: bool) -> Result<Vec<SearchHit>, ApiError> {
         let size = api::page_size(page_size, 500);
         let url = self.endpoints.url("messages", &[("q", query), ("maxResults", &size), ("fields", LIST_FIELDS)]);
         let (ids, _) = self.listing(url, Priority::Interactive).await?;
-        self.cache.hits(&ids, Priority::Interactive).await
+        self.cache.hits(&ids, Priority::Interactive, !quick).await
     }
 
     /// The threads among `threads` holding a message under none of the labels `own` (the user's
@@ -764,15 +766,15 @@ impl EnvelopeCache {
     }
 
     async fn envelopes(self: &Arc<Self>, ids: &[String], priority: Priority) -> Result<Vec<Envelope>, ApiError> {
-        let entries = self.lookup(ids, priority).await?;
+        let entries = self.lookup(ids, priority, true).await?;
         let names = self.names(&entries, priority).await?;
         Ok(entries.iter().map(|entry| entry.current(&names)).collect())
     }
 
     /// The envelopes placed in the mailbox their labels list them under: Inbox, Sent or Drafts
-    /// when they carry that label, else All Mail.
-    async fn hits(self: &Arc<Self>, ids: &[String], priority: Priority) -> Result<Vec<SearchHit>, ApiError> {
-        let entries = self.lookup(ids, priority).await?;
+    /// when they carry that label, else All Mail. `attachments` as `lookup` takes it.
+    async fn hits(self: &Arc<Self>, ids: &[String], priority: Priority, attachments: bool) -> Result<Vec<SearchHit>, ApiError> {
+        let entries = self.lookup(ids, priority, attachments).await?;
         let names = self.names(&entries, priority).await?;
         Ok(entries
             .iter()
@@ -785,7 +787,10 @@ impl EnvelopeCache {
 
     /// Entries of `ids` in that order, fetching metadata for the ones not cached; messages that
     /// no longer exist are left out. Ids another caller is already fetching share that fetch.
-    async fn lookup(self: &Arc<Self>, ids: &[String], priority: Priority) -> Result<Vec<Entry>, ApiError> {
+    /// A multipart/mixed message has attachments only if a part carries a file name, which
+    /// metadata doesn't show: `attachments` checks those not checked yet, else they stay
+    /// unknown (`has_attachment` None) until a lookup that does.
+    async fn lookup(self: &Arc<Self>, ids: &[String], priority: Priority, attachments: bool) -> Result<Vec<Entry>, ApiError> {
         let waits: Vec<Fetch> = {
             let mut state = self.state.lock().await;
             self.load(&mut state);
@@ -795,7 +800,7 @@ impl EnvelopeCache {
             if !missing.is_empty() {
                 let cache = self.clone();
                 let ids = missing.clone();
-                let fetch: Fetch = async move { cache.fetch(ids, priority).await.map(Arc::new) }.boxed().shared();
+                let fetch: Fetch = async move { cache.fetch(ids, priority, attachments).await.map(Arc::new) }.boxed().shared();
                 for id in missing {
                     state.loading.insert(id, fetch.clone());
                 }
@@ -816,12 +821,32 @@ impl EnvelopeCache {
                 fetched.entry(id.clone()).or_insert_with(|| entry.clone());
             }
         }
-        let state = self.state.lock().await;
-        Ok(ids.iter().filter_map(|id| state.entries.get(id).or_else(|| fetched.get(id)).cloned()).collect())
+        let mut entries: Vec<Entry> = {
+            let state = self.state.lock().await;
+            ids.iter().filter_map(|id| state.entries.get(id).or_else(|| fetched.get(id)).cloned()).collect()
+        };
+        if !attachments {
+            return Ok(entries);
+        }
+        let unchecked: Vec<String> =
+            entries.iter().filter(|entry| entry.envelope.has_attachment.is_none()).map(|entry| entry.envelope.id.clone()).collect();
+        if !unchecked.is_empty() {
+            let with_files = self.with_files(&unchecked, priority).await?;
+            let mut state = self.state.lock().await;
+            for entry in entries.iter_mut().filter(|entry| entry.envelope.has_attachment.is_none()) {
+                let has = Some(with_files.contains(&entry.envelope.id));
+                entry.envelope.has_attachment = has;
+                if let Some(cached) = state.entries.get_mut(&entry.envelope.id) {
+                    cached.envelope.has_attachment = has;
+                }
+            }
+            self.schedule_save(&mut state);
+        }
+        Ok(entries)
     }
 
-    async fn fetch(self: Arc<Self>, ids: Vec<String>, priority: Priority) -> Result<HashMap<String, Entry>, ApiError> {
-        let result = self.fetch_chunks(&ids, priority).await;
+    async fn fetch(self: Arc<Self>, ids: Vec<String>, priority: Priority, attachments: bool) -> Result<HashMap<String, Entry>, ApiError> {
+        let result = self.fetch_chunks(&ids, priority, attachments).await;
         let mut state = self.state.lock().await;
         for id in &ids {
             state.loading.remove(id);
@@ -829,7 +854,12 @@ impl EnvelopeCache {
         result
     }
 
-    async fn fetch_chunks(self: &Arc<Self>, ids: &[String], priority: Priority) -> Result<HashMap<String, Entry>, ApiError> {
+    async fn fetch_chunks(
+        self: &Arc<Self>,
+        ids: &[String],
+        priority: Priority,
+        attachments: bool,
+    ) -> Result<HashMap<String, Entry>, ApiError> {
         // The baseline comes first: history from it replays any change racing the fetch.
         if self.state.lock().await.history_id.is_none() {
             let baseline = self.history_id(priority).await?;
@@ -843,8 +873,6 @@ impl EnvelopeCache {
         for chunk in ids.chunks(50) {
             let since = self.state.lock().await.generation;
             let messages = self.metadata(chunk, &metadata_query(), priority).await?;
-            // Metadata shows only the top MIME type; a multipart/mixed message has attachments
-            // only if a part carries a file name.
             let mixed: Vec<String> = messages
                 .iter()
                 .filter(|message| {
@@ -853,20 +881,15 @@ impl EnvelopeCache {
                 })
                 .map(|message| message.id.clone())
                 .collect();
-            let with_files: HashSet<String> = if mixed.is_empty() {
-                HashSet::new()
-            } else {
-                self.metadata(&mixed, &parts_query(), priority)
-                    .await?
-                    .into_iter()
-                    .filter(|message| message.payload.as_ref().is_some_and(Part::has_file))
-                    .map(|message| message.id)
-                    .collect()
-            };
+            let with_files = if attachments && !mixed.is_empty() { Some(self.with_files(&mixed, priority).await?) } else { None };
             let mut state = self.state.lock().await;
             let stale = state.changed(since);
             for message in &messages {
-                let entry = entry(message, with_files.contains(&message.id));
+                let has_attachment = match &with_files {
+                    Some(with_files) => Some(with_files.contains(&message.id)),
+                    None => (!mixed.contains(&message.id)).then_some(false),
+                };
+                let entry = entry(message, has_attachment);
                 fetched.insert(message.id.clone(), entry.clone());
                 if let Some(stale) = &stale
                     && !stale.contains(&message.id)
@@ -892,6 +915,17 @@ impl EnvelopeCache {
         Ok(profile.history_id.and_then(|id| id.parse().ok()))
     }
 
+    /// Which of `ids`, multipart/mixed messages, carry a file: a part with a file name.
+    async fn with_files(&self, ids: &[String], priority: Priority) -> Result<HashSet<String>, ApiError> {
+        Ok(self
+            .metadata(ids, &parts_query(), priority)
+            .await?
+            .into_iter()
+            .filter(|message| message.payload.as_ref().is_some_and(Part::has_file))
+            .map(|message| message.id)
+            .collect())
+    }
+
     async fn metadata(&self, ids: &[String], query: &str, priority: Priority) -> Result<Vec<GmailMessage>, ApiError> {
         let found: HashMap<String, GmailMessage> =
             batch_get(&self.api, &self.endpoints, "messages", ids, query, 5, priority).await?;
@@ -913,7 +947,7 @@ fn parts_query() -> String {
     api::form_encoded([("format", "full"), ("fields", "id,payload(parts(filename,parts(filename)))")])
 }
 
-fn entry(message: &GmailMessage, has_attachment: bool) -> Entry {
+fn entry(message: &GmailMessage, has_attachment: Option<bool>) -> Entry {
     let payload = message.payload.as_ref();
     let header = |name: &str| payload.and_then(|payload| payload.header(name));
     let in_reply_to = text::parse_message_id_list(header("In-Reply-To"));
@@ -933,7 +967,7 @@ fn entry(message: &GmailMessage, has_attachment: bool) -> Entry {
         to: text::parse_address_list(header("To").unwrap_or("")),
         date: message.internal_date.as_deref().and_then(|ms| ms.parse::<f64>().ok()).map(|ms| date_from_unix(ms / 1000.0)),
         size: message.size_estimate.unwrap_or(0),
-        has_attachment: Some(has_attachment),
+        has_attachment,
         // Named from the labels as the envelope is read (`Entry::current`), as are these.
         tags: BTreeSet::new(),
         provider_category: None,

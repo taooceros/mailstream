@@ -1159,8 +1159,17 @@ impl Mail {
         }
     }
 
-    /// The providers' search over every mailbox of `accounts` but trash and junk.
-    async fn agent_search(self: &Arc<Self>, accounts: &[String], query: &str, page_size: usize) -> AgentListing {
+    /// The providers' search over every mailbox of `accounts` but trash and junk; with `held`,
+    /// the mail already loaded instead (`held_search`), and with `quick`, Gmail's answer without
+    /// the attachment check of messages it hasn't shown before (MS-352).
+    async fn agent_search(
+        self: &Arc<Self>,
+        accounts: &[String],
+        query: &str,
+        page_size: usize,
+        held: bool,
+        quick: bool,
+    ) -> AgentListing {
         let jobs: Vec<(String, Arc<Backend>)> =
             accounts.iter().filter_map(|account| self.backend(account).map(|backend| (account.clone(), backend))).collect();
         let mut failures: Vec<String> = accounts
@@ -1168,15 +1177,17 @@ impl Mail {
             .filter(|account| !jobs.iter().any(|(name, _)| name == *account))
             .map(|account| format!("{account}: signed out"))
             .collect();
+        // The screenshot mode's stand-in provider holds no mail (MS-331).
+        #[cfg(feature = "shots")]
+        let held = held || crate::shots::running();
         let mut running: FuturesUnordered<_> = jobs
             .into_iter()
             .map(|(account, backend)| async move {
-                #[cfg(feature = "shots")]
-                if crate::shots::running() {
+                if held {
                     let hits = self.held_search(&account, query).await;
                     return (account, Ok(hits));
                 }
-                let result = backend.search(query, page_size).await;
+                let result = backend.search(query, page_size, quick).await;
                 (account, result)
             })
             .collect();
@@ -1210,9 +1221,7 @@ impl Mail {
         Self::threads(&self.state(), &fetched, &context, failures, false)
     }
 
-    /// The screenshot mode's search (MS-331): its stand-in provider holds no mail, so what mail.db
-    /// lists of `account` answers, matched as `shots::matches` does.
-    #[cfg(feature = "shots")]
+    /// What mail.db lists of `account` that matches `query` (`held_match`): no provider is asked.
     async fn held_search(self: &Arc<Self>, account: &str, query: &str) -> Vec<crate::backend::SearchHit> {
         let keys: Vec<MailboxKey> =
             self.state().mailboxes.get(account).into_iter().flatten().map(|mailbox| MailboxKey::new(account, &mailbox.id)).collect();
@@ -1221,7 +1230,7 @@ impl Mail {
         keys.iter()
             .filter_map(|key| Some((key, state.listings.get(key)?)))
             .flat_map(|(key, listing)| listing.envelopes.iter().map(move |envelope| (key, envelope)))
-            .filter(|(_, envelope)| crate::shots::matches(envelope, query))
+            .filter(|(_, envelope)| held_match(envelope, query))
             .map(|(key, envelope)| crate::backend::SearchHit { mailbox: key.mailbox.clone(), envelope: Envelope::clone(envelope) })
             .collect()
     }
@@ -1358,7 +1367,8 @@ impl Mail {
         let listing = match &query {
             Some(query) => {
                 let accounts = self.account_names(args)?;
-                let mut listing = self.agent_search(&accounts, query, limit.clamp(25, 200)).await;
+                let (held, quick) = (args.bool("cached"), args.bool("quick"));
+                let mut listing = self.agent_search(&accounts, query, limit.clamp(25, 200), held, quick).await;
                 let state = self.state();
                 listing.conversations =
                     listing.conversations.into_iter().filter(|conversation| include(&state, conversation)).take(limit).collect();
@@ -1386,17 +1396,21 @@ impl Mail {
             }
             listing.conversations.iter().map(|conversation| self.summary(&state, conversation, &listing.primary)).collect()
         };
-        // Previews missing now load in the background; `mail.previews` waits for them.
-        let prefetch = listing
-            .conversations
-            .iter()
-            .map(|conversation| {
-                let latest = conversation.latest().message_ref();
-                let backend = self.backend(&latest.account);
-                (latest, backend)
-            })
-            .collect();
-        self.contents.prefetch(prefetch);
+        // Previews missing now load in the background; `mail.previews` waits for them. A search's
+        // don't: its results are mostly mail not loaded, and Gmail's quota would go on bodies of
+        // rows nobody looks at; the front end asks for the rows it shows (MS-352).
+        if query.is_none() {
+            let prefetch = listing
+                .conversations
+                .iter()
+                .map(|conversation| {
+                    let latest = conversation.latest().message_ref();
+                    let backend = self.backend(&latest.account);
+                    (latest, backend)
+                })
+                .collect();
+            self.contents.prefetch(prefetch);
+        }
         let mut answer = answers::json(&answers::Listing {
             conversations,
             failures: listing.failures,
@@ -1734,6 +1748,40 @@ fn remember(state: &mut State, conversation: &Conversation, primary: &HashSet<Ma
     }
 }
 
+/// Whether held mail, `envelope`, matches a search for `query` (MS-352): each of its words is in
+/// the subject or a sender's or recipient's name or address, ignoring case; with an `OR` between
+/// words, any one of them. `from:`, `to:`, `cc:` and `subject:` read as their value; any other
+/// operator (`is:unread`, `has:attachment`) asks what headers don't hold, so nothing matches and
+/// the provider's answer is the first.
+fn held_match(envelope: &Envelope, query: &str) -> bool {
+    let mut words: Vec<String> = Vec::new();
+    let mut any = false;
+    for word in query.split_whitespace() {
+        match word {
+            "OR" => any = true,
+            "AND" => {}
+            _ => {
+                let word = word.trim_matches(|c| matches!(c, '"' | '(' | ')' | '{' | '}'));
+                let word = match word.split_once(':') {
+                    Some(("from" | "to" | "cc" | "subject", value)) => value,
+                    Some(_) => return false,
+                    None => word,
+                };
+                if !word.is_empty() {
+                    words.push(word.to_lowercase());
+                }
+            }
+        }
+    }
+    let people = envelope.from.iter().chain(&envelope.to);
+    let fields: Vec<String> = std::iter::once(envelope.subject.as_str())
+        .chain(people.flat_map(|person| person.name.as_deref().into_iter().chain([person.email.as_str()])))
+        .map(str::to_lowercase)
+        .collect();
+    let found = |word: &String| fields.iter().any(|field| field.contains(word.as_str()));
+    !words.is_empty() && if any { words.iter().any(found) } else { words.iter().all(found) }
+}
+
 /// Sidebar order: by role, then name.
 fn sorted(mut list: Vec<Mailbox>) -> Vec<Mailbox> {
     list.sort_by(|a, b| {
@@ -1754,5 +1802,32 @@ mod tests {
         assert_eq!(parsed.id, "a@b.c|<m@x>");
         assert!((unix_seconds(parsed.date) - 1_700_000_000.123).abs() < 1e-6);
         assert!(Cursor::parse("nope").is_none());
+    }
+
+    #[test]
+    fn matches_held_mail_by_subject_and_people() {
+        let envelope = Envelope {
+            id: "m1".into(),
+            thread: None,
+            message_id: None,
+            in_reply_to: Vec::new(),
+            flags: Default::default(),
+            subject: "Lunch on Friday".into(),
+            from: vec![Address::new(Some("Ann Lee".into()), "ann@x.com")],
+            to: vec![Address::new(None, "me@y.com")],
+            date: None,
+            size: 0,
+            has_attachment: None,
+            tags: Default::default(),
+            provider_category: None,
+            important: false,
+        };
+        assert!(held_match(&envelope, "lunch"));
+        assert!(held_match(&envelope, "Friday ann"));
+        assert!(held_match(&envelope, "from:ann@x.com"));
+        assert!(held_match(&envelope, "dinner OR \"lunch\""));
+        assert!(!held_match(&envelope, "lunch dinner"));
+        assert!(!held_match(&envelope, "lunch is:unread"));
+        assert!(!held_match(&envelope, "  "));
     }
 }

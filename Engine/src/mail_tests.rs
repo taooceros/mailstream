@@ -24,8 +24,8 @@ pub(crate) fn header(name: &str, value: &str) -> Value {
     json!({ "name": name, "value": value })
 }
 
-/// The fake mailbox: 60 inbox messages (two of them one sender's repeated alert) and one sent
-/// reply to the newest.
+/// The fake mailbox: 60 inbox messages (two of them one sender's repeated alert), one sent
+/// reply to the newest, and one archived message with a file that only a search finds.
 pub(crate) fn gmail_metadata() -> HashMap<String, Value> {
     let mut messages = HashMap::new();
     for n in 0..60 {
@@ -61,6 +61,16 @@ pub(crate) fn gmail_metadata() -> HashMap<String, Value> {
             "payload": { "mimeType": "text/plain", "headers": [
                 header("From", "me@gmail.com"), header("To", "Ann <ann@x.com>"), header("Subject", "Re: Lunch?"),
                 header("Message-ID", "<s0@x>"), header("In-Reply-To", "<i00@x>"),
+            ]},
+        }),
+    );
+    messages.insert(
+        "a0".into(),
+        json!({
+            "id": "a0", "threadId": "t-a0", "labelIds": [], "internalDate": (BASE_MS - 90 * 3_600_000).to_string(),
+            "payload": { "mimeType": "multipart/mixed", "headers": [
+                header("From", "Dee <dee@x.com>"), header("To", "me@gmail.com"), header("Subject", "Archived invoice"),
+                header("Message-ID", "<a0@x>"),
             ]},
         }),
     );
@@ -102,7 +112,7 @@ pub(crate) fn gmail_batch(request: &FakeRequest, metadata: &HashMap<String, Valu
             Some(json!({ "messagesTotal": 10, "messagesUnread": if id == "INBOX" { 3 } else { 0 } }))
         } else if query.contains("format=full") {
             metadata.get(id).map(|_| {
-                let files = if id == "i00" { json!([{ "filename": "menu.pdf" }]) } else { json!([]) };
+                let files = if id == "i00" || id == "a0" { json!([{ "filename": "menu.pdf" }]) } else { json!([]) };
                 json!({ "id": id, "payload": { "parts": files } })
             })
         } else {
@@ -171,6 +181,7 @@ pub(crate) fn gmail_reply(request: &FakeRequest, counters: &GmailCounters, metad
                 (Some("INBOX"), _, None) => (0..50).map(|n| format!("i{n:02}")).collect(),
                 (Some("INBOX"), _, Some("p2")) => (50..60).map(|n| format!("i{n:02}")).collect(),
                 (Some("SENT"), _, _) => vec!["s0".into()],
+                (None, Some("invoice"), _) => vec!["a0".into()],
                 (None, Some(_), _) => vec!["i10".into(), "s0".into()],
                 _ => vec![],
             };
@@ -302,6 +313,57 @@ fn lists_shows_and_searches_gmail_and_serves_the_cache_without_asking_again() {
     call(&engine, "accounts.remove", json!({ "account": "me@gmail.com", "yes": true })).unwrap();
     assert!(!envelope_cache.exists(), "signing out drops the envelope cache");
     assert_eq!(call(&engine, "mailboxes", json!({})).unwrap(), json!({}));
+    drop(engine);
+    cleanup(&config);
+}
+
+/// A quick Gmail search answers without the attachment check of mail it hasn't shown before,
+/// which the full search then makes; a search of the mail held asks nothing (MS-352).
+#[test]
+fn searches_quickly_then_fully_and_matches_held_mail() {
+    let counters = Arc::new(GmailCounters {
+        tokens: AtomicUsize::new(0),
+        labels: AtomicUsize::new(0),
+        listings: AtomicUsize::new(0),
+    });
+    let checks = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let (counters, checks, metadata) = (counters.clone(), checks.clone(), gmail_metadata());
+        FakeServer::start(move |request| {
+            if request.path == "/token" {
+                return token_reply(&counters.tokens);
+            }
+            let text = request.text();
+            if request.path == "/batch/gmail/v1" && text.contains("format=full") && text.contains("/messages/a0?") {
+                checks.fetch_add(1, Ordering::SeqCst);
+            }
+            gmail_reply(request, &counters, &metadata)
+        })
+    };
+    let (engine, config) = engine_for(&server, &[("me@gmail.com", "google")]);
+    wait_until("mailboxes", || {
+        call(&engine, "mailboxes", json!({})).unwrap()["me@gmail.com"].as_array().is_some_and(|boxes| !boxes.is_empty())
+    });
+
+    let quick = call(&engine, "mail.search", json!({ "query": "invoice", "quick": true })).unwrap();
+    assert_eq!(ids(&quick), ["me@gmail.com|a0@x"]);
+    assert_eq!(quick["conversations"][0]["hasAttachment"], false);
+    assert_eq!(checks.load(Ordering::SeqCst), 0, "a quick search checks no attachments");
+    let full = call(&engine, "mail.search", json!({ "query": "invoice" })).unwrap();
+    assert_eq!(ids(&full), ["me@gmail.com|a0@x"]);
+    assert_eq!(full["conversations"][0]["hasAttachment"], true);
+    assert_eq!(checks.load(Ordering::SeqCst), 1, "the full search checks what the quick one left");
+    call(&engine, "mail.search", json!({ "query": "invoice" })).unwrap();
+    assert_eq!(checks.load(Ordering::SeqCst), 1, "once checked, it stays checked");
+
+    call(&engine, "mail.list", json!({ "limit": 25 })).unwrap();
+    let before = server.count();
+    let held = call(&engine, "mail.search", json!({ "query": "lunch", "cached": true })).unwrap();
+    assert_eq!(server.count(), before, "a held search asks nothing");
+    assert!(ids(&held).contains(&"me@gmail.com|i00@x".to_string()), "{held}");
+    assert!(held["conversations"].as_array().unwrap().iter().all(|c| c["subject"].as_str().unwrap().contains("Lunch")));
+    let none = call(&engine, "mail.search", json!({ "query": "lunch is:unread", "cached": true })).unwrap();
+    assert_eq!(none["conversations"], json!([]));
     drop(engine);
     cleanup(&config);
 }

@@ -14,7 +14,7 @@ pub use invitations::InvitationCard;
 pub use selection::Selection;
 pub use tags::TagEditor;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -126,6 +126,9 @@ const PAGE: u32 = 100;
 /// A list this young is served from memory when shown again; the engine's change events reload
 /// the one on screen sooner.
 const FRESH: Duration = Duration::from_secs(90);
+/// A search's first answer from each account: one batch of Gmail's metadata requests, which its
+/// quota lets out at once (MS-352).
+const FIRST_SCREEN: u32 = 25;
 
 /// What the list shows.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -165,21 +168,17 @@ pub struct ListKey {
 }
 
 impl ListKey {
-    /// One page of this list from the engine, prepared for display. `cached`: what the engine
-    /// holds, at once, without asking a provider; a search always asks.
+    /// One page of this list from the engine, prepared for display; a search's answers come
+    /// from `MailApp::search_list`. `cached`: what the engine holds, at once, without asking a
+    /// provider.
     async fn fetch(self, cursor: Option<String>, cached: bool) -> Result<Listing, MailError> {
         let account = self.source.account().cloned();
-        match &self.query {
-            Some(query) => engine().search(query.to_string(), account, PAGE).await,
-            None => {
-                let mailbox = match &self.source {
-                    Source::Unified(role) => role.as_str().to_owned(),
-                    Source::Mailbox { id, .. } => id.clone(),
-                };
-                let query = ListQuery { mailboxes: vec![mailbox], account, limit: PAGE, cursor, cached, ..ListQuery::default() };
-                engine().list(query).await
-            }
-        }
+        let mailbox = match &self.source {
+            Source::Unified(role) => role.as_str().to_owned(),
+            Source::Mailbox { id, .. } => id.clone(),
+        };
+        let query = ListQuery { mailboxes: vec![mailbox], account, limit: PAGE, cursor, cached, ..ListQuery::default() };
+        engine().list(query).await
     }
 
     /// The Smart Inbox folds bundles in the inbox, outside search.
@@ -195,7 +194,7 @@ pub struct List {
     next: Option<String>,
     /// When the providers last answered for it.
     fetched: Option<Instant>,
-    /// A read of what the engine holds (a search: the search) is under way.
+    /// A read of what the engine holds (a search: any of its answers) is under way.
     pub loading: bool,
     /// The engine changed it while a read was under way: read again when that one lands.
     stale: bool,
@@ -210,12 +209,38 @@ pub struct List {
     pub error: Option<SharedString>,
     /// The mailboxes whose providers failed when last asked.
     pub failures: Option<SharedString>,
+    /// A search's answers so far (MS-352).
+    search: Option<SearchRun>,
+}
+
+/// One run of a search (MS-352): the mail already loaded that matches shows at once, then each
+/// account's provider answers on its own, a screenful (`FIRST_SCREEN`) first and then the rest,
+/// each answer taking the place of that account's rows, so no account waits for another.
+#[derive(Default)]
+struct SearchRun {
+    /// Which run this is; answers of an earlier one are dropped.
+    run: u64,
+    /// Answers still out.
+    pending: usize,
+    /// Accounts whose provider answered ("": every account, before the accounts are known):
+    /// their rows are the provider's from then on.
+    answered: HashSet<String>,
+    /// Why each account's provider failed, from its latest answer.
+    failures: BTreeMap<String, String>,
+}
+
+/// Which answer of a search arrived: the mail already loaded, or an account's provider's
+/// (None: every account's) first screenful or the rest.
+enum SearchStep {
+    Held,
+    First(Option<String>),
+    Full(Option<String>),
 }
 
 /// What a list answer was asked as.
 #[derive(Clone, Copy, PartialEq)]
 enum Arrival {
-    /// What the engine holds (a search's results).
+    /// What the engine holds.
     Read,
     /// The providers' newest.
     Fetch,
@@ -476,6 +501,8 @@ pub struct MailApp {
     /// A previews request is out; `previews_again` asks once more when it lands.
     previews_asking: bool,
     previews_again: bool,
+    /// The search results drawn since the search started: only their previews load (MS-352).
+    drawn_rows: HashSet<String>,
     /// The window, for the toasts (`show_toast`) asked for from a task without one at hand.
     pub window: AnyWindowHandle,
     /// The row under the pointer, which shows its actions.
@@ -620,6 +647,7 @@ impl MailApp {
             selection: Selection::default(),
             previews_asking: false,
             previews_again: false,
+            drawn_rows: HashSet::new(),
             window: window.window_handle(),
             hovered_row: None,
             list_scroll: list_state(0),
@@ -738,7 +766,14 @@ impl MailApp {
                                 list.fetched = None;
                             }
                         }
-                        this.read_list(key, cx);
+                        // A search on screen stays as answered (MS-352): asking the providers
+                        // again on every sync spent Gmail's quota and kept the spinner going. A
+                        // refresh or another search asks again.
+                        if key.query.is_none() {
+                            this.read_list(key, cx);
+                        } else if batch.contains(&Event::Previews) {
+                            this.load_previews(&key, cx);
+                        }
                     } else if batch.contains(&Event::Previews) {
                         this.load_previews(&this.key(), cx);
                     }
@@ -803,9 +838,13 @@ impl MailApp {
         }
     }
 
-    /// Reads `key`'s first page as the engine holds it (a search asks the providers). A read asked
-    /// for while one is under way runs again once that one lands.
+    /// Reads `key`'s first page as the engine holds it; a search runs anew (`search_list`). A read
+    /// asked for while one is under way runs again once that one lands.
     fn read_list(&mut self, key: ListKey, cx: &mut Context<Self>) {
+        if key.query.is_some() {
+            self.search_list(key, cx);
+            return;
+        }
         let list = self.lists.entry(key.clone()).or_default();
         if list.loading {
             list.stale = true;
@@ -817,6 +856,127 @@ impl MailApp {
         self.background(cx, key.clone().fetch(None, true), move |this, result, cx| {
             this.list_arrived(key, result, Arrival::Read, cx)
         });
+    }
+
+    /// Runs `key`'s search (MS-352): the mail the engine holds that matches shows at once; each
+    /// account's provider then answers on its own, a screenful first, each answer showing as it
+    /// lands. Answers of an earlier run of it are dropped.
+    fn search_list(&mut self, key: ListKey, cx: &mut Context<Self>) {
+        let Some(query) = key.query.as_ref().map(SharedString::to_string) else { return };
+        let accounts: Vec<Option<String>> = match key.source.account() {
+            Some(account) => vec![Some(account.clone())],
+            None if self.mailboxes.is_empty() => vec![None],
+            None => {
+                let mut accounts: Vec<Option<String>> = self.mailboxes.keys().cloned().map(Some).collect();
+                accounts.sort();
+                accounts
+            }
+        };
+        let list = self.lists.entry(key.clone()).or_default();
+        let run = list.search.as_ref().map_or(0, |search| search.run) + 1;
+        list.search = Some(SearchRun { run, pending: 1 + 2 * accounts.len(), ..SearchRun::default() });
+        list.loading = true;
+        cx.notify();
+        let held = engine().search(query, key.source.account().cloned(), PAGE, true, false);
+        let held_key = key.clone();
+        self.background(cx, held, move |this, result, cx| this.search_arrived(held_key, run, SearchStep::Held, result, cx));
+        for account in accounts {
+            self.ask_search(key.clone(), run, account, true, cx);
+        }
+    }
+
+    /// Asks `account`'s provider (None: every account's) for run `run` of `key`'s search: a
+    /// screenful, quickly, when `first`, else all of it.
+    fn ask_search(&mut self, key: ListKey, run: u64, account: Option<String>, first: bool, cx: &mut Context<Self>) {
+        let Some(query) = key.query.as_ref().map(SharedString::to_string) else { return };
+        let limit = if first { FIRST_SCREEN } else { PAGE };
+        let asked = engine().search(query, account.clone(), limit, false, first);
+        let step = if first { SearchStep::First(account) } else { SearchStep::Full(account) };
+        self.background(cx, asked, move |this, result, cx| this.search_arrived(key, run, step, result, cx));
+    }
+
+    /// One answer of run `run` of `key`'s search: the mail held stands in for the accounts no
+    /// provider answered yet; a provider's answer takes the place of its account's rows, and its
+    /// first screenful asks for the rest.
+    fn search_arrived(
+        &mut self,
+        key: ListKey,
+        run: u64,
+        step: SearchStep,
+        result: Result<Listing, MailError>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(list) = self.lists.get_mut(&key) else { return };
+        let Some(search) = list.search.as_mut().filter(|search| search.run == run) else { return };
+        search.pending -= 1;
+        let removing = &self.removing;
+        let first = matches!(step, SearchStep::First(_));
+        let mut rest = None;
+        match step {
+            // What is held only gives the providers' answers a head start: a failure shows nothing.
+            SearchStep::Held => {
+                if let Ok(mut listing) = result
+                    && !search.answered.contains("")
+                {
+                    let answered = &search.answered;
+                    listing.conversations.retain(|c| !answered.contains(&c.account) && !removing.contains(&c.id));
+                    merge_answer(&mut list.conversations, listing.conversations, |c| !answered.contains(&c.account));
+                }
+            }
+            SearchStep::First(account) | SearchStep::Full(account) => {
+                let name = account.clone().unwrap_or_default();
+                search.failures.remove(&name);
+                match result {
+                    Ok(mut listing) => {
+                        if !listing.failures.is_empty() {
+                            search.failures.insert(name.clone(), listing.failures.join("; "));
+                        }
+                        search.answered.insert(name);
+                        listing.conversations.retain(|c| !removing.contains(&c.id));
+                        merge_answer(&mut list.conversations, listing.conversations, |c| {
+                            account.as_ref().is_none_or(|account| *account == c.account)
+                        });
+                        if first {
+                            rest = Some(account);
+                        }
+                    }
+                    Err(error) => {
+                        search.failures.insert(name, error.to_string());
+                        // Nor is its rest asked for.
+                        if first {
+                            search.pending -= 1;
+                        }
+                    }
+                }
+            }
+        }
+        list.loading = search.pending > 0;
+        list.failures =
+            (!search.failures.is_empty()).then(|| search.failures.values().cloned().collect::<Vec<_>>().join("; ").into());
+        if search.pending == 0 && !search.answered.is_empty() {
+            list.fetched = Some(Instant::now());
+        }
+        list.error = None;
+        if let Some(account) = rest {
+            self.ask_search(key.clone(), run, account, false, cx);
+        }
+        if key == self.key() {
+            self.rebuild_items();
+            self.refresh_layers(cx);
+        }
+        self.load_previews(&key, cx);
+        cx.notify();
+    }
+
+    /// Search result line `ix` of the list on screen was drawn: its preview loads if it has none
+    /// (MS-352), so Gmail's quota goes on the rows looked at.
+    pub fn row_drawn(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(Item::Row(index)) = self.items.get(ix) else { return };
+        let Some(conversation) = self.list().and_then(|list| list.conversations.get(*index)) else { return };
+        if conversation.snippet.is_none() && !self.drawn_rows.contains(&conversation.id) {
+            self.drawn_rows.insert(conversation.id.clone());
+            self.load_previews(&self.key(), cx);
+        }
     }
 
     /// Asks the providers for `key`'s newest, unless that is under way; its answer, which waits for
@@ -857,8 +1017,8 @@ impl MailApp {
             Arrival::More => list.loading_more = false,
         }
         let again = arrival == Arrival::Read && std::mem::take(&mut list.stale);
-        // The providers answered: a fetch, or a search.
-        let asked = arrival == Arrival::Fetch || (arrival == Arrival::Read && key.query.is_some());
+        // The providers answered.
+        let asked = arrival == Arrival::Fetch;
         match result {
             Ok(mut listing) => {
                 listing.conversations.retain(|c| !self.removing.contains(&c.id));
@@ -914,8 +1074,14 @@ impl MailApp {
             return;
         }
         let Some(list) = self.lists.get(key) else { return };
-        let ids: Vec<String> =
-            list.conversations.iter().filter(|c| c.snippet.is_none()).map(|c| c.id.to_string()).take(PAGE as usize).collect();
+        // A search's load only for rows drawn: most of its results are never looked at (MS-352).
+        let ids: Vec<String> = list
+            .conversations
+            .iter()
+            .filter(|c| c.snippet.is_none() && (key.query.is_none() || self.drawn_rows.contains(&c.id)))
+            .map(|c| c.id.to_string())
+            .take(PAGE as usize)
+            .collect();
         if ids.is_empty() {
             return;
         }
@@ -1145,6 +1311,21 @@ impl MailApp {
 /// A fresh list of `count` rows, scrolled to the top.
 pub fn list_state(count: usize) -> ListState {
     ListState::new(count, ListAlignment::Top, px(400.))
+}
+
+/// Puts `arrived`, a search's answer, in place of the rows of `rows` it `answers_for`, newest
+/// first; the previews already loaded stay with their conversations (MS-352).
+fn merge_answer(rows: &mut Vec<Conversation>, mut arrived: Vec<Conversation>, answers_for: impl Fn(&Conversation) -> bool) {
+    let (replaced, kept): (Vec<Conversation>, Vec<Conversation>) = std::mem::take(rows).into_iter().partition(|c| answers_for(c));
+    let mut previews: HashMap<String, String> = replaced.into_iter().filter_map(|c| Some((c.id, c.snippet?))).collect();
+    for conversation in &mut arrived {
+        if conversation.snippet.is_none() {
+            conversation.snippet = previews.remove(&conversation.id);
+        }
+    }
+    *rows = kept;
+    rows.extend(arrived);
+    rows.sort_by_cached_key(|c| std::cmp::Reverse(c.time()));
 }
 
 /// Puts `lines` (none: the list isn't loaded) in place of `shown`, the lines `scroll` shows of

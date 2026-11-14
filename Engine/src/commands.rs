@@ -360,6 +360,16 @@ pub const COMMANDS: &[Spec] = &[
             Argument::new("query", Kind::String, "Free text, or the provider's search syntax.").positional(),
             ACCOUNT,
             LIMIT,
+            Argument::new(
+                "cached",
+                Kind::Bool,
+                "Matches the mail already loaded (subject, people) at once, without asking the providers.",
+            ),
+            Argument::new(
+                "quick",
+                Kind::Bool,
+                "Answers sooner: Gmail leaves out whether mail it hasn't shown before has attachments, which a search without it fills in.",
+            ),
         ],
     ),
     Spec::new(

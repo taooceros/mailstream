@@ -453,9 +453,11 @@ commands! {
     /// Each account's mailboxes, by account id; only `account`'s when given.
     fn mailboxes(account: Option<String>) -> HashMap<String, Vec<Mailbox>> = "mailboxes" { "account": account };
 
-    /// The providers' own search over every mailbox but trash and junk.
-    fn search(query: String, account: Option<String>, limit: u32) -> Listing = "mail.search" {
-        "query": query, "account": account, "limit": limit
+    /// The providers' own search over every mailbox but trash and junk. `cached`: the mail
+    /// already loaded that matches, at once, without asking them; `quick`: Gmail's answer without
+    /// the attachment marks of mail it hasn't shown before, which a later search fills in.
+    fn search(query: String, account: Option<String>, limit: u32, cached: bool, quick: bool) -> Listing = "mail.search" {
+        "query": query, "account": account, "limit": limit, "cached": cached, "quick": quick
     } dressed;
 
     /// A conversation from a listing, with text bodies of at most `max_chars` characters and,
