@@ -18,7 +18,7 @@ use gpui::component::time_field::{HourCycle, TimeField, TimeFieldEvent, TimeFiel
 use gpui::component::{Disableable, IndexPath};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
+    AnyElement, App, AppContext, ClickEvent, Context, ElementId, Entity, FocusHandle, Focusable, FontWeight, Hsla,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, StatefulInteractiveElement,
     Styled, Subscription, WeakEntity, Window, actions, div, px,
 };
@@ -35,6 +35,8 @@ actions!(calendar_editor, [Save]);
 const CONTEXT: &str = "EventEditor";
 /// The editor's width, as Flutter's sheet.
 const WIDTH: f32 = 540.;
+/// The dialog asking which account's calendar to connect for a new event.
+const CONNECT_WIDTH: f32 = 440.;
 /// The labels' column.
 const LABEL: f32 = 76.;
 /// People offered as guests while an address is typed.
@@ -235,7 +237,7 @@ impl EventEditor {
         time_zone: String,
         event: Option<CalendarItem>,
         span: Option<(NaiveDateTime, NaiveDateTime)>,
-        start: Option<NaiveDateTime>,
+        new: Option<(NaiveDateTime, NaiveDateTime)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -249,8 +251,11 @@ impl EventEditor {
             }
             (Some(event), Some((start, end))) => (false, start, end, guests_of(event)),
             _ => {
-                let start = start.unwrap_or_else(next_hour);
-                (false, start, start + Duration::hours(1), Vec::new())
+                let (start, end) = new.unwrap_or_else(|| {
+                    let start = next_hour();
+                    (start, start + Duration::hours(1))
+                });
+                (false, start, end, Vec::new())
             }
         };
         let provider = accounts
@@ -763,10 +768,112 @@ impl CalendarPane {
         self.accounts.iter().any(|account| account.granted && account.writable && account.calendars.iter().any(|c| c.writable && c.shown))
     }
 
-    /// Opens the editor for a new event from `start` (an hour long), the next full hour without one.
-    pub(super) fn create_event(&mut self, start: Option<NaiveDateTime>, window: &mut Window, cx: &mut Context<Self>) {
+    /// A new event can be started: some calendar takes it, or some account's calendar can be
+    /// connected for editing first (MS-306).
+    pub(super) fn can_offer_create(&self) -> bool {
+        self.can_create() || self.accounts.iter().any(|account| !account.writable)
+    }
+
+    /// Opens the editor for a new event over `span` (from the timeline), else from the next full
+    /// hour for an hour. Where no calendar takes new events yet, asks first which account's
+    /// calendar to connect for editing (MS-312).
+    pub(super) fn create_event(&mut self, span: Option<(NaiveDateTime, NaiveDateTime)>, window: &mut Window, cx: &mut Context<Self>) {
         if self.can_create() {
-            self.open_editor(None, start, window, cx);
+            self.open_editor(None, span, window, cx);
+        } else if self.connecting.is_none() {
+            self.offer_connect(span.unwrap_or_else(|| {
+                let start = next_hour();
+                (start, start + Duration::hours(1))
+            }), window, cx);
+        }
+    }
+
+    /// No calendar takes new events: a dialog with each account Mailstream may not add events
+    /// for, to connect its calendar for editing in the browser (MS-306); the editor opens on
+    /// `span` once the provider allows it.
+    fn offer_connect(&mut self, span: (NaiveDateTime, NaiveDateTime), window: &mut Window, cx: &mut Context<Self>) {
+        let accounts: Vec<(String, SharedString, bool)> = self
+            .accounts
+            .iter()
+            .filter(|account| !account.writable)
+            .map(|account| {
+                let label = if account.label.is_empty() { &account.id } else { &account.label };
+                (account.id.clone(), label.clone().into(), account.granted)
+            })
+            .collect();
+        if accounts.is_empty() {
+            return;
+        }
+        let local = |at: NaiveDateTime| at.and_local_timezone(Local).earliest();
+        let when: SharedString = match (local(span.0), local(span.1)) {
+            (Some(start), Some(end)) => format!("{}, {}", start.format("%a, %b %-d"), super::model::time_range(start, end)),
+            _ => span.0.format("%a, %b %-d").to_string(),
+        }
+        .into();
+        let pane = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, _| {
+            let p = design::palette(window.appearance());
+            let rows = accounts.iter().map(|(id, label, granted)| {
+                let (pane, id) = (pane.clone(), id.clone());
+                let action = if *granted { "Allow Editing…" } else { "Connect Calendar…" };
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S10))
+                    .child(div().flex_1().min_w_0().truncate().child(label.clone()))
+                    .child(
+                        button(ElementId::Name(format!("event-connect:{id}").into()), action, ButtonKind::Primary, ControlSize::Regular, true, p)
+                            .on_click(move |_, window, cx| {
+                                let id = id.clone();
+                                pane.update(cx, |pane, cx| {
+                                    pane.create_after = Some((id.clone(), span));
+                                    pane.connect_calendar(id, cx);
+                                })
+                                .ok();
+                                window.close_dialog(cx);
+                            }),
+                    )
+            });
+            dialog.title("Add events to your calendar").w(px(CONNECT_WIDTH)).child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::S10))
+                    .child(div().text_color(p.muted).child(format!("New event: {when}")))
+                    .child(div().child(
+                        "Mailstream can't add events to these calendars yet. Allow it in your browser and the new event opens here.",
+                    ))
+                    .children(rows)
+                    .child(
+                        div().pt(px(space::S6)).flex().justify_end().child(
+                            button("event-connect-cancel", "Cancel", ButtonKind::Secondary, ControlSize::Regular, true, p)
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        ),
+                    ),
+            )
+        });
+    }
+
+    /// After a read, the new event waiting for its calendar to be connected for editing: kept
+    /// while that account's calendars are on their way (the pane opens it as soon as one takes
+    /// new events), else dropped, saying why.
+    pub(super) fn settle_create_after(&mut self, cx: &mut Context<Self>) {
+        let Some((id, _)) = &self.create_after else { return };
+        if self.connecting.is_some() || self.can_create() {
+            return;
+        }
+        let message = match self.accounts.iter().find(|account| &account.id == id) {
+            Some(account) if account.writable && account.problem.is_none() && account.fetched.is_none() => return,
+            Some(account) if !account.writable => Some(format!("{} did not allow Mailstream to add events.", account.id)),
+            Some(account) => Some(match &account.problem {
+                Some(problem) => format!("Could not read {}'s calendar: {problem}", account.id),
+                None => format!("{} has no calendar shown that takes new events.", account.id),
+            }),
+            None => None,
+        };
+        self.create_after = None;
+        if let Some(message) = message {
+            self.toast(message, cx);
         }
     }
 
@@ -777,14 +884,22 @@ impl CalendarPane {
         }
     }
 
-    fn open_editor(&mut self, index: Option<usize>, start: Option<NaiveDateTime>, window: &mut Window, cx: &mut Context<Self>) {
+    /// The editor over the window: on the event at `index`, else on a new one over `new` (from the
+    /// next full hour for an hour without it).
+    pub(super) fn open_editor(
+        &mut self,
+        index: Option<usize>,
+        new: Option<(NaiveDateTime, NaiveDateTime)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let pane = cx.entity().downgrade();
         let event = index.map(|index| &self.events[index]);
         let item = event.map(|event| event.item.clone());
         let span = event.map(|event| (event.start.naive_local(), event.end.naive_local()));
         let title = if item.is_some() { "Edit event" } else { "New event" };
         let (accounts, time_zone) = (self.accounts.clone(), self.time_zone.clone());
-        let editor = cx.new(|cx| EventEditor::new(pane, accounts, time_zone, item, span, start, window, cx));
+        let editor = cx.new(|cx| EventEditor::new(pane, accounts, time_zone, item, span, new, window, cx));
         let content = editor.clone();
         window.open_dialog(cx, move |dialog, _, _| {
             let editor = content.clone();

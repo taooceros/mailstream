@@ -12,16 +12,20 @@
 //! beside the calendar: on the side of the card with more of the week, under an all-day bar. A
 //! press outside it, Esc or another week closes it; the day view keeps the pane. A double click
 //! on a card or bar opens the event's page over the whole window, in either view.
+//!
+//! A press on a day's free time dragged up or down draws a new event over the quarter hours it
+//! crosses and opens the editor on them when the button goes up (MS-312); a click opens it on
+//! an hour from the quarter hour under it.
 
-use chrono::{DateTime, Days, Local, NaiveDate, Timelike};
+use chrono::{DateTime, Days, Duration, Local, NaiveDate, NaiveDateTime, Timelike};
 use gpui::prelude::FluentBuilder;
 use gpui::base::Selectable;
 use gpui::component::popover::Popover;
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Context, Div, ElementId, FontWeight, HighlightStyle, Hsla,
-    InteractiveElement, IntoElement, ParentElement, PathBuilder, RenderOnce, ScrollEvent, Stateful,
-    StatefulInteractiveElement, StyleRefinement, Styled, StyledText, Window, canvas, div, linear_color_stop,
-    linear_gradient, point, px, relative,
+    Anchor, AnyElement, App, ClickEvent, Context, DispatchPhase, Div, ElementId, Entity, FontWeight, HighlightStyle, Hsla,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder,
+    RenderOnce, ScrollEvent, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, StyledText, Window, canvas, div,
+    linear_color_stop, linear_gradient, point, px, relative,
 };
 
 use super::agenda::{dot_color, guest_avatars};
@@ -59,6 +63,100 @@ fn fit(minutes: i64) -> Fit {
     } else {
         Fit::Full
     }
+}
+
+/// Minutes a new event snaps to on the timeline.
+const QUARTER: i64 = 15;
+
+/// The quarter hour (minutes from midnight) at `y` points into the timeline's hours.
+fn quarter_at(y: f32) -> i64 {
+    let minutes = (y / PER_MINUTE).floor() as i64;
+    (minutes.div_euclid(QUARTER) * QUARTER).clamp(0, DAY_MINUTES as i64 - QUARTER)
+}
+
+/// A new event dragged out on a day's free time (MS-312), from the press until the button goes
+/// up: the quarter hour pressed and the one under the pointer now, either way round.
+pub(super) struct Sketch {
+    day: NaiveDate,
+    anchor: i64,
+    to: i64,
+    /// The pointer has left the quarter hour pressed: a drag, not a click.
+    dragged: bool,
+}
+
+impl Sketch {
+    /// From the earlier quarter hour's start to the later one's end, in minutes from midnight.
+    fn minutes(&self) -> (i64, i64) {
+        (self.anchor.min(self.to), self.anchor.max(self.to) + QUARTER)
+    }
+
+    /// The new event's start and end: the stretch dragged out, or an hour from the quarter hour
+    /// clicked.
+    fn span(&self) -> (NaiveDateTime, NaiveDateTime) {
+        let midnight = self.day.and_hms_opt(0, 0, 0).expect("midnight");
+        let (from, to) = if self.dragged { self.minutes() } else { (self.anchor, self.anchor + 60) };
+        (midnight + Duration::minutes(from), midnight + Duration::minutes(to))
+    }
+}
+
+/// The new event under the pointer, over the stretch it covers in its day's column: a card in
+/// the accent saying when, as Google Calendar's.
+fn render_sketch(sketch: &Sketch, gap: f32, p: &'static Palette) -> Div {
+    let (from, to) = sketch.minutes();
+    let local = |at: NaiveDateTime| at.and_local_timezone(Local).earliest().unwrap_or_else(|| model::midnight(sketch.day));
+    let (start, end) = sketch.span();
+    let when = model::time_range(local(start), local(end));
+    let height = ((to - from) as f32 * PER_MINUTE - gap / 2.).max(0.);
+    let title = div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("New event");
+    let when = div().min_w_0().truncate().text_color(p.muted).child(when);
+    div()
+        .debug_selector(|| "calendar-sketch".into())
+        .absolute()
+        .left(px(gap / 2.))
+        .right(px(gap))
+        .top(px(metrics::INSET + from as f32 * PER_MINUTE))
+        .h(px(height))
+        .overflow_hidden()
+        .rounded(px(metrics::CARD_RADIUS))
+        .bg(p.card.blend(design::tint(p.accent, metrics::SKETCH_TINT)))
+        .border(px(stroke::RIM))
+        .border_color(p.accent)
+        .shadow(p.raised_shadow.clone())
+        .px(px(space::S6))
+        .text_size(px(text::FOOTNOTE))
+        .line_height(px(15.))
+        .map(|d| match fit(to - from) {
+            Fit::Line => d.flex().items_center().gap(px(space::S6)).child(title).child(when),
+            _ => d.pt(px(3.)).flex().flex_col().child(title).child(when.text_size(px(text::CAPTION)).line_height(px(14.))),
+        })
+}
+
+/// Hands `pane` the pointer's movement and the button going up anywhere in the window, in the
+/// capture phase, for a new event being dragged out: the drag goes on over cards and off the
+/// day's column, and its release clicks nothing under it. Drawn with the grid whether or not one
+/// is, so a click's release that comes before the next frame is heard too.
+fn sketch_capture(pane: Entity<CalendarPane>) -> gpui::Canvas<()> {
+    canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            let moved = pane.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx: &mut App| {
+                let held = event.pressed_button == Some(MouseButton::Left);
+                if phase == DispatchPhase::Capture && moved.update(cx, |this, cx| this.move_sketch(event.position, held, cx)) {
+                    cx.stop_propagation();
+                }
+            });
+            let released = pane.clone();
+            window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx: &mut App| {
+                if phase == DispatchPhase::Capture
+                    && event.button == MouseButton::Left
+                    && released.update(cx, |this, cx| this.end_sketch(window, cx))
+                {
+                    cx.stop_propagation();
+                }
+            });
+        },
+    )
 }
 
 /// One page's days laid out.
@@ -298,6 +396,50 @@ impl CalendarPane {
         }
     }
 
+    /// A left press on `day`'s free time (`event`) starts a new event there (MS-312), unless it
+    /// went down on an event's card or closed the week's popover, which is all it does.
+    fn start_sketch(&mut self, day: NaiveDate, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let at = event.position;
+        let on_event = self.pressed_event.take() == Some(at);
+        // The week's popover open: the press closes it (and may have done so already).
+        let popover = self.view == View::Week && self.opened.is_some() && !self.page;
+        let dismissed = self.dismissed_at.take() == Some(at) || popover;
+        if on_event || dismissed || event.click_count > 1 || event.modifiers.modified() {
+            return;
+        }
+        let anchor = quarter_at(f32::from(at.y) - self.band_top.get() - metrics::INSET);
+        self.sketch = Some(Sketch { day, anchor, to: anchor, dragged: false });
+        cx.notify();
+    }
+
+    /// The pointer moved while a new event is dragged out: its end follows to the quarter hour
+    /// under it. The button already up (let go outside the window) drops the new event. True when
+    /// one is dragged out.
+    fn move_sketch(&mut self, at: gpui::Point<gpui::Pixels>, held: bool, cx: &mut Context<Self>) -> bool {
+        let Some(sketch) = &mut self.sketch else { return false };
+        if !held {
+            self.sketch = None;
+            cx.notify();
+            return false;
+        }
+        let to = quarter_at(f32::from(at.y) - self.band_top.get() - metrics::INSET);
+        if to != sketch.to {
+            sketch.to = to;
+            sketch.dragged |= to != sketch.anchor;
+            cx.notify();
+        }
+        true
+    }
+
+    /// The button went up: the editor opens on the stretch dragged out, or an hour from the
+    /// quarter hour clicked. True when a new event was under way.
+    fn end_sketch(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(sketch) = self.sketch.take() else { return false };
+        cx.notify();
+        self.create_event(Some(sketch.span()), window, cx);
+        true
+    }
+
     /// The day or week view: the synced note, the dates, the all-day row and the timeline, its
     /// pages under the fingers or sliding.
     pub(super) fn render_grid(
@@ -513,6 +655,7 @@ impl CalendarPane {
         // Two-finger paging: scroll events are seen in the capture phase, before the timeline
         // scrolls with them, so a sideways swipe is never eaten by it.
         let swipe = swipe::scroll_capture(cx.entity(), Self::feed_swipe).absolute().size_full();
+        let sketching = sketch_capture(cx.entity()).absolute().size_0();
 
         div()
             .relative()
@@ -520,6 +663,7 @@ impl CalendarPane {
             .flex()
             .flex_col()
             .child(swipe)
+            .child(sketching)
             .when_some(unsynced, |d, (from, until)| {
                 d.child(
                     div()
@@ -606,28 +750,17 @@ impl CalendarPane {
             }
             let day = page.days[i];
             let column = day_column(i, count).id(ElementId::Name(format!("timeline-day:{day}").into()));
-            let column = if self.can_create() {
-                // A click on free time there: a new event from the quarter hour under it.
-                let top = self.band_top.clone();
-                column.on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                    // The press closed the open event's popover: that is all it does.
-                    let down = match event {
-                        ClickEvent::Mouse(click) => Some(click.down.position),
-                        _ => None,
-                    };
-                    if this.dismissed_at.take().is_some_and(|at| Some(at) == down) {
-                        return;
-                    }
-                    let y = f32::from(event.position().y) - top.get() - metrics::INSET;
-                    let minutes = ((y / PER_MINUTE).floor() as i64).div_euclid(15) * 15;
-                    let minutes = minutes.clamp(0, DAY_MINUTES as i64 - 15);
-                    let start = day.and_hms_opt(0, 0, 0).expect("midnight") + chrono::Duration::minutes(minutes);
-                    this.create_event(Some(start), window, cx);
+            let column = if self.can_offer_create() {
+                // A press on free time there starts a new event at the quarter hour under it,
+                // dragged out to the one where the button goes up (MS-312).
+                column.on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.start_sketch(day, event, cx);
                 }))
             } else {
                 column
             };
-            d = d.child(column.child(cards));
+            let sketch = self.sketch.as_ref().filter(|sketch| sketch.day == day && sketch.dragged);
+            d = d.child(column.child(cards).children(sketch.map(|sketch| render_sketch(sketch, gap, p))));
         }
         // The time now: a line with a dot across today's column, dashed across the other days.
         if let Some(at) = today_at {
@@ -886,13 +1019,16 @@ impl CalendarPane {
     ) -> AnyElement {
         let key = key.clone();
         let clicked = key.clone();
-        let trigger = trigger.on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-            cx.stop_propagation();
-            // The week's popover opens on the press; its second (a double click's) closed it.
-            if this.view != View::Week || event.click_count() >= 2 {
-                this.open_clicked(clicked.clone(), event, cx);
-            }
-        }));
+        let trigger = trigger
+            // Heard before the day's column under it, which then starts no new event (MS-312).
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, _| this.pressed_event = Some(event.position)))
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                // The week's popover opens on the press; its second (a double click's) closed it.
+                if this.view != View::Week || event.click_count() >= 2 {
+                    this.open_clicked(clicked.clone(), event, cx);
+                }
+            }));
         if self.view != View::Week {
             return trigger.into_any_element();
         }
@@ -1524,6 +1660,120 @@ mod tests {
         assert_eq!(states(&pane, cx), vec![false, false, false, false]);
         click_on(cx, "calendar-show-all");
         assert_eq!(states(&pane, cx), vec![true, true, true, true]);
+    }
+
+    /// An account whose calendar takes new events.
+    fn editable_account() -> mailstream::CalendarAccount {
+        mailstream::CalendarAccount {
+            id: "sam@example.com".into(),
+            label: "sam@example.com".into(),
+            provider: mailstream::Provider::Google,
+            granted: true,
+            writable: true,
+            loading: false,
+            problem: None,
+            fetched: None,
+            calendars: vec![mailstream::CalendarInfo {
+                id: "work".into(),
+                name: "Work".into(),
+                color: Some("#4285f4".into()),
+                primary: true,
+                writable: true,
+                access: "owner".into(),
+                selected: true,
+                hidden: false,
+                shown: true,
+            }],
+        }
+    }
+
+    fn sketch(pane: &Entity<CalendarPane>, cx: &mut VisualTestContext) -> Option<(String, String)> {
+        pane.read_with(cx, |pane, _| {
+            pane.sketch.as_ref().map(|sketch| {
+                let (start, end) = sketch.span();
+                (start.format("%a %H:%M").to_string(), end.format("%a %H:%M").to_string())
+            })
+        })
+    }
+
+    #[test]
+    fn a_click_is_an_hour_and_a_drag_its_quarter_hours_either_way() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+        let span = |anchor, to, dragged| {
+            let (start, end) = super::Sketch { day, anchor, to, dragged }.span();
+            (start.format("%H:%M").to_string(), end.format("%d %H:%M").to_string())
+        };
+        assert_eq!(span(9 * 60 + 15, 9 * 60 + 15, false), ("09:15".into(), "12 10:15".into()), "a click: an hour");
+        assert_eq!(span(9 * 60, 10 * 60 + 15, true), ("09:00".into(), "12 10:30".into()), "down to the end of 10:15");
+        assert_eq!(span(11 * 60, 9 * 60 + 30, true), ("09:30".into(), "12 11:15".into()), "dragged up");
+        assert_eq!(span(23 * 60 + 45, 23 * 60 + 45, true), ("23:45".into(), "13 00:00".into()), "the day's last quarter");
+        assert_eq!(super::quarter_at(-20.), 0);
+        assert_eq!(super::quarter_at(super::TIMELINE), super::DAY_MINUTES as i64 - super::QUARTER);
+    }
+
+    #[gpui::test]
+    fn a_drag_on_free_time_draws_a_new_event_over_the_quarter_hours_it_crosses(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        pane.update(cx, |pane, cx| {
+            pane.accounts = vec![editable_account()];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let today = Local::now().date_naive();
+        let days = model::week_days(model::week_of(today));
+        // A day with nothing on it: neither today nor Saturday.
+        let free = days.iter().position(|&day| day != today && day != days[6]).unwrap();
+        let band = bounds(cx, "timeline-band");
+        let x = band.left() + band.size.width * ((free as f32 + 0.5) / 7.);
+        let y = |minutes: f32| band.top() + px(super::metrics::INSET + minutes * super::PER_MINUTE);
+        let weekday = days[free].format("%a");
+
+        // A press alone draws nothing yet; dragged down, the new event covers 11:00 to 12:30.
+        cx.simulate_mouse_down(point(x, y(11. * 60. + 5.)), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("calendar-sketch").is_none(), "a press alone shows no new event");
+        mouse_drag_on(cx, point(x, y(11. * 60. + 5.)), point(x, y(12. * 60. + 20.)), 6);
+        assert_eq!(sketch(&pane, cx), Some((format!("{weekday} 11:00"), format!("{weekday} 12:30"))));
+        let drawn = bounds(cx, "calendar-sketch");
+        assert!((drawn.top() - y(11. * 60.)).abs() < px(1.), "it starts at 11:00: {drawn:?}");
+
+        // Back up past where it started, it runs from 10:30 to the end of 11:00's quarter hour.
+        mouse_drag_on(cx, point(x, y(12. * 60. + 20.)), point(x, y(10. * 60. + 40.)), 6);
+        assert_eq!(sketch(&pane, cx), Some((format!("{weekday} 10:30"), format!("{weekday} 11:15"))));
+
+        // Esc drops it; the release then opens nothing.
+        key(cx, "escape");
+        assert_eq!(sketch(&pane, cx), None);
+        assert!(cx.debug_bounds("calendar-sketch").is_none());
+        cx.simulate_mouse_up(point(x, y(10. * 60. + 40.)), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(sketch(&pane, cx), None);
+    }
+
+    /// The pointer moved with the left button held from `from` to `to` in `steps`.
+    fn mouse_drag_on(cx: &mut VisualTestContext, from: Point<Pixels>, to: Point<Pixels>, steps: usize) {
+        for step in 1..=steps {
+            let t = step as f32 / steps as f32;
+            cx.simulate_mouse_move(point(from.x, from.y + (to.y - from.y) * t), MouseButton::Left, Modifiers::default());
+        }
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_press_on_an_event_starts_no_new_event_under_it(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        pane.update(cx, |pane, cx| {
+            pane.accounts = vec![editable_account()];
+            cx.notify();
+        });
+        key(cx, "d");
+        let card = bounds(cx, "card:today");
+        cx.simulate_mouse_down(card.center(), MouseButton::Left, Modifiers::default());
+        mouse_drag_on(cx, card.center(), point(card.center().x, card.center().y + px(120.)), 6);
+        assert_eq!(sketch(&pane, cx), None, "the card's press is the card's");
+        cx.simulate_mouse_up(point(card.center().x, card.center().y + px(120.)), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(sketch(&pane, cx), None);
     }
 }
 

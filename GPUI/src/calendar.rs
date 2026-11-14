@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use chrono::{Days, Local, NaiveDate};
+use chrono::{Days, Local, NaiveDate, NaiveDateTime};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
@@ -160,6 +160,14 @@ pub struct CalendarPane {
     /// Where the press that closed the week view's popover went down: the click it makes is the
     /// popover's, and starts no new event on the free time under it.
     dismissed_at: Option<Point<Pixels>>,
+    /// Where the last press on an event's card went down, which the day's free time under it
+    /// then leaves alone.
+    pressed_event: Option<Point<Pixels>>,
+    /// A new event being dragged out on the timeline (MS-312).
+    sketch: Option<grid::Sketch>,
+    /// A new event's start and end, waiting for the account named first to connect its calendar
+    /// for editing: the editor opens on them once a calendar takes new events.
+    create_after: Option<(String, (NaiveDateTime, NaiveDateTime))>,
     /// The popover closed while it may have held the keyboard: the pane takes it back as it draws.
     refocus: bool,
     /// The list of calendars to show or hide is open under its button.
@@ -252,6 +260,9 @@ impl CalendarPane {
             opened: None,
             page: false,
             dismissed_at: None,
+            pressed_event: None,
+            sketch: None,
+            create_after: None,
             refocus: false,
             calendar_list: false,
             answering: HashMap::new(),
@@ -322,7 +333,10 @@ impl CalendarPane {
             this.connecting = None;
             match result {
                 Ok(_) => this.reload(cx),
-                Err(error) => this.toast(format!("Could not connect the calendar: {error}"), cx),
+                Err(error) => {
+                    this.create_after = None;
+                    this.toast(format!("Could not connect the calendar: {error}"), cx);
+                }
             }
             cx.notify();
         });
@@ -342,6 +356,7 @@ impl CalendarPane {
         self.opened = None;
         self.page = false;
         self.calendar_list = false;
+        self.sketch = None;
         cx.notify();
     }
 
@@ -378,6 +393,7 @@ impl CalendarPane {
                     if let Some(key) = this.open_after.take_if(|key| this.events.iter().any(|event| &event.key == key)) {
                         this.open(key, cx);
                     }
+                    this.settle_create_after(cx);
                     this.rebuild(Local::now().date_naive());
                 }
                 Err(error) => this.toast(format!("Could not read the calendar: {error}"), cx),
@@ -770,9 +786,12 @@ impl CalendarPane {
         cx.notify();
     }
 
-    /// Esc and ⌘[: the page slides back off its view, else the open event slides off.
+    /// Esc and ⌘[: a new event being dragged out is dropped, else the page slides back off its
+    /// view, else the open event slides off.
     fn back(&mut self, _: &Back, _: &mut Window, cx: &mut Context<Self>) {
-        if self.opened.is_some() && self.top_surface().is_some() {
+        if self.sketch.take().is_some() {
+            cx.notify();
+        } else if self.opened.is_some() && self.top_surface().is_some() {
             self.slide_off(cx);
         } else if self.opened.is_some() {
             self.close_event(cx);
@@ -914,6 +933,13 @@ impl Render for CalendarPane {
         }
         if std::mem::take(&mut self.refocus) {
             window.focus(&self.focus, cx);
+        }
+        // A new event waited for its calendar to be connected for editing, which it now is.
+        if self.connecting.is_none() && self.can_create() {
+            if let Some((_, span)) = self.create_after.take() {
+                let pane = cx.entity();
+                window.defer(cx, move |window, cx| pane.update(cx, |this, cx| this.open_editor(None, Some(span), window, cx)));
+            }
         }
         let two_pane = f32::from(window.viewport_size().width) >= layout::TWO_PANE_WIDTH;
         // First: a pane that slid off is closed before anything is drawn.

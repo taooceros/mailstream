@@ -119,7 +119,7 @@ impl CalendarPane {
                             .child(self.calendar_list_button(p, cx))
                             .child(div().w(px(stroke::HAIRLINE)).h(px(16.)).mx(px(space::S2)).bg(p.line))
                             .child(
-                                icon_button("calendar-new", Icon::AddDraft, "New event", self.can_create(), p.glyph)
+                                icon_button("calendar-new", Icon::AddDraft, "New event", self.can_offer_create(), p.glyph)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.create_event(None, window, cx))),
                             )
                             .child(

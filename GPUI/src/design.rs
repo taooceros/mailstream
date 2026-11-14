@@ -762,6 +762,8 @@ pub mod calendar {
     pub const CONFLICT_GAP: f32 = 2.0;
     /// An all-day bar's face: its calendar's color at this over the card.
     pub const ALL_DAY_TINT: f32 = 0.18;
+    /// A new event being dragged out on the timeline (MS-312): the accent at this over the card.
+    pub const SKETCH_TINT: f32 = 0.16;
     /// An unanswered invitation's card: the clean card, hatched at 45° in its calendar's color at
     /// `HATCH_OPACITY` every `HATCH_SPACING`, in a dashed border (Flutter's `_InvitedPainter`).
     pub const HATCH_OPACITY: f32 = 0.07;
