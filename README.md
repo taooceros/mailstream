@@ -149,6 +149,43 @@ mailstream calendar update you@gmail.com --calendar you@gmail.com --id <event id
 mailstream calendar delete you@gmail.com --calendar you@gmail.com --id <event id> --yes
 ```
 
+### Headless Sync Daemon (Linux Servers)
+
+The standalone `mailstream` binary from GitHub Releases (`mailstream-linux-x86_64.tar.gz` / `mailstream-linux-aarch64.tar.gz`) can run as an always-on `iroh` sync node on a server without a GUI, mail accounts, OAuth tokens, or Keychain/Secret Service:
+
+```sh
+# First run: join an existing sync group using a ticket from your desktop app (`mailstream sync pair-ticket`)
+mailstream sync daemon --data-dir /var/lib/mailstream-sync --join '<DocTicket>'
+
+# Subsequent runs / systemd service: reuse persisted keys and state in `--data-dir` (or `$MAILSTREAM_DATA_DIR`)
+mailstream sync daemon --data-dir /var/lib/mailstream-sync
+
+# Inspect node status or mint a pairing ticket for a new laptop
+mailstream sync status --data-dir /var/lib/mailstream-sync
+mailstream sync pair-ticket --data-dir /var/lib/mailstream-sync
+```
+
+Example `systemd` unit (`/etc/systemd/system/mailstream-sync.service`):
+
+```ini
+[Unit]
+Description=Mailstream Headless Settings Sync Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=mailstream-sync
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/mailstream sync daemon --data-dir /var/lib/mailstream-sync
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ### Protocol Details
 Commands communicate over a local Unix domain socket at `~/Library/Application Support/Mailstream/control.sock` (mode `0600`) using single-line JSON messages:
 ```json

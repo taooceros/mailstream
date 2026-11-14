@@ -18,7 +18,12 @@ use serde_json::{Map, Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub use self::transport::socket_path;
-use crate::{Core, EngineError};
+use crate::EngineError;
+
+/// What answers the socket's requests: the engine, or a headless sync node (`sync_node`).
+pub(crate) trait Handle: Send + Sync + 'static {
+    fn handle(&self, command: &str, args: Value) -> impl Future<Output = Result<Value, EngineError>> + Send;
+}
 
 /// Requests larger than this are refused.
 pub const MAX_REQUEST: usize = 16 << 20;
@@ -29,7 +34,7 @@ pub const MAX_ANSWER: usize = 256 << 20;
 const CHECK: Duration = Duration::from_secs(5);
 
 /// Serves the socket whenever no other process does, for the life of the runtime it is called on.
-pub(crate) fn serve(core: Arc<Core>, support_directory: PathBuf) {
+pub(crate) fn serve(core: Arc<impl Handle>, support_directory: PathBuf) {
     tokio::spawn(async move {
         let path = socket_path(&support_directory);
         loop {
@@ -42,16 +47,16 @@ pub(crate) fn serve(core: Arc<Core>, support_directory: PathBuf) {
 }
 
 /// Serves connections, each on its own task, until the socket fails.
-async fn accept(mut listener: transport::Listener, core: &Arc<Core>) {
+async fn accept(mut listener: transport::Listener, core: &Arc<impl Handle>) {
     while let Ok(stream) = listener.accept().await {
         let core = core.clone();
         tokio::spawn(async move {
-            let _ = connection(stream, &core).await;
+            let _ = connection(stream, &*core).await;
         });
     }
 }
 
-async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, core: &Core) -> std::io::Result<()> {
+async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, core: &impl Handle) -> std::io::Result<()> {
     let Some(request) = receive(&mut stream).await? else { return Ok(()) };
     let mut answer = answer(core, &request).await;
     answer.push(b'\n');
@@ -78,7 +83,7 @@ async fn receive(stream: &mut (impl AsyncRead + Unpin)) -> std::io::Result<Optio
 }
 
 /// One request's answer, encoded as the Swift engine's `ControlService.handle` encodes it.
-async fn answer(core: &Core, request: &[u8]) -> Vec<u8> {
+async fn answer(core: &impl Handle, request: &[u8]) -> Vec<u8> {
     let answer = match run(core, request).await {
         Ok(result) => json!({ "ok": true, "result": result }),
         Err(error) => json!({ "ok": false, "error": { "code": error.code, "message": error.message } }),
@@ -86,7 +91,7 @@ async fn answer(core: &Core, request: &[u8]) -> Vec<u8> {
     crate::json::encode(&answer, false, false)
 }
 
-async fn run(core: &Core, request: &[u8]) -> Result<Value, EngineError> {
+async fn run(core: &impl Handle, request: &[u8]) -> Result<Value, EngineError> {
     let mut request = serde_json::from_slice::<Value>(request).unwrap_or(Value::Null);
     let Some(command) = request.get("command").and_then(Value::as_str).map(str::to_owned) else {
         return Err(EngineError::new("bad_request", "Expected {\"command\": …, \"args\": {…}}."));

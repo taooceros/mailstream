@@ -411,6 +411,13 @@ impl PeerSync {
         inner.replace(&mut group, doc, events).await
     }
 
+    /// The group id named by `ticket`, validated without joining it.
+    pub fn ticket_namespace(ticket: &str) -> Result<String> {
+        let ticket = DocTicket::from_str(ticket.trim())
+            .map_err(|error| failed(format!("Not a device sync ticket: {error}")))?;
+        Ok(ticket.capability.id().to_string())
+    }
+
     /// Stops syncing until [`PeerSync::resume`], also after a restart. Writes still go to this
     /// replica and reach the group on resuming.
     pub async fn pause(&self) -> Result<()> {

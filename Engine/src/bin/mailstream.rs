@@ -7,7 +7,8 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use mailstream_engine::commands::{self, COMMANDS, Kind, Spec};
+use mailstream_engine::commands::{self, COMMANDS, Handler, Kind, Spec};
+use mailstream_engine::sync_node::{self, SyncNode, SyncNodeConfig};
 use mailstream_engine::{EngineError, control, json};
 use serde_json::{Map, Value, json};
 
@@ -29,7 +30,9 @@ fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     match execute(&arguments) {
         Ok(text) => {
-            println!("{text}");
+            if !text.is_empty() {
+                println!("{text}");
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -48,22 +51,40 @@ fn main() -> ExitCode {
 
 /// The text to print on success.
 fn execute(arguments: &[String]) -> Result<String, EngineError> {
+    let (data_dir, arguments) = extract_data_dir(arguments)?;
     if arguments.first().is_none_or(|first| ["help", "--help", "-h"].contains(&first.as_str())) {
         let rest = arguments.get(1..).unwrap_or_default();
-        return Ok(if rest.is_empty() { general_help() } else { matching(rest)?.0.help() });
+        return Ok(if rest.is_empty() {
+            general_help()
+        } else if matches!(rest, [a, b] if a == "sync" && b == "daemon") {
+            DAEMON_HELP.to_owned()
+        } else {
+            matching(rest)?.0.help()
+        });
     }
     if arguments == ["commands"] {
         return Ok(text(&Value::Array(COMMANDS.iter().map(Spec::json).collect())));
     }
-    let (spec, rest) = matching(arguments)?;
+    if matches!(arguments.as_slice(), [a, b, ..] if a == "sync" && b == "daemon") {
+        let rest = &arguments[2..];
+        if rest.iter().any(|word| word == "--help" || word == "-h") {
+            return Ok(DAEMON_HELP.to_owned());
+        }
+        let join = parse_daemon_args(rest)?;
+        sync_node::run_daemon(data_dir, join.as_deref(), |event| {
+            println!("{}", single_line(event));
+        })?;
+        return Ok(String::new());
+    }
+    let (spec, rest) = matching(&arguments)?;
     if rest.iter().any(|word| word == "--help" || word == "-h") {
         return Ok(spec.help());
     }
     let args = parse(rest, spec)?;
     let result = if spec.local() {
-        mailstream_engine::run_settings_command(&mailstream_engine::support_directory(), spec.id, &args)?
+        mailstream_engine::run_settings_command(&data_dir, spec.id, &args)?
     } else {
-        send(spec, args)?
+        send(spec, args, &data_dir)?
     };
     if let Some(failed) = result.get("failed").and_then(Value::as_array)
         && !failed.is_empty()
@@ -74,6 +95,77 @@ fn execute(arguments: &[String]) -> Result<String, EngineError> {
         return Err(EngineError::new("partial", format!("{count} item{plural} failed; see \"failed\".")));
     }
     Ok(text(&result))
+}
+
+const DAEMON_HELP: &str = "mailstream sync daemon [--data-dir <path>] [--join <ticket>]
+
+Run a headless cross-device settings sync node without the Mailstream GUI or mail accounts.
+Prints JSON lines on stdout and shuts down cleanly on SIGTERM/SIGINT.
+
+  --data-dir <path>  Sync data directory (default: $MAILSTREAM_DATA_DIR or platform data dir)
+  --join <ticket>    Join this sync group on startup if not already paired with it";
+
+fn single_line(value: &Value) -> String {
+    String::from_utf8(json::encode(value, false, false)).expect("JSON is UTF-8")
+}
+
+fn extract_data_dir(arguments: &[String]) -> Result<(PathBuf, Vec<String>), EngineError> {
+    let mut explicit: Option<String> = None;
+    let mut rest = Vec::with_capacity(arguments.len());
+    let mut index = 0;
+    while index < arguments.len() {
+        let arg = &arguments[index];
+        if arg == "--data-dir" {
+            let value = arguments
+                .get(index + 1)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| usage("`--data-dir` requires a directory path."))?;
+            explicit = Some(value.clone());
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--data-dir=") {
+            if value.is_empty() {
+                return Err(usage("`--data-dir` requires a directory path."));
+            }
+            explicit = Some(value.to_owned());
+            index += 1;
+        } else {
+            rest.push(arg.clone());
+            index += 1;
+        }
+    }
+    let dir = match explicit {
+        Some(raw) => PathBuf::from(absolute(&raw)),
+        None => match std::env::var("MAILSTREAM_DATA_DIR").ok().filter(|v| !v.trim().is_empty()) {
+            Some(raw) => PathBuf::from(absolute(raw.trim())),
+            None => mailstream_engine::support_directory(),
+        },
+    };
+    Ok((dir, rest))
+}
+
+fn parse_daemon_args(rest: &[String]) -> Result<Option<String>, EngineError> {
+    let mut join: Option<String> = None;
+    let mut index = 0;
+    while index < rest.len() {
+        let arg = &rest[index];
+        if arg == "--join" {
+            let ticket = rest
+                .get(index + 1)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| usage("`--join` requires a pairing ticket."))?;
+            join = Some(ticket.clone());
+            index += 2;
+        } else if let Some(ticket) = arg.strip_prefix("--join=") {
+            if ticket.is_empty() {
+                return Err(usage("`--join` requires a pairing ticket."));
+            }
+            join = Some(ticket.to_owned());
+            index += 1;
+        } else {
+            return Err(usage(format!("Unknown argument \"{arg}\" for `mailstream sync daemon`.")));
+        }
+    }
+    Ok(join)
 }
 
 /// Pretty, key-sorted JSON without escaped slashes, as the Swift command line printed it.
@@ -88,6 +180,10 @@ fn usage(message: impl Into<String>) -> EngineError {
 fn general_help() -> String {
     let mut lines = vec![commands::OVERVIEW.to_owned(), String::new(), "Commands:".to_owned()];
     lines.extend(COMMANDS.iter().map(|spec| commands::row(&spec.name(), spec.summary)));
+    lines.push(commands::row(
+        "sync daemon",
+        "Run a headless device-sync node without the GUI (for servers / systemd).",
+    ));
     lines.join("\n")
 }
 
@@ -98,7 +194,11 @@ fn matching(words: &[String]) -> Result<(&'static Spec, &[String]), EngineError>
         .filter_map(|spec| {
             let name = spec.name();
             let length = name.split(' ').count();
-            (words.len() >= length && name.split(' ').zip(words).all(|(part, word)| part == word))
+            (words.len() >= length
+                && name
+                    .split(' ')
+                    .zip(words)
+                    .all(|(part, word)| !word.starts_with('-') && word.replace('-', "_") == part))
                 .then_some((spec, length))
         })
         .max_by_key(|(_, length)| *length)
@@ -247,8 +347,32 @@ fn absolute(raw: &str) -> String {
 }
 
 /// The running front end's answer to one request.
-fn send(spec: &Spec, args: Map<String, Value>) -> Result<Value, EngineError> {
-    let mut stream = connect_or_launch()?;
+fn send(spec: &Spec, args: Map<String, Value>, data_dir: &Path) -> Result<Value, EngineError> {
+    if spec.handler == Handler::Sync {
+        let path = control::socket_path(data_dir);
+        if let Some(stream) = connection::open(&path) {
+            return request_over(stream, spec, args);
+        }
+        return run_sync_headless(spec, &args, data_dir);
+    }
+    let stream = connect_or_launch(data_dir)?;
+    request_over(stream, spec, args)
+}
+
+fn run_sync_headless(spec: &Spec, args: &Map<String, Value>, data_dir: &Path) -> Result<Value, EngineError> {
+    if spec.id == "sync.join" {
+        let ticket = args
+            .get("ticket")
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| usage("sync join: <ticket> is required."))?;
+        return sync_node::run_join(data_dir.to_path_buf(), ticket);
+    }
+    let node = SyncNode::open(SyncNodeConfig::new(data_dir.to_path_buf()))?;
+    node.call_sync(spec.id, Value::Object(args.clone()))
+}
+
+fn request_over(mut stream: connection::Connection, spec: &Spec, args: Map<String, Value>) -> Result<Value, EngineError> {
     let mut request = json::encode(&json!({ "command": spec.id, "args": args }), false, false);
     request.push(b'\n');
     if stream.write_all(&request).is_err() {
@@ -293,8 +417,8 @@ fn receive(stream: &mut impl Read) -> Option<Vec<u8>> {
 
 /// A connection to the running front end; starts Mailstream GPUI (in the background) when none
 /// serves the socket.
-fn connect_or_launch() -> Result<connection::Connection, EngineError> {
-    let path = control::socket_path(&mailstream_engine::support_directory());
+fn connect_or_launch(data_dir: &Path) -> Result<connection::Connection, EngineError> {
+    let path = control::socket_path(data_dir);
     if let Some(stream) = connection::open(&path) {
         return Ok(stream);
     }
@@ -429,13 +553,14 @@ mod connection {
     pub fn sent(_pipe: &Connection, _timeout: Duration) {}
 }
 
-#[cfg(all(test, unix, not(target_os = "macos")))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn linux_front_end_prefers_launcher_and_falls_back_to_binary() {
+        use std::fs;
         let root = std::env::temp_dir().join(format!("mailstream-cli-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -457,5 +582,24 @@ mod tests {
         assert_eq!(linux_front_end(&root).as_deref(), Some(launcher.as_path()));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    fn words(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn extracts_data_dir_and_matches_hyphenated_sync_commands() {
+        let (dir, rest) = extract_data_dir(&words(&["sync", "daemon", "--data-dir", "/tmp/ms-sync", "--join", "doc1"]))
+            .unwrap();
+        assert_eq!(dir, PathBuf::from("/tmp/ms-sync"));
+        assert_eq!(rest, words(&["sync", "daemon", "--join", "doc1"]));
+        assert_eq!(parse_daemon_args(&rest[2..]).unwrap(), Some("doc1".to_owned()));
+
+        let (dir2, rest2) = extract_data_dir(&words(&["--data-dir=/tmp/ms-two", "sync", "pair-ticket"])).unwrap();
+        assert_eq!(dir2, PathBuf::from("/tmp/ms-two"));
+        let (spec, trailing) = matching(&rest2).unwrap();
+        assert_eq!(spec.id, "sync.pair_ticket");
+        assert!(trailing.is_empty());
     }
 }

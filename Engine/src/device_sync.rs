@@ -225,7 +225,7 @@ impl DeviceSync {
         }
     }
 
-    async fn open_or_err(&self) -> Result<(), EngineError> {
+    pub(crate) async fn open_or_err(&self) -> Result<(), EngineError> {
         if self.sync.read().await.is_some() {
             return Ok(());
         }

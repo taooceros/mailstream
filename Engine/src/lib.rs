@@ -56,6 +56,7 @@ pub mod settings;
 #[cfg(feature = "shots")]
 pub mod shots;
 pub mod signal;
+pub mod sync_node;
 pub mod tagging;
 pub mod tagsync;
 pub mod text;
@@ -73,6 +74,8 @@ mod chat_tests;
 mod peer_sync_tests;
 #[cfg(test)]
 mod device_sync_tests;
+#[cfg(test)]
+mod sync_node_tests;
 // Runs a shell-script omp (`omp::tests::fake_omp`).
 #[cfg(all(test, unix))]
 mod tagging_tests;
@@ -418,29 +421,7 @@ impl Engine {
     /// listeners when what it says changed. The directory is watched, so saves that replace the
     /// file are followed too.
     fn follow_settings(core: &Arc<Core>) -> Option<notify::RecommendedWatcher> {
-        let (sender, mut changes) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let file = core.settings.file().path().to_path_buf();
-        let name = file.file_name().map(ToOwned::to_owned);
-        let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            if let Ok(event) = event
-                && !matches!(event.kind, EventKind::Access(_))
-                && event.paths.iter().any(|path| path.file_name() == name.as_deref())
-            {
-                let _ = sender.send(());
-            }
-        })
-        .ok()?;
-        watcher.watch(file.parent()?, RecursiveMode::NonRecursive).ok()?;
-        let core = core.clone();
-        tokio::spawn(async move {
-            while changes.recv().await.is_some() {
-                while changes.try_recv().is_ok() {}
-                if core.settings.reload() {
-                    core.events.emit("settings");
-                }
-            }
-        });
-        Some(watcher)
+        watch_settings(core.settings.clone(), core.events.clone())
     }
 
     /// Runs one command; the future may be awaited on any executor.
@@ -496,6 +477,47 @@ impl Drop for Engine {
     }
 }
 
+/// Re-reads settings.json whenever it is written, replaced, created or deleted, and tells the
+/// listeners when what it says changed. Call on a tokio runtime.
+pub(crate) fn watch_settings(settings: Arc<Settings>, events: Arc<Events>) -> Option<notify::RecommendedWatcher> {
+    let (sender, mut changes) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let file = settings.file().path().to_path_buf();
+    let name = file.file_name().map(ToOwned::to_owned);
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if let Ok(event) = event
+            && !matches!(event.kind, EventKind::Access(_))
+            && event.paths.iter().any(|path| path.file_name() == name.as_deref())
+        {
+            let _ = sender.send(());
+        }
+    })
+    .ok()?;
+    watcher.watch(file.parent()?, RecursiveMode::NonRecursive).ok()?;
+    tokio::spawn(async move {
+        while changes.recv().await.is_some() {
+            while changes.try_recv().is_ok() {}
+            if settings.reload() {
+                events.emit("settings");
+            }
+        }
+    });
+    Some(watcher)
+}
+
+/// Runs a `config.*` command on `settings`, reloads it, and notifies listeners if it changed.
+pub(crate) fn run_local_settings(
+    settings: &Settings,
+    events: &Events,
+    command: &str,
+    values: &Map<String, Value>,
+) -> Result<Value, EngineError> {
+    let result = settings.run(command, values)?;
+    if settings.reload() {
+        events.emit("settings");
+    }
+    Ok(result)
+}
+
 impl Core {
     async fn handle(&self, command: &str, args: Value) -> Result<Value, EngineError> {
         let spec = commands::spec(command)?;
@@ -505,14 +527,7 @@ impl Core {
         };
         let args = Arguments::new(spec, &values)?;
         match spec.handler {
-            Handler::Settings => {
-                // The settings in effect follow at once rather than when the watcher next reads the file.
-                let result = self.settings.run(command, &values)?;
-                if self.settings.reload() {
-                    self.events.emit("settings");
-                }
-                Ok(result)
-            }
+            Handler::Settings => run_local_settings(&self.settings, &self.events, command, &values),
             Handler::Core => self.run(command, &args).await,
             Handler::Mail => self.mail.run(command, &args).await,
             Handler::Tagging => self.mail.tagging_command(command, &args),
@@ -705,6 +720,12 @@ impl Core {
         self.chat.accounts_changed();
         self.calendar.accounts_changed();
         Ok(record)
+    }
+}
+
+impl control::Handle for Core {
+    fn handle(&self, command: &str, args: Value) -> impl Future<Output = Result<Value, EngineError>> + Send {
+        Core::handle(self, command, args)
     }
 }
 
