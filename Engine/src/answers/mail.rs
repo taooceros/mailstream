@@ -32,8 +32,8 @@ pub struct Conversation {
     /// The user wrote the latest message: lists name its sender `me`.
     #[serde(default)]
     pub from_me: bool,
-    /// When `from_me` is true, the other party's address so lists show their avatar, not mine.
-    #[serde(skip)]
+    /// When `from_me` is true, the other party's address so lists show their avatar and name.
+    #[serde(default, with = "address_text::optional")]
     #[uniffi(default)]
     pub peer: Option<Address>,
     /// Senders' names, `me` for the user's own addresses.
