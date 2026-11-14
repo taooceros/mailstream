@@ -25,6 +25,7 @@ impl MailApp {
         self.tag_editor = None;
         self.source = source;
         self.query = None;
+        self.beneath = None;
         self.search.update(cx, |search, cx| search.clean(window, cx));
         self.layers.clear();
         if !same {
@@ -72,7 +73,7 @@ impl MailApp {
                 if text.is_empty() {
                     self.end_search(cx);
                 } else {
-                    self.start_search(text.into(), cx);
+                    self.start_search(text.into(), self.source.clone(), cx);
                 }
                 window.focus(&self.focus, cx);
             }
@@ -86,9 +87,27 @@ impl MailApp {
         cx.notify();
     }
 
-    /// Mail searches `query` on a layer over the list.
-    fn start_search(&mut self, query: SharedString, cx: &mut Context<Self>) {
+    /// Mail searches `query` over `source` on a layer over the list. The list it lies over keeps
+    /// its own lines under it (MS-343): the list on screen as it is, else (another source)
+    /// `source`'s, read anew.
+    fn start_search(&mut self, query: SharedString, source: Source, cx: &mut Context<Self>) {
         self.leave_panes(cx);
+        let fresh = if self.query.is_none() && self.source == source {
+            self.beneath = Some(Beneath {
+                source: source.clone(),
+                items: std::mem::take(&mut self.items),
+                scroll: std::mem::replace(&mut self.list_scroll, list_state(0)),
+                highlight: self.highlight.take(),
+            });
+            false
+        } else if self.beneath.as_ref().is_some_and(|beneath| beneath.source == source) {
+            false
+        } else {
+            self.beneath =
+                Some(Beneath { source: source.clone(), items: Vec::new(), scroll: list_state(0), highlight: None });
+            true
+        };
+        self.source = source;
         self.query = Some(query);
         self.layers.clear();
         self.push_layer(Layer::Search, true);
@@ -96,6 +115,9 @@ impl MailApp {
         self.list_scroll = list_state(0);
         self.rebuild_items();
         self.load_list(self.key(), false, cx);
+        if fresh && let Some(beneath) = self.beneath.as_ref().map(Beneath::key) {
+            self.load_list(beneath, false, cx);
+        }
     }
 
     /// The mail exchanged with `address`, from Chat's direct message with them (MS-331): mail
@@ -104,11 +126,12 @@ impl MailApp {
     pub fn search_mail_with(&mut self, address: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         self.context_menu = None;
         self.hovered_row = None;
-        if let Source::Mailbox { .. } = self.source {
-            self.source = Source::Unified(MailboxRole::Inbox);
-        }
+        let source = match self.source {
+            Source::Mailbox { .. } => Source::Unified(MailboxRole::Inbox),
+            ref source => source.clone(),
+        };
         self.search.update(cx, |search, cx| search.set_value(address.clone(), window, cx));
-        self.start_search(address, cx);
+        self.start_search(address, source, cx);
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -121,11 +144,21 @@ impl MailApp {
         cx.notify();
     }
 
+    /// The search's layer goes and the list beneath it is the list on screen again, as it lay.
     fn end_search(&mut self, cx: &mut Context<Self>) {
         if self.query.take().is_some() {
             self.layers.retain(|layer| !matches!(layer, Layer::Search));
-            self.highlight = None;
-            self.list_scroll = list_state(0);
+            match self.beneath.take() {
+                Some(beneath) => {
+                    self.items = beneath.items;
+                    self.list_scroll = beneath.scroll;
+                    self.highlight = beneath.highlight;
+                }
+                None => {
+                    self.highlight = None;
+                    self.list_scroll = list_state(0);
+                }
+            }
             self.rebuild_items();
             self.load_list(self.key(), false, cx);
         }
@@ -182,13 +215,7 @@ impl MailApp {
     }
 
     pub fn item_id(&self, item: &Item) -> String {
-        match item {
-            Item::Section(title) => format!("section:{title}"),
-            Item::Waiting(_) => "section:waiting".into(),
-            Item::Row(index) => self.list().and_then(|l| l.conversations.get(*index)).map(|c| c.id.clone()).unwrap_or_default(),
-            Item::Bundle(bundle) => BundleKind::Mail(bundle.category).id(),
-            Item::Chat(_) => BundleKind::Chat.id(),
-        }
+        line_id(item, self.list())
     }
 
     pub fn open_bundle(&self) -> Option<BundleKind> {

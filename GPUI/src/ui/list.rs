@@ -4,36 +4,64 @@
 
 use super::*;
 use crate::chat::UnreadSpace;
-use crate::state::ChatBundle;
+use crate::state::{ChatBundle, line_id};
 use gpui::{ListState, MouseDownEvent, list};
 use mailstream::Account;
 
 impl MailApp {
-    pub(super) fn render_list(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        if self.items.is_empty() {
-            let list = self.list();
-            let note: SharedString = match list {
+    /// The list on screen (while a search is up, its results, on its layer), or with `beneath`
+    /// the list under the search's layer (MS-343), each with its own lines and scroll.
+    pub(super) fn render_list(&self, beneath: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let (items, scroll) = self.lines_drawn(beneath);
+        if items.is_empty() {
+            let note: SharedString = match self.list_drawn(beneath) {
                 Some(list) if list.loading || list.fetching => "Loading…".into(),
                 Some(List { error: Some(error), .. }) | Some(List { failures: Some(error), .. }) => error.clone(),
                 None => "Loading…".into(),
-                Some(_) if self.query.is_some() => "No matches".into(),
+                Some(_) if !beneath && self.query.is_some() => "No matches".into(),
                 Some(_) => "No conversations".into(),
             };
             return centered_note(note, p).into_any_element();
         }
         list(
-            self.list_scroll.clone(),
+            scroll.clone(),
             cx.processor(move |this, ix: usize, _, cx| {
-                if ix + 20 >= this.items.len() {
+                // The list beneath only shows as the search slides off; it pages once on screen.
+                if !beneath && ix + 20 >= this.items.len() {
                     this.load_more(PagedView::List, this.items.len(), cx);
                 }
                 // The list's own padding stops at its top and bottom; rows step in by hand.
-                div().px(px(metrics::INSET)).child(this.render_item(ix, p, cx)).into_any_element()
+                div().px(px(metrics::INSET)).child(this.render_item(ix, beneath, p, cx)).into_any_element()
             }),
         )
         .size_full()
         .py(px(space::S6))
         .into_any_element()
+    }
+
+    /// The lines and scroll of the list on screen, or with `beneath` of the list under a search.
+    fn lines_drawn(&self, beneath: bool) -> (&[Item], &ListState) {
+        match self.beneath.as_ref().filter(|_| beneath) {
+            Some(under) => (&under.items, &under.scroll),
+            None => (&self.items, &self.list_scroll),
+        }
+    }
+
+    /// The list whose conversations `lines_drawn(beneath)` index.
+    fn list_drawn(&self, beneath: bool) -> Option<&List> {
+        match self.beneath.as_ref().filter(|_| beneath) {
+            Some(under) => self.lists.get(&under.key()),
+            None => self.list(),
+        }
+    }
+
+    /// Whether row `id` of the list `beneath` names shows as selected: the list under a search
+    /// shows its highlight, the list on screen its selection or highlight.
+    fn line_selected(&self, id: &str, beneath: bool) -> bool {
+        match self.beneath.as_ref().filter(|_| beneath) {
+            Some(under) => under.highlight.as_deref() == Some(id),
+            None => self.row_selected(id, false),
+        }
     }
 
     /// The accounts of the list on screen that can't connect (MS-278), on one line over its rows,
@@ -88,29 +116,32 @@ impl MailApp {
         )
     }
 
-    /// The id of the row after `ix` in the main list, if a row follows.
-    fn next_row(&self, ix: usize) -> Option<String> {
-        match self.items.get(ix + 1)? {
+    /// The id of the row after `ix` in `items`, lines of `list`, if a row follows.
+    fn next_row(items: &[Item], list: &List, ix: usize) -> Option<String> {
+        match items.get(ix + 1)? {
             Item::Section(_) | Item::Waiting(_) => None,
-            item => Some(self.item_id(item)),
+            item => Some(line_id(item, Some(list))),
         }
     }
 
-    fn render_item(&self, ix: usize, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let Some(list) = self.list() else { return div().into_any_element() };
-        let rule = self.next_row(ix).is_some_and(|next| !self.row_selected(&next, false));
-        match &self.items[ix] {
+    fn render_item(&self, ix: usize, beneath: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let (items, _) = self.lines_drawn(beneath);
+        let (Some(list), Some(item)) = (self.list_drawn(beneath), items.get(ix)) else {
+            return div().into_any_element();
+        };
+        let rule = Self::next_row(items, list, ix).is_some_and(|next| !self.line_selected(&next, beneath));
+        match item {
             Item::Section(title) => section_header(title.clone(), None, p).into_any_element(),
             Item::Waiting(count) => section_header("Waiting on you", Some(*count), p).into_any_element(),
             Item::Row(index) => {
-                let conversation = &list.conversations[*index];
-                let selected = self.row_selected(&conversation.id, false);
-                self.render_row(conversation, selected, rule, p, cx)
+                let Some(conversation) = list.conversations.get(*index) else { return div().into_any_element() };
+                let selected = self.line_selected(&conversation.id, beneath);
+                self.render_row(conversation, selected, rule, !beneath, p, cx)
             }
             Item::Bundle(bundle) => {
                 let newest = &list.conversations[bundle.members[0]];
                 let id = format!("bundle:{}", bundle.category.as_str());
-                let selected = self.row_selected(&id, false);
+                let selected = self.line_selected(&id, beneath);
                 let unread = bundle.unread > 0;
                 let color = design::category_color(bundle.category, p);
                 let count = if unread { format!("{} new", bundle.unread) } else { bundle.members.len().to_string() };
@@ -141,15 +172,21 @@ impl MailApp {
                     ))
                     .into_any_element()
             }
-            Item::Chat(bundle) => self.render_chat_row(bundle, rule, p, cx),
+            Item::Chat(bundle) => {
+                let selected = self.line_selected(&BundleKind::Chat.id(), beneath);
+                self.render_chat_row(bundle, selected, rule, p, cx)
+            }
         }
     }
 
+    /// A conversation's row; `on_screen` (not the list under a search, MS-343) shows what is
+    /// picked, hovered or right-clicked.
     fn render_row(
         &self,
         conversation: &Conversation,
         selected: bool,
         rule: bool,
+        on_screen: bool,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -165,14 +202,14 @@ impl MailApp {
             conversation.senders()
         };
         // A picked row (MS-305) shows a check where its avatar was.
-        let picked = self.selection().is_some_and(|selection| selection.contains(&conversation.id));
+        let picked = on_screen && self.selection().is_some_and(|selection| selection.contains(&conversation.id));
         let photo = if picked {
             icon_avatar(Icon::Check, p.accent, metrics::AVATAR).into_any_element()
         } else {
             avatars::avatar(&conversation.avatar_email(), &conversation.avatar, metrics::AVATAR, p, cx).into_any_element()
         };
-        let hovered = self.hovered_row.as_ref() == Some(&id);
-        let menu_open = self.context_menu.as_ref().is_some_and(|menu| menu.id == id);
+        let hovered = on_screen && self.hovered_row.as_ref() == Some(&id);
+        let menu_open = on_screen && self.context_menu.as_ref().is_some_and(|menu| menu.id == id);
 
         let title = div()
             .flex()
@@ -356,7 +393,7 @@ impl MailApp {
                 let next = bundle.members.get(row + 1).and_then(|&ix| list.conversations.get(ix)).map(|c| &c.id);
                 let rule = next.is_some_and(|next| !this.row_selected(next, true));
                 let selected = this.row_selected(&conversation.id, true);
-                div().px(px(metrics::INSET)).child(this.render_row(conversation, selected, rule, p, cx)).into_any_element()
+                div().px(px(metrics::INSET)).child(this.render_row(conversation, selected, rule, true, p, cx)).into_any_element()
             }),
         )
         .size_full()
@@ -366,10 +403,16 @@ impl MailApp {
 
     /// The inbox's Chat bundle row (MS-330): its spaces with unread messages, named, and the
     /// newest one's last message.
-    fn render_chat_row(&self, bundle: &ChatBundle, rule: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_chat_row(
+        &self,
+        bundle: &ChatBundle,
+        selected: bool,
+        rule: bool,
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(newest) = bundle.spaces.first() else { return div().into_any_element() };
         let id = BundleKind::Chat.id();
-        let selected = self.row_selected(&id, false);
         let color = design::chat_color();
         let title = div()
             .flex()

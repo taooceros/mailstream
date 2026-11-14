@@ -359,7 +359,7 @@ impl MailApp {
                             .shadow(p.page_shadow.clone())
                             .occlude()
                             .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer.id(), cx))
-                            .child(self.render_list(p, cx))
+                            .child(self.render_list(false, p, cx))
                             .into_any_element(),
                     )
                 }
@@ -485,7 +485,15 @@ impl MailApp {
                     .min_h_0()
                     .relative()
                     .overflow_hidden()
-                    .child(div().absolute().top_0().bottom_0().w_full().left(px(rows_shift)).child(self.render_list(p, cx)))
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .w_full()
+                            .left(px(rows_shift))
+                            .child(self.render_list(self.beneath.is_some(), p, cx)),
+                    )
                     .children(bundles),
             );
         island(p.tray, p).occlude().child(column)

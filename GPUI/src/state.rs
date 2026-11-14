@@ -326,6 +326,22 @@ impl Layer {
     }
 }
 
+/// The list a search lies over (MS-343): its own lines, scroll and highlight, drawn under the
+/// search's layer, so a swipe that closes the search shows the list it goes back to, and back on
+/// screen once the search ends. Its lines follow its list as the list on screen's do.
+pub struct Beneath {
+    pub source: Source,
+    pub items: Vec<Item>,
+    pub scroll: ListState,
+    pub highlight: Option<String>,
+}
+
+impl Beneath {
+    pub fn key(&self) -> ListKey {
+        ListKey { source: self.source.clone(), query: None }
+    }
+}
+
 /// Where a conversation beside the list's island rests (two panes), in the content area's
 /// points from its left edge.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -430,8 +446,10 @@ pub struct MailApp {
     pub source: Source,
     pub query: Option<SharedString>,
     pub lists: HashMap<ListKey, List>,
-    /// The current list's lines.
+    /// The current list's lines: while a search is up, its results (on its layer).
     pub items: Vec<Item>,
+    /// The list under the search's layer, while a search is up.
+    pub beneath: Option<Beneath>,
     /// The keyboard highlight in the list and in the open bundle: a conversation id or a bundle's
     /// `bundle:<category>`.
     pub highlight: Option<String>,
@@ -585,6 +603,7 @@ impl MailApp {
             query: None,
             lists: HashMap::new(),
             items: Vec::new(),
+            beneath: None,
             highlight: None,
             bundle_highlight: None,
             layers: Vec::new(),
@@ -878,6 +897,8 @@ impl MailApp {
         if key == self.key() {
             self.rebuild_items();
             self.refresh_layers(cx);
+        } else if self.beneath.as_ref().is_some_and(|beneath| beneath.key() == key) {
+            self.rebuild_beneath();
         }
         self.load_previews(&key, cx);
         if again {
@@ -922,18 +943,33 @@ impl MailApp {
         );
     }
 
-    /// The current list's lines. In the Smart Inbox service mail folds into bundles pinned above
-    /// the rest, newest bundle first, and what waits on the user's reply or action follows under
-    /// its own header, as in the native app's Smart Inbox; date headers group the remaining rows.
+    /// The current list's lines, and the list's under a search (MS-343), which index the same
+    /// lists: whatever changes a list rebuilds both.
     pub fn rebuild_items(&mut self) {
         let key = self.key();
+        let lines = self.lines(&key);
+        relist(&self.list_scroll, &mut self.items, lines, self.lists.get(&key));
+        self.rebuild_beneath();
+        self.trim_selection();
+    }
+
+    /// The lines of the list under a search, if one is up.
+    fn rebuild_beneath(&mut self) {
+        let Some(key) = self.beneath.as_ref().map(Beneath::key) else { return };
+        let lines = self.lines(&key);
+        if let Some(beneath) = &mut self.beneath {
+            relist(&beneath.scroll, &mut beneath.items, lines, self.lists.get(&key));
+        }
+    }
+
+    /// `key`'s lines, if its list is loaded. In the Smart Inbox service mail folds into bundles
+    /// pinned above the rest, newest bundle first, and what waits on the user's reply or action
+    /// follows under its own header, as in the native app's Smart Inbox; date headers group the
+    /// remaining rows.
+    fn lines(&self, key: &ListKey) -> Option<Vec<Item>> {
         let bundles = key.bundles();
         let sections = key.query.is_none();
-        let Some(list) = self.lists.get(&key) else {
-            self.items.clear();
-            self.list_scroll.reset(0);
-            return;
-        };
+        let list = self.lists.get(key)?;
         let mut rows = Vec::with_capacity(list.conversations.len());
         let mut pinned: Vec<Category> = Vec::new();
         let mut members: HashMap<Category, Vec<usize>> = HashMap::new();
@@ -990,20 +1026,7 @@ impl MailApp {
             }
             items.push(Item::Row(index));
         }
-        // The row at the top stays there, wherever the new lines put it; at the list's very top,
-        // the Chat bundle row arriving over it shows (MS-330).
-        let top = self.list_scroll.logical_scroll_top();
-        let at_start = top.item_ix == 0 && top.offset_in_item == px(0.);
-        let kept = self.items.get(top.item_ix).map(|item| self.item_id(item));
-        self.items = items;
-        self.list_scroll.reset(self.items.len());
-        let at = kept.and_then(|id| self.items.iter().position(|item| self.item_id(item) == id));
-        let at = if at_start && matches!(self.items.first(), Some(Item::Chat(_))) { Some(0) } else { at };
-        self.list_scroll.scroll_to(match at {
-            Some(item_ix) => ListOffset { item_ix, offset_in_item: top.offset_in_item },
-            None => ListOffset::default(),
-        });
-        self.trim_selection();
+        Some(items)
     }
 
     /// Drops a bundle layer whose bundle is gone, and keeps open readers' conversations current:
@@ -1122,6 +1145,39 @@ impl MailApp {
 /// A fresh list of `count` rows, scrolled to the top.
 pub fn list_state(count: usize) -> ListState {
     ListState::new(count, ListAlignment::Top, px(400.))
+}
+
+/// Puts `lines` (none: the list isn't loaded) in place of `shown`, the lines `scroll` shows of
+/// `list`. The row at the top stays there, wherever the new lines put it; at the list's very top,
+/// the Chat bundle row arriving over it shows (MS-330).
+fn relist(scroll: &ListState, shown: &mut Vec<Item>, lines: Option<Vec<Item>>, list: Option<&List>) {
+    let Some(lines) = lines else {
+        shown.clear();
+        scroll.reset(0);
+        return;
+    };
+    let top = scroll.logical_scroll_top();
+    let at_start = top.item_ix == 0 && top.offset_in_item == px(0.);
+    let kept = shown.get(top.item_ix).map(|item| line_id(item, list));
+    *shown = lines;
+    scroll.reset(shown.len());
+    let at = kept.and_then(|id| shown.iter().position(|item| line_id(item, list) == id));
+    let at = if at_start && matches!(shown.first(), Some(Item::Chat(_))) { Some(0) } else { at };
+    scroll.scroll_to(match at {
+        Some(item_ix) => ListOffset { item_ix, offset_in_item: top.offset_in_item },
+        None => ListOffset::default(),
+    });
+}
+
+/// The id of `item`, a line of `list`: a conversation's, a bundle's or a header's.
+pub fn line_id(item: &Item, list: Option<&List>) -> String {
+    match item {
+        Item::Section(title) => format!("section:{title}"),
+        Item::Waiting(_) => "section:waiting".into(),
+        Item::Row(index) => list.and_then(|l| l.conversations.get(*index)).map(|c| c.id.clone()).unwrap_or_default(),
+        Item::Bundle(bundle) => BundleKind::Mail(bundle.category).id(),
+        Item::Chat(_) => BundleKind::Chat.id(),
+    }
 }
 
 /// Hands the engine's change events to the window's task.
