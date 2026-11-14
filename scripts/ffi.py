@@ -7,7 +7,9 @@ bundled beside it) and, with DART_OUT=<dir>, the Dart bindings into <dir>.
 CONFIG=debug|release (default: debug).
 
 The library and the command line come from one cargo run in the repository's workspace (MS-279),
-into its one `target/`, where GPUI and the engine's tests find the same dependencies built.
+into its one `target/`, where GPUI and the engine's tests find the same dependencies built. On
+Linux it runs itself in `devenv shell`, whose fontconfig the FFI crate links through Blitz
+(devenv.nix; without it the build stops at `yeslogic-fontconfig-sys`, MS-294).
 
 The Dart bindings are one file per crate (MS-238): `mailstream.dart` for the FFI crate's methods
 and `mailstream_engine.dart` for the engine's records (what commands answer), plus uniffi-dart's
@@ -36,6 +38,12 @@ def cargo(*args):
 
 
 def main():
+    if sys.platform == "linux" and "DEVENV_ROOT" not in os.environ:
+        env = dict(ENV)
+        if env.get("DART_OUT"):
+            env["DART_OUT"] = str(Path(env["DART_OUT"]).resolve())
+        command = ["devenv", "shell", "--", "python3", str(Path(__file__).resolve())]
+        sys.exit(subprocess.run(command, cwd=ROOT, env=env).returncode)
     cargo("build", *PROFILE, "-p", "mailstream", "-p", "mailstream-engine", "--lib", "--bins")
     print(f"Built target/{CONFIG}/{LIBRARY} and target/{CONFIG}/mailstream", flush=True)
     if sys.platform == "darwin":

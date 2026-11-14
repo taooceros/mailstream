@@ -7,8 +7,9 @@ unifies dependencies' features per build, over the packages it selects, so each 
 built the way its users run it: the release engine, command line and Apple Intelligence tagger
 (`CONFIG=release scripts/ffi.py`); on the Mac every member's tests (`cargo test -p MEMBER
 --no-run`, as `cargo test` in its folder) and GPUI in release (install.sh, bench.sh), release
-with `shots` (shots.py) and debug (GPUI/run.sh; MS-273); on Linux, where GPUI builds in `devenv
-shell`, the engine's tests. Flutter is paused (MS-300): neither its Dart bindings nor their
+with `shots` (shots.py) and debug (GPUI/run.sh; MS-273); on Linux the engine's tests and, in
+`devenv shell` as install-linux.py and shots.py build it, GPUI in release and release with
+`shots` (MS-294). Flutter is paused (MS-300): neither its Dart bindings nor their
 generator (`FFI/bindgen`) are built. A crate added to the workspace gets its tests warmed with
 no change here; a new build configuration (a feature, a profile) is a new step.
 Crate-level `*/target` folders, from before the workspace, are deleted. On the Mac it first
@@ -35,9 +36,9 @@ open ovnfs checkout of it froze these folders when it opened (scripts/checkout.p
 build they opened with): any other (opened with `ovnfs new` by hand, `--rev` or before MS-152)
 reads them live, so a build under it can hand it artifacts built from other source (MS-152), and
 it exits 1 instead. --allow names such a checkout that builds nothing and may stay. Tracked files
-end as `main` has them and nothing else in the tree changes. It unlocks the default checkout's
-source for its run and locks it again when it ends, failed or not (scripts/source_lock.py,
-MS-156)."""
+end as `main` has them and nothing else in the tree changes. On the Mac it unlocks the default
+checkout's source for its run and locks it again when it ends, failed or not
+(scripts/source_lock.py, MS-156); the lock is macOS ACLs, so Linux's default checkout has none."""
 import argparse
 import hashlib
 import json
@@ -114,7 +115,9 @@ def main():
     open_now = checkouts_of(ROOT)
     blocking = [c["name"] for c in open_now if c["name"] not in allowed and not frozen(c)]
 
-    source_lock.unlock()
+    locked = sys.platform == "darwin"
+    if locked:
+        source_lock.unlock()
     try:
         # A build folder that isn't there yet would be created in the locked root, which
         # `linear-poll.py watch` may lock again during the run (MS-273); the folders themselves
@@ -139,7 +142,8 @@ def main():
         if failed:
             fail("these steps failed (the others are warm): " + ", ".join(failed))
     finally:
-        source_lock.lock()
+        if locked:
+            source_lock.lock()
 
 
 def update_source():
@@ -194,12 +198,12 @@ def build(open_before):
         ("turso.sh", capped(["sh", "scripts/turso.sh"]), {}),
         ("ffi.py", [sys.executable, "scripts/ffi.py"], {"CONFIG": "release"}),
     ]
+    gpui = ["cargo", "build", "-p", "mailstream-gpui"]
     if sys.platform == "darwin":
         steps += [(f"{member} tests", capped(["cargo", "test", "-p", member, "--no-run"]), {})
                   for member in members()]
         # GPUI as its scripts build it (MS-273): release for install.sh, bench.sh and
         # gpui-bundle.sh, release with `shots` for scripts/shots.py, debug for GPUI/run.sh.
-        gpui = ["cargo", "build", "-p", "mailstream-gpui"]
         steps += [
             ("GPUI release", capped([*gpui, "--release"]), {}),
             ("GPUI shots", capped([*gpui, "--release", "--features", "shots"]), {}),
@@ -207,6 +211,13 @@ def build(open_before):
         ]
     else:
         steps.append(("engine tests", capped(["cargo", "test", "-p", "mailstream-engine", "--no-run"]), {}))
+        # GPUI in `devenv shell` (the libraries it links, devenv.nix), release for install-linux.py
+        # and with `shots` for scripts/shots.py (MS-294).
+        gpui = ["devenv", "shell", "--", *gpui, "--release"]
+        steps += [
+            ("GPUI release", capped(gpui), {}),
+            ("GPUI shots", capped([*gpui, "--features", "shots"]), {}),
+        ]
     failed = []
     for name, command, extra in steps:
         step = time.monotonic()

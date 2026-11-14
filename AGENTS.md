@@ -293,17 +293,20 @@ it is handed over; it is not moved mid-way.
   times, which a checkout keeps for files it didn't change). `warm-build.py` builds `ffi.py`'s
   release, and on the Mac every member's tests (`cargo test -p MEMBER --no-run`, found from the
   workspace, so a new crate is covered) and GPUI in release, release with `shots` and debug
-  (MS-273); on Linux the engine's tests. Cargo builds a dependency once per set of features the
-  build asks of it, so these configurations share what they can. The FFI crate's `cdylib` has no
+  (MS-273); on Linux the engine's tests and GPUI in release and with `shots`, in `devenv shell`
+  as install-linux.py and shots.py build it (MS-294; `ffi.py` enters it by itself there). Cargo
+  builds a dependency once per set of features the build asks of it, so these configurations
+  share what they can. The FFI crate's `cdylib` has no
   hash in its name, so building another configuration that includes it (ffi.py after a GPUI
   build, or GPUI release after `shots`) recompiles it and what depends on it (~30 s). `ffi.py`
   builds the library and the command line in one cargo run and drops `SDKROOT`/`CPATH`-style
   variables: C build scripts rebuild everything above them when those differ from the warm
   build's. Run release engine builds through `ffi.py`. Never delete the default checkout's build
   folders. Only `python3 scripts/warm-build.py` builds there: it fetches `main`, moves the default
-  checkout's empty change onto it (unlocking its source for the run) and builds, but only when
-  what the dependencies are built from (lock file, manifests, vendored crates, toolchain, its own
-  build scripts) changed since its last build or that build is 12 hours old (MS-325; `--force`
+  checkout's empty change onto it (unlocking its source for the run on the Mac) and builds, but
+  only when what the dependencies are built from (lock file, manifests, vendored crates,
+  toolchain, its own build scripts) changed since its last build or that build is 12 hours old
+  (MS-325; `--force`
   builds anyway).
 - Run anything that may take over a minute (a cold cargo build, `ffi.py`, `install.sh`, a Swift
   release build, `bench.sh`) as one blocking eval cell, not `bash`: Python
