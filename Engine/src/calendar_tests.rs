@@ -443,7 +443,8 @@ fn adds_changes_and_deletes_the_accounts_own_events_and_keeps_the_copy_up_to_dat
     assert_eq!(plan["title"], json!("Planning"));
     let (request, body) = sent(&server, "PATCH", "calendars/me@gmail.com/events/plan");
     assert_eq!(request.param("sendUpdates"), Some("all"));
-    assert_eq!(body.as_object().unwrap().keys().collect::<Vec<_>>(), ["attendees", "summary"]);
+    let sent_keys = body.as_object().unwrap().keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(sent_keys, ["attendees", "summary"].into());
     assert_eq!(body["attendees"], json!([me, { "email": "bo@x.com", "responseStatus": "accepted" }, { "email": "dee@x.com" }]));
     assert_eq!(find(&events(&engine, week.clone()), "Planning")["attendees"].as_array().unwrap().len(), 3);
 
