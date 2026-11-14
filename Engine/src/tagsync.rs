@@ -61,7 +61,7 @@ fn owned(tag: &str) -> bool {
 }
 
 /// The same topic labels, in any order and case.
-fn same_topics(a: &[String], b: &[String]) -> bool {
+pub(crate) fn same_topics(a: &[String], b: &[String]) -> bool {
     a.len() == b.len() && a.iter().all(|label| b.iter().any(|other| same(label, other)))
 }
 
@@ -127,6 +127,7 @@ pub fn reconcile(local: Option<&ConversationTag>, server: &BTreeSet<String>, now
             waiting_until: None,
             // Two categories on the server: this one goes back alone.
             synced: server.categories.len() == 1,
+            manual: false,
         });
     };
     if !local.synced {
@@ -155,6 +156,8 @@ pub fn reconcile(local: Option<&ConversationTag>, server: &BTreeSet<String>, now
         // A deadline only this device knows holds while the server agrees the ask waits.
         waiting_until: if to_respond && waiting { local.waiting_until } else { None },
         synced: true,
+        // Only Waiting on you changed on the server: the user's manual choice here stays theirs.
+        manual: local.manual && category == local.category && topics_unchanged,
     };
     let unchanged = tag.category == local.category && to_respond == waiting && topics_unchanged;
     if unchanged { Step::Keep } else { Step::Adopt(tag) }
@@ -211,7 +214,7 @@ mod tests {
     }
 
     fn tag(category: Category, to_respond: bool, synced: bool) -> ConversationTag {
-        ConversationTag { category, to_respond, labels: vec!["Finance".into()], waiting_until: None, synced }
+        ConversationTag { category, to_respond, labels: vec!["Finance".into()], waiting_until: None, synced, manual: false }
     }
 
     #[test]
@@ -248,6 +251,7 @@ mod tests {
                 labels: strings(&["Travel"]),
                 waiting_until: None,
                 synced: true,
+                manual: false,
             })
         );
         // Newsletters never wait; retagging tags afresh; nothing there leaves it to the tagger,
@@ -284,6 +288,7 @@ mod tests {
                 labels: strings(&["Finance"]),
                 waiting_until: None,
                 synced: true,
+                manual: false,
             })
         );
         // A topic added, or taken off, on another device.
@@ -303,11 +308,11 @@ mod tests {
             Step::Adopt(ConversationTag { labels: vec![], ..synced.clone() })
         );
         // Resolved on another device.
-        let mut waiting = tag(Category::People, true, true);
+        let mut waiting = ConversationTag { manual: true, ..tag(Category::People, true, true) };
         waiting.waiting_until = Some(NOW + 3600.0);
         assert!(matches!(
             reconcile(Some(&waiting), &set(&["People", "Mailstream/Finance"]), NOW, true),
-            Step::Adopt(ConversationTag { to_respond: false, waiting_until: None, .. })
+            Step::Adopt(ConversationTag { to_respond: false, waiting_until: None, manual: true, .. })
         ));
         // Still waiting there: the deadline only this device knows stays.
         assert_eq!(reconcile(Some(&waiting), &set(&["People", WAITING, "Mailstream/Finance"]), NOW, true), Step::Keep);

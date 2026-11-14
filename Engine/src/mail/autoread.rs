@@ -401,7 +401,7 @@ mod tests {
     }
 
     fn tag(category: Category, to_respond: bool) -> ConversationTag {
-        ConversationTag { category, to_respond, labels: Vec::new(), waiting_until: None, synced: false }
+        ConversationTag { category, to_respond, labels: Vec::new(), waiting_until: None, synced: false, manual: false }
     }
 
     #[test]

@@ -57,14 +57,33 @@ impl Gmail {
             .iter()
             .enumerate()
             .map(|(n, (id, labels))| {
-                let value = json!({
-                    "id": id, "threadId": format!("t-{id}"), "labelIds": labels,
-                    "internalDate": (BASE_MS - n as i64 * 3_600_000).to_string(), "sizeEstimate": 100,
-                    "payload": { "mimeType": "text/plain", "headers": [
-                        header("From", &format!("Person {n} <p{n}@x.com>")), header("To", "Me <me@gmail.com>"),
-                        header("Subject", &format!("Topic {n}")), header("Message-ID", &format!("<{id}@x>")),
-                    ]},
-                });
+                let value = match id.chars().next().zip(id.get(1..)) {
+                    Some((prefix @ ('r' | 's' | 't'), parent)) => {
+                        let parent_id = format!("i{parent}");
+                        let step = (prefix as u8 - b'q') as i64;
+                        let index = parent.parse::<i64>().unwrap_or(0);
+                        json!({
+                            "id": id, "threadId": format!("t-{parent_id}"), "labelIds": labels,
+                            "internalDate": (BASE_MS + step * 3_600_000 - index * 60_000).to_string(),
+                            "sizeEstimate": 100,
+                            "payload": { "mimeType": "text/plain", "headers": [
+                                header("From", &format!("Person {parent} <p{parent}@x.com>")),
+                                header("To", "Me <me@gmail.com>"),
+                                header("Subject", &format!("Re: Topic {parent}")),
+                                header("Message-ID", &format!("<{id}@x>")),
+                                header("In-Reply-To", &format!("<{parent_id}@x>")),
+                            ]},
+                        })
+                    }
+                    _ => json!({
+                        "id": id, "threadId": format!("t-{id}"), "labelIds": labels,
+                        "internalDate": (BASE_MS - n as i64 * 3_600_000).to_string(), "sizeEstimate": 100,
+                        "payload": { "mimeType": "text/plain", "headers": [
+                            header("From", &format!("Person {n} <p{n}@x.com>")), header("To", "Me <me@gmail.com>"),
+                            header("Subject", &format!("Topic {n}")), header("Message-ID", &format!("<{id}@x>")),
+                        ]},
+                    }),
+                };
                 (id.clone(), value)
             })
             .collect()
@@ -571,6 +590,106 @@ fn stands_in_with_outlook_focused_inbox() {
     assert_eq!((category("g1"), category("g2")), (json!("people"), json!("notification")));
     let prompts = std::fs::read_to_string(dir.join("prompts")).unwrap();
     assert!(prompts.contains("\"providerCategory\":\"focused\"") && prompts.contains("\"providerCategory\":\"other\""), "{prompts}");
+    drop(engine);
+    cleanup(&config);
+}
+
+#[test]
+fn keeps_manual_category_and_topics_when_a_reply_arrives() {
+    let names = |names: &[&str]| names.iter().map(|name| name.to_string()).collect::<BTreeSet<_>>();
+    let gmail = Arc::new(Mutex::new(Gmail {
+        labels: BTreeMap::new(),
+        messages: (0..5).map(|n| (format!("i{n}"), BTreeSet::from(["INBOX".to_string()]))).collect(),
+        history: Vec::new(),
+        made: 0,
+    }));
+    let server = server(gmail.clone());
+    let (engine, config) = engine_for(&server, &[("me@gmail.com", "google")]);
+    let dir = config.support_directory.parent().unwrap().join("omp");
+    std::fs::create_dir_all(&dir).unwrap();
+    let omp = fake_omp(&dir);
+    call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
+    call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": omp.display().to_string() })).unwrap();
+    wait_until("the inbox", || call(&engine, "mail.list", json!({ "limit": 100, "cached": true })).is_ok_and(|listed| {
+        listed["conversations"].as_array().unwrap().len() == 5
+    }));
+
+    call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "true" })).unwrap();
+    wait_until("initial tags", || {
+        let gmail = gmail.lock().unwrap();
+        gmail.names("i3").contains("Notifications") && gmail.names("i4").contains("Notifications")
+    });
+    assert_eq!(counts(&dir), [5]);
+
+    // i3 gets manual category + topic; i4 gets only `waiting` changed (still AI's category).
+    let c3 = "me@gmail.com|i3@x";
+    let c4 = "me@gmail.com|i4@x";
+    call(&engine, "mail.tag", json!({ "ids": [c3], "category": "invitation", "add-labels": ["Finance"], "waiting": false })).unwrap();
+    call(&engine, "mail.tag", json!({ "ids": [c4], "waiting": true })).unwrap();
+    wait_until("manual edits on the server", || {
+        let gmail = gmail.lock().unwrap();
+        gmail.names("i3") == names(&["Invitations", "Mailstream/Finance"])
+            && gmail.names("i4") == names(&["Notifications", "Waiting on you"])
+    });
+
+    // Replies arrive in both threads: r3 (newest -> item 1 in fake_omp: people, toRespond=true,
+    // label "Work") and r4 (item 2: people, lapsed ask -> waiting=false).
+    {
+        let mut gmail = gmail.lock().unwrap();
+        gmail.messages.insert("r3".into(), BTreeSet::from(["INBOX".into()]));
+        gmail.messages.insert("r4".into(), BTreeSet::from(["INBOX".into()]));
+    }
+    call(&engine, "refresh", json!({})).unwrap();
+    wait_until("replies tagged", || counts(&dir).len() == 2);
+    assert_eq!(counts(&dir), [5, 2]);
+    wait_until("carried and retagged labels on server", || {
+        let gmail = gmail.lock().unwrap();
+        gmail.names("r3") == names(&["Invitations", "Waiting on you", "Mailstream/Finance"])
+            && gmail.names("r4") == names(&["People"])
+    });
+    // c3 kept user's Invitation + Finance while AI re-judged waiting=true; c4 was re-judged.
+    assert_eq!(tag(&engine, 3), (json!("invitation"), json!(true)));
+    assert_eq!(topics(&engine, 3), json!(["Finance"]));
+    assert_eq!(tag(&engine, 4), (json!("people"), json!(false)));
+    assert_eq!(topics(&engine, 4), json!([]));
+
+    // Switch c3 to newsletter and get a second reply s3: manual flag persists across replies,
+    // keeping newsletter + Finance and forcing waiting=false despite fake_omp saying toRespond=true.
+    call(&engine, "mail.tag", json!({ "ids": [c3], "category": "newsletter" })).unwrap();
+    wait_until("newsletter on server", || {
+        gmail.lock().unwrap().names("r3") == names(&["Newsletters", "Mailstream/Finance"])
+    });
+    {
+        let mut gmail = gmail.lock().unwrap();
+        gmail.messages.insert("s3".into(), BTreeSet::from(["INBOX".into()]));
+    }
+    call(&engine, "refresh", json!({})).unwrap();
+    wait_until("second reply tagged", || counts(&dir).len() == 3);
+    assert_eq!(counts(&dir), [5, 2, 1]);
+    wait_until("second reply carried on server", || {
+        gmail.lock().unwrap().names("s3") == names(&["Newsletters", "Mailstream/Finance"])
+    });
+    assert_eq!(tag(&engine, 3), (json!("newsletter"), json!(false)));
+    assert_eq!(topics(&engine, 3), json!(["Finance"]));
+
+    // Third reply t3 arrives already carrying another device's AI labels (People + Waiting + Work):
+    // sync adopts it through `carry`, keeps user's Newsletter + Finance, and pushes them back
+    // without calling omp.
+    {
+        let mut gmail = gmail.lock().unwrap();
+        let people = gmail.label("People").unwrap();
+        let waiting = gmail.label("Waiting on you").unwrap();
+        let work = gmail.label("Mailstream/Work").unwrap();
+        gmail.messages.insert("t3".into(), BTreeSet::from(["INBOX".into(), people, waiting, work]));
+    }
+    call(&engine, "refresh", json!({})).unwrap();
+    wait_until("server-adopted reply corrected", || {
+        gmail.lock().unwrap().names("t3") == names(&["Newsletters", "Mailstream/Finance"])
+    });
+    assert_eq!(counts(&dir), [5, 2, 1]);
+    assert_eq!(tag(&engine, 3), (json!("newsletter"), json!(false)));
+    assert_eq!(topics(&engine, 3), json!(["Finance"]));
+
     drop(engine);
     cleanup(&config);
 }

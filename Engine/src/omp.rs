@@ -492,6 +492,7 @@ fn parse(data: &[u8], items: &[Item], now: Date, source: &str) -> Result<HashMap
             labels,
             waiting_until: answer.until.as_deref().and_then(day_after),
             synced: false,
+            manual: false,
         };
         if !tag.is_waiting(now) {
             tag.to_respond = false;

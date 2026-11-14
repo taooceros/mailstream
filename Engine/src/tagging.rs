@@ -19,6 +19,12 @@
 //! How the provider itself sorted the mail (Gmail's inbox categories and Important, Outlook's
 //! Focused Inbox; MS-336) goes to the model as a hint, and lists show a conversation the tagger
 //! has not answered under the category that sorting suggests (`provisional`) until it does.
+//!
+//! A tag whose category or topic labels the user set by hand (`manual`, MS-342) stays theirs
+//! when a new message changes the conversation's key: the new message keeps their category and
+//! topics (`carry`), and only whether it waits on the user is judged again, by the tagger or by
+//! another device's tag on the server; until then lists show the user's tag, not waiting.
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -31,7 +37,7 @@ use crate::answers::{BatchFailure, TagResult, Tagged};
 use crate::cache::MailCache;
 use crate::commands::Arguments;
 use crate::content::Contents;
-use crate::model::{Conversation, Date, MailboxRole, ProviderCategory, now};
+use crate::model::{Conversation, Date, MailMessage, MailboxRole, ProviderCategory, now};
 use crate::omp::{self, Backend, Item, Options, Tagger, Tools};
 use crate::settings::{Setting, Settings};
 use crate::signal::ProcessSignal;
@@ -89,6 +95,10 @@ pub struct ConversationTag {
     /// here and not yet on the server, and for every tag of an account that doesn't sync.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub synced: bool,
+    /// The user set its category or topic labels by hand (`edit`): a new message in the
+    /// conversation keeps them (`carry`). Kept on this device only; the server has no such tag.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub manual: bool,
 }
 
 impl ConversationTag {
@@ -316,8 +326,8 @@ impl Tagging {
     }
 
     /// The conversation's tag while tagging is on, with `to_respond` false once the ask lapsed:
-    /// the tagger's verdict or the user's, never the provisional one, so what acts on mail
-    /// (auto-read) goes by these alone.
+    /// the tagger's verdict or the user's (`kept`), never the provisional one, so what acts on
+    /// mail (auto-read) goes by these alone.
     pub fn tag_for(&self, conversation: &Conversation) -> Option<ConversationTag> {
         self.lookup(conversation, false)
     }
@@ -333,11 +343,10 @@ impl Tagging {
         if !state.enabled {
             return None;
         }
-        let Some(tag) = state.tags.get(&key(conversation)) else {
+        let Some(mut tag) = kept(&state.tags, conversation, &key(conversation)) else {
             drop(state);
             return if stand_in { provisional(conversation) } else { None };
         };
-        let mut tag = tag.clone();
         drop(state);
         tag.to_respond = tag.is_waiting(now());
         Some(tag)
@@ -481,7 +490,7 @@ impl Tagging {
             model: text(Setting::AiTaggingModel),
             executable: text(Setting::AiTaggingOmpPath),
         };
-        let items = self.untagged_items(number(Setting::AiTaggingPassLimit));
+        let (items, carried) = self.untagged_items(number(Setting::AiTaggingPassLimit));
         if items.is_empty() {
             self.state().retagging = false;
         }
@@ -490,8 +499,20 @@ impl Tagging {
             let progress = format!("Tagging {remaining} conversation{}…", if remaining == 1 { "" } else { "s" });
             self.set_status(&mut self.state(), Some(progress), false);
             match self.tagger.tag(batch, &options).await {
-                Ok(result) => {
+                Ok(verdicts) => {
                     let mut state = self.state();
+                    // A tag the user set meanwhile stays as they set it.
+                    let result: HashMap<String, ConversationTag> = verdicts
+                        .into_iter()
+                        .filter(|(key, _)| !state.tags.get(key).is_some_and(|tag| tag.manual))
+                        .map(|(key, verdict)| {
+                            let tag = match carried.get(&key) {
+                                Some(previous) => carry(previous, verdict),
+                                None => verdict,
+                            };
+                            (key, tag)
+                        })
+                        .collect();
                     state.tags.extend(result.clone());
                     state.attempted.extend(batch.iter().map(|item| item.id.clone()));
                     self.save(&mut state, result);
@@ -529,14 +550,18 @@ impl Tagging {
         self.state().candidates.clone()
     }
 
-    fn untagged_items(&self, limit: usize) -> Vec<Item> {
+    /// The newest untagged candidates, up to `limit`, as the tagger is asked about them, and by
+    /// key the tag the user set by hand before the latest message of each that has one
+    /// (`carried_from`).
+    fn untagged_items(&self, limit: usize) -> (Vec<Item>, HashMap<String, ConversationTag>) {
         let candidates = self.candidates();
         // Picks under the lock, builds the items (snippets, addresses) after it, so commands
         // that take the lock meanwhile (a burst of retags) don't wait on that work.
-        let picked = {
+        let (picked, carried) = {
             let state = self.state();
             let mut keys = HashSet::new();
             let mut picked = Vec::new();
+            let mut carried = HashMap::new();
             for (index, conversation) in candidates.conversations.iter().enumerate() {
                 if picked.len() >= limit {
                     break;
@@ -545,14 +570,18 @@ impl Tagging {
                 if state.tags.contains_key(&key) || state.attempted.contains(&key) || !keys.insert(key.clone()) {
                     continue;
                 }
+                if let Some(previous) = carried_from(conversation, &key, &state.tags) {
+                    carried.insert(key.clone(), previous.clone());
+                }
                 picked.push((index, key));
             }
-            picked
+            (picked, carried)
         };
-        picked
+        let items = picked
             .into_iter()
             .map(|(index, key)| self.item(&candidates.conversations[index], key, &candidates.own))
-            .collect()
+            .collect();
+        (items, carried)
     }
 
     /// Brings the syncing accounts' tags and the server's together (`tagsync`): takes the tags
@@ -581,21 +610,34 @@ impl Tagging {
                 if local.as_ref().is_some_and(|tag| tag.synced) && state.pushed.contains_key(&key) {
                     continue;
                 }
-                match tagsync::reconcile(local.as_ref(), &conversation.latest().envelope.tags, at, !state.retagging) {
-                    Step::Keep => {}
+                let tag = match tagsync::reconcile(local.as_ref(), &conversation.latest().envelope.tags, at, !state.retagging) {
+                    Step::Keep => continue,
                     Step::Adopt(tag) => {
+                        // Another device tagged a new message in a conversation the user tagged
+                        // by hand here: their category and topics stay, and go back to the
+                        // server where it differs.
+                        let previous = if local.is_none() { carried_from(conversation, &key, &state.tags) } else { None };
+                        let tag = match previous {
+                            Some(previous) => carry(previous, tag),
+                            None => tag,
+                        };
                         state.tags.insert(key.clone(), tag.clone());
-                        adopted.insert(key, tag);
+                        adopted.insert(key.clone(), tag.clone());
+                        if tag.synced {
+                            continue;
+                        }
+                        tag
                     }
                     Step::Push => {
                         let Some(tag) = local else { continue };
-                        if state.refused.get(&key).is_some_and(|(refused, _)| *refused == tag) {
-                            continue;
-                        }
-                        let names = tagsync::names(&tag, at);
-                        pushes.push(Push { key, tag, conversation: conversation.clone(), names });
+                        tag
                     }
+                };
+                if state.refused.get(&key).is_some_and(|(refused, _)| *refused == tag) {
+                    continue;
                 }
+                let names = tagsync::names(&tag, at);
+                pushes.push(Push { key, tag, conversation: conversation.clone(), names });
             }
             if !adopted.is_empty() {
                 self.save(state, adopted);
@@ -659,8 +701,9 @@ impl Tagging {
 
     /// Corrects the conversation's tag; None leaves a part as it is. A conversation the tagger
     /// has not judged needs a category, or a provisional one, which the correction then keeps
-    /// as the user's; newsletters never wait on the user. For an account that syncs, the
-    /// correction goes to the server in a pass that follows.
+    /// as the user's; newsletters never wait on the user. A category or labels given are the
+    /// user's from then on (`manual`). For an account that syncs, the correction goes to the
+    /// server in a pass that follows.
     pub fn edit(
         self: &Arc<Self>,
         conversation: &Conversation,
@@ -673,7 +716,7 @@ impl Tagging {
             return Err(OFF_MESSAGE.into());
         }
         let key = key(conversation);
-        let existing = state.tags.get(&key).cloned();
+        let existing = kept(&state.tags, conversation, &key);
         let Some(mut tag) = existing.clone().or_else(|| {
             category.or_else(|| provisional(conversation).map(|tag| tag.category)).map(|category| ConversationTag {
                 category,
@@ -681,6 +724,7 @@ impl Tagging {
                 labels: Vec::new(),
                 waiting_until: None,
                 synced: false,
+                manual: false,
             })
         }) else {
             return Err(format!("{} has no AI tag yet; give a category.", conversation.id));
@@ -704,14 +748,18 @@ impl Tagging {
         if existing.as_ref() != Some(&tag) {
             tag.synced = false;
         }
+        // After the comparison: the server has nothing new to take when only this changes.
+        if category.is_some() || labels.is_some() {
+            tag.manual = true;
+        }
         self.store(state, conversation, key, tag.clone());
         tag.to_respond = tag.is_waiting(now());
         Ok(tag)
     }
 
-    /// The tag kept for the conversation, its waiting flag as stored (not lapsed).
+    /// The tag kept for the conversation (`kept`), its waiting flag as stored (not lapsed).
     fn stored(&self, conversation: &Conversation) -> Option<ConversationTag> {
-        self.state().tags.get(&key(conversation)).cloned()
+        kept(&self.state().tags, conversation, &key(conversation))
     }
 
     /// Puts back `before`, a tag a correction replaced (`mail.undo`, MS-280); for an account that
@@ -878,15 +926,200 @@ pub fn provisional(conversation: &Conversation) -> Option<ConversationTag> {
         ProviderCategory::Updates | ProviderCategory::Other => Category::Notification,
         ProviderCategory::Promotions | ProviderCategory::Social | ProviderCategory::Forums => Category::Newsletter,
     };
-    Some(ConversationTag { category, to_respond: false, labels: Vec::new(), waiting_until: None, synced: false })
+    Some(ConversationTag { category, to_respond: false, labels: Vec::new(), waiting_until: None, synced: false, manual: false })
 }
 
 /// The conversation's latest message, so a new reply re-tags it.
 pub fn key(conversation: &Conversation) -> String {
-    let latest = conversation.latest();
-    latest
-        .envelope
-        .message_id
-        .clone()
-        .unwrap_or_else(|| format!("{}/{}/{}", latest.account(), latest.mailbox(), latest.id()))
+    message_key(conversation.latest()).into_owned()
+}
+
+/// What a conversation whose latest message is `message` is keyed by (`key`).
+fn message_key(message: &MailMessage) -> Cow<'_, str> {
+    match &message.envelope.message_id {
+        Some(id) => Cow::Borrowed(id),
+        None => Cow::Owned(format!("{}/{}/{}", message.account(), message.mailbox(), message.id())),
+    }
+}
+
+/// The tag kept for the conversation keyed `latest` (`key`), its waiting flag as stored (not
+/// lapsed): its own, else, while the tagger has not judged that message, the category and topic
+/// labels the user set by hand before it came (`carried_from`), not waiting yet.
+fn kept(tags: &HashMap<String, ConversationTag>, conversation: &Conversation, latest: &str) -> Option<ConversationTag> {
+    if let Some(tag) = tags.get(latest) {
+        return Some(tag.clone());
+    }
+    let previous = carried_from(conversation, latest, tags)?;
+    Some(ConversationTag { to_respond: false, waiting_until: None, synced: false, ..previous.clone() })
+}
+
+/// The tag of the newest message before the conversation's latest (keyed `latest`) that has
+/// one, when the user set it by hand (`manual`).
+fn carried_from<'a>(
+    conversation: &Conversation,
+    latest: &str,
+    tags: &'a HashMap<String, ConversationTag>,
+) -> Option<&'a ConversationTag> {
+    conversation
+        .messages
+        .iter()
+        .rev()
+        .map(message_key)
+        .filter(|key| key.as_ref() != latest)
+        .find_map(|key| tags.get(key.as_ref()))
+        .filter(|tag| tag.manual)
+}
+
+/// The tag of a conversation's new latest message when the user had set its tag by hand
+/// (`previous`): their category and topic labels, still theirs, waiting on them as `verdict`
+/// says (the tagger's, or the server's when another device tagged the message first);
+/// newsletters never wait. Synced when the server's verdict already shows the user's tag.
+fn carry(previous: &ConversationTag, verdict: ConversationTag) -> ConversationTag {
+    let waits = verdict.to_respond && previous.category != Category::Newsletter;
+    ConversationTag {
+        category: previous.category,
+        to_respond: waits,
+        labels: previous.labels.clone(),
+        waiting_until: if waits { verdict.waiting_until } else { None },
+        synced: verdict.synced
+            && verdict.category == previous.category
+            && tagsync::same_topics(&verdict.labels, &previous.labels),
+        manual: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+    use crate::model::{Envelope, MailboxKey};
+
+    fn message(id: &str, message_id: Option<&str>) -> MailMessage {
+        MailMessage {
+            key: Arc::new(MailboxKey::new("me@x.com", "INBOX")),
+            envelope: Arc::new(Envelope {
+                id: id.into(),
+                thread: None,
+                message_id: message_id.map(str::to_string),
+                in_reply_to: vec![],
+                flags: BTreeSet::new(),
+                subject: "Topic".into(),
+                from: vec![],
+                to: vec![],
+                date: None,
+                size: 0,
+                has_attachment: None,
+                tags: BTreeSet::new(),
+                provider_category: None,
+                important: false,
+            }),
+            role: MailboxRole::Inbox,
+        }
+    }
+
+    fn tag(category: Category, labels: &[&str], to_respond: bool, manual: bool) -> ConversationTag {
+        ConversationTag {
+            category,
+            to_respond,
+            labels: labels.iter().map(|s| s.to_string()).collect(),
+            waiting_until: None,
+            synced: false,
+            manual,
+        }
+    }
+
+    #[test]
+    fn manual_flag_serde_is_backward_compatible() {
+        let old = r#"{"category":"people","toRespond":true,"labels":["Work"]}"#;
+        let decoded: ConversationTag = serde_json::from_str(old).unwrap();
+        assert!(!decoded.manual);
+        let encoded_ai = serde_json::to_string(&decoded).unwrap();
+        assert!(!encoded_ai.contains("manual"), "{encoded_ai}");
+
+        let mut manual = decoded;
+        manual.manual = true;
+        let encoded_manual = serde_json::to_string(&manual).unwrap();
+        assert!(encoded_manual.contains(r#""manual":true"#), "{encoded_manual}");
+        let roundtrip: ConversationTag = serde_json::from_str(&encoded_manual).unwrap();
+        assert!(roundtrip.manual);
+    }
+
+    #[test]
+    fn carries_only_manual_tags_to_new_latest_message() {
+        let m1 = message("1", Some("<1@x>"));
+        let m2 = message("2", Some("<2@x>"));
+        let m3 = message("3", None);
+        let conv = Conversation::new("me@x.com|<1@x>".into(), "me@x.com".into(), vec![m1, m2]);
+
+        let manual_tag = ConversationTag {
+            waiting_until: Some(900_000_000.0),
+            synced: true,
+            ..tag(Category::Invitation, &["Finance", "Tax"], true, true)
+        };
+        let tags = HashMap::from([("<1@x>".into(), manual_tag.clone())]);
+
+        // Before the new reply is tagged, `kept` holds the user's category and labels, not waiting.
+        let pending = kept(&tags, &conv, "<2@x>").unwrap();
+        assert_eq!(pending.category, Category::Invitation);
+        assert_eq!(pending.labels, vec!["Finance", "Tax"]);
+        assert!(!pending.to_respond);
+        assert_eq!(pending.waiting_until, None);
+        assert!(!pending.synced);
+        assert!(pending.manual);
+
+        // Non-manual tags never carry to a new reply.
+        let ai_tags = HashMap::from([("<1@x>".into(), tag(Category::Invitation, &["Finance"], true, false))]);
+        assert_eq!(carried_from(&conv, "<2@x>", &ai_tags), None);
+        assert_eq!(kept(&ai_tags, &conv, "<2@x>"), None);
+
+        // A newer AI tag between the manual tag and the latest message stops carry-over.
+        let conv3 = Conversation::new(
+            "me@x.com|<1@x>".into(),
+            "me@x.com".into(),
+            vec![message("1", Some("<1@x>")), message("2", Some("<2@x>")), m3],
+        );
+        let superseded = HashMap::from([
+            ("<1@x>".into(), manual_tag.clone()),
+            ("<2@x>".into(), tag(Category::People, &[], false, false)),
+        ]);
+        assert_eq!(carried_from(&conv3, "me@x.com/INBOX/3", &superseded), None);
+
+        // `carry` keeps user's category and topics, takes AI's waiting & deadline, stays manual.
+        let ai_verdict = ConversationTag {
+            waiting_until: Some(999_000_000.0),
+            synced: false,
+            ..tag(Category::People, &["Work"], true, false)
+        };
+        let carried = carry(&manual_tag, ai_verdict);
+        assert_eq!(carried.category, Category::Invitation);
+        assert_eq!(carried.labels, vec!["Finance", "Tax"]);
+        assert!(carried.to_respond);
+        assert_eq!(carried.waiting_until, Some(999_000_000.0));
+        assert!(!carried.synced);
+        assert!(carried.manual);
+
+        // Newsletter never waits even when AI says to_respond.
+        let newsletter = tag(Category::Newsletter, &["Deals"], false, true);
+        let carried_news = carry(
+            &newsletter,
+            ConversationTag { waiting_until: Some(999_000_000.0), ..tag(Category::People, &[], true, false) },
+        );
+        assert_eq!(carried_news.category, Category::Newsletter);
+        assert!(!carried_news.to_respond);
+        assert_eq!(carried_news.waiting_until, None);
+        assert!(carried_news.manual);
+
+        // Server verdict already matching user's category & topics (any order/case) stays synced.
+        let matching_server = ConversationTag {
+            synced: true,
+            ..tag(Category::Invitation, &["tax", "FINANCE"], false, false)
+        };
+        assert!(carry(&manual_tag, matching_server).synced);
+        let differing_server = ConversationTag {
+            synced: true,
+            ..tag(Category::People, &["Finance", "Tax"], false, false)
+        };
+        assert!(!carry(&manual_tag, differing_server).synced);
+    }
 }

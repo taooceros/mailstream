@@ -187,8 +187,8 @@ fn tags_the_inbox_with_omp_and_shares_corrections() {
     assert_eq!(saved.len(), 56);
     let lapsed = Some(crate::model::now() - 60.0);
     let written = HashMap::from([
-        (key(46), ConversationTag { category: Category::People, to_respond: true, labels: vec![], waiting_until: None, synced: false }),
-        (key(47), ConversationTag { category: Category::People, to_respond: true, labels: vec![], waiting_until: lapsed, synced: false }),
+        (key(46), ConversationTag { category: Category::People, to_respond: true, labels: vec![], waiting_until: None, synced: false, manual: false }),
+        (key(47), ConversationTag { category: Category::People, to_respond: true, labels: vec![], waiting_until: lapsed, synced: false, manual: false }),
     ]);
     block_on(engine.runtime.spawn(async move {
         let other = MailCache::new(database, files);
