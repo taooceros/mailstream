@@ -369,6 +369,7 @@ fn html_document_with(written_html: String, quoted: Option<(&str, String)>) -> S
     html + "</body></html>\n"
 }
 
+#[cfg(test)]
 fn html_document(written: &str, quoted: Option<(&str, String)>) -> String {
     html_document_with(lines_html(written), quoted)
 }
@@ -379,6 +380,7 @@ fn markdown_document(written: &str, quoted: Option<(&str, String)>) -> String {
 
 /// The HTML alternative of a reply, laid out the way Gmail does so recipients' clients fold the
 /// quote.
+#[cfg(test)]
 pub(crate) fn reply_html(reply: &str, attribution: &str, source: Option<&MessageContent>) -> String {
     html_document(reply, quote_html(source).map(|quote| (attribution, quote)))
 }

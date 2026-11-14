@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::component::button::Button;
-use gpui::component::input::{Escape, InputEvent, InputState, Paste, TextareaState};
+use gpui::component::input::{EditorState, Escape, InputEvent, InputState, Paste};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AppContext, ClickEvent, Context, Div, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
@@ -23,7 +23,8 @@ use crate::controls::{ButtonKind, ControlSize, button, icon_button, popover};
 use crate::design::{self, Palette, compose as metrics, editor, radius, space, text};
 use crate::engine::engine;
 use crate::icons::Icon;
-use crate::input::{self, AREA_INSET};
+use crate::input::{self, AREA_INSET, insert_link, wrap_selection};
+use crate::markup_highlight::{MarkupFlavor, markup_highlighter_factory};
 use crate::model::AccountExt;
 use mailstream::{Account, Address, Person};
 use attachments::{Attachments, Remove};
@@ -31,10 +32,26 @@ pub use column::{ColumnEvent, ComposeColumn, ResizeColumn};
 
 actions!(
     compose,
-    [Send, Cancel, Close, FocusNext, FocusPrevious, SuggestionNext, SuggestionPrevious, Attach, MoveToColumn]
+    [
+        Send,
+        Cancel,
+        Close,
+        FocusNext,
+        FocusPrevious,
+        SuggestionNext,
+        SuggestionPrevious,
+        Attach,
+        MoveToColumn,
+        FormatBold,
+        FormatItalic,
+        FormatLink,
+        FormatStrike,
+        FormatCode
+    ]
 );
 
 const CONTEXT: &str = "Compose";
+const BODY_CONTEXT: &str = "ComposeBody";
 const RECIPIENTS: &str = "Recipients";
 const REPLY_CONTEXT: &str = "ReplyBox";
 /// The groups files are dragged over.
@@ -48,6 +65,7 @@ pub fn bind_keys(cx: &mut App) {
     // The kit's text fields take these keys themselves (a newline, an indent); in a draft they
     // send and walk the fields. Bound after the kit's, so they win inside its fields.
     let field = Some("Compose > Input");
+    let body_field = Some("ComposeBody > Input");
     let reply_field = Some("ReplyBox > Input");
     cx.bind_keys([
         KeyBinding::new(secondary!("enter"), Send, window),
@@ -65,6 +83,16 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(secondary!("enter"), Send, reply_field),
         KeyBinding::new(secondary!("shift-a"), Attach, Some(REPLY_CONTEXT)),
         KeyBinding::new(secondary!("shift-o"), MoveToColumn, Some(REPLY_CONTEXT)),
+        KeyBinding::new(secondary!("b"), FormatBold, body_field),
+        KeyBinding::new(secondary!("i"), FormatItalic, body_field),
+        KeyBinding::new(secondary!("k"), FormatLink, body_field),
+        KeyBinding::new(secondary!("shift-x"), FormatStrike, body_field),
+        KeyBinding::new(secondary!("e"), FormatCode, body_field),
+        KeyBinding::new(secondary!("b"), FormatBold, reply_field),
+        KeyBinding::new(secondary!("i"), FormatItalic, reply_field),
+        KeyBinding::new(secondary!("k"), FormatLink, reply_field),
+        KeyBinding::new(secondary!("shift-x"), FormatStrike, reply_field),
+        KeyBinding::new(secondary!("e"), FormatCode, reply_field),
     ]);
 }
 
@@ -197,7 +225,7 @@ struct Compose {
     bcc: Entity<InputState>,
     show_bcc: bool,
     subject: Entity<InputState>,
-    body: Entity<TextareaState>,
+    body: Entity<EditorState>,
     /// What the draft opened with, to tell an edited draft from an untouched one, and a reply's
     /// recipients the engine planned from the ones the user changed.
     initial_to: String,
@@ -229,7 +257,20 @@ impl Compose {
         let cc = cx.new(|cx| InputState::new(window, cx));
         let bcc = cx.new(|cx| InputState::new(window, cx));
         let subject = cx.new(|cx| InputState::new(window, cx).placeholder("Subject"));
-        let body = cx.new(|cx| TextareaState::new(window, cx).placeholder("Write in Markdown…"));
+        let body = cx.new(|cx| {
+            let mut state = EditorState::new(window, cx)
+                .line_number(false)
+                .soft_wrap(true)
+                .searchable(false)
+                .auto_close(false)
+                .smart_indent(false)
+                .folding(false)
+                .indent_guides(false)
+                .placeholder("Write in Markdown…");
+            state.set_highlighter_factory(markup_highlighter_factory(MarkupFlavor::Markdown), cx);
+            state.set_highlighter("markdown", cx);
+            state
+        });
 
         let mut attachments = Attachments::default();
         let (mut reply, mut forward) = (None, None);
@@ -959,6 +1000,22 @@ impl Render for Compose {
             )
             .child(
                 div()
+                    .key_context(BODY_CONTEXT)
+                    .on_action(cx.listener(|this, _: &FormatBold, window, cx| {
+                        this.body.update(cx, |input, cx| wrap_selection(input, "**", window, cx));
+                    }))
+                    .on_action(cx.listener(|this, _: &FormatItalic, window, cx| {
+                        this.body.update(cx, |input, cx| wrap_selection(input, "*", window, cx));
+                    }))
+                    .on_action(cx.listener(|this, _: &FormatLink, window, cx| {
+                        this.body.update(cx, |input, cx| insert_link(input, window, cx));
+                    }))
+                    .on_action(cx.listener(|this, _: &FormatStrike, window, cx| {
+                        this.body.update(cx, |input, cx| wrap_selection(input, "~~", window, cx));
+                    }))
+                    .on_action(cx.listener(|this, _: &FormatCode, window, cx| {
+                        this.body.update(cx, |input, cx| wrap_selection(input, "`", window, cx));
+                    }))
                     .flex_1()
                     .min_h_0()
                     .pl(px(metrics::MARGIN - AREA_INSET))
@@ -967,7 +1024,7 @@ impl Render for Compose {
                     .text_size(px(text::READING))
                     .line_height(relative(editor::LEADING))
                     .when(sending, |d| d.opacity(metrics::SENT_TEXT_OPACITY))
-                    .child(input::area(&self.body).full()),
+                    .child(input::editor(&self.body).full()),
             )
             .when_some(status_line(&self.status, p), |d, status| {
                 d.child(
@@ -1002,7 +1059,7 @@ pub struct ReplyBox {
     message: Option<String>,
     all: bool,
     recipients: SharedString,
-    text: Entity<TextareaState>,
+    text: Entity<EditorState>,
     focus: FocusHandle,
     attachments: Attachments,
     status: Status,
@@ -1022,9 +1079,18 @@ impl ReplyBox {
         cx: &mut Context<Self>,
     ) -> Self {
         let text = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder(if all { "Reply to everyone in Markdown…" } else { "Reply in Markdown…" })
-                .auto_grow(metrics::REPLY_MIN_ROWS, metrics::REPLY_MAX_ROWS)
+            let mut state = EditorState::new(window, cx)
+                .line_number(false)
+                .soft_wrap(true)
+                .searchable(false)
+                .auto_close(false)
+                .smart_indent(false)
+                .folding(false)
+                .indent_guides(false)
+                .placeholder(if all { "Reply to everyone in Markdown…" } else { "Reply in Markdown…" });
+            state.set_highlighter_factory(markup_highlighter_factory(MarkupFlavor::Markdown), cx);
+            state.set_highlighter("markdown", cx);
+            state
         });
         let focus = text.focus_handle(cx);
         window.focus(&focus, cx);
@@ -1174,6 +1240,21 @@ impl Render for ReplyBox {
             .on_action(cx.listener(|this, _: &Send, window, cx| this.send(window, cx)))
             .on_action(cx.listener(Self::pick_files))
             .on_action(cx.listener(Self::move_to_column))
+            .on_action(cx.listener(|this, _: &FormatBold, window, cx| {
+                this.text.update(cx, |input, cx| wrap_selection(input, "**", window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &FormatItalic, window, cx| {
+                this.text.update(cx, |input, cx| wrap_selection(input, "*", window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &FormatLink, window, cx| {
+                this.text.update(cx, |input, cx| insert_link(input, window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &FormatStrike, window, cx| {
+                this.text.update(cx, |input, cx| wrap_selection(input, "~~", window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &FormatCode, window, cx| {
+                this.text.update(cx, |input, cx| wrap_selection(input, "`", window, cx));
+            }))
             .capture_action(cx.listener(|this, _: &Paste, _, cx| this.paste(cx)))
             .group(REPLY_DROP)
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
@@ -1215,7 +1296,12 @@ impl Render for ReplyBox {
                     .line_height(relative(editor::LEADING))
                     .text_color(p.text)
                     .when(sending, |d| d.opacity(metrics::SENT_TEXT_OPACITY))
-                    .child(input::area(&self.text)),
+                    .child({
+                        let rows = (self.text.read(cx).text().chars().filter(|&c| c == '\n').count() + 1)
+                            .clamp(metrics::REPLY_MIN_ROWS, metrics::REPLY_MAX_ROWS);
+                        let reply_height = rows as f32 * text::READING * editor::LEADING + AREA_INSET * 2.0;
+                        input::editor(&self.text).height(reply_height)
+                    }),
             )
             .when_some(attached, |d, attached| d.child(div().px(px(metrics::REPLY_PADDING)).pb(px(8.)).child(attached)))
             .child(
@@ -1250,5 +1336,108 @@ impl Render for ReplyBox {
                     ),
             )
             .child(attachments::drop_target(REPLY_DROP, radius::CARD, p))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    struct EditorHarness {
+        editor: Entity<EditorState>,
+        focus: FocusHandle,
+    }
+
+    impl Render for EditorHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .key_context(BODY_CONTEXT)
+                .track_focus(&self.focus)
+                .on_action(cx.listener(|this, _: &FormatBold, window, cx| {
+                    this.editor.update(cx, |input, cx| wrap_selection(input, "**", window, cx));
+                }))
+                .on_action(cx.listener(|this, _: &FormatItalic, window, cx| {
+                    this.editor.update(cx, |input, cx| wrap_selection(input, "*", window, cx));
+                }))
+                .on_action(cx.listener(|this, _: &FormatLink, window, cx| {
+                    this.editor.update(cx, |input, cx| insert_link(input, window, cx));
+                }))
+                .on_action(cx.listener(|this, _: &FormatStrike, window, cx| {
+                    this.editor.update(cx, |input, cx| wrap_selection(input, "~~", window, cx));
+                }))
+                .on_action(cx.listener(|this, _: &FormatCode, window, cx| {
+                    this.editor.update(cx, |input, cx| wrap_selection(input, "`", window, cx));
+                }))
+                .child(input::editor(&self.editor).full())
+        }
+    }
+
+    #[gpui::test]
+    fn markdown_formatting_shortcuts_wrap_and_insert_links(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui::component::init(cx);
+            design::sync_kit_theme(gpui::WindowAppearance::Light, cx);
+            bind_keys(cx);
+        });
+        let window = cx.add_window(|window, cx| {
+            let editor = cx.new(|cx| {
+                let mut state = EditorState::new(window, cx).line_number(false).soft_wrap(true);
+                state.set_highlighter_factory(markup_highlighter_factory(MarkupFlavor::Markdown), cx);
+                state.set_highlighter("markdown", cx);
+                state
+            });
+            let focus = editor.focus_handle(cx);
+            EditorHarness { editor, focus }
+        });
+        let editor = window.read_with(cx, |view, _| view.editor.clone()).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            let focus = editor.focus_handle(cx);
+            window.focus(&focus, cx);
+            editor.update(cx, |input, cx| {
+                input.set_value("hello world", window, cx);
+                input.set_selected_range(0..5, cx);
+            });
+        })
+        .unwrap();
+
+        cx.simulate_keystrokes(window.into(), secondary!("b"));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |input, _| input.value().to_string()), "**hello** world");
+        assert_eq!(editor.read_with(cx, |input, _| input.selected_range()), 2..7);
+
+        cx.simulate_keystrokes(window.into(), secondary!("i"));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |input, _| input.value().to_string()), "***hello*** world");
+
+        // Pressing Cmd+I again unwraps the inner italic marker.
+        cx.simulate_keystrokes(window.into(), secondary!("i"));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |input, _| input.value().to_string()), "**hello** world");
+
+        // Cmd+K wraps selection into [hello](url) and selects `url`.
+        cx.simulate_keystrokes(window.into(), secondary!("k"));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |input, _| input.value().to_string()), "**[hello](url)** world");
+        assert_eq!(editor.read_with(cx, |input, _| input.selected_range()), 10..13);
+
+        // Cmd+Shift+X and Cmd+E on empty selection.
+        cx.update_window(window.into(), |_, window, cx| {
+            editor.update(cx, |input, cx| input.set_value("", window, cx));
+        })
+        .unwrap();
+        cx.simulate_keystrokes(window.into(), secondary!("shift-x"));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |input, _| input.value().to_string()), "~~~~");
+        assert_eq!(editor.read_with(cx, |input, _| input.selected_range()), 2..2);
+
+        cx.simulate_keystrokes(window.into(), secondary!("shift-x"));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |input, _| input.value().to_string()), "");
+
+        cx.simulate_keystrokes(window.into(), secondary!("e"));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |input, _| input.value().to_string()), "``");
+        assert_eq!(editor.read_with(cx, |input, _| input.selected_range()), 1..1);
     }
 }

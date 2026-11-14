@@ -17,6 +17,7 @@ futures = "0.3"
 url = "2"
 # The calendar notes' links (MS-184), found as the engine finds Chat's.
 linkify = "0.10"
+pulldown-cmark = { version = "0.13", default-features = false }
 image = { version = "0.25", default-features = false }
 # `shots` only: the synthetic mail (`src/shots/seed.rs`) goes through the engine's cache layer,
 # which runs on tokio, in the engine's serde shapes, and names its sender pictures as the engine
