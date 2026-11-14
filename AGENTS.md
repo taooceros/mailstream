@@ -183,7 +183,7 @@ or a role (`@task`, `@smol`) names: config overrides change what actually runs. 
 
 An omp session runs `RUNNING_FILE=~/.local/state/linear-poll/running python3 scripts/linear-poll.py watch`
 as one background bash job with no deadline (`timeout: 0`) and `wait`s on it: the script checks
-Linear every minute and returns only once it has claimed something. Each line it prints carries
+Linear every 5 s and returns only once it has claimed something. Each line it prints carries
 what the session needs to hand the work out (an issue's title, state, labels, project, parent,
 creator and the start of its description; a comment's issue title and body; the script's header
 lists every field), so the session doesn't read issues on Linear itself (MS-174). The session

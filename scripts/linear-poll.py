@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One pass over Linear (`watch`: one a minute until one has output): claims what an omp session
+"""One pass over Linear (`watch`: every 5 s until one has output): claims what an omp session
 should act on now and prints it as JSON lines, which that session hands to subagents, each
 working in its own checkout (AGENTS.md, Version control). Each line carries what the session
 needs to hand it out, so it doesn't ask Linear about it (MS-174). Python 3.9+ standard library
@@ -66,18 +66,21 @@ OAuth app's client id on line 1 and secret on line 2); renewal fetches a client_
 into LINEAR_TOKEN_FILE.
 Claims are kept in ~/.local/state/linear-poll/ (STATE): `launched` (issue ids), `comments`
 (comment ids), `unblocked` (issue id and the blocker ids it was claimed with), `stale` (issue id
-and the start comment reported), `install` (when the last install line was printed).
+and the start comment reported), `install` (when the last install line was printed), `probe`
+(latest issue/comment updatedAt watermark for `watch`).
 DRY_RUN=1 prints without claiming (unclaim lines included). `linear-poll.py seen comment|issue
 <id>` puts omp's 👀 on a comment or issue once the caller has handed it to a subagent, so the
 user sees it was picked up.
-`linear-poll.py watch` runs a pass every INTERVAL seconds (default 60) and exits after the first
+`linear-poll.py watch` checks Linear every INTERVAL seconds (default 5) and exits after the first
 pass that prints lines, with that pass's lines and status; passes with nothing to print (unclaims
-included) keep it looping silently. Each pass runs the script afresh, so edits take effect
-without a restart. A failed pass (network, Linear error, token renewal) is logged to stderr and
-retried next interval; after MAX_FAILURES (default 10) failures in a row it exits 1. The caller
-starts it once as a background job with no deadline, waits for its result, handles the lines and
-starts it again, and rewrites RUNNING_FILE whenever its agents start or finish. With DRY_RUN=1 it
-exits after the first plan holding a line other than unclaim.
+included) keep it looping silently. After its first full pass, `watch` uses a lightweight
+`updatedAt` probe (~4 complexity vs ~1,145 for the full query) and runs the full query only when
+Linear changed, RUNNING/script changed, or FULL_EVERY seconds (default 60) elapsed. Each pass runs
+the script afresh, so edits take effect without a restart. A failed pass (network, Linear error,
+token renewal) is logged to stderr and retried next interval; after MAX_FAILURES (default 10)
+failures in a row it exits 1. The caller starts it once as a background job with no deadline, waits
+for its result, handles the lines and starts it again, and rewrites RUNNING_FILE whenever its agents
+start or finish. With DRY_RUN=1 it exits after the first plan holding a line other than unclaim.
 On macOS, run in the default checkout, `watch` locks that checkout's source again before each
 pass when anything there is writable (scripts/source_lock.py, MS-156), logging it to stderr.
 The caller keeps context while it is still in the prompt cache (1 h on a Claude subscription,
@@ -126,6 +129,9 @@ UNBLOCKED = STATE / "unblocked"
 STALE = STATE / "stale"
 INSTALL = os.environ.get("INSTALL", "install")
 INSTALLED = STATE / "install"
+PROBE = STATE / "probe"
+INTERVAL = int(os.environ.get("INTERVAL", "5"))
+FULL_EVERY = int(os.environ.get("FULL_EVERY", "60"))
 INSTALL_EVERY = int(os.environ.get("INSTALL_EVERY", "3600"))
 DESCRIPTION = int(os.environ.get("DESCRIPTION", "600"))
 START = re.compile(r"^\[omp @ [^\]]*\] start \((?P<a>[^)]+)\)")
@@ -242,9 +248,12 @@ def relock():
 
 def watch():
     failures = 0
+    probe = False
     while True:
         relock()
-        result = subprocess.run([sys.executable, __file__], stdout=subprocess.PIPE, text=True, encoding="utf-8")
+        env = {**os.environ, "_POLL_PROBE": "1" if probe else "0"}
+        result = subprocess.run([sys.executable, __file__], stdout=subprocess.PIPE, text=True,
+                                encoding="utf-8", env=env)
         out = result.stdout.rstrip("\n")
         # Real passes print only what the caller handles; a dry run also shows unclaim lines.
         if any(not line.startswith('{"kind":"unclaim"') for line in out.split("\n") if line):
@@ -252,17 +261,34 @@ def watch():
             return result.returncode
         if result.returncode == 0:
             failures = 0
+            probe = True
         else:
             failures += 1
             if failures >= int(os.environ.get("MAX_FAILURES", "10")):
                 log(f"pass failed {failures} times in a row; giving up")
                 return 1
-            log(f"pass failed (exit {result.returncode}); retrying in {os.environ.get('INTERVAL', '60')}s")
-        time.sleep(int(os.environ.get("INTERVAL", "60")))
+            log(f"pass failed (exit {result.returncode}); retrying in {INTERVAL}s")
+        time.sleep(INTERVAL)
+
+
+PROBE_QUERY = """query($teams: [ID!]) {
+  latestIssue: issues(first: 1, orderBy: updatedAt, filter: { team: { id: { in: $teams } } }) {
+    nodes { id updatedAt }
+  }
+  latestComment: comments(first: 1, orderBy: updatedAt, filter: { createdAt: { gt: "-P7D" }, issue: { team: { id: { in: $teams } } } }) {
+    nodes { id updatedAt }
+  }
+}"""
 
 
 QUERY = """query($teams: [ID!], $label: String!, $claimed: String!, $install: String!) {
   viewer { id name }
+  latestIssue: issues(first: 1, orderBy: updatedAt, filter: { team: { id: { in: $teams } } }) {
+    nodes { id updatedAt }
+  }
+  latestComment: comments(first: 1, orderBy: updatedAt, filter: { createdAt: { gt: "-P7D" }, issue: { team: { id: { in: $teams } } } }) {
+    nodes { id updatedAt }
+  }
   queued: issues(first: 100, filter: {
     team: { id: { in: $teams } }, state: { type: { in: ["triage", "backlog", "unstarted"] } },
     or: [{ labels: { some: { name: { eq: $label } } } }, { state: { name: { eq: "Todo" } } },
@@ -402,6 +428,39 @@ def plan(data, running):
     return out
 
 
+def watermark(data):
+    def head(key):
+        nodes = (data.get(key) or {}).get("nodes") or []
+        return [nodes[0]["id"], nodes[0]["updatedAt"]] if nodes else None
+    return {"issue": head("latestIssue"), "comment": head("latestComment")}
+
+
+def probe_context(running):
+    return {
+        "teams": TEAMS,
+        "label": LABEL,
+        "claimed": CLAIMED,
+        "install": INSTALL,
+        "host": HOST_LABEL,
+        "running": running,
+        "mtime": Path(__file__).stat().st_mtime_ns,
+    }
+
+
+def unchanged(running):
+    if os.environ.get("_POLL_PROBE") != "1" or FULL_EVERY <= 0 or os.environ.get("DRY_RUN"):
+        return False
+    try:
+        saved = json.loads(PROBE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(saved, dict) or saved.get("context") != probe_context(running):
+        return False
+    if time.time() - saved.get("fullAt", 0) >= FULL_EVERY:
+        return False
+    return watermark(gql(PROBE_QUERY, {"teams": TEAMS})) == saved.get("watermark")
+
+
 def run_pass():
     STATE.mkdir(parents=True, exist_ok=True)
     for path in (LAUNCHED, HANDLED, UNBLOCKED, STALE, INSTALLED):
@@ -413,7 +472,15 @@ def run_pass():
         if not isinstance(running, list):
             log(f"RUNNING_FILE {running_file} is not a JSON array")
             return 1
+    if unchanged(running):
+        return 0
     data = gql(QUERY, {"teams": TEAMS, "label": LABEL, "claimed": CLAIMED, "install": INSTALL})
+    if not os.environ.get("DRY_RUN"):
+        PROBE.write_text(json.dumps({
+            "watermark": watermark(data),
+            "context": probe_context(running),
+            "fullAt": time.time(),
+        }), encoding="utf-8")
     out = plan(data, running)
     if os.environ.get("DRY_RUN"):
         for line in out:
