@@ -188,7 +188,8 @@ impl SyncFile {
 }
 
 /// How the endpoint reaches other devices.
-pub(crate) enum Network {
+#[derive(Clone)]
+pub enum Network {
     /// Number 0's address lookup and relays, or the relay `sync.json` names.
     Public,
     /// 127.0.0.1 only, devices found through a lookup the test shares: no relay or DNS.
@@ -250,7 +251,7 @@ impl PeerSync {
             Err(TryLockError::Error(error)) => return Err(failed(error)),
         }
         let file = SyncFile::read(&directory)?;
-        let endpoint = bind(secret_key(&directory)?, network, file.relay_url.as_deref()).await?;
+        let endpoint = bind(secret_key(&directory)?, network.clone(), file.relay_url.as_deref()).await?;
 
         let (protect, protected) = ProtectCallbackHandler::new();
         let mut options = BlobOptions::new(&directory.join("blobs"));
@@ -300,6 +301,10 @@ impl PeerSync {
             changes: watch::channel(0).0,
         });
         let sync = Self { watchers: watch_network(&inner), inner };
+        #[cfg(test)]
+        if let Network::Loopback(lookup) = network {
+            lookup.add_endpoint_info(sync.loopback_addr());
+        }
         let reopened = {
             let mut group = sync.inner.group.lock().await;
             match group.file.namespace.as_deref().map(NamespaceId::from_str) {

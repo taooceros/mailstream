@@ -100,6 +100,41 @@ pub struct SyncStatus {
     pub push_connected: bool,
 }
 
+/// A device in the cross-device settings sync group (`DeviceSyncStatus::devices`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncDevice {
+    pub id: String,
+    pub name: String,
+    pub platform: String,
+    /// ISO 8601.
+    pub last_seen: String,
+}
+
+/// Cross-device settings sync (`sync.status`, `sync.enable`, …).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceSyncStatus {
+    /// False while another Mailstream process on this machine holds device sync, or in shots mode.
+    pub available: bool,
+    /// Paired in a sync group and not paused.
+    pub enabled: bool,
+    pub paused: bool,
+    pub endpoint_id: Option<String>,
+    pub namespace: Option<String>,
+    pub devices: Vec<SyncDevice>,
+    /// ISO 8601 of the last sync activity.
+    pub last_sync: Option<String>,
+    /// Why device sync could not open or last failed, if any.
+    pub problem: Option<String>,
+}
+
+/// Pairing ticket for another device (`sync.pair_ticket`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
+pub struct SyncTicket {
+    pub ticket: String,
+}
+
 /// Someone from the accounts' Google and Outlook directories or recent correspondents.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
 pub struct Person {

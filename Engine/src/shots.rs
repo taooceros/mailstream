@@ -94,6 +94,7 @@ pub(crate) fn config(mut config: Config) -> Config {
     config.oauth.token_endpoint = Some(format!("{}/token", server.base));
     config.endpoints = fake_server::endpoints(&server.base);
     config.push = push::PushConfig::default();
+    config.device_sync = None;
     config.oauth.open_url = Arc::new(consent);
     // A port of its own, so a run never meets the app's sign-in or another run's.
     config.oauth.redirect_port =

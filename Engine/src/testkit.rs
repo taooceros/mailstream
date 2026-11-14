@@ -68,6 +68,7 @@ pub fn config(oauth: OAuthConfig) -> TestConfig {
         avatar_web: Arc::new(avatars::tests::FakeWeb::default()),
         // The test of the socket turns it on.
         control_socket: false,
+        device_sync: None,
     })
 }
 

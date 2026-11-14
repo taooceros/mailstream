@@ -81,6 +81,8 @@ pub enum Handler {
     Chat,
     /// Calendars (`calendar::CalendarStore::run`).
     Calendar,
+    /// Cross-device settings sync (`device_sync::DeviceSync::run`).
+    Sync,
 }
 
 /// One command.
@@ -678,6 +680,49 @@ pub const COMMANDS: &[Spec] = &[
         Handler::Calendar,
         "Deletes an event the account organizes (one occurrence of a recurring one); its guests are told it is cancelled.",
         &[ACCOUNT_ADDRESS, EVENT_CALENDAR, EVENT_ID, YES],
+    ),
+    Spec::new(
+        "sync.status",
+        Handler::Sync,
+        "Cross-device settings sync state: enabled, endpoint id, paired devices and last sync time.",
+        &[],
+    ),
+    Spec::new(
+        "sync.enable",
+        Handler::Sync,
+        "Starts a new device sync group or resumes syncing.",
+        &[],
+    ),
+    Spec::new(
+        "sync.disable",
+        Handler::Sync,
+        "Pauses device sync until re-enabled.",
+        &[],
+    ),
+    Spec::new(
+        "sync.pair_ticket",
+        Handler::Sync,
+        "Creates a pairing ticket for another device to join this sync group.",
+        &[],
+    ),
+    Spec::new(
+        "sync.join",
+        Handler::Sync,
+        "Joins another device's sync group using its pairing ticket and syncs at once.",
+        &[Argument::new("ticket", Kind::String, "Pairing ticket from `mailstream sync pair_ticket`.").positional()],
+    ),
+    Spec::new(
+        "sync.reset",
+        Handler::Sync,
+        "Creates a new sync group carrying over current settings, dropping previously paired devices.",
+        &[YES],
+    )
+    .confirmed(),
+    Spec::new(
+        "sync.now",
+        Handler::Sync,
+        "Reconciles with paired devices now.",
+        &[],
     ),
 ];
 

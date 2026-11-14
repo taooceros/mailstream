@@ -187,6 +187,8 @@ pub enum Event {
     Calendar,
     /// Auto-read marked conversations read, or some were put back ([`Mailstream::auto_read_log`]).
     AutoRead,
+    /// Cross-device settings sync state or paired devices changed.
+    DeviceSync,
     /// A kind this build does not know yet.
     Other { name: String },
 }
@@ -206,6 +208,7 @@ impl Event {
             "chatMessages" => Self::ChatMessages,
             "calendar" => Self::Calendar,
             "autoRead" => Self::AutoRead,
+            "deviceSync" => Self::DeviceSync,
             _ => Self::Other { name: name.into() },
         }
     }
@@ -607,6 +610,29 @@ commands! {
     fn calendar_delete(account: String, calendar: String, id: String, confirm: bool) = "calendar.delete" {
         "account": account, "calendar": calendar, "id": id, "yes": confirm
     };
+
+    /// Cross-device settings sync status: whether enabled, this device's id, paired devices
+    /// and last sync time.
+    fn sync_status() -> DeviceSyncStatus = "sync.status" {};
+
+    /// Starts a new device sync group or resumes syncing if paused.
+    fn sync_enable() -> DeviceSyncStatus = "sync.enable" {};
+
+    /// Pauses device sync until [`Mailstream::sync_enable`] is called.
+    fn sync_disable() -> DeviceSyncStatus = "sync.disable" {};
+
+    /// Generates a pairing ticket for another device to join this sync group.
+    fn sync_pair_ticket() -> SyncTicket = "sync.pair_ticket" {};
+
+    /// Imports another device's pairing `ticket`, joins its sync group and syncs at once.
+    fn sync_join(ticket: String) -> DeviceSyncStatus = "sync.join" { "ticket": ticket };
+
+    /// Starts a new sync group carrying over current synced settings, revoking older paired
+    /// devices. `confirm` is the person's go-ahead.
+    fn sync_reset(confirm: bool) -> DeviceSyncStatus = "sync.reset" { "yes": confirm };
+
+    /// Triggers reconciliation with paired devices immediately.
+    fn sync_now() -> DeviceSyncStatus = "sync.now" {};
 }
 
 

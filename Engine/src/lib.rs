@@ -28,6 +28,7 @@ pub mod chat_markup;
 pub mod commands;
 mod content;
 pub mod control;
+pub mod device_sync;
 pub mod display;
 // The providers' stand-in: the tests' and the screenshot mode's (`shots`).
 #[cfg(any(test, feature = "shots"))]
@@ -68,6 +69,8 @@ mod push_tests;
 mod chat_tests;
 #[cfg(test)]
 mod peer_sync_tests;
+#[cfg(test)]
+mod device_sync_tests;
 // Runs a shell-script omp (`omp::tests::fake_omp`).
 #[cfg(all(test, unix))]
 mod tagging_tests;
@@ -154,6 +157,8 @@ pub struct Config {
     pub avatar_web: Arc<dyn avatars::web::Web>,
     /// Serves the control socket in `support_directory` whenever no other process does.
     pub control_socket: bool,
+    /// Cross-device settings sync network; `None` in `shots` mode and unit tests that don't sync.
+    pub device_sync: Option<peer_sync::Network>,
 }
 
 impl Config {
@@ -182,6 +187,7 @@ impl Config {
                 .unwrap_or_else(|| PathBuf::from(omp::APPLE_TAGGER)),
             avatar_web: avatars::web::Internet::shared(),
             control_socket: true,
+            device_sync: Some(peer_sync::Network::Public),
         };
         #[cfg(feature = "shots")]
         let config = shots::config(config);
@@ -263,6 +269,7 @@ struct Core {
     chat: Arc<chat::Chat>,
     calendar: Arc<calendar::CalendarStore>,
     avatars: Arc<avatars::Avatars>,
+    device_sync: Option<Arc<device_sync::DeviceSync>>,
 }
 
 /// One engine; the FFI host keeps one per process.
@@ -345,6 +352,24 @@ impl Engine {
             accounts.clone(),
             events.clone(),
         ));
+        let device_sync = config.device_sync.clone().filter(|_| {
+            #[cfg(feature = "shots")]
+            {
+                !shots::running()
+            }
+            #[cfg(not(feature = "shots"))]
+            {
+                true
+            }
+        }).map(|network| {
+            device_sync::DeviceSync::start(
+                directory.clone(),
+                network,
+                settings.clone(),
+                events.clone(),
+            )
+        });
+        let bridge_sync = device_sync.as_ref().map(Arc::downgrade);
         let (reschedule, chat_interval) = (Arc::downgrade(&polling), Arc::downgrade(&chat));
         events.listen(move |event| {
             if event != "settings" {
@@ -355,6 +380,9 @@ impl Engine {
             }
             if let Some(chat) = chat_interval.upgrade() {
                 chat.settings_changed();
+            }
+            if let Some(sync) = bridge_sync.as_ref().and_then(std::sync::Weak::upgrade) {
+                sync.settings_changed();
             }
         });
         let core = Arc::new(Core {
@@ -369,6 +397,7 @@ impl Engine {
             chat: chat.clone(),
             calendar: calendar.clone(),
             avatars,
+            device_sync,
         });
         let watcher = Self::follow_settings(&core);
         runtime.spawn(mail.start());
@@ -457,6 +486,14 @@ impl Engine {
     }
 }
 
+impl Drop for Engine {
+    fn drop(&mut self) {
+        if let Some(device_sync) = self.core.device_sync.clone() {
+            self.runtime.block_on(device_sync.shutdown());
+        }
+    }
+}
+
 impl Core {
     async fn handle(&self, command: &str, args: Value) -> Result<Value, EngineError> {
         let spec = commands::spec(command)?;
@@ -480,6 +517,20 @@ impl Core {
             Handler::Avatars => self.avatars.command(&args).await,
             Handler::Chat => self.chat.run(command, &args).await,
             Handler::Calendar => self.calendar.run(command, &args).await,
+            Handler::Sync => match &self.device_sync {
+                Some(device_sync) => device_sync.run(command, &args).await,
+                None if command == "sync.status" => Ok(answers::json(&answers::DeviceSyncStatus {
+                    available: false,
+                    enabled: false,
+                    paused: false,
+                    endpoint_id: None,
+                    namespace: None,
+                    devices: Vec::new(),
+                    last_sync: None,
+                    problem: Some("Device sync is disabled in this mode.".into()),
+                })),
+                None => Err(EngineError::new("unavailable", "Device sync is disabled in this mode.")),
+            },
         }
     }
 
