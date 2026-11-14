@@ -1,8 +1,9 @@
-//! AI tags synced with Gmail labels and Outlook categories end to end (MS-172): an engine in a
-//! throwaway folder against a fake Gmail that keeps its labels, its messages' labels and their
-//! history, and a fake Outlook that keeps its messages' categories, tagging with the fake omp
-//! of `tagging_tests`. Also the providers' own sorting as the tagger's hint and the lists'
-//! provisional tag (MS-336), which never reaches the server.
+//! AI tags synced with Gmail labels and Outlook categories end to end (MS-172), topic labels
+//! as `Mailstream/<topic>` and on by default (MS-341): an engine in a throwaway folder against a
+//! fake Gmail that keeps its labels, its messages' labels and their history, and a fake Outlook
+//! that keeps its messages' categories, tagging with the fake omp of `tagging_tests`. Also the
+//! providers' own sorting as the tagger's hint and the lists' provisional tag (MS-336), which
+//! never reaches the server.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
@@ -143,29 +144,40 @@ fn list(engine: &crate::Engine) -> Vec<Value> {
 
 /// The conversation of message `n` as listed: (category, waiting).
 fn tag(engine: &crate::Engine, n: usize) -> (Value, Value) {
-    let id = format!("me@gmail.com|i{n}@x");
-    let conversation = list(engine).into_iter().find(|conversation| conversation["id"] == id.as_str()).unwrap();
+    let conversation = listed(engine, n);
     (conversation["category"].clone(), conversation["waiting"].clone())
+}
+
+fn listed(engine: &crate::Engine, n: usize) -> Value {
+    let id = format!("me@gmail.com|i{n}@x");
+    list(engine).into_iter().find(|conversation| conversation["id"] == id.as_str()).unwrap()
+}
+
+/// The topic labels of message `n`'s conversation as listed.
+fn topics(engine: &crate::Engine, n: usize) -> Value {
+    listed(engine, n)["labels"].clone()
 }
 
 #[test]
 fn syncs_tags_with_gmail_labels_both_ways() {
     let names = |names: &[&str]| names.iter().map(|name| name.to_string()).collect::<BTreeSet<_>>();
-    // i0 already carries the user's own `newsletters` label (another device tagged it); i4
-    // carries `Receipts`, which sync never touches; the user also has an `INVITATIONS` label.
+    // i0 already carries the user's own `newsletters` label and a topic (another device tagged
+    // it); i4 carries `Receipts`, which sync never touches; the user also has an `INVITATIONS`
+    // label. No account is set to sync: every account does unless listed as local only.
     let gmail = Arc::new(Mutex::new(Gmail {
         labels: BTreeMap::from([
             ("Label_1".into(), "newsletters".into()),
             ("Label_2".into(), "Receipts".into()),
             ("Label_3".into(), "INVITATIONS".into()),
+            ("Label_4".into(), "Mailstream/Travel".into()),
         ]),
         messages: (0..5)
             .map(|n| {
                 let mut labels = BTreeSet::from(["INBOX".to_string()]);
                 match n {
-                    0 => labels.insert("Label_1".into()),
-                    4 => labels.insert("Label_2".into()),
-                    _ => false,
+                    0 => labels.extend(["Label_1".to_string(), "Label_4".to_string()]),
+                    4 => labels.extend(["Label_2".to_string()]),
+                    _ => {}
                 };
                 (format!("i{n}"), labels)
             })
@@ -180,45 +192,70 @@ fn syncs_tags_with_gmail_labels_both_ways() {
     let omp = fake_omp(&dir);
     call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
     call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": omp.display().to_string() })).unwrap();
-    call(&engine, "config.set", json!({ "key": "aiTagging.syncAccounts", "value": "[\"Me@Gmail.com\"]" })).unwrap();
     wait_until("the inbox", || call(&engine, "mail.list", json!({ "limit": 100, "cached": true })).is_ok_and(|listed| {
         listed["conversations"].as_array().unwrap().len() == 5
     }));
 
-    // The conversation another device tagged takes the server's tag and is not sent to the
-    // model; the model's tags go to Gmail, in labels made for the names Gmail lacked.
+    // The conversation another device tagged takes the server's tag and topic and is not sent
+    // to the model; the model's tags and topics go to Gmail, in labels made for the names Gmail
+    // lacked, a topic's under a Mailstream label made for it.
     call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "true" })).unwrap();
     wait_until("tags on the server", || {
         let gmail = gmail.lock().unwrap();
-        gmail.names("i1") == names(&["People", "Waiting on you"]) && gmail.names("i4") == names(&["Notifications", "Receipts"])
+        gmail.names("i1") == names(&["People", "Waiting on you", "Mailstream/Work"])
+            && gmail.names("i4") == names(&["Notifications", "Receipts"])
     });
     assert_eq!(counts(&dir), [4]);
     assert_eq!(tag(&engine, 0), (json!("newsletter"), json!(false)));
+    assert_eq!(topics(&engine, 0), json!(["Travel"]));
     assert_eq!(tag(&engine, 1), (json!("people"), json!(true)));
     {
         let gmail = gmail.lock().unwrap();
         // The lapsed ask doesn't wait; the conversation the model skipped stays bare.
         assert_eq!(gmail.names("i2"), names(&["People"]));
         assert_eq!(gmail.names("i3"), names(&[]));
-        assert_eq!(gmail.names("i0"), names(&["newsletters"]));
+        assert_eq!(gmail.names("i0"), names(&["Mailstream/Travel", "newsletters"]));
         let made: BTreeSet<String> = gmail.labels.values().cloned().collect();
-        assert_eq!(made, names(&["INVITATIONS", "Notifications", "People", "Receipts", "Waiting on you", "newsletters"]));
+        assert_eq!(
+            made,
+            names(&[
+                "INVITATIONS", "Mailstream", "Mailstream/Travel", "Mailstream/Work", "Notifications", "People", "Receipts",
+                "Waiting on you", "newsletters",
+            ])
+        );
+        // The parent before its child.
+        assert!(gmail.label("Mailstream").unwrap() < gmail.label("Mailstream/Work").unwrap());
     }
 
-    // Changed in Gmail (another device, or the user there): the server's tag wins here.
+    // Changed in Gmail (another device, or the user there): the server's tag and topics win
+    // here, a topic taken off there included.
     std::thread::sleep(Duration::from_millis(1500));
     {
         let mut gmail = gmail.lock().unwrap();
         let people = gmail.label("People").unwrap();
-        gmail.relabel("i2", &["Label_3"], &[&people]);
+        gmail.relabel("i2", &["Label_3", "Label_4"], &[&people]);
     }
     call(&engine, "refresh", json!({})).unwrap();
-    wait_until("the server's change", || tag(&engine, 2) == (json!("invitation"), json!(false)));
+    wait_until("the server's change", || {
+        tag(&engine, 2) == (json!("invitation"), json!(false)) && topics(&engine, 2) == json!(["Travel"])
+    });
+    std::thread::sleep(Duration::from_millis(1500));
+    gmail.lock().unwrap().relabel("i2", &[], &["Label_4"]);
+    call(&engine, "refresh", json!({})).unwrap();
+    wait_until("the topic taken off", || topics(&engine, 2) == json!([]));
+    assert_eq!(tag(&engine, 2), (json!("invitation"), json!(false)));
 
-    // A correction here goes there, into the user's own label of that name.
+    // A correction here goes there, into the user's own label of that name; so do topics
+    // added and taken off here.
     let i4 = "me@gmail.com|i4@x";
     call(&engine, "mail.tag", json!({ "ids": [i4], "category": "newsletter" })).unwrap();
     wait_until("the correction on the server", || gmail.lock().unwrap().names("i4") == names(&["Receipts", "newsletters"]));
+    call(&engine, "mail.tag", json!({ "ids": [i4], "add-labels": ["Finance"] })).unwrap();
+    wait_until("the topic on the server", || {
+        gmail.lock().unwrap().names("i4") == names(&["Mailstream/Finance", "Receipts", "newsletters"])
+    });
+    call(&engine, "mail.tag", json!({ "ids": [i4], "remove-labels": ["finance"] })).unwrap();
+    wait_until("the topic off the server", || gmail.lock().unwrap().names("i4") == names(&["Receipts", "newsletters"]));
 
     // Taken off in Gmail altogether: the tag stays here and is not put back.
     std::thread::sleep(Duration::from_millis(1500));
@@ -226,26 +263,77 @@ fn syncs_tags_with_gmail_labels_both_ways() {
     let before = histories();
     {
         let mut gmail = gmail.lock().unwrap();
-        let (people, waiting) = (gmail.label("People").unwrap(), gmail.label("Waiting on you").unwrap());
-        gmail.relabel("i1", &[], &[&people, &waiting]);
+        let gone = ["People", "Waiting on you", "Mailstream/Work"].map(|name| gmail.label(name).unwrap());
+        gmail.relabel("i1", &[], &gone.each_ref().map(String::as_str));
     }
     call(&engine, "refresh", json!({})).unwrap();
     wait_until("the removal read", || histories() > before);
     std::thread::sleep(Duration::from_millis(2500));
     assert_eq!(tag(&engine, 1), (json!("people"), json!(true)));
+    assert_eq!(topics(&engine, 1), json!(["Work"]));
     assert_eq!(gmail.lock().unwrap().names("i1"), names(&[]));
 
-    // Off for the account: corrections stay here.
-    call(&engine, "config.set", json!({ "key": "aiTagging.syncAccounts", "value": "[]" })).unwrap();
-    call(&engine, "mail.tag", json!({ "ids": ["me@gmail.com|i3@x"], "category": "people" })).unwrap();
+    // Local only for the account: corrections stay here.
+    call(&engine, "config.set", json!({ "key": "aiTagging.localOnlyAccounts", "value": "[\"Me@Gmail.com\"]" })).unwrap();
+    call(&engine, "mail.tag", json!({ "ids": ["me@gmail.com|i3@x"], "category": "people", "labels": ["Home"] })).unwrap();
     std::thread::sleep(Duration::from_millis(1500));
     assert_eq!(gmail.lock().unwrap().names("i3"), names(&[]));
 
     // No label was ever deleted.
     assert!(server.requests.lock().unwrap().iter().all(|request| request.method != "DELETE"));
-    assert_eq!(gmail.lock().unwrap().labels.len(), 6);
+    assert_eq!(gmail.lock().unwrap().labels.len(), 10);
     drop(engine);
     cleanup(&config);
+}
+
+/// Two devices, each an engine with a data folder of its own, on one Gmail account: what one
+/// tags, or the user corrects there, category and topics, shows on the other (MS-341).
+#[test]
+fn two_devices_share_tags_through_gmail() {
+    let gmail = Arc::new(Mutex::new(Gmail {
+        labels: BTreeMap::new(),
+        messages: (0..5).map(|n| (format!("i{n}"), BTreeSet::from(["INBOX".to_string()]))).collect(),
+        history: Vec::new(),
+        made: 0,
+    }));
+    let server = server(gmail.clone());
+    let start = |omp: fn(&std::path::Path) -> std::path::PathBuf| {
+        let (engine, config) = engine_for(&server, &[("me@gmail.com", "google")]);
+        let dir = config.support_directory.parent().unwrap().join("omp");
+        std::fs::create_dir_all(&dir).unwrap();
+        call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
+        call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": omp(&dir).display().to_string() })).unwrap();
+        wait_until("the inbox", || call(&engine, "mail.list", json!({ "limit": 100, "cached": true })).is_ok_and(|listed| {
+            listed["conversations"].as_array().unwrap().len() == 5
+        }));
+        (engine, config, dir)
+    };
+    // The laptop tags with its model; the desktop's model is unreachable, so all it shows it
+    // took from the server.
+    let (laptop, laptop_config, laptop_omp) = start(fake_omp);
+    let (desktop, desktop_config, _) = start(offline_omp);
+    call(&laptop, "config.set", json!({ "key": "aiTagging.enabled", "value": "true" })).unwrap();
+    wait_until("the laptop's tags on the server", || gmail.lock().unwrap().names("i4").contains("Notifications"));
+    call(&desktop, "refresh", json!({})).unwrap();
+    call(&desktop, "config.set", json!({ "key": "aiTagging.enabled", "value": "true" })).unwrap();
+    let same = |n: usize| (tag(&desktop, n), topics(&desktop, n)) == (tag(&laptop, n), topics(&laptop, n));
+    wait_until("the laptop's tags on the desktop", || [0, 1, 3, 4].into_iter().all(same));
+    assert_eq!(tag(&desktop, 4).0, "notification");
+    assert_eq!(topics(&desktop, 0), json!(["Work"]));
+    assert_eq!(counts(&laptop_omp), [5]);
+
+    // Corrected on the desktop: the laptop follows once it hears from Gmail.
+    std::thread::sleep(Duration::from_millis(1500));
+    let i0 = "me@gmail.com|i0@x";
+    call(&desktop, "mail.tag", json!({ "ids": [i0], "category": "invitation", "add-labels": ["Trip"] })).unwrap();
+    wait_until("the correction on the server", || gmail.lock().unwrap().names("i0").contains("Mailstream/Trip"));
+    call(&laptop, "refresh", json!({})).unwrap();
+    wait_until("the correction on the laptop", || {
+        tag(&laptop, 0) == (json!("invitation"), json!(true)) && topics(&laptop, 0) == json!(["Trip", "Work"])
+    });
+    drop((laptop, desktop));
+    cleanup(&laptop_config);
+    cleanup(&desktop_config);
 }
 
 /// Outlook as the engine calls it: the inbox, its messages with their categories, and `$batch`
@@ -318,9 +406,10 @@ fn outlook(categories: Arc<Mutex<BTreeMap<String, Vec<String>>>>) -> FakeServer 
 #[test]
 fn syncs_tags_with_outlook_categories() {
     let names = |names: &[&str]| names.iter().map(|name| name.to_string()).collect::<Vec<_>>();
-    // g1 carries the user's own category and `people` from another device.
+    // g1 carries the user's own category, and `people` with a topic from another device. Every
+    // account syncs unless listed as local only.
     let categories = Arc::new(Mutex::new(BTreeMap::from([
-        ("g1".to_string(), names(&["Red category", "people"])),
+        ("g1".to_string(), names(&["Red category", "people", "Mailstream/Bills"])),
         ("g2".to_string(), names(&["Blue category"])),
     ])));
     let server = outlook(categories.clone());
@@ -330,20 +419,29 @@ fn syncs_tags_with_outlook_categories() {
     let omp = fake_omp(&dir);
     call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
     call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": omp.display().to_string() })).unwrap();
-    call(&engine, "config.set", json!({ "key": "aiTagging.syncAccounts", "value": "me@outlook.com" })).unwrap();
     let listed = || call(&engine, "mail.list", json!({ "limit": 10, "cached": true })).map(|listed| listed["conversations"].clone());
     wait_until("the inbox", || listed().is_ok_and(|conversations| conversations.as_array().unwrap().len() == 2));
 
-    // g1 takes the server's tag; only g2 goes to the model, and its tag joins its categories.
+    // g1 takes the server's tag and topic; only g2 goes to the model, and its tag and topic join
+    // its categories.
     call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "true" })).unwrap();
-    wait_until("categories", || categories.lock().unwrap()["g2"] == names(&["Blue category", "People", "Waiting on you"]));
+    wait_until("categories", || {
+        categories.lock().unwrap()["g2"] == names(&["Blue category", "People", "Waiting on you", "Mailstream/Work"])
+    });
     assert_eq!(counts(&dir), [1]);
     let conversations = listed().unwrap();
-    assert_eq!((&conversations[1]["category"], &conversations[1]["waiting"]), (&json!("people"), &json!(false)));
+    assert_eq!(
+        (&conversations[1]["category"], &conversations[1]["waiting"], &conversations[1]["labels"]),
+        (&json!("people"), &json!(false), &json!(["Bills"]))
+    );
 
-    // A correction replaces the old name however it was spelled, and keeps the user's own.
-    call(&engine, "mail.tag", json!({ "ids": ["me@outlook.com|g1@outlook"], "category": "notification" })).unwrap();
-    wait_until("the correction", || categories.lock().unwrap()["g1"] == names(&["Red category", "Notifications"]));
+    // A correction replaces the old name however it was spelled, and keeps the user's own; a
+    // topic taken off here comes off there.
+    let g1 = "me@outlook.com|g1@outlook";
+    call(&engine, "mail.tag", json!({ "ids": [g1], "category": "notification" })).unwrap();
+    wait_until("the correction", || categories.lock().unwrap()["g1"] == names(&["Red category", "Mailstream/Bills", "Notifications"]));
+    call(&engine, "mail.tag", json!({ "ids": [g1], "remove-labels": ["Bills"] })).unwrap();
+    wait_until("the topic taken off", || categories.lock().unwrap()["g1"] == names(&["Red category", "Notifications"]));
     drop(engine);
     cleanup(&config);
 }
@@ -390,7 +488,6 @@ fn stands_in_with_gmail_categories_until_the_model_answers() {
     let offline = offline_omp(&dir);
     call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
     call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": offline.display().to_string() })).unwrap();
-    call(&engine, "config.set", json!({ "key": "aiTagging.syncAccounts", "value": "[\"me@gmail.com\"]" })).unwrap();
     wait_until("the inbox", || call(&engine, "mail.list", json!({ "limit": 100, "cached": true })).is_ok_and(|listed| {
         listed["conversations"].as_array().unwrap().len() == 6
     }));

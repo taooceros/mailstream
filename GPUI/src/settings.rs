@@ -161,7 +161,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
 const FLUTTER_ONLY: &str = "flutter.";
 
 const AI_TAGGING: &str = "aiTagging.enabled";
-const SYNC_ACCOUNTS: &str = "aiTagging.syncAccounts";
+const LOCAL_ONLY_ACCOUNTS: &str = "aiTagging.localOnlyAccounts";
 const AUTO_READ: &str = "autoRead.enabled";
 const AUTO_READ_DAYS: &str = "autoRead.days";
 /// Where the auto-read log's error goes in `Settings::errors`.
@@ -181,7 +181,7 @@ fn title(key: &str) -> &str {
         "aiTagging.batchSize" => "Batch size",
         "aiTagging.passLimit" => "Conversations per pass",
         "aiTagging.backoffSeconds" => "Wait after a failed run",
-        "aiTagging.syncAccounts" => "Sync tags with the server",
+        "aiTagging.localOnlyAccounts" => "Sync tags with the server",
         "autoRead.enabled" => "Mark stale notifications and newsletters read",
         "autoRead.days" => "Days before marking read",
         "remoteContent.trustedSenders" => "Trusted senders",
@@ -451,7 +451,7 @@ impl Settings {
             .filter_map(|entry| match &entry.value {
                 SettingValue::Number { value } => Some((entry.key.clone(), value.to_string().into())),
                 SettingValue::Text { text } if entry.choices.is_empty() => Some((entry.key.clone(), text.clone().into())),
-                SettingValue::Addresses { .. } if entry.key != SYNC_ACCOUNTS => {
+                SettingValue::Addresses { .. } if entry.key != LOCAL_ONLY_ACCOUNTS => {
                     Some((format!("{}{ADD}", entry.key), SharedString::default()))
                 }
                 _ => None,
@@ -1170,7 +1170,7 @@ impl Settings {
     }
 
     fn render_entry(&self, entry: &SettingEntry, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if entry.key == SYNC_ACCOUNTS {
+        if entry.key == LOCAL_ONLY_ACCOUNTS {
             return self.render_sync_accounts(entry, p, cx);
         }
         let key = entry.key.clone();
@@ -1316,11 +1316,12 @@ impl Settings {
             )
     }
 
-    /// `aiTagging.syncAccounts` as a switch per mail account: on, that account's AI tags sync both
-    /// ways with its Gmail labels or Outlook categories. Accounts listed but no longer signed in
-    /// show too, so they can be switched off.
+    /// `aiTagging.localOnlyAccounts` as a switch per mail account, on unless the account is
+    /// listed: on, its AI tags and topic labels sync both ways with its Gmail labels or Outlook
+    /// categories. Accounts listed but no longer signed in show too, switched off, so switching
+    /// them on takes them off the list.
     fn render_sync_accounts(&self, entry: &SettingEntry, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let listed: Vec<String> = match &entry.value {
+        let local_only: Vec<String> = match &entry.value {
             SettingValue::Addresses { addresses } => addresses.clone(),
             _ => Vec::new(),
         };
@@ -1333,7 +1334,7 @@ impl Settings {
                 (account.id.to_lowercase(), format!("{}  ·  {what}", account.title()))
             })
             .collect();
-        for address in &listed {
+        for address in &local_only {
             if !rows.iter().any(|(a, _)| a == address) {
                 rows.push((address.clone(), format!("{address}  ·  not signed in")));
             }
@@ -1354,11 +1355,11 @@ impl Settings {
                 )
             })
             .children(rows.into_iter().map(|(address, label)| {
-                let on = listed.contains(&address);
+                let on = !local_only.contains(&address);
                 let next: Vec<String> = if on {
-                    listed.iter().filter(|a| **a != address).cloned().collect()
+                    local_only.iter().cloned().chain([address.clone()]).collect()
                 } else {
-                    listed.iter().cloned().chain([address.clone()]).collect()
+                    local_only.iter().filter(|a| **a != address).cloned().collect()
                 };
                 div()
                     .pt(px(8.))
@@ -1369,11 +1370,11 @@ impl Settings {
                     .child(div().flex_1().min_w_0().truncate().child(label))
                     .child(switch(ElementId::Name(format!("sync-{address}").into()), on).on_click(cx.listener(
                         move |this, _: &bool, _, cx| {
-                            this.write(SYNC_ACCOUNTS.into(), Some(SettingValue::Addresses { addresses: next.clone() }), cx)
+                            this.write(LOCAL_ONLY_ACCOUNTS.into(), Some(SettingValue::Addresses { addresses: next.clone() }), cx)
                         },
                     )))
             }))
-            .children(self.render_error(SYNC_ACCOUNTS, p))
+            .children(self.render_error(LOCAL_ONLY_ACCOUNTS, p))
             .into_any_element()
     }
 

@@ -12,7 +12,7 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
     case aiTaggingBatchSize = "aiTagging.batchSize"
     case aiTaggingPassLimit = "aiTagging.passLimit"
     case aiTaggingBackoffSeconds = "aiTagging.backoffSeconds"
-    case aiTaggingSyncAccounts = "aiTagging.syncAccounts"
+    case aiTaggingLocalOnlyAccounts = "aiTagging.localOnlyAccounts"
     case trustedSenders = "remoteContent.trustedSenders"
     case pollSeconds = "sync.pollSeconds"
     case pushPollSeconds = "sync.pushPollSeconds"
@@ -51,9 +51,9 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         case .aiTaggingBatchSize: (.int(1...100), 20, "Conversations sent to the model per run.")
         case .aiTaggingPassLimit: (.int(1...2000), 150, "Most conversations one tagging pass looks at, newest first.")
         case .aiTaggingBackoffSeconds: (.int(0...86_400), 300, "Wait after a failed tagging run before tagging automatically again.")
-        case .aiTaggingSyncAccounts:
+        case .aiTaggingLocalOnlyAccounts:
             (.addresses, [],
-             "Accounts whose AI tags sync with the server, both ways, as Gmail labels or Outlook categories named People, Notifications, Newsletters, Invitations and Waiting on you (an existing label of that name is used, in any case). Mail another device or the server already tagged is not tagged again here. Labels are never deleted.")
+             "Accounts whose AI tags stay on this device. Every other Gmail and Outlook account's tags sync with the server both ways, so your other devices show them and don't tag that mail again: as labels or categories named People, Notifications, Newsletters, Invitations and Waiting on you (an existing one of that name is used, in any case), and topic labels as Mailstream/<topic>. Labels are never deleted.")
         case .trustedSenders:
             (.addresses, [],
              "Senders whose remote images and fonts always load, besides your own addresses and people you wrote to.")
@@ -194,6 +194,10 @@ nonisolated enum SettingsFile {
     static let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appending(path: "Mailstream", directoryHint: .isDirectory)
     static let url = directory.appending(path: "settings.json")
+    /// Keys earlier versions wrote that mean nothing now: read without an issue and dropped when
+    /// the file is next written. `aiTagging.syncAccounts` listed the accounts that synced tags,
+    /// until every account did (`aiTagging.localOnlyAccounts`, MS-341).
+    static let retired: Set<String> = ["aiTagging.syncAccounts"]
 
     /// The file's object as written; empty when there is no file.
     static func readRaw() throws -> [String: JSON] {
@@ -227,7 +231,7 @@ nonisolated enum SettingsFile {
         var issues: [String] = []
         for (key, value) in raw.sorted(by: { $0.key < $1.key }) {
             guard let setting = Setting(rawValue: key) else {
-                issues.append("Unknown setting \"\(key)\" is ignored.")
+                if !retired.contains(key) { issues.append("Unknown setting \"\(key)\" is ignored.") }
                 continue
             }
             do {
@@ -239,10 +243,10 @@ nonisolated enum SettingsFile {
         return (values, issues)
     }
 
-    /// Sets (or with nil, removes) one key, keeping everything else in the file as it was.
-    /// Writing a default value removes the key, so the file lists only real changes.
+    /// Sets (or with nil, removes) one key, keeping everything else in the file as it was but
+    /// `retired` keys. Writing a default value removes the key, so the file lists only real changes.
     static func update(_ setting: Setting, to value: JSON?) throws {
-        var raw = try readRaw()
+        var raw = try readRaw().filter { !retired.contains($0.key) }
         let normalized = try value.map(setting.validate)
         if let normalized, normalized != setting.defaultValue {
             raw[setting.rawValue] = normalized

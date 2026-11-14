@@ -99,8 +99,9 @@ fn marks_stale_notifications_and_newsletters_read_and_undoes() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let heard = events.clone();
     engine.subscribe(move |event| heard.lock().unwrap().push(event));
-    // No omp: tagging fails and leaves the tags below as they are.
+    // No omp: tagging fails and leaves the tags below as they are, which stay off the server.
     call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": "/nonexistent/omp" })).unwrap();
+    call(&engine, "config.set", json!({ "key": "aiTagging.localOnlyAccounts", "value": "[\"me@gmail.com\"]" })).unwrap();
     wait_until("the inbox", || unread(&engine).len() == 5);
     for (message, category, waiting) in [
         ("n1", "newsletter", false),

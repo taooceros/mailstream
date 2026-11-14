@@ -12,6 +12,11 @@ use crate::answers::{self, SettingEntry, SettingValue};
 use crate::EngineError;
 use crate::files;
 
+/// Keys earlier versions wrote that mean nothing now: read without an issue and dropped when the
+/// file is next written. `aiTagging.syncAccounts` listed the accounts that synced tags, until
+/// every account did (`aiTagging.localOnlyAccounts`, MS-341).
+const RETIRED: [&str; 1] = ["aiTagging.syncAccounts"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Setting {
     AiTaggingEnabled,
@@ -21,7 +26,7 @@ pub enum Setting {
     AiTaggingBatchSize,
     AiTaggingPassLimit,
     AiTaggingBackoffSeconds,
-    AiTaggingSyncAccounts,
+    AiTaggingLocalOnlyAccounts,
     TrustedSenders,
     PollSeconds,
     PushPollSeconds,
@@ -59,7 +64,7 @@ impl Setting {
         Self::AiTaggingBatchSize,
         Self::AiTaggingPassLimit,
         Self::AiTaggingBackoffSeconds,
-        Self::AiTaggingSyncAccounts,
+        Self::AiTaggingLocalOnlyAccounts,
         Self::TrustedSenders,
         Self::PollSeconds,
         Self::PushPollSeconds,
@@ -83,7 +88,7 @@ impl Setting {
             Self::AiTaggingBatchSize => "aiTagging.batchSize",
             Self::AiTaggingPassLimit => "aiTagging.passLimit",
             Self::AiTaggingBackoffSeconds => "aiTagging.backoffSeconds",
-            Self::AiTaggingSyncAccounts => "aiTagging.syncAccounts",
+            Self::AiTaggingLocalOnlyAccounts => "aiTagging.localOnlyAccounts",
             Self::TrustedSenders => "remoteContent.trustedSenders",
             Self::PollSeconds => "sync.pollSeconds",
             Self::PushPollSeconds => "sync.pushPollSeconds",
@@ -129,10 +134,10 @@ impl Setting {
                 json!(300),
                 "Wait after a failed tagging run before tagging automatically again.",
             ),
-            Self::AiTaggingSyncAccounts => (
+            Self::AiTaggingLocalOnlyAccounts => (
                 Kind::Addresses,
                 json!([]),
-                "Accounts whose AI tags sync with the server, both ways, as Gmail labels or Outlook categories named People, Notifications, Newsletters, Invitations and Waiting on you (an existing label of that name is used, in any case). Mail another device or the server already tagged is not tagged again here. Labels are never deleted.",
+                "Accounts whose AI tags stay on this device. Every other Gmail and Outlook account's tags sync with the server both ways, so your other devices show them and don't tag that mail again: as labels or categories named People, Notifications, Newsletters, Invitations and Waiting on you (an existing one of that name is used, in any case), and topic labels as Mailstream/<topic>. Labels are never deleted.",
             ),
             Self::TrustedSenders => (
                 Kind::Addresses,
@@ -435,7 +440,9 @@ impl SettingsFile {
         let mut issues = Vec::new();
         for (key, value) in &raw {
             let Some(setting) = Setting::named(key) else {
-                issues.push(format!("Unknown setting \"{key}\" is ignored."));
+                if !RETIRED.contains(&key.as_str()) {
+                    issues.push(format!("Unknown setting \"{key}\" is ignored."));
+                }
                 continue;
             };
             match setting.validate(value) {
@@ -448,10 +455,13 @@ impl SettingsFile {
         (values, issues)
     }
 
-    /// Sets (or with `None`, removes) one key, keeping everything else in the file as it was.
-    /// Writing a default value removes the key, so the file lists only real changes.
+    /// Sets (or with `None`, removes) one key, keeping everything else in the file as it was but
+    /// `RETIRED` keys. Writing a default value removes the key, so the file lists only real changes.
     pub fn update(&self, setting: Setting, value: Option<&Value>) -> Result<(), EngineError> {
         let mut raw = self.read_raw()?;
+        for key in RETIRED {
+            raw.remove(key);
+        }
         let normalized = value.map(|value| setting.validate(value)).transpose()?;
         match normalized {
             Some(normalized) if normalized != setting.default_value() => {
@@ -622,7 +632,9 @@ mod tests {
     fn writes_only_changes_and_keeps_unknown_keys() {
         let dir = temp();
         let path = dir.join("settings.json");
-        std::fs::write(&path, "{\"other\": [1, 2], \"sync.pollSeconds\": 7}").unwrap();
+        // A retired key raises no issue and is gone once the file is written.
+        std::fs::write(&path, "{\"other\": [1, 2], \"sync.pollSeconds\": 7, \"aiTagging.syncAccounts\": [\"a@x.com\"]}")
+            .unwrap();
         let settings = Settings::new(&dir);
         assert_eq!(
             settings.issues(),

@@ -11,9 +11,10 @@
 //! changed to mail.db's `tags` table and reads them all again when any process says it wrote
 //! (`ProcessSignal::TAGS`), so a tag set in one engine shows in the others, Swift or Rust.
 //!
-//! For the accounts `aiTagging.syncAccounts` lists, each pass first syncs the tags with the
-//! server as Gmail labels or Outlook categories (`tagsync`): a conversation the server already
-//! tags takes that tag and is not sent to the model, and tags made here go there.
+//! For every account but those `aiTagging.localOnlyAccounts` lists (MS-341), each pass first
+//! syncs the tags, topic labels included, with the server as Gmail labels or Outlook categories
+//! (`tagsync`): a conversation the server already tags takes that tag and is not sent to the
+//! model, and tags made here go there.
 //!
 //! How the provider itself sorted the mail (Gmail's inbox categories and Important, Outlook's
 //! Focused Inbox; MS-336) goes to the model as a hint, and lists show a conversation the tagger
@@ -155,7 +156,7 @@ struct State {
     /// `candidates` reflects the list's last change; false until first read, and after a
     /// change while tagging was off.
     fresh: bool,
-    /// The `aiTagging.syncAccounts` value last seen.
+    /// The `aiTagging.localOnlyAccounts` value last seen.
     sync_value: Value,
     /// Keys pushed lately (`PUSH_GRACE`).
     pushed: HashMap<String, Instant>,
@@ -200,7 +201,7 @@ impl Tagging {
         let state = State {
             enabled: settings.value(Setting::AiTaggingEnabled) == Value::Bool(true),
             retry_values: RETRY_SETTINGS.iter().map(|setting| settings.value(*setting)).collect(),
-            sync_value: settings.value(Setting::AiTaggingSyncAccounts),
+            sync_value: settings.value(Setting::AiTaggingLocalOnlyAccounts),
             ..State::default()
         };
         let tagging = Arc::new(Self {
@@ -347,7 +348,7 @@ impl Tagging {
     fn settings_changed(self: &Arc<Self>) {
         let enabled = self.settings.value(Setting::AiTaggingEnabled) == Value::Bool(true);
         let values: Vec<Value> = RETRY_SETTINGS.iter().map(|setting| self.settings.value(*setting)).collect();
-        let sync_value = self.settings.value(Setting::AiTaggingSyncAccounts);
+        let sync_value = self.settings.value(Setting::AiTaggingLocalOnlyAccounts);
         let (retry, sync) = {
             let mut state = self.state();
             let changed = state.retry_values != values;
@@ -364,9 +365,10 @@ impl Tagging {
         }
     }
 
-    /// The lowercased addresses of the accounts whose tags sync with the server.
-    fn sync_accounts(&self) -> HashSet<String> {
-        let value = self.settings.value(Setting::AiTaggingSyncAccounts);
+    /// The lowercased addresses of the accounts whose tags stay on this device; every other
+    /// account's sync with the server.
+    fn local_only_accounts(&self) -> HashSet<String> {
+        let value = self.settings.value(Setting::AiTaggingLocalOnlyAccounts);
         value.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_lowercase).collect()
     }
 
@@ -553,13 +555,10 @@ impl Tagging {
             .collect()
     }
 
-    /// Brings the sync accounts' tags and the server's together (`tagsync`): takes the tags the
-    /// server has and this engine lacks or has older, then puts this engine's new ones there.
+    /// Brings the syncing accounts' tags and the server's together (`tagsync`): takes the tags
+    /// the server has and this engine lacks or has older, then puts this engine's new ones there.
     async fn sync_server(&self) {
-        let accounts = self.sync_accounts();
-        if accounts.is_empty() {
-            return;
-        }
+        let local_only = self.local_only_accounts();
         let candidates = self.candidates();
         let at = now();
         let pushes = {
@@ -571,7 +570,7 @@ impl Tagging {
             let mut pushes = Vec::new();
             let mut keys = HashSet::new();
             for conversation in &candidates.conversations {
-                if !accounts.contains(&conversation.account.to_lowercase()) {
+                if local_only.contains(&conversation.account.to_lowercase()) {
                     continue;
                 }
                 let key = key(conversation);
@@ -739,7 +738,7 @@ impl Tagging {
         self.save(&mut state, HashMap::from([(key, tag.clone())]));
         drop(state);
         self.events.emit_soon("tags");
-        if !tag.synced && self.sync_accounts().contains(&conversation.account.to_lowercase()) {
+        if !tag.synced && !self.local_only_accounts().contains(&conversation.account.to_lowercase()) {
             self.request();
         }
     }
@@ -841,7 +840,7 @@ impl Tagging {
 }
 
 /// A topic label as kept: trimmed, at most `omp::MAX_LABEL_LENGTH` characters; None when empty.
-fn label_text(label: &str) -> Option<String> {
+pub(crate) fn label_text(label: &str) -> Option<String> {
     let text = crate::text::prefix_characters(label.trim(), omp::MAX_LABEL_LENGTH).0.trim_end();
     (!text.is_empty()).then(|| text.to_owned())
 }

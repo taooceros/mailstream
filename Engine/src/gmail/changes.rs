@@ -107,7 +107,9 @@ impl Gmail {
 
     /// Puts the user labels named `add` on the messages and takes those named `remove` off,
     /// matching names in any case. A label `add` names that the mailbox lacks is made, shown in
-    /// Gmail's label list and on its messages; no label is ever deleted.
+    /// Gmail's label list and on its messages, with the labels it nests under (`Mailstream` for
+    /// `Mailstream/Finance`: Gmail nests a label only under one that exists); no label is ever
+    /// deleted.
     pub async fn set_tags(&self, ids: &[String], add: &[String], remove: &[String]) -> Result<(), ApiError> {
         fn find(labels: &[Label], name: &str) -> Option<String> {
             let name = name.to_lowercase();
@@ -121,7 +123,10 @@ impl Gmail {
         let mut add_ids: Vec<String> = Vec::new();
         for name in add {
             if find(&labels, name).is_none() {
-                self.create_label(name).await?;
+                let parents = name.match_indices('/').map(|(end, _)| &name[..end]);
+                for missing in parents.filter(|parent| find(&labels, parent).is_none()).chain([name.as_str()]) {
+                    self.create_label(missing).await?;
+                }
                 labels = self.cache.labels(Priority::Interactive).await?;
                 made = true;
             }
