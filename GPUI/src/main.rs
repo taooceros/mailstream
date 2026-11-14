@@ -82,7 +82,7 @@ fn main() {
         init(cx);
         #[cfg(target_os = "macos")]
         set_dock_icon();
-        cx.set_menus(menus(cx));
+        cx.set_menus(menus());
         #[cfg(target_os = "macos")]
         updater::start();
         cx.on_window_closed(|cx, _| {
@@ -137,7 +137,7 @@ fn init(cx: &mut App) {
     state::bind_keys(cx);
     blitz_body::bind_keys(cx);
     // Last: its Tab and Esc in fields come before the views' own (`text_checking::init`).
-    text_checking::init(cx, |cx| cx.set_menus(menus(cx)));
+    text_checking::init(cx, |cx| cx.set_menus(menus()));
     cx.on_action(|_: &Quit, cx| cx.quit());
 }
 
@@ -224,7 +224,7 @@ fn appearance_from_arguments() {
 
 /// The menu bar (`AppDelegate.buildMenu`). Items dispatch to the focused window's handlers, so
 /// they show the shortcuts bound in `state::bind_keys`.
-fn menus(cx: &App) -> Vec<Menu> {
+fn menus() -> Vec<Menu> {
     let mut edit = vec![
         MenuItem::os_action("Cut", Cut, OsAction::Cut),
         MenuItem::os_action("Copy", Copy, OsAction::Copy),
@@ -234,7 +234,7 @@ fn menus(cx: &App) -> Vec<Menu> {
     ];
     // Only the Mac checks text (`text_checking`).
     if cfg!(target_os = "macos") {
-        edit.extend([text_checking::menu(cx), MenuItem::separator()]);
+        edit.extend([text_checking::menu(), MenuItem::separator()]);
     }
     edit.push(MenuItem::action("Find", FocusSearch));
     vec![

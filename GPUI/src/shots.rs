@@ -47,7 +47,7 @@
 //!                            checking, `text_checking.rs`): the field underlines it
 //! predict AT TEXT            the Mac predicts the rest of the line, TEXT, at offset AT of the
 //!                            focused field, which draws it after the caret if the caret is there;
-//!                            a click forgets both, as the platform checks again
+//!                            a click, keys or typing forget both, as the field checks again
 //! accounts mail|all          what the synthetic accounts' sign-ins granted: mail alone, as a
 //!                            sign-in now asks (MS-306), or everything (the default); applies
 //!                            before the window opens, wherever the line is. Connecting a
@@ -72,10 +72,12 @@ use std::time::{Duration, Instant};
 
 use gpui::test::TestWindowExt;
 use gpui::{
-    AnyWindowHandle, Bounds, HeadlessAppContext, InlinePrediction, InputEvent, Keystroke, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, OperatingSystem, Pixels, Point, ScrollDelta, ScrollEvent,
-    TextAssistance, TouchPhase, Window, WindowAppearance, point, px, size,
+    AnyWindowHandle, Bounds, HeadlessAppContext, InputEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, OperatingSystem, Pixels, Point, ScrollDelta, ScrollEvent, TouchPhase, Window,
+    WindowAppearance, point, px, size,
 };
+
+use crate::text_checking::{self, InlinePrediction, TextAssistance};
 
 mod seed;
 
@@ -182,6 +184,9 @@ impl Shots {
         let bounds = Bounds { origin: point(px(0.), px(0.)), size: size(px(width), px(height)) };
         let (window, app) = cx.update(|cx| {
             crate::init(cx);
+            // What the Mac's spell checker finds differs between Macs: `misspelled` and `predict`
+            // stand for it.
+            text_checking::simulate_spell_checker(cx);
             crate::open_window(crate::window_options(bounds), cx)
         });
         let window: AnyWindowHandle = window.into();
@@ -506,7 +511,7 @@ impl Run {
                 return Ok(());
             }
             Command::Click(position, button, count, modifiers) => {
-                // The platform checks a field's text again after a click.
+                // A click may move a field's caret, which then checks again.
                 self.assistance = TextAssistance::default();
                 self.pointer_to(position, None);
                 for click_count in 1..=count {
@@ -539,21 +544,25 @@ impl Run {
                 self.event(ScrollEvent { position, delta, modifiers: Modifiers::default(), touch_phase: TouchPhase::Moved, ..Default::default() });
             }
             Command::Keys(keys) => {
+                self.assistance = TextAssistance::default();
                 for key in keys {
                     self.on_window(|window, cx| window.press(&key, cx));
                     self.cx.run_until_parked();
                 }
             }
-            Command::Type(text) => self.on_window(|window, cx| window.input(&text, cx)),
+            Command::Type(text) => {
+                self.assistance = TextAssistance::default();
+                self.on_window(|window, cx| window.input(&text, cx));
+            }
             Command::Misspelled(word) => {
                 self.assistance.misspellings.push(word);
                 let assistance = self.assistance.clone();
-                self.on_window(|window, _| window.simulate_text_assistance(assistance));
+                self.on_window(|window, cx| text_checking::simulate(assistance, window, cx));
             }
             Command::Predict(offset, text) => {
                 self.assistance.prediction = Some(InlinePrediction { offset, text });
                 let assistance = self.assistance.clone();
-                self.on_window(|window, _| window.simulate_text_assistance(assistance));
+                self.on_window(|window, cx| text_checking::simulate(assistance, window, cx));
             }
             Command::Size(width, height) => self.on_window(|window, cx| {
                 window.resize(size(px(width), px(height)));

@@ -1125,15 +1125,6 @@ impl Platform for MacPlatform {
         self.0.lock().keyboard_mapper.clone()
     }
 
-    // Mailstream patch (MS-318).
-    fn text_checking_settings(&self) -> gpui::TextCheckingSettings {
-        crate::text_checking::settings()
-    }
-
-    fn set_text_checking_settings(&self, settings: gpui::TextCheckingSettings) {
-        crate::text_checking::set_settings(settings);
-    }
-
     fn app_path(&self) -> Result<PathBuf> {
         unsafe {
             let bundle: *mut AnyObject = msg_send![class!(NSBundle), mainBundle];

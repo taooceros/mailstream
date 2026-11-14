@@ -39,14 +39,14 @@ shots = ["gpui/test-support", "image/png", "dep:mailstream-engine", "mailstream-
 [dev-dependencies]
 gpui = { package = "gpui-kit", version = "0.9.1", features = ["gpui-fast", "profiler", "test-support"] }
 
-# The Mac reader's other renderer, WKWebViews (`webview.rs`), the window's Liquid Glass (`glass.rs`)
-# and the Dock icon.
+# The Mac reader's other renderer, WKWebViews (`webview.rs`), the window's Liquid Glass (`glass.rs`),
+# the Dock icon and the fields' text checking (`text_checking/mac.rs`, NSSpellChecker).
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-handle = "0.6"
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL", "NSURLRequest", "NSValue", "NSGeometry", "NSError", "NSObject", "NSObjCRuntime", "NSData", "NSBundle", "NSSet", "NSDictionary", "NSUserDefaults", "NSURLResponse"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView", "NSResponder", "NSWorkspace", "NSEvent", "NSApplication", "NSImage", "NSMenu", "NSMenuItem", "NSGlassEffectView", "NSGraphics", "NSColor", "objc2-core-foundation", "NSAppearance"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL", "NSURLRequest", "NSValue", "NSGeometry", "NSError", "NSObject", "NSObjCRuntime", "NSData", "NSBundle", "NSSet", "NSDictionary", "NSUserDefaults", "NSURLResponse", "NSArray", "NSRange", "NSProcessInfo", "NSOrthography", "NSTextCheckingResult", "NSDate", "NSRunLoop"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView", "NSResponder", "NSWorkspace", "NSEvent", "NSApplication", "NSImage", "NSMenu", "NSMenuItem", "NSGlassEffectView", "NSGraphics", "NSColor", "objc2-core-foundation", "NSAppearance", "NSSpellChecker", "block2"] }
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "objc2-core-foundation", "block2", "WKWebView", "WKWebViewConfiguration", "WKPreferences", "WKWebpagePreferences", "WKNavigationDelegate", "WKNavigationAction", "WKNavigation", "WKWebsiteDataStore", "WKUIDelegate", "WKWindowFeatures", "WKFrameInfo", "WKURLSchemeHandler", "WKURLSchemeTask"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]

@@ -28,18 +28,14 @@ resolver = "3"
 # Its test (`test_display_rate_animation_frames_skip_the_inactive_limit`) runs only in a copy outside
 # this workspace, `--features profiler,test-support`, with the published crate's tests that read
 # files it doesn't ship (in `style.rs`, `svg_renderer.rs`, `platform.rs`) taken out.
-# `GPUI/vendor/gpui-fast` also carries text checking's cross-platform half (MS-318, marked "Mailstream
-# patch"): `TextAssistance`/`InlinePrediction`/`TextCheckingSettings` and their `PlatformWindow`/
-# `Platform` methods (`platform.rs`), `Window::text_assistance` and friends (`window.rs`) and
-# `App::text_checking_settings` (`app.rs`). `GPUI/vendor/gpui-fast-macos` is GPUI Fast's Mac platform
-# 0.1.14 with the Mac half: `src/text_checking.rs` (NSSpellChecker's spelling, autocorrection and
-# inline predictions for the focused input) and its hooks in `src/window.rs` and `src/platform.rs`.
-# Both are meant to go upstream as one patch (on MS-318). The same copy also spreads each
-# mouse-wheel step over a short ease-out instead of applying it in one frame (MS-225,
-# `src/wheel_motion.rs` and its use in `window.rs`, marked "Mailstream patch"); touchpads and Magic
-# Mice keep AppKit's own deltas and momentum. Its test context can switch a test window between
-# light and dark (`simulate_window_appearance_change`, MS-347, `src/app/test_context.rs`, marked
-# "Mailstream patch"), for the views that redo their colors when the system does.
+# Its test context can also switch a test window between light and dark
+# (`simulate_window_appearance_change`, MS-347, `src/app/test_context.rs`, marked "Mailstream
+# patch"), for the views that redo their colors when the system does.
+# `GPUI/vendor/gpui-fast-macos` is GPUI Fast's Mac platform 0.1.14 spreading each mouse-wheel step
+# over a short ease-out instead of applying it in one frame (MS-225, `src/wheel_motion.rs` and its
+# use in `window.rs`, marked "Mailstream patch"); touchpads and Magic Mice keep AppKit's own deltas
+# and momentum. (The Mac's text checking is the app's own, on gpui-kit's input: MS-351,
+# `GPUI/src/text_checking.rs`.)
 # `Engine/vendor/h2` is h2 0.4.20 (HTTP/2 under reqwest) with hyperium/h2 PR #972 (MS-297, in
 # `src/proto/streams/counts.rs`, marked "Mailstream patch"): 0.4.20 accepts 100 empty DATA frames
 # over a connection's life and then closes it with `too_many_data_frames`, and Google's front end

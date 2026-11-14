@@ -109,12 +109,11 @@ click opens (`is_mail_link`).
 
 Scrolling on the Mac (MS-225): touchpads and the Magic Mouse send pixel deltas with macOS's own
 momentum, which GPUI applies as they come. A plain mouse wheel sends steps of lines, which GPUI
-would apply in one frame; `vendor/gpui-fast-macos` (GPUI Fast's macOS platform 0.1.14, which also
-carries MS-318's text checking) sends each step's first share with the notch and the rest on the
-following frames, easing out as on Wayland (95% within 120 ms; `src/wheel_motion.rs` and the
-"Mailstream patch (MS-225)" parts of `window.rs`); turning the wheel back, a click or touchpad
-scrolling drops what is left. Moving to a newer GPUI Fast means vendoring its macOS crate again
-with both patches.
+would apply in one frame; `vendor/gpui-fast-macos` (GPUI Fast's macOS platform 0.1.14) sends each
+step's first share with the notch and the rest on the following frames, easing out as on Wayland
+(95% within 120 ms; `src/wheel_motion.rs` and the "Mailstream patch (MS-225)" parts of
+`window.rs`); turning the wheel back, a click or touchpad scrolling drops what is left. Moving to a
+newer GPUI Fast means vendoring its macOS crate again with that patch.
 
 Linux differs from the Mac in:
 - HTML bodies: Blitz only (no WebView switch). fontique takes fontconfig through `dlopen`, which

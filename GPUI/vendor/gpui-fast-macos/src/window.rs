@@ -10,14 +10,13 @@ use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use gpui::{
     AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, ExternalDragPayload,
-    ExternalPaths, FileDropEvent, FocusId, ForegroundExecutor, FrameRequestSource, KeyDownEvent,
-    Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformFrameSignal, PlatformInput,
+    ExternalPaths, FileDropEvent, ForegroundExecutor, FrameRequestSource, KeyDownEvent, Keystroke,
+    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformFrameSignal, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    ScrollDelta, ScrollEvent, ScrollSource, SharedString, Size, SystemWindowTab, TextAssistance,
-    TextInputConfiguration, TextInputStateChange, TouchPhase, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowParams,
-    WindowVisibility, point, px, size,
+    ScrollDelta, ScrollEvent, ScrollSource, SharedString, Size, SystemWindowTab, TouchPhase,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
+    WindowParams, WindowVisibility, point, px, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -714,8 +713,6 @@ pub(crate) struct MacWindowState {
     accesskit_adapter: Option<accesskit_macos::SubclassingAdapter>,
     // The parent window if this window is a sheet (Dialog kind)
     sheet_parent: Option<*mut AnyObject>,
-    // Mailstream patch (MS-318).
-    pub(crate) text_checking: crate::text_checking::TextChecking,
 }
 
 impl MacWindowState {
@@ -1122,9 +1119,6 @@ impl MacWindow {
             assert!(!native_view.is_null());
 
             let metal_frames = MetalFrameSource::is_available().then(Rc::<MetalFrames>::default);
-            // Mailstream patch (MS-318).
-            let text_checking =
-                crate::text_checking::TextChecking::new(foreground_executor.clone());
             let state = Rc::new(Mutex::new(MacWindowState {
                 handle,
                 foreground_executor,
@@ -1186,7 +1180,6 @@ impl MacWindow {
                 closed: Arc::new(AtomicBool::new(false)),
                 accesskit_adapter: None,
                 sheet_parent: None,
-                text_checking,
             }));
             let mut window = Self(state, marker, metal_frames);
 
@@ -1750,36 +1743,6 @@ impl PlatformWindow for MacWindow {
 
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
         self.0.as_ref().lock().input_handler.take()
-    }
-
-    // Mailstream patch (MS-318).
-    fn set_text_input_configuration(&mut self, configuration: TextInputConfiguration) {
-        self.0.lock().text_checking.set_configuration(configuration);
-        crate::text_checking::check_again(&self.0);
-    }
-
-    fn text_input_state_changed(&self, change: TextInputStateChange) {
-        crate::text_checking::input_state_changed(&self.0, change);
-    }
-
-    fn on_text_assistance(&self, callback: Box<dyn FnMut(FocusId, TextAssistance)>) {
-        self.0.lock().text_checking.on_change(callback);
-    }
-
-    fn dismiss_inline_prediction(&self) {
-        self.0.lock().text_checking.dismiss_inline_prediction();
-    }
-
-    fn spelling_guesses(&self, word: &str) -> Vec<String> {
-        crate::text_checking::spelling_guesses(&self.0, word)
-    }
-
-    fn ignore_spelling(&self, word: &str) {
-        crate::text_checking::ignore_spelling(&self.0, word);
-    }
-
-    fn learn_spelling(&self, word: &str) {
-        crate::text_checking::learn_spelling(&self.0, word);
     }
 
     fn prompt(
@@ -2692,16 +2655,11 @@ extern "C" fn handle_key_equivalent(
     _: Sel,
     native_event: *mut AnyObject,
 ) -> Bool {
-    let handled = handle_key_event(this, native_event, true);
-    // Mailstream patch (MS-318): the key may have changed the text or moved the caret.
-    crate::text_checking::check_again(&unsafe { get_window_state(this) });
-    handled
+    handle_key_event(this, native_event, true)
 }
 
 extern "C" fn handle_key_down(this: &AnyObject, _: Sel, native_event: *mut AnyObject) {
     handle_key_event(this, native_event, false);
-    // Mailstream patch (MS-318).
-    crate::text_checking::check_again(&unsafe { get_window_state(this) });
 }
 
 extern "C" fn handle_key_up(this: &AnyObject, _: Sel, native_event: *mut AnyObject) {
@@ -3102,10 +3060,6 @@ pub(crate) extern "C" fn handle_view_event(this: &AnyObject, _: Sel, native_even
             drop(lock);
             let result = callback(event);
             crate::fast::composition::complete_event(&window_state, native_event, callback, result);
-        }
-        // Mailstream patch (MS-318): a click may have moved the caret.
-        if native_event_type == NSEventType::LeftMouseUp {
-            crate::text_checking::check_again(&window_state);
         }
     }
 }
@@ -3692,15 +3646,9 @@ extern "C" fn insert_text(
 
         let text = text.to_str();
         let replacement_range = replacement_range.to_range();
-        // Mailstream patch (MS-318): text the input method commits isn't corrected.
-        let was_composing = with_input_handler(this, |input_handler| {
-            let was_composing = input_handler.marked_text_range().is_some();
-            input_handler.replace_text_in_range(replacement_range, text);
-            was_composing
+        with_input_handler(this, |input_handler| {
+            input_handler.replace_text_in_range(replacement_range, text)
         });
-        if let Some(was_composing) = was_composing {
-            crate::text_checking::did_insert_text(this, text, was_composing);
-        }
     }
 }
 
@@ -4045,7 +3993,7 @@ fn drag_event_position(
     convert_mouse_position(drag_location, window_state.lock().content_size().height)
 }
 
-pub(crate) fn with_input_handler<F, R>(window: &AnyObject, f: F) -> Option<R>
+fn with_input_handler<F, R>(window: &AnyObject, f: F) -> Option<R>
 where
     F: FnOnce(&mut PlatformInputHandler) -> R,
 {

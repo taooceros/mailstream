@@ -35,11 +35,11 @@ impl RenderOnce for Field {
         let line_height = window.line_height();
         // The kit sizes the field's text and height by its own scale; take the surrounding text's.
         let input = Styled::h(self.input.text_size(style.font_size).line_height(style.line_height).p_0().gap_0(), line_height);
-        if !text_checking::enabled(&self.state, cx) {
+        let Some(checker) = text_checking::checker(&self.state, window, cx) else {
             return input.into_any_element();
-        }
-        let input = input.context_menu(text_checking::context_menu(&self.state));
-        text_checking::checked(input, &self.state, style.font(), window).w_full().h(line_height).into_any_element()
+        };
+        let input = input.context_menu(text_checking::context_menu(&checker));
+        text_checking::checked(input, &checker, style.font(), window).w_full().h(line_height).into_any_element()
     }
 }
 
@@ -101,20 +101,20 @@ impl RenderOnce for MarkupEditor {
             .font_family(design::ui_font())
             .text_size(style.font_size)
             .line_height(style.line_height);
-        if !text_checking::enabled(&self.state, cx) {
+        let Some(checker) = text_checking::checker(&self.state, window, cx) else {
             return match height {
                 Some(h) => div().w_full().h(h).overflow_hidden().child(editor.h(h)).into_any_element(),
                 None => editor.into_any_element(),
             };
-        }
-        let editor = editor.context_menu(text_checking::context_menu(&self.state));
+        };
+        let editor = editor.context_menu(text_checking::context_menu(&checker));
         match height {
-            Some(h) => text_checking::checked(editor.h(h), &self.state, style.font(), window)
+            Some(h) => text_checking::checked(editor.h(h), &checker, style.font(), window)
                 .w_full()
                 .h(h)
                 .overflow_hidden()
                 .into_any_element(),
-            None => text_checking::checked(editor, &self.state, style.font(), window).w_full().into_any_element(),
+            None => text_checking::checked(editor, &checker, style.font(), window).w_full().into_any_element(),
         }
     }
 }

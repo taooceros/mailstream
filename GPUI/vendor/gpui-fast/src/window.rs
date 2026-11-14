@@ -20,7 +20,7 @@ use crate::{
     PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
     ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
-    Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, Task, TextAssistance,
+    Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, Task,
     TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
     TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
@@ -1274,8 +1274,6 @@ pub struct Window {
     /// input session can restart the IME connection).
     last_text_input_configuration: Option<TextInputConfiguration>,
     focused_text_input: Option<FocusId>,
-    /// What the platform's text checking found in this text input (Mailstream patch, MS-318).
-    text_assistance: Option<(FocusId, TextAssistance)>,
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
@@ -2384,21 +2382,6 @@ impl Window {
                     .log_err();
             })
         });
-        // Mailstream patch (MS-318).
-        platform_window.on_text_assistance({
-            let mut cx = cx.to_async();
-            Box::new(move |focus, assistance| {
-                handle
-                    .update(&mut cx, |_, window, _| {
-                        let assistance = Some((focus, assistance));
-                        if window.text_assistance != assistance {
-                            window.text_assistance = assistance;
-                            window.refresh();
-                        }
-                    })
-                    .log_err();
-            })
-        });
 
         if let Some(app_id) = app_id {
             platform_window.set_app_id(&app_id);
@@ -2438,7 +2421,6 @@ impl Window {
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input: None,
-            text_assistance: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
@@ -5784,49 +5766,6 @@ impl Window {
             self.platform_window
                 .text_input_state_changed(TextInputStateChange::SelectionChanged);
         }
-    }
-
-    /// What the platform's text checking found in the text input `focus_handle` belongs to:
-    /// the inline prediction at its caret and its misspelled words, for the input to draw
-    /// (Mailstream patch, MS-318). The platform checks inputs whose [`TextInputConfiguration`]
-    /// enables suggestions, again after each key press, click and inserted text.
-    pub fn text_assistance(&self, focus_handle: &FocusHandle) -> Option<&TextAssistance> {
-        self.text_assistance
-            .as_ref()
-            .filter(|(focus, _)| *focus == focus_handle.id)
-            .map(|(_, assistance)| assistance)
-    }
-
-    /// Hides the current inline prediction, which the user declined.
-    pub fn dismiss_inline_prediction(&mut self) {
-        if let Some((_, assistance)) = &mut self.text_assistance
-            && assistance.prediction.take().is_some()
-        {
-            self.platform_window.dismiss_inline_prediction();
-            self.refresh();
-        }
-    }
-
-    /// The spell checker's suggestions for the misspelled `word`.
-    pub fn spelling_guesses(&self, word: &str) -> Vec<String> {
-        self.platform_window.spelling_guesses(word)
-    }
-
-    /// Stops reporting `word` as misspelled in this window.
-    pub fn ignore_spelling(&self, word: &str) {
-        self.platform_window.ignore_spelling(word);
-    }
-
-    /// Adds `word` to the user's spelling dictionary.
-    pub fn learn_spelling(&self, word: &str) {
-        self.platform_window.learn_spelling(word);
-    }
-
-    /// Hands `assistance` to the focused text input as the platform's text checking would.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn simulate_text_assistance(&mut self, assistance: TextAssistance) {
-        self.text_assistance = self.focused_text_input.map(|focus| (focus, assistance));
-        self.refresh();
     }
 
     /// Forwards the focused input handler's [`TextInputConfiguration`] to the

@@ -103,7 +103,7 @@ version = "0.6"
 [target."cfg(target_os = \"macos\")".dependencies.objc2-app-kit]
 version = "0.3.2"
 default-features = false
-features = ["NSAlert", "NSAppearance", "NSApplication", "NSButton", "NSCell", "NSColor", "NSControl", "NSCursor", "NSDocumentController", "NSDragging", "NSDraggingItem", "NSEvent", "NSGraphics", "NSImage", "NSMenu", "NSMenuItem", "NSOpenPanel", "NSPanel", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSSavePanel", "NSScreen", "NSScroller", "NSSpellChecker", "NSTrackingArea", "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace", "block2", "objc2-core-foundation", "objc2-uniform-type-identifiers"]
+features = ["NSAlert", "NSAppearance", "NSApplication", "NSButton", "NSCell", "NSColor", "NSControl", "NSCursor", "NSDocumentController", "NSDragging", "NSDraggingItem", "NSEvent", "NSGraphics", "NSImage", "NSMenu", "NSMenuItem", "NSOpenPanel", "NSPanel", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSSavePanel", "NSScreen", "NSScroller", "NSTrackingArea", "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace", "block2", "objc2-core-foundation", "objc2-uniform-type-identifiers"]
 
 [target."cfg(target_os = \"macos\")".dependencies.objc2-core-graphics]
 version = "=0.3.2"
@@ -124,7 +124,7 @@ features = ["CVBuffer", "CVImageBuffer", "CVHostTime"]
 [target."cfg(target_os = \"macos\")".dependencies.objc2-foundation]
 version = "=0.3.2"
 default-features = false
-features = ["NSArray", "NSAttributedString", "NSBundle", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSNull", "NSObjCRuntime", "NSObject", "NSOrthography", "NSProcessInfo", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSTextCheckingResult", "NSURL", "NSUserDefaults", "NSValue", "objc2-core-foundation", "std"]
+features = ["NSArray", "NSAttributedString", "NSBundle", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSNull", "NSObjCRuntime", "NSObject", "NSProcessInfo", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSURL", "NSValue", "objc2-core-foundation", "std"]
 
 [target."cfg(target_os = \"macos\")".dependencies.objc2-quartz-core]
 version = "=0.3.2"

@@ -28,7 +28,6 @@ pub mod metal_renderer {
 }
 
 mod platform;
-mod text_checking;
 mod window;
 mod window_appearance;
 
