@@ -308,6 +308,7 @@ impl Bundle {
 #[derive(Clone)]
 pub enum Layer {
     Bundle(BundleKind),
+    Search,
     Reader(Box<Conversation>),
 }
 
@@ -315,6 +316,7 @@ impl Layer {
     pub fn id(&self) -> SharedString {
         match self {
             Layer::Bundle(kind) => kind.id().into(),
+            Layer::Search => "search".into(),
             Layer::Reader(conversation) => format!("reader:{}", conversation.id).into(),
         }
     }

@@ -339,6 +339,27 @@ impl MailApp {
                             .into_any_element(),
                     )
                 }
+                Layer::Search => {
+                    if index == sliding && dim > 0. {
+                        bundles.push(scrim(dim, 0.).into_any_element());
+                    }
+                    bundles.push(
+                        div()
+                            .id(ElementId::Name(layer.id()))
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .w_full()
+                            .left(px(shift))
+                            .bg(p.tray)
+                            .rounded_b(px(radius::PANE))
+                            .shadow(p.page_shadow.clone())
+                            .occlude()
+                            .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer.id(), cx))
+                            .child(self.render_list(p, cx))
+                            .into_any_element(),
+                    )
+                }
                 Layer::Reader(conversation) => {
                     reader = Some((self.render_detail(conversation, layer.id(), two_pane, p, window, cx), shift));
                 }

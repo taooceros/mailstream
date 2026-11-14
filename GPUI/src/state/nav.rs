@@ -72,6 +72,7 @@ impl MailApp {
                     self.leave_panes(cx);
                     self.query = Some(text.into());
                     self.layers.clear();
+                    self.push_layer(Layer::Search, true);
                     self.highlight = None;
                     self.list_scroll = list_state(0);
                     self.rebuild_items();
@@ -99,7 +100,7 @@ impl MailApp {
 
     fn end_search(&mut self, cx: &mut Context<Self>) {
         if self.query.take().is_some() {
-            self.layers.clear();
+            self.layers.retain(|layer| !matches!(layer, Layer::Search));
             self.highlight = None;
             self.list_scroll = list_state(0);
             self.rebuild_items();
@@ -170,7 +171,7 @@ impl MailApp {
     pub fn open_bundle(&self) -> Option<BundleKind> {
         self.live_layers().rev().find_map(|l| match l {
             Layer::Bundle(kind) => Some(*kind),
-            Layer::Reader(_) => None,
+            Layer::Reader(_) | Layer::Search => None,
         })
     }
 
@@ -232,7 +233,7 @@ impl MailApp {
     fn push_layer(&mut self, layer: Layer, animate: bool) {
         self.finish_closing();
         let at = match layer {
-            Layer::Bundle(_) => {
+            Layer::Bundle(_) | Layer::Search => {
                 self.layers.iter().position(|layer| matches!(layer, Layer::Reader(_))).unwrap_or(self.layers.len())
             }
             Layer::Reader(_) => self.layers.len(),
@@ -259,7 +260,9 @@ impl MailApp {
     pub fn travel(&self, index: usize) -> f32 {
         match (self.beside, &self.layers[index]) {
             (Some(beside), Layer::Reader(_)) => beside.travel,
-            (Some(beside), Layer::Bundle(_)) if self.layers[index..].iter().any(|l| matches!(l, Layer::Reader(_))) => {
+            (Some(beside), Layer::Bundle(_) | Layer::Search)
+                if self.layers[index..].iter().any(|l| matches!(l, Layer::Reader(_))) =>
+            {
                 beside.list
             }
             _ => self.content_width,
@@ -274,7 +277,7 @@ impl MailApp {
     /// Which layer slides, and how far right of its place it sits, called while rendering with
     /// the layout's widths (`content_width`, `beside`): advances the slide, asks for the next
     /// frame while it moves, and drops a layer that slid off.
-    pub fn slide_offset(&mut self, window: &mut Window, cx: &App) -> Option<(usize, f32)> {
+    pub fn slide_offset(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<(usize, f32)> {
         if self.layers.is_empty() {
             self.slide = Slide::Rest;
             self.slide_layer = None;
@@ -292,7 +295,11 @@ impl MailApp {
         match self.slide.advance(travel, window, cx) {
             Some(offset) => Some((index, offset)),
             None => {
-                self.layers.remove(index);
+                let removed = self.layers.remove(index);
+                if matches!(removed, Layer::Search) {
+                    self.search.update(cx, |search, cx| search.clean(window, cx));
+                    self.end_search(cx);
+                }
                 self.slide_layer = self.layers.last().map(Layer::id);
                 self.layers.last().map(|_| (self.layers.len() - 1, 0.))
             }
@@ -538,7 +545,7 @@ impl MailApp {
     /// open (MS-307); without a bundle, as Back.
     pub fn list_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_closing();
-        let Some(index) = self.layers.iter().rposition(|layer| matches!(layer, Layer::Bundle(_))) else {
+        let Some(index) = self.layers.iter().rposition(|layer| matches!(layer, Layer::Bundle(_) | Layer::Search)) else {
             return self.back(&Back, window, cx);
         };
         self.slide_off(index);
