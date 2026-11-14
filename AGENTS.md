@@ -222,17 +222,19 @@ via write agent://MS164BlitzFonts first.", "solutionSpace": "cause open"}]}`. om
 definitions from the session's folder, so a change to them reaches the session once
 `warm-build.py` moves the default checkout to `main`.
 
-Cost rules (MS-157): at most three heavy agents (ones that write code) run at once; other
-claimed issues wait in the queue of `~/.local/state/linear-poll/session.md`, stay in Todo with a
-comment saying they are queued (Backlog holds only what nobody plans to do yet, MS-175), and start
-in order as slots free; the poller doesn't hand out a Todo issue again once omp has commented on
-it or claimed it. Urgent issues are the exception (MS-252): one whose `priority` (on its
-`issue` line) is `Urgent` starts at once, however many heavy agents run, and goes ahead of the
-queue. Code is written by the default model, and its agent tests it in the real app
-itself; release installs and their mechanical checks go to the batch install agent, one run for
-every issue waiting, at most once an hour (`INSTALL_EVERY`). Agents write their full report on
-the issue and yield only two or three lines (result, commit, issue state, anything the user
-must do).
+Cost rules (MS-157, MS-363): there is no cap on the total number of running agents; compiles
+instead queue through `scripts/capped` (at most 3 at once on Linux, `build-budget.py` on the Mac).
+Keep one agent limit: at most three agents on the expensive planning model at once (an `m1` agent
+counts until its prewalk hands off to the cheaper model at its first edit). Other claimed issues
+wait in the queue of `~/.local/state/linear-poll/session.md`, stay in Todo with a comment saying
+they are queued (Backlog holds only what nobody plans to do yet, MS-175), and start in order as
+slots free; the poller doesn't hand out a Todo issue again once omp has commented on it or claimed
+it. Urgent issues are the exception (MS-252): one whose `priority` (on its `issue` line) is
+`Urgent` starts at once, however many expensive-model agents run, and goes ahead of the queue.
+Code is written by the default model, and its agent tests it in the real app itself; release
+installs and their mechanical checks go to the batch install agent, one run for every issue
+waiting, at most once an hour (`INSTALL_EVERY`). Agents write their full report on the issue and
+yield only two or three lines (result, commit, issue state, anything the user must do).
 
 The session hands over to a fresh one once its own context passes about 150K tokens: every wake
 re-reads the whole conversation. It waits until no agent of its own is running (their results
@@ -271,8 +273,15 @@ it is handed over; it is not moved mid-way.
   `ffi.py`, `warm-build.py`, `shots.py`, `install.sh`, `install-linux.py`, `bundle.sh` and
   `GPUI/run.sh` already build through it, and a `capped` inside a capped build runs straight
   through. Cheap commands (jj, rg, reading files) don't need it.
-  - Linux (MS-268): at most 8 CPUs and 16 GB. `capped` runs the command in the shared systemd
-    user slice `mailstream-build.slice`, where cargo sees 8 CPUs, so don't pass a larger `-j`.
+  - Linux (MS-268, MS-363): at most 3 compile commands at once (`MAILSTREAM_BUILD_SLOTS`), queued
+    with `flock` lock files in `$XDG_RUNTIME_DIR/mailstream-build/`, and together at most 16 GB
+    RAM and 4 GB swap. `capped` runs the command in the shared systemd user slice
+    `mailstream-build.slice` (`CPUQuota=800%`, `MemoryHigh=15G`, `MemoryMax=16G`,
+    `MemorySwapMax=4G`) and pins it with `taskset` to
+    `MAILSTREAM_BUILD_CPUS` (default `12-23`, the SMT second thread of every core so the desktop
+    keeps the first thread, since the kernel's `scx_lavd` scheduler ignores `cpu.max`), where
+    cargo sees 8 CPUs, so don't pass a larger `-j`. Waiters print `waiting for a build slot`
+    once to stderr and retry every 3 s; nested `capped` calls inside the slice run directly.
   - Mac (MS-260): at most 6 CPU cores and 8 GB, kept by `scripts/build-budget.py` (its header
     has the rules). Every rustc, in any checkout or folder, waits in the rustc wrapper
     `build-budget.py install` puts in `~/.cargo/config.toml` (`warm-build.py` runs it) for a CPU

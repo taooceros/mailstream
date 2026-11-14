@@ -1,12 +1,28 @@
 #!/usr/bin/env bash
 # Runs a build or test command under this machine's compile limit: `scripts/capped CMD [ARG...]`.
 #
-# Linux (MS-268): every compile on the machine together gets at most 8 CPUs and 16 GB. The
-# command runs in a scope inside the shared systemd user slice `mailstream-build.slice`
-# (CPUQuota=800%, MemoryHigh=15G, MemoryMax=16G), so all agents' builds add up to that limit;
-# inside it `nproc`, cargo and rustc see 8 CPUs. The slice's limits are set on every run (they
-# are runtime-only and gone after a reboot). A command already in the slice runs directly, so
-# scripts that wrap their builds can be nested (install-linux.py → ffi.py).
+# Linux (MS-268, MS-363): every compile on the machine together gets 16 GB RAM, 4 GB swap,
+# and the SMT second threads, and at most 3 compile commands run at once.
+# - Queue: the command first takes one of N build slots (`MAILSTREAM_BUILD_SLOTS`, default 3),
+#   lock files `slot-<i>` in `$XDG_RUNTIME_DIR/mailstream-build/` taken with `flock -n`. With all
+#   taken it prints one "waiting for a build slot" line to stderr and tries again every 3 s.
+#   A keeper process (detached in its own session so a process-group kill doesn't free the
+#   slot early) watches the command's PID via `pidfd_open` and holds the lock until the
+#   command exits, however it ends (killed included), freeing the slot immediately; the command
+#   itself and everything it starts (a daemon left running by a build) get no copy of the
+#   lock, so they can't keep the slot.
+# - Limits: the command runs in a scope inside the shared systemd user slice
+#   `mailstream-build.slice` (CPUQuota=800%, MemoryHigh=15G, MemoryMax=16G, MemorySwapMax=4G),
+#   so all agents' builds add up to that limit. The slice's limits are set on every run (they are
+#   runtime-only and gone after a reboot). This machine's kernel runs the sched_ext scheduler scx_lavd
+#   (`/sys/kernel/sched_ext/root/ops`), which ignores cgroup `cpu.max`: the slice used 19-22
+#   CPUs under CPUQuota=800%. CPU affinity is respected, so the command is also pinned with
+#   `taskset` to `MAILSTREAM_BUILD_CPUS` (default `12-23`, the SMT second thread of every core
+#   on this Ryzen 9900X so the desktop keeps the first thread of all 12 cores; children inherit
+#   it). cpuset isn't delegated to the user manager, so the slice can't pin. CPUQuota=800%
+#   stays both for when the kernel runs CFS and so `nproc`, cargo and rustc still see 8 CPUs.
+# - A command already in the slice runs directly, without a slot, so scripts that wrap their
+#   builds can be nested (install-linux.py → ffi.py).
 # The Mac (MS-260): every compile together gets at most 6 CPU cores and 8 GB, through
 # scripts/build-budget.py (its header): swift build/test, xcodebuild and flutter build wait for
 # their share; anything else (cargo, scripts that build) runs at once, each rustc under it waiting
@@ -20,9 +36,80 @@ if [ "$(uname -s)" = Linux ] && command -v systemd-run >/dev/null 2>&1; then
   if grep -q '/mailstream-build\.slice/' /proc/self/cgroup; then
     exec "$@"
   fi
-  systemctl --user set-property --runtime mailstream-build.slice \
-    CPUQuota=800% MemoryHigh=15G MemoryMax=16G
-  exec systemd-run --user --scope --slice=mailstream-build.slice --collect --quiet -- "$@"
+  exec python3 -c '
+import fcntl, os, select, subprocess, sys, time
+
+slots_raw = os.environ.get("MAILSTREAM_BUILD_SLOTS") or "3"
+if not (slots_raw.isascii() and slots_raw.isdigit() and int(slots_raw) >= 1):
+    sys.exit(f"capped: MAILSTREAM_BUILD_SLOTS must be a positive whole number, not {slots_raw!r}")
+slots = int(slots_raw)
+cpus = os.environ.get("MAILSTREAM_BUILD_CPUS") or "12-23"
+runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+lock_dir = os.path.join(runtime_dir, "mailstream-build")
+os.makedirs(lock_dir, exist_ok=True)
+
+lock_fd = None
+waiting = False
+while lock_fd is None:
+    for i in range(1, slots + 1):
+        fd = os.open(os.path.join(lock_dir, f"slot-{i}"), os.O_CREAT | os.O_WRONLY, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_fd = fd
+            break
+        except BlockingIOError:
+            os.close(fd)
+    if lock_fd is None:
+        if not waiting:
+            print(f"capped: waiting for a build slot (all {slots} busy)", file=sys.stderr, flush=True)
+            waiting = True
+        time.sleep(3)
+
+parent_pid = os.getpid()
+r_fd, w_fd = os.pipe()
+if os.fork() == 0:
+    os.close(r_fd)
+    os.setsid()
+    try:
+        pidfd = os.pidfd_open(parent_pid)
+    except ProcessLookupError:
+        os._exit(0)
+    if os.getppid() != parent_pid:
+        os._exit(0)
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for stdio in (0, 1, 2):
+        os.dup2(devnull, stdio)
+    if devnull > 2:
+        os.close(devnull)
+    keep = {lock_fd, pidfd, w_fd}
+    for fd_str in os.listdir("/proc/self/fd"):
+        fd_num = int(fd_str)
+        if fd_num > 2 and fd_num not in keep:
+            try:
+                os.close(fd_num)
+            except OSError:
+                pass
+    os.write(w_fd, b"1")
+    os.close(w_fd)
+    poll = select.poll()
+    poll.register(pidfd, select.POLLIN)
+    poll.poll()
+    os._exit(0)
+
+os.close(w_fd)
+os.read(r_fd, 1)
+os.close(r_fd)
+os.close(lock_fd)
+subprocess.run(
+    ["systemctl", "--user", "set-property", "--runtime", "mailstream-build.slice",
+     "CPUQuota=800%", "MemoryHigh=15G", "MemoryMax=16G", "MemorySwapMax=4G"],
+    check=True,
+)
+os.execvp("systemd-run", [
+    "systemd-run", "--user", "--scope", "--slice=mailstream-build.slice",
+    "--collect", "--quiet", "--", "taskset", "-c", cpus, *sys.argv[1:],
+])
+' "$@"
 fi
 
 if [ "$(uname -s)" = Darwin ]; then
