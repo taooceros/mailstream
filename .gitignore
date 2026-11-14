@@ -5,8 +5,8 @@ build/
 Push/.wrangler/
 node_modules/
 .turso/
-# Rust/Cargo build output anywhere in the tree; on Linux a checkout's is a symlink out of the
-# ovnfs mount (scripts/checkout.py, MS-201)
+# Rust/Cargo build output anywhere in the tree; a checkout's is a symlink out of the ovnfs mount
+# (scripts/checkout.py)
 target
 Flutter/.dart_tool/
 

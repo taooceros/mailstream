@@ -8,7 +8,10 @@ description: Isolated copy-on-write checkouts of any folder or git repository wi
 This file is upstream's skill, vendored from
 https://github.com/stencil-hq/ovnfs/blob/ef1dea8f06242ff9fa066e7db1ab530ee64dcb06/skills/ovnfs/SKILL.md
 (v0.5.2, 2026-11-13); everything from `# ovnfs` on is its text unchanged. The installed ovnfs is
-v0.5.2 (MS-321; `ovnfs update` then `ovnfs restart` upgrades it).
+v0.5.2 on the Mac (MS-321) and Linux (MS-323); `ovnfs update` then `ovnfs restart` upgrades it.
+A restart while a process has its working folder in a checkout (a build) can't unmount: v0.4.0
+then keeps running, v0.5 forces the unmount on a second `stop`; either way open checkouts vanish
+until the new daemon is up, so restart when no agent works in one.
 
 - Open your checkout with `python3 ~/projects/mailstream/scripts/checkout.py NAME`, from any
   folder. It runs plain `ovnfs new` on the default checkout `~/projects/mailstream`, checks that
@@ -16,11 +19,11 @@ v0.5.2 (MS-321; `ovnfs update` then `ovnfs restart` upgrades it).
   repository, runs `jj git fetch` and `jj new main` there and prints the path. Don't open one
   with `ovnfs new` yourself, and never with `--rev`.
 - ovnfs v0.5 makes a checkout of a jj repository a jj workspace itself
-  (https://github.com/stencil-hq/ovnfs/issues/37), but through `jj workspace add --no-colocate`,
-  which this machine's jj (0.45.1) doesn't have: `ovnfs new` warns "is no jj workspace" and opens
-  the checkout without one. So `checkout.py` still adds the workspace itself, in an empty
-  temporary folder (jj adds one only in an empty folder), and moves its `.jj` into the checkout
-  (MS-179; its header has the details). Every checkout then shares one jj
+  (https://github.com/stencil-hq/ovnfs/issues/37), through `jj workspace add --no-colocate`:
+  Linux's jj (0.47.1) has it, the Mac's (0.45.1) doesn't, and there `ovnfs new` warns "is no jj
+  workspace" and opens the checkout without one. `checkout.py` then adds the workspace itself, in
+  an empty temporary folder (jj adds one only in an empty folder), and moves its `.jj` into the
+  checkout (MS-179; its header has the details). Every checkout then shares one jj
   repository: commits, bookmarks, working copies and the operation log show in all of them at
   once (AGENTS.md, Version control, for the rules that follow). The checkout's `.git` is ovnfs's
   private git directory as captured; it goes stale, so use jj there, not git.
@@ -38,8 +41,10 @@ v0.5.2 (MS-321; `ovnfs update` then `ovnfs restart` upgrades it).
   files had when the folder was opened, so a file written meanwhile read as empty for a second
   (https://github.com/stencil-hq/ovnfs/issues/48) and cargo builds in the mount failed. On the
   Mac, the warm build's ~50,000 files as `source` made up most of every capture and grew the
-  daemon to 6-9 GB of memory. Other build output (Flutter's `build/`, Swift's `.build`) stays in
-  the mount.
+  daemon to 6-9 GB of memory. v0.5.2 fixed the FUSE bug (MS-323), and the target stays outside
+  anyway: in the mount a build starts cold, goes through FUSE and grows the daemon (one cold
+  engine test build took it to ~740 MB). Other build output (Flutter's `build/`, Swift's
+  `.build`) stays in the mount.
 - The default checkout stays clean on `main` (it is locked; only `scripts/warm-build.py` moves
   it), so a checkout of it starts at `main` as of the last warm build, and `jj new main` takes it
   to `origin`'s tip. The first release `scripts/ffi.py` in a new checkout rebuilds only the repo's

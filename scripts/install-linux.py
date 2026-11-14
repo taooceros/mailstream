@@ -15,9 +15,10 @@ The folder keeps its config.json (OAuth clients; the engine reads it beside the 
 AppIcon.png, gets the built commit in `revision`, and a `nix-env` profile holding the devenv shell
 the build used, so a nix garbage collection keeps the libraries the binaries load.
 
-Builds run in `devenv shell`. Cargo can't build inside the ovnfs mount (MS-201), so the cargo
-workspace's `target` (MS-279) becomes a symlink to ~/.cache/mailstream-checkouts/<checkout>/target
-(where scripts/checkout.py puts it; `checkout.py rm` deletes it) unless it is a symlink already.
+Builds run in `devenv shell`. The cargo workspace's `target` (MS-279) stays outside the ovnfs
+mount (scripts/checkout.py's header: MS-201, MS-320, MS-323): it becomes a symlink to
+~/.cache/mailstream-checkouts/<checkout>/target (where scripts/checkout.py puts it; `checkout.py
+rm` deletes it) unless it is a symlink already.
 The running installed copy is stopped (SIGTERM, never forced) and the folder swapped; the previous
 one stays in ~/.cache/mailstream-install/previous-<folder> until the next install. Then check each
 install: `revision` equals main, and the binary stays up 30 s in a scripts/vhypr.py desktop
@@ -64,7 +65,7 @@ def main_revision():
 
 
 def move_outside(relative):
-    """MS-201: a cargo target in the FUSE mount fails to build; keep it outside."""
+    """Keeps a cargo target outside the ovnfs mount (scripts/checkout.py's header)."""
     inside = ROOT / relative
     if inside.is_symlink():
         return

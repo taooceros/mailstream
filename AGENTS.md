@@ -52,8 +52,8 @@ Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` 
   working copy. When jj says your working copy is stale (another workspace rewrote a commit under
   it), run `jj workspace update-stale`; your uncommitted changes stay. Use jj, not git, in a
   checkout: its `.git` is ovnfs's capture and goes stale. Checkouts opened before MS-179 keep a jj
-  repository of their own until removed; they land with `land.py` too. After upgrading jj, test
-  the graft again (`scripts/checkout.py`'s header says how).
+  repository of their own until removed; they land with `land.py` too. After upgrading jj or
+  ovnfs, test the workspace again (`scripts/checkout.py`'s header says how).
 - The default checkout is locked (MS-156, `scripts/source_lock.py`): every agent's tools start in
   `~/projects/mailstream`, and a relative path or a missing `cwd` put agents' edits and deletes
   there. Its tracked files and folders refuse writes, new files, deletes and renames, whatever
@@ -396,8 +396,8 @@ The batch install agent (one per `install` line of the poller, [Polling session]
    the deploy lock itself and stops only the installed copy. On Linux it runs
    `scripts/install-linux.py` (its header: what goes where, the launcher, the nix GC root, the
    desktop entry), which builds in `devenv shell` with cargo targets outside the ovnfs mount
-   (MS-201). Never an area workspace or the default checkout; never delete another agent's lock
-   or kill its processes.
+   (`scripts/checkout.py`'s header). Never an area workspace or the default checkout; never
+   delete another agent's lock or kill its processes.
 3. Checks each installed `/Applications/…app` from the shell, nothing more: its Info.plist
    `MSInstalledRevision` is the commit it built; `codesign --verify --deep --strict` passes;
    `open` launches it and its `/Applications/…app/Contents/MacOS/` executable is still running
