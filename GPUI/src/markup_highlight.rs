@@ -17,7 +17,6 @@ use crate::design::{self, Palette};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkupFlavor {
     Markdown,
-    #[allow(dead_code)]
     GoogleChat,
 }
 
@@ -104,6 +103,10 @@ fn link_style(p: &Palette) -> HighlightStyle {
         underline: Some(UnderlineStyle { thickness: px(1.), color: Some(p.accent.into()), wavy: false }),
         ..Default::default()
     }
+}
+
+fn mention_style(p: &Palette) -> HighlightStyle {
+    HighlightStyle { color: Some(p.accent.into()), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() }
 }
 
 fn merge_style(base: &mut HighlightStyle, overlay: &HighlightStyle) {
@@ -368,63 +371,191 @@ pub fn markdown_runs(text: &str, dark: bool) -> Vec<(Range<usize>, HighlightStyl
     flatten_spans(text.len(), &spans)
 }
 
+enum GchatToken {
+    Link { url_end: usize, label: Option<(usize, usize)> },
+    User,
+}
+
+fn parse_gchat_token(rest: &str) -> Option<(usize, GchatToken)> {
+    if !rest.starts_with('<') {
+        return None;
+    }
+    let close = rest[1..].find('>')? + 1;
+    let inner = &rest[1..close];
+    if inner.contains('\n') {
+        return None;
+    }
+    if inner.starts_with("http://") || inner.starts_with("https://") {
+        if let Some(pipe) = inner.find('|') {
+            let url = &inner[..pipe];
+            if url.chars().any(char::is_whitespace) {
+                return None;
+            }
+            let label_start = 1 + pipe + 1;
+            let label = (label_start < close).then_some((label_start, close));
+            return Some((close + 1, GchatToken::Link { url_end: 1 + pipe, label }));
+        }
+        if inner.chars().any(char::is_whitespace) {
+            return None;
+        }
+        return Some((close + 1, GchatToken::Link { url_end: close, label: None }));
+    }
+    if inner.starts_with("users/") && inner.len() > "users/".len() && !inner.chars().any(char::is_whitespace) {
+        return Some((close + 1, GchatToken::User));
+    }
+    None
+}
+
+fn gchat_can_open(text: &str, at: usize, delim: char) -> bool {
+    let prev = text[..at].chars().next_back();
+    let next = text[at + delim.len_utf8()..].chars().next();
+    prev.is_none_or(|c| !c.is_ascii_alphanumeric() && c != delim) && next.is_some_and(|c| !c.is_whitespace() && c != delim)
+}
+
+fn gchat_can_close(text: &str, at: usize, delim: char) -> bool {
+    let prev = text[..at].chars().next_back();
+    let next = text[at + delim.len_utf8()..].chars().next();
+    prev.is_some_and(|c| !c.is_whitespace() && c != delim) && next.is_none_or(|c| !c.is_ascii_alphanumeric() && c != delim)
+}
+
+fn gchat_closing_delim(text: &str, from: usize, delim: char) -> Option<usize> {
+    let line_end = text[from..].find('\n').map_or(text.len(), |n| from + n);
+    let mut i = from;
+    while i < line_end {
+        let rest = &text[i..line_end];
+        if rest.starts_with('`')
+            && let Some(rel_close) = rest[1..].find('`')
+            && rel_close > 0
+        {
+            i += 1 + rel_close + 1;
+            continue;
+        }
+        if rest.starts_with('<')
+            && let Some((len, _)) = parse_gchat_token(rest)
+        {
+            i += len;
+            continue;
+        }
+        if (rest.starts_with("http://") || rest.starts_with("https://"))
+            && let Some(link) = LinkFinder::new().kinds(&[LinkKind::Url]).links(rest).next()
+            && link.start() == 0
+        {
+            let end = i + link.end();
+            if link.as_str().ends_with(delim) && gchat_can_close(text, end - 1, delim) {
+                return Some(end - 1);
+            }
+            i = end;
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        if ch == delim && gchat_can_close(text, i, delim) {
+            return Some(i);
+        }
+        i += ch.len_utf8();
+    }
+    None
+}
+
+fn scan_gchat_inline(text: &str, base: usize, in_link: bool, p: &Palette, spans: &mut Vec<(Range<usize>, HighlightStyle)>) {
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
+        if rest.starts_with('`') {
+            let line_end = rest[1..].find('\n').map_or(rest.len(), |n| 1 + n);
+            if let Some(rel_close) = rest[1..line_end].find('`')
+                && rel_close > 0
+            {
+                let end = i + 1 + rel_close + 1;
+                spans.push((base + i..base + i + 1, marker_style(p)));
+                spans.push((base + i + 1..base + end - 1, code_style(p)));
+                spans.push((base + end - 1..base + end, marker_style(p)));
+                i = end;
+                continue;
+            }
+        }
+        if rest.starts_with('<')
+            && let Some((len, token)) = parse_gchat_token(rest)
+        {
+            let end = i + len;
+            match token {
+                GchatToken::Link { url_end, label: Some((ls, le)) } => {
+                    spans.push((base + i..base + i + url_end + 1, marker_style(p)));
+                    spans.push((base + i + ls..base + i + le, link_style(p)));
+                    spans.push((base + end - 1..base + end, marker_style(p)));
+                }
+                GchatToken::Link { .. } => {
+                    spans.push((base + i..base + i + 1, marker_style(p)));
+                    spans.push((base + i + 1..base + end - 1, link_style(p)));
+                    spans.push((base + end - 1..base + end, marker_style(p)));
+                }
+                GchatToken::User => {
+                    spans.push((base + i..base + i + 1, marker_style(p)));
+                    spans.push((base + i + 1..base + end - 1, mention_style(p)));
+                    spans.push((base + end - 1..base + end, marker_style(p)));
+                }
+            }
+            i = end;
+            continue;
+        }
+        if !in_link
+            && (rest.starts_with("http://") || rest.starts_with("https://"))
+            && let Some(link) = LinkFinder::new().kinds(&[LinkKind::Url]).links(rest).next()
+            && link.start() == 0
+        {
+            let end = i + link.end();
+            spans.push((base + i..base + end, link_style(p)));
+            i = end;
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        if matches!(ch, '*' | '_' | '~')
+            && gchat_can_open(text, i, ch)
+            && let Some(close) = gchat_closing_delim(text, i + 1, ch)
+        {
+            let inner = match ch {
+                '*' => bold_style(),
+                '_' => italic_style(),
+                '~' => strike_style(p),
+                _ => unreachable!(),
+            };
+            spans.push((base + i..base + i + 1, marker_style(p)));
+            spans.push((base + i + 1..base + close, inner));
+            spans.push((base + close..base + close + 1, marker_style(p)));
+            scan_gchat_inline(&text[i + 1..close], base + i + 1, in_link, p, spans);
+            i = close + 1;
+            continue;
+        }
+        i += ch.len_utf8();
+    }
+}
+
 pub fn google_chat_runs(text: &str, dark: bool) -> Vec<(Range<usize>, HighlightStyle)> {
     if text.is_empty() {
         return Vec::new();
     }
     let p = palette(dark);
     let mut spans: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
-    push_bare_links(text, p, &mut spans);
-
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        // Fenced code block ```...```
-        if text[i..].starts_with("```") {
-            if let Some(rel_end) = text[i + 3..].find("```") {
-                let end = i + 3 + rel_end + 3;
-                spans.push((i..i + 3, marker_style(p)));
-                spans.push((i + 3..end - 3, code_style(p)));
-                spans.push((end - 3..end, marker_style(p)));
-                i = end;
-                continue;
-            }
+    let mut pos = 0;
+    while pos < text.len() {
+        let Some(rel_open) = text[pos..].find("```") else {
+            scan_gchat_inline(&text[pos..], pos, false, p, &mut spans);
+            break;
+        };
+        let open = pos + rel_open;
+        let Some(rel_close) = text[open + 3..].find("```") else {
+            scan_gchat_inline(&text[pos..], pos, false, p, &mut spans);
+            break;
+        };
+        let close = open + 3 + rel_close;
+        if open > pos {
+            scan_gchat_inline(&text[pos..open], pos, false, p, &mut spans);
         }
-        // Inline code `...`
-        if bytes[i] == b'`' {
-            if let Some(rel_end) = text[i + 1..].find('`')
-                && !text[i + 1..i + 1 + rel_end].contains('\n')
-            {
-                let end = i + 1 + rel_end + 1;
-                spans.push((i..i + 1, marker_style(p)));
-                spans.push((i + 1..end - 1, code_style(p)));
-                spans.push((end - 1..end, marker_style(p)));
-                i = end;
-                continue;
-            }
+        spans.push((open..open + 3, marker_style(p)));
+        if close > open + 3 {
+            spans.push((open + 3..close, code_style(p)));
         }
-        // *bold*, _italic_, ~strike~
-        let marker = bytes[i];
-        if matches!(marker, b'*' | b'_' | b'~') {
-            let prev_ok = i == 0 || bytes[i - 1].is_ascii_whitespace() || matches!(bytes[i - 1], b'(' | b'[' | b'*' | b'_' | b'~');
-            if prev_ok
-                && let Some(rel_end) = text[i + 1..].find(marker as char)
-                && rel_end > 0
-                && !text[i + 1..i + 1 + rel_end].contains('\n')
-            {
-                let end = i + 1 + rel_end + 1;
-                spans.push((i..i + 1, marker_style(p)));
-                let inner = match marker {
-                    b'*' => bold_style(),
-                    b'_' => italic_style(),
-                    _ => strike_style(p),
-                };
-                spans.push((i + 1..end - 1, inner));
-                spans.push((end - 1..end, marker_style(p)));
-            }
-        }
-        let ch_len = text[i..].chars().next().map_or(1, char::len_utf8);
-        i += ch_len;
+        spans.push((close..close + 3, marker_style(p)));
+        pos = close + 3;
     }
 
     flatten_spans(text.len(), &spans)
@@ -471,12 +602,33 @@ mod tests {
     }
 
     #[test]
-    fn google_chat_runs_highlights_markers_and_styles() {
-        let text = "*bold* _italic_ ~strike~ `code`";
+    fn google_chat_runs_highlights_markers_nested_and_ignores_literal_delims() {
+        let text = "*粗体* _斜体_ ~删除线~ `code` 2 * 3 * 4 snake_case_name *bold _both_*";
         let runs = google_chat_runs(text, false);
-        assert!(runs.iter().any(|(r, s)| &text[r.clone()] == "bold" && s.font_weight == Some(FontWeight::BOLD)));
-        assert!(runs.iter().any(|(r, s)| &text[r.clone()] == "italic" && s.font_style == Some(FontStyle::Italic)));
-        assert!(runs.iter().any(|(r, s)| &text[r.clone()] == "strike" && s.strikethrough.is_some()));
+        let covered = cover_range(&(0..text.len()), &runs);
+        let mut cursor = 0;
+        for (r, _) in &covered {
+            assert_eq!(r.start, cursor);
+            assert!(r.start < r.end);
+            cursor = r.end;
+        }
+        assert_eq!(cursor, text.len());
+        assert!(runs.iter().any(|(r, s)| &text[r.clone()] == "粗体" && s.font_weight == Some(FontWeight::BOLD)));
+        assert!(runs.iter().any(|(r, s)| &text[r.clone()] == "斜体" && s.font_style == Some(FontStyle::Italic)));
+        assert!(runs.iter().any(|(r, s)| &text[r.clone()] == "删除线" && s.strikethrough.is_some()));
         assert!(runs.iter().any(|(r, s)| &text[r.clone()] == "code" && s.background_color.is_some()));
+        assert!(runs.iter().any(|(r, s)| &text[r.clone()] == "both" && s.font_weight == Some(FontWeight::BOLD) && s.font_style == Some(FontStyle::Italic)));
+        assert!(!runs.iter().any(|(r, s)| text[r.clone()].contains('3') && s.font_weight.is_some()));
+        assert!(!runs.iter().any(|(r, s)| text[r.clone()].contains("case") && s.font_style.is_some()));
+    }
+
+    #[test]
+    fn google_chat_runs_handles_code_blocks_and_tokens() {
+        let text = "```\n*not bold* https://a.com\n```\n<https://example.com|docs> <users/all>";
+        let runs = google_chat_runs(text, true);
+        assert!(!runs.iter().any(|(r, s)| &text[r.clone()] == "not bold" && s.font_weight.is_some()));
+        assert!(!runs.iter().any(|(r, s)| &text[r.clone()] == "https://a.com" && s.underline.is_some()));
+        assert!(runs.iter().any(|(r, s)| &text[r.clone()] == "docs" && s.underline.is_some()));
+        assert!(runs.iter().any(|(r, s)| &text[r.clone()] == "users/all" && s.font_weight == Some(FontWeight::SEMIBOLD)));
     }
 }

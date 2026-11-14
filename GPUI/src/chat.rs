@@ -21,8 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use gpui::base::input::{InputBaseState, MultiLineMode};
-use gpui::component::input::{Enter, Escape, InputEvent, InputState, TextareaState};
+use gpui::component::input::{EditorState, Enter, Escape, InputEvent, InputState};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Div, ElementId, Entity, EntityInputHandler as _, FocusHandle,
@@ -41,7 +40,8 @@ use crate::design::{self, AttachmentKind, Palette, chat as metrics, layout, list
 use crate::message_log;
 use crate::icons::{Icon, icon};
 use crate::engine::{MailError, engine};
-use crate::input;
+use crate::input::{self, wrap_selection};
+use crate::markup_highlight::{MarkupFlavor, markup_highlighter_factory};
 use crate::split;
 use crate::state::ReaderTop;
 
@@ -737,7 +737,7 @@ struct NewChatForm {
 
 pub struct ChatPane {
     focus: FocusHandle,
-    composer: Entity<TextareaState>,
+    composer: Entity<EditorState>,
     people_input: Entity<InputState>,
     /// Why the space list failed to load, until a load succeeds.
     failure: Option<SharedString>,
@@ -799,10 +799,20 @@ impl Focusable for ChatPane {
 impl ChatPane {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| {
-            TextareaState::new(window, cx)
+            let mut state = EditorState::new(window, cx)
+                .line_number(false)
+                .folding(false)
+                .indent_guides(false)
+                .smart_indent(false)
+                .auto_close(false)
+                .soft_wrap(true)
+                .searchable(false)
+                .scroll_beyond_last_line(Some(0))
                 .placeholder("Message")
-                .auto_grow(metrics::COMPOSER_MIN_ROWS, metrics::COMPOSER_MAX_ROWS)
-                .submit_on_enter(true)
+                .submit_on_enter(true);
+            state.set_highlighter_factory(markup_highlighter_factory(MarkupFlavor::GoogleChat), cx);
+            state.set_highlighter("google-chat", cx);
+            state
         });
         let people_input = cx.new(|cx| InputState::new(window, cx).placeholder("Name or email address"));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search conversations"));
@@ -810,7 +820,10 @@ impl ChatPane {
             cx.subscribe_in(&composer, window, Self::on_composer_event),
             cx.subscribe_in(&people_input, window, Self::on_people_event),
             cx.subscribe_in(&search, window, Self::on_search_event),
-            cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
+            cx.observe_window_appearance(window, |this, _, cx| {
+                this.composer.update(cx, |state, cx| state.set_highlighter("google-chat", cx));
+                cx.notify();
+            }),
         ];
         let mut this = Self {
             focus: cx.focus_handle(),
@@ -1413,7 +1426,7 @@ impl ChatPane {
 
     fn on_composer_event(
         &mut self,
-        composer: &Entity<TextareaState>,
+        composer: &Entity<EditorState>,
         event: &InputEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2257,7 +2270,12 @@ impl ChatPane {
                         .on_action(cx.listener(|this, _: &FormatItalic, window, cx| this.format_composer("_", window, cx)))
                         .on_action(cx.listener(|this, _: &FormatStrike, window, cx| this.format_composer("~", window, cx)))
                         .on_action(cx.listener(|this, _: &FormatCode, window, cx| this.format_composer("`", window, cx)))
-                        .child(div().flex_1().min_w_0().child(input::area(&self.composer)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(input::editor(&self.composer).auto_grow(metrics::COMPOSER_MIN_ROWS, metrics::COMPOSER_MAX_ROWS)),
+                        )
                         .child(
                             div().flex_shrink_0().h(px(text::READING * 1.55)).flex().items_center().child(
                                 icon_button("chat-send", Icon::Sent, format!("Send to {title}"), can_send, p.accent)
@@ -2433,66 +2451,13 @@ impl ChatPane {
     }
 }
 
-/// Wraps (or unwraps) the active selection in Google Chat `marker` (`*`, `_`, `~`, `` ` ``);
-/// generic over `MultiLineMode` so a future highlighter-backed `EditorState` shares it as-is.
-fn wrap_selection<M: MultiLineMode>(
-    input: &mut InputBaseState<M>,
-    marker: &str,
-    window: &mut Window,
-    cx: &mut Context<InputBaseState<M>>,
-) {
-    if input.marked_text_range(window, cx).is_some() {
-        return;
-    }
-    let range = input.selected_range();
-    let full = input.text().to_string();
-    let m = marker.len();
-    if range.is_empty() {
-        let pos = range.start;
-        if pos >= m && full.get(pos - m..pos) == Some(marker) && full.get(pos..pos + m) == Some(marker) {
-            input.set_selected_range(pos - m..pos + m, cx);
-            input.replace("", window, cx);
-            input.set_selected_range(pos - m..pos - m, cx);
-            return;
-        }
-        input.replace(format!("{marker}{marker}"), window, cx);
-        input.set_selected_range(pos + m..pos + m, cx);
-        return;
-    }
-    let selected = &full[range.clone()];
-    if range.start >= m && full.get(range.start - m..range.start) == Some(marker) && full.get(range.end..range.end + m) == Some(marker) {
-        let unwrapped = selected.to_owned();
-        let start = range.start - m;
-        let end = range.end - m;
-        input.set_selected_range(range.start - m..range.end + m, cx);
-        input.replace(unwrapped, window, cx);
-        input.set_selected_range(start..end, cx);
-    } else if selected.len() > 2 * m
-        && selected.starts_with(marker)
-        && selected.ends_with(marker)
-        && !selected[m..selected.len() - m].contains(marker)
-    {
-        let inner = selected[m..selected.len() - m].to_owned();
-        let start = range.start;
-        let end = start + inner.len();
-        input.replace(inner, window, cx);
-        input.set_selected_range(start..end, cx);
-    } else {
-        let wrapped = format!("{marker}{selected}{marker}");
-        let start = range.start + m;
-        let end = range.end + m;
-        input.replace(wrapped, window, cx);
-        input.set_selected_range(start..end, cx);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::TestAppContext;
 
     struct ComposerHarness {
-        composer: Entity<TextareaState>,
+        composer: Entity<EditorState>,
         sent: Vec<String>,
         _subscription: Subscription,
     }
@@ -2500,10 +2465,20 @@ mod tests {
     impl ComposerHarness {
         fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
             let composer = cx.new(|cx| {
-                TextareaState::new(window, cx)
+                let mut state = EditorState::new(window, cx)
+                    .line_number(false)
+                    .folding(false)
+                    .indent_guides(false)
+                    .smart_indent(false)
+                    .auto_close(false)
+                    .soft_wrap(true)
+                    .searchable(false)
+                    .scroll_beyond_last_line(Some(0))
                     .placeholder("Message")
-                    .auto_grow(metrics::COMPOSER_MIN_ROWS, metrics::COMPOSER_MAX_ROWS)
-                    .submit_on_enter(true)
+                    .submit_on_enter(true);
+                state.set_highlighter_factory(markup_highlighter_factory(MarkupFlavor::GoogleChat), cx);
+                state.set_highlighter("google-chat", cx);
+                state
             });
             let subscription = cx.subscribe_in(&composer, window, |this, composer, event: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { shift: false, .. } = event
@@ -2528,6 +2503,8 @@ mod tests {
                 .child(
                     div()
                         .key_context(COMPOSER_CONTEXT)
+                        .text_size(px(text::READING))
+                        .line_height(relative(1.55))
                         .on_action(cx.listener(|_, action: &Enter, _, cx| {
                             if action.shift {
                                 cx.propagate();
@@ -2545,14 +2522,18 @@ mod tests {
                         .on_action(cx.listener(|this, _: &FormatCode, window, cx| {
                             this.composer.update(cx, |input, cx| wrap_selection(input, "`", window, cx));
                         }))
-                        .child(input::area(&self.composer)),
+                        .child(
+                            div()
+                                .debug_selector(|| "chat-composer-frame".into())
+                                .child(input::editor(&self.composer).auto_grow(metrics::COMPOSER_MIN_ROWS, metrics::COMPOSER_MAX_ROWS)),
+                        ),
                 )
         }
     }
 
     fn with_composer(
         cx: &mut TestAppContext,
-        run: impl FnOnce(Entity<ComposerHarness>, Entity<TextareaState>, &mut gpui::VisualTestContext),
+        run: impl FnOnce(Entity<ComposerHarness>, Entity<EditorState>, &mut gpui::VisualTestContext),
     ) {
         cx.update(|cx| {
             gpui::init(cx);
@@ -2573,7 +2554,7 @@ mod tests {
             composer.update_in(cx, |input, _, cx| input.set_selected_range(5..5, cx));
             cx.run_until_parked();
 
-            let single_height = composer.read_with(cx, |input, _| input.input_bounds().size.height);
+            let single_height = cx.debug_bounds("chat-composer-frame").unwrap().size.height;
             cx.simulate_keystrokes("shift-enter");
             cx.run_until_parked();
             composer.update_in(cx, |input, window, cx| input.insert("world", window, cx));
@@ -2581,7 +2562,7 @@ mod tests {
 
             assert_eq!(composer.read_with(cx, |input, _| input.value().to_string()), "hello\nworld");
             assert!(view.read_with(cx, |h, _| h.sent.is_empty()));
-            let two_line_height = composer.read_with(cx, |input, _| input.input_bounds().size.height);
+            let two_line_height = cx.debug_bounds("chat-composer-frame").unwrap().size.height;
             assert!(two_line_height > single_height, "composer should grow on newline: {two_line_height:?} vs {single_height:?}");
 
             // Growing past COMPOSER_MAX_ROWS caps the height and scrolls instead.
@@ -2589,14 +2570,13 @@ mod tests {
                 cx.simulate_keystrokes("shift-enter");
             }
             cx.run_until_parked();
-            let capped_height = composer.read_with(cx, |input, _| input.input_bounds().size.height);
+            let capped_height = cx.debug_bounds("chat-composer-frame").unwrap().size.height;
             composer.update_in(cx, |input, _, _| {
                 assert!(input.display_map().wrap_row_count() > metrics::COMPOSER_MAX_ROWS);
             });
             cx.simulate_keystrokes("shift-enter");
             cx.run_until_parked();
-            assert_eq!(composer.read_with(cx, |input, _| input.input_bounds().size.height), capped_height);
-
+            assert_eq!(cx.debug_bounds("chat-composer-frame").unwrap().size.height, capped_height);
             // Plain Enter sends and clears.
             cx.simulate_keystrokes("enter");
             cx.run_until_parked();
@@ -2681,6 +2661,32 @@ mod tests {
         assert!(inline.marks.iter().any(|(_, m)| m.italic));
         assert!(inline.marks.iter().any(|(_, m)| m.strike));
         assert!(inline.marks.iter().any(|(_, m)| m.code));
+    }
+    #[gpui::test]
+    fn live_google_chat_highlighting_preserves_markers_and_selection(cx: &mut TestAppContext) {
+        with_composer(cx, |_, composer, cx| {
+            let sample = "*粗体* _斜体_ ~删除线~ `code`";
+            composer.update_in(cx, |input, window, cx| input.set_value(sample, window, cx));
+            cx.run_until_parked();
+            assert_eq!(composer.read_with(cx, |input, _| input.value().to_string()), sample);
+
+            // Caret movement and selection over highlighted CJK + markers keep exact UTF-8 offsets.
+            let bold_start = "*".len();
+            let bold_end = bold_start + "粗体".len();
+            composer.update_in(cx, |input, _, cx| input.set_selected_range(bold_start..bold_end, cx));
+            cx.run_until_parked();
+            assert_eq!(composer.read_with(cx, |input, _| input.selected_range()), bold_start..bold_end);
+
+            // IME composition inside highlighted text keeps markers intact.
+            composer.update_in(cx, |input, window, cx| {
+                input.replace_and_mark_text_in_range(None, "jiacu", None, window, cx);
+                assert!(input.marked_text_range(window, cx).is_some());
+                input.replace_text_in_range(None, "加粗", window, cx);
+                assert!(input.marked_text_range(window, cx).is_none());
+            });
+            cx.run_until_parked();
+            assert_eq!(composer.read_with(cx, |input, _| input.value().to_string()), "*加粗* _斜体_ ~删除线~ `code`");
+        });
     }
 }
 

@@ -1,15 +1,15 @@
-//! Text fields are gpui-kit's (MS-226): `InputState` for one line (the search box, forms, the chat
-//! composer; `masked` for a secret), `TextareaState` for written text (the compose body, the
-//! inline reply). `field` and `area` draw them without the kit's frame, in the text style around
-//! them, so a view frames them itself (`controls::field_frame`) or not at all. Their key context
-//! is `Input` (`!Input` keeps single-key bindings out of them). The kit emits `Change` and
+//! Text fields are gpui-kit's (MS-226): `InputState` for one line (the search box, forms;
+//! `masked` for a secret), `EditorState` for live-highlighted markup (`editor`). `field` and
+//! `editor` draw them without the kit's frame, in the text style around them, so a view frames
+//! them itself (`controls::field_frame`) or not at all. Their key context is `Input` (`!Input`
+//! keeps single-key bindings out of them). The kit emits `Change` and
 //! `PressEnter`; Esc reaches the view as the kit's `Escape` action, and a view that needs other
 //! keys inside its fields binds them in `"<its context> > Input"`, after the kit's own.
 
 use gpui::base::input::{InputBaseState, MultiLineMode};
 use gpui::component::Sizable;
-use gpui::component::input::{Editor, EditorState, Input, InputState, Textarea, TextareaState};
-use gpui::{App, Context, DefiniteLength, Entity, EntityInputHandler, IntoElement, RenderOnce, Styled, Window, px, relative};
+use gpui::component::input::{Editor, EditorState, Input, InputState};
+use gpui::{App, Context, DefiniteLength, Entity, EntityInputHandler, IntoElement, ParentElement, RenderOnce, Styled, Window, div, px, relative};
 
 use crate::design;
 
@@ -30,50 +30,26 @@ impl RenderOnce for Field {
     }
 }
 
-/// A multi-line editor in the text style around it, inset only by the kit's smallest padding
-/// (`AREA_INSET` on each side); its state's rows or `auto_grow` set its height, `full` fills its
-/// parent and scrolls inside.
-#[derive(IntoElement)]
-pub struct Area {
-    textarea: Textarea,
-    full: bool,
-}
-
 /// The horizontal inset the kit keeps inside an `area` (its `XSmall` padding): a view pads it that
 /// much less to keep the text where it was.
 pub const AREA_INSET: f32 = 4.0;
-
-pub fn area(state: &Entity<TextareaState>) -> Area {
-    Area { textarea: Textarea::new(state).appearance(false).xsmall(), full: false }
-}
-
-impl Area {
-    /// Fills the parent's height and scrolls inside it.
-    #[allow(dead_code)]
-    pub fn full(mut self) -> Self {
-        self.full = true;
-        self
-    }
-}
-
-impl RenderOnce for Area {
-    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
-        let style = window.text_style();
-        let textarea = self.textarea.text_size(style.font_size).line_height(style.line_height);
-        if self.full { textarea.h(gpui::relative(1.)) } else { textarea }
-    }
-}
-
 /// A multi-line WYSIWYM markup editor without the kit's frame or monospace override, in the
 /// surrounding UI font and text style.
 #[derive(IntoElement)]
 pub struct MarkupEditor {
+    state: Entity<EditorState>,
     editor: Editor,
     height: Option<DefiniteLength>,
+    auto_grow: Option<(usize, usize)>,
 }
 
 pub fn editor(state: &Entity<EditorState>) -> MarkupEditor {
-    MarkupEditor { editor: Editor::new(state).appearance(false).bordered(false).xsmall(), height: None }
+    MarkupEditor {
+        state: state.clone(),
+        editor: Editor::new(state).appearance(false).bordered(false).xsmall(),
+        height: None,
+        auto_grow: None,
+    }
 }
 
 impl MarkupEditor {
@@ -88,19 +64,32 @@ impl MarkupEditor {
         self.height = Some(px(height).into());
         self
     }
+
+    /// Sizes the editor by wrapped line count (`min_rows..=max_rows`) using `window.line_height()`.
+    pub fn auto_grow(mut self, min_rows: usize, max_rows: usize) -> Self {
+        self.auto_grow = Some((min_rows, max_rows));
+        self
+    }
 }
 
 impl RenderOnce for MarkupEditor {
-    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let style = window.text_style();
+        let line_height = window.line_height();
+        let height = self.height.or_else(|| {
+            self.auto_grow.map(|(min_rows, max_rows)| {
+                let rows = self.state.read(cx).display_map().wrap_row_count().clamp(min_rows, max_rows);
+                (line_height * rows as f32).into()
+            })
+        });
         let editor = self
             .editor
             .font_family(design::ui_font())
             .text_size(style.font_size)
             .line_height(style.line_height);
-        match self.height {
-            Some(h) => editor.h(h),
-            None => editor,
+        match height {
+            Some(h) => div().w_full().h(h).overflow_hidden().child(editor.h(h)).into_any_element(),
+            None => editor.into_any_element(),
         }
     }
 }
