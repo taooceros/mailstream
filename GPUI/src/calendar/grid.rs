@@ -1660,6 +1660,20 @@ mod tests {
         assert_eq!(states(&pane, cx), vec![false, false, false, false]);
         click_on(cx, "calendar-show-all");
         assert_eq!(states(&pane, cx), vec![true, true, true, true]);
+
+        // Folding "Other calendars" hides Jordan and Holidays while Work stays; keyboard Enter unfolds it.
+        click_on(cx, "calendar-group:sam@example.com:other");
+        assert!(cx.debug_bounds("calendar-shown:sam@example.com:jordan").is_none());
+        assert!(cx.debug_bounds("calendar-shown:sam@example.com:work").is_some());
+        key(cx, "enter");
+        assert!(cx.debug_bounds("calendar-shown:sam@example.com:jordan").is_some());
+
+        // Folding the whole account hides all of its calendars while the other account stays; Space unfolds it.
+        click_on(cx, "calendar-account:sam@example.com");
+        assert!(cx.debug_bounds("calendar-shown:sam@example.com:work").is_none());
+        assert!(cx.debug_bounds("calendar-shown:sam@contoso.example:outlook").is_some());
+        key(cx, "space");
+        assert!(cx.debug_bounds("calendar-shown:sam@example.com:work").is_some());
     }
 
     /// An account whose calendar takes new events.

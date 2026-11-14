@@ -3,9 +3,7 @@
 //! labels or folders. Expansion is remembered by node key.
 
 use super::*;
-use gpui::{Transformation, radians};
-
-use crate::controls::tooltip;
+use crate::controls::{disclosure_chevron, expander, tooltip};
 
 use mailstream::{Account, Mailbox};
 use crate::settings::ShowSettings;
@@ -350,11 +348,13 @@ impl MailApp {
 
         if node.key.starts_with("section:") {
             // A group's title; it folds the accounts.
-            return group_title(node.title, p)
-                .id(ElementId::Name(key.clone()))
-                .mx(px(-space::S10))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_expanded(&key, cx)))
+            return div()
+                .pt(px(space::S6))
+                .child(
+                    expander(key.clone(), expanded, node.title, p)
+                        .title_color(p.muted)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_expanded(&key, cx))),
+                )
                 .into_any_element();
         }
 
@@ -381,9 +381,7 @@ impl MailApp {
                     cx.stop_propagation();
                     this.toggle_expanded(&toggle_key, cx);
                 }))
-                .child(icon(Icon::Disclosure, 13., p.muted).with_transformation(Transformation::rotate(radians(
-                    if expanded { std::f32::consts::FRAC_PI_2 } else { 0. },
-                ))))
+                .child(disclosure_chevron(expanded, p.muted))
         });
 
         let tip = match (node.tooltip, &node.problem) {

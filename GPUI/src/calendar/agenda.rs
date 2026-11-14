@@ -22,7 +22,7 @@ use super::model::{self, ReplyState};
 use super::{CalendarPane, Entry, Refresh, Today, View};
 use crate::avatars;
 use crate::controls::{
-    ButtonKind, ControlSize, Tone, button, capsule, capsule_button, color_dots, hairline, icon_button,
+    ButtonKind, ControlSize, Tone, button, capsule, capsule_button, color_dots, expander, hairline, icon_button,
     icon_label_button, island, list_row, mark_dot, notice, notice_close, popover, segment, segmented, swatch_row, tag,
     title_bar, tooltip,
 };
@@ -237,6 +237,7 @@ impl CalendarPane {
             div()
                 .id("sidebar-calendars")
                 .debug_selector(|| "sidebar-calendars".into())
+                .flex_shrink_0()
                 .mt(px(space::S6))
                 .mb(px(space::S4))
                 .flex()
@@ -270,107 +271,127 @@ impl CalendarPane {
         let mut rows: Vec<AnyElement> = Vec::new();
         let show_all_id = format!("{prefix}-show-all");
         let show_all_sel = show_all_id.clone();
-        rows.push(
-            div()
-                .h(px(if sidebar { 24. } else { metrics::LIST_ROW }))
-                .px(px(space::S8))
-                .flex()
-                .items_center()
-                .gap(px(space::S6))
-                .when(!sidebar, |d| d.child(icon(Icon::Layers, icon_size::ROW, p.glyph)))
-                .child(
-                    div()
-                        .text_size(px(if sidebar { text::CAPTION } else { text::FOOTNOTE }))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(if sidebar { p.muted } else { p.text })
-                        .child("Calendars"),
-                )
-                .child(div().text_size(px(text::CAPTION)).text_color(p.muted).child(format!("{shown}/{total}")))
-                .child(div().flex_1())
-                .child(
-                    button(
-                        ElementId::Name(show_all_id.into()),
-                        if all_shown { "Hide all" } else { "Show all" },
-                        ButtonKind::Plain(p.accent),
-                        ControlSize::Small,
-                        true,
-                        p,
-                    )
-                    .debug_selector(move || show_all_sel.clone())
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_all_calendars(!all_shown, cx))),
-                )
-                .into_any_element(),
-        );
+        let show_all = button(
+            ElementId::Name(show_all_id.into()),
+            if all_shown { "Hide all" } else { "Show all" },
+            ButtonKind::Plain(p.accent),
+            ControlSize::Small,
+            true,
+            p,
+        )
+        .debug_selector(move || show_all_sel.clone())
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            this.set_all_calendars(!all_shown, cx);
+        }));
+        if sidebar {
+            let root_open = !self.is_collapsed("calendars");
+            let root_id = format!("{prefix}-section");
+            let root_sel = root_id.clone();
+            rows.push(
+                expander(ElementId::Name(root_id.into()), root_open, "Calendars", p)
+                    .title_color(p.muted)
+                    .detail(format!("{shown}/{total}"))
+                    .trailing(show_all)
+                    .debug_selector(move || root_sel.clone())
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_section("calendars", cx)))
+                    .into_any_element(),
+            );
+            if !root_open {
+                return rows;
+            }
+        } else {
+            rows.push(
+                div()
+                    .flex_shrink_0()
+                    .h(px(metrics::LIST_ROW))
+                    .px(px(space::S8))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S6))
+                    .child(icon(Icon::Layers, icon_size::ROW, p.glyph))
+                    .child(div().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).child("Calendars"))
+                    .child(div().text_size(px(text::CAPTION)).text_color(p.muted).child(format!("{shown}/{total}")))
+                    .child(div().flex_1())
+                    .child(show_all)
+                    .into_any_element(),
+            );
+        }
 
         for (pos, (index, account)) in granted.into_iter().enumerate() {
-            if !sidebar || pos > 0 {
-                rows.push(div().my(px(space::S4)).child(hairline(p)).into_any_element());
+            if !sidebar {
+                rows.push(div().flex_shrink_0().my(px(space::S4)).child(hairline(p)).into_any_element());
+            } else if pos > 0 {
+                rows.push(div().flex_shrink_0().h(px(space::S4)).into_any_element());
             }
             let account_title = if !account.label.is_empty() && account.label != account.id {
                 format!("{} · {}", account.label, account.id)
             } else {
                 account.id.clone()
             };
-            let account_all = account.calendars.iter().all(|c| c.shown);
+            let acc_total = account.calendars.len();
+            let acc_shown = account.calendars.iter().filter(|c| c.shown).count();
+            let account_all = acc_shown == acc_total;
             let account_id = account.id.clone();
-            rows.push(
-                div()
-                    .h(px(metrics::LIST_ROW - 2.))
-                    .px(px(space::S8))
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S6))
-                    .child(mark_dot(design::account_color(index)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(text::FOOTNOTE))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(p.text)
-                            .child(account_title),
+            let acc_key = format!("account:{account_id}");
+            let acc_open = !self.is_collapsed(&acc_key);
+            let acc_id = format!("{prefix}-account:{account_id}");
+            let acc_sel = acc_id.clone();
+            let toggle_acc = acc_key.clone();
+            let mut header = expander(ElementId::Name(acc_id.into()), acc_open, account_title, p)
+                .leading(mark_dot(design::account_color(index)))
+                .when_detail((!acc_open).then(|| format!("{acc_shown}/{acc_total}").into()))
+                .debug_selector(move || acc_sel.clone())
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_section(&toggle_acc, cx)));
+            if !sidebar && acc_open && several_accounts && acc_total > 1 {
+                let account_id = account_id.clone();
+                header = header.trailing(
+                    button(
+                        ElementId::Name(format!("{prefix}-account-all:{account_id}").into()),
+                        if account_all { "Hide all" } else { "Show all" },
+                        ButtonKind::Plain(p.muted),
+                        ControlSize::Small,
+                        true,
+                        p,
                     )
-                    .when(!sidebar && several_accounts && account.calendars.len() > 1, |d| {
-                        d.child(
-                            button(
-                                ElementId::Name(format!("{prefix}-account-all:{account_id}").into()),
-                                if account_all { "Hide all" } else { "Show all" },
-                                ButtonKind::Plain(p.muted),
-                                ControlSize::Small,
-                                true,
-                                p,
-                            )
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.set_account_calendars(&account_id, !account_all, cx);
-                            })),
-                        )
-                    })
-                    .into_any_element(),
-            );
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.set_account_calendars(&account_id, !account_all, cx);
+                    })),
+                );
+            }
+            rows.push(header.into_any_element());
+            if !acc_open {
+                continue;
+            }
 
             let mut mine: Vec<&CalendarInfo> = account.calendars.iter().filter(|c| c.owned()).collect();
             mine.sort_by_key(|c| (!c.primary, c.name.to_lowercase()));
             let mut others: Vec<&CalendarInfo> = account.calendars.iter().filter(|c| !c.owned()).collect();
             others.sort_by_key(|c| (!c.writable, c.name.to_lowercase()));
 
-            for (group_title, group) in [("My calendars", mine), ("Other calendars", others)] {
+            for (group_title, kind, group) in [("My calendars", "mine", mine), ("Other calendars", "other", others)] {
                 if group.is_empty() {
                     continue;
                 }
+                let group_key = format!("group:{}:{kind}", account.id);
+                let group_open = !self.is_collapsed(&group_key);
+                let group_shown = group.iter().filter(|c| c.shown).count();
+                let group_total = group.len();
+                let group_id = format!("{prefix}-group:{}:{kind}", account.id);
+                let group_sel = group_id.clone();
+                let toggle_group = group_key.clone();
                 rows.push(
-                    div()
-                        .h(px(metrics::LIST_GROUP))
-                        .px(px(space::S8))
-                        .flex()
-                        .items_end()
-                        .pb(px(space::S2))
-                        .text_size(px(text::TAG))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(p.muted)
-                        .child(group_title)
+                    expander(ElementId::Name(group_id.into()), group_open, group_title, p)
+                        .small()
+                        .when_detail((!group_open).then(|| format!("{group_shown}/{group_total}").into()))
+                        .debug_selector(move || group_sel.clone())
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_section(&toggle_group, cx)))
                         .into_any_element(),
                 );
+                if !group_open {
+                    continue;
+                }
                 for calendar in group {
                     let color = dot_color(
                         model::hex_color(calendar.color.as_deref()).unwrap_or_else(|| design::account_color(index)),

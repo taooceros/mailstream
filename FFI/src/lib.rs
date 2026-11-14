@@ -45,6 +45,7 @@ pub use mailstream_engine::answers::*;
 pub use mailstream_engine::chat_markup::{ChatBlock, ChatBlockKind, ChatSpan, ChatStyle};
 /// For Rust hosts (GPUI): the stable color slot of a key, as avatars pick theirs.
 pub use mailstream_engine::display::{AVATAR_SLOTS, Avatar, ChatRun, stable_slot};
+pub use mailstream_engine::support_directory;
 
 /// A failed request: the engine's stable `code` (`unknown_account`, `provider`, `confirm`, …)
 /// and a message for people.

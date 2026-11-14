@@ -19,10 +19,10 @@ use gpui::component::tooltip::Tooltip;
 use gpui::component::{Disableable, Sizable};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Anchor, AnyElement, AnyView, App, DispatchPhase, Div, ElementId, FontWeight, HighlightStyle, Hsla,
-    InteractiveElement, InteractiveText, IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    Point, SharedString, Stateful, StatefulInteractiveElement, Styled, StyledText, Window, canvas, div, hsla,
-    linear_color_stop, linear_gradient, px,
+    Anchor, AnyElement, AnyView, App, ClickEvent, DispatchPhase, Div, ElementId, FontWeight, HighlightStyle, Hsla,
+    InteractiveElement, InteractiveText, IntoElement, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Pixels, Point, RenderOnce, SharedString, Stateful, StatefulInteractiveElement, Styled, StyledText,
+    Svg, Transformation, Window, canvas, div, hsla, linear_color_stop, linear_gradient, px, radians,
 };
 use linkify::{LinkFinder, LinkKind};
 use mailstream::is_mail_link;
@@ -465,6 +465,7 @@ pub fn swatch_row(
         div()
             .id(id)
             .group("swatch-row")
+            .flex_shrink_0()
             .h(px(design::calendar::LIST_ROW))
             .px(px(space::S8))
             .flex()
@@ -514,6 +515,171 @@ pub fn swatch_row(
                 }),
         )
     })
+}
+
+/// The disclosure chevron of a collapsible row or section (`sidebar.rs`, [`Expander`]): pointing
+/// right when collapsed, rotated 90° down when `expanded`.
+pub fn disclosure_chevron(expanded: bool, color: Hsla) -> Svg {
+    icon(Icon::Disclosure, 13., color).with_transformation(Transformation::rotate(radians(
+        if expanded { std::f32::consts::FRAC_PI_2 } else { 0. },
+    )))
+}
+
+type ToggleHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+
+/// A collapsible section or group header (`Expander`, MS-309): an optional `leading` mark,
+/// `title`, an optional `detail` count, an optional `trailing` action, and a
+/// [`disclosure_chevron`] at its end. Clicks and keyboard activation (Enter, Space, ← to
+/// collapse, → to expand while focused) run `on_click`.
+#[derive(IntoElement)]
+pub struct Expander {
+    id: ElementId,
+    expanded: bool,
+    small: bool,
+    leading: Option<AnyElement>,
+    title: SharedString,
+    title_color: Option<Hsla>,
+    detail: Option<SharedString>,
+    trailing: Option<AnyElement>,
+    debug_selector: Option<Box<dyn FnOnce() -> String + 'static>>,
+    on_toggle: Option<ToggleHandler>,
+    p: &'static Palette,
+}
+
+pub fn expander(
+    id: impl Into<ElementId>,
+    expanded: bool,
+    title: impl Into<SharedString>,
+    p: &'static Palette,
+) -> Expander {
+    Expander {
+        id: id.into(),
+        expanded,
+        small: false,
+        leading: None,
+        title: title.into(),
+        title_color: None,
+        detail: None,
+        trailing: None,
+        debug_selector: None,
+        on_toggle: None,
+        p,
+    }
+}
+
+impl Expander {
+    pub fn small(mut self) -> Self {
+        self.small = true;
+        self
+    }
+
+    pub fn leading(mut self, leading: impl IntoElement) -> Self {
+        self.leading = Some(leading.into_any_element());
+        self
+    }
+
+    pub fn title_color(mut self, color: Hsla) -> Self {
+        self.title_color = Some(color);
+        self
+    }
+
+    pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    pub fn when_detail(mut self, detail: Option<SharedString>) -> Self {
+        self.detail = detail;
+        self
+    }
+
+    pub fn trailing(mut self, trailing: impl IntoElement) -> Self {
+        self.trailing = Some(trailing.into_any_element());
+        self
+    }
+
+    pub fn debug_selector(mut self, selector: impl FnOnce() -> String + 'static) -> Self {
+        self.debug_selector = Some(Box::new(selector));
+        self
+    }
+
+    pub fn on_click(mut self, listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_toggle = Some(Box::new(listener));
+        self
+    }
+}
+
+impl RenderOnce for Expander {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let p = self.p;
+        let focus = window
+            .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle().tab_stop(true))
+            .read(cx)
+            .clone();
+        let focused = focus.is_focused(window);
+        let height = if self.small { design::calendar::LIST_GROUP + 2. } else { design::calendar::LIST_ROW - 2. };
+        let font_size = if self.small { text::TAG } else { text::FOOTNOTE };
+        let ink = self.title_color.unwrap_or(if self.small { p.muted } else { p.text });
+        let expanded = self.expanded;
+        let on_toggle = self.on_toggle.map(std::rc::Rc::new);
+        let key_toggle = on_toggle.clone();
+
+        let focus_on_press = focus.clone();
+        let mut row = div()
+            .id(self.id)
+            .key_context("Expander")
+            .track_focus(&focus)
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                window.focus(&focus_on_press, cx);
+                cx.stop_propagation();
+            })
+            .flex_shrink_0()
+            .h(px(height))
+            .pl(px(space::S8))
+            .pr(px(space::S6))
+            .flex()
+            .items_center()
+            .gap(px(space::S6))
+            .rounded(px(radius::CONTROL))
+            .cursor_pointer()
+            .when(focused, |d| d.bg(p.hover))
+            .hover(|s| s.bg(p.hover))
+            .active(|s| s.bg(p.pressed));
+        if let Some(selector) = self.debug_selector {
+            row = row.debug_selector(selector);
+        }
+        if let Some(toggle) = on_toggle {
+            row = row.on_click(move |event, window, cx| toggle(event, window, cx));
+        }
+        if let Some(toggle) = key_toggle {
+            row = row.on_key_down(move |event: &KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.as_str();
+                if !event.keystroke.modifiers.modified()
+                    && (key == "enter" || key == "space" || (key == "left" && expanded) || (key == "right" && !expanded))
+                {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    toggle(&ClickEvent::default(), window, cx);
+                }
+            });
+        }
+        row.children(self.leading)
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(font_size))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(ink)
+                    .child(self.title),
+            )
+            .when_some(self.detail, |d, detail| {
+                d.child(div().flex_shrink_0().text_size(px(text::CAPTION)).text_color(p.muted).child(detail))
+            })
+            .child(div().flex_1())
+            .children(self.trailing)
+            .child(disclosure_chevron(expanded, p.muted))
+    }
 }
 
 /// The column before a list row's avatar: an accent dot while the row is unread, a little right

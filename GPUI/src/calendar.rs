@@ -67,7 +67,7 @@ fn notice_key(account: &CalendarAccount) -> String {
 pub fn bind_keys(cx: &mut App) {
     // Google Calendar's keys, as mail takes Gmail's; never while a field has focus. The window's
     // own keys (mail's) give way to these inside it.
-    let list = Some("Calendar && !Input");
+    let list = Some("Calendar && !Input && !Expander");
     let pane = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("down", Next, list),
@@ -86,7 +86,7 @@ pub fn bind_keys(cx: &mut App) {
         // The open event's page; in the week view the popover has the keyboard, and gpui-kit
         // leaves Return in it to its controls unless bound there.
         KeyBinding::new("enter", ExpandEvent, list),
-        KeyBinding::new("enter", ExpandEvent, Some("Calendar > PopoverContent")),
+        KeyBinding::new("enter", ExpandEvent, Some("Calendar > PopoverContent && !Expander")),
         KeyBinding::new(secondary!("["), Back, pane),
         KeyBinding::new(secondary!("r"), Refresh, pane),
         // Over the window's New Message while the calendar has focus.
@@ -172,6 +172,9 @@ pub struct CalendarPane {
     refocus: bool,
     /// The list of calendars to show or hide is open under its button.
     calendar_list: bool,
+    /// Collapsed sections of the calendar list (`"calendars"`, `"account:…"`, `"group:…:mine"`,
+    /// `"group:…:other"`), kept across launches in `gpui-calendar-sections.json` (MS-309).
+    collapsed: HashSet<SharedString>,
     /// Answers on their way to the calendar, by event, until it takes them.
     answering: HashMap<EventKey, &'static str>,
     /// A read is under way; `read_again` asks for one more when it lands.
@@ -265,6 +268,7 @@ impl CalendarPane {
             create_after: None,
             refocus: false,
             calendar_list: false,
+            collapsed: HashSet::new(),
             answering: HashMap::new(),
             reading: false,
             read_again: false,
@@ -344,6 +348,9 @@ impl CalendarPane {
 
     /// The calendar comes into view, from what the engine holds (it fetches what got old itself).
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.active {
+            self.collapsed = load_collapsed();
+        }
         self.active = true;
         window.focus(&self.focus, cx);
         self.reload(cx);
@@ -918,6 +925,32 @@ impl CalendarPane {
         self.show_calendars(changes, cx);
     }
 
+    /// Whether `section` in the calendar list is collapsed.
+    pub(super) fn is_collapsed(&self, section: &str) -> bool {
+        self.collapsed.contains(section)
+    }
+
+    /// Folds or unfolds `section` in the calendar list, keeping the choice on disk.
+    pub(super) fn toggle_section(&mut self, section: &str, cx: &mut Context<Self>) {
+        let key: SharedString = section.to_owned().into();
+        if !self.collapsed.remove(&key) {
+            self.collapsed.insert(key);
+        }
+        if self.active {
+            let mut saved: Vec<String> = self.collapsed.iter().map(|s| s.to_string()).collect();
+            saved.sort();
+            cx.background_executor()
+                .spawn(async move {
+                    let path = collapsed_path();
+                    if let Ok(json) = serde_json::to_vec(&saved) {
+                        std::fs::write(path, json).ok();
+                    }
+                })
+                .detach();
+        }
+        cx.notify();
+    }
+
     /// ⌘N: a new event from the next full hour.
     fn new_event(&mut self, _: &NewEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.create_event(None, window, cx);
@@ -1014,4 +1047,18 @@ impl Render for CalendarPane {
                 None => d.child(list.size_full()),
             })
     }
+}
+
+fn collapsed_path() -> std::path::PathBuf {
+    mailstream::support_directory().join("gpui-calendar-sections.json")
+}
+
+fn load_collapsed() -> HashSet<SharedString> {
+    std::fs::read(collapsed_path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(SharedString::from)
+        .collect()
 }
