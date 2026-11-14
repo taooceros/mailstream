@@ -357,22 +357,24 @@ impl MailApp {
         }
     }
 
-    /// A scroll event in the content area (`at`, from its top left), in the capture phase: true
-    /// when the back swipe took it. A swipe closes the layer under the fingers (MS-299).
-    pub fn feed_swipe(&mut self, event: &ScrollEvent, at: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+    /// A scroll event in the content area (`at`, from its top left; `None` when an overlay over
+    /// it covers the pointer), in the capture phase: true when the back swipe took it. A swipe
+    /// closes the layer under the fingers (MS-299, MS-319).
+    pub fn feed_swipe(&mut self, event: &ScrollEvent, at: Option<Point<Pixels>>, cx: &mut Context<Self>) -> bool {
         if event.touch_phase == TouchPhase::Started {
-            self.gesture_layer = self.layer_under(f32::from(at.x));
+            self.gesture_layer = at.and_then(|at| self.layer_under(f32::from(at.x)));
         }
         let can_start = self.gesture_layer.is_some() && self.context_menu.is_none();
         let step = self.swipe.feed(event, can_start);
         self.follow(step, cx)
     }
 
-    /// The layer a gesture at `x` (from the content area's left) closes (MS-299).
+    /// The layer a gesture at `x` (from the content area's left) closes (MS-299, MS-281).
     fn layer_under(&self, x: f32) -> Option<SharedString> {
         let live: Vec<&Layer> = self.live_layers().collect();
         let readers: Vec<bool> = live.iter().map(|layer| matches!(layer, Layer::Reader(_))).collect();
-        gesture_target(&readers, self.beside.map(|beside| beside.edge), x).map(|index| live[index].id())
+        let beside = self.beside.map(|beside| (beside.list, beside.edge));
+        gesture_target(&readers, beside, x).map(|index| live[index].id())
     }
 
     /// A single left press on layer `layer` at `at`: a sideways drag from there closes it, the
@@ -657,12 +659,21 @@ impl MailApp {
 
 /// The layer a close gesture at `x` (from the content area's left) takes, of `readers` (the live
 /// layers bottom to top, true for a conversation) with a conversation beside the list starting at
-/// `beside` (MS-299): over that conversation, it; over the list's island, the bundle on it, or
-/// none; otherwise (one pane, every layer covering the list's island) the top one.
-fn gesture_target(readers: &[bool], beside: Option<f32>, x: f32) -> Option<usize> {
+/// `edge` after a list island ending at `list` (MS-299, MS-281): over that conversation, it; over
+/// the list's island (`x < list`), the bundle on it, or none; between them (the gap or a docked
+/// compose column), none; otherwise (one pane, every layer covering the list's island) the top one.
+fn gesture_target(readers: &[bool], beside: Option<(f32, f32)>, x: f32) -> Option<usize> {
     let top = readers.len().checked_sub(1)?;
     match beside {
-        Some(edge) if readers[top] && x < edge => readers.iter().rposition(|reader| !reader),
+        Some((list, edge)) if readers[top] => {
+            if x >= edge {
+                Some(top)
+            } else if x < list {
+                readers.iter().rposition(|reader| !reader)
+            } else {
+                None
+            }
+        }
         _ => Some(top),
     }
 }
@@ -673,17 +684,21 @@ mod tests {
 
     #[test]
     fn a_gesture_closes_the_layer_under_the_pointer() {
-        // A bundle with a conversation beside the list, which ends at 400.
+        // A bundle with a conversation beside the list (list ends at 388, conversation at 400).
         let bundle_and_reader = [false, true];
-        assert_eq!(gesture_target(&bundle_and_reader, Some(400.), 120.), Some(0), "over the bundle");
-        assert_eq!(gesture_target(&bundle_and_reader, Some(400.), 600.), Some(1), "over the conversation");
+        assert_eq!(gesture_target(&bundle_and_reader, Some((388., 400.)), 120.), Some(0), "over the bundle");
+        assert_eq!(gesture_target(&bundle_and_reader, Some((388., 400.)), 600.), Some(1), "over the conversation");
+        assert_eq!(gesture_target(&bundle_and_reader, Some((388., 400.)), 394.), None, "over the gap");
+        // With the compose column docked between them (list 388, column 400..700, reader 712).
+        assert_eq!(gesture_target(&bundle_and_reader, Some((388., 712.)), 550.), None, "over the compose column");
+        assert_eq!(gesture_target(&bundle_and_reader, Some((388., 712.)), 750.), Some(1), "over the conversation");
         // A conversation beside the bare list: over the list, nothing to close.
-        assert_eq!(gesture_target(&[true], Some(400.), 120.), None);
-        assert_eq!(gesture_target(&[true], Some(400.), 600.), Some(0));
+        assert_eq!(gesture_target(&[true], Some((388., 400.)), 120.), None);
+        assert_eq!(gesture_target(&[true], Some((388., 400.)), 600.), Some(0));
         // A bundle alone, beside nothing.
         assert_eq!(gesture_target(&[false], None, 120.), Some(0));
         // One pane: the conversation covers the bundle and the list.
         assert_eq!(gesture_target(&bundle_and_reader, None, 120.), Some(1));
-        assert_eq!(gesture_target(&[], Some(400.), 120.), None);
+        assert_eq!(gesture_target(&[], Some((388., 400.)), 120.), None);
     }
 }

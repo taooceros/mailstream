@@ -24,8 +24,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Bounds, Canvas, Context, DispatchPhase, Entity, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, ScrollDelta, ScrollEvent, TouchPhase, Window, canvas,
+    App, Bounds, Canvas, Context, DispatchPhase, Entity, HitboxBehavior, HitboxId, MouseButton, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, ScrollDelta, ScrollEvent, TouchPhase, Window, canvas,
 };
 
 use crate::controls::WINDOW_MOVE_SLOP;
@@ -390,21 +390,26 @@ pub fn settle(offset: f32, velocity: f32, width: f32) -> (bool, f32) {
     (back, target)
 }
 
-/// Hands `host` the scroll events over the element it is drawn as (laid over a page or the
-/// pages), in the capture phase, before any scroll view under them scrolls with them, with where
-/// it points from the element's top left; `feed` answers true when the swipe took one.
+/// Hands `host` the scroll events over the element it is drawn as, in the capture phase, before
+/// any scroll view under it scrolls with them, with where it points from the element's top left:
+/// none where something drawn after it covers the pointer (a toast, a floating draft, a menu, a
+/// page laid over it), which `feed` answers with no swipe that starts there (MS-319). Draw it
+/// over the pages it serves, after them: it takes no pointer itself, its plain hitbox only telling
+/// whether anything over it does. Only a gesture's start asks: one under way when a toast shows
+/// up under the fingers goes on. `feed` answers true when the swipe took the event.
+#[allow(clippy::type_complexity)]
 pub fn scroll_capture<T: 'static>(
     host: Entity<T>,
-    feed: fn(&mut T, &ScrollEvent, Point<Pixels>, &mut Context<T>) -> bool,
-) -> Canvas<()> {
+    feed: fn(&mut T, &ScrollEvent, Option<Point<Pixels>>, &mut Context<T>) -> bool,
+) -> Canvas<HitboxId> {
     canvas(
-        |_, _, _| (),
-        move |bounds: Bounds<Pixels>, _, window, _| {
-            window.on_mouse_event(move |event: &ScrollEvent, phase, _, cx: &mut App| {
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
+        move |bounds: Bounds<Pixels>, hitbox: HitboxId, window, _| {
+            window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx: &mut App| {
                 if phase != DispatchPhase::Capture || !bounds.contains(&event.position) {
                     return;
                 }
-                let at = event.position - bounds.origin;
+                let at = hitbox.should_handle_scroll(window).then(|| event.position - bounds.origin);
                 if host.update(cx, |this, cx| feed(this, event, at, cx)) {
                     cx.stop_propagation();
                 }
@@ -616,5 +621,91 @@ mod tests {
         assert!(matches!(slide, Slide::Settle { to, back: true, .. } if to == 900.0));
         assert!(slide.follow(Step::Release { offset: 100.0, velocity: 0.0 }, 900.0));
         assert!(matches!(slide, Slide::Settle { to, back: false, .. } if to == 0.0));
+    }
+
+    struct OverlayHost {
+        swipe: BackSwipe,
+        covered: bool,
+        dragged: Vec<f32>,
+        released: Option<f32>,
+    }
+
+    impl OverlayHost {
+        fn feed(&mut self, event: &ScrollEvent, at: Option<Point<Pixels>>, cx: &mut Context<Self>) -> bool {
+            let can_start = at.is_some();
+            match self.swipe.feed(event, can_start) {
+                Step::Pass => false,
+                Step::Consume => true,
+                Step::Drag(offset) => {
+                    self.dragged.push(offset);
+                    true
+                }
+                Step::Release { offset, .. } => {
+                    self.released = Some(offset);
+                    cx.notify();
+                    true
+                }
+                Step::Cancel(_) => true,
+            }
+        }
+    }
+
+    impl gpui::Render for OverlayHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+            use gpui::{InteractiveElement as _, ParentElement as _, Styled as _, div};
+            let swipe = scroll_capture(cx.entity(), Self::feed).absolute().size_full();
+            let root = div().relative().size_full().child(div().size_full().child(swipe));
+            if self.covered {
+                root.child(div().id("overlay").occlude().absolute().right_0().top_0().w(px(200.)).h(px(200.)))
+            } else {
+                root
+            }
+        }
+    }
+
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn a_swipe_starting_over_an_overlay_is_ignored_while_one_already_started_continues(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, ScrollSource, size};
+
+        let (host, cx) = cx.add_window_view(|_, _| OverlayHost {
+            swipe: BackSwipe::default(),
+            covered: true,
+            dragged: Vec::new(),
+            released: None,
+        });
+        cx.simulate_resize(size(px(600.), px(400.)));
+        cx.run_until_parked();
+
+        let touchpad = |at, phase, dx| ScrollEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(dx), px(0.))),
+            modifiers: Modifiers::default(),
+            touch_phase: phase,
+            source: ScrollSource::Pointer,
+        };
+
+        // Over the overlay (x = 500, within the right 200x200 occluding box): never starts.
+        let over_overlay = point(px(500.), px(100.));
+        cx.simulate_event(touchpad(over_overlay, TouchPhase::Started, 0.));
+        cx.simulate_event(touchpad(over_overlay, TouchPhase::Moved, 40.));
+        cx.simulate_event(touchpad(over_overlay, TouchPhase::Ended, 0.));
+        host.read_with(cx, |host, _| {
+            assert!(host.dragged.is_empty(), "swipe over overlay must not drag: {:?}", host.dragged);
+            assert_eq!(host.released, None);
+        });
+
+        // Over the uncovered page (x = 100): starts and drags; even if the pointer moves onto
+        // the overlay mid-gesture, it keeps tracking to release.
+        let uncovered = point(px(100.), px(100.));
+        cx.simulate_event(touchpad(uncovered, TouchPhase::Started, 0.));
+        cx.simulate_event(touchpad(uncovered, TouchPhase::Moved, 20.));
+        cx.simulate_event(touchpad(over_overlay, TouchPhase::Moved, 30.));
+        cx.simulate_event(touchpad(over_overlay, TouchPhase::Ended, 0.));
+        host.read_with(cx, |host, _| {
+            assert_eq!(host.dragged, vec![20., 50.]);
+            assert_eq!(host.released, Some(50.));
+        });
     }
 }

@@ -586,8 +586,8 @@ impl CalendarPane {
     }
 
     /// A scroll event over the top surface, in the capture phase: true when the swipe took it.
-    fn feed_close_swipe(&mut self, event: &ScrollEvent, _: Point<Pixels>, cx: &mut Context<Self>) -> bool {
-        let step = self.close_swipe.feed(event, self.top_surface().is_some());
+    fn feed_close_swipe(&mut self, event: &ScrollEvent, at: Option<Point<Pixels>>, cx: &mut Context<Self>) -> bool {
+        let step = self.close_swipe.feed(event, at.is_some() && self.top_surface().is_some());
         self.follow_close(step, cx)
     }
 
@@ -631,12 +631,12 @@ impl CalendarPane {
         })
     }
 
-    /// The listeners and the measure of the top surface (`on_top`), laid around it: the swipe's
-    /// and the mouse's first, under it (`swipe.rs`), the mouse's release after it. None for the
-    /// pane under the page, so a gesture goes to one surface.
-    fn close_listeners(&self, on_top: bool, cx: &mut Context<Self>) -> (Vec<AnyElement>, Option<AnyElement>) {
+    /// The listeners and the measure of the top surface (`on_top`), laid around it: the measure
+    /// and mouse's move first, under it (`swipe.rs`), the swipe and the mouse's release after it.
+    /// None for the pane under the page, so a gesture goes to one surface.
+    fn close_listeners(&self, on_top: bool, cx: &mut Context<Self>) -> (Vec<AnyElement>, Vec<AnyElement>) {
         if !on_top {
-            return (Vec::new(), None);
+            return (Vec::new(), Vec::new());
         }
         let width = self.close_width.clone();
         let measure = canvas(move |bounds, _, _| width.set(f32::from(bounds.size.width)), |_, _, _, _| {});
@@ -645,10 +645,12 @@ impl CalendarPane {
         (
             vec![
                 measure.absolute().size_full().into_any_element(),
-                swipe.absolute().size_full().into_any_element(),
                 under.absolute().size_0().into_any_element(),
             ],
-            Some(over.absolute().size_0().into_any_element()),
+            vec![
+                swipe.absolute().size_full().into_any_element(),
+                over.absolute().size_0().into_any_element(),
+            ],
         )
     }
 

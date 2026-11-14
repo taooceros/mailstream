@@ -325,13 +325,13 @@ impl CalendarPane {
     }
 
     /// A scroll event over the grid, in the capture phase: true when the page swipe took it.
-    fn feed_swipe(&mut self, event: &ScrollEvent, _: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) -> bool {
+    fn feed_swipe(&mut self, event: &ScrollEvent, at: Option<gpui::Point<gpui::Pixels>>, cx: &mut Context<Self>) -> bool {
         // A swipe over the event's page, or the pane over the days, is theirs (`feed_close_swipe`).
         if self.page || self.pane_covers {
             return false;
         }
         let width = self.page_width.get().max(1.);
-        match self.swipe.feed(event, self.view != View::Agenda) {
+        match self.swipe.feed(event, at.is_some() && self.view != View::Agenda) {
             Step::Pass => false,
             Step::Consume => true,
             Step::Drag(offset) => {
@@ -662,7 +662,6 @@ impl CalendarPane {
             .size_full()
             .flex()
             .flex_col()
-            .child(swipe)
             .child(sketching)
             .when_some(unsynced, |d, (from, until)| {
                 d.child(
@@ -679,6 +678,7 @@ impl CalendarPane {
             .children(all_day)
             .child(div().flex_shrink_0().h(px(stroke::HAIRLINE)).bg(p.line))
             .child(timeline)
+            .child(swipe)
     }
 
     /// One page of the timeline: today's column lit, unfetched days shaded, the hour lines and
@@ -1410,6 +1410,22 @@ mod tests {
             source: ScrollSource::Pointer,
         });
         assert_eq!(shown(&pane, cx).0, week);
+    }
+
+    #[gpui::test]
+    fn a_two_finger_swipe_over_the_popover_leaves_the_week_alone(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        click_on(cx, "card:saturday");
+        let popover = bounds(cx, "calendar-popover");
+        let (week, _) = shown(&pane, cx);
+        let at = popover.center();
+        cx.simulate_event(touchpad(at, TouchPhase::Started, 0., 0.));
+        for _ in 0..10 {
+            cx.simulate_event(touchpad(at, TouchPhase::Moved, -50., 0.));
+        }
+        cx.simulate_event(touchpad(at, TouchPhase::Ended, 0., 0.));
+        assert!(matches!(shown(&pane, cx), (day, Pan::Rest) if day == week));
+        assert_eq!(opened(&pane, cx).as_deref(), Some("saturday"));
     }
 
     #[gpui::test]

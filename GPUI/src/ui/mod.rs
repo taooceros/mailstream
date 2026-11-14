@@ -372,6 +372,7 @@ impl MailApp {
 
         // Two-finger back swipe: scroll events are seen in the capture phase, before the lists
         // and the reader scroll with them, so a horizontal swipe is never eaten by a scroll view.
+        // Drawn last over the content so its hitbox detects overlays above it (MS-319).
         // A mouse drag from a press on the top layer moves it the same way (MS-266); its
         // listeners go under the layers and over them (`swipe::mouse_capture`).
         let swipe = swipe::scroll_capture(cx.entity(), Self::feed_swipe).absolute().size_full();
@@ -383,7 +384,7 @@ impl MailApp {
         // lay out and shape their text once as the slide starts, not every frame (MS-292).
         let laid_out = (two_pane && reader.is_some()).then(|| if self.closing_reader() { mail } else { split_list });
         let list = self.render_list_island(bundles, rows_shift, laid_out, p, window, cx);
-        let content = div().relative().size_full().child(swipe).child(drag_under.absolute().size_0());
+        let content = div().relative().size_full().child(drag_under.absolute().size_0());
         let content = match reader {
             // Beside the list, which narrows as the conversation slides in from the window's edge;
             // the conversation keeps its width, so its text does not reflow as it moves, and so
@@ -435,7 +436,7 @@ impl MailApp {
                 .child(div().absolute().top_0().bottom_0().w_full().left(px(shift)).child(detail)),
             None => content.child(list.size_full()),
         };
-        content.child(drag_over.absolute().size_0()).into_any_element()
+        content.child(swipe).child(drag_over.absolute().size_0()).into_any_element()
     }
 
     /// A single left press on layer `layer`, from which a sideways drag may close it (MS-266).
