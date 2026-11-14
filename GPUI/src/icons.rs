@@ -45,6 +45,7 @@ icons! {
     Label => "label",
     Layers => "layers",
     Location => "location_on",
+    Mail => "mail",
     Newsletter => "newspaper_fill",
     Notification => "notifications_fill",
     People => "group_fill",

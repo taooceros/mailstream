@@ -72,14 +72,7 @@ impl MailApp {
                 if text.is_empty() {
                     self.end_search(cx);
                 } else {
-                    self.leave_panes(cx);
-                    self.query = Some(text.into());
-                    self.layers.clear();
-                    self.push_layer(Layer::Search, true);
-                    self.highlight = None;
-                    self.list_scroll = list_state(0);
-                    self.rebuild_items();
-                    self.load_list(self.key(), false, cx);
+                    self.start_search(text.into(), cx);
                 }
                 window.focus(&self.focus, cx);
             }
@@ -90,6 +83,33 @@ impl MailApp {
             }
             _ => return,
         }
+        cx.notify();
+    }
+
+    /// Mail searches `query` on a layer over the list.
+    fn start_search(&mut self, query: SharedString, cx: &mut Context<Self>) {
+        self.leave_panes(cx);
+        self.query = Some(query);
+        self.layers.clear();
+        self.push_layer(Layer::Search, true);
+        self.highlight = None;
+        self.list_scroll = list_state(0);
+        self.rebuild_items();
+        self.load_list(self.key(), false, cx);
+    }
+
+    /// The mail exchanged with `address`, from Chat's direct message with them (MS-331): mail
+    /// searches every account for it, the address in the search field, as if typed there; Esc
+    /// ends it as any search.
+    pub fn search_mail_with(&mut self, address: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        self.context_menu = None;
+        self.hovered_row = None;
+        if let Source::Mailbox { .. } = self.source {
+            self.source = Source::Unified(MailboxRole::Inbox);
+        }
+        self.search.update(cx, |search, cx| search.set_value(address.clone(), window, cx));
+        self.start_search(address, cx);
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 

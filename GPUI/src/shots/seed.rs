@@ -20,8 +20,9 @@
 //!   tagged during a run.
 //! - Conversations Sam started that nobody answered yet, which list in the inbox from Sent alone:
 //!   the newest of all in Gmail, and one in Outlook.
-//! - Chat: a direct message, two groups and a space; the Design team's recent messages, and the
-//!   Release crew's with replies in threads (MS-329).
+//! - Chat: a direct message, two groups and a space; the Design team's recent messages, the
+//!   Release crew's with replies in threads (MS-329), and the direct message with Jordan, whose
+//!   mail its toolbar searches (MS-331; the screenshot mode searches what mail.db lists).
 //! - The calendars: this week's meetings around today, the design review among them; it and
 //!   Sprint planning (which Sam organizes, so it can be edited) carry a place, notes with links,
 //!   a link to the provider's page and guests with every kind of answer. Jordan's calendar,
@@ -717,25 +718,35 @@ fn write_chat(cache: &MailCache) {
         .enumerate()
         .map(|(n, (sender, minutes, text, thread))| threaded(release, n, *sender, *minutes, text, *thread))
         .collect();
+    // The direct message with Jordan, whose toolbar offers the mail with them (MS-331).
+    let dm = "spaces/jordan";
+    let dm_log = [
+        (1, 70., "Morning! Did the Q4 plan reach you?"),
+        (0, 66., "Not yet, can you resend it?"),
+        (1, 60., "Sent you the launch plan."),
+    ];
+    let dm_messages: Vec<Value> = dm_log.iter().enumerate().map(|(n, (sender, minutes, text))| message(dm, n, *sender, *minutes, text)).collect();
     let spaces = vec![
         json!({ "name": group, "kind": "group", "title": "Design team", "members": [user(1), user(2), user(3)],
                 "lastActive": now - 600., "lastRead": now - 900., "unread": 2, "latest": messages.last().cloned() }),
         json!({ "name": release, "kind": "group", "title": "Release crew", "members": [user(1), user(2), user(3)],
                 "lastActive": now - 95. * 60., "lastRead": now - 95. * 60., "unread": 0, "latest": release_messages.last().cloned() }),
-        json!({ "name": "spaces/jordan", "kind": "dm", "title": JORDAN.0, "members": [user(1)], "lastActive": now - 3_600.,
-                "lastRead": now - 7_200., "unread": 1, "latest": message("spaces/jordan", 0, 1, 60., "Sent you the launch plan.") }),
+        json!({ "name": dm, "kind": "dm", "title": JORDAN.0, "members": [user(1)], "lastActive": now - 3_600.,
+                "lastRead": now - 7_200., "unread": 1, "latest": dm_messages.last().cloned() }),
         json!({ "name": "spaces/launch", "kind": "space", "title": "Launch war room", "members": [],
                 "lastActive": now - 7_200., "lastRead": now - 7_200., "unread": 0,
                 "latest": message("spaces/launch", 0, 2, 120., "Staging is green.") }),
     ];
     let list: ChatSpaceList = parse(json!({ "me": "users/0", "more": false, "spaces": spaces }));
     cache.save_chat_spaces(&list, GMAIL);
-    let keys: Vec<ChatSpaceKey> = [group, release].map(|space| ChatSpaceKey { account: GMAIL.into(), space: space.into() }).into();
+    let keys: Vec<ChatSpaceKey> = [group, release, dm].map(|space| ChatSpaceKey { account: GMAIL.into(), space: space.into() }).into();
     cache.save_chat_recent(&keys);
     let page: ChatMessagePage = parse(json!({ "messages": messages, "more": false, "lastRead": now - 900. }));
     cache.save_chat_messages(&page, &keys[0]);
     let page: ChatMessagePage = parse(json!({ "messages": release_messages, "more": false, "lastRead": now - 95. * 60. }));
     cache.save_chat_messages(&page, &keys[1]);
+    let page: ChatMessagePage = parse(json!({ "messages": dm_messages, "more": false, "lastRead": now - 7_200. }));
+    cache.save_chat_messages(&page, &keys[2]);
 }
 
 fn write_calendar(cache: &MailCache) {

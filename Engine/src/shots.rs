@@ -11,7 +11,8 @@
 //! refused with a 400, which the engine treats as a failed refresh and keeps what the data folder
 //! has, so nothing it shows is replaced. The one read it answers is whether conversations the
 //! user started were answered (Gmail's threads, Graph's messages of a conversation, in batches):
-//! never, so they list in the inbox. Calendar and Chat changes are refused too.
+//! never, so they list in the inbox. Calendar and Chat changes are refused too. Searches never
+//! reach it: the engine finds the mail its data folder lists instead ([`matches`], MS-331).
 //!
 //! Sign-ins and connecting a service (`accounts.connect`, MS-306) go through [`consent`] instead
 //! of a browser: it allows everything asked, as a person ticking every box would, and redirects
@@ -30,6 +31,7 @@ use serde_json::{Value, json};
 use crate::accounts::Accounts;
 use crate::fake_server::{self, FakeRequest, FakeServer, Reply};
 use crate::keychain::SignIns;
+use crate::model::Envelope;
 use crate::{Config, OAuthClient, Provider, push};
 
 /// The sign-ins the engine reads while the screenshot mode runs: in memory only, never a
@@ -97,6 +99,21 @@ pub(crate) fn config(mut config: Config) -> Config {
     config.oauth.redirect_port =
         std::net::TcpListener::bind(("127.0.0.1", 0)).and_then(|listener| listener.local_addr()).map_or(0, |address| address.port());
     config
+}
+
+/// [`start`] ran: the engine's providers are the stand-in.
+pub(crate) fn running() -> bool {
+    PROVIDER.get().is_some()
+}
+
+/// Whether a search for `query` finds `envelope`: its subject or a sender's or recipient's name
+/// or address holds it, ignoring case, as a search for a person or a subject finds them.
+pub(crate) fn matches(envelope: &Envelope, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    let people = envelope.from.iter().chain(&envelope.to);
+    let mut fields = std::iter::once(envelope.subject.as_str())
+        .chain(people.flat_map(|person| person.name.as_deref().into_iter().chain([person.email.as_str()])));
+    !query.is_empty() && fields.any(|field| field.to_lowercase().contains(&query))
 }
 
 /// The screenshot mode's browser: allows the sign-in page at `url` everything it asks and

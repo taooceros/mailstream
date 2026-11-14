@@ -1140,6 +1140,11 @@ impl Mail {
         let mut running: FuturesUnordered<_> = jobs
             .into_iter()
             .map(|(account, backend)| async move {
+                #[cfg(feature = "shots")]
+                if crate::shots::running() {
+                    let hits = self.held_search(&account, query).await;
+                    return (account, Ok(hits));
+                }
                 let result = backend.search(query, page_size).await;
                 (account, result)
             })
@@ -1172,6 +1177,22 @@ impl Mail {
             .collect();
         self.load_cached_listings(&context).await;
         Self::threads(&self.state(), &fetched, &context, failures, false)
+    }
+
+    /// The screenshot mode's search (MS-331): its stand-in provider holds no mail, so what mail.db
+    /// lists of `account` answers, matched as `shots::matches` does.
+    #[cfg(feature = "shots")]
+    async fn held_search(self: &Arc<Self>, account: &str, query: &str) -> Vec<crate::backend::SearchHit> {
+        let keys: Vec<MailboxKey> =
+            self.state().mailboxes.get(account).into_iter().flatten().map(|mailbox| MailboxKey::new(account, &mailbox.id)).collect();
+        self.load_cached_listings(&keys).await;
+        let state = self.state();
+        keys.iter()
+            .filter_map(|key| Some((key, state.listings.get(key)?)))
+            .flat_map(|(key, listing)| listing.envelopes.iter().map(move |envelope| (key, envelope)))
+            .filter(|(_, envelope)| crate::shots::matches(envelope, query))
+            .map(|(key, envelope)| crate::backend::SearchHit { mailbox: key.mailbox.clone(), envelope: Envelope::clone(envelope) })
+            .collect()
     }
 
     // MARK: - Commands

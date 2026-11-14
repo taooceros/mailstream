@@ -32,7 +32,7 @@ use mailstream::{Account, Category, Change, Conversation, Event, EventListener, 
 
 use crate::bench::Bench;
 use crate::calendar::{CalendarPane, CalendarToast};
-use crate::chat::{ChatPane, UnreadSpace};
+use crate::chat::{ChatPane, MailWith, UnreadSpace};
 use crate::compose::{ComposeColumn, ReplyBox};
 use crate::engine::{MailError, engine};
 use crate::frame_rate::FrameRateMeter;
@@ -563,6 +563,10 @@ impl MailApp {
                     this.refresh_layers(cx);
                 }
                 cx.notify()
+            }),
+            // A direct message's "Mail with …" searches mail for the other person (MS-331).
+            cx.subscribe_in(&chat, window, |this, _, MailWith(address): &MailWith, window, cx| {
+                this.search_mail_with(address.clone(), window, cx)
             }),
             cx.subscribe(&calendar, |this, _, toast: &CalendarToast, cx| this.show_toast(toast.0.clone(), cx)),
             cx.observe(&calendar, |_, _, cx| cx.notify()),

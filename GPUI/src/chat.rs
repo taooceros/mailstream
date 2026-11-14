@@ -6,7 +6,8 @@
 //! space (or the new-chat form) on an
 //! island beside it in a wide window, over it in a narrow one; the list is as wide as mail's
 //! (`set_split`), and its title row, search field and the space's toolbar are mail's (`controls`).
-//! The sidebar reads `accounts()` and `unread()` from it.
+//! The sidebar reads `accounts()` and `unread()` from it. A direct message's toolbar asks the
+//! window for the mail exchanged with the other person ([`MailWith`], MS-331).
 //!
 //! The engine keeps the state, as it does for the native reader: it polls Google for the spaces
 //! (every `chat.pollSeconds`), and while a space is open (`chat_open`) it fetches its newest
@@ -26,11 +27,12 @@ use chrono::{DateTime, Utc};
 use gpui::component::input::{EditorState, Enter, Escape, InputEvent, InputState};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, Div, ElementId, Entity, EntityInputHandler as _, FocusHandle,
-    Focusable, FontStyle, FontWeight, HighlightStyle, ImgResourceLoader, InteractiveElement, InteractiveText,
-    IntoElement, KeyBinding, ListAlignment, ListState, ObjectFit, ParentElement, Render, Resource, ScrollEvent,
-    ScrollStrategy, SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled, StyledImage, StyledText,
-    Subscription, UniformListScrollHandle, Window, actions, canvas, div, img, list, px, relative, uniform_list,
+    AnyElement, App, AppContext, ClickEvent, Context, Div, ElementId, Entity, EntityInputHandler as _, EventEmitter,
+    FocusHandle, Focusable, FontStyle, FontWeight, HighlightStyle, ImgResourceLoader, InteractiveElement,
+    InteractiveText, IntoElement, KeyBinding, ListAlignment, ListState, ObjectFit, ParentElement, Render, Resource,
+    ScrollEvent, ScrollStrategy, SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled, StyledImage,
+    StyledText, Subscription, UniformListScrollHandle, Window, actions, canvas, div, img, list, px, relative,
+    uniform_list,
 };
 
 use crate::avatars;
@@ -179,6 +181,12 @@ impl UnreadSpace {
         format!("chat:{}:{}", self.account, self.space)
     }
 }
+
+/// Chat asks the window to show the mail exchanged with this address (MS-331): a direct message's
+/// "Mail with …" button.
+pub struct MailWith(pub SharedString);
+
+impl EventEmitter<MailWith> for ChatPane {}
 
 #[derive(Clone, PartialEq)]
 struct User {
@@ -2092,6 +2100,15 @@ impl ChatPane {
             .unwrap_or_else(|| key.space.clone())
     }
 
+    /// The other person's address in a direct message, for the mail exchanged with them
+    /// (MS-331): the one the list's row keys its photo on, else the history's member's. None in
+    /// groups, spaces and apps, and when Chat gives no address.
+    fn partner_address(&self, key: &Key) -> Option<SharedString> {
+        let space = self.space(key).filter(|space| space.kind == mailstream::ChatSpaceKind::Dm)?;
+        let member = || self.logs.get(key)?.members.first().map(|member| member.email.clone());
+        Some(space.avatar_email.clone()).filter(|address| !address.is_empty()).or_else(member).filter(|address| !address.is_empty())
+    }
+
     /// The open space's island, as mail's reader (MS-328): its log scrolls under the reader's
     /// toolbar (✕ beside the list, ‹ over it), which shows the title once the log's heading has
     /// scrolled under it; the composer below. An open thread's island sits beside it when the page
@@ -2134,7 +2151,14 @@ impl ChatPane {
                     }))
                     .child(log)
                     .when(self.log_top != ReaderTop::Top, |d| d.child(page_scrim(p)))
-                    .child(page_toolbar("chat-toolbar", close, toolbar_title, p, window, cx)),
+                    .child(page_toolbar("chat-toolbar", close, toolbar_title, p, window, cx).when_some(
+                        self.partner_address(key),
+                        |bar, address| {
+                            let mail = icon_button("chat-mail", Icon::Mail, format!("Mail with {title}"), true, p.glyph)
+                                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(MailWith(address.clone()))));
+                            bar.child(capsule(p).child(mail))
+                        },
+                    )),
             )
             .child(self.render_composer(Surface::Log, format!("Send to {title}").into(), p, cx));
         let Some(view) = self.logs.get(key).and_then(|log| log.thread.as_ref()) else { return space.into_any_element() };
