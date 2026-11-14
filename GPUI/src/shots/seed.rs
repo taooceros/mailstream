@@ -698,7 +698,7 @@ fn write_chat(cache: &MailCache) {
         json!({ "name": group, "kind": "group", "title": "Design team", "members": [user(1), user(2), user(3)],
                 "lastActive": now - 600., "lastRead": now - 900., "unread": 2, "latest": messages.last().cloned() }),
         json!({ "name": "spaces/jordan", "kind": "dm", "title": JORDAN.0, "members": [user(1)], "lastActive": now - 3_600.,
-                "lastRead": now - 3_600., "unread": 0, "latest": message("spaces/jordan", 0, 1, 60., "Sent you the launch plan.") }),
+                "lastRead": now - 7_200., "unread": 1, "latest": message("spaces/jordan", 0, 1, 60., "Sent you the launch plan.") }),
         json!({ "name": "spaces/launch", "kind": "space", "title": "Launch war room", "members": [],
                 "lastActive": now - 7_200., "lastRead": now - 7_200., "unread": 0,
                 "latest": message("spaces/launch", 0, 2, 120., "Staging is green.") }),

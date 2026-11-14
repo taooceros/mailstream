@@ -42,7 +42,7 @@ use crate::split::{self, ResizeList};
 use crate::swipe;
 use crate::model::{AccountExt, CategoryExt, ConversationExt, MailboxExt, RoleExt, ShownMessage, UNIFIED};
 use crate::state::{
-    Archive, Back, Beside, CONTEXT, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh, Removal, Reply,
+    Archive, Back, Beside, BundleKind, CONTEXT, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh, Removal, Reply,
     ReplyAll, Restore, Source, Star, ThreadState, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
 };
 #[cfg(target_os = "macos")]
@@ -314,7 +314,7 @@ impl MailApp {
                 beneath
             };
             match layer {
-                Layer::Bundle(category) => {
+                Layer::Bundle(kind) => {
                     if index == sliding && dim > 0. {
                         bundles.push(scrim(dim, 0.).into_any_element());
                     }
@@ -332,7 +332,10 @@ impl MailApp {
                             // The page keeps the keyboard; clicks never reach the list beneath.
                             .occlude()
                             .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer.id(), cx))
-                            .child(self.render_bundle(*category, p, cx))
+                            .child(match *kind {
+                                BundleKind::Mail(category) => self.render_bundle(category, p, cx),
+                                BundleKind::Chat => self.render_chat_bundle(p, cx),
+                            })
                             .into_any_element(),
                     )
                 }

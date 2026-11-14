@@ -17,11 +17,16 @@ impl MailApp {
         if self.selection().is_some() {
             return self.render_selection_bar(p, window, cx).into_any_element();
         }
-        let bundle = self.open_bundle_members();
+        // The open bundle's title and count, while it is still in the list.
+        let bundle: Option<(SharedString, SharedString)> = match self.open_bundle() {
+            Some(BundleKind::Mail(_)) => self
+                .open_bundle_members()
+                .map(|bundle| (bundle.category.label().into(), format!("{} conversations", bundle.members.len()).into())),
+            Some(BundleKind::Chat) => self.chat_bundle().map(|chat| ("Chat".into(), format!("{} unread", chat.spaces.len()).into())),
+            None => None,
+        };
         let (title, subtitle): (SharedString, Option<SharedString>) = match (&bundle, &self.query) {
-            (Some(bundle), _) => {
-                (bundle.category.label().into(), Some(format!("{} conversations", bundle.members.len()).into()))
-            }
+            (Some((title, subtitle)), _) => (title.clone(), Some(subtitle.clone())),
             (None, Some(query)) => ("Search".into(), Some(format!("“{query}”").into())),
             (None, None) => {
                 let unread = self.list().map_or(0, |list| list.conversations.iter().filter(|c| c.unread).count());

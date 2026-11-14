@@ -143,6 +143,26 @@ impl Space {
     }
 }
 
+/// A space with unread messages, as the inbox's Chat bundle lists it (MS-330).
+#[derive(Clone, PartialEq)]
+pub struct UnreadSpace {
+    pub account: SharedString,
+    pub space: SharedString,
+    pub title: SharedString,
+    pub snippet: SharedString,
+    pub avatar: mailstream::Avatar,
+    /// Whose photo the row shows, as Chat's own row (empty: the monogram).
+    pub avatar_email: SharedString,
+    pub when: SharedString,
+}
+
+impl UnreadSpace {
+    /// Its row's id in the bundle's list.
+    pub fn row_id(&self) -> String {
+        format!("chat:{}:{}", self.account, self.space)
+    }
+}
+
 #[derive(Clone, PartialEq)]
 struct User {
     /// `users/<id>`.
@@ -820,6 +840,30 @@ impl ChatPane {
             .iter()
             .filter(|space| space.unread && account.is_none_or(|a| space.account.as_ref() == a))
             .count()
+    }
+
+    /// The spaces with unread messages, in the list's order (newest activity first), for the
+    /// inbox's Chat bundle (MS-330).
+    pub fn unread_spaces(&self) -> Vec<UnreadSpace> {
+        self.spaces
+            .iter()
+            .filter(|space| space.unread)
+            .map(|space| UnreadSpace {
+                account: space.account.clone(),
+                space: space.id.clone(),
+                title: space.title.clone(),
+                snippet: space.snippet.clone(),
+                avatar: space.avatar.clone(),
+                avatar_email: space.avatar_email.clone(),
+                when: space.when.clone(),
+            })
+            .collect()
+    }
+
+    /// Opens `account`'s `space` from outside the pane (the inbox's Chat bundle); the caller
+    /// shows the pane.
+    pub fn open_space(&mut self, account: SharedString, space: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(Key { account, space }, window, cx);
     }
 
     /// Runs `work` on the background executor, then `done` with its result on the main thread.

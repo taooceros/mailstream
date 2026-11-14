@@ -13,7 +13,7 @@ use super::*;
 #[derive(Default)]
 pub struct Selection {
     /// The list and the open bundle (none: the list itself) it was made in.
-    scope: Option<(ListKey, Option<Category>)>,
+    scope: Option<(ListKey, Option<BundleKind>)>,
     ids: HashSet<String>,
     /// Where a run (⇧-click, ⇧↑/↓) starts: the row last clicked or ⌘-clicked.
     anchor: Option<String>,
@@ -86,7 +86,7 @@ impl Selection {
 
 impl MailApp {
     /// The list and open bundle a selection made now belongs to.
-    fn selection_scope(&self) -> (ListKey, Option<Category>) {
+    fn selection_scope(&self) -> (ListKey, Option<BundleKind>) {
         (self.key(), self.open_bundle())
     }
 
@@ -116,9 +116,9 @@ impl MailApp {
     }
 
     /// The conversations of the list on screen that can be picked, in order: its rows, not the
-    /// bundles folded among them.
+    /// bundles folded among them or Chat's spaces.
     fn selectable_lines(&self) -> Vec<String> {
-        self.active_lines().0.into_iter().map(|(id, _)| id).filter(|id| !id.starts_with("bundle:")).collect()
+        self.active_lines().0.into_iter().map(|(id, _)| id).filter(|id| !opens_only(id)).collect()
     }
 
     /// The highlight in the list on screen.
@@ -135,10 +135,10 @@ impl MailApp {
     }
 
     /// A click on row `id`: ⌘ (Ctrl elsewhere) adds or drops it, ⇧ selects the run to it, a
-    /// plain click opens it alone, as before. A bundle's row always opens.
+    /// plain click opens it alone, as before. A bundle's row and a Chat space always open.
     pub fn click_row(&mut self, id: &str, modifiers: Modifiers, window: &mut Window, cx: &mut Context<Self>) {
         let picking = modifiers.secondary(cx) || modifiers.shift;
-        if !picking || id.starts_with("bundle:") {
+        if !picking || opens_only(id) {
             self.selection.clear();
             self.activate(id, window, cx);
             return;
@@ -222,6 +222,11 @@ impl MailApp {
             self.selection.retain(&lines);
         }
     }
+}
+
+/// A row that can't be picked, only opened: a bundle, or a space of the Chat bundle (MS-330).
+fn opens_only(id: &str) -> bool {
+    id.starts_with("bundle:") || id.starts_with("chat:")
 }
 
 #[cfg(test)]

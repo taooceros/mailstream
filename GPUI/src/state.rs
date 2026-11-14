@@ -30,7 +30,7 @@ use mailstream::{Account, Category, Change, Conversation, Event, EventListener, 
 
 use crate::bench::Bench;
 use crate::calendar::{CalendarPane, CalendarToast};
-use crate::chat::ChatPane;
+use crate::chat::{ChatPane, UnreadSpace};
 use crate::compose::{ComposeColumn, ReplyBox};
 use crate::engine::{MailError, engine};
 use crate::frame_rate::FrameRateMeter;
@@ -236,6 +236,39 @@ pub enum Item {
     Row(usize),
     /// Service mail of one category, folded at its newest member's place.
     Bundle(Rc<Bundle>),
+    /// Chat's spaces with unread messages, folded into one row over the bundles (MS-330).
+    Chat(Rc<ChatBundle>),
+}
+
+/// What a bundle folds: service mail of one category, or Chat's unread spaces (MS-330).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum BundleKind {
+    Mail(Category),
+    Chat,
+}
+
+impl BundleKind {
+    /// Its row's id in the list.
+    pub fn id(self) -> String {
+        match self {
+            BundleKind::Mail(category) => format!("bundle:{}", category.as_str()),
+            BundleKind::Chat => "bundle:chat".into(),
+        }
+    }
+}
+
+/// The inbox's Chat bundle: the spaces of the list's accounts with unread messages.
+pub struct ChatBundle {
+    pub spaces: Vec<UnreadSpace>,
+    /// Their titles, for the row.
+    pub titles: SharedString,
+}
+
+impl ChatBundle {
+    fn new(spaces: Vec<UnreadSpace>) -> Self {
+        let titles: Vec<&str> = spaces.iter().take(6).map(|space| space.title.as_ref()).collect();
+        Self { titles: titles.join(", ").into(), spaces }
+    }
 }
 
 pub struct Bundle {
@@ -274,14 +307,14 @@ impl Bundle {
 /// What lies over the list, bottom to top.
 #[derive(Clone)]
 pub enum Layer {
-    Bundle(Category),
+    Bundle(BundleKind),
     Reader(Box<Conversation>),
 }
 
 impl Layer {
     pub fn id(&self) -> SharedString {
         match self {
-            Layer::Bundle(category) => format!("bundle:{}", category.as_str()).into(),
+            Layer::Bundle(kind) => kind.id().into(),
             Layer::Reader(conversation) => format!("reader:{}", conversation.id).into(),
         }
     }
@@ -457,6 +490,8 @@ pub struct MailApp {
     pub chat: Entity<ChatPane>,
     /// The chat account in view (None: every account), while Chat is selected.
     pub chat_view: Option<Option<SharedString>>,
+    /// Chat's spaces with unread messages, for the inbox's Chat bundle (MS-330).
+    chat_unread: Vec<UnreadSpace>,
     /// The calendar, shown instead of the mail list while `calendar_view` is set.
     pub calendar: Entity<CalendarPane>,
     pub calendar_view: bool,
@@ -510,8 +545,17 @@ impl MailApp {
                 crate::glass::follow_appearance(window);
                 cx.notify()
             }),
-            // Chat accounts and unread counts feed the sidebar.
-            cx.observe(&chat, |_, _, cx| cx.notify()),
+            // Chat accounts and unread counts feed the sidebar, and unread spaces the inbox's
+            // Chat bundle.
+            cx.observe(&chat, |this, chat, cx| {
+                let unread = chat.read(cx).unread_spaces();
+                if unread != this.chat_unread {
+                    this.chat_unread = unread;
+                    this.rebuild_items();
+                    this.refresh_layers(cx);
+                }
+                cx.notify()
+            }),
             cx.subscribe(&calendar, |this, _, toast: &CalendarToast, cx| this.show_toast(toast.0.clone(), cx)),
             cx.observe(&calendar, |_, _, cx| cx.notify()),
             // The column's placement and width lay the window out.
@@ -566,6 +610,7 @@ impl MailApp {
             renderer: Renderer::from_name(std::env::var("MAILSTREAM_READER_RENDERER").ok().as_deref()),
             chat,
             chat_view: None,
+            chat_unread: Vec::new(),
             calendar,
             calendar_view: false,
             reply: None,
@@ -896,7 +941,23 @@ impl MailApp {
                 }
             }
         }
-        let mut items = Vec::with_capacity(pinned.len() + waiting.len() + rows.len() + 9);
+        let mut items = Vec::with_capacity(pinned.len() + waiting.len() + rows.len() + 10);
+        // Chat's unread spaces of the list's accounts sit over the bundles.
+        let chats: Vec<UnreadSpace> = if bundles {
+            self.chat_unread
+                .iter()
+                .filter(|space| match &key.source {
+                    Source::Mailbox { account, .. } => *account == space.account.as_ref(),
+                    Source::Unified(_) => true,
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !chats.is_empty() {
+            items.push(Item::Chat(Rc::new(ChatBundle::new(chats))));
+        }
         items.extend(pinned.into_iter().map(|category| {
             let members = members.remove(&category).unwrap_or_default();
             Item::Bundle(Rc::new(Bundle::new(category, members, &list.conversations)))
@@ -916,12 +977,15 @@ impl MailApp {
             }
             items.push(Item::Row(index));
         }
-        // The row at the top stays there, wherever the new lines put it.
+        // The row at the top stays there, wherever the new lines put it; at the list's very top,
+        // the Chat bundle row arriving over it shows (MS-330).
         let top = self.list_scroll.logical_scroll_top();
+        let at_start = top.item_ix == 0 && top.offset_in_item == px(0.);
         let kept = self.items.get(top.item_ix).map(|item| self.item_id(item));
         self.items = items;
         self.list_scroll.reset(self.items.len());
         let at = kept.and_then(|id| self.items.iter().position(|item| self.item_id(item) == id));
+        let at = if at_start && matches!(self.items.first(), Some(Item::Chat(_))) { Some(0) } else { at };
         self.list_scroll.scroll_to(match at {
             Some(item_ix) => ListOffset { item_ix, offset_in_item: top.offset_in_item },
             None => ListOffset::default(),
@@ -932,11 +996,12 @@ impl MailApp {
     /// Drops a bundle layer whose bundle is gone, and keeps open readers' conversations current:
     /// one with new messages reads its thread again, showing the old one until it arrives (MS-79).
     fn refresh_layers(&mut self, cx: &mut Context<Self>) {
-        let bundles: HashSet<Category> = self
+        let bundles: HashSet<BundleKind> = self
             .items
             .iter()
             .filter_map(|item| match item {
-                Item::Bundle(bundle) => Some(bundle.category),
+                Item::Bundle(bundle) => Some(BundleKind::Mail(bundle.category)),
+                Item::Chat(_) => Some(BundleKind::Chat),
                 _ => None,
             })
             .collect();

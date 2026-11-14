@@ -3,6 +3,8 @@
 //! the right-click target.
 
 use super::*;
+use crate::chat::UnreadSpace;
+use crate::state::ChatBundle;
 use gpui::{ListState, MouseDownEvent, list};
 use mailstream::Account;
 
@@ -139,6 +141,7 @@ impl MailApp {
                     ))
                     .into_any_element()
             }
+            Item::Chat(bundle) => self.render_chat_row(bundle, rule, p, cx),
         }
     }
 
@@ -359,6 +362,92 @@ impl MailApp {
         .size_full()
         .py(px(space::S6))
         .into_any_element()
+    }
+
+    /// The inbox's Chat bundle row (MS-330): its spaces with unread messages, named, and the
+    /// newest one's last message.
+    fn render_chat_row(&self, bundle: &ChatBundle, rule: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let Some(newest) = bundle.spaces.first() else { return div().into_any_element() };
+        let id = BundleKind::Chat.id();
+        let selected = self.row_selected(&id, false);
+        let color = design::chat_color();
+        let title = div()
+            .flex()
+            .items_center()
+            .gap(px(space::S8))
+            .child(div().font_weight(FontWeight::BOLD).child("Chat"))
+            .child(tag(format!("{} new", bundle.spaces.len()), Some(color), p));
+        let subtitle = div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_color(p.muted)
+            .child(format!("{}  —  {}", bundle.titles, newest.snippet));
+        list_row(ElementId::Name(id.clone().into()), selected, rule, p)
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| this.click_row(&id, event.modifiers(), window, cx)))
+            .child(row_layout(
+                true,
+                icon_avatar(Icon::Chat, color, metrics::AVATAR),
+                title,
+                date(newest.when.clone(), p),
+                subtitle,
+                Vec::new(),
+                p,
+            ))
+            .into_any_element()
+    }
+
+    /// The open Chat bundle: a row per space with unread messages, as Chat's list draws it; a
+    /// click opens the space in Chat.
+    pub(super) fn render_chat_bundle(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let Some(bundle) = self.chat_bundle() else {
+            return centered_note("Nothing here any more", p).into_any_element();
+        };
+        let count = bundle.spaces.len();
+        if self.bundle_scroll.item_count() != count {
+            keep_top(&self.bundle_scroll, count);
+        }
+        list(
+            self.bundle_scroll.clone(),
+            cx.processor(move |this, row: usize, _, cx| {
+                let Some(space) = bundle.spaces.get(row) else { return div().into_any_element() };
+                let rule = bundle.spaces.get(row + 1).is_some_and(|next| !this.row_selected(&next.row_id(), true));
+                div().px(px(metrics::INSET)).child(this.render_chat_space(space, rule, p, cx)).into_any_element()
+            }),
+        )
+        .size_full()
+        .py(px(space::S6))
+        .into_any_element()
+    }
+
+    fn render_chat_space(&self, space: &UnreadSpace, rule: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let id = space.row_id();
+        let selected = self.row_selected(&id, true);
+        let title = div().min_w_0().truncate().font_weight(FontWeight::BOLD).child(space.title.clone());
+        let account_dot = (self.accounts.len() > 1)
+            .then(|| self.accounts.iter().position(|a| a.id == space.account.as_ref()))
+            .flatten()
+            .map(|index| mark_dot(design::account_color(index)));
+        let meta = div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(space::S4))
+            .children(account_dot.map(|dot| dot.mr(px(2.))))
+            .child(div().text_size(px(text::FOOTNOTE)).text_color(p.accent).child(space.when.clone()));
+        let subtitle = div().flex_1().min_w_0().truncate().text_color(p.muted).child(space.snippet.clone());
+        list_row(ElementId::Name(id.clone().into()), selected, rule, p)
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| this.click_row(&id, event.modifiers(), window, cx)))
+            .child(row_layout(
+                true,
+                avatars::avatar(&space.avatar_email, &space.avatar, metrics::AVATAR, p, cx),
+                title,
+                meta,
+                subtitle,
+                Vec::new(),
+                p,
+            ))
+            .into_any_element()
     }
 }
 

@@ -851,6 +851,11 @@ pub fn category_color(category: mailstream::Category, p: &Palette) -> Hsla {
     }
 }
 
+/// The inbox's Chat bundle's color (MS-330), Google Chat's green.
+pub fn chat_color() -> Hsla {
+    argb(0xFF34A853)
+}
+
 /// What a file is, for the color of its glyph.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AttachmentKind {

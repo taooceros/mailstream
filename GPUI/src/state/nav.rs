@@ -126,11 +126,24 @@ impl MailApp {
     /// The list the keyboard moves in: the open bundle's, else the main one. Each line is an id
     /// and the row's index in its list view.
     pub(super) fn active_lines(&self) -> (Vec<(String, usize)>, bool) {
-        if let Some(bundle) = self.open_bundle_members() {
-            let Some(list) = self.list() else { return (Vec::new(), true) };
-            let lines =
-                bundle.members.iter().enumerate().map(|(row, &ix)| (list.conversations[ix].id.clone(), row)).collect();
-            return (lines, true);
+        match self.open_bundle() {
+            Some(BundleKind::Mail(category)) => {
+                let (Some(bundle), Some(list)) = (self.bundle_members(category), self.list()) else {
+                    return (Vec::new(), true);
+                };
+                let lines = bundle
+                    .members
+                    .iter()
+                    .enumerate()
+                    .map(|(row, &ix)| (list.conversations[ix].id.clone(), row))
+                    .collect();
+                return (lines, true);
+            }
+            Some(BundleKind::Chat) => {
+                let Some(bundle) = self.chat_bundle() else { return (Vec::new(), true) };
+                return (bundle.spaces.iter().enumerate().map(|(row, space)| (space.row_id(), row)).collect(), true);
+            }
+            None => {}
         }
         let lines = self
             .items
@@ -149,26 +162,38 @@ impl MailApp {
             Item::Section(title) => format!("section:{title}"),
             Item::Waiting(_) => "section:waiting".into(),
             Item::Row(index) => self.list().and_then(|l| l.conversations.get(*index)).map(|c| c.id.clone()).unwrap_or_default(),
-            Item::Bundle(bundle) => format!("bundle:{}", bundle.category.as_str()),
+            Item::Bundle(bundle) => BundleKind::Mail(bundle.category).id(),
+            Item::Chat(_) => BundleKind::Chat.id(),
         }
     }
 
-    pub fn open_bundle(&self) -> Option<Category> {
+    pub fn open_bundle(&self) -> Option<BundleKind> {
         self.live_layers().rev().find_map(|l| match l {
-            Layer::Bundle(category) => Some(*category),
+            Layer::Bundle(kind) => Some(*kind),
             Layer::Reader(_) => None,
         })
     }
 
-    /// The bundle lying over the list.
+    /// The mail bundle lying over the list.
     pub fn open_bundle_members(&self) -> Option<Rc<Bundle>> {
-        self.bundle_members(self.open_bundle()?)
+        match self.open_bundle()? {
+            BundleKind::Mail(category) => self.bundle_members(category),
+            BundleKind::Chat => None,
+        }
     }
 
     /// `category`'s bundle in the list, also while its page slides off (MS-289).
     pub fn bundle_members(&self, category: Category) -> Option<Rc<Bundle>> {
         self.items.iter().find_map(|item| match item {
             Item::Bundle(bundle) if bundle.category == category => Some(bundle.clone()),
+            _ => None,
+        })
+    }
+
+    /// The Chat bundle in the list, also while its page slides off (MS-330).
+    pub fn chat_bundle(&self) -> Option<Rc<ChatBundle>> {
+        self.items.iter().find_map(|item| match item {
+            Item::Chat(bundle) => Some(bundle.clone()),
             _ => None,
         })
     }
@@ -432,9 +457,10 @@ impl MailApp {
     fn open_row(&mut self, id: &str, animate: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_closing();
         window.focus(&self.focus, cx);
-        if let Some(category) = id.strip_prefix("bundle:") {
-            let Some(category) = self.items.iter().find_map(|item| match item {
-                Item::Bundle(bundle) if bundle.category.as_str() == category => Some(bundle.category),
+        if id.starts_with("bundle:") {
+            let Some(kind) = self.items.iter().find_map(|item| match item {
+                Item::Bundle(bundle) if BundleKind::Mail(bundle.category).id() == id => Some(BundleKind::Mail(bundle.category)),
+                Item::Chat(_) if BundleKind::Chat.id() == id => Some(BundleKind::Chat),
                 _ => None,
             }) else {
                 return;
@@ -446,17 +472,28 @@ impl MailApp {
             }
             self.bundle_highlight = None;
             self.bundle_scroll = list_state(0);
-            self.push_layer(Layer::Bundle(category), animate);
+            self.push_layer(Layer::Bundle(kind), animate);
             cx.notify();
+            return;
+        }
+        // A space of the Chat bundle opens in Chat (MS-330).
+        if id.starts_with("chat:") {
+            let Some(space) = self.chat_bundle().and_then(|bundle| bundle.spaces.iter().find(|s| s.row_id() == id).cloned())
+            else {
+                return;
+            };
+            self.bundle_highlight = Some(id.to_owned());
+            self.select_chat(None, window, cx);
+            self.chat.update(cx, |chat, cx| chat.open_space(space.account, space.space, window, cx));
             return;
         }
         let Some(conversation) = self.list().and_then(|l| l.conversations.iter().find(|c| c.id == id)).cloned() else {
             return;
         };
-        if let Some(category) = self.open_bundle() {
+        if let Some(kind) = self.open_bundle() {
             self.bundle_highlight = Some(id.to_owned());
             // The list under the bundle points at the bundle the open conversation is in.
-            self.highlight = Some(format!("bundle:{}", category.as_str()));
+            self.highlight = Some(kind.id());
         } else {
             self.highlight = Some(id.to_owned());
         }
