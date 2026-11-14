@@ -460,10 +460,15 @@ pub mod text {
     pub const DISPLAY: f32 = 22.0;
 }
 
-/// The reader's mail as a chat log (Flutter's `_ChatLog`) and its folded quotes (`_Fold`).
+/// The message log mail between people and Google Chat share (`message_log`, MS-326).
+pub mod log {
+    /// The column the sender's avatar sits in, and the avatar.
+    pub const GUTTER: f32 = 56.0;
+    pub const AVATAR: f32 = super::list::AVATAR;
+}
+
+/// The reader's folded quotes (Flutter's `_Fold`).
 pub mod reader {
-    /// The column the sender's avatar sits in.
-    pub const LOG_GUTTER: f32 = 56.0;
     /// The "more" toggle that opens quoted history.
     pub const FOLD_WIDTH: f32 = 32.0;
     pub const FOLD_HEIGHT: f32 = 18.0;
@@ -688,15 +693,8 @@ pub mod layout {
     pub const MENU_ROW: f32 = 26.0;
 }
 
-/// The chat log (`ReaderPage.chatLog`): a flat list, one row per message, runs under one head.
+/// Google Chat: the space's log (its rows are `message_log`'s), composer and attachments.
 pub mod chat {
-    /// The column the head's avatar sits in.
-    pub const GUTTER: f32 = 34.0;
-    pub const AVATAR: f32 = 30.0;
-    /// Gap between the gutter and the text.
-    pub const GAP: f32 = 12.0;
-    /// Text line height, relative to its size.
-    pub const LINE: f32 = 1.55;
     /// The composer's field.
     pub const COMPOSER_HEIGHT: f32 = 40.0;
     /// The space header above the log.

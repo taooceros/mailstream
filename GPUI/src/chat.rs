@@ -26,10 +26,12 @@ use gpui::{
     UniformListScrollHandle, Window, actions, div, img, list, px, relative, uniform_list,
 };
 
+use crate::avatars;
 use crate::controls::{
-    ButtonKind, ControlSize, Tone, button, centered_note, icon_button, list_row, mark_dot, monogram, notice, row_layout,
+    ButtonKind, ControlSize, Tone, button, centered_note, icon_button, list_row, mark_dot, notice, raised_capsule, row_layout,
 };
-use crate::design::{self, AttachmentKind, Palette, chat as metrics, layout, list as rows, radius, space, stroke, text};
+use crate::design::{self, AttachmentKind, Palette, chat as metrics, layout, list as rows, log as log_metrics, radius, space, stroke, text};
+use crate::message_log;
 use crate::icons::{Icon, icon};
 use crate::engine::{MailError, engine};
 use crate::input;
@@ -100,6 +102,8 @@ struct Space {
     unread: bool,
     last_active: Option<DateTime<Utc>>,
     avatar: mailstream::Avatar,
+    /// The address whose photo the row shows: the person's, when the engine knows it.
+    avatar_email: SharedString,
     /// The row's date, as the engine labels it.
     when: SharedString,
 }
@@ -115,6 +119,7 @@ impl Space {
             snippet: space.preview.into(),
             unread: space.unread,
             last_active,
+            avatar_email: if space.avatar_key.contains('@') { space.avatar_key.into() } else { SharedString::default() },
             avatar: space.avatar,
             when: space.date.into(),
         }
@@ -144,11 +149,13 @@ struct User {
     id: SharedString,
     label: SharedString,
     avatar: mailstream::Avatar,
+    /// Their address, for their photo; empty when Chat doesn't give it.
+    email: SharedString,
 }
 
 impl From<mailstream::ChatUser> for User {
     fn from(user: mailstream::ChatUser) -> Self {
-        User { id: user.id.into(), label: user.name.into(), avatar: user.avatar }
+        User { id: user.id.into(), label: user.name.into(), avatar: user.avatar, email: user.email.unwrap_or_default().into() }
     }
 }
 
@@ -478,6 +485,8 @@ struct Msg {
     /// "You" for the user's own messages.
     name: SharedString,
     avatar: mailstream::Avatar,
+    /// The sender's address, for their photo; empty when Chat doesn't give it.
+    email: SharedString,
     created: Option<DateTime<Utc>>,
     time: SharedString,
     thread: Option<SharedString>,
@@ -503,6 +512,7 @@ impl Msg {
         Msg {
             name: if message.mine { "You".into() } else { sender.label.clone() },
             avatar: sender.avatar,
+            email: sender.email,
             sender_id: sender.id,
             id: message.id.into(),
             created,
@@ -1186,6 +1196,7 @@ impl ChatPane {
             sender_id: me.map_or_else(|| "me".into(), |m| m.sender_id.clone()),
             name: "You".into(),
             avatar: me.map_or_else(|| mailstream::avatar(String::new(), key.account.to_string()), |m| m.avatar.clone()),
+            email: me.map_or_else(|| key.account.clone(), |m| m.email.clone()),
             created: Some(now),
             time: mailstream::message_time(Some(now.to_rfc3339())).into(),
             thread: thread.clone(),
@@ -1628,7 +1639,7 @@ impl ChatPane {
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open(key.clone(), window, cx)))
             .child(row_layout(
                 unread,
-                monogram(&space.avatar, rows::AVATAR, p),
+                avatars::avatar(&space.avatar_email, &space.avatar, rows::AVATAR, p, cx),
                 title,
                 meta,
                 subtitle,
@@ -1653,6 +1664,8 @@ impl ChatPane {
         if space.is_some_and(|s| s.kind == mailstream::ChatSpaceKind::Group) && members > 0 {
             meta.push(format!("{} people", members + 1).into());
         }
+        // Messages already shown stay; a failed refresh only shows here.
+        let refresh_failure = log.and_then(|l| l.failure.clone().filter(|_| l.len() > 0));
         let header = self
             .header(p)
             .child(icon_button("chat-back", Icon::Back, "Back", true, p.glyph).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
@@ -1663,7 +1676,18 @@ impl ChatPane {
                     .flex()
                     .flex_col()
                     .child(div().truncate().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::SEMIBOLD).child(title.clone()))
-                    .child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(meta.join(" · "))),
+                    .child(
+                        div()
+                            .flex()
+                            .min_w_0()
+                            .gap(px(space::S4))
+                            .text_size(px(text::CAPTION))
+                            .text_color(p.muted)
+                            .child(div().flex_shrink_0().child(meta.join(" · ")))
+                            .children(refresh_failure.map(|failure| {
+                                div().min_w_0().truncate().text_color(p.danger).child(format!("· Couldn't update: {failure}"))
+                            })),
+                    ),
             );
         let log: AnyElement = match self.logs.get(key) {
             Some(log) => {
@@ -1700,6 +1724,8 @@ impl ChatPane {
             .child(div().w_full().max_w(px(layout::READING_WIDTH)).px(px(32.)).child(child))
     }
 
+    /// A message as a row of the log mail between people shares (`message_log`, MS-326): the
+    /// sender's photo, name and time over a run of their messages, the user's own on the right.
     fn render_entry(&self, key: &Key, ix: usize, window: &mut Window, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let Some(log) = self.logs.get(key) else { return div().into_any_element() };
         if ix == 0 {
@@ -1712,113 +1738,82 @@ impl ChatPane {
         let continued = run.continued;
         let hovered = self.hovered_message.as_ref() == Some(&message.id);
         let hover_id = message.id.clone();
-        let time_color = if hovered { p.faint } else { gpui::transparent_black() };
 
-        let gutter = div()
-            .flex_shrink_0()
-            .w(px(metrics::GUTTER))
-            .flex()
-            .justify_center()
-            .when(!continued, |d| d.child(monogram(&message.avatar, metrics::AVATAR, p)))
-            .when(continued, |d| {
-                d.child(div().text_size(px(text::TAG)).line_height(px(22.)).text_color(time_color).child(message.time.clone()))
-            });
-
-        let status: Option<SharedString> = match &message.status {
-            Status::Sent => None,
-            Status::Sending => Some("Sending…".into()),
-            Status::Failed(_) => Some("Not sent".into()),
+        let lead = if continued {
+            let color = if hovered { p.muted } else { gpui::transparent_black() };
+            message_log::run_time(message.time.clone(), color, false).into_any_element()
+        } else {
+            // The user's own address is the account's when Chat doesn't give it.
+            let email = if message.email.is_empty() && message.mine { &key.account } else { &message.email };
+            avatars::avatar(email, &message.avatar, log_metrics::AVATAR, p, cx)
         };
-        let head = (!continued).then(|| {
-            div()
-                .flex()
-                .items_baseline()
-                .gap(px(8.))
-                .min_w_0()
-                .child(
-                    div()
-                        .max_w(relative(0.6))
-                        .truncate()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .when(message.mine, |d| d.text_color(p.accent))
-                        .child(message.name.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(text::TAG))
-                        .text_color(p.faint)
-                        .child(status.clone().unwrap_or_else(|| message.time.clone())),
-                )
-        });
+        let time: SharedString = match &message.status {
+            Status::Sent => message.time.clone(),
+            Status::Sending => "Sending…".into(),
+            Status::Failed(_) => "Not sent".into(),
+        };
+        let head = (!continued).then(|| message_log::head(message.name.clone(), time, None::<AnyElement>, message.mine, p));
 
-        let main = div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .children(head)
-            .when(message.thread_reply, |d| {
-                d.child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child("↳ Reply in thread"))
-            })
-            .when(!message.body.is_empty(), |d| {
-                d.child(
-                    div()
-                        .text_size(px(text::READING))
-                        .line_height(relative(metrics::LINE))
-                        .when(message.thread_reply, |d| d.pl(px(10.)))
-                        .when(matches!(message.status, Status::Failed(_)), |d| d.text_color(p.muted))
-                        .child(message.body.element(&message.id, p)),
-                )
-            })
-            .when(!message.attachments.is_empty(), |d| {
-                d.child(div().flex().flex_wrap().items_start().gap(px(space::S8)).pt(px(space::S6)).children(
-                    message.attachments.iter().enumerate().map(|(index, attachment)| {
+        let mut content: Vec<AnyElement> = Vec::new();
+        if message.thread_reply {
+            content.push(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child("↳ Reply in thread").into_any_element());
+        }
+        if !message.body.is_empty() {
+            content.push(
+                div()
+                    .text_size(px(text::READING))
+                    .line_height(relative(text::READING_LEADING))
+                    .when(message.thread_reply, |d| d.pl(px(10.)))
+                    .when(matches!(message.status, Status::Failed(_)), |d| d.text_color(p.muted))
+                    .child(message.body.element(&message.id, p))
+                    .into_any_element(),
+            );
+        }
+        if !message.attachments.is_empty() {
+            content.push(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .when(message.mine, |d| d.justify_end())
+                    .items_start()
+                    .gap(px(space::S8))
+                    .pt(px(space::S6))
+                    .children(message.attachments.iter().enumerate().map(|(index, attachment)| {
                         let id = ElementId::Name(format!("chat-file:{}:{index}", message.id).into());
                         self.render_attachment(&key.account, id, attachment, window, p, cx)
-                    }),
-                ))
-            })
-            .when_some(
-                match &message.status {
-                    Status::Failed(reason) => Some(reason.clone()),
-                    _ => None,
-                },
-                |d, reason| {
-                    let (retry_key, retry_id) = (key.clone(), message.id.clone());
-                    let (discard_key, discard_id) = (key.clone(), message.id.clone());
-                    d.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .pt(px(4.))
-                            .text_size(px(text::FOOTNOTE))
-                            .child(div().text_color(p.danger).child(format!("Not sent: {reason}")))
-                            .child(button(ElementId::Name(format!("retry:{}", message.id).into()), "Retry", ButtonKind::Secondary, ControlSize::Small, true, p).on_click(
-                                cx.listener(move |this, _: &ClickEvent, window, cx| this.retry(&retry_key, &retry_id, window, cx)),
-                            ))
-                            .child(button(ElementId::Name(format!("discard:{}", message.id).into()), "Delete", ButtonKind::Plain(p.accent), ControlSize::Small, true, p).on_click(
-                                cx.listener(move |this, _: &ClickEvent, _, cx| this.discard(&discard_key, &discard_id, cx)),
-                            )),
-                    )
-                },
+                    }))
+                    .into_any_element(),
             );
+        }
+        if let Status::Failed(reason) = &message.status {
+            let (retry_key, retry_id) = (key.clone(), message.id.clone());
+            let (discard_key, discard_id) = (key.clone(), message.id.clone());
+            content.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .pt(px(4.))
+                    .text_size(px(text::FOOTNOTE))
+                    .child(div().text_color(p.danger).child(format!("Not sent: {reason}")))
+                    .child(button(ElementId::Name(format!("retry:{}", message.id).into()), "Retry", ButtonKind::Secondary, ControlSize::Small, true, p).on_click(
+                        cx.listener(move |this, _: &ClickEvent, window, cx| this.retry(&retry_key, &retry_id, window, cx)),
+                    ))
+                    .child(button(ElementId::Name(format!("discard:{}", message.id).into()), "Delete", ButtonKind::Plain(p.accent), ControlSize::Small, true, p).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| this.discard(&discard_key, &discard_id, cx)),
+                    ))
+                    .into_any_element(),
+            );
+        }
 
-        let reply = message.thread.clone().filter(|_| hovered && matches!(message.status, Status::Sent)).map(|thread| {
+        let reply = message.thread.clone().filter(|_| matches!(message.status, Status::Sent)).map(|thread| {
             let starter = log.messages.iter().find(|m| m.thread.as_ref() == Some(&thread) && !m.thread_reply);
             let who: SharedString = match starter {
                 Some(m) if m.mine => "your message".into(),
                 Some(m) => m.name.clone(),
                 None => message.name.clone(),
             };
-            div()
-                .absolute()
-                .top(px(-10.))
-                .right(px(10.))
-                .rounded(px(radius::CONTROL))
-                .border_1()
-                .border_color(p.line)
-                .bg(p.background)
+            raised_capsule(p)
                 .child(button(ElementId::Name(format!("reply:{}", message.id).into()), "Reply in Thread", ButtonKind::Plain(p.accent), ControlSize::Small, true, p).on_click(
                     cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.reply_thread = Some((thread.clone(), who.clone()));
@@ -1826,47 +1821,42 @@ impl ChatPane {
                         cx.notify();
                     }),
                 ))
+                .into_any_element()
         });
 
-        let row = div()
-            .id(ElementId::Name(format!("chat-msg:{}", message.id).into()))
-            .relative()
-            .flex()
-            .gap(px(metrics::GAP))
-            .mx(px(-10.))
-            .px(px(10.))
-            .pt(px(if continued { 2. } else { 8. }))
-            .pb(px(6.))
-            .rounded(px(radius::CARD))
-            .hover(|s| s.bg(p.hover))
+        let row = message_log::Row { id: ElementId::Name(format!("chat-msg:{}", message.id).into()), mine: message.mine, continued, hovered };
+        let row = message_log::message(row, lead, head, content, reply, p)
             .when(matches!(message.status, Status::Sending), |d| d.opacity(metrics::PENDING_OPACITY))
             .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
                 if *hovering {
                     this.hovered_message = Some(hover_id.clone());
                 } else if this.hovered_message.as_ref() == Some(&hover_id) {
                     this.hovered_message = None;
+                } else {
+                    return;
                 }
                 cx.notify();
-            }))
-            .child(gutter)
-            .child(main)
-            .children(reply);
+            }));
 
         Self::column(
             div()
                 .flex()
                 .flex_col()
-                .when(!run.divider.is_empty(), |d| d.child(divider(run.divider.clone().into(), p.muted, p.line)))
-                .when(new_line, |d| d.child(divider("New".into(), p.accent, p.accent.opacity(0.45))))
+                .when(!run.divider.is_empty(), |d| d.child(message_log::day_divider(run.divider.clone().into(), p)))
+                .when(new_line, |d| d.child(message_log::divider("New".into(), p.accent, p.accent.opacity(0.45))))
                 .child(row),
         )
         .into_any_element()
     }
 
+    /// Above the log: what keeps it empty (loading, a failure, no messages) or the button for
+    /// earlier messages. Over messages already shown (from the cache) neither loading nor a failed
+    /// refresh takes a line here; the header tells of the failure (MS-326).
     fn render_top(&self, key: &Key, log: &Log, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let content: AnyElement = if let Some(failure) = &log.failure {
+        let empty = log.len() == 0;
+        let content: AnyElement = if let Some(failure) = log.failure.as_ref().filter(|_| empty) {
             div().py(px(24.)).text_color(p.danger).child(format!("Could not load messages: {failure}")).into_any_element()
-        } else if !log.loaded {
+        } else if !log.loaded && empty {
             div().py(px(24.)).text_color(p.muted).child("Loading messages…").into_any_element()
         } else if log.more {
             let key = key.clone();
@@ -1879,7 +1869,7 @@ impl ChatPane {
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.load_earlier(&key, cx))),
                 )
                 .into_any_element()
-        } else if log.len() == 0 {
+        } else if empty {
             div().py(px(24.)).text_color(p.muted).child("No messages yet.").into_any_element()
         } else {
             div().pt(px(24.)).into_any_element()
@@ -2113,7 +2103,7 @@ impl ChatPane {
                 .when(index == 0, |d| d.bg(p.selection))
                 .when(index != 0, |d| d.hover(|s| s.bg(p.hover)))
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.add_person(chosen.clone(), window, cx)))
-                .child(monogram(&mailstream::avatar(person.label().to_string(), person.email.to_string()), rows::AVATAR, p))
+                .child(avatars::avatar(&person.email, &mailstream::avatar(person.label().to_string(), person.email.to_string()), rows::AVATAR, p, cx))
                 .child(div().min_w_0().truncate().child(person.label()))
                 .when(person.name.is_some(), |d| d.child(div().min_w_0().truncate().text_color(p.muted).child(person.email.clone())))
         }));
@@ -2172,22 +2162,6 @@ impl ChatPane {
 }
 
 // MARK: - Pieces
-
-/// A line across the log with a label in it.
-fn divider(label: SharedString, color: gpui::Hsla, line: gpui::Hsla) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(12.))
-        .mt(px(16.))
-        .mb(px(6.))
-        .text_size(px(text::CAPTION))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(color)
-        .child(div().flex_1().h(px(1.)).bg(line))
-        .child(label)
-        .child(div().flex_1().h(px(1.)).bg(line))
-}
 
 /// A downloaded picture at its own size, shrunk to fit the log's media box; clicking opens it in
 /// the system's image viewer.

@@ -200,6 +200,8 @@ pub struct ShownMessage {
     /// (`format::fold`).
     pub shown: Vec<format::Run>,
     pub quoted: Option<SharedString>,
+    /// Sent from one of the user's addresses: the chat log puts it on the right (MS-326).
+    pub mine: bool,
 }
 
 impl Deref for ShownMessage {
@@ -254,7 +256,8 @@ impl ShownMessage {
         if message.date.is_some() {
             headers.push(("Date", mailstream::full_date(message.date.clone()).into()));
         }
-        ShownMessage { message, body_html, tiles, preview, recipients: recipients.into(), headers, shown, quoted }
+        let mine = own.contains(&message.sender().normalized_email());
+        ShownMessage { message, body_html, tiles, preview, recipients: recipients.into(), headers, shown, quoted, mine }
     }
 
     /// Who a reply to this message goes to, as the reader can tell from its headers (Flutter's

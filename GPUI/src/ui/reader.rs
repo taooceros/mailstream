@@ -8,7 +8,8 @@ use gpui::{FocusHandle, Hsla, ObjectFit, Rgba, ScrollDelta, StyledImage, img, po
 
 use super::*;
 use crate::controls::{linked_text, tooltip};
-use crate::design::{AttachmentKind, marks, reader as metrics_reader};
+use crate::design::{AttachmentKind, log as log_metrics, marks, reader as metrics_reader};
+use crate::message_log;
 use crate::state::{ReaderPin, ReaderTop};
 
 impl MailApp {
@@ -503,12 +504,12 @@ impl MailApp {
             .into_any_element()
     }
 
-    /// A conversation between people as a chat log: a divider per day, each message under its
-    /// sender's avatar, name, time and recipients, standing on its own with its sign-off (MS-73);
-    /// a sender's next message within the hour joins theirs, its time in the avatar's column on
-    /// hover (`Message::group`). The message under the pointer takes a faint wash, its reply and
-    /// forward buttons floating on its top edge. Returns its rows, each message's with its id, for
-    /// the reader to scroll.
+    /// A conversation between people as a chat log (`message_log`, shared with Chat): a divider
+    /// per day, each message under its sender's avatar, name, time and recipients, standing on its
+    /// own with its sign-off (MS-73); the user's own on the right (MS-326). A sender's next message
+    /// within the hour joins theirs, its time in the avatar's column on hover (`Message::group`).
+    /// The message under the pointer takes a faint wash, its reply and forward buttons floating on
+    /// its top edge. Returns its rows, each message's with its id, for the reader to scroll.
     fn render_chat_log(
         &self,
         messages: &[ShownMessage],
@@ -519,7 +520,7 @@ impl MailApp {
         let mut previous: Option<&ShownMessage> = None;
         for message in messages {
             if !message.divider.is_empty() {
-                rows.push((None, day_divider(message.divider.clone().into(), p).into_any_element()));
+                rows.push((None, message_log::day_divider(message.divider.clone().into(), p).into_any_element()));
             }
             // A message joining a run names its recipients only when they changed.
             let recipients = !message.continued || previous.is_none_or(|before| before.recipients != message.recipients);
@@ -534,46 +535,32 @@ impl MailApp {
         let hovered = self.hovered_message.as_ref() == Some(&id);
         let continued = message.continued;
         let sender = message.sender();
-        let gutter = if continued {
+        let lead = if continued {
             // The time shows on hover, and while the message is unread, in the accent.
             let color = if message.unread { p.accent } else if hovered { p.muted } else { gpui::transparent_black() };
-            div()
-                .pt(px(space::S2))
-                .text_size(px(text::TAG))
-                .text_color(color)
-                .when(message.unread, |d| d.font_weight(FontWeight::SEMIBOLD))
-                .child(message.time.clone())
-                .into_any_element()
+            message_log::run_time(message.time.clone().into(), color, message.unread).into_any_element()
         } else {
-            avatars::avatar(&sender.email, &message.avatar, metrics::AVATAR, p, cx).into_any_element()
+            avatars::avatar(&sender.email, &message.avatar, log_metrics::AVATAR, p, cx)
         };
         let head = (!continued).then(|| {
-            div()
-                .pb(px(space::S4))
-                .flex()
-                .items_baseline()
-                .gap(px(space::S8))
-                .min_w_0()
-                .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).child(sender.display_name()))
-                .children(message.unread.then(|| unread_mark(p)))
-                .child(div().flex_shrink_0().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(message.time.clone()))
-                .children(message.starred.then(|| icon(Icon::Starred, icon_size::INLINE, p.star).self_center()))
+            let marks = [
+                message.unread.then(|| unread_mark(p).into_any_element()),
+                message.starred.then(|| icon(Icon::Starred, icon_size::INLINE, p.star).self_center().into_any_element()),
+            ];
+            message_log::head(sender.display_name().into(), message.time.clone().into(), marks.into_iter().flatten(), message.mine, p)
         });
-        let column = div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .children(head)
-            .when(recipients, |d| d.children(self.render_recipients(message, p, cx).map(|line| div().pb(px(space::S4)).child(line))))
-            .children(message.error.as_ref().map(|error| notice(Tone::Error, None, error.clone(), false, p)))
-            .children(message.invitation.as_ref().map(|invitation| {
-                div().pb(px(space::S8)).child(self.render_invitation(message, invitation, p, cx))
-            }))
-            .children(self.render_body(message, p, cx).map(|body| own_presses(div()).child(body)))
-            .when(!message.tiles.is_empty(), |d| {
-                d.child(div().pt(px(space::S8)).child(self.render_attachments(message, p, cx)))
-            });
+        let content = [
+            recipients
+                .then(|| self.render_recipients(message, p, cx).map(|line| div().pb(px(space::S4)).child(line).into_any_element()))
+                .flatten(),
+            message.error.as_ref().map(|error| notice(Tone::Error, None, error.clone(), false, p).into_any_element()),
+            message.invitation.as_ref().map(|invitation| {
+                div().pb(px(space::S8)).child(self.render_invitation(message, invitation, p, cx)).into_any_element()
+            }),
+            self.render_body(message, p, cx).map(|body| own_presses(div()).child(body).into_any_element()),
+            (!message.tiles.is_empty())
+                .then(|| div().pt(px(space::S8)).child(self.render_attachments(message, p, cx)).into_any_element()),
+        ];
         // The buttons answer the message under the pointer, not the conversation's latest.
         let (reply, reply_all, forward) = (id.clone(), id.clone(), id.clone());
         let actions = raised_capsule(p)
@@ -587,11 +574,8 @@ impl MailApp {
             .child(icon_button("log-forward", Icon::Forward, "Forward", true, p.glyph).on_click(cx.listener(
                 move |this, _: &ClickEvent, _, cx| this.forward_message(forward.clone(), cx),
             )));
-        // The gap above belongs to the message, so the buttons floating over it keep it hovered.
-        div()
-            .id(ElementId::Name(format!("log:{id}").into()))
-            .relative()
-            .pt(px(if continued { space::S2 } else { space::S12 }))
+        let row = message_log::Row { id: ElementId::Name(format!("log:{id}").into()), mine: message.mine, continued, hovered };
+        message_log::message(row, lead, head, content.into_iter().flatten(), Some(actions.into_any_element()), p)
             .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
                 if *hovering {
                     this.hovered_message = Some(id.clone());
@@ -602,20 +586,6 @@ impl MailApp {
                 }
                 cx.notify();
             }))
-            .child(
-                div()
-                    .relative()
-                    .px(px(space::S12))
-                    .py(px(space::S6))
-                    .flex()
-                    .items_start()
-                    .child(div().w(px(metrics_reader::LOG_GUTTER)).flex_shrink_0().child(gutter))
-                    .child(column)
-                    // The wash lies over the message, so its HTML (its own backgrounds, or paper)
-                    // takes it too.
-                    .when(hovered, |d| d.child(div().absolute().inset_0().rounded(px(radius::CONTROL)).bg(p.hover))),
-            )
-            .when(hovered, |d| d.child(div().absolute().top_0().right(px(space::S12)).child(actions)))
             .into_any_element()
     }
 }
@@ -623,22 +593,6 @@ impl MailApp {
 /// The accent dot beside an unread message's sender.
 fn unread_mark(p: &Palette) -> Div {
     div().flex_shrink_0().self_center().size(px(marks::DOT)).rounded_full().bg(p.accent)
-}
-
-/// A line across the log with the day in it.
-fn day_divider(label: SharedString, p: &Palette) -> Div {
-    // A half-point hairline vanishes at some offsets on a 1x screen.
-    let rule = || div().flex_1().h(px(stroke::RIM)).bg(p.line);
-    div()
-        .py(px(space::S12))
-        .flex()
-        .items_center()
-        .gap(px(space::S12))
-        .text_size(px(text::FOOTNOTE))
-        .text_color(p.muted)
-        .child(rule())
-        .child(label)
-        .child(rule())
 }
 
 /// A text body's runs (`format::runs`): what was written, and its quotes in place behind a rule,

@@ -33,6 +33,7 @@ mod frame_rate;
 mod glass;
 mod icons;
 mod input;
+mod message_log;
 mod model;
 mod settings;
 mod split;
