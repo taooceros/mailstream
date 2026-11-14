@@ -150,7 +150,8 @@ fn lists_every_accounts_events_from_the_cache_and_fetches_only_when_old_or_asked
     wait_until("both accounts' events", || events(&engine, week.clone())["events"].as_array().unwrap().len() == 6);
     let list = events(&engine, week.clone());
     assert_eq!(titles(&list), ["(No title)", "Standup", "Sync", "Review", "Holiday", "Trip"]);
-    assert!(heard.lock().unwrap().contains(&"calendar"));
+    // Events go out a frame (16 ms) after the change, which may still be ahead.
+    wait_until("the calendar event", || heard.lock().unwrap().contains(&"calendar"));
     let accounts = list["accounts"].as_array().unwrap();
     let granted: Vec<(&str, bool)> = accounts.iter().map(|a| (a["id"].as_str().unwrap(), a["granted"].as_bool().unwrap())).collect();
     assert_eq!(granted, [(GOOGLE, true), (OUTLOOK, true), (OLD, false)]);

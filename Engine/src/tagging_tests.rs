@@ -101,7 +101,8 @@ fn tags_the_inbox_with_omp_and_shares_corrections() {
     wait_until("the second pass", || counts(&dir).len() == 4);
     assert_eq!(counts(&dir), [20, 20, 5, 14]);
     wait_until("tags", || list(&engine, json!({}))[58]["category"] == "notification");
-    assert!(events.lock().unwrap().contains(&"tags"));
+    // Events go out a frame (16 ms) after the change, which may still be ahead.
+    wait_until("the tags event", || events.lock().unwrap().contains(&"tags"));
     let all = list(&engine, json!({}));
     // The newest thread ends with the user's reply: it never waits on them.
     assert_eq!((&all[0]["category"], &all[0]["waiting"], &all[0]["labels"]), (&json!("people"), &json!(false), &json!(["Work"])));

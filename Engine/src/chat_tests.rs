@@ -181,7 +181,8 @@ fn lists_opens_reads_sends_and_starts_chats() {
     assert_eq!((b["title"].as_str(), b["preview"].as_str(), b["unread"].as_bool()), (Some("Team"), Some("bob@x.com: hi all"), Some(false)));
     // Google withholds Ann's name in the group, and no message of hers there gives it.
     assert_eq!((c["kind"].as_str(), c["title"].as_str(), c["preview"].as_str()), (Some("group"), Some("ann@x.com, Cy"), Some("You: ok")));
-    assert!(events.lock().unwrap().contains(&"chat"));
+    // Events go out a frame (16 ms) after the change, which may still be ahead.
+    wait_until("the chat event", || events.lock().unwrap().contains(&"chat"));
     assert_eq!(call(&engine, "chat.spaces", json!({ "account": "nobody@x.com" })).unwrap_err().code, "unknown_account");
     assert_eq!(call(&engine, "chat.messages", json!({ "account": "me@outlook.com", "space": "spaces/A" })).unwrap_err().code, "unknown_account");
 
