@@ -1329,10 +1329,15 @@ impl ChatPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let InputEvent::PressEnter { shift: false, .. } = event
-            && !composer.update(cx, |input, cx| input.marked_text_range(window, cx).is_some())
-        {
-            self.send(window, cx);
+        match event {
+            // The send button enables with the first character and disables once the text is cleared.
+            InputEvent::Change => cx.notify(),
+            InputEvent::PressEnter { shift: false, .. }
+                if !composer.update(cx, |input, cx| input.marked_text_range(window, cx).is_some()) =>
+            {
+                self.send(window, cx)
+            }
+            _ => {}
         }
     }
 
@@ -2038,6 +2043,7 @@ impl ChatPane {
                 })))
         });
         let composer = self.composer.clone();
+        let can_send = !self.composer.read(cx).value().trim().is_empty();
         Self::column(
             div()
                 .pt(px(8.))
@@ -2072,22 +2078,11 @@ impl ChatPane {
                         .on_action(cx.listener(|this, _: &FormatCode, window, cx| this.format_composer("`", window, cx)))
                         .child(div().flex_1().min_w_0().child(input::area(&self.composer)))
                         .child(
-                            div()
-                                .flex_shrink_0()
-                                .h(px(text::READING * 1.55))
-                                .flex()
-                                .items_center()
-                                .text_size(px(text::CAPTION))
-                                .text_color(p.faint)
-                                .child("↩"),
+                            div().flex_shrink_0().h(px(text::READING * 1.55)).flex().items_center().child(
+                                icon_button("chat-send", Icon::Sent, format!("Send to {title}"), can_send, p.accent)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.send(window, cx))),
+                            ),
                         ),
-                )
-                .child(
-                    div()
-                        .pt(px(4.))
-                        .text_size(px(text::CAPTION))
-                        .text_color(p.faint)
-                        .child(format!("Message {title} · Return sends · Shift+Return newline · Esc goes back")),
                 ),
         )
         .into_any_element()
