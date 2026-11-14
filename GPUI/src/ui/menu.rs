@@ -1,5 +1,5 @@
 //! The row's right-click menu (`ConversationListViewController.menu`): reply and forward, read and star toggles,
-//! "Waiting on you", then filing; on a picked row, what applies to every picked conversation (MS-305). It is gpui-kit's `PopupMenu` (MS-226), built as it opens, its entries drawn
+//! "Waiting on you" and Tag… (MS-339), then filing; on a picked row, what applies to every picked conversation (MS-305). It is gpui-kit's `PopupMenu` (MS-226), built as it opens, its entries drawn
 //! in the app's row (the glyph in the secondary label before the title, in the body text); the kit
 //! steps through them with the arrows, runs one with Return and closes on Escape or a press outside.
 
@@ -51,8 +51,9 @@ impl MailApp {
                 Entry { glyph: Icon::Star, title: "Star", run: |this, w, cx| this.star(&Star, w, cx) }
             },
         ]);
+        let mut tagging = Vec::new();
         if any(Conversation::can_mark_waiting) {
-            groups.push(vec![if targets.iter().filter(|c| c.can_mark_waiting()).any(|c| c.waiting) {
+            tagging.push(if targets.iter().filter(|c| c.can_mark_waiting()).any(|c| c.waiting) {
                 Entry { glyph: Icon::Resolve, title: "Resolve", run: |this, w, cx| this.toggle_waiting(&ToggleWaiting, w, cx) }
             } else {
                 Entry {
@@ -60,8 +61,10 @@ impl MailApp {
                     title: "Mark as Waiting on You",
                     run: |this, w, cx| this.toggle_waiting(&ToggleWaiting, w, cx),
                 }
-            }]);
+            });
         }
+        tagging.push(Entry { glyph: Icon::Label, title: "Tag…", run: |this, w, cx| this.edit_tags(&EditTags, w, cx) });
+        groups.push(tagging);
         let mut filing = Vec::new();
         if any(Conversation::can_archive) {
             filing.push(Entry { glyph: Icon::Archive, title: "Archive", run: |this, w, cx| this.archive(&Archive, w, cx) });

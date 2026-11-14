@@ -700,12 +700,7 @@ impl Tagging {
             tag.to_respond = false;
         }
         if let Some(labels) = labels {
-            tag.labels = labels
-                .iter()
-                .map(|label| crate::text::prefix_characters(label.trim(), omp::MAX_LABEL_LENGTH).0.to_string())
-                .filter(|label| !label.is_empty())
-                .take(2)
-                .collect();
+            tag.labels = labels.iter().filter_map(|label| label_text(label)).take(2).collect();
         }
         if existing.as_ref() != Some(&tag) {
             tag.synced = false;
@@ -789,14 +784,30 @@ impl Tagging {
         };
         let waiting = args.flag("waiting");
         let labels = args.list("labels");
-        if category.is_none() && waiting.is_none() && labels.is_none() {
-            return Err(EngineError::usage("Give --category, --waiting or --labels."));
+        let (add, remove) = (args.list("add-labels"), args.list("remove-labels"));
+        if category.is_none() && waiting.is_none() && labels.is_none() && add.is_none() && remove.is_none() {
+            return Err(EngineError::usage("Give --category, --waiting, --labels, --add-labels or --remove-labels."));
+        }
+        if labels.is_some() && (add.is_some() || remove.is_some()) {
+            return Err(EngineError::usage("Give --labels or --add-labels and --remove-labels, not both."));
         }
         let (mut done, mut failed, mut replaced) = (Vec::new(), Vec::new(), Vec::new());
         for id in args.list("ids").unwrap_or_default() {
             let edited = lookup(&id).map_err(|error| error.message).and_then(|conversation| {
                 let before = self.stored(&conversation);
-                let tag = self.edit(&conversation, category, waiting, labels.as_deref())?;
+                let merged;
+                let labels = match (&add, &remove) {
+                    (None, None) => labels.as_deref(),
+                    _ => {
+                        merged = edited_labels(
+                            before.as_ref().map_or(&[][..], |tag| &tag.labels),
+                            add.as_deref().unwrap_or_default(),
+                            remove.as_deref().unwrap_or_default(),
+                        );
+                        Some(&merged[..])
+                    }
+                };
+                let tag = self.edit(&conversation, category, waiting, labels)?;
                 Ok((conversation, before, tag))
             });
             match edited {
@@ -827,6 +838,32 @@ impl Tagging {
             _ => unreachable!("{command} is a tagging command"),
         }
     }
+}
+
+/// A topic label as kept: trimmed, at most `omp::MAX_LABEL_LENGTH` characters; None when empty.
+fn label_text(label: &str) -> Option<String> {
+    let text = crate::text::prefix_characters(label.trim(), omp::MAX_LABEL_LENGTH).0.trim_end();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// A conversation's topic labels after `mail.tag --add-labels --remove-labels` (MS-339):
+/// `current` without those removed, then each added one it lacks put first, so the latest shows
+/// in lists; the first two are kept. Labels match by their text as kept, case aside. Front ends
+/// show the change with it before the engine answers.
+pub fn edited_labels(current: &[String], add: &[String], remove: &[String]) -> Vec<String> {
+    let key = |label: &str| label_text(label).map(|text| text.to_lowercase());
+    let gone: Vec<String> = remove.iter().filter_map(|label| key(label)).collect();
+    let mut labels: Vec<String> =
+        current.iter().filter(|label| key(label).is_none_or(|text| !gone.contains(&text))).cloned().collect();
+    for label in add.iter().rev() {
+        if let Some(text) = label_text(label)
+            && !labels.iter().any(|kept| key(kept).as_deref() == Some(&text.to_lowercase()))
+        {
+            labels.insert(0, text);
+        }
+    }
+    labels.truncate(2);
+    labels
 }
 
 /// The stand-in tag of a conversation the tagger has not answered, from how the provider sorted

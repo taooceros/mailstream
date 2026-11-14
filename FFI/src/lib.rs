@@ -47,6 +47,8 @@ pub use mailstream_engine::chat_markup::{ChatBlock, ChatBlockKind, ChatSpan, Cha
 /// For Rust hosts (GPUI): the stable color slot of a key, as avatars pick theirs.
 pub use mailstream_engine::display::{AVATAR_SLOTS, Avatar, ChatRun, stable_slot};
 pub use mailstream_engine::support_directory;
+/// For Rust hosts (GPUI): a conversation's labels after `tag`'s `add_labels`/`remove_labels`.
+pub use mailstream_engine::tagging::edited_labels;
 
 /// A failed request: the engine's stable `code` (`unknown_account`, `provider`, `confirm`, …)
 /// and a message for people.
@@ -483,14 +485,18 @@ commands! {
     fn restore(ids: Vec<String>) -> BatchResult = "mail.restore" { "ids": ids };
 
     /// Corrects the AI tag; each of `category`, `waiting` and `labels` (at most two) changes
-    /// only when given.
+    /// only when given. `add_labels` and `remove_labels` change each conversation's own labels
+    /// instead of `labels`: added ones go first, two are kept.
     fn tag(
         ids: Vec<String>,
         category: Option<String>,
         waiting: Option<bool>,
         labels: Option<Vec<String>>,
+        add_labels: Option<Vec<String>>,
+        remove_labels: Option<Vec<String>>,
     ) -> TagResult = "mail.tag" {
-        "ids": ids, "category": category, "waiting": waiting, "labels": labels
+        "ids": ids, "category": category, "waiting": waiting, "labels": labels,
+        "add-labels": add_labels, "remove-labels": remove_labels
     };
 
     /// Forgets every AI tag and tags the current list again; `disabled` while tagging is off.

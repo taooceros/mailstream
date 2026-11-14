@@ -220,6 +220,8 @@ nonisolated struct CommandSpec: Sendable {
             Argument(name: "category", kind: .choice(MailCategory.allCases.map(\.rawValue)), summary: "New category."),
             Argument(name: "waiting", kind: .choice(["true", "false"]), summary: "Whether it waits on your reply or action (not newsletters)."),
             Argument(name: "labels", kind: .list, summary: "Topic labels (at most two)."),
+            Argument(name: "add-labels", kind: .list, summary: "Topic labels to add to each conversation's own, first; it keeps two (not with --labels)."),
+            Argument(name: "remove-labels", kind: .list, summary: "Topic labels to take off each conversation (not with --labels)."),
         ]),
         CommandSpec(command: .app(.mailRetag), summary: "Forgets every AI tag and tags the current list again."),
         CommandSpec(command: .app(.mailSend), summary: "Sends a new plain-text message, with files attached if given.", arguments: [

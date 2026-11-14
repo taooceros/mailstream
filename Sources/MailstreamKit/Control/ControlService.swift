@@ -621,14 +621,37 @@ final class ControlService {
         }
         let waiting = args.string("waiting").map { $0 == "true" }
         let labels = args.list("labels")
-        guard category != nil || waiting != nil || labels != nil else {
-            throw ControlError.usage("Give --category, --waiting or --labels.")
+        let add = args.list("add-labels"), remove = args.list("remove-labels")
+        guard category != nil || waiting != nil || labels != nil || add != nil || remove != nil else {
+            throw ControlError.usage("Give --category, --waiting, --labels, --add-labels or --remove-labels.")
+        }
+        guard labels == nil || (add == nil && remove == nil) else {
+            throw ControlError.usage("Give --labels or --add-labels and --remove-labels, not both.")
         }
         return try await batch(args, rejectsEmpty: false, failureCodes: false) { id in
-            let tag = try store.tagging.edit(try lookup(id).conversation, category: category, waiting: waiting, labels: labels)
+            let conversation = try lookup(id).conversation
+            let edited = add == nil && remove == nil
+                ? labels
+                : Self.editedLabels(store.tagging.tag(for: conversation)?.labels ?? [], add: add ?? [], remove: remove ?? [])
+            let tag = try store.tagging.edit(conversation, category: category, waiting: waiting, labels: edited)
             return ["id": .string(id), "category": .string(tag.category.rawValue), "waiting": .bool(tag.toRespond),
                     "labels": .strings(tag.labels)]
         }
+    }
+
+    /// A conversation's topic labels after `--add-labels` and `--remove-labels`: `current` without
+    /// those removed, then each added one it lacks put first; `edit` keeps the first two. Labels
+    /// match by their trimmed text, case aside (the Rust engine's `tagging::edited_labels`).
+    private static func editedLabels(_ current: [String], add: [String], remove: [String]) -> [String] {
+        func same(_ a: String, _ b: String) -> Bool {
+            a.trimmingCharacters(in: .whitespaces).lowercased() == b.trimmingCharacters(in: .whitespaces).lowercased()
+        }
+        var labels = current.filter { label in !remove.contains { same($0, label) } }
+        for label in add.reversed() {
+            let trimmed = label.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty, !labels.contains(where: { same($0, trimmed) }) { labels.insert(trimmed, at: 0) }
+        }
+        return labels
     }
 
     private func addresses(_ args: Arguments, _ name: String) throws -> [Address] {

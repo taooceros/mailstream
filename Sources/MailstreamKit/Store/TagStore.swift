@@ -176,8 +176,9 @@ final class TagStore {
         }
         if tag.category == .newsletter { tag.toRespond = false }
         if let labels {
-            tag.labels = Array(labels.map { String($0.trimmingCharacters(in: .whitespaces).prefix(OmpTagger.maxLabelLength)) }
-                .filter { !$0.isEmpty }.prefix(2))
+            tag.labels = Array(labels.map {
+                String($0.trimmingCharacters(in: .whitespaces).prefix(OmpTagger.maxLabelLength)).trimmingCharacters(in: .whitespaces)
+            }.filter { !$0.isEmpty }.prefix(2))
         }
         tags[key] = tag
         attempted.insert(key)

@@ -140,13 +140,31 @@ fn tags_the_inbox_with_omp_and_shares_corrections() {
             { "id": id(2), "message": format!("{} has no AI tag yet; give a category.", id(2)) },
         ])
     );
+    // Cut to its longest, a label loses the space it ended on.
     let answer = tag(json!({ "ids": [id(2)], "category": "invitation", "labels": ["  Conference trip planning ", "", "Travel", "x"] }));
     assert_eq!(
         answer.unwrap()["done"][0],
-        json!({ "id": id(2), "category": "invitation", "waiting": false, "labels": ["Conference trip ", "Travel"] })
+        json!({ "id": id(2), "category": "invitation", "waiting": false, "labels": ["Conference trip", "Travel"] })
     );
+    // Labels added or taken off each conversation's own: a new one goes first, two are kept; one
+    // already there stays where it is. One step takes the whole change back.
+    let labels = |answer: Value| answer["done"].as_array().unwrap().iter().map(|done| done["labels"].clone()).collect::<Vec<_>>();
+    let answer = tag(json!({ "ids": [id(2), id(0)], "add-labels": ["Finance"] })).unwrap();
+    assert_eq!(labels(answer.clone()), [json!(["Finance", "Conference trip"]), json!(["Finance", "Work"])]);
+    let step = answer["undo"].clone();
+    assert_eq!(labels(tag(json!({ "ids": [id(0)], "add-labels": [" work "], "remove-labels": ["finance"] })).unwrap()), [json!(["Work"])]);
+    assert_eq!(labels(tag(json!({ "ids": [id(2)], "remove-labels": ["Nope"] })).unwrap()), [json!(["Finance", "Conference trip"])]);
+    call(&engine, "mail.undo", json!({})).unwrap();
+    call(&engine, "mail.undo", json!({ "step": step })).unwrap();
+    let listed = list(&engine, json!({}));
+    assert_eq!((&listed[2]["labels"], &listed[0]["labels"]), (&json!(["Conference trip", "Travel"]), &json!(["Work"])));
+    let error = tag(json!({ "ids": [id(5)], "labels": ["A"], "add-labels": ["B"] })).unwrap_err();
+    assert_eq!(error.message, "Give --labels or --add-labels and --remove-labels, not both.");
     let error = tag(json!({ "ids": [id(5)] })).unwrap_err();
-    assert_eq!((error.code.as_str(), error.message.as_str()), ("usage", "Give --category, --waiting or --labels."));
+    assert_eq!(
+        (error.code.as_str(), error.message.as_str()),
+        ("usage", "Give --category, --waiting, --labels, --add-labels or --remove-labels.")
+    );
     assert_eq!(tag(json!({ "ids": [id(5)], "category": "spam" })).unwrap_err().message, "Unknown category spam.");
     assert_eq!(tag(json!({ "category": "people" })).unwrap_err().message, "mail tag: <ids> is required.");
 

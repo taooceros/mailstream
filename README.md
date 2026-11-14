@@ -129,6 +129,7 @@ mailstream mail show '<conversation-id>' --html
 mailstream mail archive '<id>'
 mailstream mail star '<id>'
 mailstream mail tag '<id>' --category newsletter
+mailstream mail tag '<id>' '<id2>' --add-labels Finance --remove-labels Travel
 
 # Send replies (requires --yes confirmation)
 mailstream mail reply '<id>' --body "Thanks, received!" --yes

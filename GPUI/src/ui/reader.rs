@@ -58,8 +58,30 @@ impl MailApp {
                         )
                     })
                     .when(!conversation.tag.is_empty(), |d| d.child(pill(conversation.tag.clone(), None, p)))
-                    .children(conversation.labels.iter().map(|label| {
+                    // Its category and topic labels open the tag editor (MS-339).
+                    .child({
+                        let (title, glyph, color) = match conversation.category {
+                            Some(category) => (category.label(), Icon::for_category(category), design::category_color(category, p)),
+                            None => ("Add Tag", Icon::Label, p.glyph),
+                        };
+                        let id = conversation.id.clone();
+                        pill(title, Some(icon(glyph, icon_size::INLINE, color).into_any_element()), p)
+                            .id("reader-category")
+                            .cursor_pointer()
+                            .hover(|s| s.bg(p.hover))
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                this.open_tag_editor(vec![id.clone()], Some(event.position()), window, cx)
+                            }))
+                    })
+                    .children(conversation.labels.iter().enumerate().map(|(ix, label)| {
+                        let id = conversation.id.clone();
                         pill(label.clone(), Some(mark_dot(design::topic_color(label, p.dark)).into_any_element()), p)
+                            .id(ElementId::NamedInteger("reader-label".into(), ix as u64))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(p.hover))
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                this.open_tag_editor(vec![id.clone()], Some(event.position()), window, cx)
+                            }))
                     }))
                     .children(account)
                     .when(conversation.message_count > 1, |d| {

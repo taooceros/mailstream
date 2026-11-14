@@ -7,10 +7,12 @@ mod invitations;
 mod nav;
 mod selection;
 mod split;
+mod tags;
 
 pub use actions::Removal;
 pub use invitations::InvitationCard;
 pub use selection::Selection;
+pub use tags::TagEditor;
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -54,6 +56,7 @@ actions!(
         Star,
         ToggleRead,
         ToggleWaiting,
+        EditTags,
         Undo,
         Reply,
         ReplyAll,
@@ -100,6 +103,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(secondary!("shift-u"), ToggleRead, window),
         KeyBinding::new("d", ToggleWaiting, list),
         KeyBinding::new(secondary!("shift-d"), ToggleWaiting, window),
+        KeyBinding::new("l", EditTags, list),
         KeyBinding::new(secondary!("z"), Undo, list),
         KeyBinding::new("r", Reply, list),
         KeyBinding::new(secondary!("r"), Reply, window),
@@ -485,6 +489,8 @@ pub struct MailApp {
     /// A conversation beside the list, as last laid out (two panes).
     pub beside: Option<Beside>,
     pub context_menu: Option<ContextMenu>,
+    /// The tag editor (MS-339), over everything while it is open.
+    pub tag_editor: Option<TagEditor>,
     /// The reader's renderer, for this run (the Mac).
     #[cfg(target_os = "macos")]
     pub renderer: Renderer,
@@ -608,6 +614,7 @@ impl MailApp {
             content_width: 0.0,
             beside: None,
             context_menu: None,
+            tag_editor: None,
             #[cfg(target_os = "macos")]
             renderer: Renderer::from_name(std::env::var("MAILSTREAM_READER_RENDERER").ok().as_deref()),
             chat,

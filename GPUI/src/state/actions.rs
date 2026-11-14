@@ -356,7 +356,10 @@ impl MailApp {
         let asked = ids.clone();
         self.background(
             cx,
-            async move { engine::outcome(engine().tag(asked.clone(), None, Some(waiting), None).await.map(|r| (r.failed, r.undo)), &asked) },
+            async move {
+                let answer = engine().tag(asked.clone(), None, Some(waiting), None, None, None).await;
+                engine::outcome(answer.map(|r| (r.failed, r.undo)), &asked)
+            },
             move |this, outcome, cx| {
                 let done = ids.len() - outcome.failed.len();
                 let text = if waiting {
@@ -459,7 +462,7 @@ impl MailApp {
     }
 
     /// Applies `change` to the conversation wherever it is shown.
-    fn patch(&mut self, id: &str, change: impl Fn(&mut Conversation)) {
+    pub(super) fn patch(&mut self, id: &str, change: impl Fn(&mut Conversation)) {
         for list in self.lists.values_mut() {
             for conversation in list.conversations.iter_mut().filter(|c| c.id == id) {
                 change(conversation);
@@ -587,7 +590,7 @@ impl MailApp {
     /// Says what an action did in a toast with an Undo button that takes back `step`, the
     /// engine's step for it (none when it changed nothing: no toast then). A later action's toast
     /// takes its place; ⌘Z takes back the latest step meanwhile and after.
-    fn offer_undo(&mut self, text: SharedString, step: Option<u64>, cx: &mut Context<Self>) {
+    pub(super) fn offer_undo(&mut self, text: SharedString, step: Option<u64>, cx: &mut Context<Self>) {
         let Some(step) = step else { return };
         let app = cx.entity().downgrade();
         self.push_toast(cx, move |p| {

@@ -60,7 +60,7 @@ use gpui::{
 };
 
 use crate::state::{
-    Archive, Back, FocusSearch, Forward, MailApp, NewChat, NewMessage, Quit, Refresh, Reply, ReplyAll, Restore,
+    Archive, Back, EditTags, FocusSearch, Forward, MailApp, NewChat, NewMessage, Quit, Refresh, Reply, ReplyAll, Restore,
     Retag, Star, ToggleFrameRate, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
 };
 
@@ -262,6 +262,7 @@ fn menus(cx: &App) -> Vec<Menu> {
             MenuItem::action("Mark as Read/Unread", ToggleRead),
             MenuItem::action("Star/Unstar", Star),
             MenuItem::action("Waiting on You", ToggleWaiting),
+            MenuItem::action("Tag…", EditTags),
             MenuItem::separator(),
             MenuItem::action("Archive", Archive),
             MenuItem::action("Move to Inbox", Restore),

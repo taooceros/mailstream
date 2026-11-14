@@ -438,6 +438,12 @@ pub const COMMANDS: &[Spec] = &[
                 "Whether it waits on your reply or action (not newsletters).",
             ),
             Argument::new("labels", Kind::List, "Topic labels (at most two)."),
+            Argument::new(
+                "add-labels",
+                Kind::List,
+                "Topic labels to add to each conversation's own, first; it keeps two (not with --labels).",
+            ),
+            Argument::new("remove-labels", Kind::List, "Topic labels to take off each conversation (not with --labels)."),
         ],
     ),
     Spec::new("mail.retag", Handler::Tagging, "Forgets every AI tag and tags the current list again.", &[]),

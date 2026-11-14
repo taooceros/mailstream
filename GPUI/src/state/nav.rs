@@ -22,6 +22,7 @@ impl MailApp {
         let same = self.source == source && self.query.is_none() && self.mail_in_view();
         self.leave_panes(cx);
         self.context_menu = None;
+        self.tag_editor = None;
         self.source = source;
         self.query = None;
         self.search.update(cx, |search, cx| search.clean(window, cx));
@@ -41,6 +42,7 @@ impl MailApp {
         self.leave_panes(cx);
         self.chat_view = Some(account.clone());
         self.context_menu = None;
+        self.tag_editor = None;
         self.hovered_row = None;
         self.chat.update(cx, |chat, cx| chat.show(account, window, cx));
         cx.notify();
@@ -51,6 +53,7 @@ impl MailApp {
         self.chat_view = None;
         self.calendar_view = true;
         self.context_menu = None;
+        self.tag_editor = None;
         self.hovered_row = None;
         self.calendar.update(cx, |calendar, cx| calendar.show(window, cx));
         cx.notify();

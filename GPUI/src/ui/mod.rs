@@ -12,6 +12,7 @@ mod list;
 mod menu;
 mod reader;
 mod sidebar;
+mod tags;
 mod toolbar;
 
 use gpui::prelude::FluentBuilder;
@@ -42,8 +43,8 @@ use crate::split::{self, ResizeList};
 use crate::swipe;
 use crate::model::{AccountExt, CategoryExt, ConversationExt, MailboxExt, RoleExt, ShownMessage, UNIFIED};
 use crate::state::{
-    Archive, Back, Beside, BundleKind, CONTEXT, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh, Removal, Reply,
-    ReplyAll, Restore, Source, Star, ThreadState, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
+    Archive, Back, Beside, BundleKind, CONTEXT, EditTags, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh,
+    Removal, Reply, ReplyAll, Restore, Source, Star, ThreadState, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
 };
 #[cfg(target_os = "macos")]
 use crate::state::Renderer;
@@ -145,6 +146,7 @@ impl Render for MailApp {
             .on_action(cx.listener(Self::star))
             .on_action(cx.listener(Self::toggle_read))
             .on_action(cx.listener(Self::toggle_waiting))
+            .on_action(cx.listener(Self::edit_tags))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::refresh))
@@ -188,7 +190,7 @@ impl Render for MailApp {
             // last frame are hidden until painted again (the Mac's WebView).
             .child({
                 #[cfg(target_os = "macos")]
-                let covered = self.context_menu.is_some();
+                let covered = self.context_menu.is_some() || self.tag_editor.is_some();
                 canvas(|_, _, _| {}, move |_, _, window, _| {
                     blitz_body::begin_frame(window);
                     #[cfg(target_os = "macos")]
@@ -236,6 +238,7 @@ impl Render for MailApp {
                 )
             })
             .children(self.render_context_menu())
+            .children(self.render_tag_editor(p, window, cx))
             // Over everything in the bottom leading corner, as in Flutter.
             .when_some(self.frame_meter.clone(), |d, meter| {
                 d.child(div().absolute().left(px(space::S16)).bottom(px(space::S16)).child(meter))
