@@ -320,7 +320,7 @@ impl Gmail {
     pub async fn answered(&self, threads: &[String], own: &[String]) -> Result<HashSet<String>, ApiError> {
         let query = "format=minimal&fields=messages(labelIds)";
         let found: HashMap<String, ThreadLabels> =
-            batch_get(&self.api, &self.endpoints, "threads", threads, query, 10, Priority::Background).await?;
+            batch_get(&self.api, &self.endpoints, "threads", threads, query, 40, Priority::Background).await?;
         Ok(found
             .into_iter()
             .filter(|(_, thread)| thread.messages.iter().any(|message| !message.label_ids.iter().any(|label| own.contains(label))))
@@ -346,7 +346,7 @@ impl Gmail {
         priority: Priority,
     ) -> Result<MessageContent, ApiError> {
         let url = self.endpoints.url(&format!("messages/{}", api::percent_encoded(id)), &[("format", "full")]);
-        let message: GmailMessage = self.api.get(&url, priority, 5).await?;
+        let message: GmailMessage = self.api.get(&url, priority, 60).await?;
         let Some(payload) = message.payload else {
             return Err(ApiError::malformed(format!("Gmail returned message {id} without content")));
         };
@@ -381,7 +381,7 @@ impl Gmail {
         collect(payload, &mut wanted);
         let fetches = wanted.into_iter().map(|attachment| async move {
             let path = format!("messages/{}/attachments/{}", api::percent_encoded(message), api::percent_encoded(&attachment));
-            let body: Body = self.api.get(&self.endpoints.url(&path, &[]), priority, 5).await?;
+            let body: Body = self.api.get(&self.endpoints.url(&path, &[]), priority, 20).await?;
             Ok::<_, ApiError>((attachment, body.data.and_then(|data| text::base64_url_decode(&data)).unwrap_or_default()))
         });
         Ok(futures::future::try_join_all(fetches).await?.into_iter().collect())
@@ -399,10 +399,15 @@ fn scope(mailbox: &str) -> Vec<(&'static str, &str)> {
 
 // MARK: - Batch requests
 
-/// `GET <collection>/<id>?<query>` for every id through Gmail's batch endpoint, 50 per request
-/// and one batch at a time (parallel batches were what Gmail refused). Sub-requests Gmail
-/// throttles or fails transiently are sent again. Answers are keyed by id; ids that no longer
-/// exist are left out. `unit_cost` is one sub-request's quota units.
+/// `GET <collection>/<id>?<query>` for every id through Gmail's batch endpoint, up to 50 per
+/// request (capped so `unit_cost * count <= QuotaBudget::GMAIL_BATCH_UNITS`) and one batch at a time
+/// (parallel batches were what Gmail refused). Sub-requests Gmail throttles or fails transiently
+/// are sent again. Answers are keyed by id; ids that no longer exist are left out. `unit_cost`
+/// is one sub-request's quota units.
+fn batch_size(unit_cost: u32) -> usize {
+    (crate::api::QuotaBudget::GMAIL_BATCH_UNITS / unit_cost.max(1)).clamp(1, 50) as usize
+}
+
 async fn batch_get<T: serde::de::DeserializeOwned>(
     api: &Api,
     endpoints: &GmailEndpoints,
@@ -435,7 +440,7 @@ async fn batch_get<T: serde::de::DeserializeOwned>(
             Ok(api::multipart_parts(&response.body, &response_boundary))
         }
     };
-    api.batch(ids.to_vec(), 50, "Gmail", true, send, |id, part| match part.status {
+    api.batch(ids.to_vec(), batch_size(unit_cost), "Gmail", true, send, |id, part| match part.status {
         200 => {
             let value =
                 serde_json::from_slice::<T>(&part.body).map_err(|error| ApiError::unexpected_answer(&endpoints.batch_host(), error))?;
@@ -966,7 +971,7 @@ impl EnvelopeCache {
         let mut fetched = HashMap::new();
         for chunk in ids.chunks(50) {
             let since = self.state.lock().await.generation;
-            let messages = self.metadata(chunk, &metadata_query(), priority).await?;
+            let messages = self.metadata(chunk, &metadata_query(), 20, priority).await?;
             let mixed: Vec<String> = messages
                 .iter()
                 .filter(|message| {
@@ -1012,7 +1017,7 @@ impl EnvelopeCache {
     /// Which of `ids`, multipart/mixed messages, carry a file: a part with a file name.
     async fn with_files(&self, ids: &[String], priority: Priority) -> Result<HashSet<String>, ApiError> {
         Ok(self
-            .metadata(ids, &parts_query(), priority)
+            .metadata(ids, &parts_query(), 60, priority)
             .await?
             .into_iter()
             .filter(|message| message.payload.as_ref().is_some_and(Part::has_file))
@@ -1020,9 +1025,9 @@ impl EnvelopeCache {
             .collect())
     }
 
-    async fn metadata(&self, ids: &[String], query: &str, priority: Priority) -> Result<Vec<GmailMessage>, ApiError> {
+    async fn metadata(&self, ids: &[String], query: &str, unit_cost: u32, priority: Priority) -> Result<Vec<GmailMessage>, ApiError> {
         let found: HashMap<String, GmailMessage> =
-            batch_get(&self.api, &self.endpoints, "messages", ids, query, 5, priority).await?;
+            batch_get(&self.api, &self.endpoints, "messages", ids, query, unit_cost, priority).await?;
         Ok(found.into_values().collect())
     }
 }
@@ -1310,5 +1315,16 @@ mod tests {
         assert_eq!(env.size, 4096);
         assert!(env.tags.contains("Receipts"));
         cleanup(&config);
+    }
+
+    #[test]
+    fn batch_size_keeps_each_batch_within_gmail_burst() {
+        assert_eq!(batch_size(1), 50);
+        assert_eq!(batch_size(20), 50);
+        assert_eq!(batch_size(40), 25);
+        assert_eq!(batch_size(60), 16);
+        assert!(50 * 20 <= crate::api::QuotaBudget::GMAIL_BATCH_UNITS);
+        assert!(25 * 40 <= crate::api::QuotaBudget::GMAIL_BATCH_UNITS);
+        assert!(16 * 60 <= crate::api::QuotaBudget::GMAIL_BATCH_UNITS);
     }
 }

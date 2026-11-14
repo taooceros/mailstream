@@ -143,11 +143,12 @@ pub fn call(engine: &Engine, command: &str, args: Value) -> Result<Value, Engine
     block_on(engine.call(command, args))
 }
 
-/// Waits up to 10 s for `done`.
+/// Waits up to 20 s for `done` (a throttled 50-message Gmail inbox load spends ~1,100 units at
+/// 75 units/s after a 429 empties the bucket).
 pub fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
     let start = Instant::now();
     while !done() {
-        assert!(start.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+        assert!(start.elapsed() < Duration::from_secs(20), "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(20));
     }
 }

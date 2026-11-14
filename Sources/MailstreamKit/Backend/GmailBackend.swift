@@ -119,7 +119,7 @@ nonisolated final class GmailBackend: MailBackend {
     @concurrent func content(id: String, mailbox: String, directory: URL, urlBase: String,
                              priority: RequestPriority) async throws -> MessageContent {
         let message = try await api.get(GmailMessage.self, Self.url("messages/\(id.percentEncoded)", [("format", "full")]),
-                                        priority: priority, cost: 5)
+                                        priority: priority, cost: 60)
         guard let payload = message.payload else {
             throw APIError.malformed("Gmail returned message \(id) without content")
         }
@@ -152,7 +152,7 @@ nonisolated final class GmailBackend: MailBackend {
             for attachment in wanted {
                 group.addTask {
                     let url = Self.url("messages/\(message.percentEncoded)/attachments/\(attachment.percentEncoded)")
-                    let body = try await api.get(GmailBody.self, url, priority: priority, cost: 5)
+                    let body = try await api.get(GmailBody.self, url, priority: priority, cost: 20)
                     return (attachment, body.data.flatMap { Data(base64URLEncoded: $0) } ?? Data())
                 }
             }
@@ -175,14 +175,14 @@ nonisolated final class GmailBackend: MailBackend {
     @concurrent func move(ids: [String], from: String, to: String) async throws {
         guard from != to, !ids.isEmpty else { return }
         if to == "TRASH" {
-            try await each(ids, "trash")
+            try await each(ids, "trash", cost: 20)
             await cache.relabel(ids, add: ["TRASH"], remove: [])
             return
         }
         if from == "TRASH" {
             // Untrash restores the labels the message had; then file it where asked, unless that
             // is a label Gmail keeps to itself (Sent, Drafts, All Mail), which untrash restored.
-            try await each(ids, "untrash")
+            try await each(ids, "untrash", cost: 5)
             await cache.relabel(ids, add: [], remove: ["TRASH"])
             if !Self.fixed.contains(to) { try await modify(ids, add: [to], remove: to == "SPAM" ? ["INBOX"] : []) }
             return
@@ -234,13 +234,13 @@ nonisolated final class GmailBackend: MailBackend {
     }
 
     /// `messages/{id}/<action>` for every id, in parallel.
-    private func each(_ ids: [String], _ action: String) async throws {
+    private func each(_ ids: [String], _ action: String, cost: Int) async throws {
         let api = self.api
         try await withThrowingTaskGroup(of: Void.self) { group in
             for id in ids {
                 group.addTask {
                     let request = API.request(Self.url("messages/\(id.percentEncoded)/\(action)"), method: "POST")
-                    _ = try await api.send(request, idempotent: true, cost: 5)
+                    _ = try await api.send(request, idempotent: true, cost: cost)
                 }
             }
             try await group.waitForAll()
@@ -500,13 +500,13 @@ private actor GmailEnvelopeCache {
         var fetched: [String: Entry] = [:]
         for chunk in ids.chunked(into: 50) {
             let since = generation
-            let messages = try await GmailBackend.metadata(chunk, query: GmailBackend.metadataQuery, api: api,
+            let messages = try await GmailBackend.metadata(chunk, query: GmailBackend.metadataQuery, unitCost: 20, api: api,
                                                            priority: priority)
             // Metadata shows only the top MIME type; a multipart/mixed message has attachments
             // only if a part carries a file name.
             let mixed = messages.filter { $0.payload?.mimeType?.lowercased() == "multipart/mixed" }.map(\.id)
             let withFiles = mixed.isEmpty ? [] : Set(try await GmailBackend.metadata(
-                mixed, query: GmailBackend.partsQuery, api: api, priority: priority)
+                mixed, query: GmailBackend.partsQuery, unitCost: 60, api: api, priority: priority)
                 .filter { $0.payload?.hasFile == true }.map(\.id))
             let stale = changed(since: since)
             for message in messages {
@@ -603,24 +603,26 @@ extension GmailBackend {
     }
 
     /// Message metadata of `ids` through the batch endpoint; messages that no longer exist are left out.
-    fileprivate static func metadata(_ ids: [String], query: String, api: API,
+    fileprivate static func metadata(_ ids: [String], query: String, unitCost: Int, api: API,
                                      priority: RequestPriority) async throws -> [GmailMessage] {
-        Array(try await batchGet(GmailMessage.self, "messages", ids: ids, query: query, unitCost: 5, api: api,
+        Array(try await batchGet(GmailMessage.self, "messages", ids: ids, query: query, unitCost: unitCost, api: api,
                                  priority: priority).values)
     }
 
-    /// `GET <collection>/<id>?<query>` for every id through Gmail's batch endpoint, 50 per
-    /// request and one batch at a time: each sub-request counts against the per-user quota, so
-    /// parallel batches were what Gmail refused. Sub-requests Gmail throttles or fails transiently
-    /// are sent again. Answers are keyed by id; ids that no longer exist are left out. `unitCost`
-    /// is one sub-request's quota units.
+    /// `GET <collection>/<id>?<query>` for every id through Gmail's batch endpoint, up to 50 per
+    /// request (capped so `unitCost * count <= QuotaBudget.gmailBatchUnits`) and one batch at a time:
+    /// each sub-request counts against the per-user quota, so parallel batches were what Gmail
+    /// refused. Sub-requests Gmail throttles or fails transiently are sent again. Answers are
+    /// keyed by id; ids that no longer exist are left out. `unitCost` is one sub-request's quota
+    /// units.
     fileprivate static func batchGet<T: Decodable & Sendable>(_ type: T.Type, _ collection: String, ids: [String],
                                                              query: String, unitCost: Int, api: API,
                                                              priority: RequestPriority) async throws -> [String: T] {
+        let chunkSize = max(1, min(50, QuotaBudget.gmailBatchUnits / max(1, unitCost)))
         // Sub-requests are numbered within their batch (`Content-ID: <m3>`), and answers matched by that number.
-        let numbered = ids.chunked(into: 50).flatMap { chunk in chunk.enumerated().map { (number: $0.offset, id: $0.element) } }
+        let numbered = ids.chunked(into: chunkSize).flatMap { chunk in chunk.enumerated().map { (number: $0.offset, id: $0.element) } }
         var found: [String: T] = [:]
-        try await api.batched(numbered, size: 50, service: "Gmail") { pending in
+        try await api.batched(numbered, size: chunkSize, service: "Gmail") { pending in
             let boundary = MIMEMessage.boundary("batch_", lowercased: false)
             var body = ""
             for (number, id) in pending {

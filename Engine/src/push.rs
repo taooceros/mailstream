@@ -542,7 +542,7 @@ impl Push {
         }
         let body = serde_json::to_vec(&json!({ "topicName": topic })).expect("watch encodes");
         let request = Request::post(format!("{}watch", self.gmail_root), "application/json", body);
-        let answer: Answer = api.decode(request, Priority::Background, 0).await?;
+        let answer: Answer = api.decode(request, Priority::Background, 100).await?;
         let milliseconds: f64 =
             answer.expiration.parse().map_err(|_| ApiError::malformed("Gmail watch answered no expiration"))?;
         let registration = Registration { kind: Kind::Gmail, id: topic, expires: date_from_unix(milliseconds / 1000.0) };
@@ -633,6 +633,7 @@ impl Push {
                 body: None,
             },
         };
+        // `stop` costs 50 units on Gmail, left unbudgeted so sign-out never blocks on a paused bucket.
         let _ = api.send(request, Priority::Background, Some(true), 0).await;
     }
 }

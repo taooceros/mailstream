@@ -19,11 +19,16 @@ actor QuotaBudget {
         available = Double(burst)
     }
 
-    /// Gmail's per-user quota refused this app's mail well under the documented 15,000 units a
-    /// minute (messages.get costs 5): about 1,400 units in half a minute, mostly 250-unit
-    /// batches. So the pace is a quarter of that and bursts stay small.
+    /// Maximum units one Gmail batch request may spend, so no batch exceeds the burst.
+    static let gmailBatchUnits = 1000
+
+    /// Gmail's per-user quota as Google publishes it since 2026-05-01: 6,000 units a minute,
+    /// `messages.get` 20 units (60 with `format=full`), every request's cost from the table at
+    /// <https://developers.google.com/workspace/gmail/api/reference/quota> (MS-356). In any
+    /// minute at most `perMinute + burst` units go out: 4,500 + 1,200 stays under 6,000, and the
+    /// 150-unit reserve leaves room for message opens while a 1,000-unit batch runs.
     static func gmail() -> QuotaBudget {
-        QuotaBudget(perMinute: 3000, burst: 300, reserve: 75)
+        QuotaBudget(perMinute: 4500, burst: 1200, reserve: 150)
     }
 
     /// Nothing is spent for `delay`, and the bucket refills from empty afterwards.
@@ -51,7 +56,8 @@ actor QuotaBudget {
                 available -= cost
                 return
             }
-            let missing = cost + floor - available
+            let target = floor > 0 && cost > capacity - floor ? capacity : cost + floor
+            let missing = target - available
             try await Task.sleep(for: .milliseconds(Int(missing / perSecond * 1000) + 5))
         }
     }

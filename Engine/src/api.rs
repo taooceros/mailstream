@@ -237,6 +237,9 @@ struct BudgetState {
 }
 
 impl QuotaBudget {
+    /// Maximum units one Gmail batch request may spend, so no batch exceeds the burst.
+    pub const GMAIL_BATCH_UNITS: u32 = 1000;
+
     pub fn new(per_minute: u32, burst: u32, reserve: u32) -> Self {
         let now = Instant::now();
         Self {
@@ -247,10 +250,13 @@ impl QuotaBudget {
         }
     }
 
-    /// Gmail refused this app's mail well under its documented 15,000 units a minute, so the
-    /// pace is a quarter of what it took and bursts stay small.
+    /// Gmail's per-user quota as Google publishes it since 2026-05-01: 6,000 units a minute,
+    /// `messages.get` 20 units (60 with `format=full`), every request's cost from the table at
+    /// <https://developers.google.com/workspace/gmail/api/reference/quota> (MS-356). In any
+    /// minute at most `per_minute + burst` units go out: 4,500 + 1,200 stays under 6,000, and the
+    /// 150-unit reserve leaves room for message opens while a 1,000-unit batch runs.
     pub fn gmail() -> Self {
-        Self::new(3000, 300, 75)
+        Self::new(4500, 1200, 150)
     }
 
     /// Nothing is spent for `delay`, and the bucket refills from empty afterwards.
@@ -283,7 +289,8 @@ impl QuotaBudget {
                         state.available -= cost;
                         return;
                     }
-                    let missing = cost + floor - state.available;
+                    let target = if floor > 0.0 && cost > self.capacity - floor { self.capacity } else { cost + floor };
+                    let missing = target - state.available;
                     Duration::from_millis((missing / self.per_second * 1000.0) as u64 + 5)
                 }
             };
@@ -753,6 +760,35 @@ mod tests {
         let paused = Instant::now();
         budget.spend(1, Priority::Interactive).await;
         assert!(paused.elapsed() >= Duration::from_secs(5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gmail_budget_stays_below_published_minute_limit() {
+        // Worst-case 60 s window with interactive small requests: burst (1200) + 60s * 75/s <= 5700 < 6000.
+        let budget = QuotaBudget::gmail();
+        let start = Instant::now();
+        let mut interactive_spent = 0u32;
+        while start.elapsed() < Duration::from_secs(60) {
+            budget.spend(20, Priority::Interactive).await;
+            if start.elapsed() < Duration::from_secs(60) {
+                interactive_spent += 20;
+            }
+        }
+        assert!(interactive_spent <= 6000, "spent {interactive_spent} interactive units in 60s");
+        assert!(interactive_spent >= 5500, "spent only {interactive_spent} interactive units in 60s");
+
+        // Background 1,000-unit batches also pace cleanly without hitting the minute limit.
+        let budget = QuotaBudget::gmail();
+        let start = Instant::now();
+        let mut batch_spent = 0u32;
+        while start.elapsed() < Duration::from_secs(60) {
+            budget.spend(QuotaBudget::GMAIL_BATCH_UNITS, Priority::Background).await;
+            if start.elapsed() < Duration::from_secs(60) {
+                batch_spent += QuotaBudget::GMAIL_BATCH_UNITS;
+            }
+        }
+        assert!(batch_spent <= 6000, "spent {batch_spent} batch units in 60s");
+        assert!(batch_spent >= 5000, "spent only {batch_spent} batch units in 60s");
     }
 
     /// Google's front end (`server: ESF`) follows full DATA frames with padding-only ones, which

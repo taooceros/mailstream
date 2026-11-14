@@ -38,14 +38,14 @@ impl Gmail {
             return Ok(());
         }
         if to == "TRASH" {
-            self.each(ids, "trash").await?;
+            self.each(ids, "trash", 20).await?;
             self.cache.relabel(ids, &["TRASH"], &[]).await;
             return Ok(());
         }
         if from == "TRASH" {
             // Untrash restores the labels the message had; then file it where asked, unless that
             // is a label Gmail keeps to itself (Sent, Drafts, All Mail), which untrash restored.
-            self.each(ids, "untrash").await?;
+            self.each(ids, "untrash", 5).await?;
             self.cache.relabel(ids, &[], &["TRASH"]).await;
             if !FIXED.contains(&to) {
                 let removed: &[&str] = if to == "SPAM" { &["INBOX"] } else { &[] };
@@ -175,11 +175,11 @@ impl Gmail {
     }
 
     /// `messages/{id}/<action>` for every id, in parallel.
-    async fn each(&self, ids: &[String], action: &str) -> Result<(), ApiError> {
+    async fn each(&self, ids: &[String], action: &str, cost: u32) -> Result<(), ApiError> {
         let requests = ids.iter().map(|id| {
             let url = self.endpoints.url(&format!("messages/{}/{action}", api::percent_encoded(id)), &[]);
             let request = Request { method: reqwest::Method::POST, url, headers: Vec::new(), body: None };
-            self.api.send(request, Priority::Interactive, Some(true), 5)
+            self.api.send(request, Priority::Interactive, Some(true), cost)
         });
         futures::future::try_join_all(requests).await?;
         Ok(())
