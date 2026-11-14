@@ -465,6 +465,10 @@ pub mod log {
     /// The column the sender's avatar sits in, and the avatar.
     pub const GUTTER: f32 = 56.0;
     pub const AVATAR: f32 = super::list::AVATAR;
+    /// The most of the log's width a message's text column takes (MS-350): as in chat apps, the
+    /// user's own leave a gap on the left and others' on the right. The log itself is at most
+    /// `layout::READING_WIDTH` wide, so this needs no width cap of its own.
+    pub const SHARE: f32 = 0.75;
 }
 
 /// The reader's folded quotes (Flutter's `_Fold`).

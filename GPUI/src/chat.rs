@@ -2374,8 +2374,12 @@ impl ChatPane {
             let (retry_key, retry_id) = (key.clone(), message.id.clone());
             let (discard_key, discard_id) = (key.clone(), message.id.clone());
             content.push(
+                // Wraps within the message's column, now narrower than the log (MS-350).
                 div()
+                    .max_w_full()
                     .flex()
+                    .flex_wrap()
+                    .when(message.mine, |d| d.justify_end())
                     .items_center()
                     .gap(px(6.))
                     .pt(px(4.))
