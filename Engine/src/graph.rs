@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use crate::api::{self, Api, ApiError, GraphPage, Priority, Request};
 use crate::assembly::{AttachedMessage, MessageAssembly};
 use crate::backend::{EnvelopePage, SearchHit};
-use crate::model::{Address, DISTANT_PAST, Envelope, Mailbox, MailboxRole, MessageContent, parse_iso8601};
+use crate::model::{Address, DISTANT_PAST, Envelope, Mailbox, MailboxRole, MessageContent, ProviderCategory, parse_iso8601};
 use crate::text;
 
 mod changes;
@@ -24,8 +24,8 @@ pub const ROOT: &str = "https://graph.microsoft.com/v1.0/";
 
 const IMMUTABLE_IDS: &str = "IdType=\"ImmutableId\"";
 const HTML_BODY: &str = "outlook.body-content-type=\"html\"";
-const ENVELOPE_FIELDS: &str =
-    "id,conversationId,internetMessageId,subject,from,toRecipients,receivedDateTime,isRead,flag,isDraft,hasAttachments,categories";
+const ENVELOPE_FIELDS: &str = "id,conversationId,internetMessageId,subject,from,toRecipients,receivedDateTime,isRead,flag,isDraft,\
+     hasAttachments,categories,inferenceClassification";
 const FOLDER_FIELDS: &str = "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount";
 const ROLE_FOLDERS: [(&str, MailboxRole); 6] = [
     ("inbox", MailboxRole::Inbox),
@@ -104,6 +104,9 @@ struct Message {
     #[serde(rename = "hasAttachments")]
     has_attachments: Option<bool>,
     categories: Option<Vec<String>>,
+    /// Focused Inbox: `focused` or `other`.
+    #[serde(rename = "inferenceClassification")]
+    inference_classification: Option<String>,
     /// Only selected by search.
     #[serde(rename = "parentFolderId")]
     parent_folder_id: Option<String>,
@@ -206,6 +209,12 @@ fn envelope(message: Message) -> Envelope {
         size: 0,
         has_attachment: message.has_attachments,
         tags: message.categories.unwrap_or_default().into_iter().collect(),
+        provider_category: match message.inference_classification.as_deref() {
+            Some("focused") => Some(ProviderCategory::Focused),
+            Some("other") => Some(ProviderCategory::Other),
+            _ => None,
+        },
+        important: false,
     }
 }
 
@@ -567,7 +576,7 @@ mod tests {
             "from": { "emailAddress": { "name": "Ann", "address": "ann@x.com" } },
             "toRecipients": [{ "emailAddress": { "address": "" } }, { "emailAddress": { "address": "me@x.com" } }],
             "receivedDateTime": "2026-11-01T10:00:00Z", "isRead": false, "flag": { "flagStatus": "flagged" },
-            "isDraft": false, "hasAttachments": true,
+            "isDraft": false, "hasAttachments": true, "inferenceClassification": "other",
         }))
         .unwrap();
         let envelope = envelope(message);
@@ -575,6 +584,7 @@ mod tests {
         assert_eq!(envelope.to, vec![Address::new(None, "me@x.com")]);
         assert!(envelope.is_flagged() && !envelope.is_seen());
         assert_eq!(envelope.date.map(crate::model::iso8601).as_deref(), Some("2026-11-01T10:00:00Z"));
+        assert_eq!(envelope.provider_category, Some(ProviderCategory::Other));
         assert_eq!(split(None), (Some(String::new()), None));
     }
 }

@@ -754,6 +754,8 @@ mod tests {
             size: 100,
             has_attachment: None,
             tags: Default::default(),
+            provider_category: None,
+            important: false,
         });
         MailMessage { key, envelope, role: MailboxRole::Inbox }
     }

@@ -1,7 +1,8 @@
 //! AI tags synced with Gmail labels and Outlook categories end to end (MS-172): an engine in a
 //! throwaway folder against a fake Gmail that keeps its labels, its messages' labels and their
 //! history, and a fake Outlook that keeps its messages' categories, tagging with the fake omp
-//! of `tagging_tests`.
+//! of `tagging_tests`. Also the providers' own sorting as the tagger's hint and the lists'
+//! provisional tag (MS-336), which never reaches the server.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
@@ -264,6 +265,7 @@ fn outlook(categories: Arc<Mutex<BTreeMap<String, Vec<String>>>>) -> FakeServer 
         let message = |id: &str, conversation: &str, minutes: i64, categories: &[String]| {
             let mut message = graph_message(id, conversation, ("Bob", "bob@x.com"), &format!("Topic {id}"), minutes);
             message["categories"] = json!(categories);
+            message["inferenceClassification"] = json!(if id == "g1" { "focused" } else { "other" });
             message
         };
         match (request.method.as_str(), resource) {
@@ -342,6 +344,136 @@ fn syncs_tags_with_outlook_categories() {
     // A correction replaces the old name however it was spelled, and keeps the user's own.
     call(&engine, "mail.tag", json!({ "ids": ["me@outlook.com|g1@outlook"], "category": "notification" })).unwrap();
     wait_until("the correction", || categories.lock().unwrap()["g1"] == names(&["Red category", "Notifications"]));
+    drop(engine);
+    cleanup(&config);
+}
+
+/// An omp that writes each prompt to `<dir>/prompts` and fails, so nothing gets an AI tag.
+fn offline_omp(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("offline-omp");
+    crate::omp::tests::script(
+        &path,
+        &format!("for last; do :; done\nprintf '%s\\n' \"$last\" >> {}/prompts\necho 'Error: offline' >&2; exit 1", dir.display()),
+    );
+    path
+}
+
+fn tagging_failed(engine: &crate::Engine) -> bool {
+    call(engine, "status", json!({})).unwrap()["aiTagging"]["failed"] == json!(true)
+}
+
+#[test]
+fn stands_in_with_gmail_categories_until_the_model_answers() {
+    let names = |names: &[&str]| names.iter().map(|name| name.to_string()).collect::<BTreeSet<_>>();
+    // i0-i4 carry Gmail's five inbox categories, i1 also Important; i5 none, as in a Workspace
+    // account without categories.
+    let categories = ["CATEGORY_PERSONAL", "CATEGORY_UPDATES", "CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS"];
+    let gmail = Arc::new(Mutex::new(Gmail {
+        labels: BTreeMap::new(),
+        messages: (0..6)
+            .map(|n| {
+                let mut labels = BTreeSet::from(["INBOX".to_string()]);
+                labels.extend(categories.get(n).map(|label| label.to_string()));
+                if n == 1 {
+                    labels.insert("IMPORTANT".into());
+                }
+                (format!("i{n}"), labels)
+            })
+            .collect(),
+        history: Vec::new(),
+        made: 0,
+    }));
+    let server = server(gmail.clone());
+    let (engine, config) = engine_for(&server, &[("me@gmail.com", "google")]);
+    let dir = config.support_directory.parent().unwrap().join("omp");
+    std::fs::create_dir_all(&dir).unwrap();
+    let offline = offline_omp(&dir);
+    call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
+    call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": offline.display().to_string() })).unwrap();
+    call(&engine, "config.set", json!({ "key": "aiTagging.syncAccounts", "value": "[\"me@gmail.com\"]" })).unwrap();
+    wait_until("the inbox", || call(&engine, "mail.list", json!({ "limit": 100, "cached": true })).is_ok_and(|listed| {
+        listed["conversations"].as_array().unwrap().len() == 6
+    }));
+    // Off: no tags at all, provisional ones included.
+    assert_eq!(tag(&engine, 0), (Value::Null, json!(false)));
+
+    // On, with the model unreachable: the lists group by Gmail's categories at once.
+    call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "true" })).unwrap();
+    wait_until("the failed run", || tagging_failed(&engine));
+    let stand_ins: Vec<Value> = (0..6).map(|n| tag(&engine, n).0).collect();
+    assert_eq!(stand_ins, [json!("people"), json!("notification"), json!("newsletter"), json!("newsletter"), json!("newsletter"), Value::Null]);
+    assert!((0..6).all(|n| tag(&engine, n).1 == json!(false)));
+    let newsletters = call(&engine, "mail.list", json!({ "limit": 100, "cached": true, "category": "newsletter" })).unwrap();
+    assert_eq!(newsletters["conversations"].as_array().unwrap().len(), 3);
+    // The model was told, as hints.
+    let prompts = std::fs::read_to_string(dir.join("prompts")).unwrap();
+    let prompt = prompts.split("today: ").last().unwrap();
+    for hint in ["personal", "updates", "promotions", "social", "forums"] {
+        assert!(prompt.contains(&format!("\"providerCategory\":\"{hint}\"")), "{prompt}");
+    }
+    assert_eq!((prompt.matches("providerCategory").count(), prompt.matches("\"important\":true").count()), (5, 1), "{prompt}");
+    // Provisional tags are never saved, synced or acted on (auto-read goes by `tag_for`).
+    let mail = engine.core.mail.clone();
+    let conversation = |n: usize| mail.lookup(&format!("me@gmail.com|i{n}@x")).unwrap();
+    assert!(mail.tagging().tag_for(&conversation(2)).is_none());
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(gmail.lock().unwrap().labels.is_empty(), "no label was made for a provisional tag");
+    assert!(server.requests.lock().unwrap().iter().all(|request| !request.path.ends_with("batchModify")));
+
+    // Gmail recategorizes: the history brings the change.
+    {
+        let mut gmail = gmail.lock().unwrap();
+        gmail.relabel("i5", &["CATEGORY_PROMOTIONS"], &[]);
+        gmail.relabel("i2", &["CATEGORY_PERSONAL"], &["CATEGORY_PROMOTIONS"]);
+    }
+    call(&engine, "refresh", json!({})).unwrap();
+    wait_until("the new categories", || tag(&engine, 5).0 == "newsletter" && tag(&engine, 2).0 == "people");
+
+    // Marking a provisional conversation waiting keeps its category as the user's tag, which
+    // then syncs like any correction.
+    let answer = call(&engine, "mail.tag", json!({ "ids": ["me@gmail.com|i0@x"], "waiting": true })).unwrap();
+    assert_eq!(answer["done"][0]["category"], "people");
+    wait_until("the correction on the server", || gmail.lock().unwrap().names("i0") == names(&["People", "Waiting on you"]));
+
+    // The model answers: its tags replace the provisional ones; the one it skips keeps its
+    // stand-in, still off the server.
+    let omp = fake_omp(&dir);
+    call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": omp.display().to_string() })).unwrap();
+    wait_until("the model's tags", || tag(&engine, 5).0 == "notification");
+    assert_eq!(counts(&dir), [5]);
+    // i1 people waiting, i2 people (its ask lapsed), i3 skipped, i4 and i5 notifications.
+    assert_eq!(tag(&engine, 1), (json!("people"), json!(true)));
+    assert_eq!(tag(&engine, 3), (json!("newsletter"), json!(false)));
+    assert_eq!(tag(&engine, 4), (json!("notification"), json!(false)));
+    wait_until("the model's tags on the server", || gmail.lock().unwrap().names("i4") == names(&["Notifications"]));
+    assert_eq!(gmail.lock().unwrap().names("i3"), names(&[]));
+    drop(engine);
+    cleanup(&config);
+}
+
+#[test]
+fn stands_in_with_outlook_focused_inbox() {
+    let categories = Arc::new(Mutex::new(BTreeMap::from([("g1".to_string(), vec![]), ("g2".to_string(), vec![])])));
+    let server = outlook(categories);
+    let (engine, config) = engine_for(&server, &[("me@outlook.com", "microsoft")]);
+    let dir = config.support_directory.parent().unwrap().join("omp");
+    std::fs::create_dir_all(&dir).unwrap();
+    let offline = offline_omp(&dir);
+    call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
+    call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": offline.display().to_string() })).unwrap();
+    let listed = || call(&engine, "mail.list", json!({ "limit": 10, "cached": true }));
+    wait_until("the inbox", || listed().is_ok_and(|listed| listed["conversations"].as_array().unwrap().len() == 2));
+    call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "true" })).unwrap();
+    wait_until("the failed run", || tagging_failed(&engine));
+    let listed = listed().unwrap();
+    let category = |id: &str| {
+        let conversations = listed["conversations"].as_array().unwrap();
+        conversations.iter().find(|conversation| conversation["id"] == format!("me@outlook.com|{id}@outlook")).unwrap()["category"].clone()
+    };
+    // Focused is people, Other notifications.
+    assert_eq!((category("g1"), category("g2")), (json!("people"), json!("notification")));
+    let prompts = std::fs::read_to_string(dir.join("prompts")).unwrap();
+    assert!(prompts.contains("\"providerCategory\":\"focused\"") && prompts.contains("\"providerCategory\":\"other\""), "{prompts}");
     drop(engine);
     cleanup(&config);
 }

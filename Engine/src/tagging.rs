@@ -14,6 +14,10 @@
 //! For the accounts `aiTagging.syncAccounts` lists, each pass first syncs the tags with the
 //! server as Gmail labels or Outlook categories (`tagsync`): a conversation the server already
 //! tags takes that tag and is not sent to the model, and tags made here go there.
+//!
+//! How the provider itself sorted the mail (Gmail's inbox categories and Important, Outlook's
+//! Focused Inbox; MS-336) goes to the model as a hint, and lists show a conversation the tagger
+//! has not answered under the category that sorting suggests (`provisional`) until it does.
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -26,7 +30,7 @@ use crate::answers::{BatchFailure, TagResult, Tagged};
 use crate::cache::MailCache;
 use crate::commands::Arguments;
 use crate::content::Contents;
-use crate::model::{Conversation, Date, now};
+use crate::model::{Conversation, Date, MailboxRole, ProviderCategory, now};
 use crate::omp::{self, Backend, Item, Options, Tagger, Tools};
 use crate::settings::{Setting, Settings};
 use crate::signal::ProcessSignal;
@@ -310,13 +314,30 @@ impl Tagging {
         }
     }
 
-    /// The conversation's tag while tagging is on, with `to_respond` false once the ask lapsed.
+    /// The conversation's tag while tagging is on, with `to_respond` false once the ask lapsed:
+    /// the tagger's verdict or the user's, never the provisional one, so what acts on mail
+    /// (auto-read) goes by these alone.
     pub fn tag_for(&self, conversation: &Conversation) -> Option<ConversationTag> {
+        self.lookup(conversation, false)
+    }
+
+    /// The tag lists show and filter by: `tag_for`, else the provisional one until the tagger
+    /// answers.
+    pub fn listed_tag(&self, conversation: &Conversation) -> Option<ConversationTag> {
+        self.lookup(conversation, true)
+    }
+
+    fn lookup(&self, conversation: &Conversation, stand_in: bool) -> Option<ConversationTag> {
         let state = self.state();
         if !state.enabled {
             return None;
         }
-        let mut tag = state.tags.get(&key(conversation))?.clone();
+        let Some(tag) = state.tags.get(&key(conversation)) else {
+            drop(state);
+            return if stand_in { provisional(conversation) } else { None };
+        };
+        let mut tag = tag.clone();
+        drop(state);
         tag.to_respond = tag.is_waiting(now());
         Some(tag)
     }
@@ -630,14 +651,17 @@ impl Tagging {
             message_count: conversation.messages.len(),
             user_replied: first_incoming.is_some_and(|index| from_user[index + 1..].contains(&true)),
             latest_from_user: from_user.last().copied().unwrap_or(false),
+            provider_category: incoming.envelope.provider_category,
+            important: incoming.envelope.important,
         }
     }
 
     // MARK: - Corrections
 
     /// Corrects the conversation's tag; None leaves a part as it is. A conversation the tagger
-    /// has not judged needs a category, and newsletters never wait on the user. For an account
-    /// that syncs, the correction goes to the server in a pass that follows.
+    /// has not judged needs a category, or a provisional one, which the correction then keeps
+    /// as the user's; newsletters never wait on the user. For an account that syncs, the
+    /// correction goes to the server in a pass that follows.
     pub fn edit(
         self: &Arc<Self>,
         conversation: &Conversation,
@@ -652,7 +676,7 @@ impl Tagging {
         let key = key(conversation);
         let existing = state.tags.get(&key).cloned();
         let Some(mut tag) = existing.clone().or_else(|| {
-            category.map(|category| ConversationTag {
+            category.or_else(|| provisional(conversation).map(|tag| tag.category)).map(|category| ConversationTag {
                 category,
                 to_respond: false,
                 labels: Vec::new(),
@@ -803,6 +827,22 @@ impl Tagging {
             _ => unreachable!("{command} is a tagging command"),
         }
     }
+}
+
+/// The stand-in tag of a conversation the tagger has not answered, from how the provider sorted
+/// its latest message the user didn't send: Gmail's Primary is people, Updates notifications,
+/// Promotions, Social and Forums newsletters; Outlook's Focused is people, Other notifications.
+/// None when the provider didn't sort it (a Gmail account without inbox categories). Lists
+/// group by it; it is never saved, synced to the server or acted on.
+pub fn provisional(conversation: &Conversation) -> Option<ConversationTag> {
+    let received =
+        conversation.messages.iter().rev().find(|message| message.role != MailboxRole::Sent && !message.envelope.is_draft())?;
+    let category = match received.envelope.provider_category? {
+        ProviderCategory::Personal | ProviderCategory::Focused => Category::People,
+        ProviderCategory::Updates | ProviderCategory::Other => Category::Notification,
+        ProviderCategory::Promotions | ProviderCategory::Social | ProviderCategory::Forums => Category::Newsletter,
+    };
+    Some(ConversationTag { category, to_respond: false, labels: Vec::new(), waiting_until: None, synced: false })
 }
 
 /// The conversation's latest message, so a new reply re-tags it.

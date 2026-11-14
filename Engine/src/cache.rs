@@ -598,6 +598,8 @@ pub(crate) mod tests {
             size: 0,
             has_attachment: Some(false),
             tags: Default::default(),
+            provider_category: None,
+            important: false,
         }
     }
 

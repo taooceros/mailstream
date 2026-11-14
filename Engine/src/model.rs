@@ -292,6 +292,35 @@ impl MailboxKey {
     }
 }
 
+/// How the provider itself sorted a message (MS-336): Gmail's inbox category (`CATEGORY_*`
+/// labels), Outlook's Focused Inbox (`inferenceClassification`). A hint for the AI tagger and
+/// the stand-in category until it answers (`tagging`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderCategory {
+    Personal,
+    Social,
+    Promotions,
+    Updates,
+    Forums,
+    Focused,
+    Other,
+}
+
+impl ProviderCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Personal => "personal",
+            Self::Social => "social",
+            Self::Promotions => "promotions",
+            Self::Updates => "updates",
+            Self::Forums => "forums",
+            Self::Focused => "focused",
+            Self::Other => "other",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Envelope {
     pub id: String,
@@ -315,6 +344,13 @@ pub struct Envelope {
     /// AI tags sync through them (`tagsync`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub tags: BTreeSet<String>,
+    /// The provider's own sorting of the message; None when it doesn't sort (a Gmail account
+    /// without inbox categories, as Workspace accounts often are).
+    #[serde(rename = "providerCategory", default, skip_serializing_if = "Option::is_none")]
+    pub provider_category: Option<ProviderCategory>,
+    /// Gmail marks the message Important.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub important: bool,
 }
 
 impl Envelope {
@@ -518,6 +554,8 @@ mod tests {
             size: 0,
             has_attachment: Some(false),
             tags: Default::default(),
+            provider_category: None,
+            important: false,
         };
         let text = String::from_utf8(crate::json::encode(&envelope, false, true)).unwrap();
         assert_eq!(
@@ -527,6 +565,11 @@ mod tests {
         let swift = r#"{"to":[],"size":12,"flags":[],"subject":"S","from":[],"id":"m2","inReplyTo":["p"],"messageID":"x@y","date":700000000}"#;
         let decoded: Envelope = serde_json::from_str(swift).unwrap();
         assert_eq!((decoded.message_id.as_deref(), decoded.date, decoded.has_attachment), (Some("x@y"), Some(7e8), None));
+        assert_eq!((decoded.provider_category, decoded.important), (None, false));
+        let sorted = Envelope { provider_category: Some(ProviderCategory::Promotions), important: true, ..envelope };
+        let text = String::from_utf8(crate::json::encode(&sorted, false, true)).unwrap();
+        assert!(text.ends_with(r#""hasAttachment":false,"providerCategory":"promotions","important":true}"#), "{text}");
+        assert_eq!(serde_json::from_str::<Envelope>(&text).unwrap(), sorted);
     }
 
     #[test]

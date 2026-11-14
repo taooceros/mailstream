@@ -698,9 +698,10 @@ impl Mail {
         state.listings.get(key).is_some_and(|listing| listing.next.is_some())
     }
 
-    /// The AI tag of `conversation` while tagging is on, its waiting flag lapsed by now.
+    /// The tag `conversation` lists under while tagging is on: its AI tag, its waiting flag
+    /// lapsed by now, else the provisional one the provider's sorting gives (`tagging::provisional`).
     fn tag(&self, conversation: &Conversation) -> Option<ConversationTag> {
-        self.tagging.tag_for(conversation)
+        self.tagging.listed_tag(conversation)
     }
 
     // MARK: - Listings

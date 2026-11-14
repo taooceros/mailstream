@@ -95,6 +95,8 @@ impl Mail {
             size: 0,
             has_attachment: Some(!message.attachments.is_empty()),
             tags: Default::default(),
+            provider_category: None,
+            important: false,
         };
         let pending =
             Pending { key, envelope: Arc::new(envelope), sent_at: now(), delivered: false, copy: None };

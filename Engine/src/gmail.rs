@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 use crate::api::{self, Api, ApiError, GooglePage, Listing, Priority, Request};
 use crate::assembly::{AttachedMessage, MessageAssembly};
 use crate::backend::{EnvelopePage, SearchHit};
-use crate::model::{Address, DISTANT_PAST, Envelope, Mailbox, MailboxRole, MessageContent, date_from_unix};
+use crate::model::{Address, DISTANT_PAST, Envelope, Mailbox, MailboxRole, MessageContent, ProviderCategory, date_from_unix};
 use crate::text;
 
 mod changes;
@@ -75,6 +75,15 @@ const ROLES: [(&str, MailboxRole); 7] = [
     ("SPAM", MailboxRole::Junk),
     ("STARRED", MailboxRole::Starred),
     ("IMPORTANT", MailboxRole::Important),
+];
+
+/// Gmail's inbox categories (the tabs), as the system labels it puts on each message.
+const CATEGORIES: [(&str, ProviderCategory); 5] = [
+    ("CATEGORY_PERSONAL", ProviderCategory::Personal),
+    ("CATEGORY_SOCIAL", ProviderCategory::Social),
+    ("CATEGORY_PROMOTIONS", ProviderCategory::Promotions),
+    ("CATEGORY_UPDATES", ProviderCategory::Updates),
+    ("CATEGORY_FORUMS", ProviderCategory::Forums),
 ];
 
 /// `resultSizeEstimate` is always present, so a list with no matches still answers `{…}`.
@@ -433,7 +442,8 @@ struct Entry {
 }
 
 impl Entry {
-    /// The envelope as its labels have it: the flags, and the user labels' names as its tags.
+    /// The envelope as its labels have it: the flags, the user labels' names as its tags, and
+    /// the inbox category and Important marker Gmail gave it.
     fn current(&self, names: &HashMap<String, String>) -> Envelope {
         let mut envelope = self.envelope.clone();
         envelope.flags = Envelope::flags(
@@ -442,6 +452,9 @@ impl Entry {
             self.labels.contains("DRAFT"),
         );
         envelope.tags = self.labels.iter().filter_map(|id| names.get(id).cloned()).collect();
+        envelope.provider_category =
+            CATEGORIES.iter().find(|(label, _)| self.labels.contains(*label)).map(|(_, category)| *category);
+        envelope.important = self.labels.contains("IMPORTANT");
         envelope
     }
 
@@ -921,8 +934,10 @@ fn entry(message: &GmailMessage, has_attachment: bool) -> Entry {
         date: message.internal_date.as_deref().and_then(|ms| ms.parse::<f64>().ok()).map(|ms| date_from_unix(ms / 1000.0)),
         size: message.size_estimate.unwrap_or(0),
         has_attachment: Some(has_attachment),
-        // Named from the labels as the envelope is read (`Entry::current`).
+        // Named from the labels as the envelope is read (`Entry::current`), as are these.
         tags: BTreeSet::new(),
+        provider_category: None,
+        important: false,
     };
     Entry { envelope, labels: message.label_ids.iter().flatten().cloned().collect() }
 }

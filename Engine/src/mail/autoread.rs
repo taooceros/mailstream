@@ -383,6 +383,8 @@ mod tests {
             size: 0,
             has_attachment: Some(false),
             tags: Default::default(),
+            provider_category: None,
+            important: false,
             message_id: Some(format!("{id}@x")),
         };
         let mailbox = if role == MailboxRole::Sent { "SENT" } else { "INBOX" };

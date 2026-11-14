@@ -19,7 +19,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::OnceCell;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::model::{Date, date_from_unix, unix_seconds};
+use crate::model::{Date, ProviderCategory, date_from_unix, unix_seconds};
 use crate::tagging::{Category, ConversationTag};
 
 /// One conversation as the model sees it.
@@ -39,6 +39,11 @@ pub struct Item {
     pub message_count: usize,
     pub user_replied: bool,
     pub latest_from_user: bool,
+    /// How the provider itself sorted that message (Gmail's inbox category, Outlook's Focused
+    /// Inbox): a hint the model weighs, never a verdict (MS-336).
+    pub provider_category: Option<ProviderCategory>,
+    /// Gmail marks that message Important.
+    pub important: bool,
 }
 
 /// Who answers (`aiTagging.backend`).
@@ -274,7 +279,9 @@ incoming message); toMe (true if the user is a direct To recipient, false if cc'
 list); subject; snippet (start of that message, may be absent); date (when that message arrived) \
 and ageDays (days since then); routineUntil (date plus 14 days); count (messages in \
 thread); replied (the user already replied in the thread); lastFromMe (the latest message was sent \
-by the user).
+by the user); providerCategory (only when the mail provider sorts mail itself: how it filed that \
+message, Gmail's personal, social, promotions, updates or forums tab, or Outlook's focused or \
+other); important (only when Gmail marked that message important).
 
 Reply with ONLY a JSON array, no prose or code fences, one object per input id:
 {\"id\":\"<id>\",\"category\":\"<category>\",\"toRespond\":<bool>,\"until\":<\"YYYY-MM-DD\" or null>,\"labels\":[<string>...]}
@@ -289,6 +296,10 @@ social-network alerts.
 - newsletter: bulk content or marketing: newsletters, digests, promotions, product announcements, \
 surveys, mass mailing-list bulletins.
 - invitation: calendar invitations, event RSVPs and their responses or updates.
+
+providerCategory and important are the provider's own guesses: a hint that weighs less than what \
+the sender, subject and snippet show. Gmail files much human mail under updates or forums, and \
+Outlook's other holds both notifications and newsletters.
 
 toRespond: true when the user must personally reply to or act on the latest incoming message; \
 always false when lastFromMe is true. An earlier reply (replied) does not answer a newer ask.
@@ -371,6 +382,12 @@ fn prompt(items: &[Item], now: Date) -> String {
             entry.insert("count".into(), json!(item.message_count));
             entry.insert("replied".into(), json!(item.user_replied));
             entry.insert("lastFromMe".into(), json!(item.latest_from_user));
+            if let Some(category) = item.provider_category {
+                entry.insert("providerCategory".into(), json!(category.as_str()));
+            }
+            if item.important {
+                entry.insert("important".into(), json!(true));
+            }
             String::from_utf8(crate::json::encode(&Value::Object(entry), false, false)).expect("JSON is UTF-8")
         })
         .collect();
@@ -709,6 +726,8 @@ pub(crate) mod tests {
             message_count: 2,
             user_replied: false,
             latest_from_user,
+            provider_category: None,
+            important: false,
         }
     }
 
@@ -717,7 +736,10 @@ pub(crate) mod tests {
         let now = date_from_unix(Local.with_ymd_and_hms(2026, 11, 7, 15, 0, 0).unwrap().timestamp() as f64);
         let mut first = item("k1", false);
         first.date = Some(now - 3.0 * 86_400.0);
+        first.provider_category = Some(ProviderCategory::Promotions);
+        first.important = true;
         let mut second = item("k2", true);
+        second.provider_category = Some(ProviderCategory::Focused);
         second.sender_name = "  ".into();
         second.snippet = String::new();
         second.date = None;
@@ -725,8 +747,8 @@ pub(crate) mod tests {
         assert_eq!(
             text,
             "today: 2026-11-07 (Saturday)\n[\n\
-             {\"ageDays\":3,\"count\":2,\"date\":\"2026-11-04\",\"from\":\"Ann Lee <ann@x.com>\",\"id\":\"1\",\"lastFromMe\":false,\"replied\":false,\"routineUntil\":\"2026-11-18\",\"snippet\":\"Are you free / on Friday\",\"subject\":\"Lunch?\",\"toMe\":true},\n\
-             {\"count\":2,\"from\":\"ann@x.com\",\"id\":\"2\",\"lastFromMe\":true,\"replied\":false,\"subject\":\"Lunch?\",\"toMe\":true}\n]"
+             {\"ageDays\":3,\"count\":2,\"date\":\"2026-11-04\",\"from\":\"Ann Lee <ann@x.com>\",\"id\":\"1\",\"important\":true,\"lastFromMe\":false,\"providerCategory\":\"promotions\",\"replied\":false,\"routineUntil\":\"2026-11-18\",\"snippet\":\"Are you free / on Friday\",\"subject\":\"Lunch?\",\"toMe\":true},\n\
+             {\"count\":2,\"from\":\"ann@x.com\",\"id\":\"2\",\"lastFromMe\":true,\"providerCategory\":\"focused\",\"replied\":false,\"subject\":\"Lunch?\",\"toMe\":true}\n]"
         );
         let args = arguments("p", "");
         assert_eq!(args[..13].join(" "), "-p --no-session --no-tools --no-skills --no-rules --no-context-files --no-extensions --no-lsp --no-title --thinking off --model smol");
