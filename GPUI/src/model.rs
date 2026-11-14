@@ -109,10 +109,10 @@ impl MailboxExt for Mailbox {
 }
 
 pub trait ConversationExt {
-    /// Whom the row names: the latest message's sender (`me` when the user wrote it), else the
-    /// first participant.
+    /// Whom the row names: the latest message's sender (the other party when the user wrote it),
+    /// else the first participant.
     fn sender_name(&self) -> SharedString;
-    /// Everyone in it, for the row's first line; the sender when the engine names no one.
+    /// Everyone in it, for the row's first line; the other party when the user wrote the latest.
     fn senders(&self) -> SharedString;
     /// The address whose photo the row's avatar shows.
     fn avatar_email(&self) -> SharedString;
@@ -123,6 +123,9 @@ pub trait ConversationExt {
 impl ConversationExt for Conversation {
     fn sender_name(&self) -> SharedString {
         if self.from_me {
+            if let Some(peer) = &self.peer {
+                return peer.display_name().into();
+            }
             return "me".into();
         }
         match &self.from {
@@ -132,6 +135,10 @@ impl ConversationExt for Conversation {
     }
 
     fn senders(&self) -> SharedString {
+        if self.from_me {
+            let others: Vec<&str> = self.participants.iter().map(String::as_str).filter(|p| *p != "me").collect();
+            return if others.is_empty() { self.sender_name() } else { others.join(", ").into() };
+        }
         if self.participants.is_empty() { self.sender_name() } else { self.participants.join(", ").into() }
     }
 
@@ -384,5 +391,44 @@ mod tests {
     fn junk_keeps_its_name() {
         assert_eq!(MailboxRole::Junk.label(), "Junk");
         assert_eq!(MailboxRole::All.label(), "All Mail");
+    }
+
+    #[test]
+    fn from_me_rows_name_and_avatar_the_peer() {
+        let mut sent_only = mailstream::Conversation {
+            id: "c1".into(),
+            account: "me@example.com".into(),
+            subject: "Proposal".into(),
+            date: None,
+            from: Some(Address { name: Some("Me".into()), email: "me@example.com".into() }),
+            from_me: true,
+            peer: Some(Address { name: Some("Morgan Lee".into()), email: "morgan@example.com".into() }),
+            participants: vec!["me".into()],
+            message_count: 1,
+            unread: false,
+            starred: false,
+            has_attachment: false,
+            mailboxes: vec![MailboxRole::Sent],
+            snippet: None,
+            category: None,
+            waiting: false,
+            labels: vec![],
+            started: true,
+            tag: String::new(),
+            title: String::new(),
+            when: String::new(),
+            section: String::new(),
+            avatar: Default::default(),
+        };
+        assert_eq!(sent_only.sender_name().as_ref(), "Morgan Lee");
+        assert_eq!(sent_only.senders().as_ref(), "Morgan Lee");
+        assert_eq!(sent_only.avatar_email().as_ref(), "morgan@example.com");
+
+        sent_only.participants = vec!["Jordan Park".into(), "me".into()];
+        sent_only.peer = Some(Address { name: Some("Jordan Park".into()), email: "jordan@example.com".into() });
+        sent_only.message_count = 2;
+        assert_eq!(sent_only.sender_name().as_ref(), "Jordan Park");
+        assert_eq!(sent_only.senders().as_ref(), "Jordan Park");
+        assert_eq!(sent_only.avatar_email().as_ref(), "jordan@example.com");
     }
 }
