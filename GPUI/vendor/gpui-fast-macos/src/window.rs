@@ -14,9 +14,10 @@ use gpui::{
     Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformFrameSignal, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    SharedString, Size, SystemWindowTab, TextAssistance, TextInputConfiguration,
-    TextInputStateChange, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowKind, WindowParams, WindowVisibility, point, px, size,
+    ScrollDelta, ScrollEvent, ScrollSource, SharedString, Size, SystemWindowTab, TextAssistance,
+    TextInputConfiguration, TextInputStateChange, TouchPhase, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowParams,
+    WindowVisibility, point, px, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -72,7 +73,7 @@ use std::{
         Arc, Once,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub(crate) const WINDOW_STATE_IVAR: &CStr = c"windowState";
@@ -691,6 +692,10 @@ pub(crate) struct MacWindowState {
     external_files_dragged: bool,
     // Whether the next left-mouse click is also the focusing click.
     first_mouse: bool,
+    /// Mailstream patch (MS-225): what is left of a mouse-wheel step, delivered on each frame,
+    /// and where the latest step pointed (position, modifiers).
+    wheel_motion: crate::wheel_motion::WheelMotion,
+    wheel_target: (Point<Pixels>, Modifiers),
     // When true, the whole content view is reported as app-owned titlebar content via
     // `_opaqueRectForWindowMoveWhenInTitlebar`, so AppKit does not drag the window from
     // the titlebar or delay titlebar clicks (a delay first observed on macOS 27). Such
@@ -1153,6 +1158,8 @@ impl MacWindow {
                 last_key_equivalent: None,
                 last_left_mouse_down_event: None,
                 synthetic_drag_counter: 0,
+                wheel_motion: Default::default(),
+                wheel_target: Default::default(),
                 traffic_light_position: titlebar
                     .as_ref()
                     .and_then(|titlebar| titlebar.traffic_light_position),
@@ -3072,6 +3079,25 @@ pub(crate) extern "C" fn handle_view_event(this: &AnyObject, _: Sel, native_even
             _ => {}
         }
 
+        // Mailstream patch (MS-225): a mouse-wheel step goes out as its first share now and the
+        // rest over the next frames (`deliver_wheel_motion`); a click or precise scrolling (a
+        // touchpad, a Magic Mouse) ends it.
+        match &mut event {
+            PlatformInput::Scroll(scroll) => match scroll.delta {
+                ScrollDelta::Lines(lines) => {
+                    lock.wheel_motion.wheel((lines.x, lines.y));
+                    lock.wheel_target = (scroll.position, scroll.modifiers);
+                    if let Some((x, y)) = lock.wheel_motion.tick(Instant::now()) {
+                        scroll.delta = ScrollDelta::Lines(point(x, y));
+                    }
+                    wake_for_wheel_motion(&lock);
+                }
+                ScrollDelta::Pixels(_) => lock.wheel_motion.stop(),
+            },
+            PlatformInput::MouseDown(_) => lock.wheel_motion.stop(),
+            _ => {}
+        }
+
         if let Some(mut callback) = lock.event_callback.take() {
             drop(lock);
             let result = callback(event);
@@ -3486,9 +3512,47 @@ extern "C" fn display_layer(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     }
 }
 
+/// Mailstream patch (MS-225): delivers the share of a mouse-wheel step due by this frame, before
+/// the frame draws, as a scroll event at the step's position.
+fn deliver_wheel_motion(window_state: &Rc<Mutex<MacWindowState>>) {
+    let mut lock = window_state.lock();
+    if !lock.wheel_motion.is_active() {
+        return;
+    }
+    // An event is being dispatched (a modal loop inside it): wait for the next frame.
+    let Some(mut callback) = lock.event_callback.take() else {
+        return;
+    };
+    let Some((x, y)) = lock.wheel_motion.tick(Instant::now()) else {
+        lock.event_callback = Some(callback);
+        return;
+    };
+    let (position, modifiers) = lock.wheel_target;
+    drop(lock);
+    callback(PlatformInput::Scroll(ScrollEvent {
+        position,
+        delta: ScrollDelta::Lines(point(x, y)),
+        modifiers,
+        touch_phase: TouchPhase::Moved,
+        source: ScrollSource::Pointer,
+    }));
+    window_state.lock().event_callback = Some(callback);
+}
+
+/// Mailstream patch (MS-225): keeps a paused Metal link running while a wheel step is left, even
+/// when its share moved nothing GPUI draws.
+fn wake_for_wheel_motion(state: &MacWindowState) {
+    if state.wheel_motion.is_active()
+        && let FrameSource::Metal(metal_frames) = &state.frame_source
+    {
+        metal_frames.wake();
+    }
+}
+
 extern "C" fn step(view: *mut c_void) {
     let view = view as *mut AnyObject;
     let window_state = unsafe { get_window_state(&*view) };
+    deliver_wheel_motion(&window_state);
     let mut lock = window_state.lock();
 
     if let Some(mut callback) = lock.request_frame_callback.take() {
@@ -3515,6 +3579,7 @@ fn metal_frame(
     update: &objc2_quartz_core::CAMetalDisplayLinkUpdate,
 ) {
     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
+    deliver_wheel_motion(window_state);
     let mut lock = window_state.lock();
     let FrameSource::Metal(metal_frames) = &lock.frame_source else {
         return;
@@ -3537,6 +3602,7 @@ fn metal_frame(
     // lets the link hand it out again.
     let used_drawable = lock.renderer.set_frame_drawable(None).is_none();
     metal_frames.end_frame(used_drawable);
+    wake_for_wheel_motion(&lock);
 }
 
 extern "C" fn valid_attributes_for_marked_text(_: &AnyObject, _: Sel) -> *mut AnyObject {

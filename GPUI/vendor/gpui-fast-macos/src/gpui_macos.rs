@@ -12,6 +12,8 @@ mod fast;
 mod keyboard;
 mod pasteboard;
 mod system_notifications;
+// Mailstream patch (MS-225): smooth mouse-wheel steps.
+mod wheel_motion;
 
 #[cfg(feature = "screen-capture")]
 mod screen_capture;
