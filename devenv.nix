@@ -17,4 +17,9 @@ in
     fontconfig glib gtk3 flutter pkg-config cmake ninja python3 rustPlatform.bindgenHook
   ] ++ gpuiLibraries;
   env.LD_LIBRARY_PATH = lib.makeLibraryPath gpuiLibraries;
+  # nixpkgs' reproducible-builds hook adds `-frandom-seed=` from the shell's out path, which
+  # differs per folder, to NIX_CFLAGS_COMPILE and so to bindgenHook's BINDGEN_EXTRA_CLANG_ARGS:
+  # bindgen's build script reruns on that variable, so every checkout rebuilt bindgen and the
+  # Turso crates above it instead of reusing the default checkout's warm build (MS-294).
+  env.NIX_OUTPATH_USED_AS_RANDOM_SEED = "mailstream";
 }
