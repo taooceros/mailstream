@@ -190,7 +190,7 @@ fn answer(request: &FakeRequest) -> Reply {
         ("POST", "/v1.0/me/sendMail") => Reply::bytes(202, Vec::new()),
         ("POST", "/v1.0/$batch") => graph_batch(request, &mut lines),
         ("POST", "/batch/gmail/v1") => gmail_batch(request, &mut lines),
-        _ => refused(),
+        _ => calendar_reply(method, path, request).unwrap_or_else(refused),
     };
     let mut log = LOG.lock().expect("log lock");
     log.push(format!("{} {method} {path}", reply.status));
@@ -251,4 +251,166 @@ fn refusal() -> Value {
 
 fn refused() -> Reply {
     Reply::status(400, refusal())
+}
+
+#[derive(Default)]
+struct CalendarStore {
+    next_id: usize,
+    google: HashMap<String, Vec<Value>>,
+    graph: HashMap<String, Vec<Value>>,
+}
+
+static CALENDAR: LazyLock<Mutex<CalendarStore>> = LazyLock::new(Default::default);
+
+fn merge(target: &mut Value, patch: &Value) {
+    match (target, patch) {
+        (Value::Object(target), Value::Object(patch)) => {
+            for (key, value) in patch {
+                if value.is_null() {
+                    target.remove(key);
+                } else {
+                    merge(target.entry(key).or_insert(Value::Null), value);
+                }
+            }
+        }
+        (target, patch) => *target = patch.clone(),
+    }
+}
+
+fn calendar_reply(method: &str, path: &str, request: &FakeRequest) -> Option<Reply> {
+    if let Some(rest) = path.strip_prefix("/calendar/v3/calendars/") {
+        let mut parts = rest.split('/');
+        let cal_id = parts.next()?;
+        if parts.next() != Some("events") {
+            return None;
+        }
+        let event_id = parts.next();
+        if parts.next().is_some() {
+            return None;
+        }
+        let mut store = CALENDAR.lock().expect("calendar lock");
+        return Some(match (method, event_id) {
+            ("GET", None) => {
+                let items = store.google.get(cal_id).cloned().unwrap_or_default();
+                Reply::json(json!({ "items": items }))
+            }
+            ("POST", None) => {
+                let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+                store.next_id += 1;
+                let id = format!("shots-event-{}", store.next_id);
+                let mut event = json!({ "id": id, "organizer": { "email": cal_id, "self": true } });
+                merge(&mut event, &body);
+                normalize_google_times(&mut event);
+                store.google.entry(cal_id.to_string()).or_default().push(event.clone());
+                Reply::json(event)
+            }
+            ("GET", Some(id)) => store
+                .google
+                .get(cal_id)
+                .and_then(|events| events.iter().find(|e| e["id"] == id))
+                .cloned()
+                .map(Reply::json)
+                .unwrap_or_else(|| Reply::status(404, json!({ "error": { "code": 404, "message": "Not Found" } }))),
+            ("PATCH" | "PUT", Some(id)) => {
+                let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+                if let Some(event) = store.google.get_mut(cal_id).and_then(|events| events.iter_mut().find(|e| e["id"] == id)) {
+                    merge(event, &body);
+                    normalize_google_times(event);
+                    Reply::json(event.clone())
+                } else {
+                    Reply::status(404, json!({ "error": { "code": 404, "message": "Not Found" } }))
+                }
+            }
+            ("DELETE", Some(id)) => {
+                if let Some(events) = store.google.get_mut(cal_id) {
+                    if let Some(pos) = events.iter().position(|e| e["id"] == id) {
+                        events.remove(pos);
+                        return Some(Reply::status(204, Value::Null));
+                    }
+                }
+                Reply::status(404, json!({ "error": { "code": 404, "message": "Not Found" } }))
+            }
+            _ => return None,
+        });
+    }
+
+    if let Some(rest) = path.strip_prefix("/v1.0/me/calendars/") {
+        let mut parts = rest.split('/');
+        let cal_id = parts.next()?;
+        let resource = parts.next()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        let mut store = CALENDAR.lock().expect("calendar lock");
+        return match (method, resource) {
+            ("GET", "calendarView") => {
+                let value = store.graph.get(cal_id).cloned().unwrap_or_default();
+                Some(Reply::json(json!({ "value": value })))
+            }
+            ("POST", "events") => {
+                let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+                store.next_id += 1;
+                let id = format!("shots-event-{}", store.next_id);
+                let mut event = json!({
+                    "id": id,
+                    "isOrganizer": true,
+                    "bodyPreview": body["body"]["content"]
+                });
+                merge(&mut event, &body);
+                store.graph.entry(cal_id.to_string()).or_default().push(event.clone());
+                Some(Reply::json(event))
+            }
+            _ => None,
+        };
+    }
+
+    if let Some(id) = path.strip_prefix("/v1.0/me/events/") {
+        if id.contains('/') {
+            return None;
+        }
+        let mut store = CALENDAR.lock().expect("calendar lock");
+        return Some(match method {
+            "GET" => store
+                .graph
+                .values()
+                .flat_map(|events| events.iter())
+                .find(|e| e["id"] == id)
+                .cloned()
+                .map(Reply::json)
+                .unwrap_or_else(|| Reply::status(404, json!({ "error": { "message": "Not found" } }))),
+            "PATCH" => {
+                let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+                if let Some(event) = store.graph.values_mut().flat_map(|events| events.iter_mut()).find(|e| e["id"] == id) {
+                    merge(event, &body);
+                    Reply::json(event.clone())
+                } else {
+                    Reply::status(404, json!({ "error": { "message": "Not found" } }))
+                }
+            }
+            "DELETE" => {
+                for events in store.graph.values_mut() {
+                    if let Some(pos) = events.iter().position(|e| e["id"] == id) {
+                        events.remove(pos);
+                        return Some(Reply::status(204, Value::Null));
+                    }
+                }
+                Reply::status(404, json!({ "error": { "message": "Not found" } }))
+            }
+            _ => return None,
+        });
+    }
+
+    None
+}
+
+fn normalize_google_times(event: &mut Value) {
+    for key in ["start", "end"] {
+        if let Some(dt) = event.get_mut(key).and_then(|v| v.get_mut("dateTime")) {
+            if let Some(s) = dt.as_str() {
+                if !s.ends_with('Z') && !s.contains('+') && s.len() == 19 {
+                    *dt = Value::String(format!("{s}Z"));
+                }
+            }
+        }
+    }
 }
