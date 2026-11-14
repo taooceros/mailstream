@@ -716,6 +716,15 @@ pub mod chat {
     pub const MORE_AHEAD: usize = 8;
     /// An attachment that opens nowhere.
     pub const DIMMED: f32 = 0.5;
+    /// The open thread's island beside the space's log, and the narrowest the log's island keeps
+    /// beside it; with less room the thread opens over the log (MS-329).
+    pub const THREAD_WIDTH: f32 = 360.0;
+    pub const BESIDE_THREAD: f32 = 380.0;
+    /// The faces under a thread's first message: how many, their size, and how far each tucks
+    /// under the one before.
+    pub const THREAD_FACES: usize = 3;
+    pub const THREAD_FACE: f32 = 20.0;
+    pub const THREAD_FACE_OVERLAP: f32 = 5.0;
 }
 
 /// The calendar (Flutter's `CalendarMetrics` and the agenda's sizes).

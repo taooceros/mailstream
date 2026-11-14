@@ -1,7 +1,9 @@
 //! Google Chat through the in-process engine's `chat_*` methods: the space list (direct messages, group
 //! chats, spaces; older pages load near its end), a space's log with a composer (pictures inline,
-//! other files as tiles), and starting a conversation. `ChatPane` fills the main window's content
-//! area as mail does (MS-328): the list's island, and the open space (or the new-chat form) on an
+//! other files as tiles; a thread's replies folded under its first message, the thread opening on
+//! an island of its own with its own composer, MS-329), and starting a conversation. `ChatPane`
+//! fills the main window's content area as mail does (MS-328): the list's island, and the open
+//! space (or the new-chat form) on an
 //! island beside it in a wide window, over it in a narrow one; the list is as wide as mail's
 //! (`set_split`), and its title row, search field and the space's toolbar are mail's (`controls`).
 //! The sidebar reads `accounts()` and `unread()` from it.
@@ -600,6 +602,78 @@ impl Loaded {
     }
 }
 
+/// A thread's replies, drawn under the message that started it rather than in the log (MS-329).
+struct Replies {
+    /// The replies' indices (`Log::entry`), oldest first, pending ones last.
+    entries: Vec<usize>,
+    /// When the latest came, as the list dates its rows ("4:05 PM", "Nov 7").
+    last: SharedString,
+    /// Who replied, the latest first, each once and at most `metrics::THREAD_FACES`: their
+    /// address (for the photo) and avatar.
+    faces: Vec<(SharedString, mailstream::Avatar)>,
+}
+
+/// Each entry's id and how many replies it shows, as a list last measured them: an entry whose
+/// pair changed is measured again.
+type Measured = Vec<(SharedString, usize)>;
+
+/// A reply its log draws under its thread's first message (loaded, among `starters`) instead of
+/// in the log itself; a reply to a message not loaded stays in the log.
+fn folded(message: &Msg, starters: &HashSet<&SharedString>) -> bool {
+    message.thread_reply && message.thread.as_ref().is_some_and(|thread| starters.contains(thread))
+}
+
+/// The threads (by name) whose first message is among `messages`.
+fn starters<'a>(messages: impl IntoIterator<Item = &'a Msg>) -> HashSet<&'a SharedString> {
+    messages.into_iter().filter(|m| !m.thread_reply).filter_map(|m| m.thread.as_ref()).collect()
+}
+
+/// Tells `list` (item 0 its top, then one item per entry) which entries changed from `before` to
+/// `after`, so only those are measured again; the top is measured again always.
+fn splice(list: &ListState, before: &[(SharedString, usize)], after: &[(SharedString, usize)]) {
+    let prefix = before.iter().zip(after).take_while(|(a, b)| a == b).count();
+    let room = before.len().min(after.len()) - prefix;
+    let mut suffix = before.iter().rev().zip(after.iter().rev()).take(room).take_while(|(a, b)| a == b).count();
+    let changed = before.len() != after.len() || prefix < before.len();
+    // The first entry after a change may join or leave a run: it is measured again too.
+    if changed && suffix > 0 {
+        suffix -= 1;
+    }
+    if changed {
+        list.splice(1 + prefix..1 + before.len() - suffix, after.len() - prefix - suffix);
+    }
+    list.splice(0..1, 1);
+}
+
+/// Each of `entries`' place in a log (`mailstream::chat_runs`), the one with id `opens` starting
+/// a run of its own.
+fn runs<'a>(entries: impl Iterator<Item = &'a Msg>, opens: Option<&SharedString>) -> Vec<mailstream::ChatRun> {
+    mailstream::chat_runs(
+        entries
+            .map(|message| mailstream::ChatRunEntry {
+                sender: message.sender_id.to_string(),
+                date: message.created.map(|date| date.to_rfc3339()),
+                opens_run: opens == Some(&message.id),
+            })
+            .collect(),
+    )
+}
+
+/// The thread open beside the log (MS-329): the message that started it, when it is loaded, then
+/// its replies.
+struct ThreadView {
+    /// The thread's name (`spaces/…/threads/…`).
+    id: SharedString,
+    /// Indices (`Log::entry`) of its messages, oldest first.
+    entries: Vec<usize>,
+    /// `entries` starts with the message that started the thread.
+    starter: bool,
+    runs: Vec<mailstream::ChatRun>,
+    measured: Measured,
+    /// Item 0 is the top (under the toolbar); items 1… are the entries.
+    list: ListState,
+}
+
 /// One opened space's loaded messages and its list state.
 struct Log {
     title: Option<SharedString>,
@@ -608,8 +682,17 @@ struct Log {
     messages: Vec<Msg>,
     /// Sent from here, not confirmed yet (or failed); drawn after `messages`.
     pending: Vec<Msg>,
-    /// Each entry's place in the log (`mailstream::chat_runs`).
+    /// The entries the log shows (indices for `entry`): every message but the replies folded
+    /// under their thread's first message.
+    shown: Vec<usize>,
+    /// Each shown entry's place in the log (`mailstream::chat_runs`).
     runs: Vec<mailstream::ChatRun>,
+    /// The shown entries as the list last measured them.
+    measured: Measured,
+    /// Every thread with replies loaded, by name.
+    threads: HashMap<SharedString, Replies>,
+    /// The thread open beside the log.
+    thread: Option<ThreadView>,
     /// Older messages exist before the first one here.
     more: bool,
     loaded: bool,
@@ -623,7 +706,7 @@ struct Log {
     /// The newest request for the history, and the newest one applied; older answers are dropped.
     requested: u64,
     applied: u64,
-    /// Item 0 is the top (earlier messages, or the start); items 1… are the entries.
+    /// Item 0 is the top (earlier messages, or the start); items 1… are the shown entries.
     list: ListState,
 }
 
@@ -634,7 +717,11 @@ impl Log {
             members: Vec::new(),
             messages: Vec::new(),
             pending: Vec::new(),
+            shown: Vec::new(),
             runs: Vec::new(),
+            measured: Vec::new(),
+            threads: HashMap::new(),
+            thread: None,
             more: false,
             loaded: false,
             loading_earlier: false,
@@ -655,47 +742,96 @@ impl Log {
         self.messages.get(ix).or_else(|| self.pending.get(ix.checked_sub(self.messages.len())?))
     }
 
-    fn ids(&self) -> Vec<SharedString> {
-        self.messages.iter().chain(&self.pending).map(|m| m.id.clone()).collect()
+    /// The replies drawn under `message`, the first of its thread.
+    fn replies(&self, message: &Msg) -> Option<&Replies> {
+        self.threads.get(message.thread.as_ref().filter(|_| !message.thread_reply)?)
     }
 
-    /// Recomputes runs and tells the list which entries changed since `before` (the ids then), so
-    /// only those are measured again.
-    fn relayout(&mut self, before: &[SharedString]) {
-        let entries = self
-            .messages
-            .iter()
-            .chain(&self.pending)
-            .map(|message| mailstream::ChatRunEntry {
-                sender: message.sender_id.to_string(),
-                date: message.created.map(|date| date.to_rfc3339()),
-                opens_run: self.first_unread.as_ref() == Some(&message.id),
+    /// Opens `thread` beside the log.
+    fn open_thread(&mut self, thread: SharedString) {
+        self.thread = Some(ThreadView {
+            id: thread,
+            entries: Vec::new(),
+            starter: false,
+            runs: Vec::new(),
+            measured: Vec::new(),
+            list: ListState::new(1, ListAlignment::Bottom, px(OVERDRAW)),
+        });
+        self.relayout();
+    }
+
+    /// Groups the replies under their threads, recomputes the runs and tells the lists which
+    /// entries changed since they were last laid out, so only those are measured again.
+    fn relayout(&mut self) {
+        let all = || self.messages.iter().chain(&self.pending);
+        let starters = starters(all());
+        let mut shown = Vec::with_capacity(self.len());
+        let mut replies: HashMap<SharedString, Vec<usize>> = HashMap::new();
+        for (ix, message) in all().enumerate() {
+            if let Some(thread) = message.thread.as_ref().filter(|_| message.thread_reply) {
+                replies.entry(thread.clone()).or_default().push(ix);
+            }
+            if !folded(message, &starters) {
+                shown.push(ix);
+            }
+        }
+        let threads: HashMap<SharedString, Replies> = replies
+            .into_iter()
+            .map(|(thread, entries)| {
+                let latest = entries.iter().rev().filter_map(|&ix| self.entry(ix));
+                let last = latest.clone().next().and_then(|m| m.created).map(|date| mailstream::list_date(Some(date.to_rfc3339())));
+                let mut seen = HashSet::new();
+                let faces = latest
+                    .filter(|m| seen.insert(m.sender_id.clone()))
+                    .take(metrics::THREAD_FACES)
+                    .map(|m| (m.email.clone(), m.avatar.clone()))
+                    .collect();
+                (thread, Replies { entries, last: last.unwrap_or_default().into(), faces })
             })
             .collect();
-        self.runs = mailstream::chat_runs(entries);
 
-        let after = self.ids();
-        let prefix = before.iter().zip(&after).take_while(|(a, b)| a == b).count();
-        let room = before.len().min(after.len()) - prefix;
-        let mut suffix = before.iter().rev().zip(after.iter().rev()).take(room).take_while(|(a, b)| a == b).count();
-        let changed = before.len() != after.len() || prefix < before.len();
-        // The first entry after a change may join or leave a run: it is measured again too.
-        if changed && suffix > 0 {
-            suffix -= 1;
+        self.runs = runs(shown.iter().filter_map(|&ix| self.entry(ix)), self.first_unread.as_ref());
+        let measured: Measured = shown
+            .iter()
+            .filter_map(|&ix| self.entry(ix))
+            .map(|m| {
+                let replies = m.thread.as_ref().filter(|_| !m.thread_reply).and_then(|t| threads.get(t)).map_or(0, |r| r.entries.len());
+                (m.id.clone(), replies)
+            })
+            .collect();
+        splice(&self.list, &self.measured, &measured);
+        self.measured = measured;
+        self.shown = shown;
+
+        if let Some(view) = &self.thread {
+            let starter = all().position(|m| !m.thread_reply && m.thread.as_ref() == Some(&view.id));
+            let entries: Vec<usize> =
+                starter.into_iter().chain(threads.get(&view.id).into_iter().flat_map(|r| r.entries.iter().copied())).collect();
+            let runs = runs(entries.iter().filter_map(|&ix| self.entry(ix)), None);
+            let measured: Measured = entries.iter().filter_map(|&ix| self.entry(ix)).map(|m| (m.id.clone(), 0)).collect();
+            splice(&view.list, &view.measured, &measured);
+            if let Some(view) = &mut self.thread {
+                view.starter = starter.is_some();
+                view.entries = entries;
+                view.runs = runs;
+                view.measured = measured;
+            }
         }
-        if changed {
-            self.list.splice(1 + prefix..1 + before.len() - suffix, after.len() - prefix - suffix);
-        }
-        self.list.splice(0..1, 1);
+        self.threads = threads;
     }
 
     /// Takes the engine's history in place of what was loaded.
     fn apply(&mut self, loaded: Loaded) {
-        let before = self.ids();
         if self.place_new_line && !loaded.messages.is_empty() {
             self.place_new_line = false;
+            // Among what the log shows: a reply folded under its thread opens no run there.
+            let starters = starters(&loaded.messages);
             self.first_unread = loaded.last_read.and_then(|read| {
-                loaded.messages.iter().find(|m| !m.mine && m.created.is_some_and(|c| c > read)).map(|m| m.id.clone())
+                loaded
+                    .messages
+                    .iter()
+                    .find(|m| !m.mine && m.created.is_some_and(|c| c > read) && !folded(m, &starters))
+                    .map(|m| m.id.clone())
             });
         }
         self.title = loaded.title;
@@ -705,7 +841,7 @@ impl Log {
         self.loaded = loaded.loaded;
         self.failure = loaded.failure;
         self.loading_earlier = loaded.loading_earlier;
-        self.relayout(&before);
+        self.relayout();
     }
 }
 
@@ -717,6 +853,14 @@ enum View {
     Spaces,
     Space(Key),
     NewChat,
+}
+
+/// Where a message is drawn, and which composer writes there: the space's log, or the thread
+/// open beside it (MS-329).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Surface {
+    Log,
+    Thread,
 }
 
 /// The new-chat form.
@@ -738,6 +882,8 @@ struct NewChatForm {
 pub struct ChatPane {
     focus: FocusHandle,
     composer: Entity<EditorState>,
+    /// The open thread's composer, which replies in it (MS-329).
+    thread_composer: Entity<EditorState>,
     people_input: Entity<InputState>,
     /// Why the space list failed to load, until a load succeeds.
     failure: Option<SharedString>,
@@ -770,8 +916,9 @@ pub struct ChatPane {
     /// The list's search field, and what it holds, lowercased: the rows in view match it.
     search: Entity<InputState>,
     query: String,
-    /// The list's width beside the page, and whether the page sits beside the list (a wide
-    /// window) or over it, as the window lays out mail (`set_split`).
+    /// The pane's width, the list's width beside the page, and whether the page sits beside the
+    /// list (a wide window) or over it, as the window lays out mail (`set_split`).
+    width: f32,
     list_width: f32,
     two_pane: bool,
     /// How far the open space's log is scrolled, for its toolbar, and the height of its heading
@@ -779,9 +926,8 @@ pub struct ChatPane {
     log_top: ReaderTop,
     head_height: Rc<Cell<f32>>,
     logs: HashMap<Key, Log>,
-    /// The thread the next message replies in, and who started it.
-    reply_thread: Option<(SharedString, SharedString)>,
-    hovered_message: Option<SharedString>,
+    /// The message under the pointer, and where.
+    hovered_message: Option<(Surface, SharedString)>,
     files: HashMap<FileKey, FileState>,
     /// Files to open in the system's default app once downloaded.
     open_when_ready: HashSet<FileKey>,
@@ -798,36 +944,26 @@ impl Focusable for ChatPane {
 
 impl ChatPane {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let composer = cx.new(|cx| {
-            let mut state = EditorState::new(window, cx)
-                .line_number(false)
-                .folding(false)
-                .indent_guides(false)
-                .smart_indent(false)
-                .auto_close(false)
-                .soft_wrap(true)
-                .searchable(false)
-                .scroll_beyond_last_line(Some(0))
-                .placeholder("Message")
-                .submit_on_enter(true);
-            state.set_highlighter_factory(markup_highlighter_factory(MarkupFlavor::GoogleChat), cx);
-            state.set_highlighter("google-chat", cx);
-            state
-        });
+        let composer = Self::new_composer("Message", window, cx);
+        let thread_composer = Self::new_composer("Reply in thread", window, cx);
         let people_input = cx.new(|cx| InputState::new(window, cx).placeholder("Name or email address"));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search conversations"));
         let subscriptions = vec![
             cx.subscribe_in(&composer, window, Self::on_composer_event),
+            cx.subscribe_in(&thread_composer, window, Self::on_composer_event),
             cx.subscribe_in(&people_input, window, Self::on_people_event),
             cx.subscribe_in(&search, window, Self::on_search_event),
             cx.observe_window_appearance(window, |this, _, cx| {
-                this.composer.update(cx, |state, cx| state.set_highlighter("google-chat", cx));
+                for composer in [&this.composer, &this.thread_composer] {
+                    composer.update(cx, |state, cx| state.set_highlighter("google-chat", cx));
+                }
                 cx.notify();
             }),
         ];
         let mut this = Self {
             focus: cx.focus_handle(),
             composer,
+            thread_composer,
             people_input,
             failure: None,
             loaded: false,
@@ -849,12 +985,12 @@ impl ChatPane {
             view: View::Spaces,
             search,
             query: String::new(),
+            width: layout::MIN_LIST + layout::GAP + layout::MIN_DETAIL,
             list_width: layout::MIN_LIST,
             two_pane: true,
             log_top: ReaderTop::Top,
             head_height: Rc::new(Cell::new(0.)),
             logs: HashMap::new(),
-            reply_thread: None,
             hovered_message: None,
             files: HashMap::new(),
             open_when_ready: HashSet::new(),
@@ -866,12 +1002,32 @@ impl ChatPane {
         this
     }
 
+    /// A composer: a field growing with its text that sends on Return, its Google Chat markup
+    /// highlighted as typed (MS-316).
+    fn new_composer(placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>) -> Entity<EditorState> {
+        cx.new(|cx| {
+            let mut state = EditorState::new(window, cx)
+                .line_number(false)
+                .folding(false)
+                .indent_guides(false)
+                .smart_indent(false)
+                .auto_close(false)
+                .soft_wrap(true)
+                .searchable(false)
+                .scroll_beyond_last_line(Some(0))
+                .placeholder(placeholder)
+                .submit_on_enter(true);
+            state.set_highlighter_factory(markup_highlighter_factory(MarkupFlavor::GoogleChat), cx);
+            state.set_highlighter("google-chat", cx);
+            state
+        })
+    }
+
     /// Shows the space list of every chat account (None) or of one.
     pub fn show(&mut self, account: Option<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
         self.leave_space(cx);
         self.filter = account;
         self.view = View::Spaces;
-        self.reply_thread = None;
         self.rebuild_visible();
         window.focus(&self.focus, cx);
         // Selecting Chat fetches every account's spaces now, as the native app does.
@@ -920,10 +1076,12 @@ impl ChatPane {
         self.open(Key { account, space }, window, cx);
     }
 
-    /// How the window lays the pane out, as it lays out mail (MS-328): the list `list_width` wide
-    /// beside the open page in a wide window (`two_pane`), else the page over the list.
-    pub fn set_split(&mut self, list_width: f32, two_pane: bool, cx: &mut Context<Self>) {
-        if (list_width, two_pane) != (self.list_width, self.two_pane) {
+    /// How the window lays the pane out, as it lays out mail (MS-328): the pane `width` wide, the
+    /// list `list_width` wide beside the open page in a wide window (`two_pane`), else the page
+    /// over the list.
+    pub fn set_split(&mut self, width: f32, list_width: f32, two_pane: bool, cx: &mut Context<Self>) {
+        if (width, list_width, two_pane) != (self.width, self.list_width, self.two_pane) {
+            self.width = width;
             self.list_width = list_width;
             self.two_pane = two_pane;
             cx.notify();
@@ -1155,21 +1313,18 @@ impl ChatPane {
         }
         // The new-chat form gives way; a space open before is replaced by `chat_open`.
         self.view = View::Space(key.clone());
-        self.reply_thread = None;
         self.hovered_message = None;
         self.log_top = ReaderTop::Top;
         // Downloads that failed are tried again.
         self.files.retain(|_, file| !matches!(file, FileState::Failed(_)));
         self.composer.update(cx, |input, cx| input.clean(window, cx));
-        let first_open = !self.logs.contains_key(&key);
+        self.thread_composer.update(cx, |input, cx| input.clean(window, cx));
         let log = self.logs.entry(key.clone()).or_insert_with(Log::new);
-        // A new "New" line each time the space is opened.
+        // A new "New" line each time the space is opened, and no thread open beside it.
         log.first_unread = None;
         log.place_new_line = true;
-        if !first_open {
-            let before = log.ids();
-            log.relayout(&before);
-        }
+        log.thread = None;
+        log.relayout();
         // The engine answers what it holds now and fetches the newest (`ChatMessages` follows),
         // keeps the space current and marks it read while it stays open.
         let (account, space) = (key.account.to_string(), key.space.to_string());
@@ -1185,9 +1340,37 @@ impl ChatPane {
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.leave_space(cx);
         self.view = View::Spaces;
-        self.reply_thread = None;
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// Opens `thread` of the open space beside its log (over it when the page is narrow), its
+    /// composer taking the keys (MS-329).
+    fn open_thread(&mut self, thread: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        let View::Space(key) = &self.view else { return };
+        let Some(log) = self.logs.get_mut(key) else { return };
+        if log.thread.as_ref().is_none_or(|view| view.id != thread) {
+            log.open_thread(thread);
+            self.thread_composer.update(cx, |input, cx| input.clean(window, cx));
+        }
+        window.focus(&self.thread_composer.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// Closes the thread open beside the open space's log, the space's composer taking the keys.
+    fn close_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let View::Space(key) = &self.view else { return };
+        if let Some(log) = self.logs.get_mut(key) {
+            log.thread = None;
+        }
+        window.focus(&self.composer.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// The open thread sits beside the space's log: the page has room for both.
+    fn thread_beside(&self) -> bool {
+        let page = if self.two_pane { self.width - self.list_width - layout::GAP } else { self.width };
+        page >= metrics::BESIDE_THREAD + layout::GAP + metrics::THREAD_WIDTH
     }
 
     /// The open space is no longer kept current or read.
@@ -1253,9 +1436,20 @@ impl ChatPane {
 
     // MARK: - Attachments
 
-    /// Downloads the pictures of the log's entry `ix` as it comes into view.
-    fn fetch_pictures(&mut self, key: &Key, ix: usize, cx: &mut Context<Self>) {
-        let Some(message) = ix.checked_sub(1).and_then(|ix| self.logs.get(key)?.entry(ix)) else { return };
+    /// The message of item `ix` of `surface`'s list (item 0 is its top).
+    fn item(&self, key: &Key, surface: Surface, ix: usize) -> Option<&Msg> {
+        let log = self.logs.get(key)?;
+        let ix = ix.checked_sub(1)?;
+        let entry = match surface {
+            Surface::Log => log.shown.get(ix),
+            Surface::Thread => log.thread.as_ref()?.entries.get(ix),
+        };
+        log.entry(*entry?)
+    }
+
+    /// Downloads the pictures of item `ix` of `surface`'s list as it comes into view.
+    fn fetch_pictures(&mut self, key: &Key, surface: Surface, ix: usize, cx: &mut Context<Self>) {
+        let Some(message) = self.item(key, surface, ix) else { return };
         let wanted: Vec<Attachment> = message
             .attachments
             .iter()
@@ -1330,15 +1524,30 @@ impl ChatPane {
 
     // MARK: - Sending
 
-    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn composer(&self, surface: Surface) -> &Entity<EditorState> {
+        match surface {
+            Surface::Log => &self.composer,
+            Surface::Thread => &self.thread_composer,
+        }
+    }
+
+    /// Sends what `surface`'s composer holds: to the space, or as a reply in the open thread.
+    fn send(&mut self, surface: Surface, window: &mut Window, cx: &mut Context<Self>) {
         let View::Space(key) = &self.view else { return };
         let key = key.clone();
-        let text = self.composer.read(cx).value().trim().to_owned();
+        let thread = match surface {
+            Surface::Log => None,
+            Surface::Thread => match self.logs.get(&key).and_then(|log| log.thread.as_ref()) {
+                Some(view) => Some(view.id.clone()),
+                None => return,
+            },
+        };
+        let composer = self.composer(surface).clone();
+        let text = composer.read(cx).value().trim().to_owned();
         if text.is_empty() {
             return;
         }
-        self.composer.update(cx, |input, cx| input.clean(window, cx));
-        let thread = self.reply_thread.take().map(|(thread, _)| thread);
+        composer.update(cx, |input, cx| input.clean(window, cx));
         self.deliver(&key, text, thread, window, cx);
     }
 
@@ -1365,10 +1574,15 @@ impl ChatPane {
             status: Status::Sending,
             draft: Some((text.clone(), thread.clone())),
         };
-        let before = log.ids();
         log.pending.push(pending);
-        log.relayout(&before);
-        log.list.scroll_to_reveal_item(log.len());
+        log.relayout();
+        // Into view where it shows: the open thread, else the log.
+        match &log.thread {
+            Some(view) if thread.as_ref() == Some(&view.id) => {
+                view.list.scroll_to_reveal_item(view.entries.len());
+            }
+            _ => log.list.scroll_to_reveal_item(log.shown.len()),
+        }
         cx.notify();
 
         let (account, space) = (key.account.to_string(), key.space.to_string());
@@ -1393,11 +1607,10 @@ impl ChatPane {
                         log.apply(loaded);
                     }
                     Err(error) => {
-                        let before = log.ids();
                         if let Some(pending) = log.pending.iter_mut().find(|m| m.id == id) {
                             pending.status = Status::Failed(error.to_string().into());
                         }
-                        log.relayout(&before);
+                        log.relayout();
                     }
                 }
                 cx.notify();
@@ -1408,9 +1621,8 @@ impl ChatPane {
     fn retry(&mut self, key: &Key, id: &SharedString, window: &mut Window, cx: &mut Context<Self>) {
         let Some(log) = self.logs.get_mut(key) else { return };
         let Some(at) = log.pending.iter().position(|m| &m.id == id) else { return };
-        let before = log.ids();
         let failed = log.pending.remove(at);
-        log.relayout(&before);
+        log.relayout();
         if let Some((text, thread)) = failed.draft {
             self.deliver(key, text, thread, window, cx);
         }
@@ -1418,9 +1630,8 @@ impl ChatPane {
 
     fn discard(&mut self, key: &Key, id: &SharedString, cx: &mut Context<Self>) {
         let Some(log) = self.logs.get_mut(key) else { return };
-        let before = log.ids();
         log.pending.retain(|m| &m.id != id);
-        log.relayout(&before);
+        log.relayout();
         cx.notify();
     }
 
@@ -1437,22 +1648,23 @@ impl ChatPane {
             InputEvent::PressEnter { shift: false, .. }
                 if !composer.update(cx, |input, cx| input.marked_text_range(window, cx).is_some()) =>
             {
-                self.send(window, cx)
+                let surface = if *composer == self.thread_composer { Surface::Thread } else { Surface::Log };
+                self.send(surface, window, cx)
             }
             _ => {}
         }
     }
 
-    fn format_composer(&mut self, marker: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.composer.update(cx, |input, cx| wrap_selection(input, marker, window, cx));
+    fn format_composer(&mut self, surface: Surface, marker: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer(surface).clone().update(cx, |input, cx| wrap_selection(input, marker, window, cx));
     }
 
-    /// Esc in the composer leaves the thread it replies in; else, beside the list, gives the keys
-    /// to the list (the space stays open, ↑/↓ page through the spaces in it, Return comes back
-    /// and Esc closes it, as mail's reader); over the list it closes the space.
-    fn composer_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        if self.reply_thread.take().is_some() {
-            cx.notify();
+    /// Esc in the space's composer, beside the list, gives the keys to the list (the space stays
+    /// open, ↑/↓ page through the spaces in it, Return comes back and Esc closes it, as mail's
+    /// reader); over the list it closes the space. In the thread's composer it closes the thread.
+    fn composer_escape(&mut self, surface: Surface, window: &mut Window, cx: &mut Context<Self>) {
+        if surface == Surface::Thread {
+            self.close_thread(window, cx);
         } else if self.two_pane {
             window.focus(&self.focus, cx);
             cx.notify();
@@ -1475,7 +1687,6 @@ impl ChatPane {
         self.leave_space(cx);
         self.form = NewChatForm { account, ..Default::default() };
         self.view = View::NewChat;
-        self.reply_thread = None;
         self.people_input.update(cx, |input, cx| input.clean(window, cx));
         window.focus(&self.people_input.focus_handle(cx), cx);
         self.load_partners(cx);
@@ -1882,7 +2093,8 @@ impl ChatPane {
 
     /// The open space's island, as mail's reader (MS-328): its log scrolls under the reader's
     /// toolbar (✕ beside the list, ‹ over it), which shows the title once the log's heading has
-    /// scrolled under it; the composer below.
+    /// scrolled under it; the composer below. An open thread's island sits beside it when the page
+    /// has room, else over it (MS-329).
     fn render_space(&self, key: &Key, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let title = self.space_title(key);
         let log: AnyElement = match self.logs.get(key) {
@@ -1891,7 +2103,7 @@ impl ChatPane {
                 list(
                     log.list.clone(),
                     cx.processor(move |this, ix: usize, window, cx| {
-                        this.fetch_pictures(&list_key, ix, cx);
+                        this.fetch_pictures(&list_key, Surface::Log, ix, cx);
                         this.render_entry(&list_key, ix, window, p, cx)
                     }),
                 )
@@ -1906,7 +2118,7 @@ impl ChatPane {
         let close = icon_button("chat-close", glyph, tip, true, p.glyph)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx)));
         let toolbar_title = (self.log_top == ReaderTop::PastTitle).then(|| title.clone());
-        island(p.background, p)
+        let space = island(p.background, p)
             .occlude()
             .size_full()
             .flex()
@@ -1923,7 +2135,55 @@ impl ChatPane {
                     .when(self.log_top != ReaderTop::Top, |d| d.child(page_scrim(p)))
                     .child(page_toolbar("chat-toolbar", close, toolbar_title, p, window, cx)),
             )
-            .child(self.render_composer(&title, p, cx))
+            .child(self.render_composer(Surface::Log, format!("Send to {title}").into(), p, cx));
+        let Some(view) = self.logs.get(key).and_then(|log| log.thread.as_ref()) else { return space.into_any_element() };
+        let beside = self.thread_beside();
+        let thread = self.render_thread(key, view, beside, p, window, cx);
+        if beside {
+            div()
+                .size_full()
+                .flex()
+                .gap(px(layout::GAP))
+                .child(div().flex_1().min_w_0().h_full().child(space))
+                .child(div().flex_shrink_0().w(px(metrics::THREAD_WIDTH)).h_full().child(thread))
+                .into_any_element()
+        } else {
+            div().relative().size_full().child(space).child(div().absolute().top_0().left_0().size_full().child(thread)).into_any_element()
+        }
+    }
+
+    /// The open thread's island (MS-329): the message that started it, a line with how many
+    /// replies, the replies, and a composer that replies in it; under a toolbar that closes it
+    /// (✕ beside the space's log, ‹ over it).
+    fn render_thread(&self, key: &Key, view: &ThreadView, beside: bool, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let list_key = key.clone();
+        let entries = list(
+            view.list.clone(),
+            cx.processor(move |this, ix: usize, window, cx| {
+                this.fetch_pictures(&list_key, Surface::Thread, ix, cx);
+                this.render_thread_entry(&list_key, ix, window, p, cx)
+            }),
+        )
+        .size_full();
+        let (glyph, tip) = if beside { (Icon::Close, "Close thread (Esc)") } else { (Icon::Back, "Back to the conversation (Esc)") };
+        let close = icon_button("chat-thread-close", glyph, tip, true, p.glyph)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_thread(window, cx)));
+        island(p.background, p)
+            .occlude()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(entries)
+                    // The page's own surface under the toolbar's band until something scrolls there.
+                    .child(page_scrim(p))
+                    .child(page_toolbar("chat-thread-toolbar", close, Some("Thread".into()), p, window, cx)),
+            )
+            .child(self.render_composer(Surface::Thread, "Reply in thread".into(), p, cx))
             .into_any_element()
     }
 
@@ -1946,28 +2206,84 @@ impl ChatPane {
         }
     }
 
-    /// A column as wide as the reader's text, centered.
-    fn column(child: impl IntoElement) -> Div {
+    /// A column as wide as the reader's text, centered; narrower margins in the thread's island.
+    fn column(surface: Surface, child: impl IntoElement) -> Div {
+        let margin = match surface {
+            Surface::Log => 32.,
+            Surface::Thread => space::S12,
+        };
         div()
             .w_full()
             .flex()
             .justify_center()
-            .child(div().w_full().max_w(px(layout::READING_WIDTH)).px(px(32.)).child(child))
+            .child(div().w_full().max_w(px(layout::READING_WIDTH)).px(px(margin)).child(child))
     }
 
-    /// A message as a row of the log mail between people shares (`message_log`, MS-326): the
-    /// sender's photo, name and time over a run of their messages, the user's own on the right.
+    /// Item `ix` of the space's log: its head (`ix` 0), else a shown message, under a "New" line
+    /// when it is the first one unread.
     fn render_entry(&self, key: &Key, ix: usize, window: &mut Window, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let Some(log) = self.logs.get(key) else { return div().into_any_element() };
         if ix == 0 {
             return self.render_top(key, log, p, cx);
         }
-        let (Some(message), Some(run)) = (log.entry(ix - 1), log.runs.get(ix - 1)) else {
+        let (Some(message), Some(run)) = (self.item(key, Surface::Log, ix), log.runs.get(ix - 1)) else {
             return div().into_any_element();
         };
-        let new_line = log.first_unread.as_ref() == Some(&message.id);
+        let marker = (log.first_unread.as_ref() == Some(&message.id)).then(|| message_log::divider("New".into(), p.accent, p.accent.opacity(0.45)));
+        self.render_message(key, log, message, run, Surface::Log, marker, window, p, cx)
+    }
+
+    /// Item `ix` of the open thread: the room under its toolbar (`ix` 0, with a note when the
+    /// message that started it isn't loaded), else one of its messages, a line telling how many
+    /// replies above the first reply.
+    fn render_thread_entry(&self, key: &Key, ix: usize, window: &mut Window, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let Some((log, view)) = self.logs.get(key).and_then(|log| Some((log, log.thread.as_ref()?))) else {
+            return div().into_any_element();
+        };
+        if ix == 0 {
+            let note = (!view.starter).then(|| {
+                div().pb(px(space::S8)).text_size(px(text::FOOTNOTE)).text_color(p.muted).child("The message that started this thread is older than the messages loaded.")
+            });
+            return Self::column(Surface::Thread, div().pt(px(layout::HEADER_HEIGHT + space::S8)).children(note)).into_any_element();
+        }
+        let (Some(message), Some(run)) = (self.item(key, Surface::Thread, ix), view.runs.get(ix - 1)) else {
+            return div().into_any_element();
+        };
+        let replies = view.entries.len() - usize::from(view.starter);
+        let marker = (view.starter && ix == 2).then(|| {
+            let label = if replies == 1 { "1 reply".to_owned() } else { format!("{replies} replies") };
+            message_log::divider(label.into(), p.muted, p.line)
+        });
+        self.render_message(key, log, message, run, Surface::Thread, marker, window, p, cx)
+    }
+
+    /// A message as a row of the log mail between people shares (`message_log`, MS-326): the
+    /// sender's photo, name and time over a run of their messages, the user's own on the right;
+    /// under its day's line and `marker` (the "New" line, the thread's count of replies). In the
+    /// log, the first message of a thread with replies tells how many under it, a reply to a
+    /// message not loaded says so, and hovering a message offers to reply in its thread; each
+    /// opens the thread (MS-329).
+    #[allow(clippy::too_many_arguments)]
+    fn render_message(
+        &self,
+        key: &Key,
+        log: &Log,
+        message: &Msg,
+        run: &mailstream::ChatRun,
+        surface: Surface,
+        marker: Option<Div>,
+        window: &mut Window,
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // The thread's island shows the message that started it a second time: its elements' ids
+        // are its own.
+        let tag = match surface {
+            Surface::Log => "",
+            Surface::Thread => "thread:",
+        };
         let continued = run.continued;
-        let hovered = self.hovered_message.as_ref() == Some(&message.id);
+        let hovered = self.hovered_message.as_ref().is_some_and(|(at, id)| *at == surface && *id == message.id);
         let hover_id = message.id.clone();
 
         let lead = if continued {
@@ -1984,19 +2300,32 @@ impl ChatPane {
             Status::Failed(_) => "Not sent".into(),
         };
         let head = (!continued).then(|| message_log::head(message.name.clone(), time, None::<AnyElement>, message.mine, p));
+        // The thread a click here opens.
+        let thread = message.thread.clone().filter(|_| surface == Surface::Log && matches!(message.status, Status::Sent));
 
         let mut content: Vec<AnyElement> = Vec::new();
-        if message.thread_reply {
-            content.push(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child("↳ Reply in thread").into_any_element());
+        if let (true, Some(thread)) = (message.thread_reply && surface == Surface::Log, message.thread.clone()) {
+            content.push(
+                div()
+                    .id(ElementId::Name(format!("chat-in-thread:{}", message.id).into()))
+                    .flex()
+                    .gap(px(space::S6))
+                    .text_size(px(text::FOOTNOTE))
+                    .text_color(p.muted)
+                    .cursor_pointer()
+                    .child("↳ Replied in a thread")
+                    .child(div().text_color(p.accent).child("View thread"))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_thread(thread.clone(), window, cx)))
+                    .into_any_element(),
+            );
         }
         if !message.body.is_empty() {
             content.push(
                 div()
                     .text_size(px(text::READING))
                     .line_height(relative(text::READING_LEADING))
-                    .when(message.thread_reply, |d| d.pl(px(10.)))
                     .when(matches!(message.status, Status::Failed(_)), |d| d.text_color(p.muted))
-                    .child(message.body.element(&message.id, p))
+                    .child(message.body.element(&format!("{tag}{}", message.id), p))
                     .into_any_element(),
             );
         }
@@ -2010,7 +2339,7 @@ impl ChatPane {
                     .gap(px(space::S8))
                     .pt(px(space::S6))
                     .children(message.attachments.iter().enumerate().map(|(index, attachment)| {
-                        let id = ElementId::Name(format!("chat-file:{}:{index}", message.id).into());
+                        let id = ElementId::Name(format!("chat-file:{tag}{}:{index}", message.id).into());
                         self.render_attachment(&key.account, id, attachment, window, p, cx)
                     }))
                     .into_any_element(),
@@ -2027,41 +2356,35 @@ impl ChatPane {
                     .pt(px(4.))
                     .text_size(px(text::FOOTNOTE))
                     .child(div().text_color(p.danger).child(format!("Not sent: {reason}")))
-                    .child(button(ElementId::Name(format!("retry:{}", message.id).into()), "Retry", ButtonKind::Secondary, ControlSize::Small, true, p).on_click(
+                    .child(button(ElementId::Name(format!("retry:{tag}{}", message.id).into()), "Retry", ButtonKind::Secondary, ControlSize::Small, true, p).on_click(
                         cx.listener(move |this, _: &ClickEvent, window, cx| this.retry(&retry_key, &retry_id, window, cx)),
                     ))
-                    .child(button(ElementId::Name(format!("discard:{}", message.id).into()), "Delete", ButtonKind::Plain(p.accent), ControlSize::Small, true, p).on_click(
+                    .child(button(ElementId::Name(format!("discard:{tag}{}", message.id).into()), "Delete", ButtonKind::Plain(p.accent), ControlSize::Small, true, p).on_click(
                         cx.listener(move |this, _: &ClickEvent, _, cx| this.discard(&discard_key, &discard_id, cx)),
                     ))
                     .into_any_element(),
             );
         }
+        if let (Surface::Log, Some(replies)) = (surface, log.replies(message)) {
+            content.push(self.thread_summary(message, replies, p, cx));
+        }
 
-        let reply = message.thread.clone().filter(|_| matches!(message.status, Status::Sent)).map(|thread| {
-            let starter = log.messages.iter().find(|m| m.thread.as_ref() == Some(&thread) && !m.thread_reply);
-            let who: SharedString = match starter {
-                Some(m) if m.mine => "your message".into(),
-                Some(m) => m.name.clone(),
-                None => message.name.clone(),
-            };
+        let reply = thread.map(|thread| {
             raised_capsule(p)
                 .child(button(ElementId::Name(format!("reply:{}", message.id).into()), "Reply in Thread", ButtonKind::Plain(p.accent), ControlSize::Small, true, p).on_click(
-                    cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.reply_thread = Some((thread.clone(), who.clone()));
-                        window.focus(&this.composer.focus_handle(cx), cx);
-                        cx.notify();
-                    }),
+                    cx.listener(move |this, _: &ClickEvent, window, cx| this.open_thread(thread.clone(), window, cx)),
                 ))
                 .into_any_element()
         });
 
-        let row = message_log::Row { id: ElementId::Name(format!("chat-msg:{}", message.id).into()), mine: message.mine, continued, hovered };
+        let row = message_log::Row { id: ElementId::Name(format!("chat-msg:{tag}{}", message.id).into()), mine: message.mine, continued, hovered };
         let row = message_log::message(row, lead, head, content, reply, p)
             .when(matches!(message.status, Status::Sending), |d| d.opacity(metrics::PENDING_OPACITY))
             .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+                let here = this.hovered_message.as_ref().is_some_and(|(at, id)| *at == surface && *id == hover_id);
                 if *hovering {
-                    this.hovered_message = Some(hover_id.clone());
-                } else if this.hovered_message.as_ref() == Some(&hover_id) {
+                    this.hovered_message = Some((surface, hover_id.clone()));
+                } else if here {
                     this.hovered_message = None;
                 } else {
                     return;
@@ -2070,14 +2393,50 @@ impl ChatPane {
             }));
 
         Self::column(
+            surface,
             div()
                 .flex()
                 .flex_col()
                 .when(!run.divider.is_empty(), |d| d.child(message_log::day_divider(run.divider.clone().into(), p)))
-                .when(new_line, |d| d.child(message_log::divider("New".into(), p.accent, p.accent.opacity(0.45))))
+                .children(marker)
                 .child(row),
         )
         .into_any_element()
+    }
+
+    /// Under the first message of a thread with replies, as Google Chat shows it: the faces of
+    /// who replied, how many replies and when the last came; a click opens the thread (MS-329).
+    fn thread_summary(&self, message: &Msg, replies: &Replies, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let count = replies.entries.len();
+        let label = if count == 1 { "1 reply".to_owned() } else { format!("{count} replies") };
+        let faces = div().flex().children(replies.faces.iter().enumerate().map(|(index, (email, avatar))| {
+            div()
+                .when(index > 0, |d| d.ml(px(-metrics::THREAD_FACE_OVERLAP)))
+                .rounded_full()
+                .border(px(stroke::RIM * 2.))
+                .border_color(p.background)
+                .child(avatars::avatar(email, avatar, metrics::THREAD_FACE, p, cx))
+        }));
+        let thread = message.thread.clone().unwrap_or_default();
+        div()
+            .id(ElementId::Name(format!("chat-replies:{}", message.id).into()))
+            .mt(px(space::S4))
+            // The wash reaches past the faces, the text staying in line with the message's.
+            .map(|d| if message.mine { d.mr(px(-space::S6)) } else { d.ml(px(-space::S6)) })
+            .px(px(space::S6))
+            .py(px(space::S2))
+            .flex()
+            .items_center()
+            .gap(px(space::S8))
+            .rounded(px(radius::CONTROL))
+            .cursor_pointer()
+            .hover(|d| d.bg(p.hover))
+            .text_size(px(text::FOOTNOTE))
+            .child(faces)
+            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(p.accent).child(label))
+            .when(!replies.last.is_empty(), |d| d.child(div().text_color(p.muted).child(format!("Last reply {}", replies.last))))
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_thread(thread.clone(), window, cx)))
+            .into_any_element()
     }
 
     /// The log's head, under the toolbar's band: the space's heading (as the reader's title, in the
@@ -2106,7 +2465,7 @@ impl ChatPane {
         } else {
             div().pt(px(24.)).into_any_element()
         };
-        Self::column(div().pt(px(layout::HEADER_HEIGHT + space::S16)).child(self.render_heading(key, log, p)).child(content))
+        Self::column(Surface::Log, div().pt(px(layout::HEADER_HEIGHT + space::S16)).child(self.render_heading(key, log, p)).child(content))
             .into_any_element()
     }
 
@@ -2221,68 +2580,58 @@ impl ChatPane {
             .into_any_element()
     }
 
-    fn render_composer(&self, title: &SharedString, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let thread = self.reply_thread.as_ref().map(|(_, who)| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .pb(px(6.))
-                .text_size(px(text::FOOTNOTE))
-                .text_color(p.muted)
-                .child(format!("↳ Replying in thread to {who}"))
-                .child(icon_button("chat-unthread", Icon::Close, "Reply in the space", true, p.glyph).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.reply_thread = None;
-                    cx.notify();
-                })))
-        });
-        let composer = self.composer.clone();
-        let can_send = !self.composer.read(cx).value().trim().is_empty();
+    /// `surface`'s composer: the space's, or the open thread's (MS-329); `send_tip` names where its
+    /// send button sends.
+    fn render_composer(&self, surface: Surface, send_tip: SharedString, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let composer = self.composer(surface).clone();
+        let can_send = !composer.read(cx).value().trim().is_empty();
+        let (id, send_id) = match surface {
+            Surface::Log => ("chat-composer", "chat-send"),
+            Surface::Thread => ("chat-thread-composer", "chat-thread-send"),
+        };
+        let field = composer.clone();
         Self::column(
-            div()
-                .pt(px(8.))
-                .pb(px(16.))
-                .children(thread)
-                .child(
-                    div()
-                        .id("chat-composer")
-                        .key_context(COMPOSER_CONTEXT)
-                        .min_h(px(metrics::COMPOSER_HEIGHT))
-                        .pl(px(12. - input::AREA_INSET))
-                        .pr(px(12.))
-                        .py(px(metrics::COMPOSER_PADDING_Y))
-                        .flex()
-                        .items_end()
-                        .gap(px(8.))
-                        .rounded(px(radius::CARD))
-                        .bg(p.chip)
-                        .text_size(px(text::READING))
-                        .line_height(relative(1.55))
-                        .cursor_text()
-                        .on_click(move |_, window, cx| window.focus(&composer.focus_handle(cx), cx))
-                        .on_action(cx.listener(Self::composer_escape))
-                        .on_action(cx.listener(|_, action: &Enter, _, cx| {
-                            if action.shift {
-                                cx.propagate();
-                            }
-                        }))
-                        .on_action(cx.listener(|this, _: &FormatBold, window, cx| this.format_composer("*", window, cx)))
-                        .on_action(cx.listener(|this, _: &FormatItalic, window, cx| this.format_composer("_", window, cx)))
-                        .on_action(cx.listener(|this, _: &FormatStrike, window, cx| this.format_composer("~", window, cx)))
-                        .on_action(cx.listener(|this, _: &FormatCode, window, cx| this.format_composer("`", window, cx)))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(input::editor(&self.composer).auto_grow(metrics::COMPOSER_MIN_ROWS, metrics::COMPOSER_MAX_ROWS)),
-                        )
-                        .child(
-                            div().flex_shrink_0().h(px(text::READING * 1.55)).flex().items_center().child(
-                                icon_button("chat-send", Icon::Sent, format!("Send to {title}"), can_send, p.accent)
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.send(window, cx))),
-                            ),
+            surface,
+            div().pt(px(8.)).pb(px(16.)).child(
+                div()
+                    .id(id)
+                    .key_context(COMPOSER_CONTEXT)
+                    .min_h(px(metrics::COMPOSER_HEIGHT))
+                    .pl(px(12. - input::AREA_INSET))
+                    .pr(px(12.))
+                    .py(px(metrics::COMPOSER_PADDING_Y))
+                    .flex()
+                    .items_end()
+                    .gap(px(8.))
+                    .rounded(px(radius::CARD))
+                    .bg(p.chip)
+                    .text_size(px(text::READING))
+                    .line_height(relative(1.55))
+                    .cursor_text()
+                    .on_click(move |_, window, cx| window.focus(&field.focus_handle(cx), cx))
+                    .on_action(cx.listener(move |this, _: &Escape, window, cx| this.composer_escape(surface, window, cx)))
+                    .on_action(cx.listener(|_, action: &Enter, _, cx| {
+                        if action.shift {
+                            cx.propagate();
+                        }
+                    }))
+                    .on_action(cx.listener(move |this, _: &FormatBold, window, cx| this.format_composer(surface, "*", window, cx)))
+                    .on_action(cx.listener(move |this, _: &FormatItalic, window, cx| this.format_composer(surface, "_", window, cx)))
+                    .on_action(cx.listener(move |this, _: &FormatStrike, window, cx| this.format_composer(surface, "~", window, cx)))
+                    .on_action(cx.listener(move |this, _: &FormatCode, window, cx| this.format_composer(surface, "`", window, cx)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(input::editor(&composer).auto_grow(metrics::COMPOSER_MIN_ROWS, metrics::COMPOSER_MAX_ROWS)),
+                    )
+                    .child(
+                        div().flex_shrink_0().h(px(text::READING * 1.55)).flex().items_center().child(
+                            icon_button(send_id, Icon::Sent, send_tip, can_send, p.accent)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.send(surface, window, cx))),
                         ),
-                ),
+                    ),
+            ),
         )
         .into_any_element()
     }
@@ -2662,6 +3011,7 @@ mod tests {
         assert!(inline.marks.iter().any(|(_, m)| m.strike));
         assert!(inline.marks.iter().any(|(_, m)| m.code));
     }
+
     #[gpui::test]
     fn live_google_chat_highlighting_preserves_markers_and_selection(cx: &mut TestAppContext) {
         with_composer(cx, |_, composer, cx| {
@@ -2687,6 +3037,61 @@ mod tests {
             cx.run_until_parked();
             assert_eq!(composer.read_with(cx, |input, _| input.value().to_string()), "*加粗* _斜体_ ~删除线~ `code`");
         });
+    }
+
+    /// A message `id` from `sender`, `minutes` after the first, in the thread started by
+    /// `thread` (its own when None).
+    fn msg(id: &str, sender: &str, minutes: i64, thread: Option<&str>) -> Msg {
+        Msg {
+            id: id.to_owned().into(),
+            sender_id: sender.to_owned().into(),
+            name: sender.to_owned().into(),
+            avatar: mailstream::avatar(sender.into(), sender.into()),
+            email: format!("{sender}@example.com").into(),
+            created: Some(DateTime::from_timestamp(1_800_000_000 + minutes * 60, 0).unwrap()),
+            time: SharedString::default(),
+            thread: Some(format!("t-{}", thread.unwrap_or(id)).into()),
+            thread_reply: thread.is_some(),
+            mine: false,
+            body: Body::default(),
+            attachments: Vec::new(),
+            status: Status::Sent,
+            draft: None,
+        }
+    }
+
+    #[test]
+    fn replies_fold_under_their_threads_first_message() {
+        let mut log = Log::new();
+        log.messages = vec![
+            msg("a", "ann", 0, None),
+            msg("b", "bo", 1, None),
+            msg("a1", "bo", 2, Some("a")),
+            msg("a2", "cy", 3, Some("a")),
+            msg("x1", "cy", 4, Some("gone")),
+            msg("a3", "bo", 5, Some("a")),
+        ];
+        log.relayout();
+        let shown: Vec<&str> = log.shown.iter().map(|&ix| log.entry(ix).unwrap().id.as_ref()).collect();
+        // Replies to "a" fold under it; a reply to a message not loaded stays in the log.
+        assert_eq!(shown, ["a", "b", "x1"]);
+        let replies = log.replies(&log.messages[0]).expect("a's replies");
+        assert_eq!(replies.entries, [2, 3, 5]);
+        // The latest repliers first, each once.
+        let faces: Vec<&str> = replies.faces.iter().map(|(email, _)| email.as_ref()).collect();
+        assert_eq!(faces, ["bo@example.com", "cy@example.com"]);
+        assert!(log.replies(&log.messages[1]).is_none());
+        assert_eq!(log.runs.len(), 3);
+
+        // The open thread shows its first message, then its replies, a pending one last.
+        log.open_thread("t-a".into());
+        log.pending.push(msg("p", "me", 6, Some("a")));
+        log.relayout();
+        let view = log.thread.as_ref().unwrap();
+        assert!(view.starter);
+        assert_eq!(view.entries, [0, 2, 3, 5, 6]);
+        assert_eq!(log.shown.len(), 3);
+        assert_eq!(log.replies(&log.messages[0]).unwrap().entries.len(), 4);
     }
 }
 

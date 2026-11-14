@@ -106,7 +106,7 @@ impl Render for MailApp {
         let content = if self.chat_view.is_some() {
             // Chat lays out its own islands, the list as wide as mail's (MS-328).
             let list = split::list_width(self.list_share * room, mail);
-            self.chat.update(cx, |chat, cx| chat.set_split(list, two_pane, cx));
+            self.chat.update(cx, |chat, cx| chat.set_split(mail, list, two_pane, cx));
             div().size_full().child(self.chat.clone()).into_any_element()
         } else if self.calendar_view {
             // The calendar lays out its own islands.
