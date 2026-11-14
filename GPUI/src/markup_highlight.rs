@@ -24,15 +24,29 @@ pub fn markup_highlighter_factory(flavor: MarkupFlavor) -> InputHighlighterFacto
     Rc::new(move |_| Some(Box::new(MarkupHighlighter::new(flavor))))
 }
 
+/// Colors come from the window's palette when the text is parsed, so an editor that uses one
+/// sets its highlighter again when the window's appearance changes (Chat's composers, the
+/// compose and reply bodies).
 pub struct MarkupHighlighter {
     flavor: MarkupFlavor,
-    dark: bool,
+    /// The text as of the last parse, kept to reuse its allocation.
+    source: String,
     runs: Vec<(Range<usize>, HighlightStyle)>,
 }
 
 impl MarkupHighlighter {
     pub fn new(flavor: MarkupFlavor) -> Self {
-        Self { flavor, dark: false, runs: Vec::new() }
+        Self { flavor, source: String::new(), runs: Vec::new() }
+    }
+
+    fn parse(&mut self, text: &Rope, window: &Window) {
+        let dark = design::palette(window.appearance()).dark;
+        self.source.clear();
+        self.source.extend(text.chunks());
+        self.runs = match self.flavor {
+            MarkupFlavor::Markdown => markdown_runs(&self.source, dark),
+            MarkupFlavor::GoogleChat => google_chat_runs(&self.source, dark),
+        };
     }
 }
 
@@ -52,12 +66,15 @@ impl InputHighlighter for MarkupHighlighter {
         window: &mut Window,
         _cx: &mut Context<EditorState>,
     ) {
-        self.dark = design::palette(window.appearance()).dark;
-        let source = text.to_string();
-        self.runs = match self.flavor {
-            MarkupFlavor::Markdown => markdown_runs(&source, self.dark),
-            MarkupFlavor::GoogleChat => google_chat_runs(&source, self.dark),
-        };
+        self.parse(text, window);
+    }
+
+    /// One parse for the whole change (typing with several carets), of the text after its last
+    /// edit.
+    fn update_batch(&mut self, edits: &[(InputEdit, Rope)], _folding: bool, window: &mut Window, _cx: &mut Context<EditorState>) {
+        if let Some((_, text)) = edits.last() {
+            self.parse(text, window);
+        }
     }
 
     fn styles(&self, range: &Range<usize>, _resolver: &dyn HighlightStyleResolver) -> Vec<(Range<usize>, HighlightStyle)> {
@@ -131,45 +148,49 @@ fn merge_style(base: &mut HighlightStyle, overlay: &HighlightStyle) {
 }
 
 /// Flattens potentially overlapping `(range, style)` intervals into ordered, non-overlapping runs
-/// within `0..len`, merging styles where intervals overlap.
+/// within `0..len`, merging styles where intervals overlap: a later interval's style goes over an
+/// earlier one's. One sweep over the intervals sorted by start, holding only those that cover the
+/// current segment (as many as markup nests), so a long body costs O(n log n), not O(n²).
 fn flatten_spans(len: usize, spans: &[(Range<usize>, HighlightStyle)]) -> Vec<(Range<usize>, HighlightStyle)> {
-    if len == 0 || spans.is_empty() {
+    let clip = |i: usize| spans[i].0.start.min(len)..spans[i].0.end.min(len);
+    let mut by_start: Vec<usize> = (0..spans.len()).filter(|&i| !clip(i).is_empty()).collect();
+    if by_start.is_empty() {
         return Vec::new();
     }
-    let mut boundaries: Vec<usize> = Vec::with_capacity(spans.len() * 2);
-    for (r, _) in spans {
-        let s = r.start.min(len);
-        let e = r.end.min(len);
-        if s < e {
-            boundaries.push(s);
-            boundaries.push(e);
-        }
-    }
+    by_start.sort_by_key(|&i| spans[i].0.start);
+    let mut boundaries: Vec<usize> = by_start.iter().flat_map(|&i| [clip(i).start, clip(i).end]).collect();
     boundaries.sort_unstable();
     boundaries.dedup();
-    if boundaries.len() < 2 {
-        return Vec::new();
-    }
+
     let mut out: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+    // Indices of the intervals covering the segment, in input order.
+    let mut active: Vec<usize> = Vec::new();
+    let mut next = 0;
     for pair in boundaries.windows(2) {
         let seg = pair[0]..pair[1];
-        let mut combined = HighlightStyle::default();
-        let mut any = false;
-        for (r, style) in spans {
-            if r.start <= seg.start && r.end >= seg.end {
-                merge_style(&mut combined, style);
-                any = true;
-            }
+        // Every start and end is a boundary, so an interval covers a segment whole or not at all.
+        active.retain(|&i| clip(i).end > seg.start);
+        while let Some(&i) = by_start.get(next)
+            && spans[i].0.start <= seg.start
+        {
+            let at = active.partition_point(|&j| j < i);
+            active.insert(at, i);
+            next += 1;
         }
-        if any {
-            if let Some((prev_range, prev_style)) = out.last_mut()
-                && prev_range.end == seg.start
-                && *prev_style == combined
-            {
-                prev_range.end = seg.end;
-            } else {
-                out.push((seg, combined));
-            }
+        if active.is_empty() {
+            continue;
+        }
+        let mut combined = HighlightStyle::default();
+        for &i in &active {
+            merge_style(&mut combined, &spans[i].1);
+        }
+        if let Some((prev_range, prev_style)) = out.last_mut()
+            && prev_range.end == seg.start
+            && *prev_style == combined
+        {
+            prev_range.end = seg.end;
+        } else {
+            out.push((seg, combined));
         }
     }
     out
@@ -203,14 +224,14 @@ pub fn cover_range(range: &Range<usize>, runs: &[(Range<usize>, HighlightStyle)]
     out
 }
 
-fn push_bare_links(text: &str, p: &Palette, spans: &mut Vec<(Range<usize>, HighlightStyle)>) {
+/// The web and email addresses in `text`, which starts at `at` in the body, as the sent mail
+/// links them (`text::linkify` in the engine, which also takes `example.com` without a scheme).
+fn push_bare_links(finder: &LinkFinder, text: &str, at: usize, p: &Palette, spans: &mut Vec<(Range<usize>, HighlightStyle)>) {
     if !text.contains(['.', ':']) {
         return;
     }
-    let mut finder = LinkFinder::new();
-    finder.kinds(&[LinkKind::Url, LinkKind::Email]);
     for link in finder.links(text) {
-        spans.push((link.start()..link.end(), link_style(p)));
+        spans.push((at + link.start()..at + link.end(), link_style(p)));
     }
 }
 
@@ -220,12 +241,28 @@ pub fn markdown_runs(text: &str, dark: bool) -> Vec<(Range<usize>, HighlightStyl
     }
     let p = palette(dark);
     let mut spans: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
-    push_bare_links(text, p, &mut spans);
+    let mut finder = LinkFinder::new();
+    finder.url_must_have_scheme(false);
 
-    let parser = Parser::new_ext(text, Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS).into_offset_iter();
-    let mut code_stack: Vec<usize> = Vec::new();
+    // The options `markdown_to_html` sends with, so what shows as markup here is what the mail shows.
+    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let parser = Parser::new_ext(text, options).into_offset_iter();
+    // Bare addresses are links only in plain text, as `markdown_to_html` links them: not in code,
+    // a link (its text or target) or an image's description.
+    let mut in_code_block = false;
+    let mut links = 0usize;
+    let mut images = 0usize;
 
     for (event, range) in parser {
+        match &event {
+            Event::Start(Tag::Link { .. }) => links += 1,
+            Event::End(TagEnd::Link) => links = links.saturating_sub(1),
+            Event::Start(Tag::Image { .. }) => images += 1,
+            Event::End(TagEnd::Image) => images = images.saturating_sub(1),
+            Event::Start(Tag::CodeBlock(_)) => in_code_block = true,
+            Event::End(TagEnd::CodeBlock) => in_code_block = false,
+            _ => {}
+        }
         let s = range.start.min(text.len());
         let e = range.end.min(text.len());
         if s >= e {
@@ -278,7 +315,6 @@ pub fn markdown_runs(text: &str, dark: bool) -> Vec<(Range<usize>, HighlightStyl
                 }
             }
             Event::Start(Tag::CodeBlock(_)) => {
-                code_stack.push(s);
                 spans.push((s..e, code_style(p)));
                 if slice.starts_with("```") || slice.starts_with("~~~") {
                     if let Some(nl) = slice.find('\n') {
@@ -292,9 +328,6 @@ pub fn markdown_runs(text: &str, dark: bool) -> Vec<(Range<usize>, HighlightStyl
                         }
                     }
                 }
-            }
-            Event::End(TagEnd::CodeBlock) => {
-                code_stack.pop();
             }
             Event::Start(Tag::Heading { .. }) => {
                 let hashes = slice.bytes().take_while(|&b| b == b'#').count();
@@ -363,6 +396,10 @@ pub fn markdown_runs(text: &str, dark: bool) -> Vec<(Range<usize>, HighlightStyl
             }
             Event::Rule => {
                 spans.push((s..e, marker_style(p)));
+            }
+            // An escape or entity reads otherwise than its source: offsets wouldn't line up.
+            Event::Text(t) if !in_code_block && links == 0 && images == 0 && t.as_ref() == slice => {
+                push_bare_links(&finder, slice, s, p, &mut spans);
             }
             _ => {}
         }
@@ -599,6 +636,61 @@ mod tests {
         assert!(runs.iter().any(|(r, s)| &text[r.clone()] == "斜体" && s.font_style == Some(FontStyle::Italic)));
         assert!(runs.iter().any(|(r, s)| &text[r.clone()] == "链接" && s.underline.is_some()));
         assert!(runs.iter().any(|(r, s)| &text[r.clone()] == "code" && s.background_color.is_some()));
+    }
+
+    /// The byte ranges `runs` underline, merged where they touch.
+    fn underlined<'a>(text: &'a str, runs: &[(Range<usize>, HighlightStyle)]) -> Vec<&'a str> {
+        let mut out: Vec<Range<usize>> = Vec::new();
+        for (r, _) in runs.iter().filter(|(_, s)| s.underline.is_some()) {
+            match out.last_mut() {
+                Some(last) if last.end == r.start => last.end = r.end,
+                _ => out.push(r.clone()),
+            }
+        }
+        out.into_iter().map(|r| &text[r]).collect()
+    }
+
+    #[test]
+    fn markdown_runs_link_addresses_only_in_plain_text() {
+        let text = "see https://a.example.com/x_y_z, example.org or ops@example.org\n\n\
+                    `https://code.example.com` [click](https://target.example.com) ![pic](https://img.example.com/p.png \"https://title.example.com\") <https://auto.example.com>\n\n\
+                    ```\nhttps://block.example.com\n```\n\n    https://indented.example.com\n";
+        let runs = markdown_runs(text, false);
+        assert_eq!(
+            underlined(text, &runs),
+            ["https://a.example.com/x_y_z", "example.org", "ops@example.org", "click", "https://auto.example.com"]
+        );
+        // The link's target is a muted marker, not underlined.
+        let target = text.find("(https://target").unwrap();
+        assert!(runs.iter().any(|(r, s)| r.start <= target && r.end > target + 10 && s.color.is_some() && s.underline.is_none()));
+    }
+
+    #[test]
+    fn flatten_spans_layers_later_spans_over_earlier_ones() {
+        let p = palette(false);
+        let spans = vec![(0..10, bold_style()), (2..6, marker_style(p)), (4..8, italic_style()), (12..14, code_style(p)), (13..20, link_style(p))];
+        let runs = flatten_spans(16, &spans);
+        let mut bold_marker = bold_style();
+        merge_style(&mut bold_marker, &marker_style(p));
+        let mut bold_marker_italic = bold_marker;
+        merge_style(&mut bold_marker_italic, &italic_style());
+        let mut bold_italic = bold_style();
+        merge_style(&mut bold_italic, &italic_style());
+        let mut code_link = code_style(p);
+        merge_style(&mut code_link, &link_style(p));
+        assert_eq!(
+            runs,
+            vec![
+                (0..2, bold_style()),
+                (2..4, bold_marker),
+                (4..6, bold_marker_italic),
+                (6..8, bold_italic),
+                (8..10, bold_style()),
+                (12..13, code_style(p)),
+                (13..14, code_link),
+                (14..16, link_style(p)),
+            ]
+        );
     }
 
     #[test]

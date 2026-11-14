@@ -7,7 +7,8 @@ use crate::{
     MouseUpEvent, Pixels, Platform, PlatformTextSystem, Point, Render, Result, SharedString, Size,
     SystemNotification, SystemNotificationResponse, Task, TestDispatcher, TestPlatform,
     TestScreenCaptureSource, TestWindow, TextSystem, VisualContext, Window, WindowBounds,
-    WindowHandle, WindowOptions, WindowVisibility, app::GpuiMode, window::ElementArenaScope,
+    WindowAppearance, WindowHandle, WindowOptions, WindowVisibility, app::GpuiMode,
+    window::ElementArenaScope,
 };
 use anyhow::{anyhow, bail};
 use futures::{Stream, StreamExt, channel::oneshot};
@@ -466,6 +467,17 @@ impl TestAppContext {
     /// Simulates the user resizing the window to the new size.
     pub fn simulate_window_resize(&self, window_handle: AnyWindowHandle, size: Size<Pixels>) {
         self.test_window(window_handle).simulate_resize(size);
+    }
+
+    /// Simulates the system switching the window between light and dark (Mailstream patch,
+    /// MS-347).
+    pub fn simulate_window_appearance_change(
+        &self,
+        window_handle: AnyWindowHandle,
+        appearance: WindowAppearance,
+    ) {
+        self.test_window(window_handle)
+            .simulate_appearance_change(appearance);
     }
 
     /// Simulates a change in whether the platform is presenting the window.
@@ -1013,6 +1025,12 @@ impl VisualTestContext {
     /// Simulates the user resizing the window to the new size.
     pub fn simulate_resize(&self, size: Size<Pixels>) {
         self.simulate_window_resize(self.window, size)
+    }
+
+    /// Simulates the system switching this window between light and dark (Mailstream patch,
+    /// MS-347).
+    pub fn simulate_appearance_change(&self, appearance: WindowAppearance) {
+        self.simulate_window_appearance_change(self.window, appearance);
     }
 
     /// Simulates a change in whether the platform is presenting this window.

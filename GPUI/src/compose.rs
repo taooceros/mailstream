@@ -331,6 +331,10 @@ impl Compose {
                 this.edited(cx);
             }
         }));
+        // The highlighter takes its colors when it parses: made again in the new palette.
+        subscriptions.push(cx.observe_window_appearance(window, |this, _, cx| {
+            this.body.update(cx, |state, cx| state.set_highlighter("markdown", cx));
+        }));
 
         Self {
             focus: cx.focus_handle(),
@@ -1064,7 +1068,7 @@ pub struct ReplyBox {
     focus: FocusHandle,
     attachments: Attachments,
     status: Status,
-    _subscription: Subscription,
+    _subscriptions: [Subscription; 2],
 }
 
 impl EventEmitter<ReplyEvent> for ReplyBox {}
@@ -1096,12 +1100,18 @@ impl ReplyBox {
         });
         let focus = text.focus_handle(cx);
         window.focus(&focus, cx);
-        let subscription = cx.subscribe_in(&text, window, |this, _, event: &InputEvent, _, cx| {
-            if matches!(event, InputEvent::Change) && matches!(this.status, Status::Failed(_)) {
-                this.status = Status::Idle;
-                cx.notify();
-            }
-        });
+        let subscriptions = [
+            cx.subscribe_in(&text, window, |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) && matches!(this.status, Status::Failed(_)) {
+                    this.status = Status::Idle;
+                    cx.notify();
+                }
+            }),
+            // The highlighter takes its colors when it parses: made again in the new palette.
+            cx.observe_window_appearance(window, |this, _, cx| {
+                this.text.update(cx, |state, cx| state.set_highlighter("markdown", cx));
+            }),
+        ];
         Self {
             conversation_id,
             message,
@@ -1111,7 +1121,7 @@ impl ReplyBox {
             focus,
             attachments: Attachments::default(),
             status: Status::Idle,
-            _subscription: subscription,
+            _subscriptions: subscriptions,
         }
     }
 
@@ -1344,7 +1354,13 @@ impl Render for ReplyBox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::TestAppContext;
+    use std::cell::RefCell;
+    use std::ops::Range;
+
+    use gpui::component::input::{FoldRange, HighlightStyleResolver, InputEdit, InputHighlighter, Rope};
+    use gpui::{HighlightStyle, TestAppContext, WindowAppearance};
+
+    use crate::markup_highlight::MarkupHighlighter;
 
     struct EditorHarness {
         editor: Entity<EditorState>,
@@ -1441,5 +1457,62 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(editor.read_with(cx, |input, _| input.value().to_string()), "``");
         assert_eq!(editor.read_with(cx, |input, _| input.selected_range()), 1..1);
+    }
+
+    /// The real highlighter, noting the window's appearance at each parse.
+    struct AppearanceProbe {
+        inner: MarkupHighlighter,
+        parsed_in: Rc<RefCell<Vec<WindowAppearance>>>,
+    }
+
+    impl InputHighlighter for AppearanceProbe {
+        fn language(&self) -> SharedString {
+            self.inner.language()
+        }
+
+        fn update(&mut self, edit: Option<InputEdit>, text: &Rope, folding: bool, window: &mut Window, cx: &mut Context<EditorState>) {
+            self.parsed_in.borrow_mut().push(window.appearance());
+            self.inner.update(edit, text, folding, window, cx);
+        }
+
+        fn styles(&self, range: &Range<usize>, resolver: &dyn HighlightStyleResolver) -> Vec<(Range<usize>, HighlightStyle)> {
+            self.inner.styles(range, resolver)
+        }
+
+        fn fold_ranges(&self, text: &Rope) -> Vec<FoldRange> {
+            self.inner.fold_ranges(text)
+        }
+    }
+
+    /// The reply's Markdown colors follow the system into dark without another keystroke (MS-347).
+    #[gpui::test]
+    fn reply_highlighting_follows_the_appearance(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui::component::init(cx);
+            design::sync_kit_theme(WindowAppearance::Light, cx);
+        });
+        let (reply, cx) = cx.add_window_view(|window, cx| {
+            ReplyBox::new("conversation".into(), None, false, "someone@example.com".into(), window, cx)
+        });
+        let parsed_in = Rc::new(RefCell::new(Vec::new()));
+        let probe = parsed_in.clone();
+        reply.update_in(cx, |reply, window, cx| {
+            reply.text.update(cx, |state, cx| {
+                state.set_highlighter_factory(
+                    Rc::new(move |_| {
+                        Some(Box::new(AppearanceProbe { inner: MarkupHighlighter::new(MarkupFlavor::Markdown), parsed_in: probe.clone() }))
+                    }),
+                    cx,
+                );
+                state.set_highlighter("markdown", cx);
+                state.set_value("**bold** and https://example.com", window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(parsed_in.borrow().last(), Some(&WindowAppearance::Light));
+
+        cx.simulate_appearance_change(WindowAppearance::Dark);
+        cx.run_until_parked();
+        assert_eq!(parsed_in.borrow().last(), Some(&WindowAppearance::Dark));
     }
 }
