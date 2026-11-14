@@ -23,11 +23,33 @@ pub fn unique() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// A throwaway engine folder and Keychain item that cleans itself up on drop (including panics).
+pub struct TestConfig(Config);
+
+impl std::ops::Deref for TestConfig {
+    type Target = Config;
+    fn deref(&self) -> &Config {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for TestConfig {
+    fn deref_mut(&mut self) -> &mut Config {
+        &mut self.0
+    }
+}
+
+impl Drop for TestConfig {
+    fn drop(&mut self) {
+        cleanup(&self.0);
+    }
+}
+
 /// A throwaway engine folder and Keychain item whose providers are all unreachable.
-pub fn config(oauth: OAuthConfig) -> Config {
+pub fn config(oauth: OAuthConfig) -> TestConfig {
     let name = format!("mailstream-engine-{}-{}", std::process::id(), unique());
     let root = std::env::temp_dir().join(name.clone());
-    Config {
+    TestConfig(Config {
         support_directory: root.join("support"),
         cache_directory: root.join("caches"),
         keychain_service: format!("dev.mailstream.test.{name}"),
@@ -45,7 +67,7 @@ pub fn config(oauth: OAuthConfig) -> Config {
         avatar_web: Arc::new(avatars::tests::FakeWeb::default()),
         // The test of the socket turns it on.
         control_socket: false,
-    }
+    })
 }
 
 /// A PATH holding just the folders of the tools the fake scripts run (`grep`, `head`, `sleep`,
@@ -66,7 +88,7 @@ pub fn tools_path() -> String {
 }
 
 /// `config` with every provider and the token endpoint (`/token`) on `server`.
-pub fn server_config(server: &FakeServer) -> Config {
+pub fn server_config(server: &FakeServer) -> TestConfig {
     let mut config = config(OAuthConfig { token_endpoint: Some(format!("{}/token", server.base)), ..OAuthConfig::default() });
     config.endpoints = endpoints(&server.base);
     config
@@ -102,7 +124,7 @@ pub fn sign_in_all(config: &Config, records: &[Value]) {
 }
 
 /// An engine on `server`, signed in to `accounts` (`(id, provider)`) as mail accounts.
-pub fn engine_for(server: &FakeServer, accounts: &[(&str, &str)]) -> (Engine, Config) {
+pub fn engine_for(server: &FakeServer, accounts: &[(&str, &str)]) -> (Engine, TestConfig) {
     let config = server_config(server);
     let records: Vec<Value> = accounts.iter().map(|(id, provider)| mail_account(id, provider)).collect();
     sign_in_all(&config, &records);

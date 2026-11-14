@@ -126,7 +126,7 @@ fn messages(space: &str, older: bool) -> Reply {
 
 /// A folder on `server` with a Google account that reads chat, signed in, and an Outlook one
 /// without chat.
-fn config_for(server: &FakeServer) -> Config {
+fn config_for(server: &FakeServer) -> crate::testkit::TestConfig {
     let config = server_config(server);
     let scopes = [
         "openid",

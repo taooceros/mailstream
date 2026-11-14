@@ -100,7 +100,7 @@ fn graph_reply(request: &FakeRequest) -> Reply {
 
 /// A folder on `server` with a Google and an Outlook account that read calendars and one Google
 /// account signed in before calendars were asked for, all signed in.
-fn config_for(server: &FakeServer) -> Config {
+fn config_for(server: &FakeServer) -> crate::testkit::TestConfig {
     let config = server_config(server);
     sign_in_all(
         &config,

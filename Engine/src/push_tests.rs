@@ -85,7 +85,7 @@ const TOPIC: &str = "projects/p/topics/t";
 
 /// A throwaway engine folder pointed at `server` and `relay`, signed in to `accounts` through a
 /// test Keychain item; push.json may be written before the engine starts on it.
-fn prepare(server: &FakeServer, relay: &FakeRelay, accounts: &[(&str, &str)]) -> Config {
+fn prepare(server: &FakeServer, relay: &FakeRelay, accounts: &[(&str, &str)]) -> crate::testkit::TestConfig {
     let mut config = server_config(server);
     config.push = PushConfig {
         url: Some(relay.base.clone()),

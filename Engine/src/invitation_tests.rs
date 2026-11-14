@@ -30,7 +30,7 @@ fn ics_time(days: i64, hour: f64) -> String {
 
 /// An engine on `server` signed in to `accounts` (`(id, provider)`), each with mail and every
 /// calendar scope.
-fn engine_for(server: &FakeServer, accounts: &[(&str, &str)]) -> (Engine, Config) {
+fn engine_for(server: &FakeServer, accounts: &[(&str, &str)]) -> (Engine, crate::testkit::TestConfig) {
     let config = server_config(server);
     let records: Vec<Value> = accounts
         .iter()

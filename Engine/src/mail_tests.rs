@@ -289,7 +289,7 @@ fn lists_shows_and_searches_gmail_and_serves_the_cache_without_asking_again() {
 
     // Next launch, offline: mail.db and the content cache answer.
     let mut offline = config.clone();
-    offline.endpoints = crate::testkit::config(OAuthConfig::default()).endpoints;
+    offline.endpoints = crate::testkit::config(OAuthConfig::default()).endpoints.clone();
     offline.oauth.token_endpoint = Some("http://127.0.0.1:9/token".into());
     let engine = Engine::start(offline);
     wait_until("restored mailboxes", || call(&engine, "mailboxes", json!({})).unwrap()["me@gmail.com"].is_array());
