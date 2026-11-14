@@ -11,6 +11,7 @@
 use std::ops::Range;
 
 use gpui::component::button::{Button, ButtonVariants};
+use gpui::component::input::Escape;
 use gpui::component::notification::Notification;
 use gpui::component::switch::Switch;
 use gpui::component::tab::{Tab, TabBar};
@@ -311,6 +312,105 @@ pub fn title_bar(id: impl Into<ElementId>, window: &mut Window, cx: &mut App) ->
             }
         })
         .child(follow.absolute().size_0())
+}
+
+/// A list island's title row, mail's and Chat's (MS-328): `back` on a capsule, the `title` in bold
+/// over its `subtitle`, then `actions` (a capsule of icon buttons).
+#[allow(clippy::too_many_arguments)]
+pub fn list_header(
+    id: impl Into<ElementId>,
+    back: Option<Button>,
+    title: SharedString,
+    subtitle: Option<SharedString>,
+    actions: impl IntoElement,
+    p: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) -> Stateful<Div> {
+    let indent = back.is_none();
+    title_bar(id, window, cx)
+        .flex_shrink_0()
+        .h(px(layout::HEADER_HEIGHT))
+        .px(px(space::S10))
+        .flex()
+        .items_center()
+        .gap(px(space::S10))
+        .when_some(back, |d, back| d.child(capsule(p).child(back)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .when(indent, |d| d.pl(px(space::S6)))
+                .flex()
+                .flex_col()
+                .child(div().truncate().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::BOLD).child(title))
+                .when_some(subtitle, |d, subtitle| {
+                    d.child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(subtitle))
+                }),
+        )
+        .child(actions)
+}
+
+/// The search field under a list's title row, mail's and Chat's (MS-328): the magnifier before
+/// `field` in a capsule; Esc in it calls `on_escape`.
+pub fn search_field(
+    id: impl Into<ElementId>,
+    focused: bool,
+    field: impl IntoElement,
+    on_escape: impl Fn(&Escape, &mut Window, &mut App) + 'static,
+    p: &Palette,
+) -> Div {
+    div().flex_shrink_0().px(px(space::S12)).pb(px(space::S10)).child(
+        field_frame(focused, true, p)
+            .id(id)
+            .h(px(28.))
+            .pl(px(space::S10))
+            .pr(px(space::S8))
+            .gap(px(space::S6))
+            .line_height(px(18.))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_action(on_escape)
+            .child(icon(Icon::Search, 14., p.muted))
+            .child(div().flex_1().min_w_0().child(field)),
+    )
+}
+
+/// The toolbar floating over the top of a page, the mail reader's and Chat's conversation
+/// (MS-328): `close` on a capsule, then `title` centered in one line (once the page's own title
+/// has scrolled under it). The caller adds its actions' capsules after it.
+pub fn page_toolbar(
+    id: impl Into<ElementId>,
+    close: Button,
+    title: Option<SharedString>,
+    p: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) -> Stateful<Div> {
+    title_bar(id, window, cx)
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .h(px(layout::HEADER_HEIGHT))
+        .px(px(space::S10))
+        .flex()
+        .items_center()
+        .gap(px(space::S8))
+        .child(capsule(p).child(close))
+        .child(div().flex_1().min_w_0().flex().justify_center().when_some(title, |d, title| {
+            d.child(div().min_w_0().truncate().text_size(px(text::BODY)).font_weight(FontWeight::SEMIBOLD).child(title))
+        }))
+}
+
+/// The page's surface under its toolbar once anything has scrolled there, fading out below
+/// (MS-255).
+pub fn page_scrim(p: &Palette) -> Div {
+    let fade = linear_gradient(
+        180.,
+        linear_color_stop(p.background, design::reader::SCRIM_SOLID),
+        linear_color_stop(p.background.opacity(0.), 1.),
+    );
+    div().absolute().top_0().left_0().right_0().h(px(design::reader::SCRIM_HEIGHT)).bg(fade)
 }
 
 /// Keeps a left press on `element` from what lies under it, for content whose own drag must

@@ -46,12 +46,17 @@ pub fn shares(key: &str) -> Shares {
 #[derive(Clone, Copy)]
 pub struct ResizeList;
 
+/// The list's width beside an open page for a list `wanted` wide (its share of the room): at
+/// least `MIN_LIST`, leaving the page beside it at least `MIN_DETAIL` of `mail`. Mail's list and
+/// Chat's are laid out by it (MS-328).
+pub fn list_width(wanted: f32, mail: f32) -> f32 {
+    wanted.clamp(layout::MIN_LIST, layout::MIN_LIST.max(mail - layout::GAP - layout::MIN_DETAIL))
+}
+
 /// The list's width for a list edge dragged to `x` (window coordinates): the list starts at
-/// `left`, and its edge is the middle of the gap after it. It stays at least `MIN_LIST` wide and
-/// leaves the page beside it at least `MIN_DETAIL` of `mail`.
+/// `left`, and its edge is the middle of the gap after it (`list_width`'s bounds).
 pub fn dragged_width(x: f32, left: f32, mail: f32) -> f32 {
-    let widest = layout::MIN_LIST.max(mail - layout::GAP - layout::MIN_DETAIL);
-    (x - left - layout::GAP / 2.).clamp(layout::MIN_LIST, widest)
+    list_width(x - left - layout::GAP / 2., mail)
 }
 
 /// The handle in the gap after the list: zero wide, its band straddling where the caller places it

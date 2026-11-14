@@ -1,7 +1,10 @@
 //! Google Chat through the in-process engine's `chat_*` methods: the space list (direct messages, group
 //! chats, spaces; older pages load near its end), a space's log with a composer (pictures inline,
 //! other files as tiles), and starting a conversation. `ChatPane` fills the main window's content
-//! area; the sidebar reads `accounts()` and `unread()` from it.
+//! area as mail does (MS-328): the list's island, and the open space (or the new-chat form) on an
+//! island beside it in a wide window, over it in a narrow one; the list is as wide as mail's
+//! (`set_split`), and its title row, search field and the space's toolbar are mail's (`controls`).
+//! The sidebar reads `accounts()` and `unread()` from it.
 //!
 //! The engine keeps the state, as it does for the native reader: it polls Google for the spaces
 //! (every `chat.pollSeconds`), and while a space is open (`chat_open`) it fetches its newest
@@ -9,9 +12,11 @@
 //! engine's `Chat` event and the open space's history on `ChatMessages`. Engine calls run on the
 //! background executor.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,20 +27,23 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Div, ElementId, Entity, EntityInputHandler as _, FocusHandle,
     Focusable, FontStyle, FontWeight, HighlightStyle, ImgResourceLoader, InteractiveElement, InteractiveText,
-    IntoElement, KeyBinding, ListAlignment, ListState, ObjectFit, ParentElement, Render, Resource, ScrollStrategy,
-    SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled, StyledImage, StyledText, Subscription,
-    UniformListScrollHandle, Window, actions, div, img, list, px, relative, uniform_list,
+    IntoElement, KeyBinding, ListAlignment, ListState, ObjectFit, ParentElement, Render, Resource, ScrollEvent,
+    ScrollStrategy, SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled, StyledImage, StyledText,
+    Subscription, UniformListScrollHandle, Window, actions, canvas, div, img, list, px, relative, uniform_list,
 };
 
 use crate::avatars;
 use crate::controls::{
-    ButtonKind, ControlSize, Tone, button, centered_note, icon_button, list_row, mark_dot, notice, raised_capsule, row_layout,
+    ButtonKind, ControlSize, Tone, button, capsule, centered_note, hairline, icon_button, island, list_header, list_row,
+    mark_dot, notice, page_scrim, page_toolbar, pill, raised_capsule, row_layout, search_field,
 };
 use crate::design::{self, AttachmentKind, Palette, chat as metrics, layout, list as rows, log as log_metrics, radius, space, stroke, text};
 use crate::message_log;
 use crate::icons::{Icon, icon};
 use crate::engine::{MailError, engine};
 use crate::input;
+use crate::split;
+use crate::state::ReaderTop;
 
 actions!(chat, [Back, Next, Previous, Open, NewChat, Refresh, FormatBold, FormatItalic, FormatStrike, FormatCode]);
 
@@ -703,7 +711,9 @@ impl Log {
 
 // MARK: - The pane
 
+/// What the page beside (or over) the list shows.
 enum View {
+    /// Nothing: the list takes the whole pane.
     Spaces,
     Space(Key),
     NewChat,
@@ -757,6 +767,17 @@ pub struct ChatPane {
     highlight: Option<Key>,
     scroll: UniformListScrollHandle,
     view: View,
+    /// The list's search field, and what it holds, lowercased: the rows in view match it.
+    search: Entity<InputState>,
+    query: String,
+    /// The list's width beside the page, and whether the page sits beside the list (a wide
+    /// window) or over it, as the window lays out mail (`set_split`).
+    list_width: f32,
+    two_pane: bool,
+    /// How far the open space's log is scrolled, for its toolbar, and the height of its heading
+    /// (the title and its pills) as last laid out.
+    log_top: ReaderTop,
+    head_height: Rc<Cell<f32>>,
     logs: HashMap<Key, Log>,
     /// The thread the next message replies in, and who started it.
     reply_thread: Option<(SharedString, SharedString)>,
@@ -784,9 +805,11 @@ impl ChatPane {
                 .submit_on_enter(true)
         });
         let people_input = cx.new(|cx| InputState::new(window, cx).placeholder("Name or email address"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search conversations"));
         let subscriptions = vec![
             cx.subscribe_in(&composer, window, Self::on_composer_event),
             cx.subscribe_in(&people_input, window, Self::on_people_event),
+            cx.subscribe_in(&search, window, Self::on_search_event),
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
         ];
         let mut this = Self {
@@ -811,6 +834,12 @@ impl ChatPane {
             highlight: None,
             scroll: UniformListScrollHandle::new(),
             view: View::Spaces,
+            search,
+            query: String::new(),
+            list_width: layout::MIN_LIST,
+            two_pane: true,
+            log_top: ReaderTop::Top,
+            head_height: Rc::new(Cell::new(0.)),
             logs: HashMap::new(),
             reply_thread: None,
             hovered_message: None,
@@ -876,6 +905,16 @@ impl ChatPane {
     /// shows the pane.
     pub fn open_space(&mut self, account: SharedString, space: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         self.open(Key { account, space }, window, cx);
+    }
+
+    /// How the window lays the pane out, as it lays out mail (MS-328): the list `list_width` wide
+    /// beside the open page in a wide window (`two_pane`), else the page over the list.
+    pub fn set_split(&mut self, list_width: f32, two_pane: bool, cx: &mut Context<Self>) {
+        if (list_width, two_pane) != (self.list_width, self.two_pane) {
+            self.list_width = list_width;
+            self.two_pane = two_pane;
+            cx.notify();
+        }
     }
 
     /// Runs `work` on the background executor, then `done` with its result on the main thread.
@@ -1025,13 +1064,42 @@ impl ChatPane {
     }
 
     fn rebuild_visible(&mut self) {
+        let query = &self.query;
         self.visible = self
             .spaces
             .iter()
             .enumerate()
             .filter(|(_, space)| self.filter.as_ref().is_none_or(|a| &space.account == a))
+            .filter(|(_, space)| {
+                query.is_empty()
+                    || space.title.to_lowercase().contains(query)
+                    || space.snippet.to_lowercase().contains(query)
+            })
             .map(|(ix, _)| ix)
             .collect();
+    }
+
+    /// Typing in the list's search field keeps only the conversations whose title or latest
+    /// message holds the text.
+    fn on_search_event(&mut self, input: &Entity<InputState>, event: &InputEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let InputEvent::Change = event {
+            let query = input.read(cx).value().trim().to_lowercase();
+            if query != self.query {
+                self.query = query;
+                self.rebuild_visible();
+                if !self.visible.is_empty() {
+                    self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    /// Esc in the search field clears it and gives the keys back to the list.
+    fn cancel_search(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |search, cx| search.clean(window, cx));
+        window.focus(&self.focus, cx);
+        cx.notify();
     }
 
     fn space(&self, key: &Key) -> Option<&Space> {
@@ -1055,11 +1123,28 @@ impl ChatPane {
 
     // MARK: - Opening
 
+    /// Opens `key` beside the list (over it in a narrow window), its composer taking the keys.
     fn open(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_space(key, true, window, cx);
+    }
+
+    /// Opens `key` in the page, in place of what it showed; `type_here` gives its composer the
+    /// keys, else the list keeps them (paging through the spaces with the keys, MS-328). The
+    /// space open already only takes the keys.
+    fn show_space(&mut self, key: Key, type_here: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.highlight = Some(key.clone());
+        if matches!(&self.view, View::Space(open) if *open == key) {
+            if type_here {
+                window.focus(&self.composer.focus_handle(cx), cx);
+            }
+            cx.notify();
+            return;
+        }
+        // The new-chat form gives way; a space open before is replaced by `chat_open`.
         self.view = View::Space(key.clone());
         self.reply_thread = None;
         self.hovered_message = None;
+        self.log_top = ReaderTop::Top;
         // Downloads that failed are tried again.
         self.files.retain(|_, file| !matches!(file, FileState::Failed(_)));
         self.composer.update(cx, |input, cx| input.clean(window, cx));
@@ -1076,7 +1161,11 @@ impl ChatPane {
         // keeps the space current and marks it read while it stays open.
         let (account, space) = (key.account.to_string(), key.space.to_string());
         self.load_thread(&key, async move { engine().chat_open(account, space).await }, cx);
-        window.focus(&self.composer.focus_handle(cx), cx);
+        if type_here {
+            window.focus(&self.composer.focus_handle(cx), cx);
+        } else {
+            window.focus(&self.focus, cx);
+        }
         cx.notify();
     }
 
@@ -1345,9 +1434,14 @@ impl ChatPane {
         self.composer.update(cx, |input, cx| wrap_selection(input, marker, window, cx));
     }
 
-    /// Esc in the composer leaves the thread it replies in, else closes the space.
+    /// Esc in the composer leaves the thread it replies in; else, beside the list, gives the keys
+    /// to the list (the space stays open, ↑/↓ page through the spaces in it, Return comes back
+    /// and Esc closes it, as mail's reader); over the list it closes the space.
     fn composer_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
         if self.reply_thread.take().is_some() {
+            cx.notify();
+        } else if self.two_pane {
+            window.focus(&self.focus, cx);
             cx.notify();
         } else {
             self.close(window, cx);
@@ -1365,8 +1459,10 @@ impl ChatPane {
             .clone()
             .or_else(|| self.chat_accounts.iter().find(|a| a.can_start).map(|a| a.id.clone()))
             .or_else(|| self.accounts.first().map(|a| a.id.clone()));
+        self.leave_space(cx);
         self.form = NewChatForm { account, ..Default::default() };
         self.view = View::NewChat;
+        self.reply_thread = None;
         self.people_input.update(cx, |input, cx| input.clean(window, cx));
         window.focus(&self.people_input.focus_handle(cx), cx);
         self.load_partners(cx);
@@ -1528,15 +1624,20 @@ impl ChatPane {
         }
     }
 
+    /// Esc on the list: the open space or form closes, else the search ends, else the window
+    /// takes it.
     fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
         match self.view {
-            View::Spaces => cx.propagate(),
             View::Space(_) | View::NewChat => self.close(window, cx),
+            View::Spaces if !self.query.is_empty() => self.cancel_search(&Escape, window, cx),
+            View::Spaces => cx.propagate(),
         }
     }
 
-    fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if !matches!(self.view, View::Spaces) || self.visible.is_empty() {
+    /// ↑/↓ on the list: the highlight moves; with a space open, the one highlighted opens in its
+    /// place, the list keeping the keys (as mail's reader pages through the list).
+    fn step(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.visible.is_empty() {
             return;
         }
         let current = self
@@ -1547,22 +1648,28 @@ impl ChatPane {
             None => 0,
             Some(at) => at.saturating_add_signed(delta).min(self.visible.len() - 1),
         };
-        self.highlight = Some(self.spaces[self.visible[next]].key());
+        let key = self.spaces[self.visible[next]].key();
         self.scroll.scroll_to_item(next, ScrollStrategy::Center);
-        cx.notify();
+        if matches!(self.view, View::Space(_)) {
+            self.show_space(key, false, window, cx);
+        } else {
+            self.highlight = Some(key);
+            cx.notify();
+        }
     }
 
-    fn next(&mut self, _: &Next, _: &mut Window, cx: &mut Context<Self>) {
-        self.step(1, cx);
+    fn next(&mut self, _: &Next, window: &mut Window, cx: &mut Context<Self>) {
+        self.step(1, window, cx);
     }
 
-    fn previous(&mut self, _: &Previous, _: &mut Window, cx: &mut Context<Self>) {
-        self.step(-1, cx);
+    fn previous(&mut self, _: &Previous, window: &mut Window, cx: &mut Context<Self>) {
+        self.step(-1, window, cx);
     }
 
+    /// Return on the list opens the highlighted space, or goes back to typing in the open one.
     fn open_highlighted(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.highlight.clone() else { return };
-        if matches!(self.view, View::Spaces) && self.space(&key).is_some() {
+        if self.space(&key).is_some() {
             self.open(key, window, cx);
         }
     }
@@ -1588,14 +1695,16 @@ impl ChatPane {
 impl Render for ChatPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = design::palette(window.appearance());
-        let body = match &self.view {
-            View::Spaces => self.render_spaces(p, cx),
+        let list = self.render_list_island(p, window, cx);
+        let page = match &self.view {
+            View::Spaces => None,
             View::Space(key) => {
                 let key = key.clone();
-                self.render_space(&key, p, cx)
+                Some(self.render_space(&key, p, window, cx))
             }
-            View::NewChat => self.render_form(p, cx),
+            View::NewChat => Some(self.render_form(p, window, cx)),
         };
+        let (two_pane, list_width) = (self.two_pane, self.list_width);
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -1605,39 +1714,66 @@ impl Render for ChatPane {
             .on_action(cx.listener(Self::open_highlighted))
             .on_action(cx.listener(Self::new_chat))
             .on_action(cx.listener(Self::refresh))
+            .relative()
             .size_full()
-            .flex()
-            .flex_col()
             .font_family(design::ui_font())
             .text_size(px(text::BODY))
-            .bg(p.background)
             .text_color(p.text)
-            .child(body)
+            .map(|d| match page {
+                // Beside the list, which is as wide as mail's; the gap between them moves its edge
+                // (`split.rs`).
+                Some(page) if two_pane => d
+                    .child(list.absolute().left_0().top_0().bottom_0().w(px(list_width)))
+                    .child(split::list_handle("chat-split").left(px(list_width + layout::GAP / 2.)))
+                    .child(div().absolute().top_0().bottom_0().right_0().left(px(list_width + layout::GAP)).child(page)),
+                // Over the list, which stays beneath it.
+                Some(page) => d.child(list.size_full()).child(div().absolute().top_0().left_0().size_full().child(page)),
+                None => d.child(list.size_full()),
+            })
     }
 }
 
 impl ChatPane {
-    fn header(&self, p: &'static Palette) -> Div {
-        div()
-            .flex_shrink_0()
-            .h(px(metrics::HEADER_HEIGHT))
-            .px(px(rows::INSET + rows::SECTION_X))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .border_b_1()
-            .border_color(p.line)
+    /// The list's island, as mail's (MS-328): its title row (the account or "Chat", how many
+    /// conversations are unread, refresh and New Chat on a capsule), the search field, the rows.
+    fn render_list_island(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let title = self.filter.as_ref().map_or_else(|| SharedString::from("Chat"), |a| self.account_label(a));
+        let unread = self.unread(self.filter.as_deref());
+        let subtitle: Option<SharedString> = if !self.loaded && self.failure.is_none() {
+            Some("Loading…".into())
+        } else if !self.query.is_empty() {
+            Some(match self.visible.len() {
+                1 => "1 conversation".into(),
+                found => format!("{found} conversations").into(),
+            })
+        } else {
+            (unread > 0).then(|| format!("{unread} unread").into())
+        };
+        let actions = capsule(p)
+            .child(
+                icon_button("chat-refresh", Icon::Refresh, "Refresh", true, p.glyph)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
+            )
+            .child(
+                icon_button("chat-new", Icon::Compose, "New Chat", !self.accounts.is_empty(), p.glyph)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.start_form(window, cx))),
+            );
+        let search_focused = self.search.focus_handle(cx).is_focused(window);
+        island(p.tray, p).occlude().child(
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(list_header("chat-list-header", None, title, subtitle, actions, p, window, cx))
+                .child(search_field("chat-search", search_focused, input::field(&self.search), cx.listener(Self::cancel_search), p))
+                .child(hairline(p))
+                .child(div().flex_1().min_h_0().child(self.render_spaces(p, cx))),
+        )
     }
 
+    /// The rows, or what stands in for them.
     fn render_spaces(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let title = self.filter.as_ref().map_or_else(|| SharedString::from("Chat"), |a| self.account_label(a));
-        let header = self
-            .header(p)
-            .child(div().flex_1().min_w_0().truncate().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::SEMIBOLD).child(title))
-            .when(!self.accounts.is_empty(), |d| {
-                d.child(button("chat-new", "New Chat", ButtonKind::Secondary, ControlSize::Small, true, p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.start_form(window, cx))))
-            });
-        let content: AnyElement = if let Some(failure) = &self.failure {
+        if let Some(failure) = &self.failure {
             centered_note(failure.clone(), p).into_any_element()
         } else if !self.loaded {
             centered_note("Loading chats…", p).into_any_element()
@@ -1661,6 +1797,8 @@ impl ChatPane {
                 }))
                 .when_some(self.connect_failure.clone(), |d, failure| d.child(div().text_center().text_color(p.danger).child(failure)))
                 .into_any_element()
+        } else if self.visible.is_empty() && !self.query.is_empty() {
+            centered_note("No conversations match.", p).into_any_element()
         } else if self.visible.is_empty() {
             centered_note("No conversations yet.", p)
                 .child(button("chat-new-empty", "New Chat", ButtonKind::Secondary, ControlSize::Small, true, p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.start_form(window, cx))))
@@ -1677,12 +1815,11 @@ impl ChatPane {
                 }),
             )
             .track_scroll(&self.scroll)
-            .flex_1()
+            .size_full()
             .px(px(rows::INSET))
             .py(px(6.))
             .into_any_element()
-        };
-        div().size_full().flex().flex_col().child(header).child(content).into_any_element()
+        }
     }
 
     /// The `position`th space in view.
@@ -1722,46 +1859,19 @@ impl ChatPane {
             .into_any_element()
     }
 
-    fn render_space(&self, key: &Key, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let space = self.space(key);
-        let log = self.logs.get(key);
-        let title = space
+    /// The space's title: the list's, else its history's, else its id.
+    fn space_title(&self, key: &Key) -> SharedString {
+        self.space(key)
             .map(|s| s.title.clone())
-            .or_else(|| log.and_then(|l| l.title.clone()))
-            .unwrap_or_else(|| key.space.clone());
-        let mut meta = vec![SharedString::from(space.map_or("Space", Space::kind_title))];
-        if self.accounts.len() > 1 {
-            meta.push(self.account_label(&key.account));
-        }
-        let members = log.map_or(0, |l| l.members.len());
-        if space.is_some_and(|s| s.kind == mailstream::ChatSpaceKind::Group) && members > 0 {
-            meta.push(format!("{} people", members + 1).into());
-        }
-        // Messages already shown stay; a failed refresh only shows here.
-        let refresh_failure = log.and_then(|l| l.failure.clone().filter(|_| l.len() > 0));
-        let header = self
-            .header(p)
-            .child(icon_button("chat-back", Icon::Back, "Back", true, p.glyph).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(div().truncate().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::SEMIBOLD).child(title.clone()))
-                    .child(
-                        div()
-                            .flex()
-                            .min_w_0()
-                            .gap(px(space::S4))
-                            .text_size(px(text::CAPTION))
-                            .text_color(p.muted)
-                            .child(div().flex_shrink_0().child(meta.join(" · ")))
-                            .children(refresh_failure.map(|failure| {
-                                div().min_w_0().truncate().text_color(p.danger).child(format!("· Couldn't update: {failure}"))
-                            })),
-                    ),
-            );
+            .or_else(|| self.logs.get(key).and_then(|l| l.title.clone()))
+            .unwrap_or_else(|| key.space.clone())
+    }
+
+    /// The open space's island, as mail's reader (MS-328): its log scrolls under the reader's
+    /// toolbar (✕ beside the list, ‹ over it), which shows the title once the log's heading has
+    /// scrolled under it; the composer below.
+    fn render_space(&self, key: &Key, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let title = self.space_title(key);
         let log: AnyElement = match self.logs.get(key) {
             Some(log) => {
                 let list_key = key.clone();
@@ -1772,20 +1882,55 @@ impl ChatPane {
                         this.render_entry(&list_key, ix, window, p, cx)
                     }),
                 )
-                    .flex_1()
-                    .w_full()
-                    .into_any_element()
+                .size_full()
+                .into_any_element()
             }
-            None => div().flex_1().into_any_element(),
+            None => div().into_any_element(),
         };
-        div()
+        // Where the log is, once this frame has laid it out (opened, grown, scrolled).
+        cx.on_next_frame(window, |this, _, cx| this.note_log_top(cx));
+        let (glyph, tip) = if self.two_pane { (Icon::Close, "Close (Esc)") } else { (Icon::Back, "Back (Esc)") };
+        let close = icon_button("chat-close", glyph, tip, true, p.glyph)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx)));
+        let toolbar_title = (self.log_top == ReaderTop::PastTitle).then(|| title.clone());
+        island(p.background, p)
+            .occlude()
             .size_full()
             .flex()
             .flex_col()
-            .child(header)
-            .child(log)
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .on_scroll(cx.listener(|_, _: &ScrollEvent, window, cx| {
+                        cx.on_next_frame(window, |this, _, cx| this.note_log_top(cx));
+                    }))
+                    .child(log)
+                    .when(self.log_top != ReaderTop::Top, |d| d.child(page_scrim(p)))
+                    .child(page_toolbar("chat-toolbar", close, toolbar_title, p, window, cx)),
+            )
             .child(self.render_composer(&title, p, cx))
             .into_any_element()
+    }
+
+    /// Notes how far the open space's log is scrolled, for its toolbar: past its top, and past its
+    /// heading (the title and its pills, under the toolbar's band at the top of the log).
+    fn note_log_top(&mut self, cx: &mut Context<Self>) {
+        let View::Space(key) = &self.view else { return };
+        let Some(log) = self.logs.get(key) else { return };
+        let scrolled = -f32::from(log.list.scroll_px_offset_for_scrollbar().y);
+        let top = if scrolled <= 0.5 {
+            ReaderTop::Top
+        } else if scrolled > space::S16 + self.head_height.get() {
+            ReaderTop::PastTitle
+        } else {
+            ReaderTop::Scrolled
+        };
+        if top != self.log_top {
+            self.log_top = top;
+            cx.notify();
+        }
     }
 
     /// A column as wide as the reader's text, centered.
@@ -1922,9 +2067,10 @@ impl ChatPane {
         .into_any_element()
     }
 
-    /// Above the log: what keeps it empty (loading, a failure, no messages) or the button for
-    /// earlier messages. Over messages already shown (from the cache) neither loading nor a failed
-    /// refresh takes a line here; the header tells of the failure (MS-326).
+    /// The log's head, under the toolbar's band: the space's heading (as the reader's title, in the
+    /// messages' column, MS-328), then what keeps the log empty (loading, a failure, no messages)
+    /// or the button for earlier messages. Over messages already shown (from the cache) neither
+    /// loading nor a failed refresh takes a line here; the heading tells of the failure (MS-326).
     fn render_top(&self, key: &Key, log: &Log, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let empty = log.len() == 0;
         let content: AnyElement = if let Some(failure) = log.failure.as_ref().filter(|_| empty) {
@@ -1947,7 +2093,42 @@ impl ChatPane {
         } else {
             div().pt(px(24.)).into_any_element()
         };
-        Self::column(content).into_any_element()
+        Self::column(div().pt(px(layout::HEADER_HEIGHT + space::S16)).child(self.render_heading(key, log, p)).child(content))
+            .into_any_element()
+    }
+
+    /// The space's title, large, over its pills: its kind, its account (with several), how many
+    /// people are in a group; a refresh that failed over the messages shown, in red.
+    fn render_heading(&self, key: &Key, log: &Log, p: &'static Palette) -> Div {
+        let space = self.space(key);
+        let mut pills = vec![pill(space.map_or("Space", Space::kind_title), None, p)];
+        if self.accounts.len() > 1 {
+            let dot = self.account_color(&key.account).map(|color| mark_dot(color).into_any_element());
+            pills.push(pill(self.account_label(&key.account), dot, p));
+        }
+        if space.is_some_and(|s| s.kind == mailstream::ChatSpaceKind::Group) && !log.members.is_empty() {
+            pills.push(pill(format!("{} people", log.members.len() + 1), None, p));
+        }
+        let refresh_failure = log.failure.clone().filter(|_| log.len() > 0);
+        // Its height, for the toolbar to tell when it has scrolled under it.
+        let height = self.head_height.clone();
+        let measure = canvas(move |bounds, _, _| height.set(f32::from(bounds.size.height)), |_, _, _, _| {});
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .text_size(px(text::DISPLAY))
+                    .line_height(relative(1.2))
+                    .font_weight(FontWeight::BOLD)
+                    .child(self.space_title(key)),
+            )
+            .child(div().mt(px(space::S12)).flex().flex_wrap().items_center().gap(px(space::S8)).children(pills))
+            .children(refresh_failure.map(|failure| {
+                div().mt(px(space::S8)).text_size(px(text::FOOTNOTE)).text_color(p.danger).child(format!("Couldn't update: {failure}"))
+            }))
+            .child(measure.absolute().top_0().left_0().size_full())
     }
 
     /// An attachment in the log: an uploaded picture as itself once downloaded (Flutter's
@@ -2088,7 +2269,7 @@ impl ChatPane {
         .into_any_element()
     }
 
-    fn render_form(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_form(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let form = &self.form;
         let can_start = form
             .account
@@ -2207,17 +2388,14 @@ impl ChatPane {
             .when(start_enabled, |d| d.cursor_pointer())
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.start_chat(window, cx)))
             .child("Start");
-        div()
+        let (glyph, tip) = if self.two_pane { (Icon::Close, "Close (Esc)") } else { (Icon::Back, "Back (Esc)") };
+        let close = icon_button("chat-form-close", glyph, tip, true, p.glyph)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx)));
+        island(p.background, p)
+            .occlude()
             .size_full()
-            .flex()
-            .flex_col()
             .child(
-                self.header(p)
-                    .child(icon_button("chat-form-back", Icon::Back, "Back", true, p.glyph).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))))
-                    .child(div().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::SEMIBOLD).child("New Chat")),
-            )
-            .child(
-                div().flex_1().flex().justify_center().pt(px(32.)).child(
+                div().size_full().flex().justify_center().pt(px(layout::HEADER_HEIGHT + space::S16)).child(
                     div()
                         .w_full()
                         .max_w(px(metrics::FORM_WIDTH))
@@ -2225,6 +2403,14 @@ impl ChatPane {
                         .flex()
                         .flex_col()
                         .gap(px(12.))
+                        .child(
+                            div()
+                                .pb(px(space::S8))
+                                .text_size(px(text::DISPLAY))
+                                .line_height(relative(1.2))
+                                .font_weight(FontWeight::BOLD)
+                                .child("New Chat"),
+                        )
                         .children(accounts)
                         .child(field)
                         .child(suggestions)
@@ -2242,6 +2428,7 @@ impl ChatPane {
                         ),
                 ),
             )
+            .child(page_toolbar("chat-form-toolbar", close, None, p, window, cx))
             .into_any_element()
     }
 }

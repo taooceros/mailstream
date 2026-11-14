@@ -700,7 +700,6 @@ pub mod chat {
     pub const COMPOSER_MIN_ROWS: usize = 1;
     pub const COMPOSER_MAX_ROWS: usize = 6;
     pub const COMPOSER_PADDING_Y: f32 = 9.0;
-    pub const HEADER_HEIGHT: f32 = 56.0;
     /// Width of the new-chat form.
     pub const FORM_WIDTH: f32 = 520.0;
     /// A message still being sent.

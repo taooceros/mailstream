@@ -27,8 +27,8 @@ use crate::avatars;
 use crate::bench::{Bench, Turn};
 use crate::compose::{ComposeColumn, ResizeColumn};
 use crate::controls::{
-    Tone, capsule, centered_note, field_frame, hairline, icon_avatar, icon_button, island, list_row, mark_dot, notice,
-    notice_close, own_presses, pill, raised_capsule, row_layout, scrim, section_header, tag, title_bar,
+    Tone, capsule, centered_note, hairline, icon_avatar, icon_button, island, list_row, mark_dot, notice, notice_close,
+    own_presses, pill, raised_capsule, row_layout, scrim, search_field, section_header, tag, title_bar,
 };
 #[cfg(target_os = "macos")]
 use crate::controls::{segment, segmented};
@@ -104,8 +104,10 @@ impl Render for MailApp {
             None => mail,
         };
         let content = if self.chat_view.is_some() {
-            // Chat draws its own header; it takes one island.
-            island(p.background, p).occlude().size_full().child(self.chat.clone()).into_any_element()
+            // Chat lays out its own islands, the list as wide as mail's (MS-328).
+            let list = split::list_width(self.list_share * room, mail);
+            self.chat.update(cx, |chat, cx| chat.set_split(list, two_pane, cx));
+            div().size_full().child(self.chat.clone()).into_any_element()
         } else if self.calendar_view {
             // The calendar lays out its own islands.
             div().size_full().child(self.calendar.clone()).into_any_element()
@@ -278,9 +280,7 @@ impl MailApp {
                 let column = column.min(widest);
                 (split_list, room - column - layout::GAP, Some((column, navigation, widest)))
             }
-            None => {
-                (share.clamp(layout::MIN_LIST, layout::MIN_LIST.max(mail - layout::GAP - layout::MIN_DETAIL)), mail, None)
-            }
+            None => (split::list_width(share, mail), mail, None),
         };
         // Where the layers rest beside each other, for the gestures and the slide (MS-299).
         let inset = between.map_or(0., |(column, _, _)| column + layout::GAP);
@@ -452,21 +452,7 @@ impl MailApp {
         };
         let column = column
             .child(self.render_list_header(p, window, cx))
-            .child(
-                div().flex_shrink_0().px(px(space::S12)).pb(px(space::S10)).child(
-                    field_frame(search_focused, true, p)
-                        .id("search")
-                        .h(px(28.))
-                        .pl(px(space::S10))
-                        .pr(px(space::S8))
-                        .gap(px(space::S6))
-                        .line_height(px(18.))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_action(cx.listener(Self::cancel_search))
-                        .child(icon(Icon::Search, 14., p.muted))
-                        .child(div().flex_1().min_w_0().child(input::field(&self.search))),
-                ),
-            )
+            .child(search_field("search", search_focused, input::field(&self.search), cx.listener(Self::cancel_search), p))
             .children(self.render_account_notice(p, cx))
             .child(hairline(p))
             .child(

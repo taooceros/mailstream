@@ -2,7 +2,7 @@
 //! refresh and compose on a capsule) and the conversation's toolbar (close or back, then its
 //! actions on capsules floating over the message, which scrolls under them).
 
-use gpui::{linear_color_stop, linear_gradient};
+use crate::controls::{list_header, page_scrim, page_toolbar};
 
 use super::*;
 use crate::state::ReaderTop;
@@ -42,48 +42,20 @@ impl MailApp {
             }
         };
         let loading = self.list().is_some_and(|list| list.loading || list.fetching);
-        let can_go_back = bundle.is_some() || self.query.is_some();
-        title_bar("list-header", window, cx)
-            .flex_shrink_0()
-            .h(px(layout::HEADER_HEIGHT))
-            .px(px(space::S10))
-            .flex()
-            .items_center()
-            .gap(px(space::S10))
-            .when(can_go_back, |d| {
-                d.child(capsule(p).child(icon_button("back", Icon::Back, "Back (Esc)", true, p.glyph).on_click(
-                    cx.listener(|this, _: &ClickEvent, window, cx| this.list_back(window, cx)),
-                )))
-            })
+        let back = (bundle.is_some() || self.query.is_some()).then(|| {
+            icon_button("back", Icon::Back, "Back (Esc)", true, p.glyph)
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.list_back(window, cx)))
+        });
+        let actions = capsule(p)
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .when(!can_go_back, |d| d.pl(px(space::S6)))
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(text::PANE_TITLE))
-                            .font_weight(FontWeight::BOLD)
-                            .child(title),
-                    )
-                    .when_some(if loading { Some("Loading…".into()) } else { subtitle }, |d, subtitle: SharedString| {
-                        d.child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(subtitle))
-                    }),
+                icon_button("refresh", Icon::Refresh, "Get New Mail", true, p.glyph)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
             )
-            .child(
-                capsule(p)
-                    .child(
-                        icon_button("refresh", Icon::Refresh, "Get New Mail", true, p.glyph)
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
-                    )
-                    .child(icon_button("compose", Icon::Compose, "New Message", true, p.glyph).on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.new_message(&NewMessage, window, cx)),
-                    )),
-            )
-            .into_any_element()
+            .child(icon_button("compose", Icon::Compose, "New Message", true, p.glyph).on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| this.new_message(&NewMessage, window, cx)),
+            ));
+        let subtitle = if loading { Some("Loading…".into()) } else { subtitle };
+        list_header("list-header", back, title, subtitle, actions, p, window, cx).into_any_element()
     }
 
     /// The list's title row while conversations are picked (MS-305): ✕ ends the selection, then
@@ -168,11 +140,6 @@ impl MailApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let scrim = linear_gradient(
-            180.,
-            linear_color_stop(p.background, design::reader::SCRIM_SOLID),
-            linear_color_stop(p.background.opacity(0.), 1.),
-        );
         island(p.background, p)
             .id(ElementId::Name(format!("detail:{}", conversation.id).into()))
             .size_full()
@@ -180,9 +147,7 @@ impl MailApp {
             .occlude()
             .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer.clone(), cx))
             .child(self.render_reader(conversation, p, window, cx))
-            .when(self.reader_top != ReaderTop::Top, |d| {
-                d.child(div().absolute().top_0().left_0().right_0().h(px(design::reader::SCRIM_HEIGHT)).bg(scrim))
-            })
+            .when(self.reader_top != ReaderTop::Top, |d| d.child(page_scrim(p)))
             .child(self.render_detail_toolbar(conversation, layer, two_pane, p, window, cx))
             .into_any_element()
     }
@@ -204,32 +169,12 @@ impl MailApp {
         let unread = conversation.unread;
         let starred = conversation.starred;
         let (close_icon, close_tip) = if two_pane { (Icon::Close, "Close (Esc)") } else { (Icon::Back, "Back (Esc)") };
-        title_bar("detail-toolbar", window, cx)
+        let close = icon_button("close", close_icon, close_tip, true, p.glyph)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.back(&Back, window, cx)));
+        // Once the title has scrolled away, the subject in one line between the capsules.
+        let title = (self.reader_top == ReaderTop::PastTitle).then(|| SharedString::from(conversation.title.clone()));
+        page_toolbar("detail-toolbar", close, title, p, window, cx)
             .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer, cx))
-            .absolute()
-            .top_0()
-            .left_0()
-            .right_0()
-            .h(px(layout::HEADER_HEIGHT))
-            .px(px(space::S10))
-            .flex()
-            .items_center()
-            .gap(px(space::S8))
-            .child(capsule(p).child(
-                icon_button("close", close_icon, close_tip, true, p.glyph)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.back(&Back, window, cx))),
-            ))
-            // Once the title has scrolled away, the subject in one line between the capsules.
-            .child(div().flex_1().min_w_0().flex().justify_center().when(self.reader_top == ReaderTop::PastTitle, |d| {
-                d.child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(text::BODY))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(conversation.title.clone()),
-                )
-            }))
             .child(
                 capsule(p)
                     .when(conversation.waiting, |d| {
