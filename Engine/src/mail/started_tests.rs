@@ -131,18 +131,18 @@ fn gmail_inbox_lists_the_users_replies_and_the_conversations_they_started() {
     let lunch = conversation(&listing, "me@gmail.com|i1@x");
     assert_eq!(lunch["from"], "Me <me@gmail.com>");
     assert_eq!((lunch["fromMe"].clone(), lunch["started"].clone()), (json!(true), json!(false)));
-    assert_eq!(lunch["peer"], "Ann <ann@x.com>");
+    assert_eq!(lunch["peers"], json!(["Ann <ann@x.com>"]));
     assert_eq!(lunch["date"], date(1));
     assert_eq!(lunch["participants"], json!(["Ann", "me"]));
     assert_eq!(lunch["unread"], true);
     let kickoff = conversation(&listing, "me@gmail.com|s2@x");
     assert_eq!((kickoff["fromMe"].clone(), kickoff["started"].clone()), (json!(true), json!(true)));
-    assert_eq!(kickoff["peer"], "Ann <ann@x.com>");
+    assert_eq!(kickoff["peers"], json!(["Ann <ann@x.com>"]));
     assert_eq!(kickoff["participants"], json!(["me"]));
     assert_eq!(kickoff["mailboxes"], json!(["sent"]));
     let report = conversation(&listing, "me@gmail.com|i2@x");
     assert_eq!((report["from"].clone(), report["fromMe"].clone()), (json!("Bob <bob@x.com>"), json!(false)));
-    assert_eq!(report["peer"], json!(null));
+    assert_eq!(report["peers"], json!([]));
     // One lookup of each thread the user started, the one on Sent's second page too; the reply
     // is never asked about.
     let mut threads = asked.lock().unwrap().clone();

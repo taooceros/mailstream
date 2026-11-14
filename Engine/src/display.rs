@@ -316,7 +316,7 @@ impl Conversation {
         let date = local_iso(self.date.as_deref());
         self.when = date.map(|date| labels.list(&date)).unwrap_or_default();
         self.section = date.map_or_else(|| "Older".into(), |date| labels.section(&date));
-        let avatar_address = self.peer.as_ref().or(self.from.as_ref());
+        let avatar_address = self.peers.first().or(self.from.as_ref());
         self.avatar = match (avatar_address, self.participants.first()) {
             (Some(address), _) => Avatar::of(address),
             (None, Some(name)) => Avatar::new(name, name),

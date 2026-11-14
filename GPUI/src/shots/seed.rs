@@ -373,6 +373,19 @@ fn mail() -> Vec<(Mail, Option<Value>)> {
             .into(),
     );
     all.push((proposal, None));
+    let mut group_reply = Mail::new(GMAIL, "audit-1", JORDAN, "Accessibility audit");
+    group_reply.thread = "audit";
+    group_reply.to = vec![("Design Team", "design@northwind.example")];
+    group_reply.minutes_ago = 90.;
+    group_reply.text = Some("Sharing the contrast notes from our review with the Design Team.".into());
+    all.push((group_reply, None));
+    let mut group_sent = Mail::sent(GMAIL, "audit-2", "Re: Accessibility audit");
+    group_sent.thread = "audit";
+    group_sent.to = vec![("Design Team", "design@northwind.example")];
+    group_sent.reply_to = Some("audit-1");
+    group_sent.minutes_ago = 4.;
+    group_sent.text = Some("Thanks Jordan, updated the focus ring tokens.".into());
+    all.push((group_sent, tag("people", &["Design"], false)));
 
     let mut quoted = Mail::new(GMAIL, "rate-limits", CHRIS, "Re: Question about the API rate limits");
     quoted.minutes_ago = 2. * 24. * 60. + 200.;

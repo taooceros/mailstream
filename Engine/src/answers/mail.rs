@@ -32,10 +32,12 @@ pub struct Conversation {
     /// The user wrote the latest message: lists name its sender `me`.
     #[serde(default)]
     pub from_me: bool,
-    /// When `from_me` is true, the other party's address so lists show their avatar and name.
-    #[serde(default, with = "address_text::optional")]
+    /// When `from_me` is true, whom the user's latest message went to, so lists show them (a
+    /// group's own address, or the people of a group) rather than the user (MS-337, MS-284): its
+    /// recipients but the user, else the last other person who wrote.
+    #[serde(default, with = "address_text::list")]
     #[uniffi(default)]
-    pub peer: Option<Address>,
+    pub peers: Vec<Address>,
     /// Senders' names, `me` for the user's own addresses.
     pub participants: Vec<String>,
     pub message_count: u32,
@@ -69,7 +71,7 @@ pub struct Conversation {
     #[serde(skip)]
     #[uniffi(default = "")]
     pub section: String,
-    /// The avatar of `from`, else of the first participant.
+    /// The avatar of the first of `peers`, else of `from`, else of the first participant.
     #[serde(skip)]
     #[uniffi(default)]
     pub avatar: Avatar,

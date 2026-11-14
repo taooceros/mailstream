@@ -195,7 +195,7 @@ impl MailApp {
     ) -> AnyElement {
         let id = conversation.id.clone();
         // Sent mail names who it went to.
-        let senders = if self.source.role().shows_recipients() {
+        let senders = if self.source.role().shows_recipients() && conversation.peers.is_empty() {
             conversation
                 .participants
                 .iter()

@@ -123,8 +123,8 @@ pub trait ConversationExt {
 impl ConversationExt for Conversation {
     fn sender_name(&self) -> SharedString {
         if self.from_me {
-            if let Some(peer) = &self.peer {
-                return peer.display_name().into();
+            if !self.peers.is_empty() {
+                return self.peers.iter().map(Address::display_name).collect::<Vec<_>>().join(", ").into();
             }
             return "me".into();
         }
@@ -136,6 +136,9 @@ impl ConversationExt for Conversation {
 
     fn senders(&self) -> SharedString {
         if self.from_me {
+            if !self.peers.is_empty() {
+                return self.sender_name();
+            }
             let others: Vec<&str> = self.participants.iter().map(String::as_str).filter(|p| *p != "me").collect();
             return if others.is_empty() { self.sender_name() } else { others.join(", ").into() };
         }
@@ -143,8 +146,8 @@ impl ConversationExt for Conversation {
     }
 
     fn avatar_email(&self) -> SharedString {
-        self.peer
-            .as_ref()
+        self.peers
+            .first()
             .or(self.from.as_ref())
             .map_or_else(|| self.sender_name(), |address| address.email.clone().into())
     }
@@ -402,7 +405,7 @@ mod tests {
             date: None,
             from: Some(Address { name: Some("Me".into()), email: "me@example.com".into() }),
             from_me: true,
-            peer: Some(Address { name: Some("Morgan Lee".into()), email: "morgan@example.com".into() }),
+            peers: vec![Address { name: Some("Morgan Lee".into()), email: "morgan@example.com".into() }],
             participants: vec!["me".into()],
             message_count: 1,
             unread: false,
@@ -425,10 +428,24 @@ mod tests {
         assert_eq!(sent_only.avatar_email().as_ref(), "morgan@example.com");
 
         sent_only.participants = vec!["Jordan Park".into(), "me".into()];
-        sent_only.peer = Some(Address { name: Some("Jordan Park".into()), email: "jordan@example.com".into() });
+        sent_only.peers = vec![Address { name: Some("Jordan Park".into()), email: "jordan@example.com".into() }];
         sent_only.message_count = 2;
         assert_eq!(sent_only.sender_name().as_ref(), "Jordan Park");
         assert_eq!(sent_only.senders().as_ref(), "Jordan Park");
         assert_eq!(sent_only.avatar_email().as_ref(), "jordan@example.com");
+
+        // Multiple recipients or a group address: row names all peers (or the group) and keys the avatar on the first.
+        sent_only.peers = vec![
+            Address { name: Some("Morgan Lee".into()), email: "morgan@example.com".into() },
+            Address { name: Some("Devon Kim".into()), email: "devon@example.com".into() },
+        ];
+        assert_eq!(sent_only.sender_name().as_ref(), "Morgan Lee, Devon Kim");
+        assert_eq!(sent_only.senders().as_ref(), "Morgan Lee, Devon Kim");
+        assert_eq!(sent_only.avatar_email().as_ref(), "morgan@example.com");
+
+        sent_only.peers = vec![Address { name: Some("Design Team".into()), email: "design@example.com".into() }];
+        assert_eq!(sent_only.sender_name().as_ref(), "Design Team");
+        assert_eq!(sent_only.senders().as_ref(), "Design Team");
+        assert_eq!(sent_only.avatar_email().as_ref(), "design@example.com");
     }
 }

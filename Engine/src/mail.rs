@@ -1446,16 +1446,7 @@ impl Mail {
             date: conversation.latest_date.map(iso8601),
             from: latest.envelope.from.first().cloned(),
             from_me: latest.is_from_user(&own),
-            peer: latest.is_from_user(&own).then(|| {
-                conversation
-                    .messages
-                    .iter()
-                    .rev()
-                    .flat_map(|message| message.envelope.from.iter())
-                    .chain(latest.envelope.to.iter())
-                    .find(|address| !own.contains(&address.normalized_email()))
-                    .cloned()
-            }).flatten(),
+            peers: conversation_peers(conversation, &own),
             participants,
             message_count: conversation.messages.len() as u32,
             unread: conversation.is_unread,
@@ -1747,6 +1738,35 @@ fn remember(state: &mut State, conversation: &Conversation, primary: &HashSet<Ma
         }
     }
 }
+/// Whom the user's latest message went to when `from_me` is true: its non-own recipients in
+/// order (deduplicated), or the last other sender in the thread if it only names the user.
+fn conversation_peers(conversation: &Conversation, own: &HashSet<String>) -> Vec<Address> {
+    let latest = conversation.latest();
+    if !latest.is_from_user(own) {
+        return Vec::new();
+    }
+    let mut seen = HashSet::new();
+    let recipients: Vec<Address> = latest
+        .envelope
+        .to
+        .iter()
+        .filter(|address| !own.contains(&address.normalized_email()) && seen.insert(address.normalized_email()))
+        .cloned()
+        .collect();
+    if !recipients.is_empty() {
+        return recipients;
+    }
+    conversation
+        .messages
+        .iter()
+        .rev()
+        .flat_map(|message| message.envelope.from.iter())
+        .find(|address| !own.contains(&address.normalized_email()))
+        .cloned()
+        .into_iter()
+        .collect()
+}
+
 
 /// Whether held mail, `envelope`, matches a search for `query` (MS-352): each of its words is in
 /// the subject or a sender's or recipient's name or address, ignoring case; with an `OR` between
@@ -1829,5 +1849,61 @@ mod tests {
         assert!(!held_match(&envelope, "lunch dinner"));
         assert!(!held_match(&envelope, "lunch is:unread"));
         assert!(!held_match(&envelope, "  "));
+    }
+
+    #[test]
+    fn conversation_peers_picks_recipients_or_group_before_prior_sender() {
+        let msg = |id: &str, role: MailboxRole, from: Vec<Address>, to: Vec<Address>| MailMessage {
+            key: Arc::new(MailboxKey::new("me@x.com", if role == MailboxRole::Sent { "SENT" } else { "INBOX" })),
+            envelope: Arc::new(Envelope {
+                id: id.into(),
+                thread: None,
+                message_id: None,
+                in_reply_to: Vec::new(),
+                flags: Default::default(),
+                subject: "Subj".into(),
+                from,
+                to,
+                date: None,
+                size: 0,
+                has_attachment: None,
+                tags: Default::default(),
+                provider_category: None,
+                important: false,
+            }),
+            role,
+        };
+        let me = Address::new(Some("Me".into()), "me@x.com");
+        let alice = Address::new(Some("Alice".into()), "alice@x.com");
+        let bob = Address::new(Some("Bob".into()), "bob@x.com");
+        let group = Address::new(Some("Design Team".into()), "design@x.com");
+        let own: HashSet<String> = ["me@x.com".to_string()].into_iter().collect();
+
+        // Sent to multiple people: lists every recipient, deduplicated and without me.
+        let multi = Conversation::thread(vec![msg(
+            "m1",
+            MailboxRole::Sent,
+            vec![me.clone()],
+            vec![me.clone(), alice.clone(), bob.clone(), Address::new(None, "ALICE@x.com")],
+        )]);
+        assert_eq!(conversation_peers(&multi, &own), vec![alice.clone(), bob.clone()]);
+
+        // Reply in a group-addressed thread: shows the group rather than the earlier sender.
+        let grouped = Conversation::thread(vec![
+            msg("m1", MailboxRole::Inbox, vec![alice.clone()], vec![group.clone(), me.clone()]),
+            msg("m2", MailboxRole::Sent, vec![me.clone()], vec![group.clone(), me.clone()]),
+        ]);
+        assert_eq!(conversation_peers(&grouped, &own), vec![group.clone()]);
+
+        // Sent with only self in To: falls back to the last other sender.
+        let fallback = Conversation::thread(vec![
+            msg("m1", MailboxRole::Inbox, vec![bob.clone()], vec![me.clone()]),
+            msg("m2", MailboxRole::Sent, vec![me.clone()], vec![me.clone()]),
+        ]);
+        assert_eq!(conversation_peers(&fallback, &own), vec![bob]);
+
+        // Incoming latest message: peers stays empty.
+        let incoming = Conversation::thread(vec![msg("m1", MailboxRole::Inbox, vec![alice], vec![me])]);
+        assert!(conversation_peers(&incoming, &own).is_empty());
     }
 }
