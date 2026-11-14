@@ -130,6 +130,9 @@ pub struct Config {
     pub cache_directory: PathBuf,
     /// The Keychain service of the sign-ins item; tests use their own.
     pub keychain_service: String,
+    /// Where Linux and Windows keep `<service>.signins` (`~/.local/share/Mailstream` /
+    /// `%LOCALAPPDATA%\Mailstream`); tests use their temporary folder. Unused on macOS.
+    pub keychain_directory: PathBuf,
     pub built_in_clients: BuiltInClients,
     pub oauth: OAuthConfig,
     /// The providers' API roots; tests use a local server.
@@ -164,6 +167,7 @@ impl Config {
             support_directory: support,
             cache_directory: caches,
             keychain_service: service.unwrap_or_else(|| keychain::SERVICE.into()),
+            keychain_directory: keychain::default_directory(),
             built_in_clients: bundle::built_in_clients(),
             oauth: OAuthConfig::default(),
             endpoints: backend::Endpoints::default(),
@@ -287,7 +291,7 @@ impl Engine {
             .collect();
         let oauth = Arc::new(OAuth::new(config.oauth.clone()));
         let tokens = Arc::new(Tokens::new(
-            Keychain::new(config.keychain_service.clone()),
+            Keychain::new(config.keychain_service.clone(), config.keychain_directory.clone()),
             oauth.clone(),
             config.built_in_clients,
             signed_in,
@@ -742,7 +746,7 @@ mod tests {
         assert_eq!(error.code, "confirm");
         let error = block_on(engine.call("accounts.rename", json!({ "account": "x@y.z", "label": "a" }))).unwrap_err();
         assert_eq!(error.code, "unknown_account");
-        let keychain = Keychain::new(config.keychain_service.clone());
+        let keychain = Keychain::new(config.keychain_service.clone(), config.keychain_directory.clone());
         assert_eq!(keychain.load().unwrap().refresh_tokens["me@outlook.com"], "rt");
         let error = block_on(engine.call("accounts.connect", json!({ "account": "me@outlook.com", "service": "chat" })))
             .unwrap_err();

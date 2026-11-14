@@ -250,7 +250,7 @@ fn connects_registers_follows_notifications_and_stops_on_sign_out() {
     block_on(engine.call("accounts.remove", json!({ "account": "me@gmail.com", "yes": true }))).unwrap();
     assert_eq!(requests(&server, "POST", "/gmail/v1/users/me/stop").len(), 1);
     assert_eq!(registrations(&config), json!({}));
-    assert!(Keychain::new(config.keychain_service.clone()).load().unwrap().refresh_tokens.is_empty());
+    assert!(Keychain::new(config.keychain_service.clone(), config.keychain_directory.clone()).load().unwrap().refresh_tokens.is_empty());
     drop(engine);
     cleanup(&config);
 }

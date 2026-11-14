@@ -24,6 +24,7 @@
 //! under `shots::SERVICE`: they never reach a Keychain item or a file.
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +33,12 @@ use crate::oauth::OAuthClient;
 /// The service the apps' sign-ins live under. Tests and benchmarks use their own: only a build
 /// signed as the app reads this one.
 pub const SERVICE: &str = "dev.mailstream.Mailstream.oauth";
+
+/// Where platforms without a Keychain keep `<service>.signins`: `~/.local/share/Mailstream` on
+/// Linux, `%LOCALAPPDATA%\Mailstream` on Windows.
+pub fn default_directory() -> PathBuf {
+    dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")).join("Mailstream")
+}
 
 /// What the item keeps, by account id and provider.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -76,6 +83,8 @@ impl SignIns {
 #[derive(Clone, Debug)]
 pub struct Keychain {
     service: String,
+    #[cfg(not(target_os = "macos"))]
+    directory: PathBuf,
 }
 
 #[cfg(target_os = "macos")]
@@ -86,6 +95,16 @@ pub use sealed::KeychainError;
 pub use private_file::KeychainError;
 
 impl Keychain {
+    pub fn new(service: impl Into<String>, directory: impl Into<PathBuf>) -> Self {
+        #[cfg(target_os = "macos")]
+        let _ = directory;
+        Self {
+            service: service.into(),
+            #[cfg(not(target_os = "macos"))]
+            directory: directory.into(),
+        }
+    }
+
     /// The stored sign-ins; empty when there are none.
     pub fn load(&self) -> Result<SignIns, KeychainError> {
         #[cfg(feature = "shots")]
@@ -189,10 +208,6 @@ mod apple {
     });
 
     impl Keychain {
-        pub fn new(service: impl Into<String>) -> Self {
-            Self { service: service.into() }
-        }
-
         /// The stored sign-ins; empty when there are none.
         pub(super) fn load_item(&self) -> Result<SignIns, KeychainError> {
             self.may_ask()?;
@@ -292,15 +307,15 @@ mod apple {
         fn builds_not_signed_as_the_app_leave_its_item_alone() {
             // Test binaries are signed ad hoc: neither call may reach Security, which would ask.
             assert!(!*SIGNED_AS_APP);
-            let apps = Keychain::new(SERVICE);
+            let apps = Keychain::new(SERVICE, PathBuf::new());
             assert!(matches!(apps.load_item(), Err(KeychainError::NotTheApp)));
             assert!(matches!(apps.store_item(&SignIns::default()), Err(KeychainError::NotTheApp)));
         }
 
         #[test]
         fn a_refused_prompt_is_not_asked_again() {
-            let keychain = Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::testkit::unique()));
-            let other = Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::testkit::unique()));
+            let keychain = Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::testkit::unique()), PathBuf::new());
+            let other = Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::testkit::unique()), PathBuf::new());
             keychain.failed(errSecUserCanceled);
             assert!(matches!(keychain.load_item(), Err(KeychainError::Status(errSecUserCanceled))));
             assert!(matches!(keychain.store_item(&SignIns::default()), Err(KeychainError::Status(errSecUserCanceled))));
@@ -312,7 +327,6 @@ mod apple {
 #[cfg(windows)]
 mod sealed {
     use std::io::ErrorKind;
-    use std::path::PathBuf;
 
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{
@@ -332,10 +346,6 @@ mod sealed {
     }
 
     impl Keychain {
-        pub fn new(service: impl Into<String>) -> Self {
-            Self { service: service.into() }
-        }
-
         /// The stored sign-ins; empty when there are none.
         pub(super) fn load_item(&self) -> Result<SignIns, KeychainError> {
             let sealed = match std::fs::read(self.path()) {
@@ -362,8 +372,7 @@ mod sealed {
         }
 
         fn path(&self) -> PathBuf {
-            let local = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-            local.join("Mailstream").join(format!("{}.signins", self.service))
+            self.directory.join(format!("{}.signins", self.service))
         }
     }
 
@@ -427,7 +436,6 @@ mod sealed {
 mod private_file {
     use std::io::{ErrorKind, Write};
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
@@ -443,10 +451,6 @@ mod private_file {
     }
 
     impl Keychain {
-        pub fn new(service: impl Into<String>) -> Self {
-            Self { service: service.into() }
-        }
-
         /// The stored sign-ins; empty when there are none.
         pub(super) fn load_item(&self) -> Result<SignIns, KeychainError> {
             match std::fs::read(self.path()) {
@@ -470,8 +474,7 @@ mod private_file {
         }
 
         fn path(&self) -> PathBuf {
-            let local = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-            local.join("Mailstream").join(format!("{}.signins", self.service))
+            self.directory.join(format!("{}.signins", self.service))
         }
     }
 
@@ -522,18 +525,34 @@ mod tests {
 
     #[test]
     fn keeps_one_item_under_its_service() {
-        let keychain = Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::testkit::unique()));
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = TempDir(std::env::temp_dir().join(format!(
+            "mailstream-keychain-{}-{}",
+            std::process::id(),
+            crate::testkit::unique()
+        )));
+        let service = format!("dev.mailstream.test.{}.{}", std::process::id(), crate::testkit::unique());
+        let keychain = Keychain::new(&service, &dir.0);
         assert_eq!(keychain.load().unwrap(), SignIns::default());
         let mut sign_ins = SignIns::default();
         sign_ins.refresh_tokens.insert("a@b.c".into(), "one".into());
         sign_ins.last_clients.insert("google".into(), client("g", Some("s")));
         keychain.store(&sign_ins).unwrap();
+        #[cfg(not(target_os = "macos"))]
+        assert!(dir.0.join(format!("{service}.signins")).exists());
         assert_eq!(keychain.load().unwrap(), sign_ins);
         sign_ins.refresh_tokens.insert("a@b.c".into(), "two".into());
         keychain.store(&sign_ins).unwrap();
         assert_eq!(keychain.load().unwrap(), sign_ins);
         // Nothing left to keep deletes the item.
         keychain.store(&SignIns::default()).unwrap();
+        #[cfg(not(target_os = "macos"))]
+        assert!(!dir.0.join(format!("{service}.signins")).exists());
         assert_eq!(keychain.load().unwrap(), SignIns::default());
     }
 }

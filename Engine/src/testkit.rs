@@ -53,6 +53,7 @@ pub fn config(oauth: OAuthConfig) -> TestConfig {
         support_directory: root.join("support"),
         cache_directory: root.join("caches"),
         keychain_service: format!("dev.mailstream.test.{name}"),
+        keychain_directory: root.join("support"),
         built_in_clients: BuiltInClients::new(),
         oauth,
         // Nothing listens there: no test reaches a real provider.
@@ -113,7 +114,7 @@ pub fn sign_in(config: &Config, ids: &[&str]) {
         sign_ins.refresh_tokens.insert(id.to_string(), format!("rt-{id}"));
         sign_ins.clients.insert(id.to_string(), OAuthClient { id: "client".into(), secret: Some("secret".into()) });
     }
-    Keychain::new(config.keychain_service.clone()).store(&sign_ins).unwrap();
+    Keychain::new(config.keychain_service.clone(), config.keychain_directory.clone()).store(&sign_ins).unwrap();
 }
 
 /// `records` written and every one of them signed in.
@@ -133,7 +134,7 @@ pub fn engine_for(server: &FakeServer, accounts: &[(&str, &str)]) -> (Engine, Te
 
 /// Empties the test Keychain item and deletes the folder.
 pub fn cleanup(config: &Config) {
-    let _ = Keychain::new(config.keychain_service.clone()).store(&SignIns::default());
+    let _ = Keychain::new(config.keychain_service.clone(), config.keychain_directory.clone()).store(&SignIns::default());
     let _ = std::fs::remove_dir_all(config.support_directory.parent().unwrap());
 }
 
@@ -176,4 +177,30 @@ pub fn redirecting_browser(port: u16, query: &'static str) -> Arc<dyn Fn(&str) +
             assert!(page.starts_with("HTTP/1.1 200 OK"), "{page}");
         });
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sign_ins_stay_in_temporary_folder_and_clean_up_on_drop() {
+        let (root, file, default_file, config_copy) = {
+            let config = config(OAuthConfig::default());
+            sign_in(&config, &["me@gmail.com"]);
+            let file = config.keychain_directory.join(format!("{}.signins", config.keychain_service));
+            let default_file = crate::keychain::default_directory().join(format!("{}.signins", config.keychain_service));
+            assert!(!default_file.exists(), "test sign-ins must not touch default_directory");
+            #[cfg(not(target_os = "macos"))]
+            assert!(file.exists(), "test sign-ins must live in the temporary keychain_directory");
+            (config.support_directory.parent().unwrap().to_path_buf(), file, default_file, config.clone())
+        };
+        assert!(!file.exists());
+        assert!(!default_file.exists());
+        assert!(!root.exists());
+        assert_eq!(
+            Keychain::new(config_copy.keychain_service, config_copy.keychain_directory).load().unwrap(),
+            SignIns::default()
+        );
+    }
 }

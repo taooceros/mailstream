@@ -689,7 +689,8 @@ mod tests {
 
     /// An `Api` whose account is never asked for a token: `batch` sends nothing itself.
     fn tokenless_api() -> Api {
-        let keychain = crate::keychain::Keychain::new(format!("dev.mailstream.test.api.{}", crate::testkit::unique()));
+        let name = format!("mailstream-api-{}-{}", std::process::id(), crate::testkit::unique());
+        let keychain = crate::keychain::Keychain::new(format!("dev.mailstream.test.{name}"), std::env::temp_dir().join(name));
         let oauth = Arc::new(crate::oauth::OAuth::new(crate::oauth::OAuthConfig::default()));
         let tokens = Tokens::new(keychain, oauth, crate::BuiltInClients::new(), std::collections::HashMap::new());
         Api::graph("me@x.com", Arc::new(tokens))

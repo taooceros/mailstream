@@ -283,18 +283,21 @@ mod tests {
     use crate::oauth::OAuthConfig;
     use crate::testkit::{FakeServer, Reply};
 
-    /// A Keychain item of its own, deleted when the test ends.
-    struct TestKeychain(Keychain);
+    /// A Keychain item and temporary folder of its own, deleted when the test ends.
+    struct TestKeychain(Keychain, std::path::PathBuf);
 
     impl TestKeychain {
         fn new() -> Self {
-            Self(Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::testkit::unique())))
+            let name = format!("mailstream-tokens-{}-{}", std::process::id(), crate::testkit::unique());
+            let directory = std::env::temp_dir().join(&name);
+            Self(Keychain::new(format!("dev.mailstream.test.{name}"), &directory), directory)
         }
     }
 
     impl Drop for TestKeychain {
         fn drop(&mut self) {
             let _ = self.0.store(&SignIns::default());
+            let _ = std::fs::remove_dir_all(&self.1);
         }
     }
 
