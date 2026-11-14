@@ -1,6 +1,6 @@
 //! `mailstream`: Mailstream from a shell or an AI agent. `config …` works on settings.json
 //! directly; every other command goes to the control socket of the running front end
-//! (`mailstream_engine::control`), starting Mailstream Flutter in the background when none runs.
+//! (`mailstream_engine::control`), starting Mailstream GPUI in the background when none runs.
 //! Commands, arguments, help and output are the command table's (`mailstream_engine::commands`).
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -11,13 +11,15 @@ use mailstream_engine::commands::{self, COMMANDS, Kind, Spec};
 use mailstream_engine::{EngineError, control, json};
 use serde_json::{Map, Value, json};
 
-/// The front end started when none serves the socket: Mailstream Flutter, by bundle id when this
+/// The front end started when none serves the socket: Mailstream GPUI, by bundle id when this
 /// binary is not inside its bundle.
 #[cfg(target_os = "macos")]
-const FRONT_END: &str = "dev.mailstream.MailstreamFlutter";
-/// Linux: Mailstream Flutter's executable, beside this one in the release bundle.
+const FRONT_END: &str = "dev.mailstream.MailstreamGPUI";
+/// Linux: Mailstream GPUI beside this executable, first choice first: the launcher of the
+/// installed folder (`~/.local/opt/mailstream-gpui`, which sets the library path NixOS needs),
+/// then the bare binary of a build folder (`target/release`).
 #[cfg(all(unix, not(target_os = "macos")))]
-const FRONT_END: &str = "mailstream_ui";
+const FRONT_ENDS: [&str; 2] = ["mailstream-gpui.sh", "mailstream-gpui"];
 /// How long an answer may take: `accounts add` waits up to 5 minutes for the browser sign-in.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(420);
 /// How long a started front end may take to open the socket.
@@ -289,8 +291,8 @@ fn receive(stream: &mut impl Read) -> Option<Vec<u8>> {
     (message.len() <= control::MAX_ANSWER).then_some(message)
 }
 
-/// A connection to the running front end; starts Mailstream Flutter (in the background) when
-/// none serves the socket.
+/// A connection to the running front end; starts Mailstream GPUI (in the background) when none
+/// serves the socket.
 fn connect_or_launch() -> Result<connection::Connection, EngineError> {
     let path = control::socket_path(&mailstream_engine::support_directory());
     if let Some(stream) = connection::open(&path) {
@@ -307,7 +309,7 @@ fn connect_or_launch() -> Result<connection::Connection, EngineError> {
     Err(EngineError::new("not_running", format!("Started {name}, but it did not open its control socket within 20 s.")))
 }
 
-/// Starts Mailstream Flutter in the background; answers what it started.
+/// Starts Mailstream GPUI in the background; answers what it started.
 #[cfg(target_os = "macos")]
 fn launch() -> Result<String, EngineError> {
     use std::process::{Command, Stdio};
@@ -322,7 +324,7 @@ fn launch() -> Result<String, EngineError> {
         }
         None => {
             open.args(["-b", FRONT_END]);
-            "Mailstream Flutter".to_owned()
+            "Mailstream GPUI".to_owned()
         }
     };
     match open.status() {
@@ -332,7 +334,7 @@ fn launch() -> Result<String, EngineError> {
     }
 }
 
-/// Starts Mailstream Flutter in the background, from the bundle this executable (or the target of
+/// Starts Mailstream GPUI in the background, from the folder this executable (or the target of
 /// a symlink such as ~/.local/bin/mailstream) lives in; answers what it started.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn launch() -> Result<String, EngineError> {
@@ -341,9 +343,10 @@ fn launch() -> Result<String, EngineError> {
 
     let not_running = |message: String| EngineError::new("not_running", message);
     let executable = std::env::current_exe().and_then(|path| path.canonicalize());
-    let front_end = executable.ok().and_then(|path| Some(path.parent()?.join(FRONT_END))).filter(|path| path.is_file());
+    let front_end = executable.ok().and_then(|path| linux_front_end(path.parent()?));
     let Some(front_end) = front_end else {
-        return Err(not_running(format!("Mailstream is not running, and there is no {FRONT_END} beside this command to start; start it, then try again.")));
+        let primary = FRONT_ENDS[0];
+        return Err(not_running(format!("Mailstream is not running, and there is no {primary} beside this command to start; start it, then try again.")));
     };
     let name = front_end.display().to_string();
     // A process group of its own, so the app outlives this command and its terminal's signals.
@@ -357,6 +360,11 @@ fn launch() -> Result<String, EngineError> {
         Ok(_) => Ok(name),
         Err(error) => Err(not_running(format!("Could not start {name}: {error}"))),
     }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_front_end(directory: &Path) -> Option<PathBuf> {
+    FRONT_ENDS.iter().map(|candidate| directory.join(candidate)).find(|path| path.is_file())
 }
 
 /// Windows has no app to start by name: the person starts Mailstream.
@@ -419,4 +427,35 @@ mod connection {
 
     /// A pipe has neither a half-close nor a read timeout: the request's newline ends it.
     pub fn sent(_pipe: &Connection, _timeout: Duration) {}
+}
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn linux_front_end_prefers_launcher_and_falls_back_to_binary() {
+        let root = std::env::temp_dir().join(format!("mailstream-cli-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        assert_eq!(linux_front_end(&root), None);
+
+        // Ignores Flutter's old executable even if present beside the CLI.
+        fs::write(root.join("mailstream_ui"), b"").unwrap();
+        assert_eq!(linux_front_end(&root), None);
+
+        // Falls back to the bare binary in a build folder (target/release).
+        let binary = root.join("mailstream-gpui");
+        fs::write(&binary, b"").unwrap();
+        assert_eq!(linux_front_end(&root).as_deref(), Some(binary.as_path()));
+
+        // Prefers the installed NixOS launcher when both exist.
+        let launcher = root.join("mailstream-gpui.sh");
+        fs::write(&launcher, b"").unwrap();
+        assert_eq!(linux_front_end(&root).as_deref(), Some(launcher.as_path()));
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

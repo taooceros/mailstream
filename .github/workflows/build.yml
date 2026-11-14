@@ -79,7 +79,7 @@ jobs:
           restore-keys: gpui-cargo-workspace-${{ runner.os }}-
 
       - name: GPUI (release)
-        run: cd GPUI && cargo build --release
+        run: cargo build --release -p mailstream-gpui -p mailstream-engine --bin mailstream
 
       # An app bundle: the binary links the engine. Signed ad hoc, like the other two.
       - name: App bundle and disk image

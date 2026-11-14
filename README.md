@@ -104,10 +104,10 @@ Pre-built binaries are generated on every push to `main` via GitHub Actions (`.g
 
 ## CLI & Agent Automation
 
-Mailstream is designed from the ground up to be inspected and driven by developer tools and AI agents. Link the bundled CLI binary into your path:
+Mailstream is designed from the ground up to be inspected and driven by developer tools and AI agents. Link the bundled CLI binary into your path (on macOS; `scripts/install.sh gpui` on Linux links `~/.local/opt/mailstream-gpui/mailstream` automatically):
 
 ```sh
-ln -s '/Applications/Mailstream Flutter.app/Contents/MacOS/mailstream' ~/.local/bin/mailstream
+ln -s '/Applications/Mailstream GPUI.app/Contents/MacOS/mailstream' ~/.local/bin/mailstream
 ```
 
 ### Essential CLI Commands

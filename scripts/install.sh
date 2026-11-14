@@ -47,7 +47,7 @@ for frontend in "$@"; do
     gpui)
       name='Mailstream GPUI'
       executable=mailstream-gpui
-      (cd GPUI && ../scripts/capped cargo build --release)
+      ./scripts/capped cargo build --release -p mailstream-gpui -p mailstream-engine --bin mailstream
       ./scripts/gpui-bundle.sh
       app="build/$name.app"
       ;;
@@ -92,6 +92,14 @@ for frontend in "$@"; do
   fi
   codesign --verify --deep --strict "$destination"
   echo "Installed $destination at $revision (release, shared signature)."
+  # The mailstream command line ships in Mailstream GPUI; a ~/.local/bin/mailstream link into
+  # an installed Mailstream app moves to it.
+  link="$HOME/.local/bin/mailstream"
+  if [ "$frontend" = gpui ] && [ -L "$link" ] &&
+    case "$(readlink "$link")" in /Applications/Mailstream*.app/*) true ;; *) false ;; esac; then
+    ln -sfn "$destination/Contents/MacOS/mailstream" "$link"
+    echo "$link -> $destination/Contents/MacOS/mailstream"
+  fi
   echo "Check this /Applications copy: MSInstalledRevision, codesign, launch (AGENTS.md)."
   echo "Previous bundle retained at $previous until those checks pass."
 done

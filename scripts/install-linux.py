@@ -7,10 +7,11 @@ flutter is refused: the Flutter front end is paused (MS-300); ~/.local/opt/mails
 installed.
 
 Installed front end, a folder under ~/.local/opt:
-- gpui: ~/.local/opt/mailstream-gpui/ holds the release binary `mailstream-gpui` and the launcher
-  `mailstream-gpui.sh`, which sets LD_LIBRARY_PATH to the devenv shell's (GPUI dlopens Vulkan,
-  Wayland and fontconfig; NixOS has no global library path) and starts it. The desktop entry
-  ~/.local/share/applications/dev.mailstream.MailstreamGPUI.desktop starts the launcher.
+- gpui: ~/.local/opt/mailstream-gpui/ holds the release binary `mailstream-gpui`, the
+  `mailstream` command line beside it and the launcher `mailstream-gpui.sh`, which sets
+  LD_LIBRARY_PATH to the devenv shell's (GPUI dlopens Vulkan, Wayland and fontconfig; NixOS has no
+  global library path) and starts it; ~/.local/bin/mailstream links to the command line. The desktop
+  entry ~/.local/share/applications/dev.mailstream.MailstreamGPUI.desktop starts the launcher.
 The folder keeps its config.json (OAuth clients; the engine reads it beside the executable) and
 AppIcon.png, gets the built commit in `revision`, and a `nix-env` profile holding the devenv shell
 the build used, so a nix garbage collection keeps the libraries the binaries load.
@@ -78,10 +79,11 @@ def move_outside(relative):
 
 def build(frontend):
     """Builds `frontend` (gpui) in devenv shell; returns the folder to install."""
-    devenv("cd GPUI && cargo build --release")
+    devenv("cargo build --release -p mailstream-gpui -p mailstream-engine --bin mailstream")
     staged = Path(os.path.realpath(ROOT / "target")) / "release/mailstream-gpui-install"
     shutil.rmtree(staged, ignore_errors=True)
     staged.mkdir()
+    shutil.copy2(ROOT / "target/release/mailstream", staged / "mailstream")
     shutil.copy2(ROOT / "target/release/mailstream-gpui", staged / "mailstream-gpui")
     return staged
 
@@ -155,6 +157,11 @@ def install(frontend, built, revision, ld_library_path, shell):
             "Comment=Mail, chat and calendar for Gmail and Outlook (GPUI)\n"
             f"Exec={folder / 'mailstream-gpui.sh'}\nIcon={folder / 'AppIcon.png'}\n"
             "Terminal=false\nCategories=Network;Email;\nStartupWMClass=dev.mailstream.MailstreamGPUI\n")
+        link = HOME / ".local/bin/mailstream"
+        if link.is_symlink() or not link.exists():
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.unlink(missing_ok=True)
+            link.symlink_to(folder / "mailstream")
     print(f"Installed {folder} at {revision}; previous folder kept at {previous}.", flush=True)
 
 

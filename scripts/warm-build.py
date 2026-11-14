@@ -205,7 +205,7 @@ def build(open_before):
         # GPUI as its scripts build it (MS-273): release for install.sh, bench.sh and
         # gpui-bundle.sh, release with `shots` for scripts/shots.py, debug for GPUI/run.sh.
         steps += [
-            ("GPUI release", capped([*gpui, "--release"]), {}),
+            ("GPUI release", capped([*gpui, "-p", "mailstream-engine", "--bin", "mailstream", "--release"]), {}),
             ("GPUI shots", capped([*gpui, "--release", "--features", "shots"]), {}),
             ("GPUI debug", capped(gpui), {}),
         ]
@@ -215,7 +215,7 @@ def build(open_before):
         # and with `shots` for scripts/shots.py (MS-294).
         gpui = ["devenv", "shell", "--", *gpui, "--release"]
         steps += [
-            ("GPUI release", capped(gpui), {}),
+            ("GPUI release", capped([*gpui, "-p", "mailstream-engine", "--bin", "mailstream"]), {}),
             ("GPUI shots", capped([*gpui, "--features", "shots"]), {}),
         ]
     failed = []

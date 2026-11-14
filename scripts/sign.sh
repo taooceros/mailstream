@@ -25,7 +25,7 @@ for target in "$@"; do
       codesign --force --sign "$IDENTITY" --preserve-metadata=identifier,entitlements "$helper" >/dev/null
     done
   fi
-  # Mailstream Flutter carries the mailstream command line beside its executable.
+  # Mailstream GPUI (and Flutter) carries the mailstream command line beside its executable.
   cli="$target/Contents/MacOS/mailstream"
   if [ -f "$cli" ]; then
     codesign --force --sign "$IDENTITY" --identifier dev.mailstream.cli "$cli" >/dev/null
