@@ -103,6 +103,34 @@ pub(crate) fn quote(text: &str) -> String {
 
 const FORWARD_MARKER: &str = "---------- Forwarded message ---------";
 
+/// The fields `display::forward_header` writes under [`FORWARD_MARKER`].
+const FORWARD_FIELDS: [&str; 5] = ["From:", "Date:", "Subject:", "To:", "Cc:"];
+
+/// What follows [`FORWARD_MARKER`] in a forward's body, split into the rest of its header (the
+/// marker line's end and the field lines under it) and the forwarded text. The header ends at the
+/// first line that is no field, so the text is found even when the blank line after it is gone.
+fn split_forward_block(after_marker: &str) -> (&str, &str) {
+    let mut lines = after_marker.split_inclusive('\n');
+    let mut end = lines.next().map_or(0, str::len);
+    for line in lines {
+        if !FORWARD_FIELDS.iter().any(|field| line.starts_with(field)) {
+            break;
+        }
+        end += line.len();
+    }
+    let (header, text) = after_marker.split_at(end);
+    (header.trim_end_matches('\n'), text.trim_matches('\n'))
+}
+
+/// The same text but for blank lines and the whitespace around lines, which compose's prefill
+/// drops (GPUI's `format::body`).
+fn same_text(a: &str, b: &str) -> bool {
+    fn lines(text: &str) -> impl Iterator<Item = &str> {
+        text.lines().map(str::trim).filter(|line| !line.is_empty())
+    }
+    lines(a).eq(lines(b))
+}
+
 /// Written plain text as HTML lines with links turned into anchors.
 fn lines_html(text: &str) -> String {
     text.replace("\r\n", "\n")
@@ -115,11 +143,14 @@ fn lines_html(text: &str) -> String {
 fn quote_html(source: Option<&MessageContent>) -> Option<String> {
     match source {
         Some(MessageContent { html: Some(body), .. }) => Some(body_contents(body)),
-        Some(MessageContent { text: Some(body), .. }) => {
-            Some(format!("<div style=\"white-space:pre-wrap\">{}</div>", text::plain_to_html(body)))
-        }
+        Some(MessageContent { text: Some(body), .. }) => Some(plain_quote_html(body)),
         _ => None,
     }
+}
+
+/// Quoted plain text as HTML, its whitespace kept.
+fn plain_quote_html(text: &str) -> String {
+    format!("<div style=\"white-space:pre-wrap\">{}</div>", text::plain_to_html(text))
 }
 
 fn heading_level(level: HeadingLevel) -> u8 {
@@ -394,14 +425,16 @@ pub(crate) fn reply_markdown_html(reply: &str, attribution: &str, source: Option
 /// Plain-text and HTML bodies for a forward of `source`: keeps `body` as `text/plain` when it
 /// already carries the forwarded quote block (as compose prefills it), otherwise appends the
 /// plain-text quote; when `source` had HTML, quotes its HTML in `.gmail_quote` (dropping inline
-/// `mscid:`/`file:` images).
-fn forward_bodies(body: &str, source: &MailMessage, content: Option<&MessageContent>) -> (String, String) {
-    let cc = content.map(|c| c.cc.as_slice()).unwrap_or(&[]);
+/// `mscid:`/`file:` images) unless the user changed the forwarded text, in which case the HTML
+/// quote is built from the edited plain text so neither part leaks removed content.
+fn forward_bodies(body: &str, source: &MailMessage, content: &MessageContent) -> (String, String) {
+    let cc = content.cc.as_slice();
     let plain_source = content
-        .and_then(|c| c.text.as_deref())
+        .text
+        .as_deref()
         .filter(|t| !t.is_empty())
         .map(str::to_string)
-        .or_else(|| content.and_then(|c| c.html.as_deref()).map(text::strip_html))
+        .or_else(|| content.html.as_deref().map(text::strip_html))
         .unwrap_or_default();
     let forwarded = crate::display::Forwarded {
         from: &source.envelope.from,
@@ -419,17 +452,21 @@ fn forward_bodies(body: &str, source: &MailMessage, content: Option<&MessageCont
         let quoted = crate::display::forward_body(&forwarded);
         if body.is_empty() { quoted } else { format!("{body}\n\n{quoted}") }
     };
-    let html = match content.and_then(|c| c.html.as_deref()) {
+    let html = match content.html.as_deref() {
         Some(orig_html) => {
-            let quote = body_contents(orig_html);
             if let Some((before, after)) = normalized.split_once(FORWARD_MARKER) {
                 let written = before.trim_end_matches('\n');
-                let block = format!("{FORWARD_MARKER}{after}");
-                let attr = block.split("\n\n").next().unwrap_or(&block);
-                markdown_document(written, Some((attr, quote)))
+                let (header, quoted_text) = split_forward_block(after);
+                let attr = format!("{FORWARD_MARKER}{header}");
+                let quote = if same_text(quoted_text, &plain_source) {
+                    body_contents(orig_html)
+                } else {
+                    plain_quote_html(quoted_text)
+                };
+                markdown_document(written, Some((&attr, quote)))
             } else {
                 let attr = crate::display::forward_header(&forwarded);
-                markdown_document(body, Some((&attr, quote)))
+                markdown_document(body, Some((&attr, body_contents(orig_html))))
             }
         }
         None => {
@@ -541,8 +578,9 @@ impl Mail {
         }
         let (text, html) = match &forward {
             Some(source) => {
-                let content = self.contents.load(&source.message_ref(), self.backend(source.account())).await.ok();
-                forward_bodies(&body, source, content.as_deref())
+                let content =
+                    self.contents.load(&source.message_ref(), self.backend(source.account())).await.map_err(EngineError::failed)?;
+                forward_bodies(&body, source, &content)
             }
             None => (body.clone(), markdown_document(&body, None)),
         };
@@ -798,21 +836,47 @@ mod tests {
             invitation: None,
         };
         let prefilled = "FYI https://example.com\n\n---------- Forwarded message ---------\nFrom: Jordan <jordan@x.com>\nSubject: Q4 plan\nTo: Sam <me@x.com>\n\nHello Sam";
-        let (plain, html) = forward_bodies(prefilled, &source, Some(&html_content));
+        let (plain, html) = forward_bodies(prefilled, &source, &html_content);
         assert_eq!(plain, prefilled);
         assert!(html.contains("<div dir=\"auto\"><p>FYI <a href=\"https://example.com\">https://example.com</a></p></div>"), "{html}");
         assert!(html.contains("<div dir=\"ltr\" class=\"gmail_attr\">---------- Forwarded message ---------<br>From: Jordan &lt;jordan@x.com&gt;<br>Subject: Q4 plan<br>To: Sam &lt;me@x.com&gt;<br></div>"), "{html}");
         assert!(html.contains("<p>Hello <b>Sam</b></p>"), "{html}");
         assert!(!html.contains("mscid:") && !html.contains("file:///"), "{html}");
 
+        // Editing or deleting part of the forwarded quote replaces the original HTML quote with the
+        // edited plain text so deleted content is not leaked in `text/html`.
+        let multi_html_content = MessageContent {
+            html: Some("<body><p>Public line</p><p>Secret: <b>1234</b></p></body>".into()),
+            text: Some("Public line\nSecret: 1234".into()),
+            ..html_content.clone()
+        };
+        let redacted = "FYI\n\n---------- Forwarded message ---------\nFrom: Jordan <jordan@x.com>\nSubject: Q4 plan\nTo: Sam <me@x.com>\n\nPublic line";
+        let (redacted_plain, redacted_html) = forward_bodies(redacted, &source, &multi_html_content);
+        assert_eq!(redacted_plain, redacted);
+        assert!(redacted_html.contains("Public line") && !redacted_html.contains("Secret") && !redacted_html.contains("1234"), "{redacted_html}");
+        assert!(redacted_html.contains("<div class=\"gmail_quote\">") && redacted_html.contains("<div class=\"ms-plain\">"), "{redacted_html}");
+
+        // Deleting the blank line after the forward header still separates header from body and
+        // does not duplicate the body into `.gmail_attr`.
+        let no_blank = "FYI\n\n---------- Forwarded message ---------\nFrom: Jordan <jordan@x.com>\nTo: Sam <me@x.com>\nPublic line\nSecret: 1234";
+        let (_, no_blank_html) = forward_bodies(no_blank, &source, &multi_html_content);
+        assert_eq!(no_blank_html.matches("Public line").count(), 1, "{no_blank_html}");
+        assert!(no_blank_html.contains("<p>Secret: <b>1234</b></p>"), "{no_blank_html}");
+
+        // Edited without the blank line: still puts only headers in `.gmail_attr` and edited text in the quote.
+        let no_blank_edited = "FYI\n\n---------- Forwarded message ---------\nFrom: Jordan <jordan@x.com>\nTo: Sam <me@x.com>\nPublic line";
+        let (_, no_blank_edited_html) = forward_bodies(no_blank_edited, &source, &multi_html_content);
+        assert_eq!(no_blank_edited_html.matches("Public line").count(), 1, "{no_blank_edited_html}");
+        assert!(!no_blank_edited_html.contains("Secret"), "{no_blank_edited_html}");
+
         // Bare forward without intro text.
         let bare = "\n\n---------- Forwarded message ---------\nFrom: Jordan <jordan@x.com>\n\nHello Sam";
-        let (plain_bare, html_bare) = forward_bodies(bare, &source, Some(&html_content));
+        let (plain_bare, html_bare) = forward_bodies(bare, &source, &html_content);
         assert_eq!(plain_bare, bare);
         assert!(html_bare.contains("<div dir=\"auto\"><div><br></div></div>\n<br><div class=\"gmail_quote\">"), "{html_bare}");
 
         // CLI forward without prefilled marker adds plain-text quote and HTML quote.
-        let (cli_plain, cli_html) = forward_bodies("Take a look", &source, Some(&html_content));
+        let (cli_plain, cli_html) = forward_bodies("Take a look", &source, &html_content);
         assert!(cli_plain.starts_with("Take a look\n\n---------- Forwarded message ---------\nFrom: Jordan <jordan@x.com>"), "{cli_plain}");
         assert!(cli_plain.ends_with("\n\nHello Sam"), "{cli_plain}");
         assert!(cli_html.contains("<p>Take a look</p>") && cli_html.contains("<p>Hello <b>Sam</b></p>"), "{cli_html}");
@@ -829,7 +893,7 @@ mod tests {
             invitation: None,
         };
         let plain_prefilled = "FYI\n\n---------- Forwarded message ---------\nFrom: Jordan <jordan@x.com>\n\nSee www.example.org";
-        let (plain_only_text, plain_only_html) = forward_bodies(plain_prefilled, &source, Some(&plain_content));
+        let (plain_only_text, plain_only_html) = forward_bodies(plain_prefilled, &source, &plain_content);
         assert_eq!(plain_only_text, plain_prefilled);
         assert!(!plain_only_html.contains("gmail_quote"), "{plain_only_html}");
         assert!(plain_only_html.contains("<a href=\"http://www.example.org\">www.example.org</a>"), "{plain_only_html}");

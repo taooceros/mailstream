@@ -406,7 +406,7 @@ fn sends_multipart_new_mail_and_forwards_for_gmail_and_graph() {
     let err = call(&engine, "mail.send", json!({ "from": "me@gmail.com", "to": ["bob@x.com"], "subject": "Fwd: Lunch?", "body": "Hi", "forward": "me@gmail.com|nope@x", "yes": true })).unwrap_err();
     assert_eq!(err.code, "unknown_conversation");
 
-    let prefilled = "FYI https://menu.example\n\n---------- Forwarded message ---------\nFrom: Ann <ann@x.com>\nSubject: Lunch?\nTo: Me <me@gmail.com>\n\nHi, lunch at noon?";
+    let prefilled = "FYI https://menu.example\n\n---------- Forwarded message ---------\nFrom: Ann <ann@x.com>\nSubject: Lunch?\nTo: Me <me@gmail.com>\n\nHi, lunch at noon?\n\nOn Mon, Bob wrote:\n> old";
     call(
         &engine,
         "mail.send",
@@ -431,6 +431,30 @@ fn sends_multipart_new_mail_and_forwards_for_gmail_and_graph() {
     assert!(fwd_html.contains("<p>Hi, lunch </p>"), "{fwd_html}");
     assert!(!fwd_html.contains("mscid:"), "{fwd_html}");
 
+
+    // Deleting a line from the prefilled forward drops it from both `text/plain` and `text/html`.
+    let redacted = "FYI\n\n---------- Forwarded message ---------\nFrom: Ann <ann@x.com>\nSubject: Lunch?\nTo: Me <me@gmail.com>\n\nOn Mon, Bob wrote:\n> old";
+    call(
+        &engine,
+        "mail.send",
+        json!({
+            "from": "me@gmail.com",
+            "to": ["bob@x.com"],
+            "subject": "Fwd: Lunch?",
+            "body": redacted,
+            "forward": lunch,
+            "forward-message": "i00",
+            "yes": true,
+        }),
+    )
+    .unwrap();
+    let redacted_upload = changes(&changed).pop().unwrap().text();
+    assert!(!redacted_upload.contains("Hi, lunch"), "{redacted_upload}");
+    assert!(redacted_upload.contains("On Mon, Bob wrote:"), "{redacted_upload}");
+    let redacted_html = html_part(&redacted_upload);
+    assert!(redacted_html.contains("<div class=\"gmail_quote\">"), "{redacted_html}");
+    assert!(!redacted_html.contains("Hi, lunch"), "{redacted_html}");
+    assert!(redacted_html.contains("On Mon, Bob wrote:"), "{redacted_html}");
     // Forward plain-text message `i03`: no `.gmail_quote`, linkified HTML lines.
     let topic = "me@gmail.com|i03@x";
     let plain_fwd = "Look at www.security.example\n\n---------- Forwarded message ---------\nFrom: Person 3 <p3@x.com>\n\nBody of i03";
@@ -482,7 +506,7 @@ fn sends_multipart_new_mail_and_forwards_for_gmail_and_graph() {
         match path.strip_prefix("/v1.0/").unwrap_or(path) {
             "me" => Reply::json(json!({ "displayName": "Me Outlook", "mail": "me@outlook.com" })),
             "me/mailFolders" => Reply::json(json!({ "value": [folder("F-inbox", "Inbox"), folder("F-sent", "Sent Items")] })),
-            "me/mailFolders/F-inbox/messages" => Reply::json(json!({ "value": [graph_message("g1", "c1", ("Bob", "bob@x.com"), "Report", 0)] })),
+            "me/mailFolders/F-inbox/messages" => Reply::json(json!({ "value": [graph_message("g1", "c1", ("Bob", "bob@x.com"), "Report", 0), graph_message("g9", "c9", ("Dana", "dana@x.com"), "Broken", 5)] })),
             "me/mailFolders/F-sent/messages" => Reply::json(json!({ "value": [] })),
             other => {
                 if other == "me/mailFolders/inbox" {
@@ -531,6 +555,23 @@ fn sends_multipart_new_mail_and_forwards_for_gmail_and_graph() {
     assert!(graph_html.contains("<div class=\"gmail_quote\">"), "{graph_html}");
     assert!(graph_html.contains("<p>Quarterly <b>numbers</b></p>"), "{graph_html}");
     assert!(!graph_html.contains("file:///"), "{graph_html}");
+
+    // Failing to load the forwarded message returns an error instead of sending an empty quote.
+    let err = call(
+        &engine,
+        "mail.send",
+        json!({
+            "from": "me@outlook.com",
+            "to": ["carol@x.com"],
+            "subject": "Fwd: Broken",
+            "body": "FYI",
+            "forward": "me@outlook.com|g9@outlook",
+            "yes": true,
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "failed");
+    assert!(changes(&changed).is_empty());
     drop(engine);
     cleanup(&config);
 }
