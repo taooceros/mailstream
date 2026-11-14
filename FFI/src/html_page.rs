@@ -2110,7 +2110,7 @@ mod tests {
         let head = format!(
             r#"<link rel="stylesheet" href="{SHEET}"><link rel="stylesheet" href="http://fonts.test/plain.css"><link rel="stylesheet" href="//fonts.test/relative.css">"#
         );
-        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, resources.clone());
+        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, None, resources.clone());
         let (system, mono) = in_time(async move {
             // The font is held back: the page lays out in the system font meanwhile.
             let system = page.layout(400.0, 1.0).await.unwrap().height;
@@ -2126,7 +2126,7 @@ mod tests {
             "no Cyrillic file for Latin text, no second-level import, no `http:` or `//` sheet"
         );
         // Open again: everything from the cache, nothing asked.
-        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, resources);
+        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, None, resources);
         let again = in_time(async move { height_when(&page, |height| height > system * 1.5).await });
         assert_eq!(again, mono);
         assert_eq!(web.asked().len(), asked.len());
@@ -2142,7 +2142,7 @@ mod tests {
         // Every font is late once the page has been laid out.
         let first = resources(web.clone(), Duration::ZERO);
         let head = format!(r#"<link rel="stylesheet" href="{SHEET}">"#);
-        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, first.clone());
+        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, None, first.clone());
         let (page, system) = in_time(async move {
             let system = page.layout(400.0, 1.0).await.unwrap().height;
             release.send(()).unwrap();
@@ -2158,7 +2158,7 @@ mod tests {
         // The next run of the app reads the sheet and the font from the disk cache in time.
         let offline = Arc::new(FakeWeb::default());
         let next = Arc::new(Resources { web: offline.clone(), cache: ResourceCache::new(first.cache.folder.clone(), CACHE_CAP), late: LATE });
-        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, next);
+        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, None, next);
         in_time(async move { height_when(&page, |height| height > system * 1.5).await });
         assert!(offline.asked().is_empty(), "{:?}", offline.asked());
     }
@@ -2170,14 +2170,14 @@ mod tests {
         web.file(SHEET, mono_sheet());
         web.file(MONO, monaco());
         let release = web.hold(MONO);
-        let reader = HtmlPage::open(mono_mail(&format!(r#"<link rel="stylesheet" href="{SHEET}">"#)), HtmlPart::Whole, resources(web, LATE));
+        let reader = HtmlPage::open(mono_mail(&format!(r#"<link rel="stylesheet" href="{SHEET}">"#)), HtmlPart::Whole, None, resources(web, LATE));
         let (system, mono, other) = in_time(async move {
             let system = reader.layout(400.0, 1.0).await.unwrap().height;
             release.send(()).unwrap();
             let mono = height_when(&reader, |height| height > system * 1.5).await;
             // A mail naming the same family, opened after the font arrived for the first one:
             // all pages used to share one collection, so it got the font too.
-            let other = HtmlPage::open(mono_mail(""), HtmlPart::Whole, offline());
+            let other = HtmlPage::open(mono_mail(""), HtmlPart::Whole, None, offline());
             let other = other.layout(400.0, 1.0).await.unwrap().height;
             (system, mono, other)
         });
