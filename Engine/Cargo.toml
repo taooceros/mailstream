@@ -45,6 +45,13 @@ resvg = { version = "0.45", default-features = false }
 hickory-resolver = "0.26"
 # Attachment file names in NFC, as the Swift engine sends them (MS-114).
 unicode-normalization = "0.1"
+# Device sync between one user's machines (`peer_sync.rs`, MS-359): iroh's QUIC endpoint,
+# iroh-docs' replicated key-value document over iroh-gossip and iroh-blobs, kept in
+# `peer-sync/` with redb. iroh-docs 0.101 pins the blobs and gossip releases below.
+iroh = "1"
+iroh-docs = { version = "0.101", default-features = false, features = ["fs-store"] }
+iroh-blobs = { version = "0.103", default-features = false, features = ["fs-store"] }
+iroh-gossip = "0.101"
 
 # The screenshot mode's stand-in provider and in-memory sign-ins (`src/shots.rs`, MS-265), for
 # GPUI's `shots` feature only; installed builds leave it out.

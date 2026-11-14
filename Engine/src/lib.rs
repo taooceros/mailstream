@@ -47,6 +47,7 @@ pub mod model;
 mod oauth;
 mod omp;
 mod polling;
+pub mod peer_sync;
 pub mod push;
 pub mod settings;
 #[cfg(feature = "shots")]
@@ -65,6 +66,8 @@ mod mail_tests;
 mod push_tests;
 #[cfg(test)]
 mod chat_tests;
+#[cfg(test)]
+mod peer_sync_tests;
 // Runs a shell-script omp (`omp::tests::fake_omp`).
 #[cfg(all(test, unix))]
 mod tagging_tests;

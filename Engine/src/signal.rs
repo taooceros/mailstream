@@ -5,13 +5,33 @@
 //! mail.db; the posting process hears its own posts too. Both engines post and hear the same
 //! names, so a Swift and a Rust engine running at once follow each other.
 //!
-//! Also the system's own notifications of this kind, such as [`ProcessSignal::NETWORK_CHANGE`].
+//! Also the system's own notifications of this kind, such as [`ProcessSignal::NETWORK_CHANGE`],
+//! and the machine waking from sleep ([`next_wake`]), which no notification announces.
 //!
 //! Elsewhere (Windows) the front end is the only process with an engine (mail.db has no
 //! multi-process WAL there, and the CLI goes through its control pipe), so posts reach this
 //! process's own receivers only and system names never post.
 use std::borrow::Cow;
 use std::ffi::CString;
+use std::time::{Duration, SystemTime};
+
+use tokio::time::Instant;
+
+/// More wall-clock time than this beyond the engine's own clock (which stops while the machine
+/// sleeps) between two looks means the machine slept.
+const SLEPT: Duration = Duration::from_secs(30);
+
+/// Returns once the machine has woken from sleep, looking every `check`. Call on a tokio runtime.
+pub async fn next_wake(check: Duration) {
+    loop {
+        let (wall, clock) = (SystemTime::now(), Instant::now());
+        tokio::time::sleep(check).await;
+        let passed = SystemTime::now().duration_since(wall).unwrap_or_default();
+        if passed > clock.elapsed() + SLEPT {
+            return;
+        }
+    }
+}
 
 pub struct ProcessSignal {
     pub name: Cow<'static, str>,

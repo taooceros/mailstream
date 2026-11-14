@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -36,9 +36,6 @@ const GRAPH_LIFETIME: f64 = 4200.0 * 60.0;
 const RENEW_WITHIN: f64 = 24.0 * 3600.0;
 /// How long the socket's handshake may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// More wall-clock time than this beyond the engine's own clock (which stops while the Mac
-/// sleeps) between two looks means the Mac slept.
-const SLEPT: Duration = Duration::from_secs(30);
 
 /// The relay and what the registrations name, from the host app's build.
 #[derive(Clone, Debug, Default)]
@@ -249,13 +246,9 @@ impl Push {
         let push = self.clone();
         tokio::spawn(async move {
             loop {
-                let (wall, clock) = (SystemTime::now(), Instant::now());
-                tokio::time::sleep(push.config.timing.wake_check).await;
-                let passed = SystemTime::now().duration_since(wall).unwrap_or_default();
-                if passed > clock.elapsed() + SLEPT {
-                    push.reconnect_now();
-                    push.check();
-                }
+                crate::signal::next_wake(push.config.timing.wake_check).await;
+                push.reconnect_now();
+                push.check();
             }
         });
         let push = self.clone();
