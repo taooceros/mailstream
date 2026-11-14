@@ -579,7 +579,11 @@ impl MailApp {
             message.invitation.as_ref().map(|invitation| {
                 div().pb(px(space::S8)).child(self.render_invitation(message, invitation, p, cx)).into_any_element()
             }),
-            self.render_body(message, p, cx).map(|body| own_presses(div()).child(body).into_any_element()),
+            // An HTML body has no width of its own (Blitz and the web view lay it out at the width
+            // they are given), so it takes the column's: on the user's own side, which hugs its
+            // pieces to the right, it would shrink to a sliver (MS-349).
+            self.render_body(message, p, cx)
+                .map(|body| own_presses(div()).when(message.body_html.is_some(), |d| d.w_full()).child(body).into_any_element()),
             (!message.tiles.is_empty())
                 .then(|| div().pt(px(space::S8)).child(self.render_attachments(message, p, cx)).into_any_element()),
         ];

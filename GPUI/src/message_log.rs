@@ -79,8 +79,9 @@ pub fn head(
 
 /// A message: `lead` (its sender's avatar, or for a message joining a run its `run_time`) in the
 /// avatar's column, then `head` and `content` in a column beside it, its pieces at its right edge
-/// for the user's own. The gap above belongs to the message, so `actions` floating over it keep
-/// it hovered; the caller adds the hover handler.
+/// for the user's own, each as wide as its content: a piece with no width of its own (an HTML
+/// body) sets one (`w_full`). The gap above belongs to the message, so `actions` floating over it
+/// keep it hovered; the caller adds the hover handler.
 pub fn message(
     row: Row,
     lead: impl IntoElement,

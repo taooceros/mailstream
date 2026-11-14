@@ -262,6 +262,13 @@ fn mail() -> Vec<(Mail, Option<Value>)> {
     answer.cc = vec![DEVON];
     answer.reply_to = Some("launch-1");
     answer.minutes_ago = 2. * 24. * 60.;
+    // HTML, as Gmail sends a reply: the user's own HTML body takes the log's whole width (MS-349).
+    answer.html = Some(
+        "<p>Thanks Jordan, two questions inline.</p><blockquote>Ship date: Nov 20</blockquote>\
+         <p>Can we move this to the 24th? QA needs the weekend.</p>\
+         <blockquote>Owners: see the attached plan</blockquote><p>I'll take the onboarding flow.</p><p>Sam</p>"
+            .into(),
+    );
     answer.text = Some(
         "Thanks Jordan, two questions inline.\n\n> Ship date: Nov 20\n\nCan we move this to the 24th? \
          QA needs the weekend.\n\n> Owners: see the attached plan\n\nI'll take the onboarding flow.\n\nSam"
