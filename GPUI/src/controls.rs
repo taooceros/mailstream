@@ -630,7 +630,8 @@ type ToggleHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 /// A collapsible section or group header (`Expander`, MS-309): an optional `leading` mark,
 /// `title`, an optional `detail` count, an optional `trailing` action, and a
 /// [`disclosure_chevron`] at its end. Clicks and keyboard activation (Enter, Space, ← to
-/// collapse, → to expand while focused) run `on_click`.
+/// collapse, → to expand while focused, as Tab leaves it) run `on_click`; a click leaves the
+/// keys where they were (MS-344).
 #[derive(IntoElement)]
 pub struct Expander {
     id: ElementId,
@@ -724,13 +725,15 @@ impl RenderOnce for Expander {
         let on_toggle = self.on_toggle.map(std::rc::Rc::new);
         let key_toggle = on_toggle.clone();
 
-        let focus_on_press = focus.clone();
         let mut row = div()
             .id(self.id)
             .key_context("Expander")
             .track_focus(&focus)
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                window.focus(&focus_on_press, cx);
+            // A press only folds or unfolds it: the keys stay where they were (MS-344), since the
+            // list's and the calendar's single keys give way to a focused header. Tab reaches it
+            // for Enter, Space, ← and →.
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                window.prevent_default();
                 cx.stop_propagation();
             })
             .flex_shrink_0()
@@ -1143,7 +1146,85 @@ pub fn linked_text(id: impl Into<ElementId>, text: impl Into<SharedString>, p: &
 
 #[cfg(test)]
 mod tests {
-    use super::text_links;
+    use gpui::{
+        ClickEvent, Context, FocusHandle, InteractiveElement, IntoElement, Modifiers, ParentElement, Render, Styled,
+        TestAppContext, VisualTestContext, Window, WindowAppearance, div,
+    };
+
+    use super::{expander, text_links};
+    use crate::{design, state};
+
+    /// The mail window as far as the keys go: the list has them under `Mail`'s single keys
+    /// (`state::bind_keys`), and the sidebar's "Accounts" header folds.
+    struct SidebarHost {
+        list: FocusHandle,
+        expanded: bool,
+        moved: usize,
+    }
+
+    impl Render for SidebarHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let p = design::palette(WindowAppearance::Light);
+            div()
+                .key_context(state::CONTEXT)
+                .size_full()
+                .on_action(cx.listener(|this, _: &state::Next, _, _| this.moved += 1))
+                .child(
+                    expander("section:accounts", self.expanded, "Accounts", p)
+                        .debug_selector(|| "accounts".into())
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.expanded = !this.expanded;
+                            cx.notify();
+                        })),
+                )
+                .child(div().id("list").track_focus(&self.list).size_full())
+        }
+    }
+
+    fn key(cx: &mut VisualTestContext, keys: &str) {
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_click_on_a_header_folds_it_and_leaves_the_keys_with_the_list(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui::init(cx);
+            state::bind_keys(cx);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| SidebarHost { list: cx.focus_handle(), expanded: true, moved: 0 });
+        host.update_in(cx, |host, window, cx| window.focus(&host.list, cx));
+        cx.run_until_parked();
+        let state = |cx: &mut VisualTestContext| host.read_with(cx, |host, _| (host.expanded, host.moved));
+        let list_focused = |cx: &mut VisualTestContext| host.update_in(cx, |host, window, _| host.list.is_focused(window));
+
+        key(cx, "j");
+        assert_eq!(state(cx), (true, 1), "j moves the list down");
+
+        let at = cx.debug_bounds("accounts").expect("the header is drawn").center();
+        cx.simulate_click(at, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(state(cx), (false, 1), "the click folds the header");
+        assert!(list_focused(cx), "the click leaves the keys with the list");
+        key(cx, "j");
+        assert_eq!(state(cx), (false, 2), "j still moves the list down after the click");
+
+        // Tab (the kit's Root moves to the next tab stop) gives the header the keys: Enter, Space,
+        // → and ← fold it, and the list's single keys give way.
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.run_until_parked();
+        assert!(!list_focused(cx), "Tab reached the header");
+        key(cx, "j");
+        assert_eq!(state(cx), (false, 2), "j doesn't reach the list from the header");
+        key(cx, "enter");
+        assert_eq!(state(cx), (true, 2), "Enter unfolds it");
+        key(cx, "left");
+        assert_eq!(state(cx), (false, 2), "← folds it");
+        key(cx, "right");
+        assert_eq!(state(cx), (true, 2), "→ unfolds it");
+        key(cx, "space");
+        assert_eq!(state(cx), (false, 2), "Space folds it");
+    }
 
     #[test]
     fn detects_allowed_web_and_mail_links_only() {
