@@ -47,7 +47,7 @@ for frontend in "$@"; do
     gpui)
       name='Mailstream GPUI'
       executable=mailstream-gpui
-      ./scripts/capped cargo build --release -p mailstream-gpui -p mailstream-engine --bin mailstream
+      ./scripts/capped cargo build --release -p mailstream-gpui -p mailstream-engine --bin mailstream-gpui --bin mailstream
       ./scripts/gpui-bundle.sh
       app="build/$name.app"
       ;;

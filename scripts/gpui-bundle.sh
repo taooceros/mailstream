@@ -1,6 +1,6 @@
 #!/bin/sh
 # Bundles target/release/mailstream-gpui and target/release/mailstream (build them first:
-# cargo build --release -p mailstream-gpui -p mailstream-engine --bin mailstream)
+# cargo build --release -p mailstream-gpui -p mailstream-engine --bin mailstream-gpui --bin mailstream)
 # as an unsigned "Mailstream GPUI.app" for scripts/install.sh, the nightly and the signed
 # updates CI publishes (MS-219): the Apple Intelligence tagger, Sparkle in Frameworks
 # (the pinned version scripts/sparkle.sh fetches once into build/) and an Info.plist naming the

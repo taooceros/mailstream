@@ -85,7 +85,7 @@ jobs:
       - name: Build release
         run: |
           echo "Building update $BUILD_NUMBER"
-          cargo build --release -p mailstream-gpui -p mailstream-engine --bin mailstream
+          cargo build --release -p mailstream-gpui -p mailstream-engine --bin mailstream-gpui --bin mailstream
           ./scripts/gpui-bundle.sh
       - name: Sign and prepare authenticated package
         env:

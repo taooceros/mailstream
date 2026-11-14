@@ -79,7 +79,7 @@ def move_outside(relative):
 
 def build(frontend):
     """Builds `frontend` (gpui) in devenv shell; returns the folder to install."""
-    devenv("cargo build --release -p mailstream-gpui -p mailstream-engine --bin mailstream")
+    devenv("cargo build --release -p mailstream-gpui -p mailstream-engine --bin mailstream-gpui --bin mailstream")
     staged = Path(os.path.realpath(ROOT / "target")) / "release/mailstream-gpui-install"
     shutil.rmtree(staged, ignore_errors=True)
     staged.mkdir()
