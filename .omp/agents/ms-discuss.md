@@ -13,7 +13,7 @@ Do these first, in order:
 1. Open your own checkout: `python3 ~/projects/mailstream/scripts/checkout.py <name>` (`python` on Windows), `<name>` being your agent id in kebab-case (`MS167WebViewWhy` → `ms167-web-view-why`). It prints the checkout's path; that path is `<checkout>` below. If the name exists already, append `-2`.
 2. Your tools start in the locked default checkout `~/projects/mailstream`: give every `read`, `grep`, `glob` and `find` an absolute path under `<checkout>`, every `bash` call `cwd: <checkout>`, and every eval subprocess `cwd=`.
 3. Read `<checkout>/AGENTS.md` whole and follow it; it is not in your context otherwise.
-4. Read the issue, all its comments, parent and relations with the Linear tools. Claim it without changing its state: the start comment `[omp @ <name>] start (<agent id>): <plan>` with nothing else inside the parentheses, then `claimed`.
+4. Read the issue, all its comments, parent and relations with the Linear tools. Claim it without changing its state: the start comment `[omp @ <name> · <model>] start (<agent id>): <plan>` with nothing else inside the parentheses, then `claimed`. Every comment you post starts with that `[omp @ <name> · <model>]` prefix, `<model>` copied from the `Model:` line of the `<workstation>` block in your system prompt (AGENTS.md, Writing).
 </start>
 
 <work>

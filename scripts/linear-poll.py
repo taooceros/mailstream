@@ -43,11 +43,12 @@ only, so the same script runs on macOS, Windows and Linux.
     to the issue's subagent or starts one.
   {"kind": "stale", "id", "identifier", "title", "agent", "claimedAt"}: an In Progress issue labelled
     `claimed` whose owner, the agent named in its latest start comment
-    (`[omp @ <checkout>] start (<agent id>): …`, posted at claimedAt), is not in RUNNING, and
-    whose claim is at least 10 minutes old. agent is null when no start comment names one. Each
-    start comment is reported once: whoever takes the issue over posts a new one. Needs the
-    agent ids running now, as the caller sees them, as a JSON array: in RUNNING_FILE (re-read
-    each pass; wins when the file exists) or RUNNING; without either nothing is reported stale.
+    (`[omp @ <checkout> · <model>] start (<agent id>): …`, posted at claimedAt; START also takes
+    the older `[omp @ <checkout>]`), is not in RUNNING, and whose claim is at least 10 minutes
+    old. agent is null when no start comment names one. Each start comment is reported once:
+    whoever takes the issue over posts a new one. Needs the agent ids running now, as the caller
+    sees them, as a JSON array: in RUNNING_FILE (re-read each pass; wins when the file exists) or
+    RUNNING; without either nothing is reported stale.
     Issues out of In Progress whose owner is not running lose `claimed`.
 Machines: the poller covers the teams in TEAMS (comma-separated ids, default Mailstream `MS` and
 `WIN`). Issues of a team in HOST_TEAMS (comma-separated `KEY=host`, default `WIN=windows`) belong

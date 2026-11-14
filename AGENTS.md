@@ -100,6 +100,15 @@ hedging or repeated disclaimers ("未授权", "不代表", "不算通过"); own 
 as facts and never present the unverified as done. Identifiers, paths, commands and commit
 hashes stay as they are.
 
+Every comment an agent posts, the polling session's included, starts with `[omp @ <checkout> ·
+<model>]`: its checkout's folder name and the model it runs on, so the issue shows which model
+wrote what (MS-334). The model is the `Model:` line of the `<workstation>` block in the agent's
+own system prompt, copied as it stands: `anthropic/claude-opus-5-5`, or
+`google-vertex/gemini-4-argon` for `gemini-task`, `google-vertex/gemini-4-hydrogen` for the
+user's `m1` and `@smol` agents such as `ms-install`. Never the model a task, an agent definition
+or a role (`@task`, `@smol`) names: config overrides change what actually runs. Markers such as
+`**待安装**` and `**❓ 需要你回答：**` come right after the prefix.
+
 ### Filing
 
 - Labels: one type (`Bug`, `Feature`, `Improvement`, `Performance`, `Regression`) plus one `Area`
@@ -135,10 +144,11 @@ hashes stay as they are.
   the text does not count.
 - Start: read the issue and its comments. Skip issues already In Progress unless the user or the
   polling session hands one over. Move it to In Progress, comment
-  `[omp @ <checkout>] start (<agent id>): <plan>` (the subagent/roster id, so the issue shows
-  who owns it), then add the `claimed` label. Taking over or resuming counts as starting: post a
-  new start comment with your own id. Remove `claimed` when you stop (In Review, also when
-  handed to the install batch; Todo with a question; Backlog when blocked).
+  `[omp @ <checkout> · <model>] start (<agent id>): <plan>` (the prefix of [Writing](#writing);
+  the subagent/roster id, so the issue shows who owns it), then add the `claimed` label. Taking
+  over or resuming counts as starting: post a new start comment with your own id. Remove
+  `claimed` when you stop (In Review, also when handed to the install batch; Todo with a
+  question; Backlog when blocked).
 - Progress: record decisions, blockers and dead ends as comments; the next session only sees
   what is on the issue.
 - Blocked by another issue (it needs that change first, or the user said to wait for it): add a
@@ -147,8 +157,8 @@ hashes stay as they are.
   Done or Canceled; the user's review is not awaited), the poll hands it out again, in Todo or
   Backlog, and its agent carries on from the comments.
 - Questions only the user can decide: don't guess. Assign the issue to the user (taooceros), move
-  it to Todo, start the comment with `**❓ 需要你回答：**` followed by the question(s), each
-  answerable on its own, and stop.
+  it to Todo, start the comment (after the prefix) with `**❓ 需要你回答：**` followed by the
+  question(s), each answerable on its own, and stop.
 - Finish: reference the issue in the commit (`Fixes MS-12`, or `Refs MS-12` for partial work)
   and land it on `main` (`scripts/land.py`, [Version control](#version-control-jj)) once the
   tests for what you changed pass and you have checked it in the
@@ -370,10 +380,10 @@ The code agent:
    install nothing (In Review directly, [Finish](#working-an-issue)). Changes to deployment
    itself (`install.sh`, `install-linux.py`, signing, updates) exercise the real path: their own
    agent installs them as below.
-4. Hands over: a comment starting `**待安装**` with what changed, the commit, the targets and
-   what it verified, with its screenshots; nothing is left for the installer to test. Then it
-   adds the `install` label, removes `claimed`, moves the issue to In Review, does the parent
-   check ([Working an issue](#working-an-issue)) and removes its checkout.
+4. Hands over: a comment whose prefix is followed by `**待安装**`, with what changed, the commit,
+   the targets and what it verified, with its screenshots; nothing is left for the installer to
+   test. Then it adds the `install` label, removes `claimed`, moves the issue to In Review, does
+   the parent check ([Working an issue](#working-an-issue)) and removes its checkout.
 
 The batch install agent (one per `install` line of the poller, [Polling session](#polling-session)):
 

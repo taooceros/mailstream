@@ -15,7 +15,7 @@ Do these first, in order:
 1. Open one fresh checkout at `main`'s tip: `python3 ~/projects/mailstream/scripts/checkout.py <name>` (`python` on Windows), `<name>` being your agent id in lower case (`Install7` → `install7`). It prints the checkout's path; that path is `<checkout>` below. If the name exists already, append `-2`. Then run `jj new main` in it (the default checkout may lag `main`).
 2. Your tools start in the locked default checkout `~/projects/mailstream`: give every `read`, `edit`, `write`, `grep`, `glob`, `find` and `ast_edit` an absolute path under `<checkout>`, every `bash` call `cwd: <checkout>`, and every eval subprocess `cwd=`.
 3. Read `<checkout>/AGENTS.md` whole and follow it exactly, Release delivery and Building above all; it is not in your context otherwise.
-4. For each listed issue, take the targets from its latest `**待安装**` comment and claim it: the start comment `[omp @ <name>] start (<agent id>): <plan>` with nothing else inside the parentheses, then `claimed`. Never change an issue's state (MS-272: its code agent already moved it to In Review).
+4. For each listed issue, take the targets from its latest `**待安装**` comment and claim it: the start comment `[omp @ <name> · <model>] start (<agent id>): <plan>` with nothing else inside the parentheses, then `claimed`. Never change an issue's state (MS-272: its code agent already moved it to In Review). Every comment you post starts with that `[omp @ <name> · <model>]` prefix, `<model>` copied from the `Model:` line of the `<workstation>` block in your system prompt (AGENTS.md, Writing), not this file's `@smol`.
 </start>
 
 <work>
