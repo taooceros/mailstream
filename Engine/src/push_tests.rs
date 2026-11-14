@@ -192,7 +192,8 @@ fn connects_registers_follows_notifications_and_stops_on_sign_out() {
         "{\n  \"me@gmail.com\" : {\n    \"expires\" : \"2026-09-21T14:13:20Z\",\n    \"id\" : \"projects\\/p\\/topics\\/t\",\n    \"kind\" : \"gmail\"\n  },\n  \"me@outlook.com\" : {\n    \"expires\" : \"2026-11-11T00:00:00Z\",\n    \"id\" : \"sub-1\",\n    \"kind\" : \"graph\"\n  }\n}"
     );
 
-    // A Graph change refreshes that account's inbox and counts, half a second later.
+    // A Graph change refreshes that account's inbox and counts, half a second later, and once
+    // more when it has settled.
     let inbox = || requests(&server, "GET", "/v1.0/me/mailFolders/F-inbox/messages").len();
     let folders = || requests(&server, "GET", "/v1.0/me/mailFolders").len();
     wait_until("the first inbox fetch", || inbox() > 0);
@@ -203,6 +204,7 @@ fn connects_registers_follows_notifications_and_stops_on_sign_out() {
     wait_until("the pushed inbox fetch", || inbox() > inbox_before && folders() > folders_before);
     std::thread::sleep(Duration::from_millis(700));
     assert_eq!(inbox(), inbox_before + 1, "the two notifications came as one refresh");
+    wait_until("the second look", || inbox() == inbox_before + 2 && folders() >= folders_before + 2);
     // An unknown subscription or address is ignored; a Gmail change refreshes that account.
     let labels = || requests(&server, "GET", "/gmail/v1/users/me/labels").len();
     let labels_before = labels();
@@ -210,7 +212,7 @@ fn connects_registers_follows_notifications_and_stops_on_sign_out() {
     relay.send(json!({ "source": "gmail", "email": "Someone@else.com", "historyId": "1" }));
     relay.send(json!({ "source": "gmail", "email": "Me@Gmail.com", "historyId": "10" }));
     wait_until("the pushed Gmail counts", || labels() > labels_before);
-    assert_eq!(inbox(), inbox_before + 1);
+    assert_eq!(inbox(), inbox_before + 2);
 
     // Graph asking for reauthorization renews the subscription at once.
     relay.send(json!({ "source": "graph", "subscriptionId": "sub-1", "lifecycleEvent": "reauthorizationRequired" }));
@@ -291,6 +293,111 @@ fn stays_idle_without_a_relay() {
     std::thread::sleep(Duration::from_millis(300));
     assert!(!engine.core.push.is_connected());
     assert!(!config.support_directory.join("push.json").exists());
+    drop(engine);
+    cleanup(&config);
+}
+
+/// Gmail and Outlook each with one inbox conversation and, from the moment `sent_from` names
+/// on, the user's reply to it from another client in Sent.
+fn mailbox_server(sent_from: Arc<Mutex<Option<std::time::Instant>>>) -> FakeServer {
+    use crate::mail_tests::{BASE_MS, gmail_batch, graph_message, header};
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert("i0".to_string(), json!({
+        "id": "i0", "threadId": "t0", "labelIds": ["INBOX"], "internalDate": BASE_MS.to_string(),
+        "payload": { "mimeType": "text/plain", "headers": [
+            header("From", "Ann <ann@x.com>"), header("To", "me@gmail.com"), header("Subject", "Lunch?"),
+            header("Message-ID", "<i0@x>"),
+        ]},
+    }));
+    metadata.insert("s1".to_string(), json!({
+        "id": "s1", "threadId": "t0", "labelIds": ["SENT"], "internalDate": (BASE_MS + 60_000).to_string(),
+        "payload": { "mimeType": "text/plain", "headers": [
+            header("From", "me@gmail.com"), header("To", "Ann <ann@x.com>"), header("Subject", "Re: Lunch?"),
+            header("Message-ID", "<s1@x>"), header("In-Reply-To", "<i0@x>"),
+        ]},
+    }));
+    let tokens = AtomicUsize::new(0);
+    FakeServer::start(move |request: &FakeRequest| {
+        let sent = sent_from.lock().unwrap().is_some_and(|from| std::time::Instant::now() >= from);
+        match (request.method.as_str(), request.path.as_str()) {
+            (_, "/token") => {
+                let call = tokens.fetch_add(1, Ordering::SeqCst) + 1;
+                Reply::json(json!({ "access_token": format!("at{call}"), "expires_in": 3600 }))
+            }
+            ("POST", "/gmail/v1/users/me/watch") => Reply::json(json!({ "historyId": "9", "expiration": "1790000000000" })),
+            ("POST", "/v1.0/subscriptions") => {
+                Reply::status(201, json!({ "id": "sub-1", "expirationDateTime": "2026-11-11T00:00:00Z" }))
+            }
+            (_, "/batch/gmail/v1") => gmail_batch(request, &metadata),
+            ("GET", "/gmail/v1/users/me/profile") => Reply::json(json!({ "emailAddress": "me@gmail.com", "historyId": "100" })),
+            ("GET", "/gmail/v1/users/me/settings/sendAs") => {
+                Reply::json(json!({ "sendAs": [{ "sendAsEmail": "me@gmail.com", "isPrimary": true }] }))
+            }
+            ("GET", "/gmail/v1/users/me/labels") => Reply::json(json!({ "labels": [
+                { "id": "INBOX", "name": "INBOX", "type": "system" }, { "id": "SENT", "name": "SENT", "type": "system" },
+            ]})),
+            ("GET", "/gmail/v1/users/me/history") => Reply::json(json!({ "historyId": "101" })),
+            ("GET", "/gmail/v1/users/me/messages") => {
+                let ids: Vec<Value> = match request.param("labelIds") {
+                    Some("INBOX") => vec![json!({ "id": "i0" })],
+                    Some("SENT") if sent => vec![json!({ "id": "s1" })],
+                    _ => vec![],
+                };
+                Reply::json(json!({ "messages": ids, "resultSizeEstimate": ids.len() }))
+            }
+            ("GET", "/v1.0/me") => Reply::json(json!({ "displayName": "Me", "mail": "me@outlook.com" })),
+            ("GET", "/v1.0/me/mailFolders") => Reply::json(json!({ "value": [
+                { "id": "F-inbox", "displayName": "Inbox", "childFolderCount": 0, "unreadItemCount": 0, "totalItemCount": 1 },
+                { "id": "F-sent", "displayName": "Sent Items", "childFolderCount": 0, "unreadItemCount": 0, "totalItemCount": 0 },
+            ]})),
+            ("GET", "/v1.0/me/mailFolders/inbox") => Reply::json(json!({ "id": "F-inbox" })),
+            ("GET", "/v1.0/me/mailFolders/sentitems") => Reply::json(json!({ "id": "F-sent" })),
+            ("GET", "/v1.0/me/mailFolders/F-inbox/messages") => {
+                Reply::json(json!({ "value": [graph_message("g1", "c1", ("Bob", "bob@x.com"), "Plan", 0)] }))
+            }
+            ("GET", "/v1.0/me/mailFolders/F-sent/messages") if sent => {
+                Reply::json(json!({ "value": [graph_message("g2", "c1", ("Me", "me@outlook.com"), "RE: Plan", 1)] }))
+            }
+            ("GET", other) if other.starts_with("/v1.0/me/mailFolders/") && other.ends_with("/messages") => {
+                Reply::json(json!({ "value": [] }))
+            }
+            _ => Reply::status(404, json!({ "error": { "message": "Not found" } })),
+        }
+    })
+}
+
+/// Mail the user sends from another client reaches its conversation without a refresh, on Gmail
+/// and on Outlook, though the notification push delivers comes before the provider lists the
+/// sent copy and none follows for it (MS-282): Gmail drops a mailbox's notifications beyond one
+/// a second, and a send from another client is a burst of changes (the draft saved, then gone,
+/// the sent copy added).
+#[test]
+fn a_push_brings_mail_sent_from_another_client() {
+    let sent_from = Arc::new(Mutex::new(None));
+    let server = mailbox_server(sent_from.clone());
+    let relay = FakeRelay::start();
+    let config = prepare(&server, &relay, &[("me@outlook.com", "microsoft"), ("me@gmail.com", "google")]);
+    let engine = Engine::start(config.clone());
+    let push = engine.core.push.clone();
+    wait_until("push connected", || push.is_connected());
+    // Each conversation as the inbox holds it: its message count and whether its latest is the user's.
+    let held = |id: &str| {
+        let listing = crate::testkit::call(&engine, "mail.list", json!({ "cached": true })).ok()?;
+        let conversation = listing["conversations"].as_array()?.iter().find(|c| c["id"] == json!(id))?.clone();
+        Some((conversation["messageCount"].as_u64()?, conversation["fromMe"].as_bool()?))
+    };
+    wait_until("both inboxes", || held("me@gmail.com|i0@x").is_some() && held("me@outlook.com|g1@outlook").is_some());
+    assert_eq!(held("me@gmail.com|i0@x"), Some((1, false)));
+    assert_eq!(held("me@outlook.com|g1@outlook"), Some((1, false)));
+    wait_until("registrations", || registrations(&config).as_object().is_some_and(|all| all.len() == 2));
+
+    // The draft's change is reported; the sent copies list a second later, unreported.
+    std::thread::sleep(Duration::from_millis(300));
+    *sent_from.lock().unwrap() = Some(std::time::Instant::now() + Duration::from_secs(1));
+    relay.send(json!({ "source": "gmail", "email": "me@gmail.com", "historyId": "102" }));
+    relay.send(json!({ "source": "graph", "subscriptionId": "sub-1", "changeType": "updated", "lifecycleEvent": null }));
+    wait_until("the Gmail reply", || held("me@gmail.com|i0@x") == Some((2, true)));
+    wait_until("the Outlook reply", || held("me@outlook.com|g1@outlook") == Some((2, true)));
     drop(engine);
     cleanup(&config);
 }

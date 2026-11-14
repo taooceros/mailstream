@@ -60,6 +60,14 @@ pub const PAGE_SIZE: usize = 50;
 const AGENT_PAGE_ROUNDS: usize = 6;
 /// Conversations `mail.*` commands remember by id while the engine runs.
 const KNOWN_LIMIT: usize = 5000;
+/// How long push notifications for one account gather before the pass that picks them up.
+const PUSH_GATHER: std::time::Duration = std::time::Duration::from_millis(500);
+/// How long after a push pass the account is looked at once more. A notification can come
+/// before the provider lists what it reports, and Gmail drops a mailbox's notifications beyond
+/// one a second: mail sent from another client is a burst of changes (the draft saved, then
+/// gone, the sent copy added), so its sent copy often lists only after the pass for the draft's
+/// notification, and no notification of its own follows (MS-282).
+const PUSH_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Clone, Debug, Default)]
 struct Listing {
@@ -116,6 +124,8 @@ struct State {
     connected: bool,
     /// Accounts push reported a change of, waiting out the coalescing delay.
     account_refreshes: HashSet<String>,
+    /// Push passes started per account; only an account's latest one looks again (`PUSH_SETTLE`).
+    push_passes: HashMap<String, u64>,
     /// The conversations the user started that the inbox lists.
     started: started::Started,
     /// Mail sent from here that Sent doesn't list yet, listed with it.
@@ -799,25 +809,46 @@ impl Mail {
     }
 
     /// Picks up a change push reported for `account`: its mailboxes in the default list and its
-    /// counts. Bursts (a sync touching many messages) coalesce into one pass half a second later.
+    /// counts. Bursts (a sync touching many messages) coalesce into one pass half a second later,
+    /// and the latest pass looks again once the change has settled (`PUSH_SETTLE`).
     pub fn refresh_account(self: &Arc<Self>, account: &str) {
         if !self.state().account_refreshes.insert(account.to_string()) {
             return;
         }
         let (mail, account) = (self.clone(), account.to_string());
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let keys: Vec<MailboxKey> = {
+            tokio::time::sleep(PUSH_GATHER).await;
+            let pass = {
                 let mut state = mail.state();
                 state.account_refreshes.remove(&account);
-                if !state.accounts.iter().any(|known| known.name == account) {
-                    return;
-                }
-                Self::default_keys(&state).into_iter().filter(|key| key.account == account).collect()
+                let passes = state.push_passes.entry(account.clone()).or_default();
+                *passes += 1;
+                *passes
             };
-            mail.refresh_account_counts(account);
-            mail.fetch_first_pages(&keys).await;
+            if !mail.refresh_account_now(&account).await {
+                return;
+            }
+            tokio::time::sleep(PUSH_SETTLE).await;
+            // A later notification's pass looks again after itself.
+            if mail.state().push_passes.get(&account) == Some(&pass) {
+                mail.refresh_account_now(&account).await;
+            }
         });
+    }
+
+    /// `account`'s mailboxes in the default list and its counts, fetched now; false when the
+    /// account is gone.
+    async fn refresh_account_now(self: &Arc<Self>, account: &str) -> bool {
+        let keys: Vec<MailboxKey> = {
+            let state = self.state();
+            if !state.accounts.iter().any(|known| known.name == account) {
+                return false;
+            }
+            Self::default_keys(&state).into_iter().filter(|key| key.account == account).collect()
+        };
+        self.refresh_account_counts(account.to_string());
+        self.fetch_first_pages(&keys).await;
+        true
     }
 
     /// First pages of `keys`, and the keys that failed. Each page is taken in as it arrives, so a
