@@ -52,6 +52,11 @@ iroh = "1"
 iroh-docs = { version = "0.101", default-features = false, features = ["fs-store"] }
 iroh-blobs = { version = "0.103", default-features = false, features = ["fs-store"] }
 iroh-gossip = "0.101"
+# Gmail search and its envelopes over IMAP (`gmail/imap.rs`, MS-358), which Gmail's API quota
+# doesn't count; TLS through the rustls reqwest and the push relay already use.
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-native-certs = "0.8"
 
 # The screenshot mode's stand-in provider and in-memory sign-ins (`src/shots.rs`, MS-265), for
 # GPUI's `shots` feature only; installed builds leave it out.

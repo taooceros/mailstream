@@ -368,6 +368,175 @@ fn searches_quickly_then_fully_and_matches_held_mail() {
     cleanup(&config);
 }
 
+#[test]
+fn searches_gmail_over_imap_reuses_connection_and_reconnects_when_dropped() {
+    use crate::fake_imap::{FakeImapConfig, FakeImapMessage, FakeImapServer};
+    use crate::testkit::{mail_account, server_config, sign_in_all};
+
+    let counters = Arc::new(GmailCounters {
+        tokens: AtomicUsize::new(0),
+        labels: AtomicUsize::new(0),
+        listings: AtomicUsize::new(0),
+    });
+    let rest_searches = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let (counters, rest_searches, metadata) = (counters.clone(), rest_searches.clone(), gmail_metadata());
+        FakeServer::start(move |request| {
+            if request.path == "/token" {
+                return token_reply(&counters.tokens);
+            }
+            if request.path == "/gmail/v1/users/me/messages" && request.param("q").is_some() {
+                rest_searches.fetch_add(1, Ordering::SeqCst);
+            }
+            gmail_reply(request, &counters, &metadata)
+        })
+    };
+
+    let imap = FakeImapServer::start(FakeImapConfig {
+        all_mail_name: "[Gmail]/所有邮件".into(),
+        reject_first_token: Some("at2".into()),
+        messages: vec![
+            FakeImapMessage {
+                uid: 101,
+                msg_id: 0x11be0a6e39d8e501,
+                thr_id: 0x22be0a6e39d8e500,
+                labels: vec!["\\Inbox".into(), "\\Important".into(), "Receipts".into()],
+                flags: vec!["\\Flagged".into()],
+                internal_date: "14-Nov-2026 08:00:00 +0000".into(),
+                size: 4096,
+                bodystructure: r#"(("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 12 1 NIL NIL NIL)("APPLICATION" "PDF" ("NAME" "invoice.pdf") NIL NIL "BASE64" 512 NIL ("ATTACHMENT" ("FILENAME" "invoice.pdf")) NIL) "MIXED" ("BOUNDARY" "m") NIL NIL)"#.into(),
+                headers: vec![
+                    ("From".into(), "Vendor <billing@x.com>".into()),
+                    ("To".into(), "Me <me@gmail.com>".into()),
+                    ("Subject".into(), "=?UTF-8?B?5Y+R56Wo?= #1".into()),
+                    ("Message-ID".into(), "<inv1@x>".into()),
+                ],
+            },
+            FakeImapMessage {
+                uid: 102,
+                msg_id: 0x11be0a6e39d8e502,
+                thr_id: 0x22be0a6e39d8e500,
+                labels: vec!["\\Sent".into()],
+                flags: vec!["\\Seen".into()],
+                internal_date: "14-Nov-2026 09:00:00 +0000".into(),
+                size: 512,
+                bodystructure: r#"(("TEXT" "HTML" ("CHARSET" "UTF-8") NIL NIL "7BIT" 20 1 NIL NIL NIL)("IMAGE" "PNG" ("NAME" "logo.png") "<logo@x>" NIL "BASE64" 64 NIL ("INLINE" ("FILENAME" "logo.png")) NIL) "RELATED" ("BOUNDARY" "r") NIL NIL)"#.into(),
+                headers: vec![
+                    ("From".into(), "me@gmail.com".into()),
+                    ("To".into(), "Vendor <billing@x.com>".into()),
+                    ("Subject".into(), "Re: =?UTF-8?B?5Y+R56Wo?= #1".into()),
+                    ("Message-ID".into(), "<inv2@x>".into()),
+                    ("In-Reply-To".into(), "<inv1@x>".into()),
+                ],
+            },
+            FakeImapMessage {
+                uid: 103,
+                msg_id: 0x11be0a6e39d8e503,
+                thr_id: 0x22be0a6e39d8e503,
+                labels: vec!["\\Inbox".into()],
+                flags: vec!["\\Seen".into()],
+                internal_date: "14-Nov-2026 10:00:00 +0000".into(),
+                size: 256,
+                bodystructure: r#"("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 10 1 NIL NIL NIL)"#.into(),
+                headers: vec![
+                    ("From".into(), "Bob <bob@x.com>".into()),
+                    ("To".into(), "Me <me@gmail.com>".into()),
+                    ("Subject".into(), "Unrelated".into()),
+                    ("Message-ID".into(), "<bob@x>".into()),
+                ],
+            },
+        ],
+        matches: Box::new(|query, msg| {
+            if query.contains("发票") { msg.uid == 101 || msg.uid == 102 } else { msg.uid == 103 }
+        }),
+        ..FakeImapConfig::default()
+    });
+
+    let mut config = server_config(&server);
+    config.endpoints.gmail.imap = Some(imap.endpoint.clone());
+    sign_in_all(&config, &[mail_account("me@gmail.com", "google")]);
+    let engine = Engine::start(config.clone());
+    wait_until("mailboxes", || {
+        call(&engine, "mailboxes", json!({})).unwrap()["me@gmail.com"].as_array().is_some_and(|boxes| !boxes.is_empty())
+    });
+
+    let found = call(&engine, "mail.search", json!({ "query": "发票 \"paid\"" })).unwrap();
+    assert_eq!(rest_searches.load(Ordering::SeqCst), 0, "IMAP search must not touch Gmail REST messages?q=");
+    assert_eq!(imap.last_query.lock().unwrap().as_deref(), Some("发票 \"paid\""));
+    assert_eq!(imap.last_user.lock().unwrap().as_deref(), Some("me@gmail.com"));
+    assert_eq!(imap.last_token.lock().unwrap().as_deref(), Some("at3"), "rejected token refreshed once");
+    assert_eq!(ids(&found), ["me@gmail.com|inv1@x"]);
+    let conv = &found["conversations"][0];
+    assert_eq!(conv["subject"], "发票 #1");
+    assert_eq!(conv["messageCount"], 2);
+    assert_eq!(conv["unread"], true);
+    assert_eq!(conv["starred"], true);
+    assert_eq!(conv["hasAttachment"], true);
+    assert_eq!(conv["mailboxes"], json!(["inbox", "sent"]));
+
+    let shown = call(&engine, "mail.show", json!({ "id": "me@gmail.com|inv1@x" })).unwrap();
+    assert_eq!(shown["messages"][0]["id"], "11be0a6e39d8e501");
+    assert_eq!(shown["messages"][1]["id"], "11be0a6e39d8e502");
+
+    // Second search reuses the existing IMAP connection without reconnecting.
+    let second = call(&engine, "mail.search", json!({ "query": "unrelated" })).unwrap();
+    assert_eq!(ids(&second), ["me@gmail.com|bob@x"]);
+    assert_eq!(second["conversations"][0]["hasAttachment"], false);
+    assert_eq!(imap.connections.load(Ordering::SeqCst), 2, "initial failed auth + 1 long-lived connection");
+    assert_eq!(imap.searches.load(Ordering::SeqCst), 2);
+    assert_eq!(imap.fetches.load(Ordering::SeqCst), 2);
+
+    // Simulate an idle disconnect on the next search: client reconnects seamlessly.
+    imap.config.drop_once_on_search.store(true, Ordering::SeqCst);
+    let third = call(&engine, "mail.search", json!({ "query": "unrelated" })).unwrap();
+    assert_eq!(ids(&third), ["me@gmail.com|bob@x"]);
+    assert_eq!(imap.connections.load(Ordering::SeqCst), 3);
+
+    drop(engine);
+    cleanup(&config);
+}
+
+#[test]
+fn falls_back_to_gmail_api_when_imap_disabled_or_fails() {
+    use crate::fake_imap::{FakeImapConfig, FakeImapServer};
+    use crate::testkit::{mail_account, server_config, sign_in_all};
+
+    let counters = Arc::new(GmailCounters {
+        tokens: AtomicUsize::new(0),
+        labels: AtomicUsize::new(0),
+        listings: AtomicUsize::new(0),
+    });
+    let server = gmail_server(counters.clone());
+
+    // 1. Admin disabled IMAP (auth rejected): falls back to Gmail REST API.
+    let disabled_imap = FakeImapServer::start(FakeImapConfig { reject_auth: true, ..FakeImapConfig::default() });
+    let mut config = server_config(&server);
+    config.endpoints.gmail.imap = Some(disabled_imap.endpoint.clone());
+    sign_in_all(&config, &[mail_account("me@gmail.com", "google")]);
+    let engine = Engine::start(config.clone());
+    wait_until("mailboxes", || {
+        call(&engine, "mailboxes", json!({})).unwrap()["me@gmail.com"].as_array().is_some_and(|boxes| !boxes.is_empty())
+    });
+    let found = call(&engine, "mail.search", json!({ "query": "invoice" })).unwrap();
+    assert_eq!(ids(&found), ["me@gmail.com|a0@x"]);
+    drop(engine);
+    cleanup(&config);
+
+    // 2. UID SEARCH returns NO: must fall back to Gmail REST API instead of returning empty results.
+    let failing_search_imap = FakeImapServer::start(FakeImapConfig { fail_search: true, ..FakeImapConfig::default() });
+    let mut config = server_config(&server);
+    config.endpoints.gmail.imap = Some(failing_search_imap.endpoint.clone());
+    sign_in_all(&config, &[mail_account("me@gmail.com", "google")]);
+    let engine = Engine::start(config.clone());
+    wait_until("mailboxes", || {
+        call(&engine, "mailboxes", json!({})).unwrap()["me@gmail.com"].as_array().is_some_and(|boxes| !boxes.is_empty())
+    });
+    let found = call(&engine, "mail.search", json!({ "query": "invoice" })).unwrap();
+    assert_eq!(ids(&found), ["me@gmail.com|a0@x"]);
+    drop(engine);
+    cleanup(&config);
+}
+
 // MARK: - Graph
 
 pub(crate) fn graph_message(id: &str, conversation: &str, from: (&str, &str), subject: &str, minutes: i64) -> Value {

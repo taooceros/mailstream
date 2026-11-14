@@ -45,6 +45,9 @@ resolver = "3"
 # copy once an h2 release carries the fix. Its unit tests run in a copy outside this workspace
 # (`cargo test --all-features --lib -- --skip hpack::test::fixture`: the crate ships no fixtures);
 # `api::tests::http2_connections_outlast_empty_data_frames` checks it from the engine.
+# `Engine/vendor/async-imap` is async-imap 0.12.0 with `Fetch::gmail_thr_id` added to
+# `src/types/fetch.rs` (marked "Mailstream patch", MS-358) so Gmail's `X-GM-THRID` can be read
+# alongside `gmail_msg_id()`. Drop the copy once an async-imap release carries the method.
 [patch.crates-io]
 stylo_derive = { path = "GPUI/vendor/stylo_derive" }
 gpui-fast = { path = "GPUI/vendor/gpui-fast" }
@@ -52,6 +55,7 @@ gpui-fast-linux = { path = "GPUI/vendor/gpui-fast-linux" }
 h2 = { path = "Engine/vendor/h2" }
 gpui-fast-macos = { path = "GPUI/vendor/gpui-fast-macos" }
 gpui-fast-wgpu = { path = "GPUI/vendor/gpui-fast-wgpu" }
+async-imap = { path = "Engine/vendor/async-imap" }
 
 # Debug builds with optimized dependencies, as GPUI had them on its own; one profile for every
 # member, so a debug build of GPUI and the engine's tests share their dependencies.

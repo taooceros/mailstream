@@ -21,15 +21,25 @@ use crate::model::{Address, DISTANT_PAST, Envelope, Mailbox, MailboxRole, Messag
 use crate::text;
 
 mod changes;
+mod imap;
 
 pub const ALL_MAIL: &str = "ALL";
 
-/// Where Gmail's REST API lives: its root, and its batch endpoint (whose sub-requests name
-/// paths under the root).
+/// Where Gmail's REST API and IMAP server live: the REST root, its batch endpoint (whose
+/// sub-requests name paths under the root), and the IMAP host (`None` disables IMAP, e.g. in
+/// offline or HTTP-only test setups).
+#[derive(Clone, Debug)]
+pub struct ImapEndpoint {
+    pub host: String,
+    pub port: u16,
+    pub tls: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct GmailEndpoints {
     pub root: String,
     pub batch: String,
+    pub imap: Option<ImapEndpoint>,
 }
 
 impl Default for GmailEndpoints {
@@ -37,6 +47,7 @@ impl Default for GmailEndpoints {
         Self {
             root: "https://gmail.googleapis.com/gmail/v1/users/me/".into(),
             batch: "https://gmail.googleapis.com/batch/gmail/v1".into(),
+            imap: Some(ImapEndpoint { host: "imap.gmail.com".into(), port: 993, tls: true }),
         }
     }
 }
@@ -65,6 +76,7 @@ pub struct Gmail {
     api: Arc<Api>,
     endpoints: Arc<GmailEndpoints>,
     cache: Arc<EnvelopeCache>,
+    imap: Arc<imap::ImapClient>,
 }
 
 const ROLES: [(&str, MailboxRole); 7] = [
@@ -171,7 +183,8 @@ struct Label {
 impl Gmail {
     pub fn new(api: Arc<Api>, endpoints: Arc<GmailEndpoints>, cache_root: &std::path::Path) -> Self {
         let cache = Arc::new(EnvelopeCache::new(api.clone(), endpoints.clone(), cache_file(cache_root, &api.account)));
-        Self { api, endpoints, cache }
+        let imap = Arc::new(imap::ImapClient::new(api.clone(), endpoints.clone()));
+        Self { api, endpoints, cache, imap }
     }
 
     pub async fn identity(&self) -> Result<Address, ApiError> {
@@ -286,6 +299,16 @@ impl Gmail {
     /// `quick` leaves out the attachment check of messages not seen before (MS-352): they show no
     /// paperclip until a later search or listing checks them.
     pub async fn search(&self, query: &str, page_size: usize, quick: bool) -> Result<Vec<SearchHit>, ApiError> {
+        if self.endpoints.imap.is_some()
+            && let Ok(messages) = self.imap.search(query, page_size.clamp(1, 100)).await
+            && let Ok(hits) = self.cache.imap_hits(messages, Priority::Interactive).await
+        {
+            return Ok(hits);
+        }
+        self.search_api(query, page_size, quick).await
+    }
+
+    async fn search_api(&self, query: &str, page_size: usize, quick: bool) -> Result<Vec<SearchHit>, ApiError> {
         let size = api::page_size(page_size, 500);
         let url = self.endpoints.url("messages", &[("q", query), ("maxResults", &size), ("fields", LIST_FIELDS)]);
         let (ids, _) = self.listing(url, Priority::Interactive).await?;
@@ -785,6 +808,77 @@ impl EnvelopeCache {
             .collect())
     }
 
+    async fn imap_hits(
+        self: &Arc<Self>,
+        messages: Vec<imap::ImapMessage>,
+        priority: Priority,
+    ) -> Result<Vec<SearchHit>, ApiError> {
+        let has_user_labels = messages.iter().any(|msg| !msg.user_labels.is_empty());
+        let names = if has_user_labels {
+            let known = self.names.lock().expect("label names").clone();
+            let needs_refresh = match &known {
+                None => true,
+                Some((names, read)) => {
+                    read.elapsed() >= NAMES_REFRESH
+                        && messages.iter().flat_map(|msg| msg.user_labels.iter()).any(|name| {
+                            !names.values().any(|known_name| known_name == name || known_name.eq_ignore_ascii_case(name))
+                        })
+                }
+            };
+            if needs_refresh {
+                self.labels(priority).await?;
+                self.names.lock().expect("label names").as_ref().map(|(names, _)| names.clone()).unwrap_or_default()
+            } else {
+                known.map(|(names, _)| names).unwrap_or_default()
+            }
+        } else {
+            self.names.lock().expect("label names").as_ref().map(|(names, _)| names.clone()).unwrap_or_default()
+        };
+
+        let by_name: HashMap<&str, &str> = names.iter().map(|(id, name)| (name.as_str(), id.as_str())).collect();
+        let mut state = self.state.lock().await;
+        self.load(&mut state);
+        Ok(messages
+            .into_iter()
+            .map(|msg| {
+                let mut labels = msg.system_labels;
+                for name in &msg.user_labels {
+                    if let Some(id) = by_name.get(name.as_str()).copied().or_else(|| {
+                        names.iter().find(|(_, known)| known.eq_ignore_ascii_case(name)).map(|(id, _)| id.as_str())
+                    }) {
+                        labels.insert(id.to_string());
+                    }
+                }
+                if let Some(cached) = state.entries.get(&msg.id) {
+                    for (category, _) in CATEGORIES {
+                        if cached.labels.contains(category) {
+                            labels.insert(category.into());
+                        }
+                    }
+                }
+                let envelope = Envelope {
+                    id: msg.id,
+                    thread: msg.thread,
+                    message_id: msg.message_id,
+                    in_reply_to: msg.in_reply_to,
+                    flags: BTreeSet::new(),
+                    subject: msg.subject,
+                    from: msg.from,
+                    to: msg.to,
+                    date: msg.date,
+                    size: msg.size,
+                    has_attachment: msg.has_attachment,
+                    tags: BTreeSet::new(),
+                    provider_category: None,
+                    important: false,
+                };
+                let entry = Entry { envelope, labels };
+                let mailbox = ["INBOX", "SENT", "DRAFT"].into_iter().find(|label| entry.labels.contains(*label));
+                SearchHit { mailbox: mailbox.unwrap_or(ALL_MAIL).to_string(), envelope: entry.current(&names) }
+            })
+            .collect())
+    }
+
     /// Entries of `ids` in that order, fetching metadata for the ones not cached; messages that
     /// no longer exist are left out. Ids another caller is already fetching share that fetch.
     /// A multipart/mixed message has attachments only if a part carries a file name, which
@@ -1145,5 +1239,76 @@ mod tests {
         assert!(content.html.unwrap().contains("mscid://k/0-a.png"));
         assert!(content.attachments.is_empty());
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn imap_search_maps_ids_thread_tags_important_flags_and_attachments() {
+        use std::sync::atomic::AtomicUsize;
+        use crate::fake_imap::{FakeImapConfig, FakeImapMessage, FakeImapServer};
+        use crate::testkit::{FakeServer, Reply, cleanup, mail_account, server_config, sign_in_all, token_reply};
+
+        let tokens = Arc::new(AtomicUsize::new(0));
+        let server = {
+            let tokens = tokens.clone();
+            FakeServer::start(move |req| {
+                if req.path == "/token" {
+                    return token_reply(&tokens);
+                }
+                if req.path == "/gmail/v1/users/me/labels" {
+                    return Reply::json(serde_json::json!({
+                        "labels": [
+                            { "id": "INBOX", "name": "INBOX", "type": "system" },
+                            { "id": "Label_1", "name": "Receipts", "type": "user" }
+                        ]
+                    }));
+                }
+                Reply::status(404, serde_json::json!({}))
+            })
+        };
+        let imap = FakeImapServer::start(FakeImapConfig {
+            messages: vec![FakeImapMessage {
+                uid: 42,
+                msg_id: 0x11be0a6e39d8e501,
+                thr_id: 0x22be0a6e39d8e500,
+                labels: vec!["\\Inbox".into(), "\\Important".into(), "Receipts".into()],
+                flags: vec!["\\Flagged".into()],
+                internal_date: "14-Nov-2026 08:00:00 +0000".into(),
+                size: 4096,
+                bodystructure: r#"(("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 12 1 NIL NIL NIL)("APPLICATION" "PDF" ("NAME" "invoice.pdf") NIL NIL "BASE64" 512 NIL ("ATTACHMENT" ("FILENAME" "invoice.pdf")) NIL) "MIXED" ("BOUNDARY" "m") NIL NIL)"#.into(),
+                headers: vec![
+                    ("From".into(), "Vendor <billing@x.com>".into()),
+                    ("To".into(), "Me <me@gmail.com>".into()),
+                    ("Subject".into(), "Receipt".into()),
+                    ("Message-ID".into(), "<r42@x>".into()),
+                ],
+            }],
+            ..FakeImapConfig::default()
+        });
+        let mut config = server_config(&server);
+        config.endpoints.gmail.imap = Some(imap.endpoint.clone());
+        sign_in_all(&config, &[mail_account("me@gmail.com", "google")]);
+        let keychain = crate::keychain::Keychain::new(config.keychain_service.clone(), config.keychain_directory.clone());
+        let oauth = Arc::new(crate::oauth::OAuth::new(config.oauth.clone()));
+        let signed_in = HashMap::from([(
+            "me@gmail.com".to_string(),
+            crate::tokens::SignedIn { provider: crate::Provider::Google, scopes: vec!["https://mail.google.com/".into()] },
+        )]);
+        let tokens_mgr = Arc::new(crate::tokens::Tokens::new(keychain, oauth, config.built_in_clients.clone(), signed_in));
+        let api = Arc::new(Api::gmail("me@gmail.com", tokens_mgr));
+        let gmail = Gmail::new(api, Arc::new(config.endpoints.gmail.clone()), &config.cache_directory);
+
+        let hits = gmail.search("Receipt", 25, true).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].mailbox, "INBOX");
+        let env = &hits[0].envelope;
+        assert_eq!(env.id, "11be0a6e39d8e501");
+        assert_eq!(env.thread.as_deref(), Some("22be0a6e39d8e500"));
+        assert!(env.important);
+        assert!(env.is_flagged());
+        assert!(!env.is_seen());
+        assert_eq!(env.has_attachment, Some(true));
+        assert_eq!(env.size, 4096);
+        assert!(env.tags.contains("Receipts"));
+        cleanup(&config);
     }
 }

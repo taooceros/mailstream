@@ -34,6 +34,8 @@ pub mod display;
 #[cfg(any(test, feature = "shots"))]
 #[cfg_attr(not(test), allow(dead_code))]
 mod fake_server;
+#[cfg(test)]
+mod fake_imap;
 mod files;
 pub mod gmail;
 pub mod graph;

@@ -322,6 +322,16 @@ impl Api {
         }
     }
 
+    /// A current access token for this account, refreshing if expired.
+    pub async fn token(&self) -> Result<String, ApiError> {
+        self.tokens.token(&self.account).await.map_err(ApiError::from)
+    }
+
+    /// Drops `token` after a provider refused it so the next `token()` refreshes.
+    pub fn reject_token(&self, token: &str) {
+        self.tokens.reject(token, &self.account);
+    }
+
     /// GETs `url` and decodes its JSON answer.
     pub async fn get<T: DeserializeOwned>(&self, url: &str, priority: Priority, cost: u32) -> Result<T, ApiError> {
         self.decode(Request::get(url), priority, cost).await

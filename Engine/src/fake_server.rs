@@ -19,6 +19,7 @@ pub fn endpoints(base: &str) -> backend::Endpoints {
         gmail: gmail::GmailEndpoints {
             root: format!("{base}/gmail/v1/users/me/"),
             batch: format!("{base}/batch/gmail/v1"),
+            imap: None,
         },
         graph: format!("{base}/v1.0/"),
         chat: format!("{base}/chat/v1/"),
