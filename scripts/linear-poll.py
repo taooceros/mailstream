@@ -63,7 +63,10 @@ app reaches it only that way.
 Token: the Mac reads omp's from the keychain and renews it with RENEW. A machine without
 `security` sets LINEAR_TOKEN_FILE (the OAuth token JSON) and LINEAR_CREDENTIALS (a file with the
 OAuth app's client id on line 1 and secret on line 2); renewal fetches a client_credentials token
-into LINEAR_TOKEN_FILE.
+into LINEAR_TOKEN_FILE with the scopes in LINEAR_SCOPE (default `read,write`). Every process that
+renews the app's token must ask for the same set: Linear revokes the app's other tokens when the
+set changes. Linux's app, once it is an agent (MS-377, `scripts/linear-agent.py`), needs
+`read,write,app:assignable,app:mentionable`.
 Claims are kept in ~/.local/state/linear-poll/ (STATE): `launched` (issue ids), `comments`
 (comment ids), `unblocked` (issue id and the blocker ids it was claimed with), `stale` (issue id
 and the start comment reported), `install` (when the last install line was printed), `probe`
@@ -122,6 +125,7 @@ PEERS = os.environ.get("PEERS", "omp,windows-omp,linux-omp").split(",")
 RENEW = Path.home() / ".pi/agent/extensions/linear/renew-omp-token.sh"
 TOKEN_FILE = os.environ.get("LINEAR_TOKEN_FILE", "")
 CREDENTIALS = os.environ.get("LINEAR_CREDENTIALS", "")
+SCOPE = os.environ.get("LINEAR_SCOPE", "read,write")
 STATE = Path(os.environ.get("STATE") or Path.home() / ".local/state/linear-poll")
 LAUNCHED = STATE / "launched"
 HANDLED = STATE / "comments"
@@ -162,7 +166,7 @@ def renew():
         return
     client_id, secret = Path(CREDENTIALS).read_text(encoding="utf-8").splitlines()[:2]
     form = urllib.parse.urlencode({"grant_type": "client_credentials", "client_id": client_id.strip(),
-                                   "client_secret": secret.strip(), "scope": "read,write"}).encode()
+                                   "client_secret": secret.strip(), "scope": SCOPE}).encode()
     with urllib.request.urlopen("https://api.linear.app/oauth/token", form, timeout=60) as response:
         out = json.load(response)
     if not out.get("access_token"):

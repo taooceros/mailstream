@@ -91,6 +91,13 @@ is reached as the machine's OAuth app: its client id (line 1) and secret (line 2
 client_secret=… -d scope=read,write` into `token.json`; `linear-poll.py` does this itself. Never
 print or commit either file. The apps can't create labels; ask the user for new ones.
 
+Linux's app is becoming a Linear agent (MS-377, step 1): delegating an issue to `linux-omp` or
+mentioning it opens an Agent session, whose webhook the Cloudflare Worker in `LinearAgent/`
+keeps until `python3 scripts/linear-agent.py watch` pulls it, runs one omp agent on it with the
+`ms-issue` template and answers in the session (the script's header has the details). It runs
+beside the poller, which still does everything below; the app's token then needs
+`LINEAR_SCOPE=read,write,app:assignable,app:mentionable` wherever it is renewed.
+
 ### Writing
 
 Everything on Linear is plain Chinese that someone who has not read the code understands at
