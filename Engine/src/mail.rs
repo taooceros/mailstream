@@ -242,7 +242,6 @@ impl Mail {
         self.state.lock().expect("mail lock")
     }
 
-    #[cfg(test)]
     pub async fn flush(&self) {
         self.cache.flush().await;
     }

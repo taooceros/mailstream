@@ -39,15 +39,7 @@ pub(crate) fn run_with(
 ) -> Result<(), EngineError> {
     let directory = config.support_directory.clone();
     let socket = control::socket_path(&directory);
-    if served(&socket) {
-        return Err(EngineError::new(
-            "busy",
-            format!(
-                "Another Mailstream process already serves {}; stop it, or give this daemon another --data-dir.",
-                directory.display()
-            ),
-        ));
-    }
+    refuse_if_served(&directory)?;
     if let Some(ticket) = join_ticket {
         PeerSync::ticket_namespace(ticket).map_err(|error| EngineError::failed(error.to_string()))?;
     }
@@ -99,6 +91,8 @@ pub(crate) fn run_with(
         loop {
             tokio::select! {
                 _ = &mut shutdown => {
+                    // mail.db queues its writes: land them before the runtime goes away.
+                    engine.core.mail.flush().await;
                     emit(&json!({ "event": "stopping", "status": engine.core.status() }));
                     break;
                 }
@@ -155,6 +149,21 @@ pub(crate) fn join_and_cloud(
     }
     if let Some(url) = cloud_url {
         call("sync.cloud_enable", json!({ "url": url }))?;
+    }
+    Ok(())
+}
+
+/// `busy` when a process (the app, either daemon) already serves `directory`'s control socket:
+/// one Mailstream per data directory, or two would share mail.db, settings.json and `peer-sync/`.
+pub(crate) fn refuse_if_served(directory: &Path) -> Result<(), EngineError> {
+    if served(&control::socket_path(directory)) {
+        return Err(EngineError::new(
+            "busy",
+            format!(
+                "Another Mailstream process already serves {}; stop it, or give this daemon another --data-dir.",
+                directory.display()
+            ),
+        ));
     }
     Ok(())
 }

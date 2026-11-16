@@ -122,9 +122,13 @@ fn serves_every_command_on_its_socket_logs_sign_ins_and_stops() {
     let redirect = format!("http://localhost:{}", config.oauth.redirect_port);
     assert_eq!(sign_in["redirect"], json!(redirect));
 
-    // One Mailstream per folder: a second daemon there refuses at once.
+    // One Mailstream per folder: a second daemon there refuses at once, and so does the light
+    // sync daemon, which would otherwise start beside it (device sync is off, so `peer-sync/` is
+    // not locked) and wait to take over the socket.
     let second = daemon::run_with((*config).clone(), None, None, std::future::pending(), |_| {});
     assert_eq!(second.unwrap_err().code, "busy");
+    let sync_node = crate::sync_node::run_daemon(config.support_directory.clone(), None, None, |_| {});
+    assert_eq!(sync_node.unwrap_err().code, "busy");
 
     stop.send(()).unwrap();
     runner.join().unwrap().unwrap();

@@ -193,6 +193,8 @@ pub fn run_daemon(
     if let Some(ticket) = join_ticket {
         PeerSync::ticket_namespace(ticket).map_err(|error| EngineError::failed(error.to_string()))?;
     }
+    // The full daemon or the app may already serve this folder without holding `peer-sync/`.
+    daemon::refuse_if_served(&data_directory)?;
     let mut config = SyncNodeConfig::new(data_directory);
     config.control_socket = true;
     let node = SyncNode::open(config)?;
