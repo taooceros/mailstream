@@ -6061,8 +6061,10 @@ dependencies = [
 name = "mailstream-engine"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "async-imap",
  "base64 0.22.1",
+ "blake3",
  "bytes",
  "chrono",
  "core-foundation 0.10.1",

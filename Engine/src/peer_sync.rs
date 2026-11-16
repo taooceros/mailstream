@@ -3,7 +3,8 @@
 //! (QUIC, direct or through a relay, found through number 0's DNS address lookup), reconcile their
 //! replicas whenever they meet and pass new entries on live through iroh-gossip; the values ride
 //! in iroh-blobs. Nothing is stored on a server, so a change reaches another device once both
-//! have been online at the same time (directly or through a third device of the group).
+//! have been online at the same time (directly or through a third device of the group), or
+//! through the optional cloud drop (`cloud_drop.rs`, MS-374), which carries encrypted copies.
 //!
 //! Everything lives in `peer-sync/` in the engine's support folder:
 //! - `lock`: the one process with sync open holds it (redb opens its stores for one process
@@ -56,7 +57,7 @@ use iroh_docs::api::protocol::{AddrInfoOptions, ShareMode};
 use iroh_docs::engine::{LiveEvent, ProtectCallbackHandler};
 use iroh_docs::protocol::Docs;
 use iroh_docs::store::Query;
-use iroh_docs::{AuthorId, ContentStatus, DocTicket, NamespaceId};
+use iroh_docs::{AuthorId, Capability, ContentStatus, DocTicket, NamespaceId};
 use iroh_gossip::net::Gossip;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -474,6 +475,54 @@ impl PeerSync {
         }
         inner.put(doc, key, value).await?;
         Ok(true)
+    }
+
+    /// The group's write secret, which every device of the group holds (a ticket hands it over)
+    /// and the cloud drop derives its keys from (MS-374); `None` outside a group or while paused
+    /// (iroh-docs starts syncing a document it shares).
+    pub async fn group_secret(&self) -> Result<Option<[u8; 32]>> {
+        let group = self.inner.group.lock().await;
+        let Some(doc) = group.doc.as_ref().filter(|_| !group.file.paused) else { return Ok(None) };
+        let ticket = doc.share(ShareMode::Write, AddrInfoOptions::Id).await.map_err(failed)?;
+        match ticket.capability {
+            Capability::Write(secret) => Ok(Some(secret.to_bytes())),
+            Capability::Read(_) => Ok(None),
+        }
+    }
+
+    /// Writes what `incoming` (another device's state, as the cloud drop carried it) holds that
+    /// is newer than this replica's, each value at its own time, as syncing with that device
+    /// would have; this device's own description stays. `pending` is ignored. Returns whether
+    /// anything was written.
+    pub async fn merge(&self, incoming: &Snapshot) -> Result<bool> {
+        let inner = &self.inner;
+        let group = inner.group.lock().await;
+        let doc = group.doc.as_ref().ok_or(PeerSyncError::NoGroup)?;
+        let current = inner.read(doc).await?;
+        let newer = |at: u64, have: Option<u64>| have.is_none_or(|have| at > have);
+        let mut wrote = false;
+        for (address, trusted) in &incoming.trusted {
+            if newer(trusted.at, current.trusted.get(address).map(|have| have.at)) {
+                let value = TrustedValue { trusted: trusted.value, at: trusted.at };
+                inner.put(doc, format!("{TRUSTED}{address}"), &value).await?;
+                wrote = true;
+            }
+        }
+        for (key, setting) in &incoming.settings {
+            if newer(setting.at, current.settings.get(key).map(|have| have.at)) {
+                let value = SettingValue { value: setting.value.clone(), at: setting.at };
+                inner.put(doc, format!("{SETTING}{key}"), &value).await?;
+                wrote = true;
+            }
+        }
+        let me = inner.endpoint().id().to_string();
+        for (id, device) in incoming.devices.iter().filter(|(id, _)| **id != me) {
+            if newer(device.last_seen, current.devices.get(id).map(|have| have.last_seen)) {
+                inner.put(doc, format!("{DEVICE}{id}"), device).await?;
+                wrote = true;
+            }
+        }
+        Ok(wrote)
     }
 
     /// Where the loopback endpoint listens, for the tests' shared lookup.

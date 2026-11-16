@@ -70,8 +70,8 @@ fn execute(arguments: &[String]) -> Result<String, EngineError> {
         if rest.iter().any(|word| word == "--help" || word == "-h") {
             return Ok(DAEMON_HELP.to_owned());
         }
-        let join = parse_daemon_args(rest)?;
-        sync_node::run_daemon(data_dir, join.as_deref(), |event| {
+        let daemon = parse_daemon_args(rest)?;
+        sync_node::run_daemon(data_dir, daemon.join.as_deref(), daemon.cloud.as_deref(), |event| {
             println!("{}", single_line(event));
         })?;
         return Ok(String::new());
@@ -97,13 +97,15 @@ fn execute(arguments: &[String]) -> Result<String, EngineError> {
     Ok(text(&result))
 }
 
-const DAEMON_HELP: &str = "mailstream sync daemon [--data-dir <path>] [--join <ticket>]
+const DAEMON_HELP: &str = "mailstream sync daemon [--data-dir <path>] [--join <ticket>] [--cloud <url>]
 
 Run a headless cross-device settings sync node without the Mailstream GUI or mail accounts.
 Prints JSON lines on stdout and shuts down cleanly on SIGTERM/SIGINT.
 
   --data-dir <path>  Sync data directory (default: $MAILSTREAM_DATA_DIR or platform data dir)
-  --join <ticket>    Join this sync group on startup if not already paired with it";
+  --join <ticket>    Join this sync group on startup if not already paired with it
+  --cloud <url>      Also keep an encrypted copy on this Cloudflare Worker (SyncDrop/), for devices
+                     that are never online together; `mailstream sync cloud-disable` turns it off";
 
 fn single_line(value: &Value) -> String {
     String::from_utf8(json::encode(value, false, false)).expect("JSON is UTF-8")
@@ -143,29 +145,43 @@ fn extract_data_dir(arguments: &[String]) -> Result<(PathBuf, Vec<String>), Engi
     Ok((dir, rest))
 }
 
-fn parse_daemon_args(rest: &[String]) -> Result<Option<String>, EngineError> {
-    let mut join: Option<String> = None;
+/// `mailstream sync daemon`'s options.
+#[derive(Debug, Default, PartialEq)]
+struct DaemonArgs {
+    join: Option<String>,
+    cloud: Option<String>,
+}
+
+fn parse_daemon_args(rest: &[String]) -> Result<DaemonArgs, EngineError> {
+    let mut parsed = DaemonArgs::default();
     let mut index = 0;
     while index < rest.len() {
         let arg = &rest[index];
-        if arg == "--join" {
-            let ticket = rest
-                .get(index + 1)
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| usage("`--join` requires a pairing ticket."))?;
-            join = Some(ticket.clone());
-            index += 2;
-        } else if let Some(ticket) = arg.strip_prefix("--join=") {
-            if ticket.is_empty() {
-                return Err(usage("`--join` requires a pairing ticket."));
+        let (name, inline) = match arg.split_once('=') {
+            Some((name, value)) => (name, Some(value.to_owned())),
+            None => (arg.as_str(), None),
+        };
+        let (slot, what) = match name {
+            "--join" => (&mut parsed.join, "a pairing ticket"),
+            "--cloud" => (&mut parsed.cloud, "the Cloudflare Worker's URL"),
+            _ => return Err(usage(format!("Unknown argument \"{arg}\" for `mailstream sync daemon`."))),
+        };
+        let value = match inline {
+            Some(value) => {
+                index += 1;
+                value
             }
-            join = Some(ticket.to_owned());
-            index += 1;
-        } else {
-            return Err(usage(format!("Unknown argument \"{arg}\" for `mailstream sync daemon`.")));
+            None => {
+                index += 2;
+                rest.get(index - 1).cloned().unwrap_or_default()
+            }
+        };
+        if value.is_empty() {
+            return Err(usage(format!("`{name}` requires {what}.")));
         }
+        *slot = Some(value);
     }
-    Ok(join)
+    Ok(parsed)
 }
 
 /// Pretty, key-sorted JSON without escaped slashes, as the Swift command line printed it.
@@ -594,12 +610,22 @@ mod tests {
             .unwrap();
         assert_eq!(dir, PathBuf::from("/tmp/ms-sync"));
         assert_eq!(rest, words(&["sync", "daemon", "--join", "doc1"]));
-        assert_eq!(parse_daemon_args(&rest[2..]).unwrap(), Some("doc1".to_owned()));
+        assert_eq!(parse_daemon_args(&rest[2..]).unwrap(), DaemonArgs { join: Some("doc1".to_owned()), cloud: None });
+        let both = words(&["--cloud=https://drop.example.workers.dev", "--join", "doc1"]);
+        assert_eq!(
+            parse_daemon_args(&both).unwrap(),
+            DaemonArgs { join: Some("doc1".to_owned()), cloud: Some("https://drop.example.workers.dev".to_owned()) }
+        );
+        assert_eq!(parse_daemon_args(&words(&["--cloud"])).unwrap_err().code, "usage");
 
         let (dir2, rest2) = extract_data_dir(&words(&["--data-dir=/tmp/ms-two", "sync", "pair-ticket"])).unwrap();
         assert_eq!(dir2, PathBuf::from("/tmp/ms-two"));
         let (spec, trailing) = matching(&rest2).unwrap();
         assert_eq!(spec.id, "sync.pair_ticket");
         assert!(trailing.is_empty());
+        let cloud = words(&["sync", "cloud-enable", "https://drop.example.workers.dev"]);
+        let (spec, trailing) = matching(&cloud).unwrap();
+        assert_eq!(spec.id, "sync.cloud_enable");
+        assert_eq!(trailing, words(&["https://drop.example.workers.dev"]));
     }
 }

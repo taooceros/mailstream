@@ -182,10 +182,12 @@ pub fn run_join(data_directory: PathBuf, ticket: &str) -> Result<Value, EngineEr
 }
 
 /// Runs `mailstream sync daemon`: serves `control.sock`, syncs `peer_sync` + `settings.json`,
-/// emits JSON event lines via `emit`, and flushes cleanly on `SIGTERM`/`SIGINT`.
+/// emits JSON event lines via `emit`, and flushes cleanly on `SIGTERM`/`SIGINT`. `cloud_url`
+/// turns on the Cloudflare drop (`sync.cloud_enable`) first.
 pub fn run_daemon(
     data_directory: PathBuf,
     join_ticket: Option<&str>,
+    cloud_url: Option<&str>,
     mut emit: impl FnMut(&Value),
 ) -> Result<(), EngineError> {
     let target_namespace = join_ticket
@@ -212,6 +214,9 @@ pub fn run_daemon(
         if !already_paired {
             node.call_sync("sync.join", json!({ "ticket": ticket }))?;
         }
+    }
+    if let Some(url) = cloud_url {
+        node.call_sync("sync.cloud_enable", json!({ "url": url }))?;
     }
 
     let initial = node.call_sync("sync.status", json!({}))?;

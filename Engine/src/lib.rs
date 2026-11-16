@@ -25,6 +25,7 @@ mod chat;
 mod chat_api;
 pub mod chat_model;
 pub mod chat_markup;
+mod cloud_drop;
 pub mod commands;
 mod content;
 pub mod control;
@@ -76,6 +77,8 @@ mod peer_sync_tests;
 mod device_sync_tests;
 #[cfg(test)]
 mod sync_node_tests;
+#[cfg(test)]
+mod cloud_drop_tests;
 // Runs a shell-script omp (`omp::tests::fake_omp`).
 #[cfg(all(test, unix))]
 mod tagging_tests;
@@ -551,6 +554,7 @@ impl Core {
                             devices: Vec::new(),
                             last_sync: None,
                             problem: Some("Device sync is disabled in this mode.".into()),
+                            cloud: Default::default(),
                         })),
                         _ => Err(EngineError::new("unavailable", "Device sync is disabled in this mode.")),
                     }

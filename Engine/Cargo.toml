@@ -52,6 +52,10 @@ iroh = "1"
 iroh-docs = { version = "0.101", default-features = false, features = ["fs-store"] }
 iroh-blobs = { version = "0.103", default-features = false, features = ["fs-store"] }
 iroh-gossip = "0.101"
+# Device sync's Cloudflare drop (`cloud_drop.rs`, MS-374): keys derived from the group's secret,
+# copies sealed with AES-256-GCM; both already in the tree (iroh, QUIC, Turso).
+blake3 = "1"
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 # Gmail search and its envelopes over IMAP (`gmail/imap.rs`, MS-358), which Gmail's API quota
 # doesn't count; TLS through the rustls reqwest and the push relay already use.
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }

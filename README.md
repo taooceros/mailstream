@@ -186,6 +186,28 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
+### Cloudflare Fallback for Device Sync (optional)
+
+Without an always-on node, a change reaches another device only once both are online at the same time. The optional Cloudflare fallback (`SyncDrop/`, MS-374) closes that gap on the Workers Free plan: each device keeps an encrypted copy of the synced settings (trusted senders with their removals, the synced settings, the device list) on your own Worker and merges the other devices' copies, latest change per key winning. The Worker stores only AES-256-GCM ciphertext under ids derived from the sync group's secret, and only the group's devices can read or replace its copies (the group's first upload registers a write token derived from the same secret). It is off until you turn it on.
+
+Deploy the Worker once with your Cloudflare account (free; one SQLite Durable Object per sync group):
+
+```sh
+cd SyncDrop
+npx --yes wrangler@4 login     # opens Cloudflare in the browser
+npx --yes wrangler@4 deploy    # prints https://mailstream-sync-drop.<you>.workers.dev
+```
+
+Then turn it on on each device with that URL: Settings ▸ Device sync ▸ Cloudflare fallback, or
+
+```sh
+mailstream sync cloud-enable https://mailstream-sync-drop.<you>.workers.dev
+mailstream sync daemon --data-dir /var/lib/mailstream-sync --cloud https://mailstream-sync-drop.<you>.workers.dev
+mailstream sync cloud-disable   # stops it and deletes this device's copy from the Worker
+```
+
+Devices exchange with the Worker after every change, on start, after waking or a network change, and every 5 minutes. `npx wrangler@4 dev` in a copy of `SyncDrop/` runs the same Worker locally (no account), for `mailstream sync cloud-enable http://127.0.0.1:8787`.
+
 ### Protocol Details
 Commands communicate over a local Unix domain socket at `~/Library/Application Support/Mailstream/control.sock` (mode `0600`) using single-line JSON messages:
 ```json
@@ -227,6 +249,7 @@ Mailstream decouples front-end presentation from core email synchronisation and 
 | **Rust Engine** | `Engine/` | Core business logic running on Tokio: account synchronization, Turso SQLite database management, OAuth token refresh, MIME serialization, and Unix domain socket control server. |
 | **Turso DB** | `Support/SQLite.swift`, `.turso/` | Embedded Turso database engine running multi-process WAL mode (`mail.db-tshm`) for concurrent UI and background process reads. |
 | **Push Relay** | `Push/` | Stateless Cloudflare Worker relay forwarding Google Pub/Sub push notifications and Microsoft Graph webhooks over a single WebSocket to the local client. |
+| **Sync Drop** | `SyncDrop/` | Optional Cloudflare Worker holding device sync's encrypted settings copies for devices that are never online together. |
 
 ---
 

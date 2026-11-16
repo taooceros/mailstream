@@ -724,6 +724,18 @@ pub const COMMANDS: &[Spec] = &[
         "Reconciles with paired devices now.",
         &[],
     ),
+    Spec::new(
+        "sync.cloud_enable",
+        Handler::Sync,
+        "Keeps an encrypted copy of the synced settings on your Cloudflare Worker (SyncDrop/), so devices that are never online together still sync.",
+        &[Argument::new("url", Kind::String, "The Worker's URL, https://….workers.dev.").positional()],
+    ),
+    Spec::new(
+        "sync.cloud_disable",
+        Handler::Sync,
+        "Stops using the Cloudflare Worker and deletes this device's copy from it.",
+        &[],
+    ),
 ];
 
 /// What `mailstream help` prints above the command list.

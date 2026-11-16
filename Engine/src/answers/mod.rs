@@ -127,6 +127,24 @@ pub struct DeviceSyncStatus {
     pub last_sync: Option<String>,
     /// Why device sync could not open or last failed, if any.
     pub problem: Option<String>,
+    pub cloud: SyncCloud,
+}
+
+/// Device sync's Cloudflare drop (`DeviceSyncStatus::cloud`, MS-374): encrypted copies of the
+/// group's state on the user's own Worker, for devices that are never online together.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncCloud {
+    /// Uploads and fetches while device sync is on.
+    pub enabled: bool,
+    /// The Worker, kept while off.
+    pub url: Option<String>,
+    /// ISO 8601 of this device's last upload.
+    pub last_upload: Option<String>,
+    /// ISO 8601 of the last time another device's copy brought something new.
+    pub last_received: Option<String>,
+    /// Why the last exchange failed, if it did.
+    pub problem: Option<String>,
 }
 
 /// Pairing ticket for another device (`sync.pair_ticket`).

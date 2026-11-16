@@ -1,5 +1,6 @@
 //! Bridges [`PeerSync`] (`peer-sync/`) to the whitelisted cross-device keys in `settings.json`
-//! without feedback loops (MS-360), and answers the `sync.*` commands.
+//! without feedback loops (MS-360), runs the optional cloud drop (`cloud_drop.rs`, MS-374), and
+//! answers the `sync.*` commands.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -7,18 +8,22 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc, watch};
+use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::answers::{self, DeviceSyncStatus, SyncDevice, SyncTicket};
+use crate::cloud_drop::{self, CloudDrop};
 use crate::commands::Arguments;
 use crate::peer_sync::{Network, PeerSync, PeerSyncError};
 use crate::settings::{Setting, Settings, Values};
+use crate::signal::{ProcessSignal, next_wake};
 use crate::{EngineError, Events, files, model};
 
 const BRIDGE_FILE: &str = "bridged.json";
 const RETRY_BUSY: Duration = Duration::from_secs(5);
 const RETRY_FAILED: Duration = Duration::from_secs(30);
+/// How often to look whether the machine slept, to exchange with the cloud drop on waking.
+const WAKE_CHECK: Duration = Duration::from_secs(10);
 
 /// When the settings a device brings into a group it joins were set, as far as the group can
 /// tell (MS-367): older than anything a device writes, so a value the group already holds for the
@@ -141,7 +146,10 @@ pub struct DeviceSync {
     bridge: AsyncMutex<BridgeState>,
     meta: Mutex<StatusMeta>,
     wake_tx: mpsc::UnboundedSender<()>,
-    task: Mutex<Option<JoinHandle<()>>>,
+    cloud: CloudDrop,
+    /// Asks for an exchange with the cloud drop.
+    cloud_wake: Notify,
+    tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl DeviceSync {
@@ -155,6 +163,7 @@ impl DeviceSync {
     ) -> Arc<Self> {
         let (wake_tx, wake_rx) = mpsc::unbounded_channel();
         let this = Arc::new(Self {
+            cloud: CloudDrop::new(&support_directory),
             support_directory,
             network,
             settings,
@@ -164,13 +173,12 @@ impl DeviceSync {
             bridge: AsyncMutex::new(BridgeState::default()),
             meta: Mutex::new(StatusMeta::default()),
             wake_tx,
-            task: Mutex::new(None),
+            cloud_wake: Notify::new(),
+            tasks: Mutex::new(Vec::new()),
         });
-        let runner = this.clone();
-        let handle = tokio::spawn(async move {
-            runner.run_loop(wake_rx).await;
-        });
-        *this.task.lock().expect("device sync task lock") = Some(handle);
+        let bridge = tokio::spawn(this.clone().run_loop(wake_rx));
+        let cloud = tokio::spawn(this.clone().cloud_loop());
+        *this.tasks.lock().expect("device sync task lock") = vec![bridge, cloud];
         this
     }
 
@@ -181,8 +189,8 @@ impl DeviceSync {
 
     /// Stops the background bridge and cleanly closes `PeerSync` (releasing `peer-sync/lock`).
     pub async fn shutdown(&self) {
-        if let Some(handle) = self.task.lock().expect("device sync task lock").take() {
-            handle.abort();
+        for task in self.tasks.lock().expect("device sync task lock").drain(..) {
+            task.abort();
         }
         let sync = self.sync.write().await.take();
         if let Some(sync) = sync {
@@ -199,6 +207,7 @@ impl DeviceSync {
                         changes = rx;
                         let _ = self.reconcile_and_report().await;
                         self.events.emit("deviceSync");
+                        self.cloud_wake.notify_one();
                     }
                     Err(error) => {
                         let delay = match error {
@@ -228,6 +237,7 @@ impl DeviceSync {
                     self.meta.lock().expect("meta lock").last_sync_ms = Some(now_ms());
                     let _ = self.reconcile_and_report().await;
                     self.events.emit("deviceSync");
+                    self.cloud_wake.notify_one();
                 }
                 msg = wake_rx.recv() => {
                     if msg.is_none() {
@@ -237,9 +247,53 @@ impl DeviceSync {
                     if self.reconcile_and_report().await {
                         self.events.emit("deviceSync");
                     }
+                    self.cloud_wake.notify_one();
                 }
             }
         }
+    }
+
+    /// Exchanges with the cloud drop when asked (after opening and after every local or synced
+    /// change), every [`cloud_drop::POLL`] ([`cloud_drop::RETRY`] after a failure), and after a
+    /// network change or a wake.
+    async fn cloud_loop(self: Arc<Self>) {
+        let mut network = ProcessSignal::NETWORK_CHANGE.posts();
+        let mut delay = cloud_drop::POLL;
+        loop {
+            let network_closed = tokio::select! {
+                _ = self.cloud_wake.notified() => false,
+                _ = tokio::time::sleep(delay) => false,
+                _ = next_wake(WAKE_CHECK) => false,
+                posted = async {
+                    match network.as_mut() {
+                        Some(posts) => posts.next().await,
+                        None => std::future::pending().await,
+                    }
+                } => !posted,
+            };
+            if network_closed {
+                network = None;
+            }
+            delay = if self.cloud_exchange().await { cloud_drop::POLL } else { cloud_drop::RETRY };
+        }
+    }
+
+    /// One exchange with the cloud drop, bridging what it brought into `settings.json`; false
+    /// when it failed.
+    async fn cloud_exchange(&self) -> bool {
+        let exchange = {
+            let guard = self.sync.read().await;
+            let Some(sync) = guard.as_ref() else { return true };
+            self.cloud.exchange(sync).await
+        };
+        if exchange.merged {
+            self.meta.lock().expect("meta lock").last_sync_ms = Some(now_ms());
+            self.reconcile_and_report().await;
+        }
+        if exchange.changed {
+            self.events.emit("deviceSync");
+        }
+        self.cloud.status().problem.is_none()
     }
 
     async fn ensure_open(&self) -> Result<Option<watch::Receiver<u64>>, PeerSyncError> {
@@ -474,6 +528,7 @@ impl DeviceSync {
                     }
                 }
                 self.reconcile().await?;
+                self.cloud_exchange().await;
                 self.events.emit("deviceSync");
                 Ok(answers::json(&self.status_answer().await))
             }
@@ -512,6 +567,7 @@ impl DeviceSync {
                 }
                 self.meta.lock().expect("meta lock").last_sync_ms = Some(now_ms());
                 self.reconcile().await?;
+                self.cloud_exchange().await;
                 self.events.emit("deviceSync");
                 Ok(answers::json(&self.status_answer().await))
             }
@@ -529,6 +585,7 @@ impl DeviceSync {
                     sync.create_group().await.map_err(map_error)?;
                 }
                 self.reconcile().await?;
+                self.cloud_exchange().await;
                 self.events.emit("deviceSync");
                 Ok(answers::json(&self.status_answer().await))
             }
@@ -551,6 +608,19 @@ impl DeviceSync {
                 }
                 self.meta.lock().expect("meta lock").last_sync_ms = Some(now_ms());
                 self.reconcile().await?;
+                self.cloud_exchange().await;
+                self.events.emit("deviceSync");
+                Ok(answers::json(&self.status_answer().await))
+            }
+            "sync.cloud_enable" => {
+                let url = args.required("url")?;
+                self.cloud.enable(&url)?;
+                self.cloud_exchange().await;
+                self.events.emit("deviceSync");
+                Ok(answers::json(&self.status_answer().await))
+            }
+            "sync.cloud_disable" => {
+                self.cloud.disable().await;
                 self.events.emit("deviceSync");
                 Ok(answers::json(&self.status_answer().await))
             }
@@ -571,6 +641,7 @@ impl DeviceSync {
                 devices: Vec::new(),
                 last_sync: None,
                 problem: meta.problem.clone(),
+                cloud: self.cloud.status(),
             };
         };
         let status = sync.status().await;
@@ -601,6 +672,7 @@ impl DeviceSync {
             devices,
             last_sync,
             problem: meta.problem.clone(),
+            cloud: self.cloud.status(),
         }
     }
 }

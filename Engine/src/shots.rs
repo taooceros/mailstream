@@ -34,7 +34,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use crate::answers::{self, DeviceSyncStatus, SyncDevice, SyncTicket};
+use crate::answers::{self, DeviceSyncStatus, SyncCloud, SyncDevice, SyncTicket};
 use crate::commands::Arguments;
 use crate::{EngineError, Events, model};
 
@@ -421,6 +421,9 @@ struct DeviceSyncMock {
     paused: bool,
     joined_peer: bool,
     last_sync_secs: Option<f64>,
+    cloud_url: Option<String>,
+    cloud_enabled: bool,
+    cloud_upload_secs: Option<f64>,
 }
 
 static DEVICE_SYNC: LazyLock<Mutex<DeviceSyncMock>> = LazyLock::new(Default::default);
@@ -459,6 +462,14 @@ impl DeviceSyncMock {
             devices,
             last_sync: self.last_sync_secs.map(|s| model::iso8601(model::date_from_unix(s))),
             problem: None,
+            cloud: SyncCloud {
+                enabled: self.cloud_enabled,
+                url: self.cloud_url.clone(),
+                last_upload: self.cloud_upload_secs.map(|s| model::iso8601(model::date_from_unix(s))),
+                last_received: (self.cloud_enabled && self.joined_peer)
+                    .then(|| model::iso8601(model::date_from_unix(now - 600.0))),
+                problem: None,
+            },
         }
     }
 }
@@ -526,6 +537,24 @@ pub(crate) fn device_sync(command: &str, args: &Arguments, events: &Events) -> R
                 ));
             }
             mock.last_sync_secs = Some(now);
+            events.emit("deviceSync");
+            Ok(answers::json(&mock.status()))
+        }
+        "sync.cloud_enable" => {
+            let url = args.required("url")?;
+            let url = url.trim().trim_end_matches('/');
+            if !url.starts_with("https://") {
+                return Err(EngineError::new("invalid", "The Worker's URL must start with https://."));
+            }
+            mock.cloud_url = Some(url.to_string());
+            mock.cloud_enabled = true;
+            mock.cloud_upload_secs = Some(now);
+            events.emit("deviceSync");
+            Ok(answers::json(&mock.status()))
+        }
+        "sync.cloud_disable" => {
+            mock.cloud_enabled = false;
+            mock.cloud_upload_secs = None;
             events.emit("deviceSync");
             Ok(answers::json(&mock.status()))
         }

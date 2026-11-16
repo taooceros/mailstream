@@ -258,6 +258,7 @@ enum SyncBusy {
     Join,
     Reset,
     Now,
+    Cloud,
 }
 
 struct Settings {
@@ -272,6 +273,11 @@ struct Settings {
     errors: HashMap<String, SharedString>,
     join_input: Option<Entity<InputState>>,
     join_subscription: Option<Subscription>,
+    /// The Cloudflare drop's Worker URL, made once device sync's status names the saved one.
+    cloud_input: Option<Entity<InputState>>,
+    cloud_subscription: Option<Subscription>,
+    /// Why the last change to the Cloudflare drop failed before reaching it (no URL, a bad one).
+    cloud_error: Option<SharedString>,
     sync_ticket: Option<String>,
     ticket_copied: bool,
     sync_confirm_reset: bool,
@@ -302,6 +308,9 @@ impl Settings {
             errors: HashMap::new(),
             join_input: None,
             join_subscription: None,
+            cloud_input: None,
+            cloud_subscription: None,
+            cloud_error: None,
             sync_ticket: None,
             ticket_copied: false,
             sync_confirm_reset: false,
@@ -589,6 +598,24 @@ impl Settings {
         self.join_subscription = Some(subscription);
     }
 
+    fn ensure_cloud_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(status) = &self.device_sync else { return };
+        if self.cloud_input.is_some() {
+            return;
+        }
+        let saved = status.cloud.url.clone().unwrap_or_default();
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Worker URL, like https://mailstream-sync-drop.<you>.workers.dev").default_value(saved)
+        });
+        let subscription = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, _, cx| {
+            if let InputEvent::PressEnter { secondary: false, .. } = event {
+                this.toggle_cloud(true, cx);
+            }
+        });
+        self.cloud_input = Some(input);
+        self.cloud_subscription = Some(subscription);
+    }
+
     fn run_sync<F>(&mut self, busy: SyncBusy, work: F, after: impl FnOnce(&mut Self) + 'static, cx: &mut Context<Self>)
     where
         F: Future<Output = Result<DeviceSyncStatus, MailError>> + Send + 'static,
@@ -734,6 +761,37 @@ impl Settings {
             cx,
         );
     }
+
+    /// Turns the Cloudflare drop on with the URL typed, or off (which deletes this device's copy).
+    fn toggle_cloud(&mut self, enable: bool, cx: &mut Context<Self>) {
+        if self.sync_busy.is_some() {
+            return;
+        }
+        let url = self.cloud_input.as_ref().map(|input| input.read(cx).value().trim().to_string()).unwrap_or_default();
+        if enable && url.is_empty() {
+            self.cloud_error = Some("Enter your Cloudflare Worker's URL first.".into());
+            cx.notify();
+            return;
+        }
+        self.sync_busy = Some(SyncBusy::Cloud);
+        self.cloud_error = None;
+        cx.notify();
+        self.background(
+            cx,
+            async move {
+                if enable { engine().sync_cloud_enable(url).await } else { engine().sync_cloud_disable().await }
+            },
+            |this, result, cx| {
+                this.sync_busy = None;
+                match result {
+                    Ok(status) => this.device_sync = Some(status),
+                    Err(error) => this.cloud_error = Some(error.to_string().into()),
+                }
+                cx.notify();
+            },
+        );
+    }
+
     fn retag(&mut self, cx: &mut Context<Self>) {
         self.retag_started = true;
         cx.notify();
@@ -985,6 +1043,7 @@ impl Render for Settings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_fields(window, cx);
         self.ensure_join_input(window, cx);
+        self.ensure_cloud_input(window, cx);
         let p = design::palette(window.appearance());
         div()
             .id("settings")
@@ -1881,6 +1940,7 @@ impl Settings {
                 }))
                 .into_any_element();
             rows.push(devices_row);
+            rows.push(self.render_cloud(status, interactive, p, window, cx));
         }
 
         let pair_block: AnyElement = match &self.sync_ticket {
@@ -2095,6 +2155,81 @@ impl Settings {
             .when_some(self.sync_error.clone(), |d, error| {
                 d.child(div().text_size(px(text::FOOTNOTE)).text_color(p.danger).child(error))
             })
+    }
+
+    /// The Cloudflare drop (MS-374): its switch, state, the Worker's URL and what it stores.
+    fn render_cloud(
+        &self,
+        status: &DeviceSyncStatus,
+        interactive: bool,
+        p: &'static Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let cloud = &status.cloud;
+        let on = cloud.enabled;
+        let date = |at: &String| mailstream::message_date(Some(at.clone()));
+        let state = if self.sync_busy == Some(SyncBusy::Cloud) {
+            "Contacting the Worker…".to_owned()
+        } else if !on {
+            "Off · Changes reach another device only while both are online.".to_owned()
+        } else if !status.enabled {
+            "On · Waits until device sync is on again.".to_owned()
+        } else {
+            match (&cloud.last_upload, &cloud.last_received) {
+                (Some(up), Some(down)) => format!("On · Uploaded {} · Received {}", date(up), date(down)),
+                (Some(up), None) => format!("On · Uploaded {}", date(up)),
+                (None, Some(down)) => format!("On · Received {}", date(down)),
+                (None, None) => "On".to_owned(),
+            }
+        };
+        div()
+            .px(px(14.))
+            .py(px(10.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().font_weight(FontWeight::MEDIUM).child("Cloudflare fallback"))
+                            .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(state)),
+                    )
+                    .child(
+                        switch("cloud-drop-toggle", on)
+                            .disabled(!interactive)
+                            .when(interactive, |s| s.on_click(cx.listener(move |this, _: &bool, _, cx| this.toggle_cloud(!on, cx)))),
+                    ),
+            )
+            .when_some(self.cloud_input.as_ref(), |d, input| {
+                let focused = input.focus_handle(cx).is_focused(window);
+                d.child(
+                    field_frame(focused, false, p)
+                        .overflow_hidden()
+                        .h(px(26.))
+                        .px(px(8.))
+                        .child(div().flex_1().min_w_0().child(input::field(input))),
+                )
+            })
+            .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
+                "Keeps an encrypted copy of the synced settings on your own Cloudflare Worker (SyncDrop/ in the \
+                 Mailstream repository), so devices that are never online at the same time still sync. The Worker \
+                 sees only ciphertext under ids derived from this sync group; turning this off deletes this \
+                 device's copy. Off unless you turn it on.",
+            ))
+            .when_some(self.cloud_error.clone().or_else(|| cloud.problem.clone().map(SharedString::from)), |d, problem| {
+                d.child(div().text_size(px(text::FOOTNOTE)).text_color(p.danger).child(problem))
+            })
+            .into_any_element()
     }
 }
 

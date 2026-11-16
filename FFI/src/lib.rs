@@ -633,6 +633,13 @@ commands! {
 
     /// Triggers reconciliation with paired devices immediately.
     fn sync_now() -> DeviceSyncStatus = "sync.now" {};
+
+    /// Keeps an encrypted copy of the synced settings on the user's Cloudflare Worker at `url`
+    /// and exchanges with it at once, so devices never online together still sync.
+    fn sync_cloud_enable(url: String) -> DeviceSyncStatus = "sync.cloud_enable" { "url": url };
+
+    /// Stops using the Worker and deletes this device's copy from it.
+    fn sync_cloud_disable() -> DeviceSyncStatus = "sync.cloud_disable" {};
 }
 
 
