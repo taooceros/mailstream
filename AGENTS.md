@@ -74,33 +74,35 @@ Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` 
 
 ## Work tracking: Linear
 
-Team `MS` (the Mailstream app: code in this repo, every machine), split into projects by effort;
-issue IDs look like `MS-12`. Team `WIN` holds the Windows machine's own chores (its setup and
-tools, nothing in this repo); every `WIN` issue goes to the Windows poller. Use omp's Linear tools.
-The issue, not the session, is the record other sessions read.
+One Linear team per project (MS-386), the issue key's prefix naming it: `MS` (the Mailstream
+app: code in this repo), `WIN` (the Windows machine's own chores and tools, nothing in this repo),
+and saturn's `MRV` (Marvell OCTEON DPU, `~/dev/marvell` there) and `HET` (hetero TPU/GPU serving
+research). `MS` is split into projects by effort; issue IDs look like `MS-12`. Use omp's Linear
+tools. The issue, not the session, is the record other sessions read.
 
-Three machines poll: the Mac (Linear app `omp`), Windows (`windows-omp`; `WIN` issues and `MS`
-issues labelled `windows`) and Linux (NixOS, `linux-omp`; `MS` issues labelled `linux`). `MS`
-work goes to Linux unless it is Mac-specific (MS-254, [Polling session](#polling-session)).
-On Windows and Linux there are no omp Linear tools or keychain. Linear
-is reached as the machine's OAuth app: its client id (line 1) and secret (line 2) are in
-`~/.config/linear/credentials`, and the access token in `~/.config/linear/token.json`. Call
-`https://api.linear.app/graphql` with `Authorization: Bearer <access_token>`. On an
-`AUTHENTICATION_ERROR` (tokens last ~30 days) fetch a new one with
+Four machines poll, each as its own Linear OAuth app: the Mac (`omp`), Windows (`windows-omp`),
+Linux (NixOS, `linux-omp`) and saturn (`saturn-omp`). The app an issue is delegated to works it
+([Polling session](#polling-session)). On Windows, Linux and saturn there are no omp Linear tools
+or keychain. Linear is reached as the machine's OAuth app: its client id (line 1) and secret
+(line 2) are in `~/.config/linear/credentials`, and the access token in
+`~/.config/linear/token.json`. Call `https://api.linear.app/graphql` with `Authorization: Bearer
+<access_token>`. On an `AUTHENTICATION_ERROR` (tokens last ~30 days) fetch a new one with
 `curl https://api.linear.app/oauth/token -d grant_type=client_credentials -d client_id=… -d
-client_secret=… -d scope=read,write` into `token.json` (on Linux, `~/.config/linear/bearer.sh` does
-this with its own `scope=`); `linear-poll.py` does this itself. Never
-print or commit either file. The apps can't create labels; ask the user for new ones.
+client_secret=… -d scope=read,write,app:assignable,app:mentionable` into `token.json` (on Linux,
+`~/.config/linear/bearer.sh` does this); `linear-poll.py` does this itself. Never print or commit
+either file. The apps can't create teams or labels; ask the user for new ones.
 
-Linux's app is a Linear agent (MS-377): with the token scopes `app:assignable` and
-`app:mentionable` the user can delegate an issue to `linux-omp` (Linear's "assign to agent") or
-@-mention it, and Linear opens an agent session for it. `linear-poll.py` finds those sessions,
-delegated issues and mentions by polling (no webhook), prints them as issue and comment lines
-like any other, acknowledges in the session and posts the result there once the agent hands over
-(its header has the details). Every process that renews the app's token must ask for the same
-scopes, or Linear revokes the others' tokens: on Linux the set is the `scope=` in
-`~/.config/linear/bearer.sh`, and the poller's LINEAR_SCOPE copies it
-([Polling session](#polling-session)).
+Every machine's app is a Linear agent (MS-377, MS-386): its token's scopes include
+`app:assignable` and `app:mentionable`, so the user can delegate an issue to it (Linear's "assign
+to agent", which sets the issue's delegate; an app can't be its assignee) or @-mention it. An app
+whose token lacks `app:assignable` is missing from the picker and can't be delegated anything.
+Where Linear opens an agent session for a delegation or mention, `linear-poll.py` finds it by
+polling (no webhook), prints it as issue and comment lines like any other, acknowledges in the
+session and posts the result there once the agent hands over (its header has the details). Every
+process that renews an app's token must ask for the same scopes, or Linear revokes the others'
+tokens: `read,write,app:assignable,app:mentionable`, the poller's LINEAR_SCOPE default, which the
+Mac's `~/.pi/agent/extensions/linear/renew-omp-token.sh` and Linux's `~/.config/linear/bearer.sh`
+ask for too.
 
 ### Writing
 
@@ -142,10 +144,10 @@ or a role (`@task`, `@smol`) names: config overrides change what actually runs. 
 - Label, place and prioritize issues you file when creating them. Issues the user files often
   lack these: the agent that claims one adds what is missing (a priority only if it has none)
   before its start comment (the polling session leaves this to it).
-- File your own issues in Backlog; only the user starts them (moving one to Todo or adding `omp`).
-  Problems found outside the current change get their own Backlog issue; don't fix them in passing.
-- An issue filed on Windows or Linux for that machine to do carries its machine label (`windows`,
-  `linux`) from the start, added by the agent that files it.
+- File your own issues in Backlog and delegated to nobody; only the user starts them, by
+  delegating one to a machine's app (or adding `omp` to one delegated already). Problems found
+  outside the current change get their own Backlog issue; don't fix them in passing. The
+  `windows` and `linux` labels no longer route anything (MS-386).
 
 ### Working an issue
 
@@ -212,10 +214,9 @@ session. Each time before it starts the script again, the session runs `python3
 scripts/warm-build.py` in the default checkout ([Building](#building)).
 `python3 scripts/linear-omp.py MS-12` opens one issue in a new Tern tab instead. The scripts are
 Python (standard library only) so every machine runs the same ones; on Windows the command is
-`python`, and the poller also needs `HOST_LABEL=windows LINEAR_TOKEN_FILE=~/.config/linear/token.json
-LINEAR_CREDENTIALS=~/.config/linear/credentials`; on Linux the same with `HOST_LABEL=linux` and
-`LINEAR_SCOPE="$(sed -n 's/.*scope=\([^ ]*\).*/\1/p' ~/.config/linear/bearer.sh)"`, so the
-poller renews the token with the scopes `bearer.sh` asks for.
+`python`. Off the Mac the poller also needs `LINEAR_TOKEN_FILE=~/.config/linear/token.json
+LINEAR_CREDENTIALS=~/.config/linear/credentials`. Nothing in the command names the machine: the
+poller learns which app it is from its token.
 
 Nothing the script prints may be dropped silently (MS-385): every issue and comment line goes
 into the script's ledger (`~/.local/state/linear-poll/ledger.jsonl`) and stays open until this
@@ -255,9 +256,10 @@ Keep one agent limit: at most three agents on the expensive planning model at on
 counts until its prewalk hands off to the cheaper model at its first edit). Other claimed issues
 wait in the queue of `~/.local/state/linear-poll/session.md`, stay in Todo with a comment saying
 they are queued (Backlog holds only what nobody plans to do yet, MS-175), and start in order as
-slots free; the poller doesn't hand out a Todo issue again once omp has commented on it or claimed
-it. Urgent issues are the exception (MS-252): one whose `priority` (on its `issue` line) is
-`Urgent` starts at once, however many expensive-model agents run, and goes ahead of the queue.
+slots free; the poller doesn't hand out an issue again once it has claimed it on this machine
+(unless it gets `omp` or unblocked). Urgent issues are the exception (MS-252): one whose
+`priority` (on its `issue` line) is `Urgent` starts at once, however many expensive-model agents
+run, and goes ahead of the queue.
 Code is written by the default model, and its agent tests it in the real app itself; release
 installs and their mechanical checks go to the batch install agent, one run for every issue
 waiting, at most once an hour (`INSTALL_EVERY`). Agents write their full report on the issue and
@@ -272,20 +274,22 @@ none by then), empties RUNNING_FILE, opens
 ~/.local/state/linear-poll/session.md, then start the poller."` and stops (it does not start
 the script again). The new session reads `session.md`, starts the queued issues and the script.
 
-The Mac (app `omp`), the Windows machine (app `windows-omp`) and the Linux machine (app
-`linux-omp`) talk only through Linear. New work for another machine is an issue (a sub-issue
-when it serves one) labelled `omp`, plus `windows` or `linux` (or in team `WIN` when it is a
-chore on the Windows machine, not repo work): its poller claims it whoever created it. A comment
-naming a machine's app reaches that machine alone on any issue, from the user or another
-machine; agents write the name in backticks (`` `@omp` ``), since Linear rejects an app's
+The machines talk only through Linear, and the issue's delegate decides which one works it
+(MS-386): each poller claims, resumes, installs, reports stale and routes comments only for
+issues delegated to its own app, in every team, whatever their labels. An issue delegated to
+nobody is nobody's until the user delegates it, and delegating starts it. New work for another
+machine is an issue (a sub-issue when it serves one, in the team of its project) delegated to
+that machine's app: its poller claims it, since every machine's app counts as a trusted creator.
+A comment naming a machine's app reaches that machine alone on any issue, from the user or
+another machine; agents write the name in backticks (`` `@omp` ``), since Linear rejects an app's
 @-mention of an app.
 
-Linux does the work unless it is Mac-specific (MS-254). Mac-specific means it needs macOS:
-macOS packaging and signing, installing to `/Applications`, `bench.sh` benchmarks, Mac menus and
-shortcuts, the AppKit app, Liquid Glass. The Mac poller keeps those; every other `MS` issue it
-claims (GPUI, the engine, tooling) gets `linux` and `omp` and goes to `` `@linux-omp` ``
-with a comment saying so, unworked. An issue already being worked on the Mac stays there until
-it is handed over; it is not moved mid-way.
+Which machine to delegate Mailstream work to (MS-254): Linux (`linux-omp`) unless it is
+Mac-specific, which means it needs macOS: macOS packaging and signing, installing to
+`/Applications`, `bench.sh` benchmarks, Mac menus and shortcuts, the AppKit app, Liquid Glass
+(`omp`). Windows chores go to `windows-omp`, `MRV` and `HET` to `saturn-omp`. The user's choice
+stands: a poller works what is delegated to it and doesn't pass it on by itself. An issue already
+being worked stays on its machine until it is handed over; it is not moved mid-way.
 
 ## Building
 
