@@ -56,7 +56,7 @@ The window opens at --size (default 1240x800, the app's) with the inbox loaded. 
 
 The PNGs go to DIR (default: a folder under the system's temporary folder, printed). --upload
 puts each on Linear (the machine's app token: ~/.config/linear/token.json on Linux and Windows, the
-`linear-omp` Keychain item on the Mac, as scripts/linear-poll.py reads it) and prints the
+`linear-mac-omp` Keychain item on the Mac, as scripts/linear-poll.py reads it) and prints the
 Markdown to paste into the issue's comment, light first, then dark.
 
 The synthetic accounts are signed in to a stand-in provider (`Engine/src/shots.rs`, MS-265), so

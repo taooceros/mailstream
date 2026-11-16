@@ -152,11 +152,12 @@ class Ledger:
     # Answers and overdue items.
 
     def answer(self, comments, me):
-        """Records the items this machine's app (`me`, its user id) answered among `comments`."""
+        """Records the items this machine's apps (`me`, their user ids: its app and FORMER ones,
+        linear-poll.py) answered among `comments`."""
         waiting = {}
         for id, item in self.open_items().items():
             waiting.setdefault(self.issue_of(id, item), []).append((id, item))
-        mine = sorted((c for c in comments if (c.get("user") or {}).get("id") == me and c["issue"]["id"] in waiting),
+        mine = sorted((c for c in comments if (c.get("user") or {}).get("id") in me and c["issue"]["id"] in waiting),
                       key=lambda c: c["createdAt"])
         for comment in mine:
             at, items = parse(comment["createdAt"]), waiting[comment["issue"]["id"]]

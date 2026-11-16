@@ -63,9 +63,12 @@ only, so the same script runs on macOS, Windows and Linux.
 Machines (MS-386, MS-387): each machine's poller runs as its own Linear OAuth app (`mac-omp`,
 `windows-omp`, `linux-omp`, `saturn-omp`: the Mac, Windows, Linux, saturn) and watches every team,
 one team per project. The script knows the apps by their Linear user ids (APPS, comma-separated,
-default those four) and itself by the token's viewer, never by name: each full pass reads the
-apps' current names, so renaming an app in Linear (the Mac's `omp` became `mac-omp`) changes
-nothing here. An issue belongs to the machine whose app it is delegated to (Linear's "assign to
+default those four and FORMER's) and itself by the token's viewer, never by name: each full pass
+reads the apps' current names, so renaming an app in Linear changes nothing here. FORMER lists a
+machine's earlier apps (the Mac's `omp`, replaced by the new app `mac-omp` in MS-387 since Linear
+couldn't rename it): they still count as that machine, so issues delegated to them, comments
+written by them and mentions of their names are its own. An issue belongs to the machine whose
+app it is delegated to (Linear's "assign to
 agent" sets the issue's delegate; an app can't be its assignee): that poller alone claims,
 resumes, installs, reports stale and routes comments for it. An issue delegated to nobody belongs
 to no machine, so nothing happens on it until the user delegates it. A comment naming a machine's
@@ -92,7 +95,8 @@ sessions not on an issue. A delegation of an issue an agent already holds (In Pr
 `claimed`) gets only the thought. Delegated issues (above) and mentions (Machines) are claimed
 without a session too, so the work arrives where Linear opens none for an app that has no
 webhook. Without those scopes the app can't be delegated or mentioned at all.
-Token: the Mac reads its app's from the Keychain (item `linear-omp`) and renews it with RENEW. A machine without
+Token: the Mac reads its app's from the Keychain (service `linear-mac-omp`; the old `omp`'s was
+`linear-omp`) and renews it with RENEW. A machine without
 `security` sets LINEAR_TOKEN_FILE (the OAuth token JSON) and LINEAR_CREDENTIALS (a file with the
 OAuth app's client id on line 1 and secret on line 2); renewal fetches a client_credentials token
 into LINEAR_TOKEN_FILE with the scopes in LINEAR_SCOPE (default
@@ -164,11 +168,13 @@ import source_lock
 LABEL = os.environ.get("LABEL", "omp")
 CLAIMED = os.environ.get("CLAIMED", "claimed")
 APPS = os.environ.get("APPS", ",".join((
-    "da14602e-8f26-4082-8ca7-1be2cc5d3c5c",  # mac-omp
+    "3a60f58a-3306-4ec5-8e88-1819e1f9ce43",  # mac-omp
     "26c89eea-6fa1-4455-a506-a9dbee9b5d6a",  # windows-omp
     "6b274855-c5e9-4203-84f4-56ef84f7209c",  # linux-omp
     "e09f599a-5bcb-4e17-b981-3ef92d3594a9",  # saturn-omp
+    "da14602e-8f26-4082-8ca7-1be2cc5d3c5c",  # omp, the Mac's app until MS-387 (FORMER)
 ))).split(",")
+FORMER = {"3a60f58a-3306-4ec5-8e88-1819e1f9ce43": ["da14602e-8f26-4082-8ca7-1be2cc5d3c5c"]}  # see Machines
 RENEW = Path.home() / ".pi/agent/extensions/linear/renew-omp-token.sh"
 TOKEN_FILE = os.environ.get("LINEAR_TOKEN_FILE", "")
 CREDENTIALS = os.environ.get("LINEAR_CREDENTIALS", "")
@@ -209,7 +215,7 @@ def emit(line):
 def token():
     if TOKEN_FILE:
         return json.loads(Path(TOKEN_FILE).read_text(encoding="utf-8"))["access_token"]
-    return subprocess.run(["security", "find-generic-password", "-s", "linear-omp", "-a", "access_token", "-w"],
+    return subprocess.run(["security", "find-generic-password", "-s", "linear-mac-omp", "-a", "access_token", "-w"],
                           check=True, capture_output=True, text=True).stdout.strip()
 
 
@@ -363,18 +369,19 @@ def handles(app):
 def comments_query(apps):
     """Every comment written since the checkpoint (`since`, poll_ledger.py), page by page (MS-385): a
     single page of the newest 100 lost the oldest ones after an hour's stop at busy times. Only those
-    on issues delegated to this machine or naming one of the machines' apps (Machines)."""
+    on issues delegated to this machine (`$me`, its app ids) or naming one of the machines' apps
+    (Machines)."""
     named = "".join(f", {{ body: {{ contains: {json.dumps(prefix + handle)} }} }}"
                     for app in apps for handle in handles(app) for prefix in ("@", "profiles/"))
     return """comments(first: 100, after: $after, filter: { createdAt: { gt: $since },
-      or: [{ issue: { delegate: { isMe: { eq: true } } } }""" + named + """] }) {
+      or: [{ issue: { delegate: { id: { in: $me } } } }""" + named + """] }) {
     nodes { id createdAt body user { id name app guest }
       issue { id identifier title delegate { id } state { name } } }
     pageInfo { hasNextPage endCursor } }"""
 
 
 def comments_page(apps):
-    return "query($since: DateTimeOrDuration!, $after: String) {\n  " + comments_query(apps) + "\n}"
+    return "query($me: [ID!], $since: DateTimeOrDuration!, $after: String) {\n  " + comments_query(apps) + "\n}"
 
 
 # The issues of overdue ledger items: whether they are finished, still this poller's, held by an agent.
@@ -384,20 +391,20 @@ LEDGER_ISSUES = """query($ids: [ID!], $n: Int!) { issues(first: $n, filter: { id
 
 
 def query(apps):
-    return """query($claimed: String!, $install: String!, $sessions: Int!, $since: DateTimeOrDuration!, $after: String) {""" + WATERMARKS + """
+    return """query($me: [ID!], $claimed: String!, $install: String!, $sessions: Int!, $since: DateTimeOrDuration!, $after: String) {""" + WATERMARKS + """
   queued: issues(first: 100, filter: {
-    delegate: { isMe: { eq: true } }, state: { type: { in: ["triage", "backlog", "unstarted"] } } }) {
+    delegate: { id: { in: $me } }, state: { type: { in: ["triage", "backlog", "unstarted"] } } }) {
     nodes { id identifier number title description priority priorityLabel state { name }
       creator { id name app guest } project { name } parent { identifier title }
       labels { nodes { id name } }
       inverseRelations(first: 50) { nodes { type issue { id identifier state { name type }
         labels { nodes { name } } } } } } }
   installs: issues(first: 100, filter: {
-    delegate: { isMe: { eq: true } }, labels: { some: { name: { eq: $install } } },
+    delegate: { id: { in: $me } }, labels: { some: { name: { eq: $install } } },
     state: { type: { nin: ["completed", "canceled", "duplicate"] } } }) {
     nodes { identifier number } }
   claimed: issues(first: 100, filter: {
-    delegate: { isMe: { eq: true } }, labels: { some: { name: { eq: $claimed } } } }) {
+    delegate: { id: { in: $me } }, labels: { some: { name: { eq: $claimed } } } }) {
     nodes { id identifier title state { name } labels { nodes { id name } }
       comments(first: 100) { nodes { id createdAt body user { app } } } } }
   """ + comments_query(apps) + """
@@ -418,8 +425,9 @@ def labelled(issue):
 
 
 def mine(issue, me):
-    """Whether an issue belongs to this machine: it is delegated to this machine's app (see Machines)."""
-    return (issue.get("delegate") or {}).get("id") == me["id"]
+    """Whether an issue belongs to this machine: it is delegated to this machine's app, or one of
+    its FORMER apps (see Machines)."""
+    return (issue.get("delegate") or {}).get("id") in me["ids"]
 
 
 def member(user):
@@ -439,12 +447,12 @@ def named(body, apps):
 def routed(comment, me, apps):
     """Whether a comment goes to this poller: see "Machines" above."""
     user, body = comment["user"], comment["body"]
-    if user is None or user["id"] == me["id"]:
+    if user is None or user["id"] in me["ids"]:
         return False
-    names = named(body, apps)
+    names, ours = named(body, apps), set(me["ids"])
     if member(user):
-        return me["id"] in names if names else mine(comment["issue"], me)
-    return user.get("app") is True and user["id"] in APPS and me["id"] in names
+        return bool(names & ours) if names else mine(comment["issue"], me)
+    return user.get("app") is True and user["id"] in APPS and bool(names & ours)
 
 
 def blockers(issue):
@@ -513,7 +521,7 @@ def plan_sessions(data, known, done, handled, todo):
     """Issue lines, comment and stop lines, and replies for the app's agent sessions (see Agent
     sessions above). A line's `reply` is the activity to post as it is printed; it may attach to an
     issue line already in todo."""
-    me, app = data["viewer"]["id"], data["viewer"]["name"]
+    me, ours, app = data["viewer"]["id"], data["viewer"]["ids"], data["viewer"]["name"]
     no_issue = {"type": "error", "body": NO_ISSUE.format(tag=TAG, app=app)}
     issues, notes, replies = [], [], []
     for session in (data.get("sessions") or {}).get("nodes") or []:
@@ -565,7 +573,7 @@ def plan_sessions(data, known, done, handled, todo):
         if new or issue is None or not entry.get("ackedAt") or entry.get("answered"):
             continue
         acked = timestamp(entry["ackedAt"])
-        after = [c for c in issue["comments"]["nodes"] if (c["user"] or {}).get("id") == me
+        after = [c for c in issue["comments"]["nodes"] if (c["user"] or {}).get("id") in ours
                  and timestamp(c["createdAt"]) > acked and not START.match(c["body"])]
         question = max((c for c in after if QUESTION in c["body"]), key=lambda c: c["createdAt"], default=None)
         if question is not None:
@@ -689,9 +697,10 @@ def run_pass():
         return 0
     started = datetime.now(timezone.utc)
     ledger = poll_ledger.Ledger(STATE, dry=bool(os.environ.get("DRY_RUN")))
-    page_vars = {"since": ledger.rewind(), "after": None}
     machines = gql(APPS_QUERY, {"ids": APPS})
     me, apps = machines["viewer"], machines["apps"]["nodes"]
+    me["ids"] = [me["id"], *FORMER.get(me["id"], [])]
+    page_vars = {"me": me["ids"], "since": ledger.rewind(), "after": None}
     if me["id"] not in {app["id"] for app in apps}:
         apps.append(me)
     data = {**gql(query(apps), {**page_vars, "claimed": CLAIMED, "install": INSTALL, "sessions": SESSION_COUNT}),
@@ -707,7 +716,7 @@ def run_pass():
             "fullAt": time.time(),
         }), encoding="utf-8")
     known = json.loads(SESSIONS.read_text(encoding="utf-8")) if SESSIONS.exists() else {}
-    ledger.answer(data["comments"]["nodes"], data["viewer"]["id"])
+    ledger.answer(data["comments"]["nodes"], me["ids"])
     out = plan(data, running, known)
     printed = {line["id"] for line in out if line["kind"] in ("issue", "comment")}
     again = ledger.overdue(lambda ids: gql(LEDGER_ISSUES, {"ids": ids, "n": len(ids)})["issues"]["nodes"], running,
