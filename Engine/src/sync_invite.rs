@@ -117,6 +117,11 @@ impl Invites {
         }
         Ok(())
     }
+
+    /// How many codes are still redeemable.
+    pub fn open(&self) -> usize {
+        self.open.lock().expect("invites lock").values().filter(|issued| issued.elapsed() < LIFETIME).count()
+    }
 }
 
 fn unix_ms() -> u64 {

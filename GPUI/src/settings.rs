@@ -1854,8 +1854,9 @@ impl Settings {
             .gap(px(8.))
             .child(heading("Device sync", p))
             .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
-                "Syncs trusted senders, auto-read, and AI tagging preferences directly between your devices \
-                 with iroh. Off until enabled or paired, so Mailstream does not connect to a relay on its own.",
+                "Syncs your accounts, trusted senders, auto-read, and AI tagging preferences directly between \
+                 your devices with iroh; sign-ins travel encrypted for each device. Off until enabled or paired, \
+                 so Mailstream does not connect to a relay on its own.",
             ));
         let Some(status) = &self.device_sync else {
             return section
@@ -2278,7 +2279,7 @@ impl Settings {
                 )
             })
             .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
-                "Keeps an encrypted copy of the synced settings on your own Cloudflare Worker (SyncDrop/ in the \
+                "Keeps an encrypted copy of the synced settings and accounts on your own Cloudflare Worker (SyncDrop/ in the \
                  Mailstream repository), so devices that are never online at the same time still sync. The Worker \
                  sees only ciphertext under ids derived from this sync group; turning this off deletes this \
                  device's copy. Off unless you turn it on.",

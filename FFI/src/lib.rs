@@ -630,10 +630,11 @@ commands! {
     /// Pauses device sync until [`Mailstream::sync_enable`] is called.
     fn sync_disable() -> DeviceSyncStatus = "sync.disable" {};
 
-    /// Generates a pairing ticket for another device to join this sync group.
+    /// A one-time pairing code for another device to join this sync group, valid for 10 minutes
+    /// while this device runs; the device that joins also gets the signed-in accounts (MS-376).
     fn sync_pair_ticket() -> SyncTicket = "sync.pair_ticket" {};
 
-    /// Imports another device's pairing `ticket`, joins its sync group and syncs at once.
+    /// Redeems another device's pairing code (`ticket`), joins its sync group and syncs at once.
     fn sync_join(ticket: String) -> DeviceSyncStatus = "sync.join" { "ticket": ticket };
 
     /// Starts a new sync group carrying over current synced settings, revoking older paired

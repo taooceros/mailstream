@@ -424,6 +424,13 @@ fn run_sync_headless(spec: &Spec, args: &Map<String, Value>, data_dir: &Path) ->
             .ok_or_else(|| usage("sync join: <ticket> is required."))?;
         return sync_node::run_join(data_dir.to_path_buf(), ticket);
     }
+    if spec.id == "sync.pair_ticket" {
+        // The code works only while this process runs: show it now, then wait for the joiner.
+        return sync_node::run_pair(data_dir.to_path_buf(), |code| {
+            println!("{}", text(code));
+            eprintln!("Waiting up to 10 minutes for another device to join with this code…");
+        });
+    }
     let node = SyncNode::open(SyncNodeConfig::new(data_dir.to_path_buf()))?;
     node.call_sync(spec.id, Value::Object(args.clone()))
 }

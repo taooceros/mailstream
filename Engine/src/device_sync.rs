@@ -218,6 +218,22 @@ impl DeviceSync {
         let _ = self.wake_tx.send(());
     }
 
+    /// How many pairing codes this device issued are still redeemable; none while sync is closed.
+    pub(crate) async fn open_invites(&self) -> usize {
+        self.sync.read().await.as_ref().map_or(0, PeerSync::open_invites)
+    }
+
+    /// Whether every other device that gets the accounts has each of this device's signed-in
+    /// accounts sealed to it, so this device may go offline after pairing.
+    pub(crate) async fn accounts_handed_over(&self) -> bool {
+        let Some(host) = self.accounts.get().and_then(Weak::upgrade) else { return true };
+        let guard = self.sync.read().await;
+        let Some(sync) = guard.as_ref() else { return false };
+        let me = sync.status().await.endpoint_id;
+        let Ok(snapshot) = sync.snapshot().await else { return false };
+        account_sync::handed_over(&snapshot, &me, &*host)
+    }
+
     /// Stops the background bridge and cleanly closes `PeerSync` (releasing `peer-sync/lock`).
     pub async fn shutdown(&self) {
         for task in self.tasks.lock().expect("device sync task lock").drain(..) {

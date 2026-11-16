@@ -587,6 +587,11 @@ impl PeerSync {
         Ok((code.to_string(), expires))
     }
 
+    /// How many pairing codes this device issued are still redeemable.
+    pub fn open_invites(&self) -> usize {
+        self.inner.invites.open()
+    }
+
     /// Joins the group of `ticket` (see [`PeerSync::ticket`]) and syncs with the devices it
     /// names, resuming sync if paused. The group this device was in, if another, is deleted
     /// from it. The group's devices sync with this one once one of them admitted it, which it

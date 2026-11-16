@@ -243,6 +243,48 @@ pub fn run_join(data_directory: PathBuf, ticket: &str) -> Result<Value, EngineEr
     node.join_and_wait(ticket, JOIN_REACH_TIMEOUT)
 }
 
+/// How long `mailstream sync pair-ticket` waits, once its code was used, for the joining device to
+/// get this device's accounts.
+const HANDOVER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Runs `mailstream sync pair-ticket` headlessly when no daemon or app serves the control socket
+/// (MS-376). A code works only while the device that made it runs, so this prints it at once
+/// through `emit`, then waits until a device used it and got this device's accounts, or until it
+/// expired. Returns the status after.
+pub fn run_pair(data_directory: PathBuf, mut emit: impl FnMut(&Value)) -> Result<Value, EngineError> {
+    let node = SyncNode::open(SyncNodeConfig::new(data_directory))?;
+    let receiving = |status: &Value| {
+        status["devices"].as_array().map_or(0, |devices| devices.iter().filter(|device| device["accounts"] == true).count())
+    };
+    let before = receiving(&node.call_sync("sync.status", json!({}))?);
+    let issued = Instant::now();
+    emit(&node.call_sync("sync.pair_ticket", json!({}))?);
+    let sync = node.inner.device_sync.clone();
+    node.runtime.block_on(async {
+        while sync.open_invites().await > 0 {
+            tokio::time::sleep(JOIN_POLL).await;
+        }
+    });
+    if issued.elapsed() >= crate::sync_invite::LIFETIME {
+        return Err(EngineError::new("expired", "No device used the pairing code within 10 minutes."));
+    }
+    let deadline = Instant::now() + HANDOVER_TIMEOUT;
+    loop {
+        let status = node.call_sync("sync.status", json!({}))?;
+        if receiving(&status) > before && node.runtime.block_on(sync.accounts_handed_over()) {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            return Err(EngineError::new(
+                "unreachable",
+                "The other device joined, but didn't get this device's accounts within a minute; keep a device \
+                 with them online (or `mailstream sync daemon`) until it does.",
+            ));
+        }
+        std::thread::sleep(JOIN_POLL);
+    }
+}
+
 /// Runs `mailstream sync daemon`: serves `control.sock`, syncs `peer_sync` + `settings.json`,
 /// emits JSON event lines via `emit`, and flushes cleanly on `SIGTERM`/`SIGINT`. `cloud_url`
 /// turns on the Cloudflare drop (`sync.cloud_enable`) first.

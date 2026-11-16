@@ -378,6 +378,21 @@ pub(crate) fn receives(snapshot: &Snapshot, id: &str) -> bool {
     snapshot.device_keys.get(id).is_some_and(|announced| announced.verified(id).is_some())
 }
 
+/// Whether each of `host`'s accounts with a saved sign-in is sealed to every other device that
+/// gets the accounts, in `snapshot`.
+pub(crate) fn handed_over(snapshot: &Snapshot, me: &str, host: &dyn AccountHost) -> bool {
+    let Ok(sign_ins) = host.keychain().load() else { return false };
+    let recipients = recipients(snapshot, me);
+    host.accounts().iter().filter(|record| sign_ins.refresh_tokens.contains_key(&record.id)).all(|record| {
+        recipients.iter().all(|(recipient, key)| {
+            snapshot
+                .credentials
+                .get(&format!("{recipient}/{}", record.id))
+                .is_some_and(|sealed| sealed.sealed.is_some() && sealed.to == hex(key))
+        })
+    })
+}
+
 /// This device's records as the group keeps them, by id.
 fn local_records(host: &dyn AccountHost) -> BTreeMap<String, Value> {
     host.accounts()

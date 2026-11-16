@@ -719,19 +719,19 @@ pub const COMMANDS: &[Spec] = &[
     Spec::new(
         "sync.pair_ticket",
         Handler::Sync,
-        "Creates a pairing ticket for another device to join this sync group.",
+        "Creates a one-time pairing code, valid for 10 minutes, for another device to join this sync group; the device that joins also gets the signed-in accounts. Without a running app or daemon, waits until a device used it.",
         &[],
     ),
     Spec::new(
         "sync.join",
         Handler::Sync,
-        "Joins another device's sync group using its pairing ticket and syncs at once.",
-        &[Argument::new("ticket", Kind::String, "Pairing ticket from `mailstream sync pair_ticket`.").positional()],
+        "Joins another device's sync group with its pairing code, gets its signed-in accounts and syncs at once.",
+        &[Argument::new("ticket", Kind::String, "Pairing code from `mailstream sync pair-ticket` (works once, for 10 minutes).").positional()],
     ),
     Spec::new(
         "sync.reset",
         Handler::Sync,
-        "Creates a new sync group carrying over current settings, dropping previously paired devices.",
+        "Creates a new sync group carrying over current settings and accounts (no sign-ins), dropping previously paired devices.",
         &[YES],
     )
     .confirmed(),
