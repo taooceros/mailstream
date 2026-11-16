@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use base64::Engine as _;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -32,6 +33,8 @@ pub struct FakeImapConfig {
     pub reject_auth: bool,
     pub reject_first_token: Option<String>,
     pub fail_search: bool,
+    pub refuse_query: Option<String>,
+    pub search_delay: Duration,
     /// Drops the connection once when a `UID SEARCH` arrives, then succeeds on reconnect.
     pub drop_once_on_search: AtomicBool,
     pub messages: Vec<FakeImapMessage>,
@@ -45,6 +48,8 @@ impl Default for FakeImapConfig {
             reject_auth: false,
             reject_first_token: None,
             fail_search: false,
+            refuse_query: None,
+            search_delay: Duration::ZERO,
             drop_once_on_search: AtomicBool::new(false),
             messages: Vec::new(),
             matches: Box::new(|_, _| true),
@@ -57,6 +62,11 @@ pub struct FakeImapServer {
     pub connections: AtomicUsize,
     pub searches: AtomicUsize,
     pub fetches: AtomicUsize,
+    pub noops: AtomicUsize,
+    pub in_flight_searches: AtomicUsize,
+    pub peak_in_flight_searches: AtomicUsize,
+    /// Connections up to this 1-based index stop answering without closing the socket.
+    pub silence_before: AtomicUsize,
     pub last_query: Mutex<Option<String>>,
     pub last_user: Mutex<Option<String>>,
     pub last_token: Mutex<Option<String>>,
@@ -74,6 +84,10 @@ impl FakeImapServer {
             connections: AtomicUsize::new(0),
             searches: AtomicUsize::new(0),
             fetches: AtomicUsize::new(0),
+            noops: AtomicUsize::new(0),
+            in_flight_searches: AtomicUsize::new(0),
+            peak_in_flight_searches: AtomicUsize::new(0),
+            silence_before: AtomicUsize::new(0),
             last_query: Mutex::new(None),
             last_user: Mutex::new(None),
             last_token: Mutex::new(None),
@@ -97,7 +111,7 @@ impl FakeImapServer {
     }
 
     async fn serve(&self, stream: TcpStream) {
-        self.connections.fetch_add(1, Ordering::SeqCst);
+        let connection = self.connections.fetch_add(1, Ordering::SeqCst) + 1;
         let (read, mut write) = stream.into_split();
         let mut reader = BufReader::new(read);
         if write.write_all(b"* OK Gimap ready for requests from 127.0.0.1\r\n").await.is_err() {
@@ -108,6 +122,10 @@ impl FakeImapServer {
             line.clear();
             let Ok(n) = reader.read_line(&mut line).await else { return };
             if n == 0 {
+                return;
+            }
+            if connection <= self.silence_before.load(Ordering::SeqCst) {
+                let _ = reader.read_line(&mut line).await;
                 return;
             }
             let trimmed = line.trim_end_matches(['\r', '\n']);
@@ -175,12 +193,19 @@ impl FakeImapServer {
                 let resp = format!(
                     "* FLAGS (\\Answered \\Flagged \\Draft \\Deleted \\Seen)\r\n\
                      * {} EXISTS\r\n\
+                     * OK [UIDVALIDITY 1] UIDs valid\r\n\
                      {tag} OK [READ-ONLY] Selected (Success)\r\n",
                     self.config.messages.len()
                 );
                 let _ = write.write_all(resp.as_bytes()).await;
             } else if let Some(after) = strip_prefix_ignore_case(rest, "UID SEARCH X-GM-RAW ") {
                 self.searches.fetch_add(1, Ordering::SeqCst);
+                let in_flight = self.in_flight_searches.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak_in_flight_searches.fetch_max(in_flight, Ordering::SeqCst);
+                if !self.config.search_delay.is_zero() {
+                    tokio::time::sleep(self.config.search_delay).await;
+                }
+                self.in_flight_searches.fetch_sub(1, Ordering::SeqCst);
                 let query = unquote_imap(after);
                 *self.last_query.lock().unwrap() = Some(query.clone());
                 if self.config.drop_once_on_search.swap(false, Ordering::SeqCst) {
@@ -188,6 +213,10 @@ impl FakeImapServer {
                 }
                 if self.config.fail_search {
                     let _ = write.write_all(format!("{tag} NO [CANNOT] Search failed\r\n").as_bytes()).await;
+                    continue;
+                }
+                if self.config.refuse_query.as_deref() == Some(query.as_str()) {
+                    let _ = write.write_all(format!("{tag} BAD [CLIENTBUG] Unsupported search query\r\n").as_bytes()).await;
                     continue;
                 }
                 let matched: Vec<String> = self
@@ -241,6 +270,9 @@ impl FakeImapServer {
                 out.extend_from_slice(format!("{tag} OK Success\r\n").as_bytes());
                 let _ = write.write_all(&out).await;
             } else if upper == "NOOP" || upper == "LOGOUT" {
+                if upper == "NOOP" {
+                    self.noops.fetch_add(1, Ordering::SeqCst);
+                }
                 let _ = write.write_all(format!("{tag} OK Success\r\n").as_bytes()).await;
                 if upper == "LOGOUT" {
                     return;

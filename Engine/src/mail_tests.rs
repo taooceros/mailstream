@@ -542,6 +542,139 @@ fn falls_back_to_gmail_api_when_imap_disabled_or_fails() {
     });
     let found = call(&engine, "mail.search", json!({ "query": "invoice" })).unwrap();
     assert_eq!(ids(&found), ["me@gmail.com|a0@x"]);
+    assert_eq!(failing_search_imap.connections.load(Ordering::SeqCst), 1, "query NO does not reconnect");
+    drop(engine);
+    cleanup(&config);
+}
+
+#[test]
+fn imap_search_probes_dead_sessions_runs_concurrently_reuses_quick_and_keeps_above_100() {
+    use crate::fake_imap::{FakeImapConfig, FakeImapMessage, FakeImapServer};
+    use crate::testkit::{mail_account, server_config, sign_in_all};
+    use futures::executor::block_on;
+
+    let counters = Arc::new(GmailCounters {
+        tokens: AtomicUsize::new(0),
+        labels: AtomicUsize::new(0),
+        listings: AtomicUsize::new(0),
+    });
+    let rest_searches = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let (counters, rest_searches, metadata) = (counters.clone(), rest_searches.clone(), gmail_metadata());
+        FakeServer::start(move |request| {
+            if request.path == "/token" {
+                return token_reply(&counters.tokens);
+            }
+            if request.path == "/gmail/v1/users/me/messages" && request.param("q").is_some() {
+                rest_searches.fetch_add(1, Ordering::SeqCst);
+            }
+            gmail_reply(request, &counters, &metadata)
+        })
+    };
+
+    let messages: Vec<FakeImapMessage> = (1u32..=150)
+        .map(|uid| FakeImapMessage {
+            uid,
+            msg_id: 0x2000_0000_0000_0000 + u64::from(uid),
+            thr_id: 0x3000_0000_0000_0000 + u64::from(uid),
+            labels: vec!["\\Inbox".into()],
+            flags: vec!["\\Seen".into()],
+            internal_date: format!("14-Nov-2026 10:{:02}:{:02} +0000", uid / 60, uid % 60),
+            size: 256,
+            bodystructure: r#"("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 10 1 NIL NIL NIL)"#.into(),
+            headers: vec![
+                ("From".into(), "Bob <bob@x.com>".into()),
+                ("To".into(), "Me <me@gmail.com>".into()),
+                ("Subject".into(), format!("Report #{uid}")),
+                ("Message-ID".into(), format!("<r{uid}@x>")),
+            ],
+        })
+        .collect();
+
+    let imap = FakeImapServer::start(FakeImapConfig {
+        refuse_query: Some("invoice".into()),
+        search_delay: Duration::from_millis(80),
+        messages,
+        matches: Box::new(|query, msg| match query {
+            "small" => msg.uid <= 10,
+            "many" => true,
+            "q1" => msg.uid == 1,
+            "q2" => msg.uid == 2,
+            "q3" => msg.uid == 3,
+            _ => false,
+        }),
+        ..FakeImapConfig::default()
+    });
+
+    let mut config = server_config(&server);
+    config.endpoints.gmail.imap = Some(imap.endpoint.clone());
+    sign_in_all(&config, &[mail_account("me@gmail.com", "google")]);
+    let engine = Engine::start(config.clone());
+    wait_until("mailboxes", || {
+        call(&engine, "mailboxes", json!({})).unwrap()["me@gmail.com"].as_array().is_some_and(|boxes| !boxes.is_empty())
+    });
+
+    // 1. Quick search holds UIDs: when all matches fit in the quick screenful, the full search
+    //    that follows does neither another UID SEARCH nor another UID FETCH.
+    let quick_small = call(&engine, "mail.search", json!({ "query": "small", "limit": 25, "quick": true })).unwrap();
+    assert_eq!(quick_small["conversations"].as_array().unwrap().len(), 10);
+    assert_eq!((imap.connections.load(Ordering::SeqCst), imap.searches.load(Ordering::SeqCst), imap.fetches.load(Ordering::SeqCst)), (1, 1, 1));
+    let full_small = call(&engine, "mail.search", json!({ "query": "small", "limit": 100 })).unwrap();
+    assert_eq!(ids(&full_small), ids(&quick_small));
+    assert_eq!((imap.searches.load(Ordering::SeqCst), imap.fetches.load(Ordering::SeqCst)), (1, 1));
+    assert_eq!(imap.noops.load(Ordering::SeqCst), 0, "freshly used session skips NOOP");
+
+    // 2. Above 100 results: quick fetches 25, and full with limit 200 fetches only the remaining
+    //    125 (in two 100-UID chunks) without repeating UID SEARCH or truncating at 100.
+    let quick_many = call(&engine, "mail.search", json!({ "query": "many", "limit": 25, "quick": true })).unwrap();
+    assert_eq!(quick_many["conversations"].as_array().unwrap().len(), 25);
+    assert_eq!(quick_many["conversations"][0]["id"], "me@gmail.com|r150@x");
+    let full_many = call(&engine, "mail.search", json!({ "query": "many", "limit": 200 })).unwrap();
+    let many_ids = ids(&full_many);
+    assert_eq!(many_ids.len(), 150, "IMAP search must not truncate at 100");
+    assert_eq!((many_ids.first().unwrap().as_str(), many_ids.last().unwrap().as_str()), ("me@gmail.com|r150@x", "me@gmail.com|r1@x"));
+    assert_eq!(imap.searches.load(Ordering::SeqCst), 2, "full search reused quick's UID SEARCH");
+    assert_eq!(imap.fetches.load(Ordering::SeqCst), 4, "1 quick chunk + 2 chunks for remaining 125");
+
+    // 3. A single BAD/NO query falls back to REST without reconnecting or disabling IMAP.
+    let fallback = call(&engine, "mail.search", json!({ "query": "invoice" })).unwrap();
+    assert_eq!(ids(&fallback), ["me@gmail.com|a0@x"]);
+    assert_eq!(rest_searches.load(Ordering::SeqCst), 1);
+    assert_eq!(imap.connections.load(Ordering::SeqCst), 1, "query BAD keeps the session");
+    let still_imap = call(&engine, "mail.search", json!({ "query": "q1" })).unwrap();
+    assert_eq!(ids(&still_imap), ["me@gmail.com|r1@x"]);
+    assert_eq!(rest_searches.load(Ordering::SeqCst), 1, "next query still uses IMAP");
+
+    // 4. Idle connection is probed with NOOP; a half-dead connection (never closes, never answers)
+    //    is replaced within PROBE_TIMEOUT instead of stalling for SEARCH_TIMEOUT.
+    let noops_before = imap.noops.load(Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(550));
+    let probed = call(&engine, "mail.search", json!({ "query": "q2" })).unwrap();
+    assert_eq!(ids(&probed), ["me@gmail.com|r2@x"]);
+    assert_eq!((imap.noops.load(Ordering::SeqCst) - noops_before, imap.connections.load(Ordering::SeqCst)), (1, 1));
+
+    imap.silence_before.store(1, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(550));
+    let started = std::time::Instant::now();
+    let recovered = call(&engine, "mail.search", json!({ "query": "q3" })).unwrap();
+    assert_eq!(ids(&recovered), ["me@gmail.com|r3@x"]);
+    assert!(started.elapsed() < Duration::from_secs(5), "half-dead session recovered in {:?}", started.elapsed());
+    assert_eq!(imap.connections.load(Ordering::SeqCst), 2);
+    assert_eq!(rest_searches.load(Ordering::SeqCst), 1);
+
+    // 5. Concurrent searches on the same account run side by side over pooled connections.
+    let (f1, f2, f3) = (
+        engine.call("mail.search", json!({ "query": "q1" })),
+        engine.call("mail.search", json!({ "query": "q2" })),
+        engine.call("mail.search", json!({ "query": "q3" })),
+    );
+    let (r1, r2, r3) = block_on(async { tokio::join!(f1, f2, f3) });
+    assert_eq!(ids(&r1.unwrap()), ["me@gmail.com|r1@x"]);
+    assert_eq!(ids(&r2.unwrap()), ["me@gmail.com|r2@x"]);
+    assert_eq!(ids(&r3.unwrap()), ["me@gmail.com|r3@x"]);
+    assert!(imap.peak_in_flight_searches.load(Ordering::SeqCst) >= 2, "same-account searches overlapped");
+    assert_eq!(rest_searches.load(Ordering::SeqCst), 1);
+
     drop(engine);
     cleanup(&config);
 }

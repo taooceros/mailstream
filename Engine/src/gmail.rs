@@ -296,11 +296,12 @@ impl Gmail {
     }
 
     /// No label filter: Gmail then searches everything but spam and trash, as its web search does.
-    /// `quick` leaves out the attachment check of messages not seen before (MS-352): they show no
-    /// paperclip until a later search or listing checks them.
+    /// On the REST fallback, `quick` leaves out the attachment check of messages not seen before
+    /// (MS-352); over IMAP, `BODYSTRUCTURE` already carries it and `quick` holds the matched UIDs
+    /// so the full search that follows only fetches the rest (MS-371).
     pub async fn search(&self, query: &str, page_size: usize, quick: bool) -> Result<Vec<SearchHit>, ApiError> {
         if self.endpoints.imap.is_some()
-            && let Ok(messages) = self.imap.search(query, page_size.clamp(1, 100)).await
+            && let Ok(messages) = self.imap.search(query, page_size.clamp(1, 500), quick).await
             && let Ok(hits) = self.cache.imap_hits(messages, Priority::Interactive).await
         {
             return Ok(hits);

@@ -1,14 +1,14 @@
 //! Gmail search and header fetch over IMAP (`imap.gmail.com:993`, MS-358). Gmail's REST API
 //! charges per-minute quota units for `messages.list` + batched `messages.get`, whereas IMAP is
-//! covered by the existing `https://mail.google.com/` scope and avoids those quota units. One
-//! long-lived connection per account stays open on `[Gmail]/All Mail` (found via `\All` in
-//! `LIST`), reconnecting when dropped and falling back to the REST API if IMAP is disabled or
-//! unavailable.
+//! covered by the existing `https://mail.google.com/` scope and avoids those quota units. Each
+//! account keeps up to `MAX_SESSIONS` long-lived connections open on `[Gmail]/All Mail` (found via
+//! `\All` in `LIST`), so its searches run side by side (MS-371); dropped connections are replaced,
+//! and the REST API answers when IMAP is disabled, unavailable or refuses a query.
 use std::collections::{BTreeSet, HashMap};
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_imap::error::Error as ImapError;
 use async_imap::imap_proto::{BodyContentCommon, BodyStructure, MailboxDatum, Response, Status};
@@ -18,7 +18,7 @@ use base64::Engine as _;
 use futures::TryStreamExt;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls;
@@ -31,6 +31,18 @@ use crate::text;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(20);
+/// A connection unused this long must answer a `NOOP` within `PROBE_TIMEOUT` before it carries a
+/// search: one a sleep or a NAT dropped without a word would otherwise hold the search for all of
+/// `SEARCH_TIMEOUT` (MS-371).
+const PROBE_AFTER_IDLE: Duration = Duration::from_millis(if cfg!(test) { 500 } else { 15_000 });
+const PROBE_TIMEOUT: Duration = Duration::from_millis(if cfg!(test) { 500 } else { 5_000 });
+/// Connections an account's searches use at once. Gmail allows 15 per account across every
+/// client, so this leaves room for the user's other ones.
+const MAX_SESSIONS: usize = 4;
+/// UIDs one `UID FETCH` asks for, keeping each command line short when `limit` reaches 500.
+const FETCH_CHUNK: usize = 100;
+/// How long a quick search's matches wait for the full search of the same query that follows it.
+const HELD_FOR: Duration = Duration::from_secs(30);
 /// How long IMAP steps aside after a connection, auth, or protocol failure (e.g. Workspace
 /// admin disabled IMAP) before trying IMAP again.
 const DISABLED_COOLDOWN: Duration = Duration::from_secs(300);
@@ -114,6 +126,7 @@ impl Authenticator for XOAuth2 {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct ImapMessage {
     pub id: String,
     pub thread: Option<String>,
@@ -132,18 +145,69 @@ pub(super) struct ImapMessage {
 struct LiveSession {
     session: Session<Transport>,
     utf8: bool,
+    uid_validity: Option<u32>,
+    /// When it last answered, by the wall clock: unlike `Instant`, which stops while the machine
+    /// sleeps, it counts the sleep that may have cost the connection.
+    used: SystemTime,
+}
+
+impl LiveSession {
+    fn needs_probe(&self) -> bool {
+        needs_probe_since(self.used, SystemTime::now())
+    }
+}
+
+fn needs_probe_since(used: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(used).map_or(true, |idle| idle >= PROBE_AFTER_IDLE)
+}
+
+/// What one query matched: every UID, newest first, and the messages of the first `fetched` of
+/// them (less those gone before the fetch).
+#[derive(Clone)]
+struct Matches {
+    uid_validity: Option<u32>,
+    uids: Vec<u32>,
+    messages: HashMap<u32, ImapMessage>,
+    unkeyed: Vec<ImapMessage>,
+    fetched: usize,
+}
+
+impl Matches {
+    /// Whether the first `limit` matches are fetched already.
+    fn covers(&self, limit: usize) -> bool {
+        self.fetched >= limit.min(self.uids.len())
+    }
+
+    /// The first `limit` matches' messages, newest first.
+    fn into_first(mut self, limit: usize) -> Vec<ImapMessage> {
+        let mut out: Vec<ImapMessage> = self.uids.iter().take(limit).filter_map(|uid| self.messages.remove(uid)).collect();
+        out.extend(self.unkeyed.into_iter().take(limit.saturating_sub(out.len())));
+        out
+    }
+}
+
+/// A quick search's matches, kept for the full search of the same query that follows it.
+struct HeldSearch {
+    query: String,
+    at: Instant,
+    matches: Matches,
 }
 
 #[derive(Default)]
 struct ImapState {
-    session: Option<LiveSession>,
+    /// Open connections no search is using, the most recently used last.
+    idle: Vec<LiveSession>,
     disabled_until: Option<Instant>,
+    held: Vec<HeldSearch>,
 }
 
 pub(super) struct ImapClient {
     api: Arc<Api>,
     endpoints: Arc<GmailEndpoints>,
+    /// Locked only to take or put back a connection, never across the network.
     state: Mutex<ImapState>,
+    /// One per connection a search may hold: searches beyond `MAX_SESSIONS` wait for one.
+    slots: Semaphore,
 }
 
 #[derive(Debug)]
@@ -155,52 +219,123 @@ pub(super) enum Fallback {
 
 impl ImapClient {
     pub(super) fn new(api: Arc<Api>, endpoints: Arc<GmailEndpoints>) -> Self {
-        Self { api, endpoints, state: Mutex::new(ImapState::default()) }
+        Self { api, endpoints, state: Mutex::new(ImapState::default()), slots: Semaphore::new(MAX_SESSIONS) }
     }
 
-    pub(super) async fn search(&self, query: &str, limit: usize) -> Result<Vec<ImapMessage>, Fallback> {
+    /// The newest `limit` messages in All Mail matching `query`, newest first. A `quick` search
+    /// keeps its matches for the full search of the same query that follows it (MS-371), which
+    /// then fetches only the messages the quick one left out instead of searching again.
+    pub(super) async fn search(&self, query: &str, limit: usize, quick: bool) -> Result<Vec<ImapMessage>, Fallback> {
         let Some(endpoint) = self.endpoints.imap.as_ref() else {
             return Err(Fallback::Unconfigured);
         };
-        let mut state = self.state.lock().await;
-        if state.disabled_until.is_some_and(|until| Instant::now() < until) {
+        if self.disabled() {
+            return Err(Fallback::Disabled);
+        }
+        let known = if quick { None } else { self.take_held(query) };
+        let known = match known {
+            Some(known) if known.covers(limit) => return Ok(known.into_first(limit)),
+            other => other,
+        };
+        let _slot = self.slots.acquire().await.expect("IMAP slots are never closed");
+        // Another search may have failed while this one waited for a slot.
+        if self.disabled() {
             return Err(Fallback::Disabled);
         }
 
-        if let Some(live) = state.session.as_mut() {
-            match tokio::time::timeout(SEARCH_TIMEOUT, search_on_session(live, query, limit)).await {
-                Ok(Ok(messages)) => return Ok(messages),
-                Ok(Err(SearchError::UnsupportedQuery)) => return Err(Fallback::Failed),
-                Ok(Err(SearchError::Protocol)) | Err(_) => {
-                    state.session = None;
+        if let Some(mut live) = self.idle_session().await {
+            match tokio::time::timeout(SEARCH_TIMEOUT, search_on_session(&mut live, query, limit, known.as_ref())).await {
+                Ok(Ok(found)) => return Ok(self.finish(live, query, quick, found, limit)),
+                Ok(Err(SearchError::Query)) => {
+                    self.put_back(live);
+                    return Err(Fallback::Failed);
                 }
+                Ok(Err(SearchError::Protocol)) => {}
+                // It answered a moment ago, so the server is slow rather than gone: a new
+                // connection would only make the fallback wait longer.
+                Err(_) => return Err(Fallback::Failed),
             }
         }
 
-        let live = match tokio::time::timeout(CONNECT_TIMEOUT, connect_and_examine(endpoint, &self.api)).await {
+        let mut live = match tokio::time::timeout(CONNECT_TIMEOUT, connect_and_examine(endpoint, &self.api)).await {
             Ok(Ok(live)) => live,
             Ok(Err(_)) | Err(_) => {
-                state.disabled_until = Some(Instant::now() + DISABLED_COOLDOWN);
+                self.disable();
                 return Err(Fallback::Failed);
             }
         };
-        state.session = Some(live);
-
-        let live = state.session.as_mut().expect("session just stored");
-        match tokio::time::timeout(SEARCH_TIMEOUT, search_on_session(live, query, limit)).await {
-            Ok(Ok(messages)) => Ok(messages),
-            Ok(Err(SearchError::UnsupportedQuery)) => Err(Fallback::Failed),
+        match tokio::time::timeout(SEARCH_TIMEOUT, search_on_session(&mut live, query, limit, known.as_ref())).await {
+            Ok(Ok(found)) => Ok(self.finish(live, query, quick, found, limit)),
+            Ok(Err(SearchError::Query)) => {
+                self.put_back(live);
+                Err(Fallback::Failed)
+            }
             Ok(Err(SearchError::Protocol)) | Err(_) => {
-                state.session = None;
-                state.disabled_until = Some(Instant::now() + DISABLED_COOLDOWN);
+                self.disable();
                 Err(Fallback::Failed)
             }
         }
     }
+
+    fn disabled(&self) -> bool {
+        self.state.lock().expect("IMAP state").disabled_until.is_some_and(|until| Instant::now() < until)
+    }
+
+    fn disable(&self) {
+        self.state.lock().expect("IMAP state").disabled_until = Some(Instant::now() + DISABLED_COOLDOWN);
+    }
+
+    /// The held quick search's matches when they are `query`'s and still fresh.
+    fn take_held(&self, query: &str) -> Option<Matches> {
+        let mut state = self.state.lock().expect("IMAP state");
+        state.held.retain(|entry| entry.at.elapsed() < HELD_FOR);
+        let pos = state.held.iter().rposition(|entry| entry.query == query)?;
+        Some(state.held.remove(pos).matches)
+    }
+
+    /// The most recently used open connection. One unused for `PROBE_AFTER_IDLE` that doesn't
+    /// answer `NOOP` lost the network, and so did the others idle as long: they all go.
+    /// `run_command_and_check_ok` is used rather than `Session::noop`, whose `take_while`
+    /// swallows `NO`, `BAD` and EOF.
+    async fn idle_session(&self) -> Option<LiveSession> {
+        loop {
+            let mut live = self.state.lock().expect("IMAP state").idle.pop()?;
+            if !live.needs_probe() {
+                return Some(live);
+            }
+            if let Ok(Ok(())) = tokio::time::timeout(PROBE_TIMEOUT, live.session.run_command_and_check_ok("NOOP")).await {
+                live.used = SystemTime::now();
+                return Some(live);
+            }
+            self.state.lock().expect("IMAP state").idle.retain(|other| !other.needs_probe());
+        }
+    }
+
+    fn put_back(&self, mut live: LiveSession) {
+        live.used = SystemTime::now();
+        self.state.lock().expect("IMAP state").idle.push(live);
+    }
+
+    /// Puts `live` back and answers with `found`'s first `limit`, holding them when `quick`.
+    fn finish(&self, live: LiveSession, query: &str, quick: bool, found: Matches, limit: usize) -> Vec<ImapMessage> {
+        self.put_back(live);
+        if quick {
+            let mut state = self.state.lock().expect("IMAP state");
+            state.held.retain(|entry| entry.at.elapsed() < HELD_FOR && entry.query != query);
+            if state.held.len() >= MAX_SESSIONS {
+                state.held.remove(0);
+            }
+            state.held.push(HeldSearch { query: query.to_string(), at: Instant::now(), matches: found.clone() });
+        }
+        found.into_first(limit)
+    }
 }
 
 enum SearchError {
-    UnsupportedQuery,
+    /// IMAP can't answer this query (it needs UTF-8 the server didn't enable, or the server
+    /// refused it with `NO`/`BAD`); the connection is fine and the REST API answers instead.
+    Query,
+    /// The connection failed or answered something unreadable.
     Protocol,
 }
 
@@ -247,8 +382,8 @@ async fn connect_and_examine(endpoint: &ImapEndpoint, api: &Api) -> Result<LiveS
     };
 
     let all_mail = find_all_mail(&mut session).await?;
-    session.examine(&all_mail).await.map_err(|error| format!("IMAP EXAMINE {all_mail}: {error}"))?;
-    Ok(LiveSession { session, utf8 })
+    let mailbox = session.examine(&all_mail).await.map_err(|error| format!("IMAP EXAMINE {all_mail}: {error}"))?;
+    Ok(LiveSession { session, utf8, uid_validity: mailbox.uid_validity, used: SystemTime::now() })
 }
 
 async fn find_all_mail(session: &mut Session<Transport>) -> Result<String, String> {
@@ -280,48 +415,57 @@ async fn find_all_mail(session: &mut Session<Transport>) -> Result<String, Strin
     Err("IMAP LIST returned no \\All mailbox".into())
 }
 
-async fn search_on_session(live: &mut LiveSession, query: &str, limit: usize) -> Result<Vec<ImapMessage>, SearchError> {
-    if !query.is_ascii() && !live.utf8 {
-        return Err(SearchError::UnsupportedQuery);
-    }
-    let escaped = quote_imap_string(query);
-    let mut uids = uid_search_checked(&mut live.session, &format!("X-GM-RAW {escaped}")).await?;
-    if uids.is_empty() {
-        return Ok(Vec::new());
-    }
-    uids.sort_unstable_by(|a, b| b.cmp(a));
-    uids.truncate(limit);
-
-    let uid_set = uids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-    let fetches: Vec<Fetch> = {
-        let stream = live.session.uid_fetch(&uid_set, FETCH_ITEMS).await.map_err(|_| SearchError::Protocol)?;
-        stream.try_collect().await.map_err(|_| SearchError::Protocol)?
+async fn search_on_session(
+    live: &mut LiveSession,
+    query: &str,
+    limit: usize,
+    known: Option<&Matches>,
+) -> Result<Matches, SearchError> {
+    let mut matches = match known.filter(|known| known.uid_validity == live.uid_validity) {
+        Some(known) => known.clone(),
+        None => {
+            if !query.is_ascii() && !live.utf8 {
+                return Err(SearchError::Query);
+            }
+            let escaped = quote_imap_string(query);
+            let mut uids = uid_search_checked(&mut live.session, &format!("X-GM-RAW {escaped}")).await?;
+            uids.sort_unstable_by(|a, b| b.cmp(a));
+            Matches {
+                uid_validity: live.uid_validity,
+                uids,
+                messages: HashMap::new(),
+                unkeyed: Vec::new(),
+                fetched: 0,
+            }
+        }
     };
-    if fetches.is_empty() {
-        return Err(SearchError::Protocol);
-    }
 
-    let mut by_uid: HashMap<u32, ImapMessage> = HashMap::with_capacity(fetches.len());
-    let mut ordered = Vec::with_capacity(fetches.len());
-    for fetch in fetches {
-        let uid = fetch.uid;
-        let Some(message) = fetch_to_message(&fetch, live.utf8) else {
-            return Err(SearchError::Protocol);
-        };
-        if let Some(uid) = uid {
-            by_uid.insert(uid, message);
-        } else {
-            ordered.push(message);
+    let target = limit.min(matches.uids.len());
+    if target > matches.fetched {
+        for chunk in matches.uids[matches.fetched..target].chunks(FETCH_CHUNK) {
+            let uid_set = chunk.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+            let fetches: Vec<Fetch> = {
+                let stream = live.session.uid_fetch(&uid_set, FETCH_ITEMS).await.map_err(|_| SearchError::Protocol)?;
+                stream.try_collect().await.map_err(|_| SearchError::Protocol)?
+            };
+            if fetches.is_empty() {
+                return Err(SearchError::Protocol);
+            }
+            for fetch in fetches {
+                let uid = fetch.uid;
+                let Some(message) = fetch_to_message(&fetch, live.utf8) else {
+                    return Err(SearchError::Protocol);
+                };
+                if let Some(uid) = uid {
+                    matches.messages.insert(uid, message);
+                } else {
+                    matches.unkeyed.push(message);
+                }
+            }
         }
+        matches.fetched = target;
     }
-    let mut out = Vec::with_capacity(uids.len());
-    for uid in uids {
-        if let Some(message) = by_uid.remove(&uid) {
-            out.push(message);
-        }
-    }
-    out.extend(ordered);
-    Ok(out)
+    Ok(matches)
 }
 
 /// Runs `UID SEARCH <criteria>` and checks the tagged `OK`/`NO`/`BAD` completion rather than
@@ -329,6 +473,7 @@ async fn search_on_session(live: &mut LiveSession, query: &str, limit: usize) ->
 async fn uid_search_checked(session: &mut Session<Transport>, criteria: &str) -> Result<Vec<u32>, SearchError> {
     let tag = session.run_command(&format!("UID SEARCH {criteria}")).await.map_err(|_| SearchError::Protocol)?;
     let mut uids = Vec::new();
+    let mut bye = false;
     loop {
         let Some(resp) = session.read_response().await.map_err(|_| SearchError::Protocol)? else {
             return Err(SearchError::Protocol);
@@ -337,8 +482,12 @@ async fn uid_search_checked(session: &mut Session<Transport>, criteria: &str) ->
             Response::MailboxData(MailboxDatum::Search(found)) => {
                 uids.extend_from_slice(found);
             }
+            Response::Data { status: Status::Bye, .. } => {
+                bye = true;
+            }
             Response::Done { tag: done_tag, status, .. } if *done_tag == tag => match status {
-                Status::Ok => return Ok(uids),
+                Status::Ok if !bye => return Ok(uids),
+                Status::No | Status::Bad if !bye => return Err(SearchError::Query),
                 _ => return Err(SearchError::Protocol),
             },
             _ => {}
@@ -614,5 +763,13 @@ mod tests {
         let system: Vec<_> = labels.iter().filter_map(|label| map_gmail_system_label(label)).collect();
         assert_eq!(system, ["INBOX", "IMPORTANT", "SENT"]);
         assert_eq!(gmail_label("&ZeVnLIqe-", true), "&ZeVnLIqe-");
+    }
+
+    #[test]
+    fn probes_after_idle_or_clock_jump() {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert!(!needs_probe_since(base, base + PROBE_AFTER_IDLE - Duration::from_millis(1)));
+        assert!(needs_probe_since(base, base + PROBE_AFTER_IDLE));
+        assert!(needs_probe_since(base, base - Duration::from_secs(1)));
     }
 }
