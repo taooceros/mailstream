@@ -80,9 +80,12 @@ and saturn's `MRV` (Marvell OCTEON DPU, `~/dev/marvell` there) and `HET` (hetero
 research). `MS` is split into projects by effort; issue IDs look like `MS-12`. Use omp's Linear
 tools. The issue, not the session, is the record other sessions read.
 
-Four machines poll, each as its own Linear OAuth app: the Mac (`omp`), Windows (`windows-omp`),
-Linux (NixOS, `linux-omp`) and saturn (`saturn-omp`). The app an issue is delegated to works it
-([Polling session](#polling-session)). On Windows, Linux and saturn there are no omp Linear tools
+Four machines poll, each as its own Linear OAuth app: the Mac (`mac-omp`, called `omp` until
+MS-387), Windows (`windows-omp`), Linux (NixOS, `linux-omp`) and saturn (`saturn-omp`). The poller
+knows the apps by their Linear user ids and reads their names from Linear, so renaming an app
+breaks no routing. The app an issue is delegated to works it
+([Polling session](#polling-session)). The `omp` label keeps its name and meaning (rerun the
+issue on the machine it is delegated to). On Windows, Linux and saturn there are no omp Linear tools
 or keychain. Linear is reached as the machine's OAuth app: its client id (line 1) and secret
 (line 2) are in `~/.config/linear/credentials`, and the access token in
 `~/.config/linear/token.json`. Call `https://api.linear.app/graphql` with `Authorization: Bearer
@@ -281,13 +284,13 @@ nobody is nobody's until the user delegates it, and delegating starts it. New wo
 machine is an issue (a sub-issue when it serves one, in the team of its project) delegated to
 that machine's app: its poller claims it, since every machine's app counts as a trusted creator.
 A comment naming a machine's app reaches that machine alone on any issue, from the user or
-another machine; agents write the name in backticks (`` `@omp` ``), since Linear rejects an app's
+another machine; agents write the name in backticks (`` `@mac-omp` ``), since Linear rejects an app's
 @-mention of an app.
 
 Which machine to delegate Mailstream work to (MS-254): Linux (`linux-omp`) unless it is
 Mac-specific, which means it needs macOS: macOS packaging and signing, installing to
 `/Applications`, `bench.sh` benchmarks, Mac menus and shortcuts, the AppKit app, Liquid Glass
-(`omp`). Windows chores go to `windows-omp`, `MRV` and `HET` to `saturn-omp`. The user's choice
+(`mac-omp`). Windows chores go to `windows-omp`, `MRV` and `HET` to `saturn-omp`. The user's choice
 stands: a poller works what is delegated to it and doesn't pass it on by itself. An issue already
 being worked stays on its machine until it is handed over; it is not moved mid-way.
 
