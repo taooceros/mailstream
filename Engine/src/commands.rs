@@ -768,7 +768,8 @@ and exit 1 (2 for usage errors, 3 when the app cannot be reached).
 
 `config …` reads and writes ~/Library/Application Support/Mailstream/settings.json directly;
 the running app applies changes at once. Every other command talks to the running app over
-a private socket, launching the app in the background if needed.
+a private socket, launching the app in the background if needed. On a server without a
+desktop, `mailstream daemon` runs the app's engine headless and answers the same commands.
 
 Conversations are addressed by the `id` that `mail list`, `mail search` and `mail show`
 return (e.g. \"you@gmail.com|<message-id>\"). Accounts are addressed by their email address.

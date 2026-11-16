@@ -692,7 +692,7 @@ pub(crate) fn graph_message(id: &str, conversation: &str, from: (&str, &str), su
     })
 }
 
-fn graph_server(tokens: Arc<AtomicUsize>) -> FakeServer {
+pub(crate) fn graph_server(tokens: Arc<AtomicUsize>) -> FakeServer {
     FakeServer::start(move |request| {
         if request.path == "/token" {
             return token_reply(&tokens);

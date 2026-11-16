@@ -29,6 +29,7 @@ mod cloud_drop;
 pub mod commands;
 mod content;
 pub mod control;
+pub mod daemon;
 pub mod device_sync;
 pub mod display;
 // The providers' stand-in: the tests' and the screenshot mode's (`shots`).
@@ -75,6 +76,8 @@ mod chat_tests;
 mod peer_sync_tests;
 #[cfg(test)]
 mod device_sync_tests;
+#[cfg(test)]
+mod daemon_tests;
 #[cfg(test)]
 mod sync_node_tests;
 #[cfg(test)]
@@ -200,6 +203,19 @@ impl Config {
         #[cfg(feature = "shots")]
         let config = shots::config(config);
         config
+    }
+
+    /// The same with every file in `directory` (`mailstream daemon --data-dir`, MS-375):
+    /// settings.json, accounts.json, mail.db, `peer-sync/`, control.sock and, off macOS, the
+    /// sign-ins file in it, the caches in its `cache/`. The app's own support directory keeps
+    /// the app's places, so a daemon there shares the GUI's sign-ins and caches.
+    pub fn in_directory(mut self, directory: PathBuf) -> Self {
+        if directory != self.support_directory {
+            self.cache_directory = directory.join("cache");
+            self.keychain_directory = directory.clone();
+            self.support_directory = directory;
+        }
+        self
     }
 }
 

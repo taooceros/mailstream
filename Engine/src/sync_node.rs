@@ -11,7 +11,7 @@ use crate::commands::{self, Arguments, Handler};
 use crate::device_sync::DeviceSync;
 use crate::peer_sync::{Network, PeerSync};
 use crate::settings::Settings;
-use crate::{EngineError, Events, control};
+use crate::{EngineError, Events, control, daemon};
 
 /// How long `mailstream sync join` waits for the pairing peer to become reachable before giving up.
 const JOIN_REACH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -50,7 +50,7 @@ impl Inner {
             _ => Err(EngineError::new(
                 "unavailable",
                 format!(
-                    "`{}` requires the Mailstream app; this headless sync node only serves `sync.*` and `config.*`.",
+                    "`{}` needs the whole engine: this headless sync node (`mailstream sync daemon`) only serves `sync.*` and `config.*`; run `mailstream daemon` instead.",
                     spec.name()
                 ),
             )),
@@ -166,7 +166,7 @@ impl Drop for SyncNode {
     }
 }
 
-fn has_peer(status: &Value) -> bool {
+pub(crate) fn has_peer(status: &Value) -> bool {
     let me = status.get("endpointId").and_then(Value::as_str);
     status
         .get("devices")
@@ -190,11 +190,9 @@ pub fn run_daemon(
     cloud_url: Option<&str>,
     mut emit: impl FnMut(&Value),
 ) -> Result<(), EngineError> {
-    let target_namespace = join_ticket
-        .map(PeerSync::ticket_namespace)
-        .transpose()
-        .map_err(|error| EngineError::failed(error.to_string()))?;
-
+    if let Some(ticket) = join_ticket {
+        PeerSync::ticket_namespace(ticket).map_err(|error| EngineError::failed(error.to_string()))?;
+    }
     let mut config = SyncNodeConfig::new(data_directory);
     config.control_socket = true;
     let node = SyncNode::open(config)?;
@@ -205,27 +203,13 @@ pub fn run_daemon(
             let _ = tx.send(event);
         }
     });
-
-    if let (Some(ticket), Some(target_ns)) = (join_ticket, target_namespace.as_deref()) {
-        let current = node.call_sync("sync.status", json!({}))?;
-        let already_paired = current.get("namespace").and_then(Value::as_str) == Some(target_ns)
-            && current.get("paused").and_then(Value::as_bool) != Some(true)
-            && has_peer(&current);
-        if !already_paired {
-            node.call_sync("sync.join", json!({ "ticket": ticket }))?;
-        }
-    }
-    if let Some(url) = cloud_url {
-        node.call_sync("sync.cloud_enable", json!({ "url": url }))?;
-    }
+    daemon::join_and_cloud(|command, args| node.call_sync(command, args), join_ticket, cloud_url)?;
 
     let initial = node.call_sync("sync.status", json!({}))?;
     emit(&json!({ "event": "started", "status": initial }));
 
     node.runtime.block_on(async {
-        // One subscription for the whole run: tokio's handler stays installed once registered, so
-        // a signal arriving between per-iteration subscriptions would be swallowed (MS-369).
-        let shutdown = shutdown_signal();
+        let shutdown = daemon::shutdown_signal();
         tokio::pin!(shutdown);
         loop {
             tokio::select! {
@@ -249,26 +233,4 @@ pub fn run_daemon(
         }
     });
     Ok(())
-}
-
-#[cfg(unix)]
-async fn shutdown_signal() {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut sigterm = signal(SignalKind::terminate()).ok();
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = async {
-            match sigterm.as_mut() {
-                Some(stream) => {
-                    let _ = stream.recv().await;
-                }
-                None => std::future::pending::<()>().await,
-            }
-        } => {}
-    }
-}
-
-#[cfg(not(unix))]
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
 }

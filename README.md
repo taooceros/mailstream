@@ -149,6 +149,24 @@ mailstream calendar update you@gmail.com --calendar you@gmail.com --id <event id
 mailstream calendar delete you@gmail.com --calendar you@gmail.com --id <event id> --yes
 ```
 
+### Headless Engine Daemon (Linux Servers)
+
+The same standalone `mailstream` binary runs Mailstream's whole engine without a GUI, so a server (and the AI agents on it) can use every command: `status`, `accounts`, `mailboxes`, `mail`, `calendar`, `chat`, `config` and `sync`. It keeps the signed-in accounts' mail, calendars and Google Chat in sync and answers on the control socket of its data directory:
+
+```sh
+mailstream daemon --data-dir /var/lib/mailstream     # or $MAILSTREAM_DATA_DIR; prints JSON lines
+
+# In another shell: give every command the same data directory
+export MAILSTREAM_DATA_DIR=/var/lib/mailstream
+mailstream accounts add google --client-id <id> --client-secret <secret>
+mailstream mail list --unread --limit 10
+mailstream calendar events --days 7
+```
+
+The data directory holds everything: `settings.json`, `accounts.json`, `mail.db`, `peer-sync/`, the sign-ins file (`dev.mailstream.Mailstream.oauth.signins`, mode `0600`), `cache/` and `control.sock`. Only one Mailstream (the daemon or the app) serves a data directory; a second daemon there exits with `busy`. Without a running daemon, commands for another data directory, or on a machine without a desktop session, fail at once with `not_running` and name the `mailstream daemon` command to start, instead of launching Mailstream GPUI.
+
+Signing in: `accounts add` and `accounts connect` print the provider's sign-in page in the daemon's output as a `{"event":"signIn","url":…}` line (and open it in a browser only on a desktop). The page returns to `http://localhost:49152` on the server, so open it from a machine that forwards that port: `ssh -L 49152:localhost:49152 <server>`. `--join <ticket>` and `--cloud <url>` work as for `mailstream sync daemon` below. A `systemd` unit is the one below with `ExecStart=/usr/local/bin/mailstream daemon --data-dir /var/lib/mailstream` and `StateDirectory=mailstream`.
+
 ### Headless Sync Daemon (Linux Servers)
 
 The standalone `mailstream` binary from GitHub Releases (`mailstream-linux-x86_64.tar.gz` / `mailstream-linux-aarch64.tar.gz`) can run as an always-on `iroh` sync node on a server without a GUI, mail accounts, OAuth tokens, or Keychain/Secret Service:

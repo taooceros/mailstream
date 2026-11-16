@@ -1,7 +1,8 @@
 //! `mailstream`: Mailstream from a shell or an AI agent. `config …` works on settings.json
-//! directly; every other command goes to the control socket of the running front end
-//! (`mailstream_engine::control`), starting Mailstream GPUI in the background when none runs.
-//! Commands, arguments, help and output are the command table's (`mailstream_engine::commands`).
+//! directly; every other command goes to the control socket of the running front end or
+//! `mailstream daemon` (`mailstream_engine::control`), starting Mailstream GPUI in the background
+//! when none runs and a desktop can show it. Commands, arguments, help and output are the command
+//! table's (`mailstream_engine::commands`).
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
@@ -9,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use mailstream_engine::commands::{self, COMMANDS, Handler, Kind, Spec};
 use mailstream_engine::sync_node::{self, SyncNode, SyncNodeConfig};
-use mailstream_engine::{EngineError, control, json};
+use mailstream_engine::{EngineError, control, daemon, json};
 use serde_json::{Map, Value, json};
 
 /// The front end started when none serves the socket: Mailstream GPUI, by bundle id when this
@@ -25,6 +26,9 @@ const FRONT_ENDS: [&str; 2] = ["mailstream-gpui.sh", "mailstream-gpui"];
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(420);
 /// How long a started front end may take to open the socket.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
+/// What to run where no app can serve the socket (a server without a desktop).
+#[cfg(all(unix, not(target_os = "macos")))]
+const DAEMON_HINT: &str = "start the headless engine with `mailstream daemon` (for example as a systemd service), then try again";
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -56,8 +60,8 @@ fn execute(arguments: &[String]) -> Result<String, EngineError> {
         let rest = arguments.get(1..).unwrap_or_default();
         return Ok(if rest.is_empty() {
             general_help()
-        } else if matches!(rest, [a, b] if a == "sync" && b == "daemon") {
-            DAEMON_HELP.to_owned()
+        } else if let Some((_, help)) = daemon_command(rest).filter(|(length, _)| *length == rest.len()) {
+            help.to_owned()
         } else {
             matching(rest)?.0.help()
         });
@@ -65,15 +69,19 @@ fn execute(arguments: &[String]) -> Result<String, EngineError> {
     if arguments == ["commands"] {
         return Ok(text(&Value::Array(COMMANDS.iter().map(Spec::json).collect())));
     }
-    if matches!(arguments.as_slice(), [a, b, ..] if a == "sync" && b == "daemon") {
-        let rest = &arguments[2..];
+    if let Some((length, help)) = daemon_command(&arguments) {
+        let rest = &arguments[length..];
         if rest.iter().any(|word| word == "--help" || word == "-h") {
-            return Ok(DAEMON_HELP.to_owned());
+            return Ok(help.to_owned());
         }
-        let daemon = parse_daemon_args(rest)?;
-        sync_node::run_daemon(data_dir, daemon.join.as_deref(), daemon.cloud.as_deref(), |event| {
-            println!("{}", single_line(event));
-        })?;
+        let options = parse_daemon_args(rest, &arguments[..length].join(" "))?;
+        let (join, cloud) = (options.join.as_deref(), options.cloud.as_deref());
+        let print = |event: &Value| println!("{}", single_line(event));
+        if length == 1 {
+            daemon::run(data_dir, join, cloud, print)?;
+        } else {
+            sync_node::run_daemon(data_dir, join, cloud, print)?;
+        }
         return Ok(String::new());
     }
     let (spec, rest) = matching(&arguments)?;
@@ -97,15 +105,43 @@ fn execute(arguments: &[String]) -> Result<String, EngineError> {
     Ok(text(&result))
 }
 
-const DAEMON_HELP: &str = "mailstream sync daemon [--data-dir <path>] [--join <ticket>] [--cloud <url>]
+const DAEMON_HELP: &str = "mailstream daemon [--data-dir <path>] [--join <ticket>] [--cloud <url>]
 
-Run a headless cross-device settings sync node without the Mailstream GUI or mail accounts.
-Prints JSON lines on stdout and shuts down cleanly on SIGTERM/SIGINT.
+Run Mailstream's whole engine without the GUI, for servers and the agents on them: it keeps the
+signed-in accounts' mail, calendars and Google Chat in sync and answers every command (status,
+accounts, mailboxes, mail, calendar, chat, config, sync) on the control socket of its data
+directory. Prints JSON lines on stdout and shuts down cleanly on SIGTERM/SIGINT. One Mailstream
+(this daemon or the app) serves a data directory at a time.
+
+  --data-dir <path>  Data directory: settings.json, accounts.json, mail.db, peer-sync/, the
+                     sign-ins file, cache/ and control.sock (default: $MAILSTREAM_DATA_DIR or the
+                     app's own folder). Other commands reach the daemon with the same --data-dir.
+  --join <ticket>    Join this device-sync group on startup if not already paired with it
+  --cloud <url>      Also keep an encrypted settings copy on this Cloudflare Worker (SyncDrop/)
+
+`mailstream accounts add google|microsoft` prints the provider's sign-in page as a `signIn` line
+here; open it in a browser that reaches http://localhost:49152 on this machine (from another one,
+forward the port first: ssh -L 49152:localhost:49152 <server>).";
+
+const SYNC_DAEMON_HELP: &str = "mailstream sync daemon [--data-dir <path>] [--join <ticket>] [--cloud <url>]
+
+Run a headless cross-device settings sync node without the Mailstream GUI or mail accounts
+(`mailstream daemon` runs the whole engine instead). Prints JSON lines on stdout and shuts down
+cleanly on SIGTERM/SIGINT.
 
   --data-dir <path>  Sync data directory (default: $MAILSTREAM_DATA_DIR or platform data dir)
   --join <ticket>    Join this sync group on startup if not already paired with it
   --cloud <url>      Also keep an encrypted copy on this Cloudflare Worker (SyncDrop/), for devices
                      that are never online together; `mailstream sync cloud-disable` turns it off";
+
+/// The daemon `words` start with (`daemon`, `sync daemon`): how many words name it, and its help.
+fn daemon_command(words: &[String]) -> Option<(usize, &'static str)> {
+    match words {
+        [first, ..] if first == "daemon" => Some((1, DAEMON_HELP)),
+        [first, second, ..] if first == "sync" && second == "daemon" => Some((2, SYNC_DAEMON_HELP)),
+        _ => None,
+    }
+}
 
 fn single_line(value: &Value) -> String {
     String::from_utf8(json::encode(value, false, false)).expect("JSON is UTF-8")
@@ -145,14 +181,14 @@ fn extract_data_dir(arguments: &[String]) -> Result<(PathBuf, Vec<String>), Engi
     Ok((dir, rest))
 }
 
-/// `mailstream sync daemon`'s options.
+/// The daemons' options.
 #[derive(Debug, Default, PartialEq)]
 struct DaemonArgs {
     join: Option<String>,
     cloud: Option<String>,
 }
 
-fn parse_daemon_args(rest: &[String]) -> Result<DaemonArgs, EngineError> {
+fn parse_daemon_args(rest: &[String], command: &str) -> Result<DaemonArgs, EngineError> {
     let mut parsed = DaemonArgs::default();
     let mut index = 0;
     while index < rest.len() {
@@ -164,7 +200,7 @@ fn parse_daemon_args(rest: &[String]) -> Result<DaemonArgs, EngineError> {
         let (slot, what) = match name {
             "--join" => (&mut parsed.join, "a pairing ticket"),
             "--cloud" => (&mut parsed.cloud, "the Cloudflare Worker's URL"),
-            _ => return Err(usage(format!("Unknown argument \"{arg}\" for `mailstream sync daemon`."))),
+            _ => return Err(usage(format!("Unknown argument \"{arg}\" for `mailstream {command}`."))),
         };
         let value = match inline {
             Some(value) => {
@@ -196,6 +232,10 @@ fn usage(message: impl Into<String>) -> EngineError {
 fn general_help() -> String {
     let mut lines = vec![commands::OVERVIEW.to_owned(), String::new(), "Commands:".to_owned()];
     lines.extend(COMMANDS.iter().map(|spec| commands::row(&spec.name(), spec.summary)));
+    lines.push(commands::row(
+        "daemon",
+        "Run the whole engine without the GUI, serving every command (for servers / systemd).",
+    ));
     lines.push(commands::row(
         "sync daemon",
         "Run a headless device-sync node without the GUI (for servers / systemd).",
@@ -431,12 +471,23 @@ fn receive(stream: &mut impl Read) -> Option<Vec<u8>> {
     (message.len() <= control::MAX_ANSWER).then_some(message)
 }
 
-/// A connection to the running front end; starts Mailstream GPUI (in the background) when none
-/// serves the socket.
+/// A connection to the running front end or daemon; starts Mailstream GPUI (in the background)
+/// when none serves the socket.
 fn connect_or_launch(data_dir: &Path) -> Result<connection::Connection, EngineError> {
     let path = control::socket_path(data_dir);
     if let Some(stream) = connection::open(&path) {
         return Ok(stream);
+    }
+    // The app serves only its own folder: only a daemon answers for another one.
+    if data_dir != mailstream_engine::support_directory() {
+        return Err(EngineError::new(
+            "not_running",
+            format!(
+                "Nothing serves {}; start the headless engine with `mailstream daemon --data-dir {}`, then try again.",
+                data_dir.display(),
+                data_dir.display()
+            ),
+        ));
     }
     let name = launch()?;
     let deadline = Instant::now() + LAUNCH_TIMEOUT;
@@ -486,8 +537,15 @@ fn launch() -> Result<String, EngineError> {
     let front_end = executable.ok().and_then(|path| linux_front_end(path.parent()?));
     let Some(front_end) = front_end else {
         let primary = FRONT_ENDS[0];
-        return Err(not_running(format!("Mailstream is not running, and there is no {primary} beside this command to start; start it, then try again.")));
+        return Err(not_running(format!(
+            "Mailstream is not running, and there is no {primary} beside this command to start; start the app, or {DAEMON_HINT}."
+        )));
     };
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none() {
+        return Err(not_running(format!(
+            "Mailstream is not running, and there is no desktop session to show Mailstream GPUI in; {DAEMON_HINT}."
+        )));
+    }
     let name = front_end.display().to_string();
     // A process group of its own, so the app outlives this command and its terminal's signals.
     let started = Command::new(&front_end)
@@ -610,13 +668,16 @@ mod tests {
             .unwrap();
         assert_eq!(dir, PathBuf::from("/tmp/ms-sync"));
         assert_eq!(rest, words(&["sync", "daemon", "--join", "doc1"]));
-        assert_eq!(parse_daemon_args(&rest[2..]).unwrap(), DaemonArgs { join: Some("doc1".to_owned()), cloud: None });
+        assert_eq!(
+            parse_daemon_args(&rest[2..], "sync daemon").unwrap(),
+            DaemonArgs { join: Some("doc1".to_owned()), cloud: None }
+        );
         let both = words(&["--cloud=https://drop.example.workers.dev", "--join", "doc1"]);
         assert_eq!(
-            parse_daemon_args(&both).unwrap(),
+            parse_daemon_args(&both, "sync daemon").unwrap(),
             DaemonArgs { join: Some("doc1".to_owned()), cloud: Some("https://drop.example.workers.dev".to_owned()) }
         );
-        assert_eq!(parse_daemon_args(&words(&["--cloud"])).unwrap_err().code, "usage");
+        assert_eq!(parse_daemon_args(&words(&["--cloud"]), "sync daemon").unwrap_err().code, "usage");
 
         let (dir2, rest2) = extract_data_dir(&words(&["--data-dir=/tmp/ms-two", "sync", "pair-ticket"])).unwrap();
         assert_eq!(dir2, PathBuf::from("/tmp/ms-two"));
@@ -631,5 +692,27 @@ mod tests {
         let (spec, trailing) = matching(&bare_cloud).unwrap();
         assert_eq!(spec.id, "sync.cloud_enable");
         assert!(parse(trailing, spec).unwrap().is_empty());
+    }
+
+    #[test]
+    fn names_both_daemons_and_sends_other_data_directories_to_the_daemon() {
+        assert_eq!(daemon_command(&words(&["daemon", "--join", "doc1"])), Some((1, DAEMON_HELP)));
+        assert_eq!(daemon_command(&words(&["sync", "daemon"])), Some((2, SYNC_DAEMON_HELP)));
+        assert_eq!(daemon_command(&words(&["sync", "status"])), None);
+        assert_eq!(execute(&words(&["help", "daemon"])).unwrap(), DAEMON_HELP);
+        assert_eq!(execute(&words(&["daemon", "--help"])).unwrap(), DAEMON_HELP);
+        assert_eq!(execute(&words(&["help", "sync", "daemon"])).unwrap(), SYNC_DAEMON_HELP);
+        assert!(general_help().contains("\n  daemon "), "{}", general_help());
+        let error = execute(&words(&["daemon", "--verbose"])).unwrap_err();
+        assert_eq!((error.code.as_str(), error.message.as_str()), ("usage", "Unknown argument \"--verbose\" for `mailstream daemon`."));
+
+        // Nothing serves this folder and no app would: the command names the daemon at once
+        // instead of starting Mailstream GPUI and waiting 20 s for a socket it never opens.
+        let folder = std::env::temp_dir().join(format!("mailstream-cli-nodaemon-{}", std::process::id()));
+        let started = Instant::now();
+        let error = execute(&words(&["--data-dir", folder.to_str().unwrap(), "mail", "list"])).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(error.code, "not_running");
+        assert!(error.message.contains(&format!("`mailstream daemon --data-dir {}`", folder.display())), "{}", error.message);
     }
 }
