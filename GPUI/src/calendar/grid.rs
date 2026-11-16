@@ -1624,6 +1624,7 @@ mod tests {
                     provider: mailstream::Provider::Google,
                     granted: true,
                     writable: true,
+                    list_editable: true,
                     loading: false,
                     problem: None,
                     fetched: None,
@@ -1639,6 +1640,7 @@ mod tests {
                     provider: mailstream::Provider::Microsoft,
                     granted: true,
                     writable: true,
+                    list_editable: false,
                     loading: false,
                     problem: None,
                     fetched: None,
@@ -1695,6 +1697,83 @@ mod tests {
         assert!(cx.debug_bounds("calendar-shown:sam@example.com:jordan").is_some());
     }
 
+    #[gpui::test]
+    fn the_calendar_list_adds_and_removes_others_google_calendars(cx: &mut TestAppContext) {
+        let (pane, cx) = week_view(cx);
+        let cal = |id: &str, name: &str, primary: bool, access: &str| mailstream::CalendarInfo {
+            id: id.into(),
+            name: name.into(),
+            color: Some("#4285f4".into()),
+            primary,
+            writable: access == "owner",
+            access: access.into(),
+            selected: true,
+            hidden: false,
+            shown: true,
+        };
+        pane.update_in(cx, |pane, _, cx| {
+            pane.accounts = vec![
+                mailstream::CalendarAccount {
+                    calendars: vec![cal("work", "Work", true, "owner"), cal("jordan", "Jordan Park", false, "reader")],
+                    ..editable_account()
+                },
+                mailstream::CalendarAccount {
+                    id: "sam@contoso.example".into(),
+                    label: "sam@contoso.example".into(),
+                    provider: mailstream::Provider::Microsoft,
+                    calendars: vec![cal("outlook", "Calendar", true, "owner"), cal("dana", "Dana White", false, "reader")],
+                    ..editable_account()
+                },
+            ];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        click_on(cx, "calendar-list-button");
+        let names = |pane: &Entity<CalendarPane>, cx: &mut VisualTestContext| -> Vec<String> {
+            pane.read_with(cx, |pane, _| pane.accounts.iter().flat_map(|a| a.calendars.iter().map(|c| c.name.clone())).collect())
+        };
+
+        // Only someone else's calendar in a Google account offers Remove (Outlook's are removed in
+        // Outlook), which asks first: Cancel keeps it, Remove takes it off the list.
+        assert!(cx.debug_bounds("calendar-remove:sam@example.com:work").is_none());
+        assert!(cx.debug_bounds("calendar-remove:sam@contoso.example:dana").is_none());
+        hover_on(cx, "calendar-shown:sam@example.com:jordan");
+        click_on(cx, "calendar-remove:sam@example.com:jordan");
+        assert!(cx.debug_bounds("calendar-shown:sam@example.com:jordan").is_none());
+        click_on(cx, "calendar-remove-cancel:sam@example.com:jordan");
+        assert!(cx.debug_bounds("calendar-shown:sam@example.com:jordan").is_some());
+        hover_on(cx, "calendar-shown:sam@example.com:jordan");
+        click_on(cx, "calendar-remove:sam@example.com:jordan");
+        click_on(cx, "calendar-remove-confirm:sam@example.com:jordan");
+        assert_eq!(names(&pane, cx), ["Work", "Calendar", "Dana White"]);
+        assert!(cx.debug_bounds("calendar-shown:sam@example.com:jordan").is_none());
+
+        // Add calendar opens a field holding the keys; Esc closes it and the calendar has them again.
+        assert!(cx.debug_bounds("calendar-add:sam@contoso.example").is_none());
+        click_on(cx, "calendar-add:sam@example.com");
+        bounds(cx, "calendar-add-confirm:sam@example.com");
+        assert!(cx.debug_bounds("calendar-add:sam@example.com").is_none());
+        cx.simulate_input("ann@example.com");
+        let typed = pane.read_with(cx, |pane, cx| pane.add_input.read(cx).value().to_string());
+        assert_eq!(typed, "ann@example.com");
+        key(cx, "escape");
+        assert!(cx.debug_bounds("calendar-add-confirm:sam@example.com").is_none());
+        let week = shown(&pane, cx).0;
+        key(cx, "n");
+        assert_eq!(shown(&pane, cx).0, week + Days::new(7), "the calendar's keys work once the field closes");
+
+        // A sign-in that may not change the list asks for that first.
+        pane.update_in(cx, |pane, _, cx| {
+            pane.accounts[0].list_editable = false;
+            pane.calendar_list = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        click_on(cx, "calendar-add:sam@example.com");
+        bounds(cx, "calendar-add-allow:sam@example.com");
+        assert!(cx.debug_bounds("calendar-add-confirm:sam@example.com").is_none());
+    }
+
     /// An account whose calendar takes new events.
     fn editable_account() -> mailstream::CalendarAccount {
         mailstream::CalendarAccount {
@@ -1703,6 +1782,7 @@ mod tests {
             provider: mailstream::Provider::Google,
             granted: true,
             writable: true,
+            list_editable: true,
             loading: false,
             problem: None,
             fetched: None,

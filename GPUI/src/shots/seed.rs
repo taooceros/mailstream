@@ -182,11 +182,22 @@ impl Mail {
     }
 }
 
-/// Writes the synthetic data into `support` (the engine's data folder) and `caches`.
-/// `mail_only`: the accounts' sign-ins granted mail alone, as a sign-in asks now (MS-306).
-pub fn write(support: &Path, caches: &Path, mail_only: bool) {
+/// What the synthetic accounts' sign-ins granted (`accounts` in a shots script).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Grants {
+    /// Mail alone, as a sign-in asks now (MS-306).
+    Mail,
+    /// Everything but Google's calendar list: Calendar connected before Mailstream added and
+    /// removed others' calendars (MS-310).
+    Older,
+    All,
+}
+
+/// Writes the synthetic data into `support` (the engine's data folder) and `caches`, the
+/// accounts granted `grants`.
+pub fn write(support: &Path, caches: &Path, grants: Grants) {
     std::fs::create_dir_all(support).expect("the data folder");
-    write_accounts(support, mail_only);
+    write_accounts(support, grants);
     // Tagging stays on, or the list shows no tags; every conversation has one already, and this
     // `omp` doesn't exist, so a run never tags anything with the person's own.
     let settings = json!({ "aiTagging.ompPath": "/nonexistent/shots-omp" });
@@ -204,7 +215,7 @@ pub fn write(support: &Path, caches: &Path, mail_only: bool) {
     });
 }
 
-fn write_accounts(support: &Path, mail_only: bool) {
+fn write_accounts(support: &Path, grants: Grants) {
     let google = [
         "openid",
         "email",
@@ -213,6 +224,7 @@ fn write_accounts(support: &Path, mail_only: bool) {
         "https://www.googleapis.com/auth/chat.messages.readonly",
         "https://www.googleapis.com/auth/calendar.readonly",
         "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.calendarlist",
     ];
     let microsoft = [
         "openid",
@@ -223,7 +235,11 @@ fn write_accounts(support: &Path, mail_only: bool) {
         "https://graph.microsoft.com/Calendars.ReadWrite",
     ];
     // Mail alone: what each provider lists for a sign-in that asks for nothing more.
-    let (google, microsoft) = if mail_only { (&google[..4], &microsoft[..5]) } else { (&google[..], &microsoft[..]) };
+    let (google, microsoft) = match grants {
+        Grants::Mail => (&google[..4], &microsoft[..5]),
+        Grants::Older => (&google[..7], &microsoft[..]),
+        Grants::All => (&google[..], &microsoft[..]),
+    };
     let accounts = json!([
         { "id": GMAIL, "provider": "google", "label": GMAIL, "displayName": ME, "scopes": google },
         { "id": OUTLOOK, "provider": "microsoft", "label": OUTLOOK, "displayName": ME, "scopes": microsoft },
@@ -901,6 +917,13 @@ fn write_calendar(cache: &MailCache) {
         "startDay": day(1), "endDay": day(2),
     })];
     let part = |events: Vec<Value>| json!({ "from": day(-7), "until": day(61), "events": events });
+    // Google's calendars carry a sync token: a fetch (after adding a calendar, MS-310) asks the
+    // stand-in what changed since, which is nothing, so these events stay.
+    let google_part = |events: Vec<Value>| {
+        let mut part = part(events);
+        part["sync"] = json!("shots");
+        part
+    };
     let copy = json!({
         "fetched": now(), "format": 2,
         "calendars": [
@@ -914,13 +937,25 @@ fn write_calendar(cache: &MailCache) {
             { "id": "holidays", "name": "Holidays", "color": "#0b8043", "access": "reader", "shown": false },
         ],
         "parts": {
-            "work": part(events),
-            "personal": part(personal),
-            "design-team": part(team),
-            (JORDAN.1): part(jordans),
-            "holidays": part(holidays),
+            "work": google_part(events),
+            "personal": google_part(personal),
+            "design-team": google_part(team),
+            (JORDAN.1): google_part(jordans),
+            "holidays": google_part(holidays),
         },
     });
+    // The stand-in lists the same calendars as Google would, so a fetch keeps them.
+    let entries = copy["calendars"]
+        .as_array()
+        .expect("calendars")
+        .iter()
+        .map(|calendar| {
+            json!({ "id": calendar["id"], "summary": calendar["name"], "backgroundColor": calendar["color"],
+                    "primary": calendar["primary"].as_bool().unwrap_or(false), "accessRole": calendar["access"],
+                    "selected": calendar["selected"].as_bool().unwrap_or(false) })
+        })
+        .collect();
+    mailstream_engine::shots::set_google_calendars(entries);
     cache.save_calendar(&parse(copy), GMAIL);
     let outlook = json!({
         "fetched": now(), "format": 2,

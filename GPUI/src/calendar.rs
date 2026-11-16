@@ -12,7 +12,9 @@
 //! mail.db; the pane reads what it holds (a week back on) and reads it again on its `Calendar`
 //! event, so the calendar shows at once and nothing waits on the network. Every calendar in each
 //! account's list is there, others' (shared or subscribed) in their own colors and read-only;
-//! the header's Calendars list shows or hides each (`calendar_show`, MS-302).
+//! the header's Calendars list shows or hides each (`calendar_show`, MS-302), and for a Google
+//! account adds a calendar shared with it or removes someone else's (`calendar_add`,
+//! `calendar_remove`, MS-310).
 
 mod agenda;
 mod detail;
@@ -26,11 +28,12 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use chrono::{Days, Local, NaiveDate, NaiveDateTime};
+use gpui::component::input::{InputEvent, InputState};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyBinding, ListAlignment, ListOffset, ListState, ParentElement, Pixels, Point, Render, ScrollEvent, ScrollHandle,
-    SharedString, Styled, Subscription, Task, Window, actions, canvas, div, px, relative,
+    AnyElement, App, AppContext, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyBinding, ListAlignment, ListOffset, ListState, ParentElement, Pixels, Point, Render, ScrollEvent,
+    ScrollHandle, SharedString, Styled, Subscription, Task, Window, actions, canvas, div, px, relative,
 };
 use mailstream::CalendarAccount;
 
@@ -175,6 +178,16 @@ pub struct CalendarPane {
     /// Collapsed sections of the calendar list (`"calendars"`, `"account:…"`, `"group:…:mine"`,
     /// `"group:…:other"`), kept across launches in `gpui-calendar-sections.json` (MS-309).
     collapsed: HashSet<SharedString>,
+    /// The account whose "Add calendar" field is open (MS-310), in the list that opened it (its
+    /// rows' prefix: the popover's `calendar` or the sidebar's `sidebar-calendar`).
+    adding: Option<(String, String)>,
+    add_input: Entity<InputState>,
+    /// The calendar typed is on its way to the account's list.
+    add_busy: bool,
+    /// Why the last calendar typed could not be added.
+    add_error: Option<SharedString>,
+    /// The calendar, by account and id, whose row asks to confirm taking it off the list.
+    removing: Option<(String, String)>,
     /// Answers on their way to the calendar, by event, until it takes them.
     answering: HashMap<EventKey, &'static str>,
     /// A read is under way; `read_again` asks for one more when it lands.
@@ -248,6 +261,8 @@ impl CalendarPane {
                 }
             }
         });
+        let add_input = cx.new(|cx| InputState::new(window, cx).placeholder("Email address or calendar ID"));
+        let add_input_events = add_input.clone();
         Self {
             focus: cx.focus_handle(),
             active: false,
@@ -269,6 +284,11 @@ impl CalendarPane {
             refocus: false,
             calendar_list: false,
             collapsed: HashSet::new(),
+            adding: None,
+            add_input,
+            add_busy: false,
+            add_error: None,
+            removing: None,
             answering: HashMap::new(),
             reading: false,
             read_again: false,
@@ -295,7 +315,10 @@ impl CalendarPane {
             list_share: split::shares(split::CALENDAR_WIDTH).default,
             band_top: Rc::new(Cell::new(0.)),
             _clock: clock,
-            _subscriptions: vec![cx.observe_window_appearance(window, |_, _, cx| cx.notify())],
+            _subscriptions: vec![
+                cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
+                cx.subscribe_in(&add_input_events, window, Self::on_add_event),
+            ],
         }
     }
 
@@ -363,6 +386,8 @@ impl CalendarPane {
         self.opened = None;
         self.page = false;
         self.calendar_list = false;
+        self.adding = None;
+        self.removing = None;
         self.sketch = None;
         cx.notify();
     }
@@ -925,6 +950,88 @@ impl CalendarPane {
             })
             .collect();
         self.show_calendars(changes, cx);
+    }
+
+    /// Opens the "Add calendar" field under `account`'s calendars in the list whose rows start
+    /// with `prefix`, empty and holding the keys.
+    pub(super) fn open_add_calendar(&mut self, account: &str, prefix: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.adding = Some((account.to_owned(), prefix.to_owned()));
+        self.add_error = None;
+        self.removing = None;
+        self.add_input.update(cx, |input, cx| input.clean(window, cx));
+        window.focus(&self.add_input.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// Closes the "Add calendar" field (Cancel, Esc), giving the keys back to the calendar.
+    pub(super) fn close_add_calendar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.adding = None;
+        self.add_error = None;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Adds the calendar typed in the field to its account's list (`calendar_add`): the engine
+    /// shows it and says the calendar changed, which lists it; a refusal stays under the field.
+    pub(super) fn add_calendar(&mut self, cx: &mut Context<Self>) {
+        let Some((account, _)) = self.adding.clone() else { return };
+        let typed = self.add_input.read(cx).value().trim().to_owned();
+        if typed.is_empty() || self.add_busy {
+            return;
+        }
+        self.add_busy = true;
+        self.add_error = None;
+        cx.notify();
+        self.background(cx, async move { engine().calendar_add(account, typed).await }, |this, result, cx| {
+            this.add_busy = false;
+            match result {
+                Ok(_) => {
+                    this.adding = None;
+                    // The field held the keys; the calendar takes them back as it draws.
+                    this.refocus = true;
+                }
+                Err(error) => this.add_error = Some(error.to_string().into()),
+            }
+            cx.notify();
+        });
+    }
+
+    fn on_add_event(&mut self, _: &Entity<InputState>, event: &InputEvent, _: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            InputEvent::Change => {
+                // Add follows whether anything is typed.
+                self.add_error = None;
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => self.add_calendar(cx),
+            _ => {}
+        }
+    }
+
+    /// Asks to confirm taking a calendar (account, id) off its account's list, on its row;
+    /// `None` stops asking.
+    pub(super) fn ask_remove_calendar(&mut self, target: Option<(String, String)>, cx: &mut Context<Self>) {
+        self.removing = target;
+        cx.notify();
+    }
+
+    /// Takes `calendar` (someone else's) off `account`'s list (`calendar_remove`): it leaves the
+    /// list at once, and the engine says the calendar changed, which reads the events again.
+    pub(super) fn remove_calendar(&mut self, account: &str, calendar: &str, cx: &mut Context<Self>) {
+        self.removing = None;
+        let Some(entry) = self.accounts.iter_mut().find(|a| a.id == account) else { return };
+        let Some(at) = entry.calendars.iter().position(|c| c.id == calendar) else { return };
+        let name = entry.calendars.remove(at).name;
+        if self.active {
+            let (account, calendar) = (account.to_owned(), calendar.to_owned());
+            self.background(cx, async move { engine().calendar_remove(account, calendar, true).await }, move |this, result, cx| {
+                if let Err(error) = result {
+                    this.toast(format!("Could not remove {name}: {error}"), cx);
+                    this.reload(cx);
+                }
+            });
+        }
+        cx.notify();
     }
 
     /// Whether `section` in the calendar list is collapsed.

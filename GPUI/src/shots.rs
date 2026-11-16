@@ -51,10 +51,11 @@
 //! predict AT TEXT            the Mac predicts the rest of the line, TEXT, at offset AT of the
 //!                            focused field, which draws it after the caret if the caret is there;
 //!                            a click, keys or typing forget both, as the field checks again
-//! accounts mail|all          what the synthetic accounts' sign-ins granted: mail alone, as a
-//!                            sign-in now asks (MS-306), or everything (the default); applies
-//!                            before the window opens, wherever the line is. Connecting a
-//!                            service (Settings, the calendar's notice) is allowed at once
+//! accounts mail|older|all    what the synthetic accounts' sign-ins granted: mail alone, as a
+//!                            sign-in now asks (MS-306), everything but Google's calendar list
+//!                            (Calendar connected before MS-310), or everything (the default);
+//!                            applies before the window opens, wherever the line is. Connecting
+//!                            a service (Settings, the calendar's notice) is allowed at once
 //! ```
 //!
 //! Every input command then lets `SETTLE` pass. The window opens at `--size` (default 1240×800,
@@ -166,11 +167,11 @@ impl Shots {
         APPEARANCE.set(if self.dark { WindowAppearance::Dark } else { WindowAppearance::Light }).ok();
         let home = data_folder();
         let support = mailstream_engine::support_directory();
-        let mail_only = commands.iter().rev().find_map(|(_, command)| match command {
-            Command::Accounts(mail_only) => Some(*mail_only),
+        let grants = commands.iter().rev().find_map(|(_, command)| match command {
+            Command::Accounts(grants) => Some(*grants),
             _ => None,
         });
-        seed::write(&support, &mailstream_engine::cache_directory(), mail_only.unwrap_or(false));
+        seed::write(&support, &mailstream_engine::cache_directory(), grants.unwrap_or(seed::Grants::All));
         // Before the engine starts: its accounts sign in to a stand-in provider, so changes
         // (marking read, archive, star, send) succeed.
         mailstream_engine::shots::start(&support);
@@ -295,8 +296,8 @@ enum Command {
     Freeze,
     Film(String, usize, f32),
     Thaw,
-    /// The accounts were granted mail alone (`true`) or everything.
-    Accounts(bool),
+    /// What the accounts were granted.
+    Accounts(seed::Grants),
     Misspelled(Range<usize>),
     Predict(usize, String),
 }
@@ -375,8 +376,12 @@ impl Command {
                 };
                 Command::Provider(provider, outage)
             }
-            "accounts" if rest == "mail" || rest == "all" => Command::Accounts(rest == "mail"),
-            "accounts" => return Err("accounts: mail or all".into()),
+            "accounts" => Command::Accounts(match rest {
+                "mail" => seed::Grants::Mail,
+                "older" => seed::Grants::Older,
+                "all" => seed::Grants::All,
+                _ => return Err("accounts: mail, older or all".into()),
+            }),
             "freeze" => Command::Freeze,
             "thaw" => Command::Thaw,
             "film" if !words.is_empty() && !words[0].contains(['/', '\\']) => {

@@ -52,7 +52,7 @@ pub enum ControlSize {
 }
 
 impl ControlSize {
-    fn height(self) -> f32 {
+    pub fn height(self) -> f32 {
         match self {
             ControlSize::Small => 22.,
             ControlSize::Regular => 28.,

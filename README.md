@@ -140,10 +140,13 @@ mailstream chat messages you@gmail.com spaces/AAAA
 mailstream chat send you@gmail.com spaces/AAAA --text "On my way" --yes
 
 # Calendar agenda (with every calendar in each account's list: its own, and others' shared with
-# it or subscribed to), showing or hiding one, and adding, changing and deleting your own events
+# it or subscribed to), showing or hiding one, adding someone's shared Google calendar to the list
+# or removing one, and adding, changing and deleting your own events
 mailstream calendar events --days 7
 mailstream calendar show you@gmail.com --calendar colleague@example.com
 mailstream calendar show you@gmail.com --calendar colleague@example.com --off
+mailstream calendar add you@gmail.com --calendar colleague@example.com
+mailstream calendar remove you@gmail.com --calendar colleague@example.com --yes
 mailstream calendar create you@gmail.com --title "Lunch" --start 2026-11-10T12:00 --location "Cafe"
 mailstream calendar update you@gmail.com --calendar you@gmail.com --id <event id> --title "Team lunch"
 mailstream calendar delete you@gmail.com --calendar you@gmail.com --id <event id> --yes

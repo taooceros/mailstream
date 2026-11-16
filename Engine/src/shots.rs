@@ -11,8 +11,9 @@
 //! refused with a 400, which the engine treats as a failed refresh and keeps what the data folder
 //! has, so nothing it shows is replaced. The one read it answers is whether conversations the
 //! user started were answered (Gmail's threads, Graph's messages of a conversation, in batches):
-//! never, so they list in the inbox. Calendar and Chat changes are refused too. Searches never
-//! reach it: the engine searches the mail its data folder lists instead, as it does for the
+//! never, so they list in the inbox. Chat changes are refused too; calendar events, and the Google
+//! account's calendar list the seed gives ([`set_google_calendars`]), are kept in memory. Searches
+//! never reach it: the engine searches the mail its data folder lists instead, as it does for the
 //! held matches it shows before a provider answers (`Mail::held_search`, MS-331, MS-352).
 //!
 //! Sign-ins and connecting a service (`accounts.connect`, MS-306) go through [`consent`] instead
@@ -258,9 +259,66 @@ struct CalendarStore {
     next_id: usize,
     google: HashMap<String, Vec<Value>>,
     graph: HashMap<String, Vec<Value>>,
+    /// The Google account's calendar list, once the seed gave it ([`set_google_calendars`]);
+    /// until then `calendarList` is refused.
+    google_list: Option<Vec<Value>>,
 }
 
 static CALENDAR: LazyLock<Mutex<CalendarStore>> = LazyLock::new(Default::default);
+
+/// The Google account's calendar list as the seed painted it, as Google answers `calendarList`
+/// (MS-310). From then on the stand-in answers the list with it and takes calendars added to it
+/// (each holding two meetings of its owner) and removed from it; a calendar asked for what
+/// changed since its sync token has no changes, so the seeded events stay.
+pub fn set_google_calendars(entries: Vec<Value>) {
+    CALENDAR.lock().expect("calendar lock").google_list = Some(entries);
+}
+
+/// Two meetings of `owner`'s on their calendar, added to the list: tomorrow and the day after.
+fn owner_meetings(owner: &str) -> Vec<Value> {
+    let at = |days: i64, hour: f64| {
+        let midnight = crate::calendar_api::local_midnight(&crate::calendar_api::local_day(days)).unwrap_or_else(model::now);
+        model::iso8601(midnight + hour * 3600.)
+    };
+    [("Office hours", 1, 10.), ("Quarterly planning", 2, 14.)]
+        .into_iter()
+        .enumerate()
+        .map(|(n, (title, days, hour))| {
+            json!({ "id": format!("shots-owner-{n}"), "status": "confirmed", "summary": title,
+                    "start": { "dateTime": at(days, hour) }, "end": { "dateTime": at(days, hour + 1.) },
+                    "organizer": { "email": owner, "self": true } })
+        })
+        .collect()
+}
+
+/// Google's `calendarList`, once the seed gave it: listed, added to, removed from.
+fn calendar_list_reply(method: &str, rest: &str, request: &FakeRequest) -> Option<Reply> {
+    let mut store = CALENDAR.lock().expect("calendar lock");
+    let CalendarStore { google, google_list, .. } = &mut *store;
+    let list = google_list.as_mut()?;
+    Some(match (method, rest) {
+        ("GET", "") => Reply::json(json!({ "items": list })),
+        ("POST", "") => {
+            let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+            let Some(id) = body["id"].as_str().filter(|id| !id.is_empty()) else { return Some(refused()) };
+            // Every Google calendar id is an address (a person's, `…@group.calendar.google.com`):
+            // anything else is a calendar Google doesn't have.
+            if !id.contains('@') {
+                return Some(Reply::status(404, json!({ "error": { "code": 404, "message": "Not Found" } })));
+            }
+            let entry = json!({ "id": id, "summary": id, "backgroundColor": "#039be5", "accessRole": "reader", "selected": true });
+            list.retain(|kept| kept["id"] != id);
+            list.push(entry.clone());
+            google.entry(id.to_string()).or_insert_with(|| owner_meetings(id));
+            Reply::json(entry)
+        }
+        ("DELETE", id) if id.starts_with('/') => {
+            list.retain(|kept| kept["id"] != id[1..]);
+            Reply::status(204, Value::Null)
+        }
+        _ => return None,
+    })
+}
 
 fn merge(target: &mut Value, patch: &Value) {
     match (target, patch) {
@@ -278,6 +336,9 @@ fn merge(target: &mut Value, patch: &Value) {
 }
 
 fn calendar_reply(method: &str, path: &str, request: &FakeRequest) -> Option<Reply> {
+    if let Some(rest) = path.strip_prefix("/calendar/v3/users/me/calendarList") {
+        return calendar_list_reply(method, rest, request);
+    }
     if let Some(rest) = path.strip_prefix("/calendar/v3/calendars/") {
         let mut parts = rest.split('/');
         let cal_id = parts.next()?;
@@ -290,6 +351,10 @@ fn calendar_reply(method: &str, path: &str, request: &FakeRequest) -> Option<Rep
         }
         let mut store = CALENDAR.lock().expect("calendar lock");
         return Some(match (method, event_id) {
+            // Nothing changed since the token: the seeded events stay.
+            ("GET", None) if request.param("syncToken").is_some() => {
+                Reply::json(json!({ "items": [], "nextSyncToken": request.param("syncToken") }))
+            }
             ("GET", None) => {
                 let items = store.google.get(cal_id).cloned().unwrap_or_default();
                 Reply::json(json!({ "items": items }))

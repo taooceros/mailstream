@@ -50,9 +50,10 @@ are window points from its top left (a PNG's pixels halved: shots are drawn at 2
     predict AT TEXT            the Mac predicts TEXT at offset AT of the focused field, drawn
                                after its caret while the caret is there; a click, keys or typing
                                forget both
-    accounts mail|all          what the synthetic accounts were granted: mail alone (as a sign-in
-                               asks now, MS-306) or everything (default); read before the window
-                               opens. Connecting a service is allowed at once, with no browser
+    accounts mail|older|all    what the synthetic accounts were granted: mail alone (as a sign-in
+                               asks now, MS-306), everything but Google's calendar list (Calendar
+                               connected before MS-310) or everything (default); read before the
+                               window opens. Connecting a service is allowed at once, no browser
 
 The window opens at --size (default 1240x800, the app's) with the inbox loaded. Each input lets
 0.6 s pass. Shot first, then click: open `NAME-light.png` to find where things are.

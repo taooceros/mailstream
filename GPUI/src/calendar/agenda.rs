@@ -1,6 +1,7 @@
 //! The calendar's list island (Flutter's `CalendarListPane`): the title row with the calendars'
 //! list (each account's own and others' shared or subscribed calendars, shown or hidden with a
-//! switch, MS-302), New event and Refresh over
+//! switch, MS-302; a Google account's list added to and others' calendars removed, MS-310), New
+//! event and Refresh over
 //! the views' bar (Agenda, Day, Week; previous page, Today, next page), then the agenda (this
 //! week's days on a strip, today raised and the others over a bar of the hours they book; the
 //! meeting about to start on one card with Join; notices for accounts whose calendar is not
@@ -8,23 +9,24 @@
 //! (`grid.rs`).
 
 use chrono::{DateTime, Local, NaiveDate};
+use gpui::component::input::Escape;
 use gpui::component::popover::Popover;
 use gpui::component::tab::TabBar;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Anchor, AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
+    Anchor, AnyElement, ClickEvent, Context, Div, ElementId, Focusable, FontWeight, Hsla, InteractiveElement, IntoElement,
     ListOffset, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, list, px,
 };
-use mailstream::{CalendarInfo, CalendarPerson};
+use mailstream::{CalendarInfo, CalendarPerson, Provider};
 
 use super::grid::day_header;
 use super::model::{self, ReplyState};
 use super::{CalendarPane, Entry, Refresh, Today, View};
 use crate::avatars;
 use crate::controls::{
-    ButtonKind, ControlSize, Tone, button, capsule, capsule_button, color_dots, expander, hairline, icon_button,
-    icon_label_button, island, list_row, mark_dot, notice, notice_close, popover, segment, segmented, swatch_row, tag,
-    title_bar, tooltip,
+    ButtonKind, ControlSize, Tone, button, capsule, capsule_button, color_dots, expander, field_frame, hairline,
+    icon_button, icon_label_button, island, list_row, mark_dot, notice, notice_close, popover, segment, segmented,
+    swatch_row, tag, title_bar, tooltip,
 };
 use crate::design::{self, Palette, calendar as metrics, icon as icon_size, layout, list as rows, space, stroke, text};
 use crate::icons::{Icon, icon};
@@ -116,7 +118,7 @@ impl CalendarPane {
                     )
                     .child(
                         capsule(p)
-                            .child(self.calendar_list_button(p, cx))
+                            .child(self.calendar_list_button(p, window, cx))
                             .child(div().w(px(stroke::HAIRLINE)).h(px(16.)).mx(px(space::S2)).bg(p.line))
                             .child(
                                 icon_button("calendar-new", Icon::AddDraft, "New event", self.can_offer_create(), p.glyph)
@@ -166,7 +168,7 @@ impl CalendarPane {
 
     /// Calendars: the list of every account's calendars, under the capsule button that shows
     /// their active color dots and count.
-    fn calendar_list_button(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn calendar_list_button(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let mut colors = Vec::new();
         let mut total = 0usize;
         for (index, account) in self.accounts.iter().enumerate().filter(|(_, account)| account.granted) {
@@ -209,14 +211,15 @@ impl CalendarPane {
                 })
                 .ok();
             })
-            .when(self.calendar_list, |popover| popover.child(self.render_calendar_list(p, cx)))
+            .when(self.calendar_list, |popover| popover.child(self.render_calendar_list(p, window, cx)))
             .into_any_element()
     }
 
     /// Each account's calendars grouped into "My calendars" (owned) and "Other calendars"
     /// (shared or subscribed), with a color swatch checkbox per calendar, inline access hints,
-    /// Show/Hide all and hover Solo ("Only").
-    fn render_calendar_list(&self, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Show/Hide all and hover Solo ("Only"); for a Google account, Add calendar and hover Remove
+    /// on others' calendars (MS-310).
+    fn render_calendar_list(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         popover(p)
             .id("calendar-list")
             .debug_selector(|| "calendar-list".into())
@@ -227,12 +230,12 @@ impl CalendarPane {
             .pb(px(space::S8))
             .text_size(px(text::BODY))
             .text_color(p.text)
-            .children(self.calendar_list_rows("calendar", false, p, cx))
+            .children(self.calendar_list_rows("calendar", false, p, window, cx))
     }
 
     /// The "Calendars" section in the window's left sidebar while Calendar is in view.
-    pub fn render_sidebar_section(&self, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let rows = self.calendar_list_rows("sidebar-calendar", true, p, cx);
+    pub fn render_sidebar_section(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows = self.calendar_list_rows("sidebar-calendar", true, p, window, cx);
         (!rows.is_empty()).then(|| {
             div()
                 .id("sidebar-calendars")
@@ -252,6 +255,7 @@ impl CalendarPane {
         prefix: &str,
         sidebar: bool,
         p: &'static Palette,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let granted: Vec<(usize, &mailstream::CalendarAccount)> = self
@@ -393,6 +397,12 @@ impl CalendarPane {
                     continue;
                 }
                 for calendar in group {
+                    // Someone else's calendar in a Google account's list can be taken off it.
+                    let removable = account.provider == Provider::Google && !calendar.owned();
+                    if removable && self.removing.as_ref().is_some_and(|(a, c)| *a == account.id && *c == calendar.id) {
+                        rows.push(self.render_remove_confirm(prefix, &account.id, calendar, p, cx));
+                        continue;
+                    }
                     let color = dot_color(
                         model::hex_color(calendar.color.as_deref()).unwrap_or_else(|| design::account_color(index)),
                         p,
@@ -425,6 +435,24 @@ impl CalendarPane {
                         }))
                         .into_any_element()
                     });
+                    let remove = removable.then(|| {
+                        let target = (account_id.clone(), calendar_id.clone());
+                        let remove_sel = format!("{prefix}-remove:{account_id}:{calendar_id}");
+                        icon_button(ElementId::Name(remove_sel.clone().into()), Icon::Close, "Remove from your calendars", true, p.muted)
+                            .size(px(ControlSize::Small.height()))
+                            .debug_selector(move || remove_sel.clone())
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.ask_remove_calendar(Some(target.clone()), cx);
+                            }))
+                            .into_any_element()
+                    });
+                    let actions = match (solo, remove) {
+                        (None, None) => None,
+                        (solo, remove) => Some(
+                            div().flex().items_center().gap(px(space::S2)).children(solo).children(remove).into_any_element(),
+                        ),
+                    };
                     let row_sel = format!("{prefix}-shown:{account_id}:{calendar_id}");
                     rows.push(
                         swatch_row(
@@ -433,7 +461,7 @@ impl CalendarPane {
                             color,
                             calendar.name.clone(),
                             meta,
-                            solo,
+                            actions,
                             p,
                         )
                         .debug_selector(move || row_sel.clone())
@@ -444,8 +472,200 @@ impl CalendarPane {
                     );
                 }
             }
+            // A Google account adds calendars shared with it (Outlook adds them in Outlook).
+            if account.provider == Provider::Google {
+                rows.push(self.render_add_calendar(prefix, account, p, window, cx));
+            }
         }
         rows
+    }
+
+    /// In place of someone else's calendar's row: whether to take it off the account's list,
+    /// with Cancel and Remove.
+    fn render_remove_confirm(
+        &self,
+        prefix: &str,
+        account: &str,
+        calendar: &CalendarInfo,
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (account_id, calendar_id) = (account.to_owned(), calendar.id.clone());
+        let confirm_sel = format!("{prefix}-remove-confirm:{account}:{}", calendar.id);
+        let cancel_sel = format!("{prefix}-remove-cancel:{account}:{}", calendar.id);
+        div()
+            .id(ElementId::Name(format!("{prefix}-removing:{account}:{}", calendar.id).into()))
+            .flex_shrink_0()
+            .mx(px(space::S2))
+            .my(px(space::S2))
+            .px(px(space::S6))
+            .py(px(space::S6))
+            .flex()
+            .flex_col()
+            .gap(px(space::S6))
+            .rounded(px(design::radius::CONTROL))
+            .bg(p.hover)
+            .child(
+                div()
+                    .text_size(px(text::FOOTNOTE))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Remove {}?", calendar.name)))
+                    .child(div().text_color(p.muted).child("It leaves your calendars, in Google Calendar too. Its owner keeps it.")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(space::S6))
+                    .child(
+                        button(ElementId::Name(cancel_sel.clone().into()), "Cancel", ButtonKind::Secondary, ControlSize::Small, true, p)
+                            .debug_selector(move || cancel_sel.clone())
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.ask_remove_calendar(None, cx);
+                            })),
+                    )
+                    .child(
+                        button(ElementId::Name(confirm_sel.clone().into()), "Remove", ButtonKind::Destructive, ControlSize::Small, true, p)
+                            .debug_selector(move || confirm_sel.clone())
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.remove_calendar(&account_id, &calendar_id, cx);
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// Under a Google account's calendars: Add calendar, which opens a field for a calendar shared
+    /// with the account (a person's email address, a calendar ID) with Cancel and Add, and why
+    /// adding failed. An account whose sign-in may not change its calendar list asks for that in
+    /// the browser first.
+    fn render_add_calendar(
+        &self,
+        prefix: &str,
+        account: &mailstream::CalendarAccount,
+        p: &'static Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let account_id = account.id.clone();
+        let open = self.adding.as_ref().is_some_and(|(a, list)| *a == account.id && list == prefix);
+        if !open {
+            let (list, add_sel) = (prefix.to_owned(), format!("{prefix}-add:{account_id}"));
+            return div()
+                .flex_shrink_0()
+                .flex()
+                .child(
+                    icon_label_button(
+                        ElementId::Name(add_sel.clone().into()),
+                        Some(Icon::Add),
+                        "Add calendar",
+                        ButtonKind::Plain(p.accent),
+                        ControlSize::Small,
+                        true,
+                        p,
+                    )
+                    .debug_selector(move || add_sel.clone())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_add_calendar(&account_id, &list, window, cx);
+                    })),
+                )
+                .into_any_element();
+        }
+        let cancel = button(
+            ElementId::Name(format!("{prefix}-add-cancel:{account_id}").into()),
+            "Cancel",
+            ButtonKind::Secondary,
+            ControlSize::Small,
+            true,
+            p,
+        )
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            cx.stop_propagation();
+            this.close_add_calendar(window, cx);
+        }));
+        let form = div()
+            .id(ElementId::Name(format!("{prefix}-add-form:{account_id}").into()))
+            .flex_shrink_0()
+            .mx(px(space::S2))
+            .my(px(space::S2))
+            .px(px(space::S6))
+            .py(px(space::S6))
+            .flex()
+            .flex_col()
+            .gap(px(space::S6))
+            .rounded(px(design::radius::CONTROL))
+            .bg(p.hover)
+            .text_size(px(text::BODY))
+            .on_action(cx.listener(|this, _: &Escape, window, cx| this.close_add_calendar(window, cx)));
+        if !account.list_editable {
+            let waiting = self.connecting.is_some();
+            let allow_sel = format!("{prefix}-add-allow:{account_id}");
+            return form
+                .child(
+                    div()
+                        .text_size(px(text::FOOTNOTE))
+                        .text_color(p.muted)
+                        .child("Mailstream needs permission to add and remove calendars for this account."),
+                )
+                .child(
+                    div().flex().justify_end().gap(px(space::S6)).child(cancel).child(
+                        button(
+                            ElementId::Name(allow_sel.clone().into()),
+                            if waiting { "Waiting for the browser…" } else { "Allow…" },
+                            ButtonKind::Primary,
+                            ControlSize::Small,
+                            !waiting,
+                            p,
+                        )
+                        .debug_selector(move || allow_sel.clone())
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.connect_calendar(account_id.clone(), cx);
+                        })),
+                    ),
+                )
+                .into_any_element();
+        }
+        let busy = self.add_busy;
+        let typed = !self.add_input.read(cx).value().trim().is_empty();
+        let focused = self.add_input.focus_handle(cx).is_focused(window);
+        let confirm_sel = format!("{prefix}-add-confirm:{account_id}");
+        form.child(
+            field_frame(focused, false, p)
+                .h(px(metrics::LIST_ROW))
+                .px(px(space::S8))
+                .child(div().flex_1().min_w_0().child(crate::input::field(&self.add_input))),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S6))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(text::CAPTION))
+                        .text_color(p.muted)
+                        .when(busy, |d| d.child("Adding…")),
+                )
+                .child(cancel)
+                .child(
+                    button(ElementId::Name(confirm_sel.clone().into()), "Add", ButtonKind::Primary, ControlSize::Small, typed && !busy, p)
+                        .debug_selector(move || confirm_sel.clone())
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.add_calendar(cx);
+                        })),
+                ),
+        )
+        .when_some(self.add_error.clone(), |d, error| {
+            d.child(div().text_size(px(text::CAPTION)).text_color(p.danger).child(error))
+        })
+        .into_any_element()
     }
 
     /// This week's seven days: today raised on a card, the others over a bar as long as their

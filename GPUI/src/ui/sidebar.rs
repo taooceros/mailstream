@@ -48,7 +48,7 @@ impl MailApp {
             let is_calendar = node.key.as_ref() == "calendar";
             rows.push(self.sidebar_row(node, p, cx));
             if is_calendar && self.calendar_view {
-                rows.extend(self.calendar.update(cx, |pane, cx| pane.render_sidebar_section(p, cx)));
+                rows.extend(self.calendar.update(cx, |pane, cx| pane.render_sidebar_section(p, window, cx)));
             }
         }
         rows.push(

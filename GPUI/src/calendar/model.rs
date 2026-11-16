@@ -678,6 +678,7 @@ pub(super) mod tests {
             provider: mailstream::Provider::Google,
             granted: true,
             writable: true,
+            list_editable: false,
             loading: false,
             problem: None,
             fetched: None,
