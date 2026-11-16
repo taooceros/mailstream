@@ -1,10 +1,11 @@
 //! Bridges [`PeerSync`] (`peer-sync/`) to the whitelisted cross-device keys in `settings.json`
-//! without feedback loops (MS-360), runs the optional cloud drop (`cloud_drop.rs`, MS-374), and
-//! answers the `sync.*` commands. Sync is open only while this device syncs a group, or a command
-//! needs it: opening binds an iroh endpoint, which reaches number 0's relays (MS-370).
+//! without feedback loops (MS-360) and to the signed-in accounts (`account_sync.rs`, MS-376),
+//! runs the optional cloud drop (`cloud_drop.rs`, MS-374), and answers the `sync.*` commands.
+//! Sync is open only while this device syncs a group, or a command needs it: opening binds an
+//! iroh endpoint, which reaches number 0's relays (MS-370).
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock, mpsc, watch};
 use tokio::task::JoinHandle;
 
+use crate::account_sync::{self, AccountHost};
 use crate::answers::{self, DeviceSyncStatus, SyncDevice, SyncTicket};
 use crate::cloud_drop::{self, CloudDrop};
 use crate::commands::Arguments;
@@ -61,6 +63,9 @@ struct Bridged {
     trusted: BTreeMap<String, bool>,
     #[serde(default)]
     settings: BTreeMap<String, Value>,
+    /// Account records by id as last reconciled (accounts.json's JSON); `None`: removed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    accounts: BTreeMap<String, Option<Value>>,
     /// Set by `sync.join` until the first reconcile with the joined group completes: pushes of
     /// keys without a bridged value are then stamped [`JOIN_AT`], not now. `join` returns
     /// before the group's entries have arrived, so "the group doesn't hold it" is unknown there.
@@ -138,7 +143,7 @@ struct StatusMeta {
     problem: Option<String>,
 }
 
-/// Bridges `settings.json` and `PeerSync` for one running `Engine`.
+/// Bridges `settings.json` and the accounts to `PeerSync` for one running `Engine` or sync node.
 pub struct DeviceSync {
     support_directory: PathBuf,
     network: Network,
@@ -153,6 +158,8 @@ pub struct DeviceSync {
     /// Asks for an exchange with the cloud drop.
     cloud_wake: Notify,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// The accounts and sign-ins to bridge, once attached.
+    accounts: OnceLock<Weak<dyn AccountHost>>,
 }
 
 impl DeviceSync {
@@ -178,6 +185,7 @@ impl DeviceSync {
             wake_tx,
             cloud_wake: Notify::new(),
             tasks: Mutex::new(Vec::new()),
+            accounts: OnceLock::new(),
         });
         let bridge = tokio::spawn(this.clone().run_loop(wake_rx));
         let cloud = tokio::spawn(this.clone().cloud_loop());
@@ -187,6 +195,26 @@ impl DeviceSync {
 
     /// Wakes the bridge after `settings.json` changed.
     pub fn settings_changed(&self) {
+        let _ = self.wake_tx.send(());
+    }
+
+    /// Bridges `host`'s accounts and sign-ins from now on.
+    pub(crate) fn attach_accounts(&self, host: Weak<dyn AccountHost>) {
+        if self.accounts.set(host).is_ok() {
+            let _ = self.wake_tx.send(());
+        }
+    }
+
+    /// Wakes the bridge after an account was added, renamed or removed here.
+    pub fn accounts_changed(&self) {
+        let _ = self.wake_tx.send(());
+    }
+
+    /// Records that `account` signed in here, so its new credential reaches the group's devices.
+    pub(crate) fn account_signed_in(&self, account: &str) {
+        if let Err(error) = account_sync::signed_in(&self.support_directory, account, now_ms()) {
+            self.meta.lock().expect("meta lock").problem = Some(error.message);
+        }
         let _ = self.wake_tx.send(());
     }
 
@@ -529,6 +557,24 @@ impl DeviceSync {
                 next_bridged.trusted = prev_bridged.trusted.clone();
             }
 
+            let mut accounts_problem = None;
+            next_bridged.accounts = prev_bridged.accounts.clone();
+            if let Some(host) = self.accounts.get().and_then(Weak::upgrade) {
+                let pass = account_sync::Pass {
+                    sync,
+                    host: &*host,
+                    support_directory: &self.support_directory,
+                    me: &status.endpoint_id,
+                    bridged: &prev_bridged.accounts,
+                    joining: prev_bridged.joining,
+                    join_at: JOIN_AT,
+                };
+                match account_sync::reconcile(pass, &mut |min_at| bridge.next_at(min_at)).await {
+                    Ok(done) => next_bridged.accounts = done.bridged,
+                    Err(error) => accounts_problem = Some(format!("Accounts: {}", error.message)),
+                }
+            }
+
             if !pending_updates.is_empty() {
                 for (setting, value) in &pending_updates {
                     self.settings.file().update(*setting, Some(value))?;
@@ -541,7 +587,7 @@ impl DeviceSync {
             if !pending_updates.is_empty() && self.settings.reload() {
                 self.events.emit("settings");
             }
-            self.meta.lock().expect("meta lock").problem = invalid_problem(&invalid);
+            self.meta.lock().expect("meta lock").problem = invalid_problem(&invalid).or(accounts_problem);
             return Ok(());
         }
         Ok(())

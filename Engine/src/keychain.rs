@@ -20,6 +20,10 @@
 //! Linux keeps the same file, `<service>.signins` in `~/.local/share/Mailstream`, readable by the
 //! user alone (mode 0600): many desktops run no Secret Service to hold it.
 //!
+//! Beside the sign-ins, the same service keeps this device's device-sync credential key
+//! (MS-376): Keychain account `device-sync-key` on macOS, `<service>.devicekey` elsewhere,
+//! protected the same way.
+//!
 //! The screenshot mode (the `shots` feature, `crate::shots`) keeps its fake sign-ins in memory
 //! under `shots::SERVICE`: they never reach a Keychain item or a file.
 use std::collections::BTreeMap;
@@ -79,6 +83,45 @@ impl SignIns {
     }
 }
 
+/// The items kept under one service: the sign-ins, and this device's device-sync credential key
+/// (MS-376), the X25519 secret other devices seal refresh tokens to (`account_sync.rs`). The key
+/// is an item of its own because the Swift engine rewrites the sign-ins item whole and would drop
+/// a field it doesn't know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Item {
+    SignIns,
+    DeviceKey,
+}
+
+impl Item {
+    /// The macOS item's account attribute.
+    #[cfg(target_os = "macos")]
+    fn account(self) -> &'static str {
+        match self {
+            Self::SignIns => "refresh-tokens",
+            Self::DeviceKey => "device-sync-key",
+        }
+    }
+
+    /// The macOS item's label, which Keychain Access shows.
+    #[cfg(target_os = "macos")]
+    fn label(self) -> &'static str {
+        match self {
+            Self::SignIns => "Mailstream sign-ins",
+            Self::DeviceKey => "Mailstream device sync key",
+        }
+    }
+
+    /// The file's extension on platforms without a Keychain: `<service>.<extension>`.
+    #[cfg(not(target_os = "macos"))]
+    fn extension(self) -> &'static str {
+        match self {
+            Self::SignIns => "signins",
+            Self::DeviceKey => "devicekey",
+        }
+    }
+}
+
 /// The sign-ins item under one service.
 #[derive(Clone, Debug)]
 pub struct Keychain {
@@ -111,17 +154,38 @@ impl Keychain {
         if self.service == crate::shots::SERVICE {
             return Ok(crate::shots::SIGN_INS.lock().expect("sign-ins lock").clone());
         }
-        self.load_item()
+        Ok(self.read(Item::SignIns)?.map(|data| SignIns::decode(&data)).unwrap_or_default())
     }
 
-    /// Replaces the stored sign-ins.
+    /// Replaces the stored sign-ins; with no refresh token and no remembered client left the item
+    /// is deleted.
     pub fn store(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
         #[cfg(feature = "shots")]
         if self.service == crate::shots::SERVICE {
             *crate::shots::SIGN_INS.lock().expect("sign-ins lock") = sign_ins.clone();
             return Ok(());
         }
-        self.store_item(sign_ins)
+        if sign_ins.refresh_tokens.is_empty() && sign_ins.last_clients.is_empty() {
+            return self.write(Item::SignIns, None);
+        }
+        self.write(Item::SignIns, Some(&sign_ins.encode()))
+    }
+
+    /// This device's device-sync credential key, if made; a damaged item reads as none.
+    pub fn device_key(&self) -> Result<Option<[u8; 32]>, KeychainError> {
+        Ok(self.read(Item::DeviceKey)?.and_then(|data| data.try_into().ok()))
+    }
+
+    /// Keeps `key` as this device's device-sync credential key.
+    pub fn store_device_key(&self, key: &[u8; 32]) -> Result<(), KeychainError> {
+        self.write(Item::DeviceKey, Some(key))
+    }
+
+    /// Deletes this device's credential key, which tests make in the person's login keychain on
+    /// macOS.
+    #[cfg(test)]
+    pub(crate) fn forget_device_key(&self) -> Result<(), KeychainError> {
+        self.write(Item::DeviceKey, None)
     }
 }
 
@@ -147,8 +211,6 @@ mod apple {
 
     use super::*;
 
-    const ACCOUNT: &str = "refresh-tokens";
-    const LABEL: &str = "Mailstream sign-ins";
     /// What a process must be signed as to touch the item under [`SERVICE`]: the identifier
     /// `scripts/sign.sh` gives every host of the engine, with an Apple-issued certificate.
     const APP_REQUIREMENT: &str = r#"identifier "dev.mailstream.Mailstream" and anchor apple generic"#;
@@ -208,10 +270,10 @@ mod apple {
     });
 
     impl Keychain {
-        /// The stored sign-ins; empty when there are none.
-        pub(super) fn load_item(&self) -> Result<SignIns, KeychainError> {
+        /// The item's data; `None` when there is no item.
+        pub(super) fn read(&self, item: Item) -> Result<Option<Vec<u8>>, KeychainError> {
             self.may_ask()?;
-            let mut query = self.base();
+            let mut query = self.base(item);
             unsafe {
                 query.push((CFString::wrap_under_get_rule(kSecReturnData), CFBoolean::true_value().into_CFType()));
             }
@@ -221,42 +283,41 @@ mod apple {
             match status {
                 errSecSuccess => {
                     if result.is_null() {
-                        return Ok(SignIns::default());
+                        return Ok(None);
                     }
                     let value = unsafe { CFType::wrap_under_create_rule(result) };
-                    Ok(value.downcast::<CFData>().map(|data| SignIns::decode(data.bytes())).unwrap_or_default())
+                    Ok(value.downcast::<CFData>().map(|data| data.bytes().to_vec()))
                 }
-                errSecItemNotFound => Ok(SignIns::default()),
+                errSecItemNotFound => Ok(None),
                 status => Err(self.failed(status)),
             }
         }
 
-        /// Replaces the stored sign-ins; with no refresh token and no remembered client left the item
-        /// is deleted.
-        pub(super) fn store_item(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
+        /// Replaces the item's data; `None` deletes the item.
+        pub(super) fn write(&self, item: Item, data: Option<&[u8]>) -> Result<(), KeychainError> {
             self.may_ask()?;
-            let base = CFDictionary::from_CFType_pairs(&self.base());
-            if sign_ins.refresh_tokens.is_empty() && sign_ins.last_clients.is_empty() {
+            let base = CFDictionary::from_CFType_pairs(&self.base(item));
+            let Some(data) = data else {
                 let deleted = unsafe { SecItemDelete(base.as_concrete_TypeRef()) };
                 return match deleted {
                     errSecSuccess | errSecItemNotFound => Ok(()),
                     status => Err(self.failed(status)),
                 };
-            }
-            let data = CFData::from_buffer(&sign_ins.encode());
+            };
+            let data = CFData::from_buffer(data);
             let value_key = unsafe { CFString::wrap_under_get_rule(kSecValueData) };
             let update = CFDictionary::from_CFType_pairs(&[(value_key.clone(), data.clone().into_CFType())]);
             match unsafe { SecItemUpdate(base.as_concrete_TypeRef(), update.as_concrete_TypeRef()) } {
                 errSecSuccess => Ok(()),
                 errSecItemNotFound => {
-                    let mut item = self.base();
-                    item.push((value_key, data.into_CFType()));
-                    item.push((
+                    let mut added = self.base(item);
+                    added.push((value_key, data.into_CFType()));
+                    added.push((
                         unsafe { CFString::wrap_under_get_rule(kSecAttrLabel) },
-                        CFString::new(LABEL).into_CFType(),
+                        CFString::new(item.label()).into_CFType(),
                     ));
-                    let item = CFDictionary::from_CFType_pairs(&item);
-                    match unsafe { SecItemAdd(item.as_concrete_TypeRef(), std::ptr::null_mut()) } {
+                    let added = CFDictionary::from_CFType_pairs(&added);
+                    match unsafe { SecItemAdd(added.as_concrete_TypeRef(), std::ptr::null_mut()) } {
                         errSecSuccess => Ok(()),
                         status => Err(self.failed(status)),
                     }
@@ -285,7 +346,7 @@ mod apple {
             KeychainError::Status(status)
         }
 
-        fn base(&self) -> Vec<(CFString, CFType)> {
+        fn base(&self, item: Item) -> Vec<(CFString, CFType)> {
             unsafe {
                 vec![
                     (
@@ -293,7 +354,7 @@ mod apple {
                         CFString::wrap_under_get_rule(kSecClassGenericPassword).into_CFType(),
                     ),
                     (CFString::wrap_under_get_rule(kSecAttrService), CFString::new(&self.service).into_CFType()),
-                    (CFString::wrap_under_get_rule(kSecAttrAccount), CFString::new(ACCOUNT).into_CFType()),
+                    (CFString::wrap_under_get_rule(kSecAttrAccount), CFString::new(item.account()).into_CFType()),
                 ]
             }
         }
@@ -308,8 +369,8 @@ mod apple {
             // Test binaries are signed ad hoc: neither call may reach Security, which would ask.
             assert!(!*SIGNED_AS_APP);
             let apps = Keychain::new(SERVICE, PathBuf::new());
-            assert!(matches!(apps.load_item(), Err(KeychainError::NotTheApp)));
-            assert!(matches!(apps.store_item(&SignIns::default()), Err(KeychainError::NotTheApp)));
+            assert!(matches!(apps.read(Item::SignIns), Err(KeychainError::NotTheApp)));
+            assert!(matches!(apps.write(Item::DeviceKey, None), Err(KeychainError::NotTheApp)));
         }
 
         #[test]
@@ -317,9 +378,9 @@ mod apple {
             let keychain = Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::testkit::unique()), PathBuf::new());
             let other = Keychain::new(format!("dev.mailstream.test.{}.{}", std::process::id(), crate::testkit::unique()), PathBuf::new());
             keychain.failed(errSecUserCanceled);
-            assert!(matches!(keychain.load_item(), Err(KeychainError::Status(errSecUserCanceled))));
-            assert!(matches!(keychain.store_item(&SignIns::default()), Err(KeychainError::Status(errSecUserCanceled))));
-            assert_eq!(other.load_item().unwrap(), SignIns::default());
+            assert!(matches!(keychain.read(Item::SignIns), Err(KeychainError::Status(errSecUserCanceled))));
+            assert!(matches!(keychain.write(Item::SignIns, None), Err(KeychainError::Status(errSecUserCanceled))));
+            assert_eq!(other.read(Item::SignIns).unwrap(), None);
         }
     }
 }
@@ -346,33 +407,32 @@ mod sealed {
     }
 
     impl Keychain {
-        /// The stored sign-ins; empty when there are none.
-        pub(super) fn load_item(&self) -> Result<SignIns, KeychainError> {
-            let sealed = match std::fs::read(self.path()) {
+        /// The item's data; `None` when there is no file.
+        pub(super) fn read(&self, item: Item) -> Result<Option<Vec<u8>>, KeychainError> {
+            let sealed = match std::fs::read(self.path(item)) {
                 Ok(sealed) => sealed,
-                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(SignIns::default()),
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(KeychainError(error.to_string())),
             };
-            Ok(SignIns::decode(&unseal(&sealed)?))
+            unseal(&sealed).map(Some)
         }
 
-        /// Replaces the stored sign-ins; with no refresh token and no remembered client left the
-        /// file is deleted.
-        pub(super) fn store_item(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
-            let path = self.path();
-            if sign_ins.refresh_tokens.is_empty() && sign_ins.last_clients.is_empty() {
+        /// Replaces the item's data; `None` deletes the file.
+        pub(super) fn write(&self, item: Item, data: Option<&[u8]>) -> Result<(), KeychainError> {
+            let path = self.path(item);
+            let Some(data) = data else {
                 return match std::fs::remove_file(&path) {
                     Err(error) if error.kind() != ErrorKind::NotFound => Err(KeychainError(error.to_string())),
                     _ => Ok(()),
                 };
-            }
-            let sealed = seal(&sign_ins.encode())?;
+            };
+            let sealed = seal(data)?;
             let directory = path.parent().expect("the file is in a directory");
             crate::files::replace(directory, &path, &sealed).map_err(|error| KeychainError(error.to_string()))
         }
 
-        fn path(&self) -> PathBuf {
-            self.directory.join(format!("{}.signins", self.service))
+        fn path(&self, item: Item) -> PathBuf {
+            self.directory.join(format!("{}.{}", self.service, item.extension()))
         }
     }
 
@@ -451,30 +511,29 @@ mod private_file {
     }
 
     impl Keychain {
-        /// The stored sign-ins; empty when there are none.
-        pub(super) fn load_item(&self) -> Result<SignIns, KeychainError> {
-            match std::fs::read(self.path()) {
-                Ok(data) => Ok(SignIns::decode(&data)),
-                Err(error) if error.kind() == ErrorKind::NotFound => Ok(SignIns::default()),
+        /// The item's data; `None` when there is no file.
+        pub(super) fn read(&self, item: Item) -> Result<Option<Vec<u8>>, KeychainError> {
+            match std::fs::read(self.path(item)) {
+                Ok(data) => Ok(Some(data)),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(KeychainError(error.to_string())),
             }
         }
 
-        /// Replaces the stored sign-ins; with no refresh token and no remembered client left the
-        /// file is deleted.
-        pub(super) fn store_item(&self, sign_ins: &SignIns) -> Result<(), KeychainError> {
-            let path = self.path();
-            if sign_ins.refresh_tokens.is_empty() && sign_ins.last_clients.is_empty() {
+        /// Replaces the item's data; `None` deletes the file.
+        pub(super) fn write(&self, item: Item, data: Option<&[u8]>) -> Result<(), KeychainError> {
+            let path = self.path(item);
+            let Some(data) = data else {
                 return match std::fs::remove_file(&path) {
                     Err(error) if error.kind() != ErrorKind::NotFound => Err(KeychainError(error.to_string())),
                     _ => Ok(()),
                 };
-            }
-            write_private(&path, &sign_ins.encode()).map_err(|error| KeychainError(error.to_string()))
+            };
+            write_private(&path, data).map_err(|error| KeychainError(error.to_string()))
         }
 
-        fn path(&self) -> PathBuf {
-            self.directory.join(format!("{}.signins", self.service))
+        fn path(&self, item: Item) -> PathBuf {
+            self.directory.join(format!("{}.{}", self.service, item.extension()))
         }
     }
 
@@ -554,5 +613,19 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         assert!(!dir.0.join(format!("{service}.signins")).exists());
         assert_eq!(keychain.load().unwrap(), SignIns::default());
+        // The device-sync key is an item of its own, untouched by the sign-ins.
+        assert_eq!(keychain.device_key().unwrap(), None);
+        keychain.store_device_key(&[7; 32]).unwrap();
+        keychain.store(&sign_ins).unwrap();
+        keychain.store(&SignIns::default()).unwrap();
+        assert_eq!(keychain.device_key().unwrap(), Some([7; 32]));
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.0.join(format!("{service}.devicekey"))).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        keychain.write(Item::DeviceKey, None).unwrap();
+        assert_eq!(keychain.device_key().unwrap(), None);
     }
 }

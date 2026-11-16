@@ -1,14 +1,20 @@
 //! Headless device-sync node (`mailstream sync daemon`, MS-362): runs `PeerSync` and the
 //! `settings.json` bridge (`DeviceSync`) on one data directory without Mailstream's mail, chat,
-//! calendar, AI tagging, or keychain/OAuth layers.
+//! calendar, AI tagging or OAuth layers. It bridges the accounts too (MS-376): records and the
+//! refresh tokens sealed to this device land in accounts.json and the sign-ins, so an engine
+//! started on the same data later uses them without signing in.
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::future::BoxFuture;
 use serde_json::{Map, Value, json};
 
+use crate::account_sync::{self, AccountHost, Credential};
+use crate::accounts::{AccountRecord, Accounts};
 use crate::commands::{self, Arguments, Handler};
 use crate::device_sync::DeviceSync;
+use crate::keychain::{self, Keychain};
 use crate::peer_sync::{Network, PeerSync};
 use crate::settings::Settings;
 use crate::{EngineError, Events, control, daemon};
@@ -22,11 +28,60 @@ pub struct SyncNodeConfig {
     pub data_directory: PathBuf,
     pub network: Network,
     pub control_socket: bool,
+    /// The sign-ins item the accounts' refresh tokens go to, as [`crate::Config`] names it.
+    pub keychain_service: String,
+    pub keychain_directory: PathBuf,
 }
 
 impl SyncNodeConfig {
+    /// The app's sign-ins (`MAILSTREAM_KEYCHAIN_SERVICE` names another item, as for the engine):
+    /// kept where the app keeps them for the app's data folder, else beside the data.
     pub fn new(data_directory: PathBuf) -> Self {
-        Self { data_directory, network: Network::Public, control_socket: false }
+        let keychain_service = std::env::var("MAILSTREAM_KEYCHAIN_SERVICE")
+            .ok()
+            .filter(|service| !service.is_empty())
+            .unwrap_or_else(|| keychain::SERVICE.into());
+        let keychain_directory = if data_directory == crate::support_directory() {
+            keychain::default_directory()
+        } else {
+            data_directory.clone()
+        };
+        Self { data_directory, network: Network::Public, control_socket: false, keychain_service, keychain_directory }
+    }
+}
+
+/// The node's accounts.json and sign-ins, as device sync bridges them.
+struct NodeAccounts {
+    accounts: Accounts,
+    keychain: Keychain,
+}
+
+impl AccountHost for NodeAccounts {
+    fn keychain(&self) -> &Keychain {
+        &self.keychain
+    }
+
+    fn accounts(&self) -> Vec<AccountRecord> {
+        self.accounts.list()
+    }
+
+    fn adopt(&self, record: AccountRecord, credential: Option<Credential>) -> Result<(), String> {
+        if let Some(credential) = &credential {
+            let mut sign_ins = self.keychain.load().map_err(|error| error.to_string())?;
+            account_sync::adopt_sign_in(&mut sign_ins, &record.id, record.provider, credential);
+            self.keychain.store(&sign_ins).map_err(|error| error.to_string())?;
+        }
+        self.accounts.adopt(record).map(|_| ())
+    }
+
+    fn remove(&self, id: String) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            self.accounts.remove(&id)?;
+            let mut sign_ins = self.keychain.load().map_err(|error| error.to_string())?;
+            sign_ins.refresh_tokens.remove(&id);
+            sign_ins.clients.remove(&id);
+            self.keychain.store(&sign_ins).map_err(|error| error.to_string())
+        })
     }
 }
 
@@ -34,6 +89,8 @@ struct Inner {
     settings: Arc<Settings>,
     events: Arc<Events>,
     device_sync: Arc<DeviceSync>,
+    /// Held for `device_sync`, which keeps it weakly.
+    _accounts: Arc<dyn AccountHost>,
 }
 
 impl Inner {
@@ -96,6 +153,11 @@ impl SyncNode {
         let events = Arc::new(Events::default());
         let device_sync =
             DeviceSync::start(config.data_directory.clone(), config.network, settings.clone(), events.clone());
+        let accounts: Arc<dyn AccountHost> = Arc::new(NodeAccounts {
+            accounts: Accounts::new(&config.data_directory),
+            keychain: Keychain::new(config.keychain_service, config.keychain_directory),
+        });
+        device_sync.attach_accounts(Arc::downgrade(&accounts));
         let bridge_sync = Arc::downgrade(&device_sync);
         events.listen(move |event| {
             if event == "settings"
@@ -110,7 +172,7 @@ impl SyncNode {
             return Err(error);
         }
 
-        let inner = Arc::new(Inner { settings, events, device_sync });
+        let inner = Arc::new(Inner { settings, events, device_sync, _accounts: accounts });
         let watcher = crate::watch_settings(inner.settings.clone(), inner.events.clone());
         if config.control_socket {
             control::serve(inner.clone(), config.data_directory);

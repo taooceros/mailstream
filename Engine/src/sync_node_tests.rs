@@ -56,6 +56,8 @@ fn offline_device_syncs_through_headless_sync_node() {
         data_directory: dir_s.clone(),
         network: Network::Loopback(lookup.clone()),
         control_socket: true,
+        keychain_service: cfg_s.keychain_service.clone(),
+        keychain_directory: cfg_s.keychain_directory.clone(),
     })
     .unwrap();
     let joined_s = node_s.join_and_wait(&ticket_a, Duration::from_secs(15)).unwrap();
@@ -136,6 +138,8 @@ fn sync_node_rejects_second_holder_and_persists_across_restart() {
         data_directory: dir.clone(),
         network: Network::Loopback(lookup.clone()),
         control_socket: false,
+        keychain_service: cfg.keychain_service.clone(),
+        keychain_directory: cfg.keychain_directory.clone(),
     })
     .unwrap();
     let enabled = node1.call_sync("sync.enable", json!({})).unwrap();
@@ -146,6 +150,8 @@ fn sync_node_rejects_second_holder_and_persists_across_restart() {
         data_directory: dir.clone(),
         network: Network::Loopback(lookup.clone()),
         control_socket: false,
+        keychain_service: cfg.keychain_service.clone(),
+        keychain_directory: cfg.keychain_directory.clone(),
     }) {
         Ok(_) => panic!("second SyncNode on same directory must fail with busy"),
         Err(error) => error,
@@ -169,6 +175,8 @@ fn sync_node_rejects_second_holder_and_persists_across_restart() {
         data_directory: dir,
         network: Network::Loopback(lookup),
         control_socket: false,
+        keychain_service: cfg.keychain_service.clone(),
+        keychain_directory: cfg.keychain_directory.clone(),
     })
     .unwrap();
     let status2 = node2.call_sync("sync.status", json!({})).unwrap();

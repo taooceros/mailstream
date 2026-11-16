@@ -133,9 +133,11 @@ pub fn engine_for(server: &FakeServer, accounts: &[(&str, &str)]) -> (Engine, Te
     (Engine::start(config.clone()), config)
 }
 
-/// Empties the test Keychain item and deletes the folder.
+/// Empties the test Keychain items and deletes the folder.
 pub fn cleanup(config: &Config) {
-    let _ = Keychain::new(config.keychain_service.clone(), config.keychain_directory.clone()).store(&SignIns::default());
+    let keychain = Keychain::new(config.keychain_service.clone(), config.keychain_directory.clone());
+    let _ = keychain.store(&SignIns::default());
+    let _ = keychain.forget_device_key();
     let _ = std::fs::remove_dir_all(config.support_directory.parent().unwrap());
 }
 

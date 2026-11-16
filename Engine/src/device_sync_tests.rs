@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use iroh::address_lookup::MemoryLookup;
 use serde_json::{Value, json};
 
+use crate::keychain::Keychain;
 use crate::mail_tests::{GmailCounters, gmail_server};
+use crate::oauth::OAuthClient;
 use crate::peer_sync::{Network, PeerSync};
 use crate::testkit::{TestConfig, call, config, mail_account, sign_in_all};
 use crate::{Engine, OAuthConfig, run_settings_command};
@@ -477,6 +479,77 @@ fn invalid_synced_keys_in_settings_file_do_not_wipe_group_or_local_edit() {
         }
     }
     assert!(saw_clear_event, "A should emit \"deviceSync\" when problem clears");
+
+    drop(engine_b);
+    drop(engine_a);
+}
+
+/// Every file under `directory` whose bytes contain `needle`.
+fn files_containing(directory: &std::path::Path, needle: &[u8]) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(directory) else { return found };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(files_containing(&path, needle));
+        } else if std::fs::read(&path).is_ok_and(|data| data.windows(needle.len()).any(|window| window == needle)) {
+            found.push(path);
+        }
+    }
+    found
+}
+
+fn account_ids(engine: &Engine) -> Vec<String> {
+    call(engine, "accounts.list", json!({})).unwrap().as_array().unwrap().iter().map(|a| a["id"].as_str().unwrap().to_string()).collect()
+}
+
+/// MS-376: a device that joins gets the group's accounts and their refresh tokens without
+/// signing in; the tokens cross only sealed to its own key; renames and removals follow.
+#[test]
+fn joining_device_gets_accounts_with_tokens_sealed_to_it() {
+    let lookup = MemoryLookup::new();
+    let cfg_a = sync_config(&lookup);
+    let cfg_b = sync_config(&lookup);
+    sign_in_all(&cfg_a, &[mail_account("me@gmail.com", "google")]);
+    let keychain = |cfg: &TestConfig| Keychain::new(cfg.keychain_service.clone(), cfg.keychain_directory.clone());
+    let mut sign_ins = keychain(&cfg_a).load().unwrap();
+    let client = OAuthClient { id: "client".into(), secret: Some("secret".into()) };
+    sign_ins.last_clients.insert("google".into(), client.clone());
+    keychain(&cfg_a).store(&sign_ins).unwrap();
+
+    let engine_a = Engine::start(cfg_a.clone());
+    let engine_b = Engine::start(cfg_b.clone());
+    assert!(account_ids(&engine_b).is_empty());
+
+    call(&engine_a, "sync.enable", json!({})).unwrap();
+    let ticket = call(&engine_a, "sync.pair_ticket", json!({})).unwrap()["ticket"].as_str().unwrap().to_string();
+    call(&engine_b, "sync.join", json!({ "ticket": ticket })).unwrap();
+
+    until("B to get A's account", || account_ids(&engine_b) == ["me@gmail.com"]);
+    let received = keychain(&cfg_b).load().unwrap();
+    assert_eq!(received.refresh_tokens["me@gmail.com"], "rt-me@gmail.com");
+    assert_eq!(received.clients["me@gmail.com"], client);
+    assert_eq!(received.last_clients["google"], client);
+    let record = &call(&engine_b, "accounts.list", json!({})).unwrap()[0];
+    assert_eq!((record["provider"].as_str(), record["services"][0].as_str()), (Some("google"), Some("mail")));
+
+    // Neither device's group store, blobs or bridge files hold the token or the client secret.
+    for cfg in [&cfg_a, &cfg_b] {
+        let folder = cfg.support_directory.join("peer-sync");
+        assert!(files_containing(&folder, b"rt-me@gmail.com").is_empty(), "{:?}", files_containing(&folder, b"rt-me@gmail.com"));
+        assert!(files_containing(&folder, b"\"secret\"").is_empty());
+        // The account record itself is in the group.
+        assert!(!files_containing(&folder, b"me@gmail.com").is_empty());
+    }
+
+    // A rename follows; then a removal signs B out and deletes its saved token.
+    call(&engine_a, "accounts.rename", json!({ "account": "me@gmail.com", "label": "Work" })).unwrap();
+    until("B to take the new label", || {
+        call(&engine_b, "accounts.list", json!({})).unwrap()[0]["label"] == json!("Work")
+    });
+    call(&engine_a, "accounts.remove", json!({ "account": "me@gmail.com", "yes": true })).unwrap();
+    until("B to sign out of the removed account", || account_ids(&engine_b).is_empty());
+    until("B to delete the token", || !keychain(&cfg_b).load().unwrap().refresh_tokens.contains_key("me@gmail.com"));
 
     drop(engine_b);
     drop(engine_a);

@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::answers::SyncCloud;
-use crate::peer_sync::{Device, PeerSync, PeerSyncError, Snapshot, Stamped};
+use crate::peer_sync::{Device, DeviceKey, PeerSync, PeerSyncError, SealedCredential, Snapshot, Stamped};
 use crate::{EngineError, api, files, model};
 
 const FILE: &str = "cloud.json";
@@ -134,6 +134,20 @@ struct Contents {
     settings: BTreeMap<String, SettingEntry>,
     #[serde(default)]
     devices: BTreeMap<String, Device>,
+    /// Account records and sealed credentials (MS-376): the credentials are sealed to each
+    /// device's own key besides this copy's group key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    accounts: BTreeMap<String, AccountEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    device_keys: BTreeMap<String, DeviceKey>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    credentials: BTreeMap<String, SealedCredential>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct AccountEntry {
+    record: Option<Value>,
+    at: u64,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -162,6 +176,13 @@ impl Contents {
                 .map(|(key, stamped)| (key, SettingEntry { value: stamped.value, at: stamped.at }))
                 .collect(),
             devices: snapshot.devices,
+            accounts: snapshot
+                .accounts
+                .into_iter()
+                .map(|(id, stamped)| (id, AccountEntry { record: stamped.value, at: stamped.at }))
+                .collect(),
+            device_keys: snapshot.device_keys,
+            credentials: snapshot.credentials,
         }
     }
 
@@ -180,6 +201,13 @@ impl Contents {
             devices: self.devices,
             // Admissions cross only between admitted devices (MS-380), never through the drop.
             admitted: Default::default(),
+            accounts: self
+                .accounts
+                .into_iter()
+                .map(|(id, entry)| (id, Stamped { value: entry.record, at: entry.at }))
+                .collect(),
+            device_keys: self.device_keys,
+            credentials: self.credentials,
             pending: Default::default(),
         }
     }

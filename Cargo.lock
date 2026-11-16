@@ -6069,6 +6069,7 @@ dependencies = [
  "chrono",
  "core-foundation 0.10.1",
  "core-foundation-sys",
+ "curve25519-dalek",
  "dirs 6.0.0",
  "encoding_rs",
  "futures",

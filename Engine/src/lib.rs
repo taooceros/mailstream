@@ -9,6 +9,7 @@
 //! wrote.
 uniffi::setup_scaffolding!();
 
+mod account_sync;
 mod accounts;
 pub mod answers;
 pub mod api;
@@ -423,6 +424,10 @@ impl Engine {
             avatars,
             device_sync,
         });
+        if let Some(sync) = &core.device_sync {
+            let host: std::sync::Weak<dyn account_sync::AccountHost> = Arc::downgrade(&core) as _;
+            sync.attach_accounts(host);
+        }
         let watcher = Self::follow_settings(&core);
         runtime.spawn(mail.start());
         polling.start();
@@ -603,6 +608,9 @@ impl Core {
                 if renamed.as_ref() != Some(&record) {
                     self.events.emit("accounts");
                     self.mail.accounts_changed();
+                    if let Some(sync) = &self.device_sync {
+                        sync.accounts_changed();
+                    }
                 }
                 Ok(answers::json(&renamed.as_ref().map(AccountRecord::answer)))
             }
@@ -629,17 +637,10 @@ impl Core {
                         ),
                     ));
                 }
-                // Push stops the account's registration with its API, taken before it goes,
-                // while the token still works; the token goes after.
-                let api = self.mail.api(&record.id);
-                self.accounts.remove(&record.id).map_err(EngineError::failed)?;
-                self.mail.accounts_changed();
-                self.chat.accounts_changed();
-                self.calendar.accounts_changed();
-                self.events.emit("accounts");
-                self.push.sign_out(&record.id, api).await;
-                let _ = std::fs::remove_file(gmail::cache_file(&self.mail.cache_root(), &record.id));
-                self.tokens.forget(&record.id);
+                self.sign_out(&record.id).await?;
+                if let Some(sync) = &self.device_sync {
+                    sync.accounts_changed();
+                }
                 Ok(json!({ "removed": record.id }))
             }
             _ => unreachable!("{command} is a core command"),
@@ -742,12 +743,62 @@ impl Core {
             .install(&grant.id, signed_in, client, &grant.refresh_token, &grant.access_token, grant.expires_in)
             .map_err(|error| EngineError::failed(error.to_string()))?;
         let record = self.accounts.signed_in(provider, grant).map_err(EngineError::failed)?;
+        self.accounts_updated();
+        if let Some(sync) = &self.device_sync {
+            sync.account_signed_in(&grant.id);
+        }
+        Ok(record)
+    }
+
+    /// Tells everything that depends on what the accounts may use that they changed.
+    fn accounts_updated(&self) {
         self.events.emit("accounts");
         self.mail.accounts_changed();
         self.push.check();
         self.chat.accounts_changed();
         self.calendar.accounts_changed();
-        Ok(record)
+    }
+
+    /// Signs out of `id`: deletes its record, its saved sign-in and its envelope cache.
+    async fn sign_out(&self, id: &str) -> Result<(), EngineError> {
+        // Push stops the account's registration with its API, taken before it goes, while the
+        // token still works; the token goes after.
+        let api = self.mail.api(id);
+        if !self.accounts.remove(id).map_err(EngineError::failed)? {
+            return Ok(());
+        }
+        self.mail.accounts_changed();
+        self.chat.accounts_changed();
+        self.calendar.accounts_changed();
+        self.events.emit("accounts");
+        self.push.sign_out(id, api).await;
+        let _ = std::fs::remove_file(gmail::cache_file(&self.mail.cache_root(), id));
+        self.tokens.forget(id);
+        Ok(())
+    }
+}
+
+/// The engine's accounts as device sync bridges them (MS-376).
+impl account_sync::AccountHost for Core {
+    fn keychain(&self) -> &Keychain {
+        self.tokens.keychain()
+    }
+
+    fn accounts(&self) -> Vec<AccountRecord> {
+        self.accounts.list()
+    }
+
+    fn adopt(&self, record: AccountRecord, credential: Option<account_sync::Credential>) -> Result<(), String> {
+        let signed_in = tokens::SignedIn { provider: record.provider, scopes: record.scopes.clone() };
+        self.tokens.adopt(&record.id, signed_in, credential.as_ref()).map_err(|error| error.to_string())?;
+        if self.accounts.adopt(record)? || credential.is_some() {
+            self.accounts_updated();
+        }
+        Ok(())
+    }
+
+    fn remove(&self, id: String) -> futures::future::BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move { self.sign_out(&id).await.map_err(|error| error.message) })
     }
 }
 

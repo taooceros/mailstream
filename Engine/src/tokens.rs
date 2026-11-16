@@ -195,6 +195,31 @@ impl Tokens {
         Ok(())
     }
 
+    /// Takes `account` as another device has it (MS-376): what its sign-in granted, and the
+    /// refresh token that device sent with its client, if any. The next `token` refreshes.
+    pub(crate) fn adopt(
+        &self,
+        account: &str,
+        signed_in: SignedIn,
+        credential: Option<&crate::account_sync::Credential>,
+    ) -> Result<(), TokenError> {
+        let mut state = self.state.lock().expect("tokens lock");
+        if let Some(credential) = credential {
+            let mut sign_ins = state.fresh(&self.keychain)?;
+            crate::account_sync::adopt_sign_in(&mut sign_ins, account, signed_in.provider, credential);
+            state.save(&self.keychain, sign_ins)?;
+            state.access.remove(account);
+        }
+        state.accounts.insert(account.into(), signed_in);
+        state.flights.remove(account);
+        Ok(())
+    }
+
+    /// Where the sign-ins are kept.
+    pub fn keychain(&self) -> &Keychain {
+        &self.keychain
+    }
+
     /// The client to offer for `provider`'s next sign-in: the one used last, else the build's.
     pub fn suggested_client(&self, provider: Provider) -> Result<Option<OAuthClient>, TokenError> {
         let mut state = self.state.lock().expect("tokens lock");

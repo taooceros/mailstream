@@ -56,6 +56,9 @@ iroh-gossip = "0.101"
 # copies sealed with AES-256-GCM; both already in the tree (iroh, QUIC, Turso).
 blake3 = "1"
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+# Refresh tokens sealed to each device's X25519 credential key (`account_sync.rs`, MS-376); the
+# curve is already in the tree through iroh's ed25519.
+curve25519-dalek = "5"
 # Gmail search and its envelopes over IMAP (`gmail/imap.rs`, MS-358), which Gmail's API quota
 # doesn't count; TLS through the rustls reqwest and the push relay already use.
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }

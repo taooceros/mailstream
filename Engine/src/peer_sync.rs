@@ -24,6 +24,13 @@
 //! - `v1/setting/<key>`: `{"value": <json>, "at": …}`.
 //! - `v1/meta/device/<endpoint id>`: `{"name": …, "platform": …, "lastSeen": …}`.
 //! - `v1/admit/<endpoint id>`: `{"by": <endpoint id>, "at": …}`: device `by` admitted it.
+//! - `v1/account/<lowercased address>` (MS-376): `{"record": <accounts.json record>|null, "at": …}`;
+//!   removing writes `record: null`.
+//! - `v1/devkey/<endpoint id>`: `{"key": …, "signature": …, "at": …}`, the device's X25519
+//!   credential key, signed with its endpoint key ([`DeviceKey`]); entries whose signature
+//!   doesn't verify are left out.
+//! - `v1/cred/<recipient endpoint id>/<account>`: a refresh token and its OAuth client sealed to
+//!   that device's credential key ([`SealedCredential`], `account_sync.rs`).
 //!
 //! Each device writes with its own author, so a key holds one entry per device that wrote it.
 //! Readers take the entry with the latest `at` (`lastSeen` for devices), on a tie the one of the
@@ -46,7 +53,8 @@
 //! the ticket carries. A device whose group predates MS-380 admits every device the group lists
 //! the first time it opens it (`admission` in `sync.json`), so existing groups keep syncing.
 //!
-//! The engine bridges this to settings.json (MS-360); this module knows nothing of settings.
+//! The engine bridges this to settings.json (MS-360) and the signed-in accounts (MS-376); this
+//! module knows nothing of either.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{File, TryLockError};
@@ -100,6 +108,11 @@ const ADMIT_WAIT: Duration = Duration::from_secs(10);
 const ADMIT_RETRY: Duration = Duration::from_secs(15);
 /// How long a connection from a device not admitted yet waits for its admission ([`Gate::admits`]).
 const ADMIT_GRACE: Duration = Duration::from_secs(10);
+const ACCOUNT: &str = "v1/account/";
+const DEVICE_KEY: &str = "v1/devkey/";
+const CREDENTIAL: &str = "v1/cred/";
+/// What a device signs to announce its credential key: this, its endpoint id, the key and when.
+const DEVICE_KEY_CONTEXT: &[u8] = b"mailstream device sync credential key v1";
 /// How often unreferenced values are deleted from `blobs/`.
 const GC_INTERVAL: Duration = Duration::from_secs(3600);
 /// How often to look whether the machine slept.
@@ -162,6 +175,12 @@ pub struct Snapshot {
     pub devices: BTreeMap<String, Device>,
     /// Who admitted each device, by endpoint id (MS-380).
     pub admitted: BTreeMap<String, Admission>,
+    /// Account records (accounts.json's) by lowercased address; `None` is a tombstone.
+    pub accounts: BTreeMap<String, Stamped<Option<Value>>>,
+    /// Credential keys by endpoint id, each verified against its device's endpoint key.
+    pub device_keys: BTreeMap<String, DeviceKey>,
+    /// Sealed credentials by `<recipient endpoint id>/<account>`.
+    pub credentials: BTreeMap<String, SealedCredential>,
     /// Keys left out above because a value is still downloading: what they hold is unknown,
     /// not absent.
     pub pending: BTreeSet<String>,
@@ -173,6 +192,53 @@ pub struct Admission {
     /// The endpoint id of the device that admitted it.
     pub by: String,
     /// Unix ms.
+    pub at: u64,
+}
+
+/// A device's X25519 credential key (MS-376), signed with the endpoint key whose public half is
+/// the device's endpoint id, so no other device can announce a key in its name, also when the
+/// cloud drop carries the entry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceKey {
+    /// The public key, hex.
+    pub key: String,
+    /// The endpoint key's signature over [`DEVICE_KEY_CONTEXT`], the endpoint id, the key and
+    /// `at`, hex.
+    pub signature: String,
+    pub at: u64,
+}
+
+impl DeviceKey {
+    fn message(endpoint_id: &EndpointId, key: &[u8; 32], at: u64) -> Vec<u8> {
+        [DEVICE_KEY_CONTEXT, endpoint_id.as_bytes(), key, &at.to_be_bytes()].concat()
+    }
+
+    fn signed(secret: &SecretKey, key: &[u8; 32], at: u64) -> Self {
+        let signature = secret.sign(&Self::message(&secret.public(), key, at));
+        Self { key: hex(key), signature: hex(&signature.to_bytes()), at }
+    }
+
+    /// The public key, when the signature is `endpoint_id`'s.
+    pub fn verified(&self, endpoint_id: &str) -> Option<[u8; 32]> {
+        let id = EndpointId::from_str(endpoint_id).ok()?;
+        let key: [u8; 32] = unhex(&self.key)?.try_into().ok()?;
+        let signature: [u8; 64] = unhex(&self.signature)?.try_into().ok()?;
+        id.verify(&Self::message(&id, &key, self.at), &iroh::Signature::from_bytes(&signature)).ok()?;
+        Some(key)
+    }
+}
+
+/// A refresh token and its client sealed to one device's credential key (`account_sync.rs`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SealedCredential {
+    /// The recipient's credential key it is sealed to, hex: a device whose key changed needs
+    /// another.
+    pub to: String,
+    /// The sealed credential; `None` once withdrawn (its account was removed).
+    pub sealed: Option<String>,
+    /// When the credential inside was issued (its sign-in), Unix ms.
+    pub issued: u64,
+    /// When it was sealed, Unix ms: the latest wins.
     pub at: u64,
 }
 
@@ -219,6 +285,12 @@ struct TrustedValue {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SettingValue {
     value: Value,
+    at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AccountValue {
+    record: Option<Value>,
     at: u64,
 }
 
@@ -443,8 +515,9 @@ impl PeerSync {
     }
 
     /// Starts a new group with this device in it, carrying over what the current group holds
-    /// (trusted senders and settings, at their times), and leaves the current one: devices that
-    /// were in it are no longer reached or admitted (pair them again). Returns the group's id.
+    /// (trusted senders, settings and account records, at their times; no credential keys or
+    /// sealed credentials, which belong to the old group's devices), and leaves the current one:
+    /// devices that were in it are no longer reached or admitted (pair them again). Returns the group's id.
     pub async fn create_group(&self) -> Result<String> {
         let inner = &self.inner;
         let mut group = inner.group.lock().await;
@@ -462,6 +535,10 @@ impl PeerSync {
             for (key, setting) in carried.settings {
                 let value = SettingValue { value: setting.value, at: setting.at };
                 inner.put(&doc, format!("{SETTING}{key}"), &value).await?;
+            }
+            for (id, account) in carried.accounts {
+                let value = AccountValue { record: account.value, at: account.at };
+                inner.put(&doc, format!("{ACCOUNT}{id}"), &value).await?;
             }
         }
         if !inner.legacy() {
@@ -591,6 +668,41 @@ impl PeerSync {
         self.set(format!("{SETTING}{key}"), &SettingValue { value, at }, at).await
     }
 
+    /// Records account `id`'s record (`None`: removed) at `at` (Unix ms); `false` when the group
+    /// already holds a value from `at` or later, which stays.
+    pub async fn set_account(&self, id: &str, record: Option<Value>, at: u64) -> Result<bool> {
+        self.set(format!("{ACCOUNT}{id}"), &AccountValue { record, at }, at).await
+    }
+
+    /// Announces `key` as this device's credential key, signed with its endpoint key; `false`
+    /// when the group already holds it.
+    pub async fn announce_device_key(&self, key: &[u8; 32]) -> Result<bool> {
+        let inner = &self.inner;
+        let secret = inner.endpoint().secret_key().clone();
+        let entry = format!("{DEVICE_KEY}{}", secret.public());
+        let group = inner.group.lock().await;
+        let doc = group.doc.as_ref().ok_or(PeerSyncError::NoGroup)?;
+        let current = inner.collect(doc, Query::key_exact(&entry).build()).await?;
+        let mut latest = 0;
+        for found in &current {
+            if let Some(Record::DeviceKey(announced)) = &found.record {
+                if announced.key == hex(key) {
+                    return Ok(false);
+                }
+                latest = latest.max(announced.at);
+            }
+        }
+        let announced = DeviceKey::signed(&secret, key, now_ms().max(latest + 1));
+        inner.put(doc, entry, &announced).await?;
+        Ok(true)
+    }
+
+    /// Records `credential` for `recipient` (an endpoint id) and `account`; `false` when the
+    /// group already holds one sealed at `credential.at` or later, which stays.
+    pub async fn set_credential(&self, recipient: &str, account: &str, credential: &SealedCredential) -> Result<bool> {
+        self.set(format!("{CREDENTIAL}{recipient}/{account}"), credential, credential.at).await
+    }
+
     async fn set(&self, key: String, value: &impl Serialize, at: u64) -> Result<bool> {
         let inner = &self.inner;
         let group = inner.group.lock().await;
@@ -641,6 +753,25 @@ impl PeerSync {
         for (id, device) in incoming.devices.iter().filter(|(id, _)| **id != me) {
             if newer(device.last_seen, current.devices.get(id).map(|have| have.last_seen)) {
                 inner.put(doc, format!("{DEVICE}{id}"), device).await?;
+                wrote = true;
+            }
+        }
+        for (id, account) in &incoming.accounts {
+            if newer(account.at, current.accounts.get(id).map(|have| have.at)) {
+                let value = AccountValue { record: account.value.clone(), at: account.at };
+                inner.put(doc, format!("{ACCOUNT}{id}"), &value).await?;
+                wrote = true;
+            }
+        }
+        for (id, key) in incoming.device_keys.iter().filter(|(id, _)| **id != me) {
+            if key.verified(id).is_some() && newer(key.at, current.device_keys.get(id).map(|have| have.at)) {
+                inner.put(doc, format!("{DEVICE_KEY}{id}"), key).await?;
+                wrote = true;
+            }
+        }
+        for (slot, credential) in &incoming.credentials {
+            if newer(credential.at, current.credentials.get(slot).map(|have| have.at)) {
+                inner.put(doc, format!("{CREDENTIAL}{slot}"), credential).await?;
                 wrote = true;
             }
         }
@@ -888,6 +1019,16 @@ impl Inner {
                 Record::Admitted(admission) => {
                     snapshot.admitted.insert(key[ADMITTED.len()..].to_string(), admission);
                 }
+                Record::Account(value) => {
+                    let stamped = Stamped { value: value.record, at: value.at };
+                    snapshot.accounts.insert(key[ACCOUNT.len()..].to_string(), stamped);
+                }
+                Record::DeviceKey(announced) => {
+                    snapshot.device_keys.insert(key[DEVICE_KEY.len()..].to_string(), announced);
+                }
+                Record::Credential(credential) => {
+                    snapshot.credentials.insert(key[CREDENTIAL.len()..].to_string(), credential);
+                }
             }
         }
         Ok(snapshot)
@@ -907,10 +1048,14 @@ enum Record {
     Setting(SettingValue),
     Device(Device),
     Admitted(Admission),
+    Account(AccountValue),
+    DeviceKey(DeviceKey),
+    Credential(SealedCredential),
 }
 
 impl Record {
-    /// `None` for keys outside the scheme and values that aren't the JSON their key calls for.
+    /// `None` for keys outside the scheme, values that aren't the JSON their key calls for and
+    /// credential keys whose signature isn't their device's.
     fn parse(key: &str, data: &[u8]) -> Option<Self> {
         if key.starts_with(TRUSTED) {
             serde_json::from_slice(data).ok().map(Self::Trusted)
@@ -920,6 +1065,14 @@ impl Record {
             serde_json::from_slice(data).ok().map(Self::Device)
         } else if key.starts_with(ADMITTED) {
             serde_json::from_slice(data).ok().map(Self::Admitted)
+        } else if key.starts_with(ACCOUNT) {
+            serde_json::from_slice(data).ok().map(Self::Account)
+        } else if let Some(endpoint_id) = key.strip_prefix(DEVICE_KEY) {
+            let announced: DeviceKey = serde_json::from_slice(data).ok()?;
+            announced.verified(endpoint_id)?;
+            Some(Self::DeviceKey(announced))
+        } else if key.starts_with(CREDENTIAL) {
+            serde_json::from_slice(data).ok().map(Self::Credential)
         } else {
             None
         }
@@ -932,6 +1085,9 @@ impl Record {
             Self::Setting(value) => value.at,
             Self::Device(device) => device.last_seen,
             Self::Admitted(admission) => admission.at,
+            Self::Account(value) => value.at,
+            Self::DeviceKey(announced) => announced.at,
+            Self::Credential(credential) => credential.at,
         }
     }
 }
@@ -1248,11 +1404,11 @@ async fn put(doc: &Doc, author: AuthorId, key: String, value: &impl Serialize) -
     Ok(())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn unhex(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn unhex(text: &str) -> Option<Vec<u8>> {
     if text.len() % 2 != 0 {
         return None;
     }

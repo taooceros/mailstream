@@ -142,6 +142,19 @@ impl Accounts {
         Ok(record)
     }
 
+    /// Keeps `record` as another device has it (MS-376): replaces this device's record of the
+    /// account, or adds it last. False when it was already so.
+    pub fn adopt(&self, record: AccountRecord) -> Result<bool, String> {
+        let mut records = self.records.lock().expect("accounts lock");
+        match records.iter_mut().find(|existing| existing.id == record.id) {
+            Some(existing) if *existing == record => return Ok(false),
+            Some(existing) => *existing = record,
+            None => records.push(record),
+        }
+        self.persist(&records)?;
+        Ok(true)
+    }
+
     /// Deletes `id`'s record; false when there was none.
     pub fn remove(&self, id: &str) -> Result<bool, String> {
         let mut records = self.records.lock().expect("accounts lock");
