@@ -71,9 +71,10 @@ Claims are kept in ~/.local/state/linear-poll/ (STATE): `launched` (issue ids), 
 (comment ids), `unblocked` (issue id and the blocker ids it was claimed with), `stale` (issue id
 and the start comment reported), `install` (when the last install line was printed), `probe`
 (latest issue/comment updatedAt watermark for `watch`).
-DRY_RUN=1 prints without claiming (unclaim lines included). `linear-poll.py seen comment|issue
-<id>` puts omp's 👀 on a comment or issue once the caller has handed it to a subagent, so the
-user sees it was picked up.
+DRY_RUN=1 prints without claiming (unclaim lines included). Each issue it claims for the first
+time (resume false) and each comment line written by a workspace member gets omp's 👀 reaction
+as it is printed, so the user sees it was picked up whichever session handles it (MS-355); a
+failed reaction is only logged.
 `linear-poll.py watch` checks Linear every INTERVAL seconds (default 5) and exits after the first
 pass that prints lines, with that pass's lines and status; passes with nothing to print (unclaims
 included) keep it looping silently. After its first full pass, `watch` uses a lightweight
@@ -227,14 +228,14 @@ def remove_label(issue, label):
         {"id": issue, "label": label})
 
 
-def seen(kind, id):
-    field = {"comment": "commentId", "issue": "issueId"}.get(kind)
-    if not field or not id:
-        print(f"usage: {sys.argv[0]} seen comment|issue <id>", file=sys.stderr)
-        return 2
-    gql(f'mutation($id: String!) {{ reactionCreate(input: {{ {field}: $id, emoji: "eyes" }}) {{ success }} }}',
-        {"id": id})
-    return 0
+def react(kind, id):
+    """Puts omp's 👀 on an issue or comment; a failure is logged and doesn't stop the pass."""
+    field = {"comment": "commentId", "issue": "issueId"}[kind]
+    try:
+        gql(f'mutation($id: String!) {{ reactionCreate(input: {{ {field}: $id, emoji: "eyes" }}) {{ success }} }}',
+            {"id": id})
+    except Failed:
+        log(f"could not react to {kind} {id}")
 
 
 def relock():
@@ -397,7 +398,7 @@ def plan(data, running):
         if labelled(issue) is not None or (free and (fresh or unblocked)):
             todo.append({"kind": "issue", "id": issue["id"], "identifier": issue["identifier"], "resume": claimed,
                          "unblockedBy": [b["identifier"] for b in blocking if resolved(b)], **about(issue),
-                         "label": labelled(issue), "unblockKey": key, "number": issue["number"]})
+                         "label": labelled(issue), "unblockKey": key, "number": issue["number"], "react": not claimed})
     out = sorted(todo, key=lambda line: line["number"])
     for line in out:
         del line["number"]
@@ -428,7 +429,7 @@ def plan(data, running):
             out.append({"kind": "comment", "id": comment["id"], "issue": comment["issue"]["identifier"],
                         "issueId": comment["issue"]["id"], "title": comment["issue"]["title"],
                         "state": comment["issue"]["state"]["name"], "createdAt": comment["createdAt"],
-                        "author": comment["user"]["name"], "body": comment["body"]})
+                        "author": comment["user"]["name"], "body": comment["body"], "react": member(comment["user"])})
     return out
 
 
@@ -492,8 +493,11 @@ def run_pass():
         return 0
     for line in out:
         kind = line["kind"]
+        react_to = line.pop("react", False)
         if kind == "comment":
             append(HANDLED, line["id"])
+            if react_to:
+                react("comment", line["id"])
             emit(line)
         elif kind == "stale":
             append(STALE, line.pop("staleKey"))
@@ -511,6 +515,8 @@ def run_pass():
                 append(UNBLOCKED, key)
             if label:
                 remove_label(line["id"], label)
+            if react_to:
+                react("issue", line["id"])
             emit(line)
     return 0
 
@@ -520,10 +526,11 @@ def main():
     sys.stderr.reconfigure(encoding="utf-8")
     args = sys.argv[1:]
     try:
-        if args[:1] == ["seen"]:
-            return seen(*(args[1:3] + [None, None])[:2])
-        if args[:1] == ["watch"]:
+        if args == ["watch"]:
             return watch()
+        if args:
+            print(f"usage: {sys.argv[0]} [watch]", file=sys.stderr)
+            return 2
         return run_pass()
     except Failed:
         return 1
