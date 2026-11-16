@@ -10,7 +10,8 @@
 //! views no placeholder painted in the frame before and hides the rest; [`paint`] shows the ones
 //! still on screen. A view is sized to its page: once loaded, its height is read from the page
 //! and the placeholder re-renders at that height. The page is the mail as the engine gave it
-//! under the engine's content policy, with the engine's style sheet and quote fold
+//! under the engine's content policy, which lets it read the web only when the reader does
+//! (`remote`, MS-364), with the engine's style sheet and quote fold
 //! (`FFI/src/mail_html.rs`, as Flutter's `MailHtmlView`): its quoted history folds behind the
 //! reader's toggle. Page scripts are off; links open in the browser when the engine's
 //! `is_mail_link` allows.
@@ -37,30 +38,43 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 /// The engine's page script (style sheet, quotes marked and folded; it runs once per page).
 static SETUP: LazyLock<String> = LazyLock::new(|| mail_web_script(WebPage::WebKit));
 
-/// [`SETUP`], then the fold the reader asks for, answering the page's height and whether it has
-/// quoted history.
+/// Whether the page names something on the web: `https:` images, stylesheets, backgrounds and
+/// what its style sheets' `url()`s point at. Its content policy holds them back without `remote`.
+const NAMES_REMOTE: &str = r#"(() => {
+  const named = (value) => /^\s*https:/i.test(value || "") || /url\(\s*['"]?https:/i.test(value || "");
+  const attributes = ["src", "srcset", "href", "background", "style"];
+  const elements = document.querySelectorAll("img, link, [background], [style]");
+  return [...elements].some((e) => attributes.some((a) => named(e.getAttribute(a))))
+    || [...document.querySelectorAll("style")].some((s) => named(s.textContent));
+})()"#;
+
+/// [`SETUP`], then the fold the reader asks for, answering the page's height, whether it has
+/// quoted history and whether it names something on the web.
 fn measure(open: bool) -> String {
     format!(
         "{}\nmailstreamFold({open});\n\
-         JSON.stringify([Math.ceil(document.documentElement.getBoundingClientRect().height), !!window.mailstreamQuoted])",
+         JSON.stringify([Math.ceil(document.documentElement.getBoundingClientRect().height), !!window.mailstreamQuoted, {NAMES_REMOTE}])",
         *SETUP
     )
 }
 
-/// A measured page: its height, the width and fold it was measured at, and whether it has quoted
-/// history.
+/// A measured page: its height, the width and fold it was measured at, whether it has quoted
+/// history and whether it names something on the web.
 #[derive(Clone, Copy)]
 struct Measured {
     height: f32,
     width: f32,
     open: bool,
     quoted: bool,
+    names_remote: bool,
 }
 
 struct Entry {
     clip: Retained<NSView>,
     web: Retained<MailWebView>,
     _delegate: Retained<Delegate>,
+    /// Whether the page's content policy lets it read the web.
+    remote: bool,
     measured: Rc<Cell<Option<Measured>>>,
     measuring: Rc<Cell<bool>>,
     painted: bool,
@@ -93,6 +107,13 @@ pub fn quoted(key: &SharedString) -> Option<bool> {
     VIEWS.with_borrow(|views| views.entries.get(key).and_then(|e| e.measured.get()).map(|measured| measured.quoted))
 }
 
+/// Whether the body of message `id` holds back what it names on the web, once measured.
+pub fn blocked(id: &str) -> bool {
+    VIEWS.with_borrow(|views| {
+        views.entries.get(id).is_some_and(|e| !e.remote && e.measured.get().is_some_and(|measured| measured.names_remote))
+    })
+}
+
 /// Starts a frame of the window: drops the views not painted last frame and hides the others
 /// until [`paint`] places them. `covered` keeps them all hidden (a GPUI overlay is open).
 pub fn begin_frame(covered: bool) {
@@ -106,13 +127,17 @@ pub fn begin_frame(covered: bool) {
 }
 
 /// Shows `html` under `key` at `bounds`, clipped to the current content mask, its quoted history
-/// shown while `open`.
-pub fn paint(key: &SharedString, html: &SharedString, open: bool, bounds: Bounds<Pixels>, window: &mut Window) {
+/// shown while `open`; the page reads the web with `remote`, and loads again when that changes (a
+/// content policy is the page's for good).
+pub fn paint(key: &SharedString, html: &SharedString, open: bool, remote: bool, bounds: Bounds<Pixels>, window: &mut Window) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let Some(host) = host_view(window) else { return };
     let pending = VIEWS.with_borrow_mut(|views| {
         let covered = views.covered;
-        let entry = views.entries.entry(key.clone()).or_insert_with(|| Entry::new(html, &host, mtm));
+        if views.entries.get(key).is_some_and(|entry| entry.remote != remote) {
+            views.entries.remove(key);
+        }
+        let entry = views.entries.entry(key.clone()).or_insert_with(|| Entry::new(html, remote, &host, mtm));
         entry.painted = true;
         let clip = bounds.intersect(&window.content_mask().bounds);
         if covered || clip.size.width <= Pixels::ZERO || clip.size.height <= Pixels::ZERO {
@@ -133,7 +158,7 @@ pub fn paint(key: &SharedString, html: &SharedString, open: bool, bounds: Bounds
 }
 
 impl Entry {
-    fn new(html: &str, host: &NSView, mtm: MainThreadMarker) -> Entry {
+    fn new(html: &str, remote: bool, host: &NSView, mtm: MainThreadMarker) -> Entry {
         let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
         unsafe {
             configuration.setWebsiteDataStore(&WKWebsiteDataStore::nonPersistentDataStore(mtm));
@@ -156,9 +181,9 @@ impl Entry {
         clip.addSubview(&web);
         host.addSubview(&clip);
         // No base URL: the page reads no file; its inline images come through `InlinePartHandler`.
-        let page = NSString::from_str(&mail_web_document(html.to_owned(), InlineParts::Served));
+        let page = NSString::from_str(&mail_web_document(html.to_owned(), InlineParts::Served, remote));
         unsafe { web.loadHTMLString_baseURL(&page, None) };
-        Entry { clip, web, _delegate: delegate, measured: Rc::default(), measuring: Rc::default(), painted: true }
+        Entry { clip, web, _delegate: delegate, remote, measured: Rc::default(), measuring: Rc::default(), painted: true }
     }
 
     /// Measures the page once it has loaded, again when the width or the fold changes. True while
@@ -178,10 +203,11 @@ impl Entry {
         let done = RcBlock::new(move |result: *mut AnyObject, _: *mut NSError| {
             measuring.set(false);
             let answer = unsafe { result.as_ref() }.and_then(|r| r.downcast_ref::<NSString>()).map(|s| s.to_string());
-            let measurement = answer.and_then(|answer| serde_json::from_str::<(f64, bool)>(&answer).ok());
+            let measurement = answer.and_then(|answer| serde_json::from_str::<(f64, bool, bool)>(&answer).ok());
             // A page that cannot be measured keeps a modest height rather than asking forever.
-            let (height, quoted) = measurement.map_or((200., false), |(height, quoted)| (height.max(1.) as f32, quoted));
-            measured.set(Some(Measured { height, width, open, quoted }));
+            let (height, quoted, names_remote) =
+                measurement.map_or((200., false, false), |(height, quoted, names_remote)| (height.max(1.) as f32, quoted, names_remote));
+            measured.set(Some(Measured { height, width, open, quoted, names_remote }));
         });
         unsafe { self.web.evaluateJavaScript_completionHandler(&NSString::from_str(&measure(open)), Some(&done)) };
         true

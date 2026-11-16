@@ -83,18 +83,27 @@ pub(crate) fn blitz_css() -> String {
     [BODY_CSS, FLEX_SIZING].concat()
 }
 
-/// What a web page may read: HTTPS and `data:` images, styles and fonts and the inline parts
-/// `inline` names; no scripts, frames, plug-ins, forms or base. The mail's own scripts are also
-/// off in every view's settings.
-fn content_policy(inline: InlineParts) -> &'static str {
-    match inline {
-        InlineParts::Served => {
+/// What a web page may read: `data:` images and fonts, inline styles and the inline parts `inline`
+/// names, and with `remote` (the conversation's senders are known, `mail.remote`) also HTTPS
+/// images, styles and fonts; no scripts, frames, plug-ins, forms or base. The mail's own scripts
+/// are also off in every view's settings.
+fn content_policy(inline: InlineParts, remote: bool) -> &'static str {
+    match (inline, remote) {
+        (InlineParts::Served, true) => {
             "default-src 'none'; img-src https: data: mscid:; style-src 'unsafe-inline' https:; \
              font-src https: data:; base-uri 'none'; form-action 'none'"
         }
-        InlineParts::Files => {
+        (InlineParts::Files, true) => {
             "default-src 'none'; img-src https: data: file:; style-src 'unsafe-inline' https:; \
              font-src https: data:; base-uri 'none'; form-action 'none'"
+        }
+        (InlineParts::Served, false) => {
+            "default-src 'none'; img-src data: mscid:; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; \
+             form-action 'none'"
+        }
+        (InlineParts::Files, false) => {
+            "default-src 'none'; img-src data: file:; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; \
+             form-action 'none'"
         }
     }
 }
@@ -104,14 +113,15 @@ fn content_policy(inline: InlineParts) -> &'static str {
 /// doctype (and the white space, comments and `<?xml …?>` line that may come before one), so the
 /// parser puts it into the (implied) head and a standards-mode body is not laid out in quirks
 /// mode (MS-160). With [`InlineParts::Served`] the inline cache's `file:` URLs become `mscid://`.
+/// Without `remote` the page reads nothing from the web (MS-364).
 #[uniffi::export]
-pub fn mail_web_document(html: String, inline: InlineParts) -> String {
+pub fn mail_web_document(html: String, inline: InlineParts, remote: bool) -> String {
     let html = match inline {
         InlineParts::Served if html.contains("file:") => html.replace(&inline_parts_url(), "mscid://"),
         _ => html,
     };
     let at = prologue_end(&html);
-    let policy = content_policy(inline);
+    let policy = content_policy(inline, remote);
     let meta = format!("<meta http-equiv=\"Content-Security-Policy\" content=\"{policy}\">");
     let mut page = String::with_capacity(html.len() + meta.len());
     page.push_str(&html[..at]);
@@ -323,9 +333,9 @@ mod tests {
 
     #[test]
     fn the_policy_goes_after_a_leading_doctype_only() {
-        let served = content_policy(InlineParts::Served);
+        let served = content_policy(InlineParts::Served, true);
         let meta = format!("<meta http-equiv=\"Content-Security-Policy\" content=\"{served}\">");
-        let page = |html: &str| mail_web_document(html.into(), InlineParts::Served);
+        let page = |html: &str| mail_web_document(html.into(), InlineParts::Served, true);
         let xhtml = "<?xml version=\"1.0\"?>\n<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"x.dtd\">";
         assert_eq!(page(&format!("\u{FEFF}{xhtml}<html></html>")), format!("\u{FEFF}{xhtml}{meta}<html></html>"));
         assert_eq!(
@@ -344,15 +354,25 @@ mod tests {
     fn served_inline_parts_leave_the_file_system() {
         let cache = inline_parts_url();
         let mail = format!("<img src=\"{cache}0a1b/0-logo%20a.png\"><img src=\"file:///etc/x.png\">");
-        let page = mail_web_document(mail.clone(), InlineParts::Served);
+        let page = mail_web_document(mail.clone(), InlineParts::Served, true);
         assert!(page.ends_with("<img src=\"mscid://0a1b/0-logo%20a.png\"><img src=\"file:///etc/x.png\">"), "{page}");
         assert!(page.contains("img-src https: data: mscid:;"));
-        let page = mail_web_document(mail.clone(), InlineParts::Files);
+        let page = mail_web_document(mail.clone(), InlineParts::Files, true);
         assert!(page.ends_with(&mail) && page.contains("img-src https: data: file:;"), "{page}");
-        for inline in [InlineParts::Served, InlineParts::Files] {
-            assert!(!content_policy(inline).contains("script"));
+        for (inline, remote) in [(InlineParts::Served, true), (InlineParts::Files, true), (InlineParts::Served, false), (InlineParts::Files, false)] {
+            assert!(!content_policy(inline, remote).contains("script"));
         }
-        assert!(!content_policy(InlineParts::Served).contains("file:"));
+        assert!(!content_policy(InlineParts::Served, true).contains("file:"));
+        assert!(!content_policy(InlineParts::Served, false).contains("file:"));
+    }
+
+    #[test]
+    fn without_remote_a_page_reads_nothing_from_the_web() {
+        for inline in [InlineParts::Served, InlineParts::Files] {
+            let page = mail_web_document("<img src=\"https://example.com/a.png\">".into(), inline, false);
+            assert!(!page.contains("https:;") && !page.contains("https: "), "{page}");
+            assert!(page.contains("img-src data: ") && page.contains("font-src data:;"), "{page}");
+        }
     }
 
     #[test]

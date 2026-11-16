@@ -489,6 +489,10 @@ pub struct MailApp {
     pub quotes_open: HashSet<String>,
     /// Messages whose full headers the user opened from their recipient line.
     pub headers_open: HashSet<String>,
+    /// Whether each conversation's remote content loads on its own, as the engine last said
+    /// (`mail.remote`), and the conversations whose remote content the person loaded (MS-364).
+    pub remote: HashMap<String, mailstream::RemoteContent>,
+    pub remote_loaded: HashSet<String>,
     /// Meeting invitations' cards, by message.
     pub invitations: HashMap<String, InvitationCard>,
     pub reader_pin: ReaderPin,
@@ -638,6 +642,8 @@ impl MailApp {
             unfolded: HashSet::new(),
             quotes_open: HashSet::new(),
             headers_open: HashSet::new(),
+            remote: HashMap::new(),
+            remote_loaded: HashSet::new(),
             invitations: HashMap::new(),
             reader_pin: ReaderPin::Free,
             reader_top: ReaderTop::Top,
@@ -747,6 +753,18 @@ impl MailApp {
                     }
                     if batch.contains(&Event::Settings) {
                         this.load_layout_settings(cx);
+                        // A sender trusted here or on another device (`remoteContent.trustedSenders`).
+                        let open: Vec<String> = this
+                            .layers
+                            .iter()
+                            .filter_map(|layer| match layer {
+                                Layer::Reader(conversation) => Some(conversation.id.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        for id in open {
+                            this.check_remote(id, cx);
+                        }
                     }
                     let mailboxes = batch.iter().any(|e| matches!(e, Event::Accounts | Event::Mailboxes));
                     if mailboxes {
@@ -1235,8 +1253,9 @@ impl MailApp {
 
     /// Reads the conversation's messages, unless they are loaded for its message count; `again`
     /// reads them anyway. A thread on screen stays until the new one arrives, and stays if that
-    /// fails.
+    /// fails. Whether its remote content loads is asked again either way.
     pub(crate) fn load_thread(&mut self, conversation: &Conversation, again: bool, cx: &mut Context<Self>) {
+        self.check_remote(conversation.id.clone(), cx);
         self.thread_requests += 1;
         let request = self.thread_requests;
         let id = conversation.id.clone();
@@ -1292,6 +1311,25 @@ impl MailApp {
         );
     }
 
+    /// Asks the engine whether conversation `id`'s remote images, stylesheets and fonts load on
+    /// their own (`mail.remote`, MS-364); until it says, the reader holds them back.
+    pub(crate) fn check_remote(&mut self, id: String, cx: &mut Context<Self>) {
+        let arg = id.clone();
+        self.background(cx, engine().remote_content(arg), move |this, result, cx| {
+            let Ok(remote) = result else { return };
+            if this.remote.get(&id) != Some(&remote) {
+                this.remote.insert(id, remote);
+                cx.notify();
+            }
+        });
+    }
+
+    /// Whether the reader lets conversation `id`'s bodies read the web: the engine says its
+    /// senders are known, or the person loaded it.
+    pub fn remote_allowed(&self, id: &str) -> bool {
+        self.remote_loaded.contains(id) || self.remote.get(id).is_some_and(|remote| remote.allowed)
+    }
+
     /// Decides where the conversation just opened holds, once its messages are in: the head of
     /// its first unread message, else of its last; its top when that is its first message (a
     /// single mail always), where the title shows.
@@ -1307,6 +1345,9 @@ impl MailApp {
         };
     }
 }
+
+/// The setting of the senders whose remote content loads on its own.
+const TRUSTED_SENDERS: &str = "remoteContent.trustedSenders";
 
 /// A fresh list of `count` rows, scrolled to the top.
 pub fn list_state(count: usize) -> ListState {

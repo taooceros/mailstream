@@ -8,7 +8,10 @@
 //! (`Flutter/lib/ui/blitz_body.dart`): a click opens the link under it in the browser when the
 //! engine's `is_mail_link` allows (http, https and mailto), a drag selects text and ⌘C (Ctrl+C)
 //! copies it (a press in a body takes keyboard focus from a text field, as in a browser), and late
-//! content (a remote image, a web font) lays the page out again. The page
+//! content (a remote image, a web font) lays the page out again. A page reads nothing from the web
+//! until the reader lets it (`remote`, the engine's `mail.remote` or the person's go-ahead), and
+//! says whether it held something back ([`blocked`]); letting a page read it later loads what it
+//! held, without opening it again (MS-364). The page
 //! takes the mail as the engine gave it; the rules every reader shares (quotes, inline images,
 //! style, the mail's colours on the reader's surface) are the engine's (`FFI/src/mail_html.rs`).
 //! Tiles are transparent where the mail paints nothing, so the surface under the body shows; a
@@ -69,6 +72,10 @@ struct Entry {
     page: Option<Arc<HtmlPage>>,
     /// The surface the page was opened for; another (the appearance changed) opens it again.
     theme: Option<HtmlTheme>,
+    /// Whether the page may read the web, and whether it held back something it asked of it, as
+    /// its latest layout says.
+    remote: bool,
+    blocked: bool,
     /// Whether the page is on paper, once it says.
     paper: Option<bool>,
     layout: Option<Layout>,
@@ -133,6 +140,19 @@ pub fn paper(key: &SharedString) -> bool {
     PAGES.with_borrow(|pages| pages.entries.get(key).and_then(|entry| entry.paper).unwrap_or(false))
 }
 
+/// Whether a page of the message `id` (its body or its quoted history) holds back remote content
+/// it asked for, as its latest layout says.
+pub fn blocked(id: &str) -> bool {
+    PAGES.with_borrow(|pages| {
+        pages.entries.iter().any(|(key, entry)| {
+            entry.blocked && key.strip_prefix(id).is_some_and(|rest| rest.is_empty() || rest == QUOTED)
+        })
+    })
+}
+
+/// What a message's id takes for the key of its quoted history's page.
+pub const QUOTED: &str = "#quoted";
+
 /// Starts a frame of the window: closes the pages not painted last frame and frees the tiles no
 /// longer shown.
 pub fn begin_frame(window: &mut Window) {
@@ -159,13 +179,15 @@ pub fn prepaint(bounds: Bounds<Pixels>, window: &mut Window) -> Hitbox {
 
 /// Draws `part` of `html` under `key` at `bounds` on the surface `theme` describes, clipped to the
 /// current content mask; a press in it moves keyboard focus to `focus` (the window's, out of any
-/// text field).
+/// text field). The page reads the web only with `remote`: turned on, the open page loads what it
+/// held back; turned off, it opens again without.
 #[allow(clippy::too_many_arguments)]
 pub fn paint(
     key: &SharedString,
     html: &SharedString,
     part: HtmlPart,
     theme: HtmlTheme,
+    remote: bool,
     bounds: Bounds<Pixels>,
     hitbox: Hitbox,
     focus: &FocusHandle,
@@ -179,16 +201,24 @@ pub fn paint(
     let mut images = Vec::new();
     let over_link = PAGES.with_borrow_mut(|pages| {
         let Pages { entries, retired } = pages;
-        if entries.get(key).is_some_and(|entry| entry.theme != Some(theme)) {
+        if entries.get(key).is_some_and(|entry| entry.theme != Some(theme) || (entry.remote && !remote)) {
             let stale = entries.remove(key).expect("the entry is there");
             retired.extend(stale.tiles.values().map(|tile| tile.image.clone()));
         }
         let entry = entries.entry(key.clone()).or_insert_with(|| {
-            open(key, html, part, theme, window, cx);
+            open(key, html, part, theme, remote, window, cx);
             let mut entry = Entry::default();
             entry.theme = Some(theme);
+            entry.remote = remote;
             entry
         });
+        if remote && !entry.remote {
+            entry.remote = true;
+            // A page still opening loads it once it is there (`open`).
+            if let Some(page) = &entry.page {
+                page.load_remote();
+            }
+        }
         entry.painted = true;
         let Some(page) = entry.page.clone() else { return false };
         if entry.asked != Some((width, scale)) {
@@ -215,15 +245,19 @@ pub fn paint(
     listen(key, bounds, hitbox, focus.clone(), window);
 }
 
-/// Opens the body's page, which parses on the engine's pages thread.
-fn open(key: &SharedString, html: &SharedString, part: HtmlPart, theme: HtmlTheme, window: &Window, cx: &App) {
+/// Opens the body's page, which parses on the engine's pages thread, reading the web if `remote`.
+fn open(key: &SharedString, html: &SharedString, part: HtmlPart, theme: HtmlTheme, remote: bool, window: &Window, cx: &App) {
     let key = key.clone();
-    let page = HtmlPage::themed(html.to_string(), part, theme);
+    let page = HtmlPage::themed(html.to_string(), part, theme, remote);
     window
         .spawn(cx, async move |cx| {
             let opened = PAGES.with_borrow_mut(|pages| match pages.entries.get_mut(&key) {
                 Some(entry) => {
                     entry.page = Some(page.clone());
+                    // Let read the web while it was opening.
+                    if entry.remote && !remote {
+                        page.load_remote();
+                    }
                     true
                 }
                 None => false,
@@ -285,6 +319,7 @@ fn lay_out(key: &SharedString, page: &Arc<HtmlPage>, width: f32, scale: f32, win
                     return false;
                 }
                 entry.layout = Some(Layout { width, scale, height: size.height as f32 });
+                entry.blocked = size.blocked;
                 entry.generation += 1;
                 true
             });

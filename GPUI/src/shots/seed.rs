@@ -14,7 +14,9 @@
 //!   font) Sam answered last, so its row shows Sam's reply as from "me"; a text mail with a long
 //!   quoted history; newsletters and notifications, which the list folds into bundles: a GitHub
 //!   notification (a transparent logo, a grey panel, a green button), a newsletter on its own
-//!   grey page with a brand band and a pastel callout, a morning brief with a photo, a logo and a
+//!   grey page with a brand band, a remote banner (held back until loaded or its sender trusted,
+//!   MS-364; this run's stand-in web serves it) and a pastel callout, a morning brief with a
+//!   photo, a logo and a
 //!   table of coloured rows; and a card painted on a paper texture (which dark mode keeps on
 //!   paper, MS-267). Every conversation with mail in the inbox carries its AI tag, so nothing is
 //!   tagged during a run.
@@ -190,6 +192,7 @@ pub fn write(support: &Path, caches: &Path, mail_only: bool) {
     let settings = json!({ "aiTagging.ompPath": "/nonexistent/shots-omp" });
     std::fs::write(support.join("settings.json"), serde_json::to_string_pretty(&settings).unwrap()).expect("settings.json");
     let mail = mail();
+    mailstream_engine::avatars::web::serve_for_shots(DIGEST_BANNER, png_bytes(&digest_banner()));
     write_avatars(&caches.join("avatars"), &mail);
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
     runtime.block_on(async {
@@ -541,15 +544,36 @@ fn github_html() -> String {
     )
 }
 
-/// A newsletter on its own grey page: a white card with a brand band, a pastel callout, a yellow
-/// button, a hairline and a muted footer.
+/// The Design Digest's banner, a remote image (MS-364): its sender is no one Sam wrote to, so the
+/// reader holds it back until loaded.
+const DIGEST_BANNER: &str = "https://designdigest.example/issues/42/banner.png";
+
+/// Stripes of the digest's palette with a sun, 520 × 120.
+fn digest_banner() -> image::RgbaImage {
+    image::RgbaImage::from_fn(520, 120, |x, y| {
+        let (fx, fy) = (x as f32 / 520., y as f32 / 120.);
+        let sun = (fx - 0.8).powi(2) * 6. + (fy - 0.45).powi(2) * 2. < 0.03;
+        let band = ((fx * 10. + fy * 3.) as u32) % 4;
+        let pixel = if sun {
+            [0xff, 0xd4, 0x3b]
+        } else {
+            [[0x3b, 0x5b, 0xdb], [0x4c, 0x6e, 0xf5], [0x74, 0x8f, 0xfc], [0x91, 0xa7, 0xff]][band as usize]
+        };
+        image::Rgba([pixel[0], pixel[1], pixel[2], 255])
+    })
+}
+
+/// A newsletter on its own grey page: a white card with a brand band, a remote banner, a pastel
+/// callout, a yellow button, a hairline and a muted footer.
 fn digest_html() -> String {
-    "<table width=\"100%\" bgcolor=\"#f2f0eb\" cellpadding=\"0\" cellspacing=\"0\" style=\"font-family:Georgia,serif\"><tr>\
+    format!(
+        "<table width=\"100%\" bgcolor=\"#f2f0eb\" cellpadding=\"0\" cellspacing=\"0\" style=\"font-family:Georgia,serif\"><tr>\
      <td align=\"center\" style=\"padding:24px 12px\">\
      <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" bgcolor=\"#ffffff\" style=\"max-width:520px;border-radius:8px\">\
      <tr><td style=\"background:#3b5bdb;color:#ffffff;padding:20px 24px;border-radius:8px 8px 0 0\">\
      <div style=\"font-size:12px;letter-spacing:2px;color:#dbe4ff\">DESIGN DIGEST · ISSUE 42</div>\
      <div style=\"font-size:24px;font-weight:bold\">Color systems</div></td></tr>\
+     <tr><td><img src=\"{DIGEST_BANNER}\" alt=\"\" style=\"display:block;width:100%;height:auto\"></td></tr>\
      <tr><td style=\"padding:20px 24px;color:#333333;font-size:15px;line-height:1.5\">\
      <p>How three teams built their color tokens, and what they would do again.</p>\
      <div style=\"background:#e7f5ff;border-left:4px solid #339af0;padding:12px 16px;color:#1c4f82\">\
@@ -562,7 +586,7 @@ fn digest_html() -> String {
      <p style=\"color:#868e96;font-size:12px\">You subscribed at designdigest.example. \
      <a href=\"https://designdigest.example/unsubscribe\" style=\"color:#868e96\">Unsubscribe</a></p>\
      </td></tr></table></td></tr></table>"
-        .into()
+    )
 }
 
 /// A morning brief with images: a transparent dark wordmark, an opaque photo, and a table of
@@ -628,9 +652,14 @@ fn card_html() -> String {
 
 /// `image` as a PNG `data:` URL.
 fn png_data(image: &image::RgbaImage) -> String {
+    format!("data:image/png;base64,{}", base64(&png_bytes(image)))
+}
+
+/// `image` as PNG bytes.
+fn png_bytes(image: &image::RgbaImage) -> Vec<u8> {
     let mut png = std::io::Cursor::new(Vec::new());
     image.write_to(&mut png, image::ImageFormat::Png).expect("a PNG encodes");
-    format!("data:image/png;base64,{}", base64(png.get_ref()))
+    png.into_inner()
 }
 
 fn base64(bytes: &[u8]) -> String {

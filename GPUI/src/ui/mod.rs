@@ -28,8 +28,9 @@ use crate::avatars;
 use crate::bench::{Bench, Turn};
 use crate::compose::{ComposeColumn, ResizeColumn};
 use crate::controls::{
-    Tone, capsule, centered_note, hairline, icon_avatar, icon_button, island, list_row, mark_dot, notice, notice_close,
-    own_presses, pill, raised_capsule, row_layout, scrim, search_field, section_header, tag, title_bar,
+    ButtonKind, ControlSize, Tone, button, capsule, centered_note, hairline, icon_avatar, icon_button, island, list_row,
+    mark_dot, notice, notice_close, own_presses, pill, raised_capsule, row_layout, scrim, search_field, section_header, tag,
+    title_bar,
 };
 #[cfg(target_os = "macos")]
 use crate::controls::{segment, segmented};

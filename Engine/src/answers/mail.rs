@@ -207,6 +207,17 @@ pub struct Thread {
     pub messages: Vec<Message>,
 }
 
+/// Whether a conversation's remote images, stylesheets and fonts load on their own
+/// (`mail.remote`): mail from the user, from people they wrote to and from senders they trust
+/// (`remoteContent.trustedSenders`) does; junk never does. `untrusted` are the senders that keep
+/// it from loading, whom trusting lets it load (junk aside).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
+pub struct RemoteContent {
+    pub allowed: bool,
+    #[serde(with = "address_text::list")]
+    pub untrusted: Vec<Address>,
+}
+
 /// A conversation's AI tag after `mail.tag` corrected it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
 pub struct Tagged {

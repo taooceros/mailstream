@@ -453,6 +453,10 @@ commands! {
     /// Puts a setting back to its default.
     fn reset_setting(key: String) -> SettingEntry = "config.reset" { "key": key };
 
+    /// Adds `values` to the list setting `key` (`remoteContent.trustedSenders`), keeping what it
+    /// holds; [`Event::Settings`] follows.
+    fn add_to_setting(key: String, values: Vec<String>) -> SettingEntry = "config.add" { "key": key, "values": values };
+
     /// Each account's mailboxes, by account id; only `account`'s when given.
     fn mailboxes(account: Option<String>) -> HashMap<String, Vec<Mailbox>> = "mailboxes" { "account": account };
 
@@ -468,6 +472,11 @@ commands! {
     fn show(id: String, max_chars: u32, html: bool) -> Thread = "mail.show" {
         "id": id, "max-chars": max_chars, "html": html
     } dressed;
+
+    /// Whether the remote images, stylesheets and fonts of conversation `id` load on their own,
+    /// and the senders that keep them from it; it changes with `remoteContent.trustedSenders`
+    /// ([`Event::Settings`]) and with the mail the user sends.
+    fn remote_content(id: String) -> RemoteContent = "mail.remote" { "id": id };
 
     /// The preview line of each conversation's latest message by id, loading those not loaded yet.
     fn previews(ids: Vec<String>) -> HashMap<String, Option<String>> = "mail.previews" { "ids": ids };

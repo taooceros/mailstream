@@ -387,6 +387,34 @@ impl MailApp {
         );
     }
 
+    /// Lets conversation `id`'s bodies read the web while the app runs (the reader's "Load
+    /// Images"): the pages on screen load what they held back.
+    pub fn load_remote_content(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.remote_loaded.insert(id.to_owned()) {
+            cx.notify();
+        }
+    }
+
+    /// Trusts the senders that keep conversation `id`'s remote content from loading
+    /// (`remoteContent.trustedSenders`, which device sync carries to the user's other devices);
+    /// the engine's settings event then lets it load here.
+    pub fn trust_senders(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(remote) = self.remote.get(id) else { return };
+        let senders: Vec<String> = remote.untrusted.iter().map(|sender| sender.email.clone()).collect();
+        if senders.is_empty() {
+            return;
+        }
+        let conversation = id.to_owned();
+        self.background(
+            cx,
+            engine().add_to_setting(TRUSTED_SENDERS.into(), senders),
+            move |this, result, cx| match result {
+                Ok(_) => this.check_remote(conversation, cx),
+                Err(error) => this.show_toast(format!("Couldn't trust the sender: {error}"), cx),
+            },
+        );
+    }
+
     /// Takes the conversations out of every list at once, with one call to the engine; puts back
     /// those it refuses. Ends a selection.
     pub fn remove(&mut self, conversations: Vec<Conversation>, removal: Removal, window: &mut Window, cx: &mut Context<Self>) {

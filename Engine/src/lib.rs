@@ -450,8 +450,8 @@ impl Engine {
     }
 
     /// Whether remote images and fonts of conversation `id` (from a listing) load on their own,
-    /// and the senders that keep them from it; see [`mail::Mail::remote_content`]. For the
-    /// AppKit reader once it moves to this engine (MS-120); no command carries it.
+    /// and the senders that keep them from it; see [`mail::Mail::remote_content`]. The
+    /// `mail.remote` command answers the same.
     pub fn remote_content(&self, id: &str) -> Result<(bool, Vec<model::Address>), EngineError> {
         self.core.mail.remote_content(id)
     }

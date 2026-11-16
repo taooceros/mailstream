@@ -90,6 +90,11 @@ impl MailApp {
                     .children(self.render_renderer_switch(p, cx)),
             );
         let mut rows: Vec<AnyElement> = vec![head.into_any_element()];
+        // The bodies read the web only when the engine knows the senders or the person says so.
+        let remote = self.remote_allowed(&conversation.id);
+        if let Some(bar) = self.render_remote_bar(conversation, remote, p, cx) {
+            rows.push(column().mt(px(space::S16)).child(bar).into_any_element());
+        }
         let pinned = match &self.reader_pin {
             ReaderPin::Message(id) => Some(id),
             _ => None,
@@ -103,7 +108,7 @@ impl MailApp {
                 column().mt(px(space::S24)).child(notice(Tone::Error, None, error.clone(), false, p)).into_any_element(),
             ),
             Some(ThreadState::Loaded(messages)) if conversation.chat_log() => {
-                for (index, (id, row)) in self.render_chat_log(messages, p, cx).into_iter().enumerate() {
+                for (index, (id, row)) in self.render_chat_log(messages, remote, p, cx).into_iter().enumerate() {
                     if pinned.is_some() && id.as_ref() == pinned {
                         target = Some(rows.len());
                     }
@@ -118,7 +123,7 @@ impl MailApp {
                     }
                     let open = index == last || message.unread || self.unfolded.contains(&message.id);
                     let gap = if index == 0 { space::S24 } else { space::S12 };
-                    rows.push(column().mt(px(gap)).child(self.render_message(message, open, index == last, p, cx)).into_any_element());
+                    rows.push(column().mt(px(gap)).child(self.render_message(message, open, index == last, remote, p, cx)).into_any_element());
                 }
             }
         }
@@ -203,13 +208,77 @@ impl MailApp {
         }
     }
 
+    /// The bar over a conversation whose bodies hold back remote content (MS-364), once the engine
+    /// said whose mail it is: what is hidden and why, "Load Images" for this time and "Trust
+    /// Sender" for good (`remoteContent.trustedSenders`, which device sync carries along).
+    fn render_remote_bar(
+        &self,
+        conversation: &Conversation,
+        remote: bool,
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if remote {
+            return None;
+        }
+        let Some(ThreadState::Loaded(messages)) = self.threads.get(&conversation.id).map(|t| &t.state) else { return None };
+        let untrusted = &self.remote.get(&conversation.id)?.untrusted;
+        if !messages.iter().any(|message| self.body_blocked(&message.id)) {
+            return None;
+        }
+        let text: SharedString = if untrusted.is_empty() {
+            "Remote images in junk mail are hidden to protect your privacy.".into()
+        } else {
+            let names: Vec<String> = untrusted.iter().map(|sender| sender.display_name()).collect();
+            format!("Remote images from {} are hidden to protect your privacy.", names.join(", ")).into()
+        };
+        let id = conversation.id.clone();
+        let load = button("remote-load", "Load Images", ButtonKind::Secondary, ControlSize::Small, true, p)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.load_remote_content(&id, cx)));
+        let trust = (!untrusted.is_empty()).then(|| {
+            let id = conversation.id.clone();
+            let emails: Vec<&str> = untrusted.iter().map(|sender| sender.email.as_str()).collect();
+            let label = if untrusted.len() == 1 { "Trust Sender" } else { "Trust Senders" };
+            button("remote-trust", label, ButtonKind::Secondary, ControlSize::Small, true, p)
+                .tooltip(format!("Always load remote images from {}, on every device", emails.join(", ")))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_senders(&id, cx)))
+        });
+        let bar = div()
+            .flex()
+            .items_center()
+            .gap(px(space::S10))
+            .pl(px(space::S12))
+            .pr(px(space::S8))
+            .py(px(space::S8))
+            .rounded(px(radius::CARD))
+            .bg(p.background)
+            .border(px(stroke::HAIRLINE))
+            .border_color(p.line)
+            .child(icon(Icon::HideImage, icon_size::ROW, p.muted))
+            .child(div().flex_1().min_w_0().text_size(px(text::FOOTNOTE)).text_color(p.text).child(text))
+            .child(load)
+            .children(trust);
+        Some(bar.into_any_element())
+    }
+
+    /// Whether a page of message `id`'s body holds back remote content, in the renderer in use.
+    fn body_blocked(&self, id: &str) -> bool {
+        #[cfg(target_os = "macos")]
+        if self.renderer == Renderer::WebKit {
+            return webview::blocked(id);
+        }
+        blitz_body::blocked(id)
+    }
+
     /// A message as Mail shows one: the page's surface inside a hairline, rounded; its header
-    /// (the sender, who it went to or a preview while folded, the date) folds it.
+    /// (the sender, who it went to or a preview while folded, the date) folds it. Its body reads
+    /// the web with `remote`.
     fn render_message(
         &self,
         message: &ShownMessage,
         open: bool,
         last: bool,
+        remote: bool,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -288,7 +357,7 @@ impl MailApp {
         });
         card.children(invitation)
             // The body's presses are its own (text selection, links): no drag of the reader there.
-            .children(self.render_body(message, p, cx).map(|body| own_presses(inset()).child(body)))
+            .children(self.render_body(message, remote, p, cx).map(|body| own_presses(inset()).child(body)))
             .when(message.truncated && message.body_html.is_none(), |d| {
                 d.child(
                     inset()
@@ -399,11 +468,12 @@ impl MailApp {
         }))
     }
 
-    /// A message's body: its HTML when it has one (`mailstream::Message::html_body`), else its text with its
-    /// `>` quotes in place; either way with its quoted history folded.
-    fn render_body(&self, message: &ShownMessage, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// A message's body: its HTML when it has one (`mailstream::Message::html_body`), reading the
+    /// web with `remote`, else its text with its `>` quotes in place; either way with its quoted
+    /// history folded.
+    fn render_body(&self, message: &ShownMessage, remote: bool, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         if let Some(html) = &message.body_html {
-            return Some(self.render_html(message, html.clone(), p, cx));
+            return Some(self.render_html(message, html.clone(), remote, p, cx));
         }
         message.text.as_ref()?;
         let open = self.quotes_open.contains(&message.id);
@@ -428,22 +498,30 @@ impl MailApp {
     /// once the toggle opens it; the Mac's web view, when chosen, folds the quotes inside its
     /// page behind the same toggle. Only the chosen renderer holds pages: the other's close at
     /// the next frame (`begin_frame`).
-    fn render_html(&self, message: &ShownMessage, html: SharedString, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_html(
+        &self,
+        message: &ShownMessage,
+        html: SharedString,
+        remote: bool,
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let id: SharedString = message.id.clone().into();
         let open = self.quotes_open.contains(&message.id);
         #[cfg(target_os = "macos")]
         if self.renderer == Renderer::WebKit {
-            let body = web_body(id.clone(), html, open);
+            let body = web_body(id.clone(), html, open, remote);
             if webview::quoted(&id) != Some(true) {
                 return body;
             }
             return div().flex().flex_col().child(body).child(self.render_fold(&id, open, div(), p, cx)).into_any_element();
         }
-        let main = blitz_html(id.clone(), html.clone(), blitz_body::HtmlPart::Main, p, &self.focus);
+        let main = blitz_html(id.clone(), html.clone(), blitz_body::HtmlPart::Main, remote, p, &self.focus);
         if blitz_body::quoted(&id) != Some(true) {
             return main;
         }
-        let quoted = blitz_html(format!("{id}#quoted").into(), html, blitz_body::HtmlPart::Quoted, p, &self.focus);
+        let key = format!("{id}{}", blitz_body::QUOTED).into();
+        let quoted = blitz_html(key, html, blitz_body::HtmlPart::Quoted, remote, p, &self.focus);
         div().flex().flex_col().child(main).child(self.render_fold(&id, open, quoted, p, cx)).into_any_element()
     }
 
@@ -535,6 +613,7 @@ impl MailApp {
     fn render_chat_log(
         &self,
         messages: &[ShownMessage],
+        remote: bool,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> Vec<(Option<String>, AnyElement)> {
@@ -547,12 +626,19 @@ impl MailApp {
             // A message joining a run names its recipients only when they changed.
             let recipients = !message.continued || previous.is_none_or(|before| before.recipients != message.recipients);
             previous = Some(message);
-            rows.push((Some(message.id.clone()), self.render_log_message(message, recipients, p, cx)));
+            rows.push((Some(message.id.clone()), self.render_log_message(message, recipients, remote, p, cx)));
         }
         rows
     }
 
-    fn render_log_message(&self, message: &ShownMessage, recipients: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_log_message(
+        &self,
+        message: &ShownMessage,
+        recipients: bool,
+        remote: bool,
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let id = message.id.clone();
         let hovered = self.hovered_message.as_ref() == Some(&id);
         let continued = message.continued;
@@ -582,7 +668,7 @@ impl MailApp {
             // An HTML body has no width of its own (Blitz and the web view lay it out at the width
             // they are given), so it takes the column's: on the user's own side, which hugs its
             // pieces to the right, it would shrink to a sliver (MS-349).
-            self.render_body(message, p, cx)
+            self.render_body(message, remote, p, cx)
                 .map(|body| own_presses(div()).when(message.body_html.is_some(), |d| d.w_full()).child(body).into_any_element()),
             (!message.tiles.is_empty())
                 .then(|| div().pt(px(space::S8)).child(self.render_attachments(message, p, cx)).into_any_element()),
@@ -639,11 +725,13 @@ fn text_runs(prefix: &str, runs: &[format::Run], p: &'static Palette) -> Div {
 /// is laid out. The mail sits on the reader's surface, its colours moved to it in dark mode
 /// (MS-267); mail that can't move is drawn on paper, which dark mode shows as a sheet with room
 /// around the mail and rounded corners, so it never meets the dark surface edge to edge (MS-256).
-/// A press in it gives the window's `focus` the keys (`blitz_body::paint`).
+/// A press in it gives the window's `focus` the keys (`blitz_body::paint`). It reads the web
+/// with `remote`.
 fn blitz_html(
     key: SharedString,
     html: SharedString,
     part: blitz_body::HtmlPart,
+    remote: bool,
     p: &Palette,
     focus: &FocusHandle,
 ) -> AnyElement {
@@ -653,7 +741,9 @@ fn blitz_html(
     let focus = focus.clone();
     let body = canvas(
         |bounds, window, _| blitz_body::prepaint(bounds, window),
-        move |bounds, hitbox, window, cx| blitz_body::paint(&key, &html, part, theme, bounds, hitbox, &focus, window, cx),
+        move |bounds, hitbox, window, cx| {
+            blitz_body::paint(&key, &html, part, theme, remote, bounds, hitbox, &focus, window, cx)
+        },
     );
     let body = body.w_full().h(px(height)).into_any_element();
     if !paper {
@@ -673,11 +763,12 @@ fn html_theme(p: &Palette) -> blitz_body::HtmlTheme {
 }
 
 /// The Mac's WebView renderer: a placeholder the native web view of the whole body is laid over,
-/// as tall as its page once that is measured; its quoted history shows while `open`.
+/// as tall as its page once that is measured; its quoted history shows while `open`, and it reads
+/// the web with `remote`.
 #[cfg(target_os = "macos")]
-fn web_body(id: SharedString, html: SharedString, open: bool) -> AnyElement {
+fn web_body(id: SharedString, html: SharedString, open: bool, remote: bool) -> AnyElement {
     let height = webview::height(&id).unwrap_or(40.);
-    let body = canvas(|_, _, _| {}, move |bounds, _, window, _| webview::paint(&id, &html, open, bounds, window));
+    let body = canvas(|_, _, _| {}, move |bounds, _, window, _| webview::paint(&id, &html, open, remote, bounds, window));
     body.w_full().h(px(height)).into_any_element()
 }
 

@@ -1246,6 +1246,10 @@ impl Mail {
                 self.list(args, Some(query)).await
             }
             "mail.show" => self.show(args).await,
+            "mail.remote" => {
+                let (allowed, untrusted) = self.remote_content(&args.required("id")?)?;
+                Ok(answers::json(&answers::RemoteContent { allowed, untrusted }))
+            }
             "mail.previews" => self.previews(args).await,
             "mail.read" | "mail.star" | "mail.archive" | "mail.trash" | "mail.restore" => self.act(command, args).await,
             "mail.autoread" | "mail.autoread.undo" => self.auto_read_command(command, args).await,

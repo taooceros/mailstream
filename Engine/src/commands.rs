@@ -389,6 +389,12 @@ pub const COMMANDS: &[Spec] = &[
         ],
     ),
     Spec::new(
+        "mail.remote",
+        Handler::Mail,
+        "Whether a conversation's remote images, stylesheets and fonts load on their own (from the user, people they wrote to or trusted senders; never junk), and the senders that keep them from it.",
+        &[CONVERSATION_ID],
+    ),
+    Spec::new(
         "mail.previews",
         Handler::Mail,
         "The preview line of each conversation's latest message, loading the messages that have none yet.",

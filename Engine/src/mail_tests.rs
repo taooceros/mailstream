@@ -286,6 +286,15 @@ fn lists_shows_and_searches_gmail_and_serves_the_cache_without_asking_again() {
     assert_eq!(ids(&found), ["me@gmail.com|s0@x", "me@gmail.com|i10@x"]);
     assert!(found.get("next").is_none());
 
+    // Remote content (MS-364): the lunch thread's sender is someone the user answered; the
+    // alert's sender is no one they wrote to.
+    let lunch_remote = call(&engine, "mail.remote", json!({ "id": "me@gmail.com|i00@x" })).unwrap();
+    assert_eq!(lunch_remote, json!({ "allowed": true, "untrusted": [] }));
+    let alert_remote = call(&engine, "mail.remote", json!({ "id": alert["id"] })).unwrap();
+    assert_eq!(alert_remote["allowed"], false);
+    assert_eq!(alert_remote["untrusted"].as_array().unwrap().len(), 1, "{alert_remote}");
+    assert_eq!(call(&engine, "mail.remote", json!({ "id": "nope" })).unwrap_err().code, "unknown_conversation");
+
     assert_eq!(call(&engine, "mail.show", json!({ "id": "nope" })).unwrap_err().code, "unknown_conversation");
     assert_eq!(call(&engine, "mail.list", json!({ "cursor": "x" })).unwrap_err().code, "usage");
     assert_eq!(call(&engine, "mail.list", json!({ "mailbox": "Nope" })).unwrap_err().code, "unknown_mailbox");

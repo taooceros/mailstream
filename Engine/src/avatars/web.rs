@@ -87,8 +87,23 @@ fn max_age(cache_control: &str) -> Option<Duration> {
     age
 }
 
+/// The screenshot mode's web for mail's remote images (`GPUI/src/shots/seed.rs`, MS-364): what
+/// [`serve_for_shots`] gave, by URL, answered before the real web is asked.
+#[cfg(feature = "shots")]
+static SHOTS_WEB: LazyLock<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>> = LazyLock::new(Default::default);
+
+/// Serves `body` at `url` to the mail reader's pages in the screenshot mode.
+#[cfg(feature = "shots")]
+pub fn serve_for_shots(url: &str, body: Vec<u8>) {
+    SHOTS_WEB.lock().unwrap().insert(url.to_owned(), body);
+}
+
 impl Web for Browser {
     fn get(&self, url: String, cap: usize) -> BoxFuture<'static, Option<Page>> {
+        #[cfg(feature = "shots")]
+        if let Some(body) = SHOTS_WEB.lock().unwrap().get(&url).cloned() {
+            return Box::pin(async move { Some(Page { body, url, max_age: None }) });
+        }
         get(&BROWSER, url, cap)
     }
 

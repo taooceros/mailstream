@@ -10,9 +10,10 @@
 //! inline parts in the engine's cache that its bodies name by `file:` URL
 //! ([`mail_html::inline_part`]), `https:` stylesheets (linked, and what those and the mail's own
 //! styles `@import`, one level deep) and the `https:` and `data:` web fonts they name; no other
-//! file. SVG is off, as its renderer would read files an SVG's `<image>` names. The reader's
-//! style sheet and where quoted history starts are the rules every reader shares
-//! (`mail_html.rs`).
+//! file. SVG is off, as its renderer would read files an SVG's `<image>` names. A page of mail whose
+//! senders aren't known (`mail.remote`) reads nothing from the web until the reader lets it
+//! ([`HtmlPage::load_remote`], MS-364). The reader's style sheet and where quoted history starts
+//! are the rules every reader shares (`mail_html.rs`).
 //!
 //! Web fonts (MS-164) never hold a page back: it lays out and draws in system fonts at once, and a
 //! font arriving later lays it out again, unless it comes [`LATE`] after the page was first shown,
@@ -111,11 +112,13 @@ const CACHE_CAP: u64 = 50 << 20;
 const MEMORY_CAP: usize = 16 << 20;
 
 /// A page's size at the width it was laid out for, in points, and its version, which grows each
-/// time late content (an image) changes it.
+/// time late content (an image) changes it; `blocked`: whether it holds back remote content it
+/// asked for (a page opened without `remote`) until [`HtmlPage::load_remote`].
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct HtmlSize {
     pub height: f64,
     pub version: i64,
+    pub blocked: bool,
 }
 
 /// `width` × `height` pixels, RGBA, 8 bits each, row by row, alpha premultiplied: opaque on white
@@ -172,20 +175,27 @@ impl HtmlPage {
     /// Starts parsing `html` on the pages' thread; returns at once.
     #[uniffi::constructor]
     pub fn new(html: String) -> Arc<Self> {
-        Self::open(html, HtmlPart::Whole, None, RESOURCES.clone())
+        Self::open(html, HtmlPart::Whole, None, true, RESOURCES.clone())
     }
 
     /// A page of one [`HtmlPart`] of `html`, parsed on the pages' thread; returns at once.
     #[uniffi::constructor]
     pub fn part(html: String, part: HtmlPart) -> Arc<Self> {
-        Self::open(html, part, None, RESOURCES.clone())
+        Self::open(html, part, None, true, RESOURCES.clone())
     }
 
     /// A page of one [`HtmlPart`] of `html` on the surface `theme` describes, parsed on the
-    /// pages' thread; returns at once.
+    /// pages' thread; returns at once. Without `remote` (the conversation's senders aren't known,
+    /// `mail.remote`) it reads nothing from the web until [`HtmlPage::load_remote`] (MS-364).
     #[uniffi::constructor]
-    pub fn themed(html: String, part: HtmlPart, theme: HtmlTheme) -> Arc<Self> {
-        Self::open(html, part, Some(theme), RESOURCES.clone())
+    pub fn themed(html: String, part: HtmlPart, theme: HtmlTheme, remote: bool) -> Arc<Self> {
+        Self::open(html, part, Some(theme), remote, RESOURCES.clone())
+    }
+
+    /// Reads the remote images, stylesheets and fonts a page opened without `remote` held back,
+    /// and what it asks for from now on; the page lays out again as they arrive.
+    pub fn load_remote(&self) {
+        send(Job::LoadRemote { id: self.id });
     }
 
     /// Whether a themed page is drawn as the mail wrote it, on white (dark mode, for mail that
@@ -280,17 +290,18 @@ impl Drop for HtmlPage {
 }
 
 impl HtmlPage {
-    /// A page of `part` of `html` reading its remote resources from `resources`.
-    fn open(html: String, part: HtmlPart, theme: Option<HtmlTheme>, resources: Arc<Resources>) -> Arc<Self> {
+    /// A page of `part` of `html` reading its remote resources from `resources`, if `remote`.
+    fn open(html: String, part: HtmlPart, theme: Option<HtmlTheme>, remote: bool, resources: Arc<Resources>) -> Arc<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        send(Job::Open { id, html, part, theme, resources });
+        send(Job::Open { id, html, part, theme, remote, resources });
         Arc::new(Self { id })
     }
 }
 
 enum Job {
-    Open { id: u64, html: String, part: HtmlPart, theme: Option<HtmlTheme>, resources: Arc<Resources> },
+    Open { id: u64, html: String, part: HtmlPart, theme: Option<HtmlTheme>, remote: bool, resources: Arc<Resources> },
+    LoadRemote { id: u64 },
     Close { id: u64 },
     Layout { id: u64, width: f64, scale: f64, reply: oneshot::Sender<Option<HtmlSize>> },
     Tile { id: u64, width: f64, scale: f64, top: f64, height: f64, reply: oneshot::Sender<Option<HtmlTile>> },
@@ -312,6 +323,7 @@ impl Job {
         match *self {
             Job::Open { id, .. }
             | Job::Close { id }
+            | Job::LoadRemote { id }
             | Job::Layout { id, .. }
             | Job::Tile { id, .. }
             | Job::LinkAt { id, .. }
@@ -444,9 +456,16 @@ impl Pages {
 
     fn handle(&mut self, job: Job) {
         match job {
-            Job::Open { id, html, part, theme, resources } => {
-                let page = Page::open(id, &html, part, theme, &self.fonts, resources);
+            Job::Open { id, html, part, theme, remote, resources } => {
+                let page = Page::open(id, &html, part, theme, remote, &self.fonts, resources);
                 self.pages.insert(id, page);
+            }
+            Job::LoadRemote { id } => {
+                if let Some(page) = self.pages.get(&id) {
+                    page.gate.load_remote();
+                    // Lays out again even when nothing arrives, so the page answers it holds nothing back.
+                    self.arrived.insert(id);
+                }
             }
             Job::Close { id } => {
                 // Dropping the senders answers pending `changed` calls.
@@ -456,7 +475,7 @@ impl Pages {
             Job::Layout { id, width, scale, reply } => {
                 let size = self.pages.get_mut(&id).map(|page| {
                     page.lay_out(width, scale);
-                    HtmlSize { height: page.height, version: page.version }
+                    HtmlSize { height: page.height, version: page.version, blocked: page.gate.blocked() }
                 });
                 let _ = reply.send(size);
             }
@@ -566,9 +585,17 @@ fn document(html: &str, net: Arc<dyn NetProvider>, shell: Arc<PageShell>, fonts:
 }
 
 impl Page {
-    fn open(id: u64, html: &str, part: HtmlPart, theme: Option<HtmlTheme>, fonts: &FontContext, resources: Arc<Resources>) -> Self {
+    fn open(
+        id: u64,
+        html: &str,
+        part: HtmlPart,
+        theme: Option<HtmlTheme>,
+        remote: bool,
+        fonts: &FontContext,
+        resources: Arc<Resources>,
+    ) -> Self {
         let shell = Arc::new(PageShell { id, quiet: AtomicBool::new(false) });
-        let gate = Arc::new(Gate::new(resources));
+        let gate = Arc::new(Gate::new(resources, remote));
         let mut doc = document(html, gate.clone(), shell.clone(), fonts);
         let quoted = cut_quotes(doc.as_mut(), part);
         let allowed = sanitize(doc.as_mut());
@@ -1197,7 +1224,8 @@ impl ShellProvider for PageShell {
 }
 
 /// A page's resources: held until parsing ends and what the page may read is known, then
-/// answered.
+/// answered; what it asks of the web held back, while the page may not read it, until
+/// [`Gate::load_remote`].
 struct Gate {
     shared: Arc<GateShared>,
 }
@@ -1206,8 +1234,9 @@ struct Gate {
 struct GateShared {
     state: Mutex<GateState>,
     resources: Arc<Resources>,
-    /// When the page was first laid out.
+    /// When the page was first laid out, and when it was let read the web after that.
     shown: OnceLock<Instant>,
+    loaded: OnceLock<Instant>,
     /// Set when a stylesheet is handed to the page: its colours move at the next layout.
     sheet_arrived: AtomicBool,
 }
@@ -1216,6 +1245,9 @@ struct GateShared {
 struct GateState {
     open: bool,
     held: Vec<(Request, Box<dyn NetHandler>)>,
+    /// Whether the page may read the web, and what it asked of it while it may not.
+    remote: bool,
+    blocked: Vec<(Request, Box<dyn NetHandler>)>,
     /// The removed elements' URLs: never answered.
     dropped: HashSet<String>,
     /// The stylesheets the page may read, each with whether its own `@import`s may be read: a
@@ -1255,9 +1287,11 @@ impl GateState {
 }
 
 impl GateShared {
-    /// Whether what arrives now comes [`Resources::late`] after the page was first shown.
+    /// Whether what arrives now comes [`Resources::late`] after the page was first shown, or
+    /// after it was let read the web.
     fn late(&self) -> bool {
-        self.shown.get().is_some_and(|shown| shown.elapsed() >= self.resources.late)
+        let since = self.loaded.get().or(self.shown.get());
+        since.is_some_and(|since| since.elapsed() >= self.resources.late)
     }
 
     /// A stylesheet: what it asks for is learned before Blitz reads it and asks.
@@ -1283,9 +1317,16 @@ impl GateShared {
 }
 
 impl Gate {
-    fn new(resources: Arc<Resources>) -> Self {
-        let state = Mutex::new(GateState::default());
-        Self { shared: Arc::new(GateShared { state, resources, shown: OnceLock::new(), sheet_arrived: AtomicBool::new(false) }) }
+    fn new(resources: Arc<Resources>, remote: bool) -> Self {
+        let state = Mutex::new(GateState { remote, ..GateState::default() });
+        let shared = GateShared {
+            state,
+            resources,
+            shown: OnceLock::new(),
+            loaded: OnceLock::new(),
+            sheet_arrived: AtomicBool::new(false),
+        };
+        Self { shared: Arc::new(shared) }
     }
 
     fn open(&self, allowed: Allowed) {
@@ -1302,6 +1343,28 @@ impl Gate {
             self.fetch(0, request, handler);
         }
     }
+
+    /// Lets the page read the web: what it held back is asked for now.
+    fn load_remote(&self) {
+        let blocked = {
+            let mut state = self.shared.state.lock().unwrap();
+            if state.remote {
+                return;
+            }
+            state.remote = true;
+            std::mem::take(&mut state.blocked)
+        };
+        // Fonts it held back are no surprise now: they swap in as they come.
+        self.shared.loaded.get_or_init(Instant::now);
+        for (request, handler) in blocked {
+            self.fetch(0, request, handler);
+        }
+    }
+
+    /// Whether the page holds back something it asked of the web.
+    fn blocked(&self) -> bool {
+        !self.shared.state.lock().unwrap().blocked.is_empty()
+    }
 }
 
 impl NetProvider for Gate {
@@ -1309,6 +1372,15 @@ impl NetProvider for Gate {
         let mut state = self.shared.state.lock().unwrap();
         if !state.open {
             state.held.push((request, handler));
+            return;
+        }
+        // Only `https:` leaves the machine; what the page never reads anyway isn't held back.
+        if !state.remote
+            && request.url.scheme() == "https"
+            && !state.dropped.contains(request.url.as_str())
+            && !state.skipped.contains(request.url.as_str())
+        {
+            state.blocked.push((request, handler));
             return;
         }
         enum Read {
@@ -1659,7 +1731,7 @@ mod tests {
     }
 
     fn part(html: &str, part: HtmlPart) -> Page {
-        Page::open(0, html, part, None, &Pages::new().fonts, offline())
+        Page::open(0, html, part, None, true, &Pages::new().fonts, offline())
     }
 
     /// A web of the files a test gives, recording what is asked; a file can be held back until
@@ -1867,6 +1939,7 @@ mod tests {
             ),
             HtmlPart::Whole,
             None,
+            true,
             &Pages::new().fonts,
             resources(web.clone(), LATE),
         );
@@ -1877,6 +1950,43 @@ mod tests {
         let doc = page.doc.as_ref();
         assert_eq!(doc.query_selector_all("iframe, object").unwrap().len(), 0);
         assert_eq!(doc.query_selector_all("p").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_page_without_remote_reads_nothing_from_the_web_until_let() {
+        let web = Arc::new(FakeWeb::default());
+        let png = data_url::DataUrl::process(PNG).unwrap().decode_to_vec().unwrap().0;
+        web.file("https://img.test/a.png", png);
+        web.file("https://img.test/a.css", "p { margin: 40px 0 }");
+        let mail = concat!(
+            r#"<link rel="stylesheet" href="https://img.test/a.css">"#,
+            r#"<img src="https://img.test/a.png" style="display:block;width:100px"><p>Text</p>"#,
+        );
+        let page = HtmlPage::open(mail.into(), HtmlPart::Whole, None, false, resources(web.clone(), LATE));
+        let before = {
+            let page = page.clone();
+            in_time(async move { page.layout(400.0, 1.0).await.unwrap() })
+        };
+        assert!(before.blocked);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(web.asked().is_empty(), "{:?}", web.asked());
+        // Let: the image and the stylesheet are read, and the page grows by both.
+        page.load_remote();
+        let after = in_time(async move {
+            loop {
+                let size = page.layout(400.0, 1.0).await.unwrap();
+                if size.height > before.height + 90.0 {
+                    return size;
+                }
+                page.changed(size.version).await.unwrap();
+            }
+        });
+        assert!(!after.blocked);
+        let expected = HashSet::from(["https://img.test/a.png".to_string(), "https://img.test/a.css".to_string()]);
+        assert!((0..200).any(|_| web.asked().into_iter().collect::<HashSet<_>>() == expected || {
+            std::thread::sleep(Duration::from_millis(25));
+            false
+        }), "{:?}", web.asked());
     }
 
     #[test]
@@ -2110,7 +2220,7 @@ mod tests {
         let head = format!(
             r#"<link rel="stylesheet" href="{SHEET}"><link rel="stylesheet" href="http://fonts.test/plain.css"><link rel="stylesheet" href="//fonts.test/relative.css">"#
         );
-        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, None, resources.clone());
+        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, None, true, resources.clone());
         let (system, mono) = in_time(async move {
             // The font is held back: the page lays out in the system font meanwhile.
             let system = page.layout(400.0, 1.0).await.unwrap().height;
@@ -2126,7 +2236,7 @@ mod tests {
             "no Cyrillic file for Latin text, no second-level import, no `http:` or `//` sheet"
         );
         // Open again: everything from the cache, nothing asked.
-        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, None, resources);
+        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, None, true, resources);
         let again = in_time(async move { height_when(&page, |height| height > system * 1.5).await });
         assert_eq!(again, mono);
         assert_eq!(web.asked().len(), asked.len());
@@ -2142,7 +2252,7 @@ mod tests {
         // Every font is late once the page has been laid out.
         let first = resources(web.clone(), Duration::ZERO);
         let head = format!(r#"<link rel="stylesheet" href="{SHEET}">"#);
-        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, None, first.clone());
+        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, None, true, first.clone());
         let (page, system) = in_time(async move {
             let system = page.layout(400.0, 1.0).await.unwrap().height;
             release.send(()).unwrap();
@@ -2158,7 +2268,7 @@ mod tests {
         // The next run of the app reads the sheet and the font from the disk cache in time.
         let offline = Arc::new(FakeWeb::default());
         let next = Arc::new(Resources { web: offline.clone(), cache: ResourceCache::new(first.cache.folder.clone(), CACHE_CAP), late: LATE });
-        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, None, next);
+        let page = HtmlPage::open(mono_mail(&head), HtmlPart::Whole, None, true, next);
         in_time(async move { height_when(&page, |height| height > system * 1.5).await });
         assert!(offline.asked().is_empty(), "{:?}", offline.asked());
     }
@@ -2170,14 +2280,15 @@ mod tests {
         web.file(SHEET, mono_sheet());
         web.file(MONO, monaco());
         let release = web.hold(MONO);
-        let reader = HtmlPage::open(mono_mail(&format!(r#"<link rel="stylesheet" href="{SHEET}">"#)), HtmlPart::Whole, None, resources(web, LATE));
+        let reader =
+            HtmlPage::open(mono_mail(&format!(r#"<link rel="stylesheet" href="{SHEET}">"#)), HtmlPart::Whole, None, true, resources(web, LATE));
         let (system, mono, other) = in_time(async move {
             let system = reader.layout(400.0, 1.0).await.unwrap().height;
             release.send(()).unwrap();
             let mono = height_when(&reader, |height| height > system * 1.5).await;
             // A mail naming the same family, opened after the font arrived for the first one:
             // all pages used to share one collection, so it got the font too.
-            let other = HtmlPage::open(mono_mail(""), HtmlPart::Whole, None, offline());
+            let other = HtmlPage::open(mono_mail(""), HtmlPart::Whole, None, true, offline());
             let other = other.layout(400.0, 1.0).await.unwrap().height;
             (system, mono, other)
         });
@@ -2269,7 +2380,7 @@ mod tests {
         let web: Arc<dyn Web> = Arc::new(Counted(log.clone()));
         let open = |resources: Arc<Resources>| {
             let start = Instant::now();
-            let page = HtmlPage::open(mail.clone(), HtmlPart::Whole, None, resources);
+            let page = HtmlPage::open(mail.clone(), HtmlPart::Whole, None, true, resources);
             let (page, painted) = in_time(async move {
                 let size = page.layout(600.0, 2.0).await.unwrap();
                 page.tile(600.0, 2.0, 0.0, 512.0).await.unwrap();
@@ -2314,7 +2425,7 @@ mod tests {
         let mut paints: Vec<Duration> = (0..20)
             .map(|_| {
                 let start = Instant::now();
-                let page = HtmlPage::open(mail.clone(), HtmlPart::Whole, None, offline());
+                let page = HtmlPage::open(mail.clone(), HtmlPart::Whole, None, true, offline());
                 in_time(async move {
                     page.layout(600.0, 2.0).await.unwrap();
                     page.tile(600.0, 2.0, 0.0, 512.0).await.unwrap();
@@ -2339,7 +2450,7 @@ mod tests {
 
     /// A themed page, laid out 400 points wide.
     fn themed(html: &str, theme: HtmlTheme) -> Page {
-        let mut page = Page::open(0, html, HtmlPart::Whole, Some(theme), &Pages::new().fonts, offline());
+        let mut page = Page::open(0, html, HtmlPart::Whole, Some(theme), true, &Pages::new().fonts, offline());
         page.lay_out(400.0, 1.0);
         page
     }
@@ -2463,6 +2574,7 @@ mod tests {
             r#"<link rel="stylesheet" href="https://example.com/mail.css"><p>Late</p>"#,
             HtmlPart::Whole,
             Some(DARK),
+            true,
             &pages.fonts,
             resources(web, LATE),
         );

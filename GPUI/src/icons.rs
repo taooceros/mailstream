@@ -40,6 +40,7 @@ icons! {
     Dock => "right_panel_open",
     Float => "picture_in_picture",
     Folder => "folder",
+    HideImage => "hide_image",
     Forward => "forward",
     Inbox => "inbox",
     Label => "label",
