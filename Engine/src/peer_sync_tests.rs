@@ -6,7 +6,8 @@ use iroh::address_lookup::MemoryLookup;
 use serde_json::json;
 
 use crate::OAuthConfig;
-use crate::peer_sync::{AdmitRequest, Network, PeerSync, PeerSyncError, Snapshot, Stamped};
+use crate::peer_sync::{Network, PeerSync, PeerSyncError, Snapshot, Stamped};
+use crate::sync_invite::Code;
 use crate::testkit::{TestConfig, config};
 
 async fn open(config: &TestConfig, lookup: &MemoryLookup) -> PeerSync {
@@ -40,11 +41,11 @@ async fn paired_devices_converge_after_editing_offline() {
     let b = open(&folder_b, &lookup).await;
     assert_eq!(b.snapshot().await, Err(PeerSyncError::NoGroup));
 
-    // A starts the group and B joins it with A's ticket.
+    // A starts the group and B joins it with a pairing code of A's.
     a.create_group().await.unwrap();
     assert!(a.set_trusted("Alice@Example.com", true, 1_000).await.unwrap());
     assert!(a.set_setting("autoRead.days", json!(3), 1_000).await.unwrap());
-    b.join(&a.ticket().await.unwrap()).await.unwrap();
+    b.join(&a.invite().await.unwrap().0).await.unwrap();
     let mut changes = b.changes();
     let (id_a, id_b) = (a.status().await.endpoint_id, b.status().await.endpoint_id);
     let paired = until("B to get A's entries", &b, |snapshot| {
@@ -114,7 +115,7 @@ async fn reads_nothing(stranger: &PeerSync, quiet: Duration) {
 }
 
 /// MS-380: a device that knows only the group's id (settings and `sync status` show it) and
-/// reaches its devices reads nothing, before or after a live change; a ticket still pairs.
+/// reaches its devices reads nothing, before or after a live change; a pairing code still pairs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_device_that_knows_only_the_group_id_reads_nothing() {
     let (folder_a, folder_b, folder_c) =
@@ -124,7 +125,7 @@ async fn a_device_that_knows_only_the_group_id_reads_nothing() {
     let namespace = a.create_group().await.unwrap();
     assert!(a.set_trusted("alice@example.com", true, 1_000).await.unwrap());
     assert!(a.set_setting("autoRead.days", json!(3), 1_000).await.unwrap());
-    b.join(&a.ticket().await.unwrap()).await.unwrap();
+    b.join(&a.invite().await.unwrap().0).await.unwrap();
     until("B to get A's entries", &b, |snapshot| trusted(snapshot, "alice@example.com").is_some()).await;
     let (id_a, id_b) = (a.status().await.endpoint_id, b.status().await.endpoint_id);
     let admitted = until("B to read both admissions", &b, |snapshot| {
@@ -161,7 +162,7 @@ async fn a_group_from_before_admission_keeps_syncing_after_the_upgrade() {
     let (a, b) = (before(&folder_a).await, before(&folder_b).await);
     let namespace = a.create_group().await.unwrap();
     assert!(a.set_trusted("alice@example.com", true, 1_000).await.unwrap());
-    b.join(&a.ticket().await.unwrap()).await.unwrap();
+    b.join_legacy(&a.legacy_ticket().await.unwrap()).await.unwrap();
     let (id_a, id_b) = (a.status().await.endpoint_id, b.status().await.endpoint_id);
     until("B to get A's entries", &b, |snapshot| trusted(snapshot, "alice@example.com").is_some()).await;
     let paired = until("A to see B", &a, |snapshot| snapshot.devices.contains_key(&id_b)).await;
@@ -186,31 +187,40 @@ async fn a_group_from_before_admission_keeps_syncing_after_the_upgrade() {
     c.shutdown().await;
 }
 
-/// MS-380: the door admits a device only for its own proof of the group's write key: not a
-/// forged one, and not another device's.
+/// MS-376 on MS-380's door: a pairing code admits one device, once; a used, forged or old-style
+/// one admits nobody, and a device that holds the group's write key without a code reads nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_door_admits_only_a_device_that_holds_the_write_key() {
-    let (folder_a, folder_b, folder_c) =
-        (config(OAuthConfig::default()), config(OAuthConfig::default()), config(OAuthConfig::default()));
+async fn a_pairing_code_admits_one_device_once() {
+    let folders = [(); 4].map(|()| config(OAuthConfig::default()));
     let lookup = MemoryLookup::new();
-    let (a, b, c) = (open(&folder_a, &lookup).await, open(&folder_b, &lookup).await, open(&folder_c, &lookup).await);
+    let (a, b) = (open(&folders[0], &lookup).await, open(&folders[1], &lookup).await);
+    let (c, d) = (open(&folders[2], &lookup).await, open(&folders[3], &lookup).await);
     let namespace = a.create_group().await.unwrap();
-    b.join(&a.ticket().await.unwrap()).await.unwrap();
-    let (member, id_b, id_c) = (a.loopback_addr(), b.status().await.endpoint_id, c.status().await.endpoint_id);
+    assert!(a.set_trusted("alice@example.com", true, 1_000).await.unwrap());
+    let (code, _) = a.invite().await.unwrap();
+    assert_eq!(a.open_invites(), 1);
+    b.join(&code).await.unwrap();
+    assert_eq!(a.open_invites(), 0);
+    let (id_b, id_c, id_d) = (b.status().await.endpoint_id, c.status().await.endpoint_id, d.status().await.endpoint_id);
+    until("B to get A's entries", &b, |snapshot| trusted(snapshot, "alice@example.com").is_some()).await;
     until("A to admit B", &a, |snapshot| snapshot.admitted.contains_key(&id_b)).await;
 
-    let forged = AdmitRequest::Proof { namespace: namespace.clone(), signature: "00".repeat(64) };
-    assert!(c.ask_admission(member.clone(), &forged).await.is_err());
-    let borrowed = b.admission_proof(member.id).await.unwrap();
-    assert!(c.ask_admission(member.clone(), &borrowed).await.is_err(), "B's proof admits B only");
-    assert_eq!(b.ask_admission(member.clone(), &borrowed).await, Ok(()));
-    assert!(!a.snapshot().await.unwrap().admitted.contains_key(&id_c));
-    c.watch(&namespace, vec![member]).await.unwrap();
-    reads_nothing(&c, Duration::from_secs(2)).await;
+    let used = c.join(&code).await.unwrap_err().to_string();
+    assert!(used.contains("used already"), "{used}");
+    let forged = Code::new(a.loopback_addr(), &namespace, &[7; 32]).to_string();
+    assert!(c.join(&forged).await.is_err());
+    let old = c.join(&a.legacy_ticket().await.unwrap()).await.unwrap_err().to_string();
+    assert!(old.contains("old device sync ticket"), "{old}");
+    // D holds the write key, as an old ticket gave it, but nobody admitted it.
+    d.join_legacy(&a.legacy_ticket().await.unwrap()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(trusted(&d.snapshot().await.unwrap(), "alice@example.com"), None, "D read the group without a code");
+    let admitted = a.snapshot().await.unwrap().admitted;
+    assert!(!admitted.contains_key(&id_c) && !admitted.contains_key(&id_d));
 
-    a.shutdown().await;
-    b.shutdown().await;
-    c.shutdown().await;
+    for sync in [a, b, c, d] {
+        sync.shutdown().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

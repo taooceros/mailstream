@@ -373,9 +373,23 @@ fn recipients(snapshot: &Snapshot, me: &str) -> Vec<(String, [u8; 32])> {
         .collect()
 }
 
-/// Whether the device `id` gets the group's accounts: it announced a credential key.
+/// Whether the device `id` gets the group's accounts (MS-376, the user's choice 1D): a device of
+/// the group admitted it (MS-380), which takes a one-time pairing code, and it announced a
+/// credential key.
 pub(crate) fn receives(snapshot: &Snapshot, id: &str) -> bool {
-    snapshot.device_keys.get(id).is_some_and(|announced| announced.verified(id).is_some())
+    snapshot.admitted.contains_key(id)
+        && snapshot.device_keys.get(id).is_some_and(|announced| announced.verified(id).is_some())
+}
+
+/// Whether `host` has every account `snapshot` holds, each with a saved sign-in.
+pub(crate) fn received(snapshot: &Snapshot, host: &dyn AccountHost) -> bool {
+    let Ok(sign_ins) = host.keychain().load() else { return false };
+    let local: BTreeSet<String> = host.accounts().into_iter().map(|record| record.id).collect();
+    snapshot
+        .accounts
+        .iter()
+        .filter(|(_, stamped)| stamped.value.is_some())
+        .all(|(id, _)| local.contains(id) && sign_ins.refresh_tokens.contains_key(id))
 }
 
 /// Whether each of `host`'s accounts with a saved sign-in is sealed to every other device that

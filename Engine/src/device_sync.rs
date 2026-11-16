@@ -234,6 +234,15 @@ impl DeviceSync {
         account_sync::handed_over(&snapshot, &me, &*host)
     }
 
+    /// Whether this device has every account the group holds, each with a saved sign-in.
+    pub(crate) async fn accounts_received(&self) -> bool {
+        let Some(host) = self.accounts.get().and_then(Weak::upgrade) else { return true };
+        let guard = self.sync.read().await;
+        let Some(sync) = guard.as_ref() else { return false };
+        let Ok(snapshot) = sync.snapshot().await else { return false };
+        account_sync::received(&snapshot, &*host)
+    }
+
     /// Stops the background bridge and cleanly closes `PeerSync` (releasing `peer-sync/lock`).
     pub async fn shutdown(&self) {
         for task in self.tasks.lock().expect("device sync task lock").drain(..) {

@@ -199,18 +199,21 @@ impl SyncNode {
         self.inner.events.listen(listener);
     }
 
-    /// Joins `ticket` and waits up to `timeout` until at least one peer device appears in the
-    /// group, so a one-shot `mailstream sync join` does not exit before discovering peers.
-    pub fn join_and_wait(&self, ticket: &str, timeout: Duration) -> Result<Value, EngineError> {
-        PeerSync::ticket_namespace(ticket).map_err(|error| EngineError::failed(error.to_string()))?;
-        let mut status = self.call_sync("sync.join", json!({ "ticket": ticket }))?;
+    /// Joins with pairing code `code` and waits up to `timeout` until another device of the group
+    /// answered and this one has the group's accounts with their sign-ins, so a one-shot
+    /// `mailstream sync join` does not exit before it can use them.
+    pub fn join_and_wait(&self, code: &str, timeout: Duration) -> Result<Value, EngineError> {
+        PeerSync::code_namespace(code).map_err(|error| EngineError::failed(error.to_string()))?;
+        let mut status = self.call_sync("sync.join", json!({ "ticket": code }))?;
         let deadline = Instant::now() + timeout;
-        while !has_peer(&status) {
+        let sync = self.inner.device_sync.clone();
+        while !has_peer(&status) || !self.runtime.block_on(sync.accounts_received()) {
             if Instant::now() >= deadline {
+                let what = if has_peer(&status) { "sent this device the group's accounts" } else { "answered" };
                 return Err(EngineError::new(
                     "unreachable",
                     format!(
-                        "Joined the sync group locally, but no other device answered within {} s. Make sure the pairing device is online and try again (or pass `--join` to `mailstream sync daemon`).",
+                        "Joined the sync group, but no other device {what} within {} s. Keep a device of the group online and try again (or pass `--join` to `mailstream sync daemon`).",
                         timeout.as_secs()
                     ),
                 ));
@@ -237,10 +240,10 @@ pub(crate) fn has_peer(status: &Value) -> bool {
 }
 
 /// Runs `mailstream sync join` headlessly when no daemon/app serves the control socket.
-pub fn run_join(data_directory: PathBuf, ticket: &str) -> Result<Value, EngineError> {
-    PeerSync::ticket_namespace(ticket).map_err(|error| EngineError::failed(error.to_string()))?;
+pub fn run_join(data_directory: PathBuf, code: &str) -> Result<Value, EngineError> {
+    PeerSync::code_namespace(code).map_err(|error| EngineError::failed(error.to_string()))?;
     let node = SyncNode::open(SyncNodeConfig::new(data_directory))?;
-    node.join_and_wait(ticket, JOIN_REACH_TIMEOUT)
+    node.join_and_wait(code, JOIN_REACH_TIMEOUT)
 }
 
 /// How long `mailstream sync pair-ticket` waits, once its code was used, for the joining device to
@@ -294,8 +297,8 @@ pub fn run_daemon(
     cloud_url: Option<&str>,
     mut emit: impl FnMut(&Value),
 ) -> Result<(), EngineError> {
-    if let Some(ticket) = join_ticket {
-        PeerSync::ticket_namespace(ticket).map_err(|error| EngineError::failed(error.to_string()))?;
+    if let Some(code) = join_ticket {
+        PeerSync::code_namespace(code).map_err(|error| EngineError::failed(error.to_string()))?;
     }
     // The full daemon or the app may already serve this folder without holding `peer-sync/`.
     daemon::refuse_if_served(&data_directory)?;

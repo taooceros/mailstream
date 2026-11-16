@@ -105,7 +105,7 @@ fn execute(arguments: &[String]) -> Result<String, EngineError> {
     Ok(text(&result))
 }
 
-const DAEMON_HELP: &str = "mailstream daemon [--data-dir <path>] [--join <ticket>] [--cloud <url>]
+const DAEMON_HELP: &str = "mailstream daemon [--data-dir <path>] [--join <code>] [--cloud <url>]
 
 Run Mailstream's whole engine without the GUI, for servers and the agents on them: it keeps the
 signed-in accounts' mail, calendars and Google Chat in sync and answers every command (status,
@@ -116,21 +116,24 @@ directory. Prints JSON lines on stdout and shuts down cleanly on SIGTERM/SIGINT.
   --data-dir <path>  Data directory: settings.json, accounts.json, mail.db, peer-sync/, the
                      sign-ins file, cache/ and control.sock (default: $MAILSTREAM_DATA_DIR or the
                      app's own folder). Other commands reach the daemon with the same --data-dir.
-  --join <ticket>    Join this device-sync group on startup if not already paired with it
+  --join <code>      Join a device-sync group on startup with a pairing code from a device in it
+                     (`mailstream sync pair-ticket` there; works once, for 10 minutes), getting
+                     its signed-in accounts, unless already paired with that group
   --cloud <url>      Also keep an encrypted settings copy on this Cloudflare Worker (SyncDrop/)
 
 `mailstream accounts add google|microsoft` prints the provider's sign-in page as a `signIn` line
 here; open it in a browser that reaches http://localhost:49152 on this machine (from another one,
 forward the port first: ssh -L 49152:localhost:49152 <server>).";
 
-const SYNC_DAEMON_HELP: &str = "mailstream sync daemon [--data-dir <path>] [--join <ticket>] [--cloud <url>]
+const SYNC_DAEMON_HELP: &str = "mailstream sync daemon [--data-dir <path>] [--join <code>] [--cloud <url>]
 
-Run a headless cross-device settings sync node without the Mailstream GUI or mail accounts
-(`mailstream daemon` runs the whole engine instead). Prints JSON lines on stdout and shuts down
-cleanly on SIGTERM/SIGINT.
+Run a headless cross-device sync node without the Mailstream GUI (`mailstream daemon` runs the
+whole engine instead): it keeps the group's settings and accounts, sign-ins included, in its data
+directory. Prints JSON lines on stdout and shuts down cleanly on SIGTERM/SIGINT.
 
   --data-dir <path>  Sync data directory (default: $MAILSTREAM_DATA_DIR or platform data dir)
-  --join <ticket>    Join this sync group on startup if not already paired with it
+  --join <code>      Join a sync group on startup with a pairing code (works once, for 10
+                     minutes) unless already paired with that group
   --cloud <url>      Also keep an encrypted copy on this Cloudflare Worker (SyncDrop/), for devices
                      that are never online together; `mailstream sync cloud-disable` turns it off";
 
@@ -198,7 +201,7 @@ fn parse_daemon_args(rest: &[String], command: &str) -> Result<DaemonArgs, Engin
             None => (arg.as_str(), None),
         };
         let (slot, what) = match name {
-            "--join" => (&mut parsed.join, "a pairing ticket"),
+            "--join" => (&mut parsed.join, "a pairing code"),
             "--cloud" => (&mut parsed.cloud, "the Cloudflare Worker's URL"),
             _ => return Err(usage(format!("Unknown argument \"{arg}\" for `mailstream {command}`."))),
         };

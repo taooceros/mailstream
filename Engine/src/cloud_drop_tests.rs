@@ -97,10 +97,15 @@ fn devices_never_online_together_sync_through_the_drop() {
     let (server, groups) = worker();
     let (cfg_a, cfg_b) = (device(), device());
 
-    // A starts the group, turns the drop on and trusts two senders, then goes offline.
+    // B pairs with A (a pairing code needs its maker online, MS-376) and goes offline at once.
     let engine_a = Engine::start(cfg_a.clone());
     call(&engine_a, "sync.enable", json!({})).unwrap();
-    let ticket = call(&engine_a, "sync.pair_ticket", json!({})).unwrap()["ticket"].as_str().unwrap().to_string();
+    let code = call(&engine_a, "sync.pair_ticket", json!({})).unwrap()["ticket"].as_str().unwrap().to_string();
+    let engine_b = Engine::start(cfg_b.clone());
+    call(&engine_b, "sync.join", json!({ "ticket": code })).unwrap();
+    drop(engine_b);
+
+    // A turns the drop on and trusts two senders, then goes offline.
     let status = call(&engine_a, "sync.cloud_enable", json!({ "url": format!("{}/", server.base) })).unwrap();
     assert_eq!(status["cloud"]["enabled"], json!(true));
     assert_eq!(status["cloud"]["url"], json!(server.base));
@@ -119,10 +124,11 @@ fn devices_never_online_together_sync_through_the_drop() {
     let endpoint_a = status["endpointId"].as_str().unwrap().to_string();
     drop(engine_a);
 
-    // B joins with A's ticket while A is offline, turns the drop on and gets A's settings.
+    // B comes back while A is offline, turns the drop on and gets A's settings.
     let engine_b = Engine::start(cfg_b.clone());
-    call(&engine_b, "sync.join", json!({ "ticket": ticket })).unwrap();
     assert_eq!(trusted(&engine_b), json!([]));
+    // Sync opens in the background on start; the status opens it now.
+    assert_eq!(call(&engine_b, "sync.status", json!({})).unwrap()["enabled"], json!(true));
     let status = call(&engine_b, "sync.cloud_enable", json!({ "url": server.base })).unwrap();
     assert_eq!(status["cloud"]["problem"], Value::Null, "{status}");
     assert!(status["cloud"]["lastReceived"].is_string(), "{status}");

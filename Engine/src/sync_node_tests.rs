@@ -185,3 +185,52 @@ fn sync_node_rejects_second_holder_and_persists_across_restart() {
     assert_eq!(status2["enabled"], json!(true));
     drop(node2);
 }
+
+/// MS-376: a headless node joins with a one-time code and comes away with the group's accounts
+/// and their sign-ins, which an engine started on its data then uses; the code pairs nobody else.
+#[test]
+fn headless_node_joins_with_a_code_and_gets_the_accounts() {
+    let lookup = MemoryLookup::new();
+    let cfg_a = sync_config(&lookup);
+    let (cfg_s, cfg_t) = (sync_config(&lookup), sync_config(&lookup));
+    crate::testkit::sign_in_all(&cfg_a, &[crate::testkit::mail_account("me@gmail.com", "google")]);
+    let engine_a = Engine::start(cfg_a.clone());
+    call(&engine_a, "sync.enable", json!({})).unwrap();
+    let pairing = call(&engine_a, "sync.pair_ticket", json!({})).unwrap();
+    let code = pairing["ticket"].as_str().unwrap().to_string();
+    assert!(code.starts_with("mailstream-pair-"), "{code}");
+    assert!(pairing["expiresAt"].is_string());
+
+    let node = |cfg: &TestConfig| {
+        SyncNode::open(SyncNodeConfig {
+            data_directory: cfg.support_directory.clone(),
+            network: Network::Loopback(lookup.clone()),
+            control_socket: false,
+            keychain_service: cfg.keychain_service.clone(),
+            keychain_directory: cfg.keychain_directory.clone(),
+        })
+        .unwrap()
+    };
+    let node_s = node(&cfg_s);
+    node_s.join_and_wait(&code, Duration::from_secs(30)).unwrap();
+    let keychain = crate::keychain::Keychain::new(cfg_s.keychain_service.clone(), cfg_s.keychain_directory.clone());
+    assert_eq!(keychain.load().unwrap().refresh_tokens["me@gmail.com"], "rt-me@gmail.com");
+    let id_s = node_s.call_sync("sync.status", json!({})).unwrap()["endpointId"].clone();
+    until("A to list S with the accounts", || {
+        call(&engine_a, "sync.status", json!({})).unwrap()["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|device| device["id"] == id_s && device["accounts"] == true)
+    });
+
+    let refused = node(&cfg_t).call_sync("sync.join", json!({ "ticket": code })).unwrap_err();
+    assert!(refused.message.contains("used already"), "{}", refused.message);
+
+    drop(node_s);
+    let engine_s = Engine::start(cfg_s.clone());
+    let accounts = call(&engine_s, "accounts.list", json!({})).unwrap();
+    assert_eq!(accounts[0]["id"], json!("me@gmail.com"));
+    drop(engine_s);
+    drop(engine_a);
+}

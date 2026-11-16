@@ -41,7 +41,7 @@ pub(crate) fn run_with(
     let socket = control::socket_path(&directory);
     refuse_if_served(&directory)?;
     if let Some(ticket) = join_ticket {
-        PeerSync::ticket_namespace(ticket).map_err(|error| EngineError::failed(error.to_string()))?;
+        PeerSync::code_namespace(ticket).map_err(|error| EngineError::failed(error.to_string()))?;
     }
     std::fs::create_dir_all(&directory).map_err(|error| EngineError::failed(error.to_string()))?;
     // `accounts add` and `accounts connect` open the provider's sign-in page: on a server there is
@@ -130,15 +130,16 @@ pub(crate) fn run_with(
     Ok(())
 }
 
-/// `--join` and `--cloud`, as both daemons take them: joins `ticket`'s sync group unless this
-/// device already syncs it with another device, then turns on the Cloudflare drop at `cloud_url`.
+/// `--join` and `--cloud`, as both daemons take them: joins the sync group of pairing code
+/// `join_ticket` unless this device already syncs it with another device, then turns on the
+/// Cloudflare drop at `cloud_url`.
 pub(crate) fn join_and_cloud(
     call: impl Fn(&str, Value) -> Result<Value, EngineError>,
     join_ticket: Option<&str>,
     cloud_url: Option<&str>,
 ) -> Result<(), EngineError> {
     if let Some(ticket) = join_ticket {
-        let namespace = PeerSync::ticket_namespace(ticket).map_err(|error| EngineError::failed(error.to_string()))?;
+        let namespace = PeerSync::code_namespace(ticket).map_err(|error| EngineError::failed(error.to_string()))?;
         let current = call("sync.status", json!({}))?;
         let already_paired = current.get("namespace").and_then(Value::as_str) == Some(namespace.as_str())
             && current.get("paused").and_then(Value::as_bool) != Some(true)
