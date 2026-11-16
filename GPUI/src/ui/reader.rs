@@ -510,7 +510,7 @@ impl MailApp {
         let open = self.quotes_open.contains(&message.id);
         #[cfg(target_os = "macos")]
         if self.renderer == Renderer::WebKit {
-            let body = web_body(id.clone(), html, open, remote);
+            let body = web_body(id.clone(), html, open, remote, p);
             if webview::quoted(&id) != Some(true) {
                 return body;
             }
@@ -752,7 +752,7 @@ fn blitz_html(
     div().p(px(metrics_reader::SHEET_PADDING)).rounded(px(radius::CARD)).bg(p.page).child(body).into_any_element()
 }
 
-/// The reader's surface under an HTML body and its own colours there, for Blitz.
+/// The reader's surface under an HTML body and its own colours there, for Blitz and the web view.
 fn html_theme(p: &Palette) -> blitz_body::HtmlTheme {
     let rgb = |color: Hsla| {
         let color = Rgba::from(color);
@@ -764,12 +764,19 @@ fn html_theme(p: &Palette) -> blitz_body::HtmlTheme {
 
 /// The Mac's WebView renderer: a placeholder the native web view of the whole body is laid over,
 /// as tall as its page once that is measured; its quoted history shows while `open`, and it reads
-/// the web with `remote`.
+/// the web with `remote`. Its colours sit on the reader's surface as Blitz's do, mail that can't
+/// move on a sheet of paper (MS-275).
 #[cfg(target_os = "macos")]
-fn web_body(id: SharedString, html: SharedString, open: bool, remote: bool) -> AnyElement {
+fn web_body(id: SharedString, html: SharedString, open: bool, remote: bool, p: &Palette) -> AnyElement {
     let height = webview::height(&id).unwrap_or(40.);
-    let body = canvas(|_, _, _| {}, move |bounds, _, window, _| webview::paint(&id, &html, open, remote, bounds, window));
-    body.w_full().h(px(height)).into_any_element()
+    let paper = p.dark && webview::paper(&id);
+    let theme = html_theme(p);
+    let body = canvas(|_, _, _| {}, move |bounds, _, window, _| webview::paint(&id, &html, open, remote, theme, bounds, window));
+    let body = body.w_full().h(px(height)).into_any_element();
+    if !paper {
+        return body;
+    }
+    div().p(px(metrics_reader::SHEET_PADDING)).rounded(px(radius::CARD)).bg(p.page).child(body).into_any_element()
 }
 
 #[cfg(test)]

@@ -46,8 +46,8 @@ use peniko::{Color, Fill};
 use sha2::{Digest, Sha256};
 use style::values::specified::box_::{DisplayInside, DisplayOutside};
 
-use crate::mail_html;
-use crate::mail_html::colours::{self, Paint, Rgba};
+use crate::mail_html::{self, HtmlTheme};
+use crate::mail_html::colours::{self, Rgba};
 
 /// The reader's look over the mail's own styles (`mail_html.rs`, as WebKit's and WebView2's views
 /// apply it): the document is as tall as its content, so nothing sizes from the viewport.
@@ -139,28 +139,6 @@ pub enum HtmlPart {
     Whole,
     Main,
     Quoted,
-}
-
-/// The surface a themed page sits on and the reader's colours there, `0xRRGGBB`: its tiles are
-/// transparent where the mail paints nothing, and in dark mode the mail's colours move to the
-/// surface (`mail_html::colours`), unless the page is on paper ([`HtmlPage::paper`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct HtmlTheme {
-    pub dark: bool,
-    pub surface: u32,
-    pub text: u32,
-    pub link: u32,
-}
-
-impl From<HtmlTheme> for colours::Theme {
-    fn from(theme: HtmlTheme) -> Self {
-        Self {
-            dark: theme.dark,
-            surface: Rgba::hex(theme.surface),
-            text: Rgba::hex(theme.text),
-            link: Rgba::hex(theme.link),
-        }
-    }
 }
 
 /// One mail body. Calls queue on the pages' thread and answer in order; [`HtmlPage::close`] (or
@@ -647,16 +625,10 @@ impl Page {
             self.doc.as_mut().set_viewport(viewport);
         }
         self.doc.as_mut().resolve(0.0);
-        let native = self.scheme == ColorScheme::Dark;
-        let mut walk = Recolour { doc: self.doc.as_ref(), theme, native, changes: Vec::new(), text: 0, on_images: 0, image_page: false };
-        if let Some(root) = self.doc.as_ref().try_root_element() {
-            walk.visit(root.id, Behind { was: Rgba::WHITE, now: None, pinned: false, framed: false });
-        }
-        let Recolour { changes, text, on_images, image_page, .. } = walk;
-        self.paper = theme.dark && !native && colours::needs_paper(self.schemes, image_page, text, on_images);
-        if self.paper {
-            return;
-        }
+        let doc = Styles(self.doc.as_ref());
+        let Some(root) = doc.0.try_root_element() else { return };
+        let colours::Recoloured { changes, paper } = colours::recolour(&doc, root.id, &theme, self.schemes);
+        self.paper = paper;
         let changes: Vec<_> = changes
             .into_iter()
             .filter_map(|(id, change)| {
@@ -818,123 +790,49 @@ fn declared_schemes(doc: &BaseDocument) -> colours::Schemes {
     colours::schemes(metas.iter().map(String::as_str), styles.iter().map(String::as_str))
 }
 
-/// What lies behind an element as [`Recolour`] walks down the page.
-#[derive(Clone, Copy)]
-struct Behind {
-    /// The mail's own background there, opaque (white where it paints none).
-    was: Rgba,
-    /// What the page paints there now; `None` where it paints nothing, over the theme's surface.
-    now: Option<Rgba>,
-    /// Whether an ancestor's text colour changed: every element under it then gets its own, as
-    /// one that inherits would otherwise take the ancestor's.
-    pinned: bool,
-    /// Whether it lies over a background image, whose colours stay the mail's.
-    framed: bool,
-}
+/// A Blitz page's computed styles, for [`colours::recolour`].
+struct Styles<'a>(&'a BaseDocument);
 
-/// One pass of [`Page::recolour`] over the computed styles: the declarations each element that
-/// changes gets, and the characters of text, those over background images and whether the page
-/// itself is an image, for paper.
-struct Recolour<'a> {
-    doc: &'a BaseDocument,
-    theme: colours::Theme,
-    /// Mail with a dark look of its own, laid out dark: only its text moves.
-    native: bool,
-    changes: Vec<(NodeId, String)>,
-    text: usize,
-    on_images: usize,
-    image_page: bool,
-}
+impl colours::Page for Styles<'_> {
+    type Id = NodeId;
 
-impl Recolour<'_> {
-    fn visit(&mut self, id: NodeId, behind: Behind) {
+    fn styled(&self, id: NodeId) -> colours::Styled {
+        use style::values::computed::BorderStyle;
         use style::values::generics::color::GenericColor;
         use style::values::generics::image::GenericImage;
-        use style::values::computed::BorderStyle;
-        let Some(node) = self.doc.get_node(id) else { return };
+        let Some(node) = self.0.get_node(id) else { return colours::Styled::Other };
         if let Some(text) = node.text_data() {
-            let count = text.content.trim().chars().count();
-            self.text += count;
-            if behind.framed {
-                self.on_images += count;
-            }
-            return;
+            return colours::Styled::Text(text.content.trim().chars().count());
         }
         if !node.is_element() {
-            return;
+            return colours::Styled::Other;
         }
-        let Some(styles) = node.primary_styles() else { return };
-        let mut next = behind;
+        let Some(styles) = node.primary_styles() else { return colours::Styled::Other };
         let tag = |name| node.data.is_element_with_tag_name(&name);
-        if !behind.framed && styles.get_background().background_image.0.iter().any(|image| !matches!(image, GenericImage::None)) {
-            next.framed = true;
-            self.image_page |= tag(local_name!("html")) || tag(local_name!("body"));
-        }
         let current = styles.clone_color();
-        let colour = rgba(&current);
-        if next.framed && behind.pinned {
-            // Text over the image keeps the mail's colour, not the one an ancestor's moved to.
-            self.changes.push((id, format!("color: {} !important;", colour.css())));
-        }
-        if !next.framed {
-            let background = rgba(&styles.clone_background_color().resolve_to_absolute(&current));
-            let surface = self.theme.surface;
-            let mut change = String::new();
-            let paint = if self.native { Paint::Keep } else { colours::background(background, behind.now.is_none(), &self.theme) };
-            match paint {
-                Paint::Keep if background.a > 0.02 => next.now = Some(background.over(behind.now.unwrap_or(surface))),
-                Paint::Keep => {}
-                Paint::Clear => change.push_str("background-color: transparent !important;"),
-                Paint::Set(shown) => {
-                    change.push_str(&format!("background-color: {} !important;", shown.css()));
-                    next.now = Some(shown.over(behind.now.unwrap_or(surface)));
-                }
-            }
-            if background.a > 0.02 {
-                next.was = background.over(behind.was);
-            }
-            let link = self.theme.dark && tag(local_name!("a")) && node.attr(local_name!("href")).is_some() && colour.same(colours::DEFAULT_LINK);
-            let wanted = if link { self.theme.link } else { colour };
-            // Mail with a dark look of its own: what its text stood out from in its light one is
-            // unknown here; white, as most mail is written for.
-            let was = if self.native { Rgba::WHITE } else { next.was };
-            let shown = colours::text(wanted, was, next.now.unwrap_or(surface), &self.theme);
-            if !shown.same(colour) || behind.pinned {
-                change.push_str(&format!("color: {} !important;", shown.css()));
-                next.pinned = true;
-            }
-            if !self.native {
-                let border = styles.get_border();
-                let sides = [
-                    ("top", &border.border_top_color, border.border_top_style),
-                    ("right", &border.border_right_color, border.border_right_style),
-                    ("bottom", &border.border_bottom_color, border.border_bottom_style),
-                    ("left", &border.border_left_color, border.border_left_style),
-                ];
-                for (side, colour, style) in sides {
-                    if matches!(style, BorderStyle::None | BorderStyle::Hidden) || matches!(colour, GenericColor::CurrentColor) {
-                        continue;
-                    }
-                    if let Some(shown) = colours::border(rgba(&colour.resolve_to_absolute(&current)), &self.theme) {
-                        change.push_str(&format!("border-{side}-color: {} !important;", shown.css()));
-                    }
-                }
-                // A transparent image (a logo drawn for white) keeps the light it was drawn on.
-                if self.theme.dark
-                    && tag(local_name!("img"))
-                    && behind.was.luminance() > 0.3
-                    && behind.now.is_none_or(|now| !now.same(behind.was))
-                {
-                    change.push_str(&format!("background-color: {} !important;", behind.was.css()));
-                }
-            }
-            if !change.is_empty() {
-                self.changes.push((id, change));
-            }
-        }
-        for &child in node.children.iter() {
-            self.visit(child, next);
-        }
+        let border = styles.get_border();
+        let side = |colour: &GenericColor<_>, style| {
+            let none = matches!(style, BorderStyle::None | BorderStyle::Hidden) || matches!(colour, GenericColor::CurrentColor);
+            (!none).then(|| rgba(&colour.resolve_to_absolute(&current)))
+        };
+        colours::Styled::Element(colours::Element {
+            color: rgba(&current),
+            background: rgba(&styles.clone_background_color().resolve_to_absolute(&current)),
+            background_image: styles.get_background().background_image.0.iter().any(|image| !matches!(image, GenericImage::None)),
+            page: tag(local_name!("html")) || tag(local_name!("body")),
+            img: tag(local_name!("img")),
+            link: tag(local_name!("a")) && node.attr(local_name!("href")).is_some(),
+            borders: [
+                side(&border.border_top_color, border.border_top_style),
+                side(&border.border_right_color, border.border_right_style),
+                side(&border.border_bottom_color, border.border_bottom_style),
+                side(&border.border_left_color, border.border_left_style),
+            ],
+        })
+    }
+
+    fn children(&self, id: NodeId) -> impl Iterator<Item = NodeId> {
+        self.0.get_node(id).into_iter().flat_map(|node| node.children.iter().copied())
     }
 }
 

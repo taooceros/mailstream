@@ -1,17 +1,19 @@
 //! The rules every reader applies to a mail's HTML, one copy for all of them (MS-234): where
 //! quoted history starts, the reader's look over the mail's own styles, what a web view's page
 //! may load, which links a click opens, which cached inline parts a page may show and how a mail's
-//! colours move to the reader's surface (`colours`, Blitz's for now). Blitz
-//! (`html_page.rs`, in Flutter and GPUI) applies them itself; the web views (Flutter's WebKit
-//! `MailHtmlView.swift` and WebView2 `mail_html_windows.dart`, GPUI's `webview.rs`) load
-//! [`mail_web_document`] and run [`mail_web_script`].
+//! colours move to the reader's surface (`colours`). Blitz (`html_page.rs`, in Flutter and GPUI)
+//! applies them itself; the web views (Flutter's WebKit `MailHtmlView.swift` and WebView2
+//! `mail_html_windows.dart`, GPUI's `webview.rs`) load [`mail_web_document`] and run
+//! [`mail_web_script`] (GPUI's also [`MAIL_WEB_COLOURS`] and [`mail_web_recolour`]).
 
 use std::path::PathBuf;
 
 use mailstream_engine::cache::MailCache;
+use serde::Deserialize;
 
-#[cfg(feature = "blitz")]
 pub(crate) mod colours;
+
+use colours::Rgba;
 
 /// Elements that start quoted history, the outermost one matching: Gmail's, Thunderbird's and
 /// Yahoo's quote containers, Outlook's reply header, Apple Mail's cited blockquote and the quotes
@@ -199,6 +201,179 @@ pub fn mail_web_script(view: MailWebView) -> String {
   }};
 }})();"
     )
+}
+
+/// The surface a page sits on and the reader's colours there, `0xRRGGBB`: the page is transparent
+/// where the mail paints nothing, and in dark mode the mail's colours move to the surface
+/// (`colours`), unless the page is on paper (`HtmlPage::paper`, [`MailWebColours::paper`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct HtmlTheme {
+    pub dark: bool,
+    pub surface: u32,
+    pub text: u32,
+    pub link: u32,
+}
+
+impl From<HtmlTheme> for colours::Theme {
+    fn from(theme: HtmlTheme) -> Self {
+        Self { dark: theme.dark, surface: Rgba::hex(theme.surface), text: Rgba::hex(theme.text), link: Rgba::hex(theme.link) }
+    }
+}
+
+/// The script a web view runs after [`mail_web_script`] to read its page's computed colours for
+/// [`mail_web_recolour`]: it answers JSON (the `color-scheme` meta tags' contents, the style
+/// sheets' text and every node of the body's tree in order, with its parent: text as its length,
+/// elements as their colours, which `<canvas>` writes as `#rrggbb` or `rgba(…)`) and keeps the
+/// nodes in `window.mailstreamColoured`, by the same index. The head is left out.
+pub const MAIL_WEB_COLOURS: &str = r#"(() => {
+  const context = document.createElement('canvas').getContext('2d');
+  const written = new Map();
+  const colour = (value) => {
+    let found = written.get(value);
+    if (found === undefined) {
+      context.fillStyle = 'transparent';
+      context.fillStyle = value;
+      found = context.fillStyle;
+      written.set(value, found);
+    }
+    return found;
+  };
+  const nodes = [], entries = [];
+  const visit = (node, parent) => {
+    if (node.nodeType === 3) {
+      nodes.push(node);
+      entries.push([parent, node.data.trim().length]);
+      return;
+    }
+    if (node.nodeType !== 1 || node.localName === 'head') return;
+    const style = getComputedStyle(node), tag = node.localName, text = style.color;
+    // A border in the text's colour is taken for `currentColor`, which follows the text.
+    const border = (side) => {
+      const kind = style.getPropertyValue(`border-${side}-style`), value = style.getPropertyValue(`border-${side}-color`);
+      return kind === 'none' || kind === 'hidden' || value === text ? null : colour(value);
+    };
+    const flags = (style.backgroundImage !== 'none' ? 1 : 0) | (tag === 'html' || tag === 'body' ? 2 : 0)
+      | (tag === 'img' ? 4 : 0) | (tag === 'a' && node.hasAttribute('href') ? 8 : 0);
+    const index = nodes.push(node) - 1;
+    entries.push([parent, colour(text), colour(style.backgroundColor), flags,
+      border('top'), border('right'), border('bottom'), border('left')]);
+    for (const child of node.childNodes) visit(child, index);
+  };
+  visit(document.documentElement, -1);
+  window.mailstreamColoured = nodes;
+  const metas = Array.from(document.querySelectorAll('meta[name][content]'))
+    .filter((meta) => /^(supported-)?color-scheme$/i.test(meta.name)).map((meta) => meta.content);
+  const styles = Array.from(document.querySelectorAll('style'), (style) => style.textContent);
+  return JSON.stringify({ metas, styles, nodes: entries });
+})()"#;
+
+/// What [`mail_web_recolour`] makes of a web page's colours.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MailWebColours {
+    /// The script that moves them, setting each changed element's `style` attribute.
+    pub script: String,
+    /// Whether the page stays as the mail wrote it, on white paper, which the reader shows as a
+    /// sheet (dark mode, mail that can't move).
+    pub paper: bool,
+}
+
+/// The colours [`MAIL_WEB_COLOURS`] read, moved to `theme`'s surface by the rules Blitz pages
+/// follow (`colours::recolour`); the web view is transparent and laid out in the theme's
+/// appearance. `None` for an answer it can't read.
+#[uniffi::export]
+pub fn mail_web_recolour(read: String, theme: HtmlTheme) -> Option<MailWebColours> {
+    let page: WebColours = serde_json::from_str(&read).ok()?;
+    let schemes = colours::schemes(page.metas.iter().map(String::as_str), page.styles.iter().map(String::as_str));
+    let mut children = vec![Vec::new(); page.nodes.len()];
+    let mut root = None;
+    for (index, node) in page.nodes.iter().enumerate() {
+        let parent = match node {
+            WebNode::Text(parent, _) | WebNode::Element(parent, ..) => *parent,
+        };
+        match usize::try_from(parent).ok().and_then(|parent| children.get_mut(parent)) {
+            Some(siblings) => siblings.push(index),
+            None => root = root.or(Some(index)),
+        }
+    }
+    let tree = WebTree { nodes: &page.nodes, children };
+    let colours::Recoloured { changes, paper } = colours::recolour(&tree, root?, &theme.into(), schemes);
+    let changes = serde_json::to_string(&changes).expect("changes encode");
+    let script = format!(
+        "(() => {{
+  const nodes = window.mailstreamColoured || [];
+  for (const [index, change] of {changes}) {{
+    const node = nodes[index], style = node && node.getAttribute('style');
+    if (node) node.setAttribute('style', style ? style + ';' + change : change);
+  }}
+}})();"
+    );
+    Some(MailWebColours { script, paper })
+}
+
+/// [`MAIL_WEB_COLOURS`]'s answer.
+#[derive(Deserialize)]
+struct WebColours {
+    metas: Vec<String>,
+    styles: Vec<String>,
+    nodes: Vec<WebNode>,
+}
+
+/// A node of a web page, with its parent's index (-1 for the root): text as its length; an
+/// element as its colour, background colour, flags (1 background image, 2 `html` or `body`, 4
+/// `img`, 8 `a[href]`) and its borders' colours.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WebNode {
+    Text(i64, usize),
+    Element(i64, String, String, u8, Option<String>, Option<String>, Option<String>, Option<String>),
+}
+
+struct WebTree<'a> {
+    nodes: &'a [WebNode],
+    children: Vec<Vec<usize>>,
+}
+
+impl colours::Page for WebTree<'_> {
+    type Id = usize;
+
+    fn styled(&self, id: usize) -> colours::Styled {
+        match &self.nodes[id] {
+            WebNode::Text(_, length) => colours::Styled::Text(*length),
+            WebNode::Element(_, color, background, flags, top, right, bottom, left) => {
+                let border = |side: &Option<String>| side.as_deref().and_then(css_colour);
+                colours::Styled::Element(colours::Element {
+                    // `<canvas>` writes every colour it can draw; others count as black text on
+                    // nothing.
+                    color: css_colour(color).unwrap_or(Rgba::BLACK),
+                    background: css_colour(background).unwrap_or(Rgba { a: 0., ..Rgba::BLACK }),
+                    background_image: flags & 1 != 0,
+                    page: flags & 2 != 0,
+                    img: flags & 4 != 0,
+                    link: flags & 8 != 0,
+                    borders: [border(top), border(right), border(bottom), border(left)],
+                })
+            }
+        }
+    }
+
+    fn children(&self, id: usize) -> impl Iterator<Item = usize> {
+        self.children[id].iter().copied()
+    }
+}
+
+/// A colour as `<canvas>` writes it: `#rrggbb` or `rgba(r, g, b, a)`.
+fn css_colour(value: &str) -> Option<Rgba> {
+    if let Some(hex) = value.strip_prefix('#') {
+        return (hex.len() == 6).then(|| u32::from_str_radix(hex, 16).ok().map(Rgba::hex)).flatten();
+    }
+    let inner = value.strip_prefix("rgba(").or_else(|| value.strip_prefix("rgb("))?.strip_suffix(')')?;
+    let parts: Vec<f32> = inner.split(',').map(|part| part.trim().parse().ok()).collect::<Option<_>>()?;
+    let (r, g, b, a) = match parts[..] {
+        [r, g, b] => (r, g, b, 1.),
+        [r, g, b, a] => (r, g, b, a),
+        _ => return None,
+    };
+    Some(Rgba { r: r / 255., g: g / 255., b: b / 255., a })
 }
 
 /// Whether a click on `link` opens it: web pages with a host and mail addresses, without
@@ -423,5 +598,34 @@ mod tests {
         ] {
             assert_eq!(served_inline_part(refused), None, "{refused}");
         }
+    }
+
+    #[test]
+    fn web_pages_move_to_the_surface_by_the_shared_rules() {
+        const DARK: HtmlTheme = HtmlTheme { dark: true, surface: 0x231E1B, text: 0xF6EFE7, link: 0x0A84FF };
+        // html > body (page white, near-black text) > [text, a (default link blue) > text, img].
+        let page = |metas: &str| {
+            format!(
+                r##"{{"metas": [{metas}], "styles": [], "nodes": [
+                [-1, "#1f1f1f", "rgba(0, 0, 0, 0)", 2, null, null, null, null],
+                [0, "#1f1f1f", "#ffffff", 2, null, null, "#dddddd", null],
+                [1, 12],
+                [1, "#0000ee", "rgba(0, 0, 0, 0)", 8, null, null, null, null],
+                [3, 4],
+                [1, "#1f1f1f", "rgba(0, 0, 0, 0)", 4, null, null, null, null]]}}"##
+            )
+        };
+        let moved = mail_web_recolour(page(""), DARK).unwrap();
+        assert!(!moved.paper);
+        let script = &moved.script;
+        assert!(script.contains("[1,\"background-color: transparent !important;color: rgba(246, 239, 231, 1) !important;border-bottom-color"), "{script}");
+        assert!(script.contains("[3,\"color: rgba(10, 132, 255, 1) !important;\"]"), "{script}");
+        // The transparent image keeps the white it was drawn on.
+        assert!(script.contains("background-color: rgba(255, 255, 255, 1) !important;"), "{script}");
+        let light = mail_web_recolour(page(""), HtmlTheme { dark: false, ..DARK }).unwrap();
+        assert!(!light.paper && light.script.contains("[1,\"background-color: transparent !important;\"]"), "{}", light.script);
+        let paper = mail_web_recolour(page(r#""only light""#), DARK).unwrap();
+        assert!(paper.paper && paper.script.contains("of []"), "{}", paper.script);
+        assert_eq!(mail_web_recolour("not json".into(), DARK), None);
     }
 }

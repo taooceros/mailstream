@@ -1,7 +1,8 @@
-//! Mail on the reader's own surface (MS-267): Blitz pages are transparent, so the reader's
-//! surface shows where the mail paints nothing, and in dark mode the mail's colours move to it, as
-//! Apple Mail, Gmail and Outlook do, never inverting the page as a whole. These are the rules;
-//! `html_page.rs` walks a page's computed styles with them.
+//! Mail on the reader's own surface (MS-267): pages are transparent, so the reader's surface
+//! shows where the mail paints nothing, and in dark mode the mail's colours move to it, as Apple
+//! Mail, Gmail and Outlook do, never inverting the page as a whole. These are the rules and the
+//! walk over a page's computed styles ([`recolour`]); Blitz (`html_page.rs`) and the web views
+//! (`mail_html::mail_web_recolour`) each hand it their own page.
 //!
 //! - Light: a near-white background with nothing painted under it (the mail's page white on
 //!   `body`, its outer tables) is cleared; every other colour stays the mail's.
@@ -287,6 +288,156 @@ pub(crate) fn schemes<'a>(metas: impl IntoIterator<Item = &'a str>, styles: impl
 /// is an image, or most of its text (`on_images` of `text` characters) lies over images.
 pub(crate) fn needs_paper(schemes: Schemes, image_page: bool, text: usize, on_images: usize) -> bool {
     schemes.only_light || image_page || on_images * 2 > text
+}
+
+/// One node of a page as [`recolour`] sees it.
+pub(crate) enum Styled {
+    /// Text of this many characters (trimmed).
+    Text(usize),
+    Element(Element),
+    /// Anything else: neither counted nor walked into.
+    Other,
+}
+
+/// An element's computed colours.
+pub(crate) struct Element {
+    pub color: Rgba,
+    pub background: Rgba,
+    /// It has a background image.
+    pub background_image: bool,
+    /// It is `html` or `body`.
+    pub page: bool,
+    pub img: bool,
+    /// An `a` with an `href`.
+    pub link: bool,
+    /// Top, right, bottom and left borders' colours: `None` for a side without a border or one in
+    /// `currentColor`.
+    pub borders: [Option<Rgba>; 4],
+}
+
+/// A page's computed styles, as a tree.
+pub(crate) trait Page {
+    type Id: Copy;
+    fn styled(&self, id: Self::Id) -> Styled;
+    fn children(&self, id: Self::Id) -> impl Iterator<Item = Self::Id>;
+}
+
+/// What [`recolour`] makes of a page: the declarations each element that changes gets (none on
+/// paper), and whether it is on paper.
+pub(crate) struct Recoloured<Id> {
+    pub changes: Vec<(Id, String)>,
+    pub paper: bool,
+}
+
+/// Moves the page under `root` to `theme`'s surface, the mail declaring `schemes`: mail with a
+/// dark look of its own (laid out dark by its renderer) moves only its text, and mail that can't
+/// move goes on paper ([`needs_paper`]).
+pub(crate) fn recolour<P: Page>(page: &P, root: P::Id, theme: &Theme, schemes: Schemes) -> Recoloured<P::Id> {
+    let native = theme.dark && schemes.dark;
+    let mut walk = Walk { page, theme, native, changes: Vec::new(), text: 0, on_images: 0, image_page: false };
+    walk.visit(root, Behind { was: Rgba::WHITE, now: None, pinned: false, framed: false });
+    let Walk { changes, text, on_images, image_page, .. } = walk;
+    let paper = theme.dark && !native && needs_paper(schemes, image_page, text, on_images);
+    Recoloured { changes: if paper { Vec::new() } else { changes }, paper }
+}
+
+/// What lies behind an element as [`recolour`] walks down the page.
+#[derive(Clone, Copy)]
+struct Behind {
+    /// The mail's own background there, opaque (white where it paints none).
+    was: Rgba,
+    /// What the page paints there now; `None` where it paints nothing, over the theme's surface.
+    now: Option<Rgba>,
+    /// Whether an ancestor's text colour changed: every element under it then gets its own, as
+    /// one that inherits would otherwise take the ancestor's.
+    pinned: bool,
+    /// Whether it lies over a background image, whose colours stay the mail's.
+    framed: bool,
+}
+
+/// One pass of [`recolour`]: the declarations each element that changes gets, and the characters
+/// of text, those over background images and whether the page itself is an image, for paper.
+struct Walk<'a, P: Page> {
+    page: &'a P,
+    theme: &'a Theme,
+    /// Mail with a dark look of its own, laid out dark: only its text moves.
+    native: bool,
+    changes: Vec<(P::Id, String)>,
+    text: usize,
+    on_images: usize,
+    image_page: bool,
+}
+
+impl<P: Page> Walk<'_, P> {
+    fn visit(&mut self, id: P::Id, behind: Behind) {
+        let element = match self.page.styled(id) {
+            Styled::Text(count) => {
+                self.text += count;
+                if behind.framed {
+                    self.on_images += count;
+                }
+                return;
+            }
+            Styled::Other => return,
+            Styled::Element(element) => element,
+        };
+        let mut next = behind;
+        if !behind.framed && element.background_image {
+            next.framed = true;
+            self.image_page |= element.page;
+        }
+        let colour = element.color;
+        if next.framed && behind.pinned {
+            // Text over the image keeps the mail's colour, not the one an ancestor's moved to.
+            self.changes.push((id, format!("color: {} !important;", colour.css())));
+        }
+        if !next.framed {
+            let theme = self.theme;
+            let background = element.background;
+            let surface = theme.surface;
+            let mut change = String::new();
+            let paint = if self.native { Paint::Keep } else { self::background(background, behind.now.is_none(), theme) };
+            match paint {
+                Paint::Keep if background.a > 0.02 => next.now = Some(background.over(behind.now.unwrap_or(surface))),
+                Paint::Keep => {}
+                Paint::Clear => change.push_str("background-color: transparent !important;"),
+                Paint::Set(shown) => {
+                    change.push_str(&format!("background-color: {} !important;", shown.css()));
+                    next.now = Some(shown.over(behind.now.unwrap_or(surface)));
+                }
+            }
+            if background.a > 0.02 {
+                next.was = background.over(behind.was);
+            }
+            let link = theme.dark && element.link && colour.same(DEFAULT_LINK);
+            let wanted = if link { theme.link } else { colour };
+            // Mail with a dark look of its own: what its text stood out from in its light one is
+            // unknown here; white, as most mail is written for.
+            let was = if self.native { Rgba::WHITE } else { next.was };
+            let shown = text(wanted, was, next.now.unwrap_or(surface), theme);
+            if !shown.same(colour) || behind.pinned {
+                change.push_str(&format!("color: {} !important;", shown.css()));
+                next.pinned = true;
+            }
+            if !self.native {
+                for (side, colour) in ["top", "right", "bottom", "left"].into_iter().zip(element.borders) {
+                    if let Some(shown) = colour.and_then(|colour| border(colour, theme)) {
+                        change.push_str(&format!("border-{side}-color: {} !important;", shown.css()));
+                    }
+                }
+                // A transparent image (a logo drawn for white) keeps the light it was drawn on.
+                if theme.dark && element.img && behind.was.luminance() > 0.3 && behind.now.is_none_or(|now| !now.same(behind.was)) {
+                    change.push_str(&format!("background-color: {} !important;", behind.was.css()));
+                }
+            }
+            if !change.is_empty() {
+                self.changes.push((id, change));
+            }
+        }
+        for child in self.page.children(id) {
+            self.visit(child, next);
+        }
+    }
 }
 
 #[cfg(test)]
