@@ -637,12 +637,12 @@ impl DeviceSync {
                     return Err(map_error(PeerSyncError::NoGroup));
                 }
                 self.open_or_err().await?;
-                let ticket = {
+                let (ticket, expires) = {
                     let guard = self.sync.read().await;
                     let sync = guard.as_ref().expect("opened");
-                    sync.ticket().await.map_err(map_error)?
+                    sync.invite().await.map_err(map_error)?
                 };
-                Ok(answers::json(&SyncTicket { ticket }))
+                Ok(answers::json(&SyncTicket { ticket, expires_at: iso_ms(expires) }))
             }
             "sync.join" => {
                 let ticket = args.required("ticket")?;
@@ -744,14 +744,15 @@ impl DeviceSync {
         let mut devices = Vec::new();
         let mut latest_other_seen = None;
         if let Some(snapshot) = snapshot {
-            for (id, device) in snapshot.devices {
-                if id != status.endpoint_id {
+            for (id, device) in &snapshot.devices {
+                if *id != status.endpoint_id {
                     latest_other_seen = Some(latest_other_seen.unwrap_or(0).max(device.last_seen));
                 }
                 devices.push(SyncDevice {
-                    id,
-                    name: device.name,
-                    platform: device.platform,
+                    accounts: account_sync::receives(&snapshot, id),
+                    id: id.clone(),
+                    name: device.name.clone(),
+                    platform: device.platform.clone(),
                     last_seen: iso_ms(device.last_seen),
                 });
             }

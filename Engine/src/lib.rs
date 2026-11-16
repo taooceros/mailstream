@@ -59,6 +59,7 @@ pub mod settings;
 #[cfg(feature = "shots")]
 pub mod shots;
 pub mod signal;
+mod sync_invite;
 pub mod sync_node;
 pub mod tagging;
 pub mod tagsync;

@@ -443,6 +443,7 @@ impl DeviceSyncMock {
                 name: "Workstation".into(),
                 platform: std::env::consts::OS.into(),
                 last_seen: model::iso8601(model::date_from_unix(now)),
+                accounts: true,
             });
             if self.joined_peer {
                 devices.push(SyncDevice {
@@ -450,6 +451,7 @@ impl DeviceSyncMock {
                     name: "Sam's MacBook Pro".into(),
                     platform: "macos".into(),
                     last_seen: model::iso8601(model::date_from_unix(now - 120.0)),
+                    accounts: true,
                 });
             }
         }
@@ -495,15 +497,23 @@ pub(crate) fn device_sync(command: &str, args: &Arguments, events: &Events) -> R
             if !mock.grouped {
                 return Err(EngineError::new("no_group", "Device sync is not enabled yet."));
             }
+            // `MAILSTREAM_SHOTS_PAIR_SECONDS` shortens a code's 10 minutes, to shoot it expired.
+            let lifetime = std::env::var("MAILSTREAM_SHOTS_PAIR_SECONDS")
+                .ok()
+                .and_then(|seconds| seconds.parse::<f64>().ok())
+                .unwrap_or(600.0);
             Ok(answers::json(&SyncTicket {
-                ticket: "docaaacaaqaaaaa3x7q4m2n8p5r9t2v6w4y8z3b5c7d9f2h4j6k8m2p4q6s8u".into(),
+                ticket: "mailstream-pair-eyJpc3N1ZXIiOnsiaWQiOiI3ZTRkOWExYzhiMmYwZTZhM2Q1YyJ9LCJuYW1lc3BhY2UiOiJzaG90In0"
+                    .into(),
+                expires_at: model::iso8601(model::date_from_unix(now + lifetime)),
             }))
         }
         "sync.join" => {
             let ticket = args.required("ticket")?;
-            let trimmed = ticket.trim();
-            if trimmed.is_empty() || trimmed.contains(char::is_whitespace) {
-                return Err(EngineError::failed("Not a device sync ticket: expected a DocTicket."));
+            // Any code-shaped text pairs here; old tickets and other text get the real refusal.
+            if !ticket.trim().starts_with("mailstream-pair-") {
+                let refused = ticket.parse::<crate::sync_invite::Code>().err().unwrap_or_default();
+                return Err(EngineError::failed(refused));
             }
             mock.grouped = true;
             mock.paused = false;

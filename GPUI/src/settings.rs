@@ -20,12 +20,12 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, AnyWindowHandle, App, AppContext, Bounds, ClipboardItem, Context, Div, ElementId, Entity, Focusable,
     FontWeight, Global, InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, TitlebarOptions, Window, WeakEntity, WindowBounds, WindowOptions,
-    actions, div, px, size,
+    StatefulInteractiveElement, Styled, Subscription, Task, TitlebarOptions, Window, WeakEntity, WindowBounds,
+    WindowOptions, actions, div, px, size,
 };
 use mailstream::{
     Account, AutoReadLog, AutoReadReason, Category, Change, DeviceSyncStatus, Event, EventListener, OAuthClientInfo,
-    Provider, SettingEntry, SettingValue, SyncDevice,
+    Provider, SettingEntry, SettingValue, SyncDevice, SyncTicket,
 };
 
 use crate::controls::{ButtonKind, ControlSize, Tone, button, field_frame, icon_button, notice, pill, switch, tag};
@@ -261,6 +261,38 @@ enum SyncBusy {
     Cloud,
 }
 
+/// The one-time pairing code on show (MS-376), redrawn every second for its countdown until it
+/// expires.
+struct PairCode {
+    code: String,
+    expires: Option<DateTime<Utc>>,
+    _tick: Task<()>,
+}
+
+impl PairCode {
+    fn new(ticket: SyncTicket, cx: &mut Context<Settings>) -> Self {
+        let expires = DateTime::parse_from_rfc3339(&ticket.expires_at).ok().map(|at| at.with_timezone(&Utc));
+        let tick = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let ticking = this.update(cx, |_, cx| {
+                    cx.notify();
+                    expires.is_some_and(|at| at > Utc::now())
+                });
+                if !ticking.unwrap_or(false) {
+                    break;
+                }
+            }
+        });
+        Self { code: ticket.ticket, expires, _tick: tick }
+    }
+
+    /// How long it still works, `None` once expired.
+    fn left(&self) -> Option<chrono::Duration> {
+        self.expires.map(|at| at - Utc::now()).filter(|left| *left > chrono::Duration::zero())
+    }
+}
+
 struct Settings {
     on_changed: Rc<dyn Fn(&mut App)>,
     accounts: Option<Result<Vec<Account>, MailError>>,
@@ -278,7 +310,7 @@ struct Settings {
     cloud_subscription: Option<Subscription>,
     /// Why the last change to the Cloudflare drop failed before reaching it (no URL, a bad one).
     cloud_error: Option<SharedString>,
-    sync_ticket: Option<String>,
+    sync_ticket: Option<PairCode>,
     ticket_copied: bool,
     sync_confirm_reset: bool,
     sync_busy: Option<SyncBusy>,
@@ -588,7 +620,7 @@ impl Settings {
         if self.join_input.is_some() {
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Paste DocTicket from another device"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Paste a pairing code from another device"));
         let subscription = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { secondary: false, .. } = event {
                 this.join_sync(window, cx);
@@ -676,14 +708,14 @@ impl Settings {
                 }
                 let ticket = engine().sync_pair_ticket().await?;
                 let status = engine().sync_status().await?;
-                Ok::<_, MailError>((status, ticket.ticket))
+                Ok::<_, MailError>((status, ticket))
             },
             |this, result, cx| {
                 this.sync_busy = None;
                 match result {
                     Ok((status, ticket)) => {
                         this.device_sync = Some(status);
-                        this.sync_ticket = Some(ticket);
+                        this.sync_ticket = Some(PairCode::new(ticket, cx));
                     }
                     Err(error) => {
                         this.sync_error = Some(error.to_string().into());
@@ -695,8 +727,8 @@ impl Settings {
     }
 
     fn copy_sync_ticket(&mut self, cx: &mut Context<Self>) {
-        let Some(ticket) = self.sync_ticket.clone() else { return };
-        cx.write_to_clipboard(ClipboardItem::new_string(ticket));
+        let Some(code) = self.sync_ticket.as_ref().map(|ticket| ticket.code.clone()) else { return };
+        cx.write_to_clipboard(ClipboardItem::new_string(code));
         self.ticket_copied = true;
         cx.notify();
     }
@@ -708,7 +740,7 @@ impl Settings {
         let Some(input) = self.join_input.clone() else { return };
         let ticket = input.read(cx).value().trim().to_string();
         if ticket.is_empty() {
-            self.sync_error = Some("Paste a DocTicket from another device to join its sync group.".into());
+            self.sync_error = Some("Paste a pairing code from another device to join its sync group.".into());
             cx.notify();
             return;
         }
@@ -1929,12 +1961,15 @@ impl Settings {
                     d.child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(if status.paused {
                         "Paired devices show again once you turn sync back on."
                     } else {
-                        "No other devices paired yet. Create a pairing ticket below or paste one from another device."
+                        "No other devices paired yet. Create a pairing code below or paste one from another device."
                     }))
                 })
                 .children(peers.into_iter().map(|peer| {
                     let seen = mailstream::message_date(Some(peer.last_seen.clone()));
-                    let meta = format!("{} · ID {} · Last synced {seen}", platform_label(&peer.platform), short_id(&peer.id));
+                    let mut meta = format!("{} · ID {} · Last synced {seen}", platform_label(&peer.platform), short_id(&peer.id));
+                    if peer.accounts {
+                        meta.push_str(" · Has your accounts");
+                    }
                     div()
                         .flex()
                         .flex_col()
@@ -1948,52 +1983,69 @@ impl Settings {
         }
 
         let pair_block: AnyElement = match &self.sync_ticket {
-            Some(ticket) => div()
-                .p(px(10.))
-                .rounded(px(radius::CONTROL))
-                .border_1()
-                .border_color(p.line)
-                .bg(p.background)
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(div().font_weight(FontWeight::MEDIUM).child("Pairing ticket"))
-                .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
-                    "Paste this DocTicket on your other device and click Join. Both devices need to be online \
-                     at the same time once to complete the initial sync.",
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .h(px(26.))
-                                .px(px(8.))
-                                .flex()
-                                .items_center()
-                                .rounded(px(radius::SMALL))
-                                .border_1()
-                                .border_color(p.line)
-                                .bg(p.fill)
-                                .font_family(design::mono_font())
-                                .text_size(px(text::CAPTION))
-                                .child(div().min_w_0().flex_1().truncate().child(ticket.clone())),
-                        )
-                        .child(
-                            button(
-                                "copy-sync-ticket",
-                                if self.ticket_copied { "Copied" } else { "Copy" },
-                                ButtonKind::Primary,
-                                ControlSize::Small,
-                                true,
-                                p,
+            Some(ticket) => {
+                let left = ticket.left();
+                let (title, detail): (SharedString, SharedString) = match left {
+                    Some(left) => (
+                        format!("Pairing code · expires in {}:{:02}", left.num_minutes(), left.num_seconds() % 60).into(),
+                        "Paste it on your other device and click Join, or run `mailstream sync join '<code>'` there. \
+                         It works once, and this device must stay open until the other one joins. The device that \
+                         joins also gets your signed-in accounts, without signing in again."
+                            .into(),
+                    ),
+                    None => (
+                        "Pairing code expired".into(),
+                        "Codes work once, for 10 minutes. Create a new one when the other device is ready.".into(),
+                    ),
+                };
+                let live = left.is_some();
+                div()
+                    .p(px(10.))
+                    .rounded(px(radius::CONTROL))
+                    .border_1()
+                    .border_color(p.line)
+                    .bg(p.background)
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(div().font_weight(FontWeight::MEDIUM).child(title))
+                    .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(detail))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h(px(26.))
+                                    .px(px(8.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(radius::SMALL))
+                                    .border_1()
+                                    .border_color(p.line)
+                                    .bg(p.fill)
+                                    .font_family(design::mono_font())
+                                    .text_size(px(text::CAPTION))
+                                    .when(!live, |d| d.text_color(p.muted).line_through())
+                                    .child(div().min_w_0().flex_1().truncate().child(ticket.code.clone())),
                             )
-                            .on_click(cx.listener(|this, _, _, cx| this.copy_sync_ticket(cx))),
-                        )
+                            .child(if live {
+                                button(
+                                    "copy-sync-ticket",
+                                    if self.ticket_copied { "Copied" } else { "Copy" },
+                                    ButtonKind::Primary,
+                                    ControlSize::Small,
+                                    true,
+                                    p,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.copy_sync_ticket(cx)))
+                            } else {
+                                button("new-sync-ticket", "New Code", ButtonKind::Primary, ControlSize::Small, interactive, p)
+                                    .when(interactive, |b| b.on_click(cx.listener(|this, _, _, cx| this.pair_device(cx))))
+                            })
                         .child(
                             button("done-sync-ticket", "Done", ButtonKind::Secondary, ControlSize::Small, true, p).on_click(
                                 cx.listener(|this, _, _, cx| {
@@ -2003,8 +2055,9 @@ impl Settings {
                                 }),
                             ),
                         ),
-                )
-                .into_any_element(),
+                    )
+                    .into_any_element()
+            }
             None => {
                 let pair_label = if self.sync_busy == Some(SyncBusy::Pair) { "Creating…" } else { "Pair Another Device" };
                 div()
@@ -2020,8 +2073,8 @@ impl Settings {
                             .gap(px(2.))
                             .child(div().font_weight(FontWeight::MEDIUM).child("Pair another device"))
                             .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
-                                "Generates a DocTicket to share with your other device. Both devices need to be \
-                                 online together once to finish the first sync.",
+                                "Creates a one-time code for your other device, valid for 10 minutes. The device \
+                                 that joins with it also gets your signed-in accounts.",
                             )),
                     )
                     .child(
@@ -2038,7 +2091,7 @@ impl Settings {
             .flex_col()
             .gap(px(6.))
             .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
-                "Or paste a DocTicket from a device already in a sync group:",
+                "Or paste a pairing code from a device already in a sync group:",
             ))
             .child(
                 div()
@@ -2087,8 +2140,10 @@ impl Settings {
                     .gap(px(8.))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("Reset sync group?"))
                     .child(div().text_size(px(text::CAPTION)).text_color(p.muted).child(
-                        "Starts a new sync group carrying over your current synced settings. If an old device \
-                         was lost, resetting stops it from receiving future changes until paired again.",
+                        "Starts a new sync group carrying over your synced settings and accounts; pair your other \
+                         devices again. A lost device stops receiving changes, but keeps the sign-ins it already \
+                         has: to cut it off, remove Mailstream's access in your Google or Microsoft account \
+                         settings, then sign in again here.",
                     ))
                     .child(
                         div()

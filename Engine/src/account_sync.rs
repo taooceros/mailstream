@@ -368,9 +368,14 @@ fn recipients(snapshot: &Snapshot, me: &str) -> Vec<(String, [u8; 32])> {
     snapshot
         .device_keys
         .iter()
-        .filter(|(id, _)| id.as_str() != me)
+        .filter(|(id, _)| id.as_str() != me && receives(snapshot, id))
         .filter_map(|(id, announced)| Some((id.clone(), announced.verified(id)?)))
         .collect()
+}
+
+/// Whether the device `id` gets the group's accounts: it announced a credential key.
+pub(crate) fn receives(snapshot: &Snapshot, id: &str) -> bool {
+    snapshot.device_keys.get(id).is_some_and(|announced| announced.verified(id).is_some())
 }
 
 /// This device's records as the group keeps them, by id.

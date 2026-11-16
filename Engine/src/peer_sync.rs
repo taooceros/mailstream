@@ -364,6 +364,8 @@ struct Inner {
     /// A device from before MS-380 ([`Network::BeforeAdmission`]).
     #[cfg(test)]
     legacy: bool,
+    /// One-time pairing codes this device issued (MS-376), redeemed at the admission door.
+    invites: crate::sync_invite::Invites,
 }
 
 /// The group this device is in, if any.
@@ -465,6 +467,7 @@ impl PeerSync {
             changes: watch::channel(0).0,
             #[cfg(test)]
             legacy,
+            invites: Default::default(),
         });
         let sync = Self { watchers: watch_network(&inner), inner };
         #[cfg(test)]
@@ -567,6 +570,21 @@ impl PeerSync {
         }
         let ticket = doc.share(ShareMode::Write, AddrInfoOptions::RelayAndAddresses).await.map_err(failed)?;
         Ok(ticket.to_string())
+    }
+
+    /// A one-time pairing code for another device (MS-376): this device's address, the group's
+    /// id and a secret this device redeems once within [`crate::sync_invite::LIFETIME`]; with
+    /// when it expires, Unix ms. It holds no group key.
+    pub async fn invite(&self) -> Result<(String, u64)> {
+        let group = self.inner.group.lock().await;
+        let doc = group.doc.as_ref().ok_or(PeerSyncError::NoGroup)?;
+        let endpoint = self.inner.endpoint();
+        if !endpoint.addr().relay_urls().any(|_| true) {
+            tokio::time::timeout(ONLINE_WAIT, endpoint.online()).await.ok();
+        }
+        let (secret, expires) = self.inner.invites.issue().map_err(failed)?;
+        let code = crate::sync_invite::Code::new(endpoint.addr(), &doc.id().to_string(), &secret);
+        Ok((code.to_string(), expires))
     }
 
     /// Joins the group of `ticket` (see [`PeerSync::ticket`]) and syncs with the devices it

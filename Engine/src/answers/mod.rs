@@ -109,6 +109,9 @@ pub struct SyncDevice {
     pub platform: String,
     /// ISO 8601.
     pub last_seen: String,
+    /// Gets this group's signed-in accounts (MS-376): admitted, with a credential key announced.
+    #[serde(default)]
+    pub accounts: bool,
 }
 
 /// Cross-device settings sync (`sync.status`, `sync.enable`, …).
@@ -149,10 +152,13 @@ pub struct SyncCloud {
     pub problem: Option<String>,
 }
 
-/// Pairing ticket for another device (`sync.pair_ticket`).
+/// A one-time pairing code for another device (`sync.pair_ticket`, MS-376).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncTicket {
     pub ticket: String,
+    /// ISO 8601: when the code stops working, if no device used it before.
+    pub expires_at: String,
 }
 
 /// Someone from the accounts' Google and Outlook directories or recent correspondents.
