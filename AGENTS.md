@@ -283,7 +283,12 @@ the script again). The new session reads `session.md`, starts the queued issues 
 The machines talk only through Linear, and the issue's delegate decides which one works it
 (MS-386): each poller claims, resumes, installs, reports stale and routes comments only for
 issues delegated to its own app, in every team, whatever their labels. An issue delegated to
-nobody is nobody's until the user delegates it, and delegating starts it. New work for another
+nobody is nobody's until it is delegated, and delegating starts it. The user delegates, or leaves
+it to the router (MS-388): the Mac's poller alone delegates an issue the user filed in Todo that
+nobody delegated within two minutes, has no sub-issues and has no comment from a machine or naming
+one, by the rule below, and comments on the issue where it sent it and why (`[linear-poll] …`,
+also in its ledger); the other pollers never route, so two machines can't race. Agents' own issues
+are never routed (Filing). New work for another
 machine is an issue (a sub-issue when it serves one, in the team of its project) delegated to
 that machine's app: its poller claims it, since every machine's app counts as a trusted creator.
 A comment naming a machine's app reaches that machine alone on any issue, from the user or
@@ -293,9 +298,17 @@ another machine; agents write the name in backticks (`` `@mac-omp` ``), since Li
 Which machine to delegate Mailstream work to (MS-254): Linux (`linux-omp`) unless it is
 Mac-specific, which means it needs macOS: macOS packaging and signing, installing to
 `/Applications`, `bench.sh` benchmarks, Mac menus and shortcuts, the AppKit app, Liquid Glass
-(`mac-omp`). Windows chores go to `windows-omp`, `MRV` and `HET` to `saturn-omp`. The user's choice
-stands: a poller works what is delegated to it and doesn't pass it on by itself. An issue already
-being worked stays on its machine until it is handed over; it is not moved mid-way.
+(`mac-omp`). Windows chores go to `windows-omp`, `MRV` and `HET` to `saturn-omp`. The router
+applies this by keywords (`linear-poll.py`'s header, Routing): an issue whose title or description
+names one machine's app (`@linux-omp`) goes there; an `MS` issue naming macOS-only work (Mac,
+macOS, AppKit, Liquid Glass, Xcode, `/Applications`, `bench.sh`, signing, Keychain, the menu bar,
+⌘ shortcuts) and not Linux goes to `mac-omp`, any other `MS` issue to `linux-omp`, and every `WIN`,
+`MRV` or `HET` issue to its team's machine. The user's choice
+stands: a poller works what is delegated to it and doesn't pass it on by itself. The router's is
+only a guess: an agent that claims an issue the router delegated and finds it needs another
+machine delegates it to that machine's app before working it, says why on the issue, removes
+`claimed` and stops. An issue already being worked stays on its machine until it is handed over;
+it is not moved mid-way.
 
 ## Building
 

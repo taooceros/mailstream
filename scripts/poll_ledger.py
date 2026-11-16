@@ -18,6 +18,12 @@ of JSON events, one per line, each with `at` (UTC, `%Y-%m-%dT%H:%M:%SZ`) and `ev
             than GAP seconds (default 300): the poller was stopped, or Linear or the network kept
             failing.
   note      {"id", "issue", "text"}: a remark written by hand (`linear-poll.py ledger note`).
+  routed    {"line", "error"}: the router (linear-poll.py, Routing; MS-388) delegated an issue that
+            nobody had delegated, line being its `route` line: `id`, `identifier`, `title`, `team`,
+            `to` (the app's name) and `why` ("named": its title or description names that machine;
+            "mac:<term>": an MS issue naming that macOS-only term; "team": its team's machine).
+            error is Linear's refusal (the issue then stays undelegated), else null. An issue is
+            routed at most once.
 
 Checkpoint and rewind (the user's idea): STATE/checkpoint holds the start of the last full pass
 whose lines were all handed out and recorded. Each full pass rewinds to it less 10 minutes (at most
@@ -27,7 +33,8 @@ handled does the checkpoint move. So a timeout, restart, warm build or crash rep
 instead of losing it, and a comment never falls out of a fixed-size page.
 
 An item is open from its first `handed` until `answered` or `closed`. Each full pass reads the
-app's own comments among the replayed ones and records the answers. At most every CHECK
+app's own comments among the replayed ones and records the answers; the router's comments, which
+start with `[linear-poll]`, answer nothing. At most every CHECK
 seconds (default 300, kept in STATE/ledger-checked), an open item last handed OVERDUE seconds ago
 (default 1800) whose issue no running agent holds (the agent of its latest start comment is not in
 RUNNING) is printed again with `overdue` (minutes since first handed), and again every OVERDUE
@@ -35,7 +42,8 @@ seconds until it is answered or closed: leaving it to another machine counts onl
 written on the issue. Without RUNNING nothing is printed again. With DRY_RUN nothing is written.
 
 `linear-poll.py ledger [HOURS]` prints the items of the last HOURS (default 72) that were handed out
-more than once or are still open, with who answered and how late, and the gaps;
+more than once or are still open, with who answered and how late, the gaps and the issues the
+router delegated;
 `linear-poll.py ledger note MS-12 TEXT` adds a note to the item last handed on that issue.
 """
 import json
@@ -46,10 +54,11 @@ from datetime import datetime, timedelta, timezone
 OVERDUE = int(os.environ.get("OVERDUE", "1800"))
 CHECK = int(os.environ.get("CHECK", "300"))
 GAP = int(os.environ.get("GAP", "300"))
-KEEP_DAYS = 14  # finished items and gaps older than this are dropped once the file passes MAX_BYTES
+KEEP_DAYS = 14  # finished items, gaps and routed issues older than this are dropped once the file passes MAX_BYTES
 MAX_BYTES = 2_000_000
 START = re.compile(r"^\[omp @ [^\]]*\] start \((?P<a>[^)]+)\)")
 PREFIX = re.compile(r"^\[omp @ (?P<p>[^\]]*)\]")
+TAG = "[linear-poll]"  # what the script's own posts start with (linear-poll.py's TAG), the router's comments included
 FINISHED = ("completed", "canceled", "duplicate")
 
 
@@ -96,6 +105,12 @@ class Ledger:
 
     def handed(self, line):
         self.write({"event": "handed", "line": line})
+
+    def routed(self, line, error):
+        self.write({"event": "routed", "line": line, "error": error})
+
+    def was_routed(self, issue):
+        return any(e["event"] == "routed" and e["line"]["id"] == issue for e in self.events)
 
     def items(self):
         """Per item id: its latest line, first and last hand-out, hand-outs, notes and how it ended."""
@@ -153,12 +168,12 @@ class Ledger:
 
     def answer(self, comments, me):
         """Records the items this machine's apps (`me`, their user ids: its app and FORMER ones,
-        linear-poll.py) answered among `comments`."""
+        linear-poll.py) answered among `comments`; the router's comments (TAG) answer nothing."""
         waiting = {}
         for id, item in self.open_items().items():
             waiting.setdefault(self.issue_of(id, item), []).append((id, item))
-        mine = sorted((c for c in comments if (c.get("user") or {}).get("id") in me and c["issue"]["id"] in waiting),
-                      key=lambda c: c["createdAt"])
+        mine = sorted((c for c in comments if (c.get("user") or {}).get("id") in me and c["issue"]["id"] in waiting
+                       and not c["body"].startswith(TAG)), key=lambda c: c["createdAt"])
         for comment in mine:
             at, items = parse(comment["createdAt"]), waiting[comment["issue"]["id"]]
             for id, item in [(id, item) for id, item in items if at > self.since_item(item)]:
@@ -202,13 +217,13 @@ class Ledger:
     # Upkeep and reports.
 
     def compact(self):
-        """Drops finished items and gaps older than KEEP_DAYS once the file passes MAX_BYTES."""
+        """Drops finished items, gaps and routed issues older than KEEP_DAYS once the file passes MAX_BYTES."""
         if not self.path.exists() or self.path.stat().st_size < MAX_BYTES:
             return
         cutoff = stamp(now() - timedelta(days=KEEP_DAYS))
         done = {id for id, item in self.items().items() if item["end"] is not None and item["end"]["at"] < cutoff}
         keep = [e for e in self.events
-                if not (e["event"] == "gap" and e["to"] < cutoff)
+                if not (e["event"] == "gap" and e["to"] < cutoff) and not (e["event"] == "routed" and e["at"] < cutoff)
                 and (e["line"]["id"] if e["event"] == "handed" else e.get("id")) not in done]
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text("".join(json.dumps(e, ensure_ascii=False, separators=(",", ":")) + "\n" for e in keep),
@@ -243,5 +258,9 @@ class Ledger:
             notes = "".join(f"\n    note: {n}" for n in item["notes"])
             rows.append(f"{item['first']}  {what}\n    handed {item['handed']}x, {outcome}{notes}")
         gaps = [f"  {e['from']} → {e['to']}" for e in self.events if e["event"] == "gap" and e["to"] >= cutoff]
+        routes = [f"  {e['at']}  {e['line']['identifier']} {e['line']['title'][:60]} → {e['line']['to']} ({e['line']['why']})"
+                  + (f" REFUSED: {e['error']}" if e["error"] else "")
+                  for e in self.events if e["event"] == "routed" and e["at"] >= cutoff]
         return "\n".join([f"Handed out more than once, noted or still open (last {hours} h):"] + (rows or ["  none"])
-                         + [f"Gaps (no full pass for over {GAP} s: poller stopped or failing):"] + (gaps or ["  none"]))
+                         + [f"Gaps (no full pass for over {GAP} s: poller stopped or failing):"] + (gaps or ["  none"])
+                         + ["Delegated by the router (issues nobody had delegated, MS-388):"] + (routes or ["  none"]))

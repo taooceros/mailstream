@@ -71,10 +71,34 @@ written by them and mentions of their names are its own. An issue belongs to the
 app it is delegated to (Linear's "assign to
 agent" sets the issue's delegate; an app can't be its assignee): that poller alone claims,
 resumes, installs, reports stale and routes comments for it. An issue delegated to nobody belongs
-to no machine, so nothing happens on it until the user delegates it. A comment naming a machine's
-app (`@linux-omp`, or a real Linear mention, which the API writes as the app's profile URL) goes to
-that machine alone, whatever the issue: that is how the user and the other machines address it.
-Another machine's app reaches it only that way. Labels and teams play no part.
+to no machine until it is delegated: by the user, or by the router (Routing) when the user filed
+it in Todo. A comment naming a machine's app (`@linux-omp`, or a real Linear mention, which the API
+writes as the app's profile URL) goes to that machine alone, whatever the issue: that is how the
+user and the other machines address it. Another machine's app reaches it only that way. Labels and
+teams play no part in who works a delegated issue.
+Routing (MS-388): one poller, the router (ROUTER, an app id, default the Mac's `mac-omp`; empty
+turns routing off), delegates the issues the user filed and nobody delegated, so they reach a
+machine; the other pollers never do, so two of them can't race or, running different versions of
+the rule, undo each other. Each full pass it reads up to 20 issues in Todo (state type
+`unstarted`), delegated to nobody, filed by a workspace member at least ROUTE_AFTER seconds ago
+(default 120: time for the user to delegate or mention a machine themselves) and without
+sub-issues (a parent is tracked through them), and skips any with a comment by an app (a machine
+already answered there, or it was routed before) or a comment naming a machine's app (that machine
+has it). Agents' own issues are never routed: their creator is an app. Each goes to the machine
+whose app its title or description names, when it names exactly one; else an `MS` issue naming
+macOS-only work (MAC_TERMS: Mac, macOS, AppKit, Liquid Glass, Xcode, `/Applications`, `bench.sh`,
+signing and notarizing, Keychain, the menu bar, ⌘ shortcuts; AGENTS.md, Polling session, MS-254)
+and no Linux (LINUX_TERMS) to `mac-omp`; else its team's machine (TEAM_APPS: `MS` to `linux-omp`,
+`WIN` to `windows-omp`, `MRV` and `HET` to `saturn-omp`); a team without one stays undelegated.
+Right before writing it reads the issue again and skips it when any of that changed. It sets the
+delegate (that machine's poller claims it on its next pass, as for any delegation), records a
+`routed` event in the ledger (scripts/poll_ledger.py) and comments on the issue where it sent it
+and why. That comment starts with TAG and names the app without `@`, so it reaches no machine as a
+mention and counts as no machine's answer (ledger, agent sessions). When Linear refuses (an app
+whose token lacks `app:assignable`), the comment says so and asks the user to delegate it; the
+ledger keeps the error and the issue is not tried again. A network failure is retried next pass.
+Real passes print nothing for it (stderr logs each); DRY_RUN prints a `route` line per issue
+instead, writing nothing.
 Agent sessions (MS-377): with the scopes `app:assignable` and `app:mentionable` the app can be
 delegated an issue and @-mentioned, and Linear opens an agent session for each
 (https://linear.app/developers/agents, https://linear.app/developers/agent-interaction). Without
@@ -87,7 +111,7 @@ whatever the issue's delegate. As it prints one, the script posts a `thought` ac
 was handed out, since Linear marks a session unresponsive without an activity within 10 s and
 stale after 30 min without one (both recover with the next activity,
 https://linear.app/developers/agent-best-practices). It answers the session itself at hand-over:
-once this machine's app has commented on the issue after that thought (start comments aside) and the issue is
+once this machine's app has commented on the issue after that thought (start comments and TAG ones aside) and the issue is
 out of In Progress and Todo, it posts a `response` with the start of that comment and its link,
 or an `elicitation` as soon as such a comment asks the user (`需要你回答`). Sessions started or
 messages sent by anyone else (a guest, an app, an automation) get an `error` and no line, as do
@@ -121,8 +145,8 @@ every OVERDUE seconds until it is answered, finished or no longer this machine's
 leaves an item to another machine says so on the issue. `linear-poll.py ledger [HOURS]` lists
 what was printed more than once or is still open, who answered and how late, and the gaps;
 `linear-poll.py ledger note MS-12 TEXT` adds a remark.
-DRY_RUN=1 prints without claiming or posting (unclaim lines included, and `reply` lines with the
-activity a session would get). Each issue it claims for the first
+DRY_RUN=1 prints without claiming or posting (unclaim lines included, `reply` lines with the
+activity a session would get, and `route` lines with what the router would delegate). Each issue it claims for the first
 time (resume false) and each comment line written by a workspace member gets the app's 👀 reaction
 as it is printed, so the user sees it was picked up whichever session handles it (MS-355); a
 failed reaction is only logged.
@@ -159,7 +183,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import poll_ledger
@@ -167,14 +191,22 @@ import source_lock
 
 LABEL = os.environ.get("LABEL", "omp")
 CLAIMED = os.environ.get("CLAIMED", "claimed")
-APPS = os.environ.get("APPS", ",".join((
-    "3a60f58a-3306-4ec5-8e88-1819e1f9ce43",  # mac-omp
-    "26c89eea-6fa1-4455-a506-a9dbee9b5d6a",  # windows-omp
-    "6b274855-c5e9-4203-84f4-56ef84f7209c",  # linux-omp
-    "e09f599a-5bcb-4e17-b981-3ef92d3594a9",  # saturn-omp
-    "da14602e-8f26-4082-8ca7-1be2cc5d3c5c",  # omp, the Mac's app until MS-387 (FORMER)
-))).split(",")
-FORMER = {"3a60f58a-3306-4ec5-8e88-1819e1f9ce43": ["da14602e-8f26-4082-8ca7-1be2cc5d3c5c"]}  # see Machines
+MAC_OMP = "3a60f58a-3306-4ec5-8e88-1819e1f9ce43"
+WINDOWS_OMP = "26c89eea-6fa1-4455-a506-a9dbee9b5d6a"
+LINUX_OMP = "6b274855-c5e9-4203-84f4-56ef84f7209c"
+SATURN_OMP = "e09f599a-5bcb-4e17-b981-3ef92d3594a9"
+OMP = "da14602e-8f26-4082-8ca7-1be2cc5d3c5c"  # the Mac's app until MS-387 (FORMER)
+APPS = os.environ.get("APPS", ",".join((MAC_OMP, WINDOWS_OMP, LINUX_OMP, SATURN_OMP, OMP))).split(",")
+FORMER = {MAC_OMP: [OMP]}  # see Machines
+CURRENT = {old: app for app, olds in FORMER.items() for old in olds}
+ROUTER = os.environ.get("ROUTER", MAC_OMP)  # see Routing
+ROUTE_AFTER = int(os.environ.get("ROUTE_AFTER", "120"))
+TEAM_APPS = {"MS": LINUX_OMP, "WIN": WINDOWS_OMP, "MRV": SATURN_OMP, "HET": SATURN_OMP}
+MAC_TERMS = re.compile(  # macOS-only work (AGENTS.md, Polling session, MS-254); `mac` also matches `macos27`, `mac上`
+    r"(?<![a-z])(?:mac(?:os|book)?|osx|appkit|xcode|keychain|apple intelligence|liquid glass|menu ?bar|dmg)(?![a-z])"
+    r"|(?<![a-z])(?:codesign|notari[sz]|cmd ?[+-])|bench\.sh|/applications(?![a-z])|mailstream\.app|⌘|液态玻璃|菜单栏|钥匙串",
+    re.I)
+LINUX_TERMS = re.compile(r"(?<![a-z])(?:linux|nixos|hyprland|wayland|x11)(?![a-z])", re.I)
 RENEW = Path.home() / ".pi/agent/extensions/linear/renew-omp-token.sh"
 TOKEN_FILE = os.environ.get("LINEAR_TOKEN_FILE", "")
 CREDENTIALS = os.environ.get("LINEAR_CREDENTIALS", "")
@@ -196,7 +228,7 @@ DESCRIPTION = int(os.environ.get("DESCRIPTION", "600"))
 START = re.compile(r"^\[omp @ [^\]]*\] start \((?P<a>[^)]+)\)")
 PREFIX = re.compile(r"^\[omp @ [^\]]*\]\s*")
 QUESTION = "需要你回答"
-TAG = "[linear-poll]"
+TAG = poll_ledger.TAG
 WORKING_STATES = ("In Progress", "Todo")  # an issue in neither has been handed over
 
 
@@ -254,8 +286,9 @@ def post(body):
     return out
 
 
-def gql(query, variables):
-    """Returns .data; renews this machine's app token once on an authentication error."""
+def respond(query, variables):
+    """Linear's whole answer (.data and .errors); renews this machine's app token once on an
+    authentication error. A network failure raises Failed."""
     body = json.dumps({"query": query, "variables": variables}).encode()
     out = post(body)
     if any((e.get("extensions") or {}).get("code") == "AUTHENTICATION_ERROR" for e in out.get("errors") or []):
@@ -266,6 +299,12 @@ def gql(query, variables):
             log(f"token renewal failed: {error}")
             raise Failed from error
         out = post(body)
+    return out
+
+
+def gql(query, variables):
+    """Returns .data; any error fails the pass."""
+    out = respond(query, variables)
     if out.get("errors"):
         log(f"linear error: {json.dumps([e.get('message') for e in out['errors']], ensure_ascii=False)}")
         raise Failed
@@ -390,8 +429,28 @@ LEDGER_ISSUES = """query($ids: [ID!], $n: Int!) { issues(first: $n, filter: { id
     comments(first: 50) { nodes { createdAt body } } } } }"""
 
 
-def query(apps):
-    return """query($me: [ID!], $claimed: String!, $install: String!, $sessions: Int!, $since: DateTimeOrDuration!, $after: String) {""" + WATERMARKS + """
+# What the router needs to decide on an issue nobody delegated (Routing); read again before it writes.
+ROUTE_FIELDS = """{ id identifier title description team { key } delegate { id } state { type }
+    creator { id name app guest } children(first: 1) { nodes { id } }
+    comments(first: 20) { nodes { body user { id app } } } }"""
+
+UNROUTED = """
+  unrouted: issues(first: 20, orderBy: createdAt, filter: { delegate: { null: true },
+    state: { type: { eq: "unstarted" } }, creator: { app: { eq: false } }, createdAt: { lt: $before } }) {
+    nodes """ + ROUTE_FIELDS + """ }"""
+
+ROUTE_CHECK = "query($id: String!) { issue(id: $id) " + ROUTE_FIELDS + " }"
+
+DELEGATE = """mutation($id: String!, $to: String!) {
+  issueUpdate(id: $id, input: { delegateId: $to }) { success } }"""
+
+COMMENT = "mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }"
+
+
+def query(apps, routing):
+    """The full pass's query; `routing` (this poller is the router) adds the issues nobody delegated."""
+    return ("""query($me: [ID!], $claimed: String!, $install: String!, $sessions: Int!, $since: DateTimeOrDuration!, $after: String"""
+            + (", $before: DateTimeOrDuration!" if routing else "") + ") {" + WATERMARKS + (UNROUTED if routing else "") + """
   queued: issues(first: 100, filter: {
     delegate: { id: { in: $me } }, state: { type: { in: ["triage", "backlog", "unstarted"] } } }) {
     nodes { id identifier number title description priority priorityLabel state { name }
@@ -417,7 +476,7 @@ def query(apps):
       issue { id identifier number title description priority priorityLabel team { key } state { name }
         creator { id name app guest } project { name } parent { identifier title }
         labels { nodes { id name } } comments(first: 20) { nodes { id createdAt body url user { id } } } } } }
-}"""
+}""")
 
 
 def labelled(issue):
@@ -574,7 +633,7 @@ def plan_sessions(data, known, done, handled, todo):
             continue
         acked = timestamp(entry["ackedAt"])
         after = [c for c in issue["comments"]["nodes"] if (c["user"] or {}).get("id") in ours
-                 and timestamp(c["createdAt"]) > acked and not START.match(c["body"])]
+                 and timestamp(c["createdAt"]) > acked and not START.match(c["body"]) and not c["body"].startswith(TAG)]
         question = max((c for c in after if QUESTION in c["body"]), key=lambda c: c["createdAt"], default=None)
         if question is not None:
             replies.append(reply([], {"type": "elicitation", "body": summary(question, issue)}, True))
@@ -635,6 +694,82 @@ def plan(data, running, known):
     return out + sorted(notes, key=lambda line: line["createdAt"]) + replies
 
 
+def routable(issue, apps):
+    """Whether the router may delegate an issue (Routing): in Todo, delegated to nobody, filed by a
+    member, without sub-issues, and no comment on it by an app or naming a machine's app."""
+    return (issue["delegate"] is None and issue["state"]["type"] == "unstarted" and member(issue["creator"])
+            and not issue["children"]["nodes"]
+            and not any((c["user"] or {}).get("app") is True or named(c["body"], apps) for c in issue["comments"]["nodes"]))
+
+
+def destination(issue, apps):
+    """The app an issue nobody delegated goes to and why (Routing); None when its team has no machine."""
+    text = f"{issue['title']}\n{issue['description'] or ''}"
+    names = {CURRENT.get(app, app) for app in named(text, apps)}
+    if len(names) == 1:
+        return names.pop(), "named"
+    team = issue["team"]["key"]
+    mac = MAC_TERMS.search(text) if team == "MS" else None
+    if mac and not LINUX_TERMS.search(text):
+        return MAC_OMP, f"mac:{mac.group(0)}"
+    return (TEAM_APPS[team], "team") if team in TEAM_APPS else None
+
+
+def route_note(line, error):
+    """The router's comment on the issue: where it sent it and why, or that Linear refused. Names the
+    app without `@`, so the comment reaches no machine as a mention (Routing)."""
+    to, why = f"`{line['to']}`", line["why"]
+    if error:
+        return (f"{TAG} 这个 issue 没指派给任何机器，我按规则想自动指派给 {to}，但 Linear 拒绝了：{error}。"
+                "请你手动指派（Linear 的「指派给 agent」）；这个 issue 我不会再试。（MS-388）")
+    if why == "named":
+        reason = f"标题或描述里点名了 {to}。"
+    elif why.startswith("mac:"):
+        reason = f"它提到「{why[4:]}」，按 AGENTS.md 属于需要 macOS 的工作，交给 Mac。"
+    elif line["team"] == "MS":
+        reason = ("Mailstream 的工作默认交给 Linux，标题和描述里没有需要 macOS 的内容（AGENTS.md 的标准：macOS 打包签名、"
+                  "装到 /Applications、bench.sh、Mac 菜单和快捷键、AppKit 版、Liquid Glass）。")
+    else:
+        reason = f"{line['team']} 团队的 issue 都交给这台机器。"
+    return (f"{TAG} 这个 issue 建好后一直没指派给任何机器，已自动指派给 {to}，它的轮询会接手。依据：{reason}"
+            "指派错了就直接改 delegate；接手的 agent 发现它要另一台机器做，也会转过去。（MS-388）")
+
+
+def route(data, ledger):
+    """Delegates the issues the user filed and nobody delegated (Routing). Returns their route lines,
+    which only a dry run prints (and then writes nothing)."""
+    apps, dry = data["apps"], bool(os.environ.get("DRY_RUN"))
+    names = {app["id"]: app["name"] for app in apps}
+    out = []
+    for issue in (data.get("unrouted") or {}).get("nodes") or []:
+        target = destination(issue, apps) if routable(issue, apps) and not ledger.was_routed(issue["id"]) else None
+        if target is None:
+            continue
+        line = {"kind": "route", "id": issue["id"], "identifier": issue["identifier"], "title": issue["title"],
+                "team": issue["team"]["key"], "to": names.get(target[0], target[0]), "why": target[1]}
+        if dry:
+            out.append(line)
+            continue
+        try:
+            if not routable(gql(ROUTE_CHECK, {"id": issue["id"]})["issue"], apps):
+                continue  # the user delegated, mentioned a machine or a machine commented meanwhile
+            result = respond(DELEGATE, {"id": issue["id"], "to": target[0]})
+        except Failed:
+            log(f"could not delegate {issue['identifier']}; trying again next pass")
+            continue
+        error = "; ".join(e.get("message") or "?" for e in result.get("errors") or [])
+        if not error and not ((result.get("data") or {}).get("issueUpdate") or {}).get("success"):
+            error = "issueUpdate did not succeed"
+        ledger.routed(line, error or None)
+        log(f"could not delegate {issue['identifier']} to {line['to']}: {error}" if error
+            else f"delegated {issue['identifier']} to {line['to']} ({line['why']})")
+        try:
+            gql(COMMENT, {"input": {"issueId": issue["id"], "body": route_note(line, error)}})
+        except Failed:
+            log(f"could not comment on {issue['identifier']} where it was delegated")
+    return out
+
+
 def watermark(data):
     def head(key):
         nodes = (data.get(key) or {}).get("nodes") or []
@@ -648,6 +783,7 @@ def probe_context(running):
         "claimed": CLAIMED,
         "install": INSTALL,
         "apps": APPS,
+        "router": ROUTER,
         "running": running,
         "mtime": Path(__file__).stat().st_mtime_ns,
     }
@@ -703,8 +839,11 @@ def run_pass():
     page_vars = {"me": me["ids"], "since": ledger.rewind(), "after": None}
     if me["id"] not in {app["id"] for app in apps}:
         apps.append(me)
-    data = {**gql(query(apps), {**page_vars, "claimed": CLAIMED, "install": INSTALL, "sessions": SESSION_COUNT}),
-            "viewer": me, "apps": apps}
+    routing = ROUTER in me["ids"]
+    variables = {**page_vars, "claimed": CLAIMED, "install": INSTALL, "sessions": SESSION_COUNT}
+    if routing:
+        variables["before"] = (started - timedelta(seconds=ROUTE_AFTER)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    data = {**gql(query(apps, routing), variables), "viewer": me, "apps": apps}
     page = data["comments"]
     while page["pageInfo"]["hasNextPage"]:
         page = gql(comments_page(apps), {**page_vars, "after": page["pageInfo"]["endCursor"]})["comments"]
@@ -723,7 +862,7 @@ def run_pass():
                            lambda issue: mine(issue, data["viewer"]))
     out += [line for line in again if line["id"] not in printed]
     if os.environ.get("DRY_RUN"):
-        for line in out:
+        for line in out + route(data, ledger):
             emit(line)
         return 0
     for line in out:
@@ -758,6 +897,7 @@ def run_pass():
             ledger.handed(line)
         if kind not in ("unclaim", "reply"):
             emit(line)
+    route(data, ledger)
     ledger.advance(started)
     return 0
 
