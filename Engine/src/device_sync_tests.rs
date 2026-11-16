@@ -248,6 +248,76 @@ fn offline_cli_edit_syncs_after_restart() {
 }
 
 #[test]
+fn joining_device_merges_its_settings_and_the_group_wins_conflicts() {
+    let lookup = MemoryLookup::new();
+    let cfg_a = sync_config(&lookup);
+    let cfg_b = sync_config(&lookup);
+
+    let engine_a = Engine::start(cfg_a.clone());
+    let engine_b = Engine::start(cfg_b.clone());
+
+    // A's group: autoRead.days 7, aiTagging off, alice trusted, carol trusted and then untrusted.
+    call(&engine_a, "sync.enable", json!({})).unwrap();
+    call(&engine_a, "config.set", json!({ "key": "autoRead.days", "value": "7" })).unwrap();
+    call(&engine_a, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
+    call(&engine_a, "config.add", json!({ "key": "remoteContent.trustedSenders", "values": ["alice@x.com", "carol@x.com"] }))
+        .unwrap();
+    let bridged_carol = || {
+        let data = std::fs::read(cfg_a.support_directory.join("peer-sync/bridged.json")).unwrap_or_default();
+        serde_json::from_slice::<Value>(&data).ok().map(|bridged| bridged["trusted"]["carol@x.com"].clone())
+    };
+    until("A to trust carol@x.com in its group", || bridged_carol() == Some(json!(true)));
+    call(&engine_a, "config.remove", json!({ "key": "remoteContent.trustedSenders", "values": ["carol@x.com"] })).unwrap();
+    until("A to untrust carol@x.com in its group", || bridged_carol() == Some(json!(false)));
+
+    // B, in no group yet, set its own: autoRead.days 14 (conflicts with the group), autoRead on
+    // (only B), bob trusted (only B) and carol trusted (the group untrusted her).
+    call(&engine_b, "config.set", json!({ "key": "autoRead.days", "value": "14" })).unwrap();
+    call(&engine_b, "config.set", json!({ "key": "autoRead.enabled", "value": "true" })).unwrap();
+    call(&engine_b, "config.add", json!({ "key": "remoteContent.trustedSenders", "values": ["bob@x.com", "carol@x.com"] }))
+        .unwrap();
+
+    let ticket = call(&engine_a, "sync.pair_ticket", json!({}))
+        .unwrap()["ticket"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(&engine_b, "sync.join", json!({ "ticket": ticket })).unwrap();
+
+    let merged_trusted = json!(["alice@x.com", "bob@x.com"]);
+    until("both engines to hold the merged settings", || {
+        // The group's values never give way to the joining device's.
+        assert_eq!(setting_value(&engine_a, "autoRead.days"), json!(7));
+        assert_eq!(setting_value(&engine_a, "aiTagging.enabled"), json!(false));
+        assert!(
+            !setting_value(&engine_a, "remoteContent.trustedSenders")
+                .as_array()
+                .unwrap()
+                .contains(&json!("carol@x.com"))
+        );
+        [&engine_a, &engine_b].iter().all(|engine| {
+            setting_value(engine, "autoRead.days") == json!(7)
+                && setting_value(engine, "autoRead.enabled") == json!(true)
+                && setting_value(engine, "aiTagging.enabled") == json!(false)
+                && setting_value(engine, "remoteContent.trustedSenders") == merged_trusted
+        })
+    });
+
+    // After the merge, B's own edits are newer than the group's again.
+    call(&engine_b, "config.set", json!({ "key": "autoRead.days", "value": "21" })).unwrap();
+    call(&engine_b, "config.add", json!({ "key": "remoteContent.trustedSenders", "values": ["carol@x.com"] }))
+        .unwrap();
+    until("A to take B's edits after the merge", || {
+        setting_value(&engine_a, "autoRead.days") == json!(21)
+            && setting_value(&engine_a, "remoteContent.trustedSenders")
+                == json!(["alice@x.com", "bob@x.com", "carol@x.com"])
+    });
+
+    drop(engine_b);
+    drop(engine_a);
+}
+
+#[test]
 fn invalid_synced_keys_in_settings_file_do_not_wipe_group_or_local_edit() {
     let lookup = MemoryLookup::new();
     let cfg_a = sync_config(&lookup);

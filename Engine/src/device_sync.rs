@@ -20,6 +20,12 @@ const BRIDGE_FILE: &str = "bridged.json";
 const RETRY_BUSY: Duration = Duration::from_secs(5);
 const RETRY_FAILED: Duration = Duration::from_secs(30);
 
+/// When the settings a device brings into a group it joins were set, as far as the group can
+/// tell (MS-367): older than anything a device writes, so a value the group already holds for the
+/// same key outweighs it whenever that value arrives, and a key only this device holds still
+/// reaches every device.
+const JOIN_AT: u64 = 1;
+
 /// Scalar whitelisted settings synced under `v1/setting/<key>`.
 /// `remoteContent.trustedSenders` is synced per address under `v1/trusted/<email>`.
 /// Machine-local keys (`aiTagging.backend`/`model`/`ompPath`/`batchSize`/`passLimit`/
@@ -33,6 +39,11 @@ const SCALAR_SETTINGS: [Setting; 4] = [
 
 /// Last reconciled group state, persisted in `peer-sync/bridged.json` so offline edits to
 /// `settings.json` (e.g. via `mailstream config`) are detected on the next start.
+///
+/// Joining a group merges this device's settings into it (MS-367): what only the group holds
+/// comes here, what only this device holds goes to the group, trusted senders end up the union of
+/// both, and where both set a key differently (an address the group untrusted included) the
+/// group's value wins, so joining never changes the other devices' settings.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Bridged {
@@ -42,6 +53,11 @@ struct Bridged {
     trusted: BTreeMap<String, bool>,
     #[serde(default)]
     settings: BTreeMap<String, Value>,
+    /// Set by `sync.join` until the first reconcile with the joined group completes: pushes of
+    /// keys without a bridged value are then stamped [`JOIN_AT`], not now. `join` returns
+    /// before the group's entries have arrived, so "the group doesn't hold it" is unknown there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    joining: bool,
 }
 
 impl Bridged {
@@ -73,14 +89,32 @@ struct BridgeState {
 
 impl BridgeState {
     fn load(&mut self, support_directory: &Path, namespace: &str) -> &Bridged {
+        let bridged = self.loaded(support_directory);
+        if bridged.namespace.as_deref() != Some(namespace) {
+            *bridged = Bridged { namespace: Some(namespace.to_string()), ..Default::default() };
+        }
+        bridged
+    }
+
+    /// After `sync.join` entered the group `namespace`: unless this device bridges that group
+    /// already, its bridge starts over as joining, on disk so a restart before the first
+    /// reconcile still merges.
+    fn joined(&mut self, support_directory: &Path, namespace: &str) -> Result<(), EngineError> {
+        if self.loaded(support_directory).namespace.as_deref() == Some(namespace) {
+            return Ok(());
+        }
+        let bridged = Bridged { namespace: Some(namespace.to_string()), joining: true, ..Default::default() };
+        bridged.write(support_directory)?;
+        self.bridged = bridged;
+        Ok(())
+    }
+
+    fn loaded(&mut self, support_directory: &Path) -> &mut Bridged {
         if !self.loaded {
             self.bridged = Bridged::read(support_directory);
             self.loaded = true;
         }
-        if self.bridged.namespace.as_deref() != Some(namespace) {
-            self.bridged = Bridged { namespace: Some(namespace.to_string()), ..Default::default() };
-        }
-        &self.bridged
+        &mut self.bridged
     }
 
     fn next_at(&mut self, min_at: u64) -> u64 {
@@ -283,8 +317,11 @@ impl DeviceSync {
                     None => local != setting.default_value() && remote.is_none() && !pending,
                 };
                 if should_push {
-                    let min_at = if base.is_some() { remote.map_or(0, |r| r.at) } else { 0 };
-                    let at = bridge.next_at(min_at);
+                    let at = match base {
+                        Some(_) => bridge.next_at(remote.map_or(0, |r| r.at)),
+                        None if prev_bridged.joining => JOIN_AT,
+                        None => bridge.next_at(0),
+                    };
                     sync.set_setting(key, local, at).await.map_err(map_error)?;
                     pushed = true;
                 }
@@ -305,8 +342,11 @@ impl DeviceSync {
                         None => in_local && remote.is_none() && !pending,
                     };
                     if should_push {
-                        let min_at = if base.is_some() { remote.map_or(0, |r| r.at) } else { 0 };
-                        let at = bridge.next_at(min_at);
+                        let at = match base {
+                            Some(_) => bridge.next_at(remote.map_or(0, |r| r.at)),
+                            None if prev_bridged.joining => JOIN_AT,
+                            None => bridge.next_at(0),
+                        };
                         sync.set_trusted(&address, in_local, at).await.map_err(map_error)?;
                         pushed = true;
                     }
@@ -325,7 +365,12 @@ impl DeviceSync {
                 continue;
             }
 
-            let mut next_bridged = Bridged { namespace: Some(namespace.clone()), ..Default::default() };
+            let mut next_bridged = Bridged {
+                namespace: Some(namespace.clone()),
+                // Invalid keys sat out: they merge as joining once the file is fixed.
+                joining: prev_bridged.joining && !invalid.is_empty(),
+                ..Default::default()
+            };
             let mut pending_updates: Vec<(Setting, Value)> = Vec::new();
 
             for setting in SCALAR_SETTINGS {
@@ -455,9 +500,15 @@ impl DeviceSync {
                 let ticket = args.required("ticket")?;
                 self.open_or_err().await?;
                 {
+                    // Held until the bridge knows it joined, so no reconcile meanwhile pushes this
+                    // device's settings as newer than the group's (MS-367).
+                    let mut bridge = self.bridge.lock().await;
                     let guard = self.sync.read().await;
                     let sync = guard.as_ref().expect("opened");
                     sync.join(&ticket).await.map_err(map_error)?;
+                    if let Some(namespace) = sync.status().await.namespace {
+                        bridge.joined(&self.support_directory, &namespace)?;
+                    }
                 }
                 self.meta.lock().expect("meta lock").last_sync_ms = Some(now_ms());
                 self.reconcile().await?;
