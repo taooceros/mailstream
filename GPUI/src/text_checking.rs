@@ -292,13 +292,18 @@ impl<M: InputModeKind> TextChecker<M> {
         self.input.focus_handle(cx)
     }
 
-    /// The field changed in some way: checks again if its text, caret or composition did.
+    /// The field changed in some way: checks again if its text, caret or composition did. An
+    /// input method starting to compose accepts the last correction, as typing on does (its
+    /// marked text isn't an edit).
     fn input_notified(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // An undo or paste that changed nothing.
         self.replaying = false;
         let seen = self.input.update(cx, |input, cx| {
             (input.selected_range(), input.marked_text_range(window, cx).is_some())
         });
+        if seen.1 && !self.seen.1 {
+            system::dismiss_correction(window);
+        }
         if self.edited || seen != self.seen {
             let typing = std::mem::take(&mut self.edited);
             self.seen = seen;
@@ -381,10 +386,13 @@ impl<M: InputModeKind> TextChecker<M> {
                 None => Vec::new(),
             };
             let caret = snapshot.selection.end;
+            // The text being composed isn't a word yet.
+            let marked = snapshot.marked.clone().unwrap_or_default();
             let misspellings = misspellings
                 .into_iter()
                 .filter(|word| !(typing && (word.start..=word.end).contains(&caret)))
                 .map(|word| snapshot.start + word.start..snapshot.start + word.end)
+                .filter(|word| !(word.start < marked.end && marked.start < word.end))
                 .collect();
             this.update(cx, |this, cx| this.found(TextAssistance { prediction, misspellings }, cx)).ok();
         }));
@@ -537,7 +545,8 @@ struct Snapshot {
     start: usize,
     /// The selection, in `text`.
     selection: Range<usize>,
-    composing: bool,
+    /// What an input method is composing, in the field.
+    marked: Option<Range<usize>>,
 }
 
 impl Snapshot {
@@ -552,7 +561,7 @@ impl Snapshot {
                 text,
                 start,
                 selection: selection.start.saturating_sub(start)..selection.end.saturating_sub(start),
-                composing: input.marked_text_range(window, cx).is_some(),
+                marked: input.marked_text_range(window, cx),
             })
         })
     }
@@ -560,7 +569,7 @@ impl Snapshot {
     /// The text before the caret, when a prediction can be drawn after it: nothing is selected
     /// or being composed and the caret ends its line (a drawn prediction would cover text).
     fn before_caret(&self) -> Option<&str> {
-        if self.composing || !self.selection.is_empty() {
+        if self.marked.is_some() || !self.selection.is_empty() {
             return None;
         }
         let caret = byte_offset(&self.text, self.selection.start)?;
