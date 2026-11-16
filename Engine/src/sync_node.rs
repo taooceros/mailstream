@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 use crate::commands::{self, Arguments, Handler};
 use crate::device_sync::DeviceSync;
 use crate::peer_sync::{Network, PeerSync};
-use crate::settings::{Setting, Settings};
+use crate::settings::Settings;
 use crate::{EngineError, Events, control};
 
 /// How long `mailstream sync join` waits for the pairing peer to become reachable before giving up.
@@ -76,10 +76,15 @@ impl SyncNode {
     /// process already holds its lock (`busy`).
     pub fn open(config: SyncNodeConfig) -> Result<Self, EngineError> {
         std::fs::create_dir_all(&config.data_directory).map_err(|error| EngineError::failed(error.to_string()))?;
+        // `peer-sync/` is private before the store writes anything into it (MS-369).
+        let peer_sync = config.data_directory.join("peer-sync");
+        std::fs::create_dir_all(&peer_sync).map_err(|error| EngineError::failed(error.to_string()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&config.data_directory, std::fs::Permissions::from_mode(0o700));
+            for directory in [&config.data_directory, &peer_sync] {
+                let _ = std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700));
+            }
         }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .thread_name("mailstream-sync")
@@ -103,14 +108,6 @@ impl SyncNode {
         if let Err(error) = runtime.block_on(device_sync.open_or_err()) {
             runtime.block_on(device_sync.shutdown());
             return Err(error);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                config.data_directory.join("peer-sync"),
-                std::fs::Permissions::from_mode(0o700),
-            );
         }
 
         let inner = Arc::new(Inner { settings, events, device_sync });
@@ -221,9 +218,13 @@ pub fn run_daemon(
     emit(&json!({ "event": "started", "status": initial }));
 
     node.runtime.block_on(async {
+        // One subscription for the whole run: tokio's handler stays installed once registered, so
+        // a signal arriving between per-iteration subscriptions would be swallowed (MS-369).
+        let shutdown = shutdown_signal();
+        tokio::pin!(shutdown);
         loop {
             tokio::select! {
-                _ = shutdown_signal() => {
+                _ = &mut shutdown => {
                     let final_status = node.inner.handle("sync.status", json!({})).await.ok();
                     emit(&json!({ "event": "stopping", "status": final_status }));
                     break;
@@ -231,18 +232,12 @@ pub fn run_daemon(
                 event = rx.recv() => {
                     let Some(first) = event else { break };
                     let mut had_sync = first == "deviceSync";
-                    let mut had_settings = first == "settings";
                     while let Ok(next) = rx.try_recv() {
                         had_sync |= next == "deviceSync";
-                        had_settings |= next == "settings";
                     }
                     if let Ok(status) = node.inner.handle("sync.status", json!({})).await {
                         let kind = if had_sync { "synced" } else { "settings" };
-                        let mut payload = json!({ "event": kind, "status": status });
-                        if had_settings {
-                            payload["trustedSenders"] = node.inner.settings.value(Setting::TrustedSenders);
-                        }
-                        emit(&payload);
+                        emit(&json!({ "event": kind, "status": status }));
                     }
                 }
             }
