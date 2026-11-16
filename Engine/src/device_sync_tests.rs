@@ -246,3 +246,123 @@ fn offline_cli_edit_syncs_after_restart() {
     drop(engine_a2);
     drop(engine_b);
 }
+
+#[test]
+fn invalid_synced_keys_in_settings_file_do_not_wipe_group_or_local_edit() {
+    let lookup = MemoryLookup::new();
+    let cfg_a = sync_config(&lookup);
+    let cfg_b = sync_config(&lookup);
+
+    let engine_a = Engine::start(cfg_a.clone());
+    let engine_b = Engine::start(cfg_b.clone());
+    let (a_tx, a_events) = mpsc::channel();
+    engine_a.subscribe(move |event| {
+        let _ = a_tx.send(event);
+    });
+
+    call(&engine_a, "sync.enable", json!({})).unwrap();
+    let ticket = call(&engine_a, "sync.pair_ticket", json!({}))
+        .unwrap()["ticket"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(&engine_b, "sync.join", json!({ "ticket": ticket })).unwrap();
+
+    call(
+        &engine_a,
+        "config.add",
+        json!({ "key": "remoteContent.trustedSenders", "values": ["alice@x.com", "bob@x.com"] }),
+    )
+    .unwrap();
+    call(&engine_a, "config.set", json!({ "key": "autoRead.days", "value": "7" })).unwrap();
+    until("B to receive initial trustedSenders and autoRead.days", || {
+        setting_value(&engine_b, "remoteContent.trustedSenders") == json!(["alice@x.com", "bob@x.com"])
+            && setting_value(&engine_b, "autoRead.days") == json!(7)
+    });
+    while a_events.try_recv().is_ok() {}
+
+    // Hand-edit A's settings.json with one malformed address, an out-of-range autoRead.days,
+    // and a valid change to aiTagging.enabled (MS-368).
+    let path_a = cfg_a.support_directory.join("settings.json");
+    std::fs::write(
+        &path_a,
+        serde_json::to_string_pretty(&json!({
+            "remoteContent.trustedSenders": ["alice@x.com", "bob@x.com", "missing-at-sign"],
+            "autoRead.days": 999,
+            "aiTagging.enabled": false,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Valid keys still bridge, proving A ran reconcile; invalid keys report a problem and sit out.
+    until("B to receive aiTagging.enabled and A to report the invalid settings", || {
+        setting_value(&engine_b, "aiTagging.enabled") == json!(false)
+            && call(&engine_a, "sync.status", json!({})).unwrap()["problem"].is_string()
+    });
+    let problem = call(&engine_a, "sync.status", json!({})).unwrap()["problem"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(problem.contains("remoteContent.trustedSenders"), "unexpected problem: {problem}");
+    assert!(problem.contains("autoRead.days"), "unexpected problem: {problem}");
+    let mut saw_device_sync_event = false;
+    while let Ok(event) = a_events.try_recv() {
+        if event == "deviceSync" {
+            saw_device_sync_event = true;
+        }
+    }
+    assert!(saw_device_sync_event, "A should emit \"deviceSync\" when problem appears");
+
+    // B must NOT lose its trusted senders or reset autoRead.days to default 3.
+    assert_eq!(setting_value(&engine_b, "remoteContent.trustedSenders"), json!(["alice@x.com", "bob@x.com"]));
+    assert_eq!(setting_value(&engine_b, "autoRead.days"), json!(7));
+
+    // Remote edits from B arrive while A's file still has invalid keys: valid keys apply on A,
+    // while A's raw invalid entries stay untouched rather than being overwritten.
+    call(&engine_b, "config.remove", json!({ "key": "remoteContent.trustedSenders", "values": ["alice@x.com"] }))
+        .unwrap();
+    call(&engine_b, "config.add", json!({ "key": "remoteContent.trustedSenders", "values": ["carol@x.com"] }))
+        .unwrap();
+    call(&engine_b, "config.set", json!({ "key": "autoRead.days", "value": "14" })).unwrap();
+    call(&engine_b, "config.set", json!({ "key": "autoRead.enabled", "value": "true" })).unwrap();
+    until("A to apply valid remote autoRead.enabled", || {
+        setting_value(&engine_a, "autoRead.enabled") == json!(true)
+    });
+    let raw_mid: Value = serde_json::from_str(&std::fs::read_to_string(&path_a).unwrap()).unwrap();
+    assert_eq!(
+        raw_mid["remoteContent.trustedSenders"],
+        json!(["alice@x.com", "bob@x.com", "missing-at-sign"])
+    );
+    assert_eq!(raw_mid["autoRead.days"], json!(999));
+    assert_eq!(setting_value(&engine_b, "remoteContent.trustedSenders"), json!(["bob@x.com", "carol@x.com"]));
+    assert_eq!(setting_value(&engine_b, "autoRead.days"), json!(14));
+
+    // Fix A's file: repair the mistyped address to dave@x.com and set autoRead.days to 30.
+    // Kept baseline entries (alice, bob) let B's tombstone for alice and addition of carol merge
+    // cleanly with A's new dave@x.com, and A's new 30 overrides B's 14.
+    while a_events.try_recv().is_ok() {}
+    let mut raw_fixed = raw_mid;
+    raw_fixed["remoteContent.trustedSenders"] = json!(["alice@x.com", "bob@x.com", "dave@x.com"]);
+    raw_fixed["autoRead.days"] = json!(30);
+    std::fs::write(&path_a, serde_json::to_string_pretty(&raw_fixed).unwrap()).unwrap();
+
+    until("both engines to converge after settings.json is fixed", || {
+        let expected = json!(["bob@x.com", "carol@x.com", "dave@x.com"]);
+        setting_value(&engine_a, "remoteContent.trustedSenders") == expected
+            && setting_value(&engine_b, "remoteContent.trustedSenders") == expected
+            && setting_value(&engine_a, "autoRead.days") == json!(30)
+            && setting_value(&engine_b, "autoRead.days") == json!(30)
+            && call(&engine_a, "sync.status", json!({})).unwrap()["problem"].is_null()
+    });
+    let mut saw_clear_event = false;
+    while let Ok(event) = a_events.try_recv() {
+        if event == "deviceSync" {
+            saw_clear_event = true;
+        }
+    }
+    assert!(saw_clear_event, "A should emit \"deviceSync\" when problem clears");
+
+    drop(engine_b);
+    drop(engine_a);
+}

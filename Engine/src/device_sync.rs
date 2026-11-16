@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -163,7 +163,7 @@ impl DeviceSync {
                 match self.ensure_open().await {
                     Ok(rx) => {
                         changes = rx;
-                        self.reconcile_and_report().await;
+                        let _ = self.reconcile_and_report().await;
                         self.events.emit("deviceSync");
                     }
                     Err(error) => {
@@ -192,7 +192,7 @@ impl DeviceSync {
                         continue;
                     }
                     self.meta.lock().expect("meta lock").last_sync_ms = Some(now_ms());
-                    self.reconcile_and_report().await;
+                    let _ = self.reconcile_and_report().await;
                     self.events.emit("deviceSync");
                 }
                 msg = wake_rx.recv() => {
@@ -200,7 +200,9 @@ impl DeviceSync {
                         return;
                     }
                     while wake_rx.try_recv().is_ok() {}
-                    self.reconcile_and_report().await;
+                    if self.reconcile_and_report().await {
+                        self.events.emit("deviceSync");
+                    }
                 }
             }
         }
@@ -232,10 +234,12 @@ impl DeviceSync {
         self.ensure_open().await.map(|_| ()).map_err(map_error)
     }
 
-    async fn reconcile_and_report(&self) {
+    async fn reconcile_and_report(&self) -> bool {
+        let before = self.meta.lock().expect("meta lock").problem.clone();
         if let Err(error) = self.reconcile().await {
             self.meta.lock().expect("meta lock").problem = Some(error.message);
         }
+        self.meta.lock().expect("meta lock").problem != before
     }
 
     async fn reconcile(&self) -> Result<(), EngineError> {
@@ -254,13 +258,20 @@ impl DeviceSync {
             let Ok(raw_before) = self.settings.file().read_raw() else {
                 return Ok(());
             };
-            let (local_values, _) = self.settings.file().read();
+            // Validate synced keys from `raw_before` itself: `SettingsFile::read` replaces an
+            // invalid key with its default, which bridged as a local edit would reset every
+            // paired device (MS-368), and reading the file a second time could race an edit.
+            let (local_values, invalid) = synced_values(&raw_before);
+            let trusted_valid = !invalid.contains_key(&Setting::TrustedSenders);
             let prev_bridged = bridge.load(&self.support_directory, &namespace).clone();
 
             let mut snapshot = sync.snapshot().await.map_err(map_error)?;
             let mut pushed = false;
 
             for setting in SCALAR_SETTINGS {
+                if invalid.contains_key(&setting) {
+                    continue;
+                }
                 let key = setting.key();
                 let local = setting.value(&local_values);
                 let doc_key = format!("v1/setting/{key}");
@@ -280,23 +291,25 @@ impl DeviceSync {
             }
 
             let local_trusted = addresses(&local_values);
-            let mut all_addresses: BTreeSet<String> = local_trusted.clone();
-            all_addresses.extend(prev_bridged.trusted.keys().cloned());
-            for address in all_addresses {
-                let in_local = local_trusted.contains(&address);
-                let doc_key = format!("v1/trusted/{address}");
-                let remote = snapshot.trusted.get(&address);
-                let pending = snapshot.pending.contains(&doc_key);
-                let base = prev_bridged.trusted.get(&address).copied();
-                let should_push = match base {
-                    Some(prev) => in_local != prev,
-                    None => in_local && remote.is_none() && !pending,
-                };
-                if should_push {
-                    let min_at = if base.is_some() { remote.map_or(0, |r| r.at) } else { 0 };
-                    let at = bridge.next_at(min_at);
-                    sync.set_trusted(&address, in_local, at).await.map_err(map_error)?;
-                    pushed = true;
+            if trusted_valid {
+                let mut all_addresses: BTreeSet<String> = local_trusted.clone();
+                all_addresses.extend(prev_bridged.trusted.keys().cloned());
+                for address in all_addresses {
+                    let in_local = local_trusted.contains(&address);
+                    let doc_key = format!("v1/trusted/{address}");
+                    let remote = snapshot.trusted.get(&address);
+                    let pending = snapshot.pending.contains(&doc_key);
+                    let base = prev_bridged.trusted.get(&address).copied();
+                    let should_push = match base {
+                        Some(prev) => in_local != prev,
+                        None => in_local && remote.is_none() && !pending,
+                    };
+                    if should_push {
+                        let min_at = if base.is_some() { remote.map_or(0, |r| r.at) } else { 0 };
+                        let at = bridge.next_at(min_at);
+                        sync.set_trusted(&address, in_local, at).await.map_err(map_error)?;
+                        pushed = true;
+                    }
                 }
             }
 
@@ -318,7 +331,9 @@ impl DeviceSync {
             for setting in SCALAR_SETTINGS {
                 let key = setting.key();
                 let doc_key = format!("v1/setting/{key}");
-                if snapshot.pending.contains(&doc_key) {
+                // Pending or invalid here: keep the old base, so the change is bridged once it
+                // lands or the file is fixed.
+                if snapshot.pending.contains(&doc_key) || invalid.contains_key(&setting) {
                     if let Some(prev) = prev_bridged.settings.get(key) {
                         next_bridged.settings.insert(key.to_string(), prev.clone());
                     }
@@ -342,33 +357,37 @@ impl DeviceSync {
                 }
             }
 
-            let mut desired_trusted = local_trusted.clone();
-            for (address, stamped) in &snapshot.trusted {
-                let doc_key = format!("v1/trusted/{address}");
-                if snapshot.pending.contains(&doc_key) {
-                    continue;
+            if trusted_valid {
+                let mut desired_trusted = local_trusted.clone();
+                for (address, stamped) in &snapshot.trusted {
+                    let doc_key = format!("v1/trusted/{address}");
+                    if snapshot.pending.contains(&doc_key) {
+                        continue;
+                    }
+                    if !is_valid_email(address) {
+                        continue;
+                    }
+                    if stamped.value {
+                        desired_trusted.insert(address.clone());
+                    } else {
+                        desired_trusted.remove(address);
+                    }
+                    next_bridged.trusted.insert(address.clone(), stamped.value);
                 }
-                if !is_valid_email(address) {
-                    continue;
+                for address in &local_trusted {
+                    let doc_key = format!("v1/trusted/{address}");
+                    if snapshot.pending.contains(&doc_key)
+                        && let Some(&prev) = prev_bridged.trusted.get(address)
+                    {
+                        next_bridged.trusted.insert(address.clone(), prev);
+                    }
                 }
-                if stamped.value {
-                    desired_trusted.insert(address.clone());
-                } else {
-                    desired_trusted.remove(address);
+                if desired_trusted != local_trusted {
+                    let list: Vec<String> = desired_trusted.into_iter().collect();
+                    pending_updates.push((Setting::TrustedSenders, json!(list)));
                 }
-                next_bridged.trusted.insert(address.clone(), stamped.value);
-            }
-            for address in &local_trusted {
-                let doc_key = format!("v1/trusted/{address}");
-                if snapshot.pending.contains(&doc_key)
-                    && let Some(&prev) = prev_bridged.trusted.get(address)
-                {
-                    next_bridged.trusted.insert(address.clone(), prev);
-                }
-            }
-            if desired_trusted != local_trusted {
-                let list: Vec<String> = desired_trusted.into_iter().collect();
-                pending_updates.push((Setting::TrustedSenders, json!(list)));
+            } else {
+                next_bridged.trusted = prev_bridged.trusted.clone();
             }
 
             if !pending_updates.is_empty() {
@@ -383,7 +402,7 @@ impl DeviceSync {
             if !pending_updates.is_empty() && self.settings.reload() {
                 self.events.emit("settings");
             }
-            self.meta.lock().expect("meta lock").problem = None;
+            self.meta.lock().expect("meta lock").problem = invalid_problem(&invalid);
             return Ok(());
         }
         Ok(())
@@ -544,6 +563,39 @@ fn addresses(values: &Values) -> BTreeSet<String> {
         .filter_map(Value::as_str)
         .map(|addr| addr.trim().to_lowercase())
         .collect()
+}
+
+/// Splits `raw`'s synced keys into valid values and those that fail validation (with why).
+/// `SettingsFile::read` gives invalid keys their default, which bridged as a local change would
+/// reset them on every device (one mistyped address untrusting every sender, MS-368), and a
+/// remote value written over them would drop what the user is still typing; so device sync
+/// leaves them alone, both ways, until the file is fixed.
+fn synced_values(raw: &Map<String, Value>) -> (Values, BTreeMap<Setting, String>) {
+    let mut values = Values::new();
+    let mut invalid = BTreeMap::new();
+    for setting in SCALAR_SETTINGS.into_iter().chain([Setting::TrustedSenders]) {
+        let Some(value) = raw.get(setting.key()) else {
+            continue;
+        };
+        match setting.validate(value) {
+            Ok(valid) => {
+                values.insert(setting, valid);
+            }
+            Err(error) => {
+                invalid.insert(setting, error.message);
+            }
+        }
+    }
+    (values, invalid)
+}
+
+/// What `sync.status` reports while `invalid_synced` keeps settings out of device sync.
+fn invalid_problem(invalid: &BTreeMap<Setting, String>) -> Option<String> {
+    if invalid.is_empty() {
+        return None;
+    }
+    let messages: Vec<&str> = invalid.values().map(String::as_str).collect();
+    Some(format!("Device sync leaves these settings alone until settings.json is fixed: {}", messages.join(" ")))
 }
 
 fn is_valid_email(address: &str) -> bool {
