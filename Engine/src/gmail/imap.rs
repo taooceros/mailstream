@@ -390,7 +390,7 @@ fn fetch_to_message(fetch: &Fetch, utf8_enabled: bool) -> Option<ImapMessage> {
 
     if let Some(raw_labels) = fetch.gmail_labels() {
         for raw in raw_labels {
-            let label = if utf8_enabled { raw.as_ref().to_string() } else { decode_mutf7(raw.as_ref()) };
+            let label = gmail_label(raw, utf8_enabled);
             if let Some(mapped) = map_gmail_system_label(&label) {
                 system_labels.insert(mapped.into());
             } else if !label.starts_with('\\') && !label.is_empty() {
@@ -428,6 +428,26 @@ fn fetch_to_message(fetch: &Fetch, utf8_enabled: bool) -> Option<ImapMessage> {
         system_labels,
         user_labels,
     })
+}
+
+/// A label as `X-GM-LABELS` lists it, as text. Gmail sends system labels and names with spaces
+/// or specials as quoted strings (`"\\Inbox"`, `"Bills \"Q4\""`), and `imap-proto` hands quoted
+/// strings over with their escapes still in (MS-366), so `\\` and `\"` are undone here. Atoms
+/// (`\Inbox`, `Receipts`) can't hold either sequence, so the same pass leaves them as they are.
+/// Without `UTF8=ACCEPT` the name is then modified UTF-7.
+fn gmail_label(raw: &str, utf8_enabled: bool) -> String {
+    let mut label = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        match (ch, chars.clone().next()) {
+            ('\\', Some(next @ ('\\' | '"'))) => {
+                label.push(next);
+                chars.next();
+            }
+            _ => label.push(ch),
+        }
+    }
+    if utf8_enabled { label } else { decode_mutf7(&label) }
 }
 
 fn map_gmail_system_label(raw: &str) -> Option<&'static str> {
@@ -579,5 +599,20 @@ mod tests {
     fn quotes_imap_search_strings() {
         assert_eq!(quote_imap_string(r#"from:"a" \b"#), r#""from:\"a\" \\b""#);
         assert_eq!(quote_imap_string("line1\r\nline2"), "\"line1  line2\"");
+    }
+
+    #[test]
+    fn reads_quoted_system_and_user_labels_as_gmail_sends_them() {
+        use async_imap::imap_proto::AttributeValue;
+        // Real Gmail quotes system labels and escapes their backslash (MS-366).
+        let raw = br#"* 1 FETCH (X-GM-LABELS ("\\Inbox" "\\Important" \Sent Receipts "Bills \"Q4\"" "C:\\Temp" "&ZeVnLIqe-"))"#;
+        let line = [&raw[..], b"\r\n"].concat();
+        let (_, Response::Fetch(_, attrs)) = Response::parse(&line).unwrap() else { panic!("not a FETCH") };
+        let [AttributeValue::GmailLabels(labels)] = attrs.as_slice() else { panic!("no X-GM-LABELS") };
+        let labels: Vec<String> = labels.iter().map(|raw| gmail_label(raw, false)).collect();
+        assert_eq!(labels, ["\\Inbox", "\\Important", "\\Sent", "Receipts", "Bills \"Q4\"", "C:\\Temp", "日本語"]);
+        let system: Vec<_> = labels.iter().filter_map(|label| map_gmail_system_label(label)).collect();
+        assert_eq!(system, ["INBOX", "IMPORTANT", "SENT"]);
+        assert_eq!(gmail_label("&ZeVnLIqe-", true), "&ZeVnLIqe-");
     }
 }

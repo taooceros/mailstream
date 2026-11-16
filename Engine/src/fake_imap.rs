@@ -208,10 +208,12 @@ impl FakeImapServer {
                     if !wanted.contains(&msg.uid) {
                         continue;
                     }
+                    // As real Gmail sends them: system labels as quoted strings with the backslash
+                    // escaped (`"\\Inbox"`, MS-366), names that fit an atom bare, others quoted.
                     let labels: Vec<String> = msg
                         .labels
                         .iter()
-                        .map(|l| if l.starts_with('\\') { l.clone() } else { quote_imap(l) })
+                        .map(|l| if !l.is_empty() && l.bytes().all(is_atom_char) { l.clone() } else { quote_imap(l) })
                         .collect();
                     let flags = msg.flags.join(" ");
                     let mut hdr_bytes = String::new();
@@ -256,6 +258,11 @@ fn strip_prefix_ignore_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 
 fn quote_imap(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// RFC 3501 ATOM-CHAR: printable ASCII except the atom-specials.
+fn is_atom_char(byte: u8) -> bool {
+    byte.is_ascii_graphic() && !b"(){%*\"\\]".contains(&byte)
 }
 
 fn unquote_imap(s: &str) -> String {

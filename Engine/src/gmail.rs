@@ -1263,7 +1263,8 @@ mod tests {
                     return Reply::json(serde_json::json!({
                         "labels": [
                             { "id": "INBOX", "name": "INBOX", "type": "system" },
-                            { "id": "Label_1", "name": "Receipts", "type": "user" }
+                            { "id": "Label_1", "name": "Receipts", "type": "user" },
+                            { "id": "Label_2", "name": "Bills \"Q4\" \\ 2026", "type": "user" }
                         ]
                     }));
                 }
@@ -1275,7 +1276,7 @@ mod tests {
                 uid: 42,
                 msg_id: 0x11be0a6e39d8e501,
                 thr_id: 0x22be0a6e39d8e500,
-                labels: vec!["\\Inbox".into(), "\\Important".into(), "Receipts".into()],
+                labels: vec!["\\Inbox".into(), "\\Important".into(), "Receipts".into(), "Bills \"Q4\" \\ 2026".into()],
                 flags: vec!["\\Flagged".into()],
                 internal_date: "14-Nov-2026 08:00:00 +0000".into(),
                 size: 4096,
@@ -1314,6 +1315,7 @@ mod tests {
         assert_eq!(env.has_attachment, Some(true));
         assert_eq!(env.size, 4096);
         assert!(env.tags.contains("Receipts"));
+        assert!(env.tags.contains("Bills \"Q4\" \\ 2026"), "{:?}", env.tags);
         cleanup(&config);
     }
 
