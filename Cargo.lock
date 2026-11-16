@@ -5241,8 +5241,6 @@ dependencies = [
 [[package]]
 name = "iroh-blobs"
 version = "0.103.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3148ad01585eb6b7cfb641e4100564f4f56db644f4cbed8c10ab2478663161f"
 dependencies = [
  "arrayvec",
  "bao-tree",
@@ -5468,8 +5466,6 @@ dependencies = [
 [[package]]
 name = "iroh-util"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20e41eb982f15230c55f0a70a74a514360e1f565b07861924fd0e8db172b3d00"
 dependencies = [
  "derive_more",
  "iroh",

@@ -254,3 +254,99 @@ async fn one_process_holds_a_folder_and_reopens_it_as_it_was() {
     assert_eq!(trusted(&sync.snapshot().await.unwrap(), "dave@example.com"), Some(Stamped { value: true, at: 3_000 }));
     sync.shutdown().await;
 }
+
+/// Closing sync releases the blob store's runtime and the endpoint's sockets (MS-378): pausing
+/// and resuming device sync closes and reopens it, which before left another set of
+/// `iroh-blob-store-*` threads and UDP sockets behind each time. Counts this process's threads
+/// and sockets, so it reruns itself alone in a child process: the other tests open endpoints and
+/// stores meanwhile.
+#[cfg(unix)]
+#[test]
+fn closing_releases_threads_and_sockets() {
+    const CHILD: &str = "MAILSTREAM_TEST_CLOSING_RELEASES";
+    if std::env::var_os(CHILD).is_none() {
+        let name = format!("{}::closing_releases_threads_and_sockets", module_path!().split_once("::").unwrap().1);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success() && stdout.contains("1 passed"), "child run failed:\n{stdout}\n{stderr}");
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).max_blocking_threads(2).enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (folder_a, folder_b) = (config(OAuthConfig::default()), config(OAuthConfig::default()));
+        let lookup = MemoryLookup::new();
+        // B stays open and paired, so each time A opens it rejoins the group and reaches B.
+        let b = open(&folder_b, &lookup).await;
+        let a = open(&folder_a, &lookup).await;
+        a.create_group().await.unwrap();
+        b.join(&a.invite().await.unwrap().0).await.unwrap();
+        let id_b = b.status().await.endpoint_id;
+        until("A to see B", &a, |snapshot| snapshot.devices.contains_key(&id_b)).await;
+        a.shutdown().await;
+        // What the process holds with A closed once: everything lazily set up is there now.
+        let before = settled(None).await;
+        for round in 0..4 {
+            let a = open(&folder_a, &lookup).await;
+            assert!(a.set_setting("round", json!(round), 10_000 + round).await.unwrap());
+            until("B to get A's round", &b, |snapshot| snapshot.settings.get("round").map(|setting| &setting.value) == Some(&json!(round))).await;
+            a.shutdown().await;
+        }
+        let after = settled(Some(before)).await;
+        assert!(after.0 <= before.0 && after.1 <= before.1, "(threads, sockets) grew from {before:?} to {after:?} closing A four more times");
+        b.shutdown().await;
+    });
+}
+
+/// This process's (threads, sockets) once they stop falling, or once they are back at `target`:
+/// a closed store's threads and an endpoint's sockets go shortly after it closes.
+#[cfg(unix)]
+async fn settled(target: Option<(usize, usize)>) -> (usize, usize) {
+    let start = Instant::now();
+    let mut last = (threads(), sockets());
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let now = (threads(), sockets());
+        let done = match target {
+            Some(target) => now.0 <= target.0 && now.1 <= target.1,
+            None => now == last,
+        };
+        if done || start.elapsed() > Duration::from_secs(15) {
+            return now;
+        }
+        last = now;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn threads() -> usize {
+    std::fs::read_dir("/proc/self/task").unwrap().count()
+}
+
+#[cfg(target_os = "macos")]
+fn threads() -> usize {
+    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+    // SAFETY: `info` is a writable `proc_taskinfo` of `size` bytes.
+    let written = unsafe { libc::proc_pidinfo(libc::getpid(), libc::PROC_PIDTASKINFO, 0, (&raw mut info).cast(), size) };
+    assert_eq!(written, size, "proc_pidinfo");
+    info.pti_threadnum as usize
+}
+
+/// The sockets among this process's open files, of any kind.
+#[cfg(unix)]
+fn sockets() -> usize {
+    let descriptors: Vec<i32> =
+        std::fs::read_dir("/dev/fd").unwrap().filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok()).collect();
+    descriptors
+        .into_iter()
+        .filter(|&fd| {
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: `stat` is a writable `struct stat`; a descriptor closed meanwhile fails.
+            unsafe { libc::fstat(fd, &mut stat) == 0 && stat.st_mode & libc::S_IFMT == libc::S_IFSOCK }
+        })
+        .count()
+}
