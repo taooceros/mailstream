@@ -394,9 +394,11 @@ pub fn settle(offset: f32, velocity: f32, width: f32) -> (bool, f32) {
 /// any scroll view under it scrolls with them, with where it points from the element's top left:
 /// none where something drawn after it covers the pointer (a toast, a floating draft, a menu, a
 /// page laid over it), which `feed` answers with no swipe that starts there (MS-319). Draw it
-/// over the pages it serves, after them: it takes no pointer itself, its plain hitbox only telling
-/// whether anything over it does. Only a gesture's start asks: one under way when a toast shows
-/// up under the fingers goes on. `feed` answers true when the swipe took the event.
+/// over the pages it serves, after them, pinned to their edges (`absolute().inset_0()`: placed
+/// after content in the flow it would sit below it, MS-384): it takes no pointer itself, its plain
+/// hitbox only telling whether anything over it does. Only a gesture's start asks: one under way
+/// when a toast shows up under the fingers goes on. `feed` answers true when the swipe took the
+/// event.
 #[allow(clippy::type_complexity)]
 pub fn scroll_capture<T: 'static>(
     host: Entity<T>,

@@ -654,7 +654,7 @@ impl CalendarPane {
 
         // Two-finger paging: scroll events are seen in the capture phase, before the timeline
         // scrolls with them, so a sideways swipe is never eaten by it.
-        let swipe = swipe::scroll_capture(cx.entity(), Self::feed_swipe).absolute().size_full();
+        let swipe = swipe::scroll_capture(cx.entity(), Self::feed_swipe).absolute().inset_0();
         let sketching = sketch_capture(cx.entity()).absolute().size_0();
 
         div()

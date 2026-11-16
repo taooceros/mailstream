@@ -373,10 +373,12 @@ impl MailApp {
 
         // Two-finger back swipe: scroll events are seen in the capture phase, before the lists
         // and the reader scroll with them, so a horizontal swipe is never eaten by a scroll view.
-        // Drawn last over the content so its hitbox detects overlays above it (MS-319).
+        // Drawn last over the content so its hitbox detects overlays above it (MS-319), pinned to
+        // its edges: after the list alone (no conversation open) it would otherwise sit below it,
+        // where no swipe reaches it (MS-384).
         // A mouse drag from a press on the top layer moves it the same way (MS-266); its
         // listeners go under the layers and over them (`swipe::mouse_capture`).
-        let swipe = swipe::scroll_capture(cx.entity(), Self::feed_swipe).absolute().size_full();
+        let swipe = swipe::scroll_capture(cx.entity(), Self::feed_swipe).absolute().inset_0();
         let (drag_under, drag_over) = swipe::mouse_capture(cx.entity(), Self::feed_drag);
 
         // Beside a conversation, the list's content keeps the width the list rests at once the

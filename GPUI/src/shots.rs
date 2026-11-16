@@ -24,6 +24,9 @@
 //!                            down, for a shot mid-drag, until `release`)
 //! release                    let go of a held drag where the pointer is
 //! scroll X Y DY [DX]         scroll the view under X Y by DY points down (DX right); negative: up
+//! swipe X Y DX               a two-finger touchpad swipe from X Y, DX points right (negative:
+//!                            left) over 12 frames, lifted at that speed with no momentum after
+//!                            (past 20 points a flick): the back swipe (`swipe.rs`)
 //! key COMBO...               press keys: `escape`, `down`, `enter`, `j`, `shift-tab`,
 //!                            `secondary-n` (⌘N on the Mac, Ctrl+N elsewhere)
 //! type TEXT                  type the rest of the line into the focused field
@@ -281,6 +284,7 @@ enum Command {
     Drag(Point<Pixels>, Point<Pixels>, bool),
     Release,
     Scroll(Point<Pixels>, Point<Pixels>),
+    Swipe(Point<Pixels>, f32),
     Keys(Vec<String>),
     Type(String),
     Size(f32, f32),
@@ -337,6 +341,7 @@ impl Command {
                 let dx = if words.len() > 3 { number(3)? } else { 0. };
                 Command::Scroll(spot(0)?, point(px(dx), px(number(2)?)))
             }
+            "swipe" => Command::Swipe(spot(0)?, number(2)?),
             "key" if !words.is_empty() => {
                 let keys: Vec<String> = words.iter().map(|key| platform_keys(key)).collect();
                 for key in &keys {
@@ -542,6 +547,24 @@ impl Run {
                 // GPUI's deltas move the content: down the page is a negative y.
                 let delta = ScrollDelta::Pixels(point(-by.x, -by.y));
                 self.event(ScrollEvent { position, delta, modifiers: Modifiers::default(), touch_phase: TouchPhase::Moved, ..Default::default() });
+            }
+            Command::Swipe(position, dx) => {
+                self.pointer_to(position, None);
+                // Two fingers on the touchpad (natural scrolling): they touch, move `dx` right over
+                // 12 frames, the content following them, and lift with no momentum after.
+                let swipe = |touch_phase, dx: f32| ScrollEvent {
+                    position,
+                    delta: ScrollDelta::Pixels(point(px(dx), px(0.))),
+                    modifiers: Modifiers::default(),
+                    touch_phase,
+                    ..Default::default()
+                };
+                self.event(swipe(TouchPhase::Started, 0.));
+                for _ in 0..12 {
+                    self.event(swipe(TouchPhase::Moved, dx / 12.));
+                    self.pass(FRAME);
+                }
+                self.event(swipe(TouchPhase::Ended, 0.));
             }
             Command::Keys(keys) => {
                 self.assistance = TextAssistance::default();

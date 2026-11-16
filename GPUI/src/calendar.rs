@@ -648,7 +648,7 @@ impl CalendarPane {
                 under.absolute().size_0().into_any_element(),
             ],
             vec![
-                swipe.absolute().size_full().into_any_element(),
+                swipe.absolute().inset_0().into_any_element(),
                 over.absolute().size_0().into_any_element(),
             ],
         )
