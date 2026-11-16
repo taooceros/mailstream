@@ -46,6 +46,9 @@ only, so the same script runs on macOS, Windows and Linux.
     names in APP_HOSTS); title and state are its issue's. session is the agent session it was
     written in, else left out; a message sent in a session without a comment has the prompt
     activity's id as id. The caller routes it to the issue's subagent or starts one.
+  An issue or comment line with "overdue" (minutes since it was first printed) is one printed before
+    that nobody has answered on the issue (Ledger below): the caller hands it out again, or writes
+    on the issue why not (left to another machine, waiting on something).
   {"kind": "stop", "session", "issue", "issueId", "title", "author", "createdAt"}: the user asked to
     stop the agent of that session (the `stop` signal). The caller stops the agent working on the
     issue (`proc://<id>/kill`); the script has already answered the session.
@@ -103,7 +106,18 @@ Claims are kept in ~/.local/state/linear-poll/ (STATE): `launched` (issue ids), 
 and the start comment reported), `install` (when the last install line was printed), `probe`
 (latest issue/comment/session updatedAt watermark for `watch`), `sessions` (JSON: per agent
 session the units handled, `created` and prompt activity ids, when it was last acknowledged and
-whether it was answered since).
+whether it was answered since), `ledger.jsonl`, `checkpoint` and `ledger-checked` (below).
+Ledger, checkpoint and rewind (MS-385, scripts/poll_ledger.py, whose header has the details):
+every issue and comment line printed is recorded in `ledger.jsonl` and stays open until this
+machine's app comments on its issue. `checkpoint` is the start of the last full pass whose lines
+were all handled; each full pass rewinds to it less 10 minutes and fetches every comment written
+since, page by page, skipping those in `comments`, so a stopped or failing poller loses none, and
+a stop is recorded as a gap. An item still open OVERDUE seconds (default 1800) after it was last
+printed, on an issue no running agent holds, is printed again as the same line with `overdue`,
+every OVERDUE seconds until it is answered, finished or no longer this machine's: a session that
+leaves an item to another machine says so on the issue. `linear-poll.py ledger [HOURS]` lists
+what was printed more than once or is still open, who answered and how late, and the gaps;
+`linear-poll.py ledger note MS-12 TEXT` adds a remark.
 DRY_RUN=1 prints without claiming or posting (unclaim lines included, and `reply` lines with the
 activity a session would get). Each issue it claims for the first
 time (resume false) and each comment line written by a workspace member gets omp's 👀 reaction
@@ -145,6 +159,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import poll_ledger
 import source_lock
 
 TEAMS = os.environ.get("TEAMS", ",".join([
@@ -341,7 +356,22 @@ USER = "{ id name app guest }"
 NOTE = "{ id createdAt body url user " + USER + " }"
 
 
-QUERY = """query($teams: [ID!], $label: String!, $claimed: String!, $install: String!, $sessions: Int!) {
+# Every comment written since the checkpoint (`since`, poll_ledger.py), page by page (MS-385): a
+# single page of the newest 100 lost the oldest ones after an hour's stop at busy times.
+COMMENTS = """comments(first: 100, after: $after, filter: { createdAt: { gt: $since }, issue: { team: { id: { in: $teams } } } }) {
+    nodes { id createdAt body user { id name app guest }
+      issue { id identifier title team { key } delegate { id name } state { name } labels { nodes { name } } } }
+    pageInfo { hasNextPage endCursor } }"""
+
+COMMENTS_PAGE = "query($teams: [ID!], $since: DateTimeOrDuration!, $after: String) {\n  " + COMMENTS + "\n}"
+
+# The issues of overdue ledger items: whether they are finished, still this poller's, held by an agent.
+LEDGER_ISSUES = """query($ids: [ID!], $n: Int!) { issues(first: $n, filter: { id: { in: $ids } }) {
+  nodes { id identifier team { key } delegate { id name } state { name type } labels { nodes { name } }
+    comments(first: 50) { nodes { createdAt body } } } } }"""
+
+QUERY = """query($teams: [ID!], $label: String!, $claimed: String!, $install: String!, $sessions: Int!,
+    $since: DateTimeOrDuration!, $after: String) {
   viewer { id name }""" + WATERMARKS + """
   queued: issues(first: 100, filter: {
     team: { id: { in: $teams } }, state: { type: { in: ["triage", "backlog", "unstarted"] } },
@@ -360,9 +390,7 @@ QUERY = """query($teams: [ID!], $label: String!, $claimed: String!, $install: St
     team: { id: { in: $teams } }, labels: { some: { name: { eq: $claimed } } } }) {
     nodes { id identifier title team { key } delegate { id name } state { name } labels { nodes { id name } }
       comments(first: 100) { nodes { id createdAt body user { app } } } } }
-  comments(first: 100, filter: { createdAt: { gt: "-P7D" }, issue: { team: { id: { in: $teams } } } }) {
-    nodes { id createdAt body user { id name app guest }
-      issue { id identifier title team { key } delegate { id name } state { name } labels { nodes { name } } } } }
+  """ + COMMENTS + """
   sessions: agentSessions(first: $sessions, orderBy: updatedAt) {
     nodes { id createdAt dismissedAt appUser { id } creator """ + USER + """
       comment """ + NOTE + """ sourceComment """ + NOTE + """
@@ -656,8 +684,14 @@ def run_pass():
             return 1
     if unchanged(running):
         return 0
-    data = gql(QUERY, {"teams": TEAMS, "label": LABEL, "claimed": CLAIMED, "install": INSTALL,
-                       "sessions": SESSION_COUNT})
+    started = datetime.now(timezone.utc)
+    ledger = poll_ledger.Ledger(STATE, dry=bool(os.environ.get("DRY_RUN")))
+    page_vars = {"teams": TEAMS, "since": ledger.rewind(), "after": None}
+    data = gql(QUERY, {**page_vars, "label": LABEL, "claimed": CLAIMED, "install": INSTALL, "sessions": SESSION_COUNT})
+    page = data["comments"]
+    while page["pageInfo"]["hasNextPage"]:
+        page = gql(COMMENTS_PAGE, {**page_vars, "after": page["pageInfo"]["endCursor"]})["comments"]
+        data["comments"]["nodes"] += page["nodes"]
     if not os.environ.get("DRY_RUN"):
         PROBE.write_text(json.dumps({
             "watermark": watermark(data),
@@ -665,12 +699,21 @@ def run_pass():
             "fullAt": time.time(),
         }), encoding="utf-8")
     known = json.loads(SESSIONS.read_text(encoding="utf-8")) if SESSIONS.exists() else {}
+    ledger.answer(data["comments"]["nodes"], data["viewer"]["id"])
     out = plan(data, running, known)
+    printed = {line["id"] for line in out if line["kind"] in ("issue", "comment")}
+    again = ledger.overdue(lambda ids: gql(LEDGER_ISSUES, {"ids": ids, "n": len(ids)})["issues"]["nodes"], running,
+                           lambda issue: host(issue) == HOST_LABEL)
+    out += [line for line in again if line["id"] not in printed]
     if os.environ.get("DRY_RUN"):
         for line in out:
             emit(line)
         return 0
     for line in out:
+        if "overdue" in line:  # printed before: its claim is done, only the ledger notes it again
+            ledger.handed(line)
+            emit(line)
+            continue
         kind = line["kind"]
         react_to = line.pop("react", False)
         reply = line.pop("reply", None)
@@ -694,8 +737,11 @@ def run_pass():
             react(kind, line["id"])
         if reply:
             answer(known, reply)
+        if kind in ("issue", "comment"):
+            ledger.handed(line)
         if kind not in ("unclaim", "reply"):
             emit(line)
+    ledger.advance(started)
     return 0
 
 
@@ -706,8 +752,16 @@ def main():
     try:
         if args == ["watch"]:
             return watch()
+        if args[:1] == ["ledger"]:
+            ledger = poll_ledger.Ledger(STATE)
+            if args[1:2] == ["note"] and len(args) >= 4:
+                ledger.note(args[2], " ".join(args[3:]))
+                return 0
+            if len(args) <= 2 and all(a.isdigit() for a in args[1:]):
+                print(ledger.report(int(args[1]) if args[1:] else 72))
+                return 0
         if args:
-            print(f"usage: {sys.argv[0]} [watch]", file=sys.stderr)
+            print(f"usage: {sys.argv[0]} [watch | ledger [HOURS] | ledger note MS-12 TEXT]", file=sys.stderr)
             return 2
         return run_pass()
     except Failed:

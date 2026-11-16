@@ -217,6 +217,16 @@ LINEAR_CREDENTIALS=~/.config/linear/credentials`; on Linux the same with `HOST_L
 `LINEAR_SCOPE="$(sed -n 's/.*scope=\([^ ]*\).*/\1/p' ~/.config/linear/bearer.sh)"`, so the
 poller renews the token with the scopes `bearer.sh` asks for.
 
+Nothing the script prints may be dropped silently (MS-385): every issue and comment line goes
+into the script's ledger (`~/.local/state/linear-poll/ledger.jsonl`) and stays open until this
+machine's app comments on that issue. A line nobody answered within 30 minutes, on an issue no
+running agent holds, comes back with `overdue`: hand it out again, or say on the issue why not
+(forwarded to the other machine as the end of this section says, queued, waiting on something).
+Deciding that another machine does it counts only once it is written on the issue. The script also
+rewinds to its checkpoint after any stop or error, so nothing written while it was down is lost.
+`python3 scripts/linear-poll.py ledger` lists what came back or is still open, who answered and
+how late, and when the poller was down (the script's header has the details).
+
 Subagents start from the repo's agent definitions in `.omp/agents`, which carry what every
 hand-out repeats: open a checkout of their own named after their agent id, give tools absolute
 paths under it (a subagent starts in the session's folder, the locked default checkout, and omp
