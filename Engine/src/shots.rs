@@ -464,7 +464,7 @@ impl DeviceSyncMock {
             problem: None,
             cloud: SyncCloud {
                 enabled: self.cloud_enabled,
-                url: self.cloud_url.clone(),
+                url: Some(self.cloud_url.clone().unwrap_or_else(|| crate::cloud_drop::DEFAULT_WORKER_URL.to_owned())),
                 last_upload: self.cloud_upload_secs.map(|s| model::iso8601(model::date_from_unix(s))),
                 last_received: (self.cloud_enabled && self.joined_peer)
                     .then(|| model::iso8601(model::date_from_unix(now - 600.0))),
@@ -541,7 +541,10 @@ pub(crate) fn device_sync(command: &str, args: &Arguments, events: &Events) -> R
             Ok(answers::json(&mock.status()))
         }
         "sync.cloud_enable" => {
-            let url = args.required("url")?;
+            let url = args
+                .string("url")
+                .filter(|url| !url.trim().is_empty())
+                .unwrap_or_else(|| crate::cloud_drop::DEFAULT_WORKER_URL.to_owned());
             let url = url.trim().trim_end_matches('/');
             if !url.starts_with("https://") {
                 return Err(EngineError::new("invalid", "The Worker's URL must start with https://."));

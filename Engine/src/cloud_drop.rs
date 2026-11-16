@@ -20,6 +20,10 @@
 //!
 //! `peer-sync/cloud.json` keeps the Worker's URL, whether the drop is on, and what was last
 //! uploaded where (with its token), so turning it off or leaving the group deletes that copy.
+/// The `SyncDrop/` Worker deployed for this project's devices (MS-374): offered by default so a
+/// device does not have to type a URL, still off until turned on.
+pub(crate) const DEFAULT_WORKER_URL: &str = "https://mailstream-sync-drop.ync-rop.workers.dev";
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -256,7 +260,7 @@ impl CloudDrop {
         let meta = self.meta.lock().expect("cloud meta lock");
         SyncCloud {
             enabled: file.enabled,
-            url: file.url.clone(),
+            url: Some(file.url.clone().unwrap_or_else(|| DEFAULT_WORKER_URL.to_owned())),
             last_upload: meta.last_upload.map(iso_ms),
             last_received: meta.last_received.map(iso_ms),
             problem: meta.problem.clone(),
@@ -491,5 +495,14 @@ mod tests {
         assert!(worker_url("http://drop.you.workers.dev").is_err());
         assert!(worker_url("https://drop.you.workers.dev/?token=1").is_err());
         assert!(worker_url("drop.you.workers.dev").is_err());
+    }
+
+    #[test]
+    fn default_worker_url_is_offered_while_off() {
+        let directory = std::env::temp_dir().join(format!("mailstream-cloud-drop-default-{}", std::process::id()));
+        let drop = CloudDrop::new(&directory);
+        let status = drop.status();
+        assert!(!status.enabled);
+        assert_eq!(status.url.as_deref(), Some(DEFAULT_WORKER_URL));
     }
 }

@@ -45,6 +45,11 @@ impl Argument {
         Self { positional: true, required: true, ..self }
     }
 
+    /// Given by position when supplied, otherwise omitted.
+    const fn optional_positional(self) -> Self {
+        Self { positional: true, required: false, ..self }
+    }
+
     const fn variadic(self) -> Self {
         Self { variadic: true, ..self }
     }
@@ -120,7 +125,13 @@ impl Spec {
     pub fn help(&self) -> String {
         let mut usage = vec![format!("mailstream {}", self.name())];
         for argument in self.arguments.iter().filter(|argument| argument.positional) {
-            usage.push(if argument.variadic { format!("{}...", argument.label()) } else { argument.label() });
+            usage.push(if argument.variadic {
+                format!("{}...", argument.label())
+            } else if !argument.required {
+                format!("[{}]", argument.label())
+            } else {
+                argument.label()
+            });
         }
         let options = if self.arguments.iter().any(|argument| !argument.positional) { " [options]" } else { "" };
         let mut lines = vec![format!("{}{options}", usage.join(" ")), String::new(), self.summary.to_owned()];
@@ -734,7 +745,12 @@ pub const COMMANDS: &[Spec] = &[
         "sync.cloud_enable",
         Handler::Sync,
         "Keeps an encrypted copy of the synced settings on your Cloudflare Worker (SyncDrop/), so devices that are never online together still sync.",
-        &[Argument::new("url", Kind::String, "The Worker's URL, https://….workers.dev.").positional()],
+        &[Argument::new(
+            "url",
+            Kind::String,
+            "The Worker's URL, https://….workers.dev (default: https://mailstream-sync-drop.ync-rop.workers.dev).",
+        )
+        .optional_positional()],
     ),
     Spec::new(
         "sync.cloud_disable",
@@ -919,6 +935,7 @@ mod tests {
         assert_eq!((defaults.int("limit"), defaults.list("mailbox")), (Some(25), Some(vec!["inbox".into(), "sent".into()])));
         assert_eq!(args("mail.show", json!({ "id": "x", "max-chars": "40" })).unwrap().int("max-chars"), Some(40));
         assert_eq!(spec("mail.nope").err().unwrap().code, "unknown_command");
+        assert!(args("sync.cloud_enable", json!({})).unwrap().string("url").is_none());
     }
 
     #[test]

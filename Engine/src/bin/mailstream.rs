@@ -627,5 +627,9 @@ mod tests {
         let (spec, trailing) = matching(&cloud).unwrap();
         assert_eq!(spec.id, "sync.cloud_enable");
         assert_eq!(trailing, words(&["https://drop.example.workers.dev"]));
+        let bare_cloud = words(&["sync", "cloud-enable"]);
+        let (spec, trailing) = matching(&bare_cloud).unwrap();
+        assert_eq!(spec.id, "sync.cloud_enable");
+        assert!(parse(trailing, spec).unwrap().is_empty());
     }
 }

@@ -666,7 +666,10 @@ impl DeviceSync {
                 Ok(answers::json(&self.status_answer().await))
             }
             "sync.cloud_enable" => {
-                let url = args.required("url")?;
+                let url = args
+                    .string("url")
+                    .filter(|url| !url.trim().is_empty())
+                    .unwrap_or_else(|| cloud_drop::DEFAULT_WORKER_URL.to_owned());
                 self.cloud.enable(&url)?;
                 self.cloud_exchange().await;
                 self.events.emit("deviceSync");
