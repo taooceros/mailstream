@@ -6,7 +6,7 @@ needs to hand it out, so it doesn't ask Linear about it (MS-174). Python 3.9+ st
 only, so the same script runs on macOS, Windows and Linux.
 
   {"kind": "issue", "id", "identifier", "resume", "unblockedBy", "title", "state", "priority",
-    "priorityValue", "labels", "creator", "project", "parent", "description"}: an issue to start.
+    "priorityValue", "labels", "creator", "project", "parent", "description", "session"}: an issue to start.
     priority is Linear's priority label (`Urgent`, `High`, `Medium`, `Low`, `No priority`) and
     priorityValue its number (1 Urgent … 4 Low, 0 none); an Urgent issue starts at once, past the
     limit on heavy agents (AGENTS.md, Polling session, MS-252). labels are its label names
@@ -21,7 +21,11 @@ only, so the same script runs on macOS, Windows and Linux.
       `main`, waiting only for the batch install). Claimed once per set of blockers, so
       blocking it again by another issue resumes it again; or
     - labelled `omp`, in any state but started, done or canceled; the label is removed on
-      claim, so adding it again reruns the issue.
+      claim, so adding it again reruns the issue; or
+    - delegated to this machine's app (Linear's "assign to agent" sets the issue's delegate), not
+      started, done or canceled, created by a member or omp and not claimed before, whatever its
+      comments.
+    session is the id of the agent session that asked for it (see Agent sessions), else left out.
     The first two skip issues with a blocker still open: a blocked issue waits until its
     blockers are on `main` (`install` or In Review), not for the user's review. resume is true
     for an issue claimed before (the subagent carries on from the issue's comments); unblockedBy
@@ -36,11 +40,15 @@ only, so the same script runs on macOS, Windows and Linux.
     RUNNING, and the previous install line is INSTALL_EVERY seconds old (default 3600). The
     caller starts one `ms-install` agent (.omp/agents) that installs `main`'s tip once for every
     listed issue and checks only that the install worked (revision, signature, launch).
-  {"kind": "comment", "id", "issue", "issueId", "title", "state", "createdAt", "author", "body"}: a
-    comment posted on any team issue in the last 7 days, each once, by a workspace member (not an
-    app, a guest or a GitHub sync) or by another machine's omp app (one of PEERS, comma-separated
-    app names, default `omp,windows-omp,linux-omp`); title and state are its issue's. The caller routes it
-    to the issue's subagent or starts one.
+  {"kind": "comment", "id", "issue", "issueId", "title", "state", "createdAt", "author", "body",
+    "session"}: a comment posted on any team issue in the last 7 days, each once, by a workspace
+    member (not an app, a guest or a GitHub sync) or by another machine's omp app (one of the app
+    names in APP_HOSTS); title and state are its issue's. session is the agent session it was
+    written in, else left out; a message sent in a session without a comment has the prompt
+    activity's id as id. The caller routes it to the issue's subagent or starts one.
+  {"kind": "stop", "session", "issue", "issueId", "title", "author", "createdAt"}: the user asked to
+    stop the agent of that session (the `stop` signal). The caller stops the agent working on the
+    issue (`proc://<id>/kill`); the script has already answered the session.
   {"kind": "stale", "id", "identifier", "title", "agent", "claimedAt"}: an In Progress issue labelled
     `claimed` whose owner, the agent named in its latest start comment
     (`[omp @ <checkout> · <model>] start (<agent id>): …`, posted at claimedAt; START also takes
@@ -52,33 +60,59 @@ only, so the same script runs on macOS, Windows and Linux.
     Issues out of In Progress whose owner is not running lose `claimed`.
 Machines: the poller covers the teams in TEAMS (comma-separated ids, default Mailstream `MS` and
 `WIN`). Issues of a team in HOST_TEAMS (comma-separated `KEY=host`, default `WIN=windows`) belong
-to that host's poller whatever their labels; in other teams, issues labelled with one of
-HOST_LABELS (comma-separated, default `windows,linux`) belong to the poller started with that
-HOST_LABEL (Windows with `windows`, Linux with `linux`); every other issue to the poller without
-one (the Mac).
+to that host's poller whatever their labels; in other teams, an issue delegated to a machine's app
+belongs to that machine (APP_HOSTS, comma-separated `app=host`, default
+`omp=,windows-omp=windows,linux-omp=linux`), and issues labelled with one of HOST_LABELS
+(comma-separated, default `windows,linux`) belong to the poller started with that HOST_LABEL
+(Windows with `windows`, Linux with `linux`); every other issue to the poller without one (the
+Mac).
 Each poller claims, resumes, reports stale and routes comments only for its own issues, except
-that a comment naming a machine's app (`@windows-omp`, `@linux-omp`) goes to that machine alone,
-whatever the issue: that is how the user and the other machines address it. Another machine's
-app reaches it only that way.
+that a comment naming a machine's app (`@windows-omp`, `@linux-omp`, or a real Linear mention,
+which the API writes as the app's profile URL) goes to that machine alone, whatever the issue:
+that is how the user and the other machines address it. Another machine's app reaches it only
+that way.
+Agent sessions (MS-377): with the scopes `app:assignable` and `app:mentionable` the app can be
+delegated an issue and @-mentioned, and Linear opens an agent session for each
+(https://linear.app/developers/agents, https://linear.app/developers/agent-interaction). Without
+a webhook the pass finds them itself: the app's SESSION_COUNT most recently updated sessions
+(`agentSessions`, default 10, newest first, kept to the app's own), each with its `prompt`
+activities (the user's messages). A new session from a workspace member becomes a comment line
+(a mention: the comment that opened it) or an issue line (a delegation), each new message in it a
+comment line, a `stop` message a stop line; all carry the session id and go to this machine
+whatever the issue's labels. As it prints one, the script posts a `thought` activity saying it
+was handed out, since Linear marks a session unresponsive without an activity within 10 s and
+stale after 30 min without one (both recover with the next activity,
+https://linear.app/developers/agent-best-practices). It answers the session itself at hand-over:
+once omp has commented on the issue after that thought (start comments aside) and the issue is
+out of In Progress and Todo, it posts a `response` with the start of that comment and its link,
+or an `elicitation` as soon as such a comment asks the user (`需要你回答`). Sessions started or
+messages sent by anyone else (a guest, an app, an automation) get an `error` and no line, as do
+sessions not on an issue. A delegation of an issue an agent already holds (In Progress,
+`claimed`) gets only the thought. Delegated issues (above) and mentions (Machines) are claimed
+without a session too, so the work arrives even where Linear opens none for an app that has no
+webhook. Without those scopes there are no sessions, delegations or real mentions.
 Token: the Mac reads omp's from the keychain and renews it with RENEW. A machine without
 `security` sets LINEAR_TOKEN_FILE (the OAuth token JSON) and LINEAR_CREDENTIALS (a file with the
 OAuth app's client id on line 1 and secret on line 2); renewal fetches a client_credentials token
 into LINEAR_TOKEN_FILE with the scopes in LINEAR_SCOPE (default `read,write`). Every process that
 renews the app's token must ask for the same set: Linear revokes the app's other tokens when the
-set changes. Linux's app, once it is an agent (MS-377, `scripts/linear-agent.py`), needs
-`read,write,app:assignable,app:mentionable`.
+set changes (https://linear.app/developers/oauth-actor-authorization). Linux takes the set from
+`~/.config/linear/bearer.sh` (AGENTS.md, Polling session).
 Claims are kept in ~/.local/state/linear-poll/ (STATE): `launched` (issue ids), `comments`
 (comment ids), `unblocked` (issue id and the blocker ids it was claimed with), `stale` (issue id
 and the start comment reported), `install` (when the last install line was printed), `probe`
-(latest issue/comment updatedAt watermark for `watch`).
-DRY_RUN=1 prints without claiming (unclaim lines included). Each issue it claims for the first
+(latest issue/comment/session updatedAt watermark for `watch`), `sessions` (JSON: per agent
+session the units handled, `created` and prompt activity ids, when it was last acknowledged and
+whether it was answered since).
+DRY_RUN=1 prints without claiming or posting (unclaim lines included, and `reply` lines with the
+activity a session would get). Each issue it claims for the first
 time (resume false) and each comment line written by a workspace member gets omp's 👀 reaction
 as it is printed, so the user sees it was picked up whichever session handles it (MS-355); a
 failed reaction is only logged.
 `linear-poll.py watch` checks Linear every INTERVAL seconds (default 5) and exits after the first
 pass that prints lines, with that pass's lines and status; passes with nothing to print (unclaims
 included) keep it looping silently. After its first full pass, `watch` uses a lightweight
-`updatedAt` probe (~4 complexity vs ~1,145 for the full query) and runs the full query only when
+`updatedAt` probe (~5 complexity vs ~2,200 for the full query) and runs the full query only when
 Linear changed, RUNNING/script changed, or FULL_EVERY seconds (default 60) elapsed. Each pass runs
 the script afresh, so edits take effect without a restart. A failed pass (network, Linear error,
 token renewal) is logged to stderr and retried next interval; after MAX_FAILURES (default 10)
@@ -122,7 +156,8 @@ LABEL = os.environ.get("LABEL", "omp")
 CLAIMED = os.environ.get("CLAIMED", "claimed")
 HOST_LABEL = os.environ.get("HOST_LABEL", "")
 HOST_LABELS = os.environ.get("HOST_LABELS", "windows,linux").split(",")
-PEERS = os.environ.get("PEERS", "omp,windows-omp,linux-omp").split(",")
+APP_HOSTS = dict(pair.split("=", 1) for pair in
+                 os.environ.get("APP_HOSTS", "omp=,windows-omp=windows,linux-omp=linux").split(",") if pair)
 RENEW = Path.home() / ".pi/agent/extensions/linear/renew-omp-token.sh"
 TOKEN_FILE = os.environ.get("LINEAR_TOKEN_FILE", "")
 CREDENTIALS = os.environ.get("LINEAR_CREDENTIALS", "")
@@ -135,11 +170,17 @@ STALE = STATE / "stale"
 INSTALL = os.environ.get("INSTALL", "install")
 INSTALLED = STATE / "install"
 PROBE = STATE / "probe"
+SESSIONS = STATE / "sessions"
+SESSION_COUNT = int(os.environ.get("SESSION_COUNT", "10"))
 INTERVAL = int(os.environ.get("INTERVAL", "5"))
 FULL_EVERY = int(os.environ.get("FULL_EVERY", "60"))
 INSTALL_EVERY = int(os.environ.get("INSTALL_EVERY", "3600"))
 DESCRIPTION = int(os.environ.get("DESCRIPTION", "600"))
 START = re.compile(r"^\[omp @ [^\]]*\] start \((?P<a>[^)]+)\)")
+PREFIX = re.compile(r"^\[omp @ [^\]]*\]\s*")
+QUESTION = "需要你回答"
+TAG = "[linear-poll]"
+WORKING_STATES = ("In Progress", "Todo")  # an issue in neither has been handed over
 
 
 class Failed(Exception):
@@ -238,6 +279,15 @@ def react(kind, id):
         log(f"could not react to {kind} {id}")
 
 
+def activity(session, content):
+    """Posts an agent activity to a session; a failure is logged and doesn't stop the pass."""
+    try:
+        gql("mutation($input: AgentActivityCreateInput!) { agentActivityCreate(input: $input) { success } }",
+            {"input": {"agentSessionId": session, "content": content}})
+    except Failed:
+        log(f"could not post a {content['type']} to agent session {session}")
+
+
 def relock():
     """Locks the default checkout again when its source is writable (source_lock.py, MS-156)."""
     if sys.platform != "darwin":
@@ -276,44 +326,52 @@ def watch():
         time.sleep(INTERVAL)
 
 
-PROBE_QUERY = """query($teams: [ID!]) {
+WATERMARKS = """
   latestIssue: issues(first: 1, orderBy: updatedAt, filter: { team: { id: { in: $teams } } }) {
     nodes { id updatedAt }
   }
   latestComment: comments(first: 1, orderBy: updatedAt, filter: { createdAt: { gt: "-P7D" }, issue: { team: { id: { in: $teams } } } }) {
     nodes { id updatedAt }
   }
-}"""
+  latestSession: agentSessions(first: 1, orderBy: updatedAt) { nodes { id updatedAt } }"""
+
+PROBE_QUERY = "query($teams: [ID!]) {" + WATERMARKS + "\n}"
+
+USER = "{ id name app guest }"
+NOTE = "{ id createdAt body url user " + USER + " }"
 
 
-QUERY = """query($teams: [ID!], $label: String!, $claimed: String!, $install: String!) {
-  viewer { id name }
-  latestIssue: issues(first: 1, orderBy: updatedAt, filter: { team: { id: { in: $teams } } }) {
-    nodes { id updatedAt }
-  }
-  latestComment: comments(first: 1, orderBy: updatedAt, filter: { createdAt: { gt: "-P7D" }, issue: { team: { id: { in: $teams } } } }) {
-    nodes { id updatedAt }
-  }
+QUERY = """query($teams: [ID!], $label: String!, $claimed: String!, $install: String!, $sessions: Int!) {
+  viewer { id name }""" + WATERMARKS + """
   queued: issues(first: 100, filter: {
     team: { id: { in: $teams } }, state: { type: { in: ["triage", "backlog", "unstarted"] } },
     or: [{ labels: { some: { name: { eq: $label } } } }, { state: { name: { eq: "Todo" } } },
-      { hasBlockedByRelations: { eq: true } }] }) {
+      { hasBlockedByRelations: { eq: true } }, { delegate: { isMe: { eq: true } } }] }) {
     nodes { id identifier number title description priority priorityLabel team { key } state { name }
-      creator { id name app guest } project { name } parent { identifier title }
+      creator { id name app guest } project { name } parent { identifier title } delegate { id name }
       labels { nodes { id name } } comments(first: 100) { nodes { user { app } } }
       inverseRelations(first: 50) { nodes { type issue { id identifier state { name type }
         labels { nodes { name } } } } } } }
   installs: issues(first: 100, filter: {
     team: { id: { in: $teams } }, labels: { some: { name: { eq: $install } } },
     state: { type: { nin: ["completed", "canceled", "duplicate"] } } }) {
-    nodes { identifier number team { key } labels { nodes { name } } } }
+    nodes { identifier number team { key } delegate { id name } labels { nodes { name } } } }
   claimed: issues(first: 100, filter: {
     team: { id: { in: $teams } }, labels: { some: { name: { eq: $claimed } } } }) {
-    nodes { id identifier title team { key } state { name } labels { nodes { id name } }
+    nodes { id identifier title team { key } delegate { id name } state { name } labels { nodes { id name } }
       comments(first: 100) { nodes { id createdAt body user { app } } } } }
   comments(first: 100, filter: { createdAt: { gt: "-P7D" }, issue: { team: { id: { in: $teams } } } }) {
     nodes { id createdAt body user { id name app guest }
-      issue { id identifier title team { key } state { name } labels { nodes { name } } } } }
+      issue { id identifier title team { key } delegate { id name } state { name } labels { nodes { name } } } } }
+  sessions: agentSessions(first: $sessions, orderBy: updatedAt) {
+    nodes { id createdAt dismissedAt appUser { id } creator """ + USER + """
+      comment """ + NOTE + """ sourceComment """ + NOTE + """
+      activities(first: 10, filter: { type: { eq: "prompt" } }) {
+        nodes { id createdAt signal user """ + USER + """ sourceComment """ + NOTE + """
+          content { ... on AgentActivityPromptContent { body } } } }
+      issue { id identifier number title description priority priorityLabel team { key } state { name }
+        creator { id name app guest } project { name } parent { identifier title }
+        labels { nodes { id name } } comments(first: 20) { nodes { id createdAt body url user { id } } } } } }
 }"""
 
 
@@ -325,6 +383,9 @@ def host(issue):
     team = HOST_TEAMS.get(issue["team"]["key"])
     if team is not None:
         return team
+    delegate = (issue.get("delegate") or {}).get("name")
+    if delegate in APP_HOSTS:
+        return APP_HOSTS[delegate]
     names = [l["name"] for l in issue["labels"]["nodes"]]
     return next((h for h in HOST_LABELS if h in names), "")
 
@@ -334,7 +395,8 @@ def member(user):
 
 
 def mentions(body, name):
-    return re.search(rf"@{re.escape(name)}(?![\w-])", body) is not None
+    """`@name` as typed, or a real mention, which the API writes as the profile URL."""
+    return re.search(rf"(?:@|linear\.app/[\w-]+/profiles/){re.escape(name)}(?![\w-])", body) is not None
 
 
 def routed(comment, me):
@@ -343,9 +405,9 @@ def routed(comment, me):
     if user is None or user["id"] == me["id"]:
         return False
     if member(user):
-        named = [peer for peer in PEERS if mentions(body, peer)]
+        named = [app for app in APP_HOSTS if mentions(body, app)]
         return me["name"] in named if named else host(comment["issue"]) == HOST_LABEL
-    return user.get("app") is True and user["name"] in PEERS and mentions(body, me["name"])
+    return user.get("app") is True and user["name"] in APP_HOSTS and mentions(body, me["name"])
 
 
 def blockers(issue):
@@ -377,8 +439,108 @@ def timestamp(text):
     return datetime.strptime(re.sub(r"\.[0-9]+Z$", "Z", text), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
-def plan(data, running):
-    """Issue lines oldest first, then stale and comment lines oldest first."""
+def comment_line(comment, issue, react):
+    return {"kind": "comment", "id": comment["id"], "issue": issue["identifier"], "issueId": issue["id"],
+            "title": issue["title"], "state": issue["state"]["name"], "createdAt": comment["createdAt"],
+            "author": comment["user"]["name"], "body": comment["body"], "react": react}
+
+
+def thought(body):
+    return {"type": "thought", "body": f"{TAG} {body}"}
+
+
+NOT_MEMBER = {"type": "error", "body": f"{TAG} 只接受工作区正式成员的请求：仓库是公开的，agent 有完整权限。"}
+NO_ISSUE = {"type": "error", "body": f"{TAG} 只处理 issue 上的会话：请在 issue 里指派或提及 linux-omp。"}
+
+
+def prompts(session):
+    """The user's messages in a session, oldest first."""
+    return sorted(session["activities"]["nodes"], key=lambda p: p["createdAt"])
+
+
+def opener(session):
+    """The member's comment that opened a session by mentioning the app; None for a delegation."""
+    notes = [session["sourceComment"], session["comment"]] + [p["sourceComment"] for p in prompts(session)]
+    return next((c for c in notes if c and member(c["user"])), None)
+
+
+def summary(comment, issue):
+    """The start of omp's hand-over comment and its link, for the session's answer."""
+    text = PREFIX.sub("", comment["body"]).strip().split("\n\n")[0]
+    if len(text) > 300:
+        text = text[:300].rstrip() + "…"
+    return f"{TAG} {issue['identifier']}（{issue['state']['name']}）：{text}\n\n{comment['url']}"
+
+
+def plan_sessions(data, known, done, handled, todo):
+    """Issue lines, comment and stop lines, and replies for the app's agent sessions (see Agent
+    sessions above). A line's `reply` is the activity to post as it is printed; it may attach to an
+    issue line already in todo."""
+    me = data["viewer"]["id"]
+    issues, notes, replies = [], [], []
+    for session in (data.get("sessions") or {}).get("nodes") or []:
+        if session["appUser"]["id"] != me or session["dismissedAt"]:
+            continue
+        sid, issue, entry = session["id"], session["issue"], known.get(session["id"])
+
+        def reply(units, content, closes=False):
+            return {"session": sid, "units": units, "content": content, "closes": closes}
+
+        if entry is None:
+            units = ["created"] + [p["id"] for p in prompts(session)]
+            if not member(session["creator"]) or issue is None:
+                replies.append(reply(units, NOT_MEMBER if not member(session["creator"]) else NO_ISSUE, True))
+                continue
+            ack = thought(f"收到，已交给 Linux 上的 omp agent 处理 {issue['identifier']}；它交接时结果会发在这里。")
+            note = opener(session)
+            line = next((l for l in todo if l["id"] == issue["id"]), None)
+            if note is not None and note["id"] not in handled:
+                notes.append({**comment_line(note, issue, True), "session": sid, "reply": reply(units, ack)})
+            elif note is None and line is not None:
+                line.update({"session": sid, "reply": reply(units, ack)})
+            elif note is None and not (issue["state"]["name"] == "In Progress"
+                                       and any(l["name"] == CLAIMED for l in issue["labels"]["nodes"])):
+                claimed = issue["id"] in done
+                issues.append({"kind": "issue", "id": issue["id"], "identifier": issue["identifier"], "resume": claimed,
+                               "unblockedBy": [], **about(issue), "session": sid, "label": None, "unblockKey": None,
+                               "number": issue["number"], "react": not claimed, "reply": reply(units, ack)})
+            else:  # its comment was already printed, or an agent already holds the issue
+                replies.append(reply(units, thought(f"收到；{issue['identifier']} 已有 agent 在处理，它交接时结果会发在这里。")))
+            continue
+        new = [p for p in prompts(session) if p["id"] not in entry["units"]]
+        for prompt in new:
+            if not member(prompt["user"]) or issue is None:
+                replies.append(reply([prompt["id"]], NOT_MEMBER if not member(prompt["user"]) else NO_ISSUE))
+            elif prompt["signal"] == "stop":
+                notes.append({"kind": "stop", "session": sid, "issue": issue["identifier"], "issueId": issue["id"],
+                              "title": issue["title"], "author": prompt["user"]["name"], "createdAt": prompt["createdAt"],
+                              "reply": reply([prompt["id"]], {"type": "response", "body": f"{TAG} 已请 Linux 的轮询会话停下 {issue['identifier']} 的 agent。"}, True)})
+            else:
+                note = prompt["sourceComment"] or {"id": prompt["id"], "createdAt": prompt["createdAt"], "user": prompt["user"],
+                                                   "body": (prompt["content"] or {}).get("body") or ""}
+                ack = thought(f"收到，已转给处理 {issue['identifier']} 的 agent；它交接时结果会发在这里。")
+                if note["id"] in handled:
+                    replies.append(reply([prompt["id"]], ack))
+                else:
+                    notes.append({**comment_line(note, issue, prompt["sourceComment"] is not None), "session": sid,
+                                  "reply": reply([prompt["id"]], ack)})
+        if new or issue is None or not entry.get("ackedAt") or entry.get("answered"):
+            continue
+        acked = timestamp(entry["ackedAt"])
+        after = [c for c in issue["comments"]["nodes"] if (c["user"] or {}).get("id") == me
+                 and timestamp(c["createdAt"]) > acked and not START.match(c["body"])]
+        question = max((c for c in after if QUESTION in c["body"]), key=lambda c: c["createdAt"], default=None)
+        if question is not None:
+            replies.append(reply([], {"type": "elicitation", "body": summary(question, issue)}, True))
+        elif after and issue["state"]["name"] not in WORKING_STATES:
+            final = max(after, key=lambda c: c["createdAt"])
+            replies.append(reply([], {"type": "response", "body": summary(final, issue)}, True))
+    return issues, notes, [{"kind": "reply", "reply": r} for r in replies]
+
+
+def plan(data, running, known):
+    """Issue lines oldest first, then install, stale and unclaim lines, comment and stop lines oldest
+    first, and the replies to agent sessions."""
     omp = data["viewer"]["id"]
     done = [line.split(" ")[0] for line in lines(LAUNCHED)]
     handled, freed, reported = lines(HANDLED), lines(UNBLOCKED), lines(STALE)
@@ -391,15 +553,17 @@ def plan(data, running):
         blocking = blockers(issue)
         free = all(resolved(b) for b in blocking)
         key = f"{issue['id']} {','.join(sorted(b['id'] for b in blocking))}" if blocking and free else None
-        fresh = (issue["state"]["name"] == "Todo"
-                 and (member(issue["creator"]) or (issue["creator"] or {}).get("id") == omp)
+        trusted = member(issue["creator"]) or (issue["creator"] or {}).get("id") == omp
+        fresh = (issue["state"]["name"] == "Todo" and trusted
                  and not claimed and not any((c["user"] or {}).get("app") is True for c in issue["comments"]["nodes"]))
+        delegated = (issue["delegate"] or {}).get("id") == omp and trusted and not claimed
         unblocked = claimed and key is not None and key not in freed
-        if labelled(issue) is not None or (free and (fresh or unblocked)):
+        if labelled(issue) is not None or delegated or (free and (fresh or unblocked)):
             todo.append({"kind": "issue", "id": issue["id"], "identifier": issue["identifier"], "resume": claimed,
                          "unblockedBy": [b["identifier"] for b in blocking if resolved(b)], **about(issue),
                          "label": labelled(issue), "unblockKey": key, "number": issue["number"], "react": not claimed})
-    out = sorted(todo, key=lambda line: line["number"])
+    issues, notes, replies = plan_sessions(data, known, done, handled, todo)
+    out = sorted(todo + issues, key=lambda line: line["number"])
     for line in out:
         del line["number"]
     waiting = sorted((i for i in data["installs"]["nodes"] if host(i) == HOST_LABEL), key=lambda i: i["number"])
@@ -424,20 +588,18 @@ def plan(data, running):
             if key not in reported and (start is None or (now - timestamp(start["createdAt"])).total_seconds() >= 600):
                 out.append({"kind": "stale", "id": issue["id"], "identifier": issue["identifier"], "title": issue["title"],
                             "agent": agent, "claimedAt": start["createdAt"] if start else None, "staleKey": key})
-    for comment in sorted(data["comments"]["nodes"], key=lambda c: c["createdAt"]):
-        if routed(comment, data["viewer"]) and comment["id"] not in handled:
-            out.append({"kind": "comment", "id": comment["id"], "issue": comment["issue"]["identifier"],
-                        "issueId": comment["issue"]["id"], "title": comment["issue"]["title"],
-                        "state": comment["issue"]["state"]["name"], "createdAt": comment["createdAt"],
-                        "author": comment["user"]["name"], "body": comment["body"], "react": member(comment["user"])})
-    return out
+    covered = {line["id"] for line in notes if line["kind"] == "comment"}
+    for comment in data["comments"]["nodes"]:
+        if routed(comment, data["viewer"]) and comment["id"] not in handled and comment["id"] not in covered:
+            notes.append(comment_line(comment, comment["issue"], member(comment["user"])))
+    return out + sorted(notes, key=lambda line: line["createdAt"]) + replies
 
 
 def watermark(data):
     def head(key):
         nodes = (data.get(key) or {}).get("nodes") or []
         return [nodes[0]["id"], nodes[0]["updatedAt"]] if nodes else None
-    return {"issue": head("latestIssue"), "comment": head("latestComment")}
+    return {"issue": head("latestIssue"), "comment": head("latestComment"), "session": head("latestSession")}
 
 
 def probe_context(running):
@@ -466,6 +628,21 @@ def unchanged(running):
     return watermark(gql(PROBE_QUERY, {"teams": TEAMS})) == saved.get("watermark")
 
 
+def answer(known, reply):
+    """Records a reply in `sessions` and posts it: a thought acknowledges (the hand-over answer is
+    then awaited), a closing reply ends the wait."""
+    entry = known.setdefault(reply["session"], {"units": [], "ackedAt": None, "answered": False})
+    entry["units"] += reply["units"]
+    if reply["content"]["type"] == "thought":
+        entry["ackedAt"], entry["answered"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), False
+    if reply["closes"]:
+        entry["answered"] = True
+    temporary = SESSIONS.with_suffix(".tmp")
+    temporary.write_text(json.dumps(known, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(SESSIONS)
+    activity(reply["session"], reply["content"])
+
+
 def run_pass():
     STATE.mkdir(parents=True, exist_ok=True)
     for path in (LAUNCHED, HANDLED, UNBLOCKED, STALE, INSTALLED):
@@ -479,14 +656,16 @@ def run_pass():
             return 1
     if unchanged(running):
         return 0
-    data = gql(QUERY, {"teams": TEAMS, "label": LABEL, "claimed": CLAIMED, "install": INSTALL})
+    data = gql(QUERY, {"teams": TEAMS, "label": LABEL, "claimed": CLAIMED, "install": INSTALL,
+                       "sessions": SESSION_COUNT})
     if not os.environ.get("DRY_RUN"):
         PROBE.write_text(json.dumps({
             "watermark": watermark(data),
             "context": probe_context(running),
             "fullAt": time.time(),
         }), encoding="utf-8")
-    out = plan(data, running)
+    known = json.loads(SESSIONS.read_text(encoding="utf-8")) if SESSIONS.exists() else {}
+    out = plan(data, running, known)
     if os.environ.get("DRY_RUN"):
         for line in out:
             emit(line)
@@ -494,20 +673,16 @@ def run_pass():
     for line in out:
         kind = line["kind"]
         react_to = line.pop("react", False)
+        reply = line.pop("reply", None)
         if kind == "comment":
             append(HANDLED, line["id"])
-            if react_to:
-                react("comment", line["id"])
-            emit(line)
         elif kind == "stale":
             append(STALE, line.pop("staleKey"))
-            emit(line)
         elif kind == "install":
             INSTALLED.write_text(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n", encoding="utf-8")
-            emit(line)
         elif kind == "unclaim":
             remove_label(line["id"], line["label"])
-        else:
+        elif kind == "issue":
             label, key = line.pop("label"), line.pop("unblockKey")
             if not line["resume"]:
                 append(LAUNCHED, f"{line['id']} {line['identifier']}")
@@ -515,8 +690,11 @@ def run_pass():
                 append(UNBLOCKED, key)
             if label:
                 remove_label(line["id"], label)
-            if react_to:
-                react("issue", line["id"])
+        if react_to:
+            react(kind, line["id"])
+        if reply:
+            answer(known, reply)
+        if kind not in ("unclaim", "reply"):
             emit(line)
     return 0
 

@@ -88,15 +88,19 @@ is reached as the machine's OAuth app: its client id (line 1) and secret (line 2
 `https://api.linear.app/graphql` with `Authorization: Bearer <access_token>`. On an
 `AUTHENTICATION_ERROR` (tokens last ~30 days) fetch a new one with
 `curl https://api.linear.app/oauth/token -d grant_type=client_credentials -d client_id=… -d
-client_secret=… -d scope=read,write` into `token.json`; `linear-poll.py` does this itself. Never
+client_secret=… -d scope=read,write` into `token.json` (on Linux, `~/.config/linear/bearer.sh` does
+this with its own `scope=`); `linear-poll.py` does this itself. Never
 print or commit either file. The apps can't create labels; ask the user for new ones.
 
-Linux's app is becoming a Linear agent (MS-377, step 1): delegating an issue to `linux-omp` or
-mentioning it opens an Agent session, whose webhook the Cloudflare Worker in `LinearAgent/`
-keeps until `python3 scripts/linear-agent.py watch` pulls it, runs one omp agent on it with the
-`ms-issue` template and answers in the session (the script's header has the details). It runs
-beside the poller, which still does everything below; the app's token then needs
-`LINEAR_SCOPE=read,write,app:assignable,app:mentionable` wherever it is renewed.
+Linux's app is a Linear agent (MS-377): with the token scopes `app:assignable` and
+`app:mentionable` the user can delegate an issue to `linux-omp` (Linear's "assign to agent") or
+@-mention it, and Linear opens an agent session for it. `linear-poll.py` finds those sessions,
+delegated issues and mentions by polling (no webhook), prints them as issue and comment lines
+like any other, acknowledges in the session and posts the result there once the agent hands over
+(its header has the details). Every process that renews the app's token must ask for the same
+scopes, or Linear revokes the others' tokens: on Linux the set is the `scope=` in
+`~/.config/linear/bearer.sh`, and the poller's LINEAR_SCOPE copies it
+([Polling session](#polling-session)).
 
 ### Writing
 
@@ -202,12 +206,16 @@ decisions go on the Linear issues (which already carry the full reports), so aft
 session only acts. It keeps RUNNING_FILE a JSON array of its running agent ids, rewritten whenever
 one starts or finishes;
 the script re-reads it each pass. The script's header says what it claims and how the session
-picks the agent. Each time before it starts the script again, the session runs `python3
+picks the agent. A `stop` line means the user pressed stop in an agent session: the session
+stops the agent working on that issue (`proc://<id>/kill`); the script has already answered the
+session. Each time before it starts the script again, the session runs `python3
 scripts/warm-build.py` in the default checkout ([Building](#building)).
 `python3 scripts/linear-omp.py MS-12` opens one issue in a new Tern tab instead. The scripts are
 Python (standard library only) so every machine runs the same ones; on Windows the command is
 `python`, and the poller also needs `HOST_LABEL=windows LINEAR_TOKEN_FILE=~/.config/linear/token.json
-LINEAR_CREDENTIALS=~/.config/linear/credentials`; on Linux the same with `HOST_LABEL=linux`.
+LINEAR_CREDENTIALS=~/.config/linear/credentials`; on Linux the same with `HOST_LABEL=linux` and
+`LINEAR_SCOPE="$(sed -n 's/.*scope=\([^ ]*\).*/\1/p' ~/.config/linear/bearer.sh)"`, so the
+poller renews the token with the scopes `bearer.sh` asks for.
 
 Subagents start from the repo's agent definitions in `.omp/agents`, which carry what every
 hand-out repeats: open a checkout of their own named after their agent id, give tools absolute
