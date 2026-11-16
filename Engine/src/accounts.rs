@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::answers;
 use crate::oauth::{
-    GOOGLE_CALENDARS, GOOGLE_CHAT, GOOGLE_CONTACTS, GOOGLE_EVENTS, GRAPH_CONTACTS, Grant, MICROSOFT_CALENDARS,
+    GOOGLE_CALENDAR_LIST, GOOGLE_CALENDARS, GOOGLE_CHAT, GOOGLE_CONTACTS, GOOGLE_EVENTS, GRAPH_CONTACTS, Grant, MICROSOFT_CALENDARS,
     MICROSOFT_CALENDARS_READ, Provider, Service, has_scope,
 };
 
@@ -79,6 +79,12 @@ impl AccountRecord {
             Provider::Google => has_scope(&self.scopes, GOOGLE_EVENTS),
             Provider::Microsoft => has_scope(&self.scopes, MICROSOFT_CALENDARS),
         }
+    }
+
+    /// Whether its sign-in lets it add calendars shared with it to its list and remove them:
+    /// Google's alone (Graph has no call that adds someone else's calendar).
+    pub fn can_change_calendar_list(&self) -> bool {
+        self.provider == Provider::Google && has_scope(&self.scopes, GOOGLE_CALENDAR_LIST)
     }
 }
 

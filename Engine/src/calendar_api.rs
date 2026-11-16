@@ -3,8 +3,9 @@
 //! one's events within a window with recurring ones expanded into occurrences (Google's
 //! `singleEvents`, Graph's `calendarView`). A Google calendar fetched once is then asked only
 //! for what changed since (its sync token). Both answer the same [`CalendarEvent`]s, which
-//! mail.db keeps as they are, per calendar ([`CalendarPart`]). Adding, changing and deleting
-//! events is in [`write`].
+//! mail.db keeps as they are, per calendar ([`CalendarPart`]). Calendars shared with a Google
+//! account are added to its list and taken off it here too (`add_calendar`, `remove_calendar`);
+//! adding, changing and deleting events is in [`write`].
 use chrono::{Local, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -306,28 +307,33 @@ impl CalendarRemote<'_> {
     async fn google_calendars(&self) -> Result<Vec<CalendarInfo>, ApiError> {
         let first = api::url(self.google, "users/me/calendarList", &[("maxResults", "250")]);
         let entries = self.all::<GooglePage<GoogleCalendar>>(first, None).await?;
-        Ok(entries
-            .into_iter()
-            .map(|entry| {
-                let primary = entry.primary == Some(true);
-                let (selected, hidden) = (entry.selected == Some(true), entry.hidden == Some(true));
-                let access = entry.access_role.unwrap_or_default();
-                CalendarInfo {
-                    name: non_empty(entry.summary_override)
-                        .or_else(|| non_empty(entry.summary))
-                        .unwrap_or_else(|| entry.id.clone()),
-                    id: entry.id,
-                    color: non_empty(entry.background_color),
-                    primary,
-                    writable: matches!(access.as_str(), "owner" | "writer" | "writerWithoutPrivateAccess"),
-                    access,
-                    selected,
-                    hidden,
-                    // As Google Calendar shows it: the primary one and those ticked in its list.
-                    shown: primary || (selected && !hidden),
-                }
-            })
-            .collect())
+        Ok(entries.into_iter().map(GoogleCalendar::info).collect())
+    }
+
+    /// Adds calendar `id` (a person's address names their own calendar), shared with the account
+    /// or public, to the account's list, ticked: Google's answer, `shown`. Graph has no such call.
+    pub async fn add_calendar(&self, id: &str) -> Result<CalendarInfo, ApiError> {
+        if self.provider != Provider::Google {
+            return Err(ApiError::new(400, "Outlook cannot add someone else's calendar from here."));
+        }
+        let url = api::url(self.google, "users/me/calendarList", &[]);
+        let entry: GoogleCalendar = self.get(Self::json_request(reqwest::Method::POST, url, &json!({ "id": id, "selected": true }))).await?;
+        Ok(CalendarInfo { shown: true, ..entry.info() })
+    }
+
+    /// Takes calendar `id` off the account's list (its owner keeps it; adding it again brings it
+    /// back). One already gone is fine.
+    pub async fn remove_calendar(&self, id: &str) -> Result<(), ApiError> {
+        if self.provider != Provider::Google {
+            return Err(ApiError::new(400, "Outlook cannot remove a calendar from here."));
+        }
+        let mut request = Request::get(api::url(self.google, &format!("users/me/calendarList/{}", api::percent_encoded(id)), &[]));
+        request.method = reqwest::Method::DELETE;
+        match self.api.send(request, self.priority, None, 0).await {
+            Ok(_) => Ok(()),
+            Err(error) if matches!(error.status, 404 | 410) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     async fn google_events(
@@ -631,6 +637,27 @@ struct GoogleCalendar {
     hidden: Option<bool>,
     /// `owner`, `writer`, `writerWithoutPrivateAccess`, `reader` or `freeBusyReader`.
     access_role: Option<String>,
+}
+
+impl GoogleCalendar {
+    /// The list entry, `shown` as Google Calendar shows it: the primary one and those ticked in
+    /// its list.
+    fn info(self) -> CalendarInfo {
+        let primary = self.primary == Some(true);
+        let (selected, hidden) = (self.selected == Some(true), self.hidden == Some(true));
+        let access = self.access_role.unwrap_or_default();
+        CalendarInfo {
+            name: non_empty(self.summary_override).or_else(|| non_empty(self.summary)).unwrap_or_else(|| self.id.clone()),
+            id: self.id,
+            color: non_empty(self.background_color),
+            primary,
+            writable: matches!(access.as_str(), "owner" | "writer" | "writerWithoutPrivateAccess"),
+            access,
+            selected,
+            hidden,
+            shown: primary || (selected && !hidden),
+        }
+    }
 }
 
 #[derive(Deserialize)]

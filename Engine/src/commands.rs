@@ -637,6 +637,21 @@ pub const COMMANDS: &[Spec] = &[
         ],
     ),
     Spec::new(
+        "calendar.add",
+        Handler::Calendar,
+        "Adds someone else's Google calendar, shared with the account or public, to its calendars (in Google Calendar too) and shows it; answers it as `calendar events` lists it. Outlook accounts add them in Outlook.",
+        &[
+            ACCOUNT_ADDRESS,
+            Argument::new("calendar", Kind::String, "The calendar: a person's email address for their own calendar, or a calendar id (Google Calendar's settings, Integrate calendar).").required(),
+        ],
+    ),
+    Spec::new(
+        "calendar.remove",
+        Handler::Calendar,
+        "Removes a calendar the account doesn't own (shared with it or subscribed to) from its calendars, in Google Calendar too; its owner keeps it, and `calendar add` brings it back.",
+        &[ACCOUNT_ADDRESS, Argument::new("calendar", Kind::String, "Calendar id from `calendar events`.").required(), YES],
+    ),
+    Spec::new(
         "calendar.invitation",
         Handler::Calendar,
         "The meeting invitation a message carries (an .ics part, an Outlook meeting request), whether its account may read and change its calendar, and the event it names there with the account's answer; `target` and `calendar` are what `calendar respond` takes.",

@@ -596,6 +596,19 @@ commands! {
         "account": account, "calendar": calendar, "off": !shown
     };
 
+    /// Adds someone else's Google calendar `calendar` (a person's email address names their own
+    /// calendar), shared with `account` or public, to its calendars and shows it
+    /// ([`CalendarAccount::list_editable`]); [`Event::Calendar`] follows with its events.
+    fn calendar_add(account: String, calendar: String) -> CalendarInfo = "calendar.add" {
+        "account": account, "calendar": calendar
+    };
+
+    /// Removes `calendar`, one `account` doesn't own, from its calendars (in Google Calendar too;
+    /// its owner keeps it). `confirm` is the person's go-ahead.
+    fn calendar_remove(account: String, calendar: String, confirm: bool) = "calendar.remove" {
+        "account": account, "calendar": calendar, "yes": confirm
+    };
+
     /// The invitation `message` of conversation `id` carries and the event it names in the
     /// account's calendar, with the account's answer; [`Event::Calendar`] follows changes.
     fn calendar_invitation(id: String, message: String) -> InvitationStatus = "calendar.invitation" {

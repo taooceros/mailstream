@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::calendar_api::{local_day, local_midnight, local_zone};
 use crate::model::iso8601;
-use crate::oauth::{GOOGLE_CALENDARS, GOOGLE_EVENTS};
+use crate::oauth::{GOOGLE_CALENDAR_LIST, GOOGLE_CALENDARS, GOOGLE_EVENTS};
 use crate::testkit::{FakeRequest, FakeServer, Reply, call, cleanup, server_config, sign_in_all, wait_until, write_accounts};
 use crate::{Config, Engine};
 
@@ -685,6 +685,104 @@ fn shows_others_calendars_read_only_in_their_colours_and_syncs_each_by_its_token
     assert_eq!(event_requests(&server, ANN).1, ["ann-1", "ann-2", "ann-2"]);
     wait_until("the fetch to settle", || events(&engine, week.clone())["loading"] == json!(false));
     assert_eq!(titles(&events(&engine, week.clone())), ["Standup", "Standup", "Dentist", "Holiday"]);
+    drop(engine);
+    cleanup(&config);
+}
+
+#[test]
+fn adds_calendars_shared_with_the_account_to_its_list_and_removes_them() {
+    // Google's list: the account's own calendar and, once added, Ann's (shared read-only); a
+    // stranger's calendar is not shared with the account.
+    let ann_listed = Arc::new(AtomicBool::new(false));
+    let server = FakeServer::start(move |request| {
+        if request.path == "/token" {
+            return Reply::json(json!({ "access_token": "at", "expires_in": 3600 }));
+        }
+        let path = request.path.strip_prefix("/calendar/v3/").unwrap_or_default();
+        let ann = json!({ "id": ANN, "summary": ANN, "summaryOverride": "Ann Lee", "backgroundColor": "#f83a22", "selected": true, "accessRole": "reader" });
+        match (request.method.as_str(), path) {
+            ("GET", "users/me/calendarList") => {
+                let own = json!({ "id": GOOGLE, "summary": GOOGLE, "primary": true, "selected": true, "accessRole": "owner" });
+                let items = if ann_listed.load(Ordering::SeqCst) { vec![own, ann] } else { vec![own] };
+                Reply::json(json!({ "items": items }))
+            }
+            ("POST", "users/me/calendarList") => {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(body["selected"], json!(true), "added calendars are ticked in Google Calendar too");
+                if body["id"] == ANN {
+                    ann_listed.store(true, Ordering::SeqCst);
+                    Reply::json(ann)
+                } else {
+                    Reply::status(404, json!({ "error": { "message": "Not Found" } }))
+                }
+            }
+            ("DELETE", "users/me/calendarList/ann@x.com") => {
+                ann_listed.store(false, Ordering::SeqCst);
+                Reply::bytes(204, Vec::new())
+            }
+            ("GET", "calendars/me@gmail.com/events") => Reply::json(json!({ "items": [], "nextSyncToken": "me-1" })),
+            ("GET", "calendars/ann@x.com/events") => Reply::json(json!({ "items": [
+                { "id": "focus", "summary": "Focus", "start": { "dateTime": at(1, 13.0) }, "end": { "dateTime": at(1, 15.0) },
+                  "organizer": { "email": ANN, "self": true } },
+            ], "nextSyncToken": "ann-1" })),
+            _ => Reply::status(404, json!({ "error": { "message": "No such path" } })),
+        }
+    });
+    let config = server_config(&server);
+    // Connected Calendar before Mailstream asked for the calendar list.
+    let earlier = "earlier@gmail.com";
+    sign_in_all(
+        &config,
+        &[
+            json!({ "id": GOOGLE, "provider": "google", "label": "Personal", "scopes": ["openid", GOOGLE_CALENDARS, GOOGLE_EVENTS, GOOGLE_CALENDAR_LIST] }),
+            json!({ "id": earlier, "provider": "google", "label": earlier, "scopes": ["openid", GOOGLE_CALENDARS, GOOGLE_EVENTS] }),
+        ],
+    );
+    let engine = Engine::start(config.clone());
+    let week = json!({ "account": GOOGLE, "from": local_day(-7), "days": 30 });
+    let requests = |method: &str| {
+        let requests = server.requests.lock().unwrap();
+        requests.iter().filter(|request| request.method == method && request.path.contains("/calendarList")).count()
+    };
+    wait_until("the first fetch", || {
+        let list = events(&engine, week.clone());
+        list["loading"] == json!(false) && list["accounts"][0]["calendars"].as_array().unwrap().len() == 1
+    });
+    let all = events(&engine, json!({}));
+    let editable: Vec<bool> = all["accounts"].as_array().unwrap().iter().map(|account| account["list_editable"].as_bool().unwrap()).collect();
+    assert_eq!(editable, [true, false]);
+    let earlier_add = call(&engine, "calendar.add", json!({ "account": earlier, "calendar": ANN })).unwrap_err();
+    assert_eq!(earlier_add.code, "no_calendar", "{}", earlier_add.message);
+
+    // Only a calendar shared with the account can be added.
+    let stranger = call(&engine, "calendar.add", json!({ "account": GOOGLE, "calendar": "stranger@x.com" })).unwrap_err();
+    assert_eq!(stranger.code, "not_found", "{}", stranger.message);
+
+    // Ann's: listed and shown at once, then her events come.
+    let added = call(&engine, "calendar.add", json!({ "account": GOOGLE, "calendar": format!(" {ANN} ") })).unwrap();
+    assert_eq!((added["name"].as_str(), added["access"].as_str(), added["shown"].as_bool()), (Some("Ann Lee"), Some("reader"), Some(true)));
+    assert_eq!(calendar_of(&events(&engine, week.clone()), ANN)["shown"], json!(true));
+    wait_until("Ann's events", || titles(&events(&engine, week.clone())) == ["Focus"]);
+    // Listed already: shown, not added again.
+    call(&engine, "calendar.add", json!({ "account": GOOGLE, "calendar": "Ann@x.com" })).unwrap();
+    assert_eq!(requests("POST"), 2);
+
+    // The account's own calendar stays; Ann's goes once confirmed, with her events, at once.
+    let own = call(&engine, "calendar.remove", json!({ "account": GOOGLE, "calendar": GOOGLE, "yes": true })).unwrap_err();
+    assert_eq!(own.code, "own_calendar");
+    let unconfirmed = call(&engine, "calendar.remove", json!({ "account": GOOGLE, "calendar": ANN })).unwrap_err();
+    assert_eq!(unconfirmed.code, "confirm", "{}", unconfirmed.message);
+    assert_eq!(requests("DELETE"), 0);
+    call(&engine, "calendar.remove", json!({ "account": GOOGLE, "calendar": ANN, "yes": true })).unwrap();
+    assert_eq!(requests("DELETE"), 1);
+    let list = events(&engine, week.clone());
+    assert!(titles(&list).is_empty());
+    assert_eq!(list["accounts"][0]["calendars"].as_array().unwrap().len(), 1);
+    wait_until("the fetch to settle", || events(&engine, week.clone())["loading"] == json!(false));
+    let list = events(&engine, week.clone());
+    assert!(titles(&list).is_empty() && list["accounts"][0]["calendars"].as_array().unwrap().len() == 1);
+    let gone = call(&engine, "calendar.remove", json!({ "account": GOOGLE, "calendar": ANN, "yes": true })).unwrap_err();
+    assert_eq!(gone.code, "not_found");
     drop(engine);
     cleanup(&config);
 }

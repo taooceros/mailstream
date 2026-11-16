@@ -8,7 +8,8 @@
 //! timer fetches accounts whose copy got older (a Google calendar asks only for what changed
 //! since, by its sync token); `calendar.refresh` fetches now. Front ends re-read on `calendar`.
 //! Meeting invitations in mail are matched to their events and answered in [`invitation`];
-//! events the account organizes are added, changed and deleted in [`edit`].
+//! events the account organizes are added, changed and deleted in [`edit`]; calendars shared with
+//! a Google account are added to its list and removed in [`list`].
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,6 +29,7 @@ use crate::{EngineError, Events};
 
 mod edit;
 mod invitation;
+mod list;
 
 /// How long a fetched copy serves before the timer fetches it again.
 const FRESH: f64 = 5.0 * 60.0;
@@ -339,12 +341,14 @@ impl CalendarStore {
             "calendar.events" => self.list(only.as_deref(), args),
             "calendar.invitation" => self.invitation(args).await,
             "calendar.respond" => self.respond(only.as_deref(), args).await,
-            "calendar.create" | "calendar.update" | "calendar.delete" | "calendar.show" => {
+            "calendar.create" | "calendar.update" | "calendar.delete" | "calendar.show" | "calendar.add" | "calendar.remove" => {
                 let account = only.ok_or_else(|| EngineError::usage("account is required."))?;
-                if command == "calendar.show" {
-                    return self.show(&account, &args.required("calendar")?, !args.bool("off"));
+                match command {
+                    "calendar.show" => self.show(&account, &args.required("calendar")?, !args.bool("off")),
+                    "calendar.add" => self.add(&account, args).await,
+                    "calendar.remove" => self.remove(&account, args).await,
+                    _ => self.edit(command, &account, args).await,
                 }
-                self.edit(command, &account, args).await
             }
             "calendar.refresh" => {
                 if let Some(id) = &only
@@ -412,6 +416,7 @@ impl CalendarStore {
                 provider: record.provider,
                 granted: account.is_some(),
                 writable: account.is_some() && record.can_edit_calendars(),
+                list_editable: account.is_some() && record.can_change_calendar_list(),
                 loading: account.is_some_and(|account| account.fetching),
                 problem: account.and_then(|account| account.problem.clone()),
                 fetched: copy.map(|copy| iso8601(copy.fetched)),

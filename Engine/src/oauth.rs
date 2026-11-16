@@ -43,10 +43,13 @@ const GOOGLE_CHAT_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/chat.memberships.readonly",
     "https://www.googleapis.com/auth/chat.users.readstate",
 ];
-/// Calendars and their events (the calendar view), and answering invitations and editing events.
-const GOOGLE_CALENDAR_SCOPES: &[&str] = &[GOOGLE_CALENDARS, GOOGLE_EVENTS];
+/// Calendars and their events (the calendar view), answering invitations and editing events, and
+/// adding others' calendars to the list or removing them.
+const GOOGLE_CALENDAR_SCOPES: &[&str] = &[GOOGLE_CALENDARS, GOOGLE_EVENTS, GOOGLE_CALENDAR_LIST];
 pub const GOOGLE_CALENDARS: &str = "https://www.googleapis.com/auth/calendar.readonly";
 pub const GOOGLE_EVENTS: &str = "https://www.googleapis.com/auth/calendar.events";
+/// Adding calendars shared with the account to its list and removing them (MS-310).
+pub const GOOGLE_CALENDAR_LIST: &str = "https://www.googleapis.com/auth/calendar.calendarlist";
 const MICROSOFT_MAIL: &[&str] = &[
     "openid",
     "email",
@@ -801,7 +804,7 @@ mod tests {
         assert_eq!(error.code, "wrong_account");
         let grant = oauth.sign_in(Provider::Google, &client, Some(connect)).await.unwrap();
         let asked = opened.lock().unwrap()[2].clone();
-        assert_eq!(asked["scope"], format!("openid email {GOOGLE_CALENDARS} {GOOGLE_EVENTS}"));
+        assert_eq!(asked["scope"], format!("openid email {GOOGLE_CALENDARS} {GOOGLE_EVENTS} {GOOGLE_CALENDAR_LIST}"));
         assert_eq!((asked["include_granted_scopes"].as_str(), asked["login_hint"].as_str()), ("true", "me@gmail.com"));
         assert!(has_scope(&grant.scopes, GOOGLE_EVENTS) && has_scope(&grant.scopes, GMAIL));
 

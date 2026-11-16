@@ -16,6 +16,10 @@ pub struct CalendarAccount {
     /// Whether its sign-in lets it add, change and delete events.
     #[serde(default)]
     pub writable: bool,
+    /// Whether its sign-in lets it add calendars shared with it to its list and remove others'
+    /// (`calendar.add`, `calendar.remove`): Google's, once Calendar is connected since MS-310.
+    #[serde(default)]
+    pub list_editable: bool,
     pub loading: bool,
     /// Why its last fetch failed; its events are the ones fetched before.
     pub problem: Option<String>,
