@@ -14,14 +14,16 @@
 //! - `docs/`: iroh-docs' store (`docs.redb`) and this device's author key (`default-author`),
 //!   which signs what it writes.
 //! - `blobs/`: iroh-blobs' store with the entries' values.
-//! - `sync.json`: `{"namespace": …, "relayUrl": …, "paused": …}`: the group this device is in,
-//!   a relay to use instead of number 0's public ones, and whether sync is paused.
+//! - `sync.json`: `{"namespace": …, "relayUrl": …, "paused": …, "admission": …}`: the group this
+//!   device is in, a relay to use instead of number 0's public ones, whether sync is paused, and
+//!   whether the group's devices were admitted (below).
 //!
 //! The group's entries are one key per item, each value JSON with its own time (Unix ms):
 //! - `v1/trusted/<lowercased address>`: `{"trusted": true|false, "at": …}`; untrusting writes
 //!   `trusted: false` (a tombstone), never deletes.
 //! - `v1/setting/<key>`: `{"value": <json>, "at": …}`.
 //! - `v1/meta/device/<endpoint id>`: `{"name": …, "platform": …, "lastSeen": …}`.
+//! - `v1/admit/<endpoint id>`: `{"by": <endpoint id>, "at": …}`: device `by` admitted it.
 //!
 //! Each device writes with its own author, so a key holds one entry per device that wrote it.
 //! Readers take the entry with the latest `at` (`lastSeen` for devices), on a tie the one of the
@@ -33,6 +35,17 @@
 //! counts as successful, and it counts one as failed when closing the connection afterwards
 //! fails, which often happens although every entry crossed.
 //!
+//! Admission (MS-380): iroh-docs serves a group to any device that names its id, iroh-blobs a
+//! value to any device that names its hash, and the group's id is no secret (settings and `sync
+//! status` show it). So the protocols the group rides on (docs, blobs, gossip) serve only the
+//! devices listed under `v1/admit/` ([`Gate`]), and a device reconciles only with those. Only
+//! holders of the group's write key can write entries, and admissions travel only through the
+//! gate: the cloud drop neither carries nor merges them. A device that joins asks the devices its
+//! ticket names, and later the ones the group lists, to admit it at the door, ALPN
+//! `mailstream/admit/1` ([`Door`]), until one does: today it proves it holds the write key, which
+//! the ticket carries. A device whose group predates MS-380 admits every device the group lists
+//! the first time it opens it (`admission` in `sync.json`), so existing groups keep syncing.
+//!
 //! The engine bridges this to settings.json (MS-360); this module knows nothing of settings.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -40,13 +53,13 @@ use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::str::FromStr;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::{Stream, StreamExt};
-use iroh::endpoint::presets;
-use iroh::protocol::Router;
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey};
+use iroh::endpoint::{Connection, VarInt, presets};
+use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, Signature};
 use iroh_blobs::api::Store as BlobStore;
 use iroh_blobs::api::blobs::BlobStatus;
 use iroh_blobs::store::GcConfig;
@@ -57,11 +70,11 @@ use iroh_docs::api::protocol::{AddrInfoOptions, ShareMode};
 use iroh_docs::engine::{LiveEvent, ProtectCallbackHandler};
 use iroh_docs::protocol::Docs;
 use iroh_docs::store::Query;
-use iroh_docs::{AuthorId, Capability, ContentStatus, DocTicket, NamespaceId};
+use iroh_docs::{AuthorId, Capability, ContentStatus, DocTicket, NamespaceId, NamespacePublicKey, NamespaceSecret};
 use iroh_gossip::net::Gossip;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
 use crate::files;
@@ -74,6 +87,19 @@ const PREFIX: &str = "v1/";
 const TRUSTED: &str = "v1/trusted/";
 const SETTING: &str = "v1/setting/";
 const DEVICE: &str = "v1/meta/device/";
+const ADMITTED: &str = "v1/admit/";
+/// The door's ALPN ([`Door`]).
+const ADMIT_ALPN: &[u8] = b"mailstream/admit/1";
+/// Opens what a joiner signs with the group's write key to be admitted ([`proof_message`]).
+const ADMIT_CONTEXT: &[u8] = b"mailstream device sync admission v1";
+/// The most a door request or answer holds.
+const ADMIT_LIMIT: usize = 4096;
+/// How long a device waits for another to answer at the door.
+const ADMIT_WAIT: Duration = Duration::from_secs(10);
+/// How often a device that isn't admitted asks again.
+const ADMIT_RETRY: Duration = Duration::from_secs(15);
+/// How long a connection from a device not admitted yet waits for its admission ([`Gate::admits`]).
+const ADMIT_GRACE: Duration = Duration::from_secs(10);
 /// How often unreferenced values are deleted from `blobs/`.
 const GC_INTERVAL: Duration = Duration::from_secs(3600);
 /// How often to look whether the machine slept.
@@ -134,9 +160,20 @@ pub struct Snapshot {
     pub settings: BTreeMap<String, Stamped<Value>>,
     /// By endpoint id.
     pub devices: BTreeMap<String, Device>,
+    /// Who admitted each device, by endpoint id (MS-380).
+    pub admitted: BTreeMap<String, Admission>,
     /// Keys left out above because a value is still downloading: what they hold is unknown,
     /// not absent.
     pub pending: BTreeSet<String>,
+}
+
+/// How a device came into the group.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Admission {
+    /// The endpoint id of the device that admitted it.
+    pub by: String,
+    /// Unix ms.
+    pub at: u64,
 }
 
 /// What sync is doing.
@@ -195,6 +232,10 @@ struct SyncFile {
     relay_url: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     paused: bool,
+    /// The group's devices were admitted: this device made or joined the group with admission
+    /// (MS-380), or admitted the devices its older group listed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    admission: bool,
 }
 
 impl SyncFile {
@@ -220,6 +261,10 @@ pub enum Network {
     /// 127.0.0.1 only, devices found through a lookup the test shares: no relay or DNS.
     #[cfg(test)]
     Loopback(iroh::address_lookup::MemoryLookup),
+    /// Loopback as a device from before MS-380: it neither admits nor asks, and lets every
+    /// device sync.
+    #[cfg(test)]
+    BeforeAdmission(iroh::address_lookup::MemoryLookup),
 }
 
 /// Sync open on one support folder. Call [`PeerSync::shutdown`] before opening it again.
@@ -238,8 +283,15 @@ struct Inner {
     docs: Docs,
     author: AuthorId,
     group: tokio::sync::Mutex<Group>,
+    /// Who may sync the group.
+    gate: Arc<Gate>,
+    /// Wakes the admission loop ([`Inner::seek`]).
+    asked: Arc<Notify>,
     /// Counts remote changes that became readable.
     changes: watch::Sender<u64>,
+    /// A device from before MS-380 ([`Network::BeforeAdmission`]).
+    #[cfg(test)]
+    legacy: bool,
 }
 
 /// The group this device is in, if any.
@@ -248,6 +300,8 @@ struct Group {
     doc: Option<Doc>,
     /// Follows the doc's events.
     events: Option<JoinHandle<()>>,
+    /// The devices the ticket this device joined with named, asked to admit it.
+    candidates: Vec<EndpointAddr>,
 }
 
 impl Drop for Group {
@@ -301,19 +355,30 @@ impl PeerSync {
                 return Err(failed(error));
             }
         };
-        let router = Router::builder(endpoint)
-            .accept(iroh_blobs::ALPN, iroh_blobs::BlobsProtocol::new(&blobs, None))
-            .accept(iroh_gossip::ALPN, gossip)
-            .accept(iroh_docs::ALPN, docs.clone())
-            .spawn();
         let author = match docs.author_default().await {
             Ok(author) => author,
             Err(error) => {
-                router.shutdown().await.ok();
+                ProtocolHandler::shutdown(&docs).await;
                 blobs.shutdown().await.ok();
+                endpoint.close().await;
                 return Err(failed(error));
             }
         };
+        let gate = Arc::new(Gate::default());
+        #[cfg(test)]
+        let legacy = matches!(network, Network::BeforeAdmission(_));
+        #[cfg(test)]
+        {
+            gate.state.write().expect("gate lock").open = legacy;
+        }
+        let door = Door { gate: gate.clone(), docs: docs.clone(), author, me: endpoint.id() };
+        // Every protocol of the group passes the gate; the door stands outside it.
+        let router = Router::builder(endpoint)
+            .accept(iroh_blobs::ALPN, Gated { gate: gate.clone(), protocol: iroh_blobs::BlobsProtocol::new(&blobs, None) })
+            .accept(iroh_gossip::ALPN, Gated { gate: gate.clone(), protocol: gossip })
+            .accept(iroh_docs::ALPN, Gated { gate: gate.clone(), protocol: docs.clone() })
+            .accept(ADMIT_ALPN, door)
+            .spawn();
 
         let inner = Arc::new(Inner {
             directory,
@@ -322,12 +387,16 @@ impl PeerSync {
             blobs,
             docs,
             author,
-            group: tokio::sync::Mutex::new(Group { file, doc: None, events: None }),
+            group: tokio::sync::Mutex::new(Group { file, doc: None, events: None, candidates: Vec::new() }),
+            gate,
+            asked: Arc::new(Notify::new()),
             changes: watch::channel(0).0,
+            #[cfg(test)]
+            legacy,
         });
         let sync = Self { watchers: watch_network(&inner), inner };
         #[cfg(test)]
-        if let Network::Loopback(lookup) = network {
+        if let Network::Loopback(lookup) | Network::BeforeAdmission(lookup) = network {
             lookup.add_endpoint_info(sync.loopback_addr());
         }
         let reopened = {
@@ -375,7 +444,7 @@ impl PeerSync {
 
     /// Starts a new group with this device in it, carrying over what the current group holds
     /// (trusted senders and settings, at their times), and leaves the current one: devices that
-    /// were in it are no longer reached (pair them again). Returns the group's id.
+    /// were in it are no longer reached or admitted (pair them again). Returns the group's id.
     pub async fn create_group(&self) -> Result<String> {
         let inner = &self.inner;
         let mut group = inner.group.lock().await;
@@ -395,6 +464,11 @@ impl PeerSync {
                 inner.put(&doc, format!("{SETTING}{key}"), &value).await?;
             }
         }
+        if !inner.legacy() {
+            let me = inner.endpoint().id();
+            inner.put(&doc, admit_key(me), &Admission { by: me.to_string(), at: now_ms() }).await?;
+        }
+        group.file.admission = !inner.legacy();
         let events = doc.subscribe().await.map_err(failed)?;
         inner.replace(&mut group, doc, events).await?;
         if !group.file.paused {
@@ -405,8 +479,8 @@ impl PeerSync {
     }
 
     /// A ticket another device joins the group with: the group's write key and this device's
-    /// addresses. Whoever has it can read and write the group until it is replaced
-    /// ([`PeerSync::create_group`]).
+    /// addresses. Whoever has it can read and write the group, and be admitted to it, until it is
+    /// replaced ([`PeerSync::create_group`]).
     pub async fn ticket(&self) -> Result<String> {
         let group = self.inner.group.lock().await;
         let doc = group.doc.as_ref().ok_or(PeerSyncError::NoGroup)?;
@@ -420,20 +494,29 @@ impl PeerSync {
 
     /// Joins the group of `ticket` (see [`PeerSync::ticket`]) and syncs with the devices it
     /// names, resuming sync if paused. The group this device was in, if another, is deleted
-    /// from it.
+    /// from it. The group's devices sync with this one once one of them admitted it, which it
+    /// asks for from here on ([`Inner::seek`]); the ones from before MS-380 sync at once.
     pub async fn join(&self, ticket: &str) -> Result<()> {
-        let ticket = DocTicket::from_str(ticket.trim()).map_err(|error| failed(format!("Not a device sync ticket: {error}")))?;
+        let DocTicket { capability, nodes } =
+            DocTicket::from_str(ticket.trim()).map_err(|error| failed(format!("Not a device sync ticket: {error}")))?;
         let inner = &self.inner;
         let mut group = inner.group.lock().await;
         if group.file.paused {
             group.file.paused = false;
             group.file.write(&inner.directory)?;
         }
-        if let Some(doc) = group.doc.as_ref().filter(|doc| doc.id() == ticket.capability.id()) {
-            return doc.start_sync(ticket.nodes).await.map_err(failed);
+        if let Some(doc) = group.doc.as_ref().filter(|doc| doc.id() == capability.id()) {
+            doc.start_sync(nodes.clone()).await.map_err(failed)?;
+        } else {
+            let doc = inner.docs.import_namespace(capability).await.map_err(failed)?;
+            let events = doc.subscribe().await.map_err(failed)?;
+            doc.start_sync(nodes.clone()).await.map_err(failed)?;
+            group.file.admission = !inner.legacy();
+            inner.replace(&mut group, doc, events).await?;
         }
-        let (doc, events) = inner.docs.import_and_subscribe(ticket).await.map_err(failed)?;
-        inner.replace(&mut group, doc, events).await
+        group.candidates = nodes;
+        inner.asked.notify_one();
+        Ok(())
     }
 
     /// The group id named by `ticket`, validated without joining it.
@@ -526,17 +609,13 @@ impl PeerSync {
     pub async fn group_secret(&self) -> Result<Option<[u8; 32]>> {
         let group = self.inner.group.lock().await;
         let Some(doc) = group.doc.as_ref().filter(|_| !group.file.paused) else { return Ok(None) };
-        let ticket = doc.share(ShareMode::Write, AddrInfoOptions::Id).await.map_err(failed)?;
-        match ticket.capability {
-            Capability::Write(secret) => Ok(Some(secret.to_bytes())),
-            Capability::Read(_) => Ok(None),
-        }
+        Ok(write_secret(doc).await?.map(|secret| secret.to_bytes()))
     }
 
     /// Writes what `incoming` (another device's state, as the cloud drop carried it) holds that
     /// is newer than this replica's, each value at its own time, as syncing with that device
-    /// would have; this device's own description stays. `pending` is ignored. Returns whether
-    /// anything was written.
+    /// would have; this device's own description stays. Admissions and `pending` are ignored:
+    /// admissions cross only between admitted devices. Returns whether anything was written.
     pub async fn merge(&self, incoming: &Snapshot) -> Result<bool> {
         let inner = &self.inner;
         let group = inner.group.lock().await;
@@ -574,6 +653,36 @@ impl PeerSync {
         let endpoint = self.inner.endpoint();
         endpoint.bound_sockets().into_iter().fold(EndpointAddr::new(endpoint.id()), EndpointAddr::with_ip_addr)
     }
+
+    /// Syncs group `namespace` read-only with `peers`, as a device that knows only the group's
+    /// id would (shown in settings and `sync status`): the tests' stranger.
+    #[cfg(test)]
+    pub(crate) async fn watch(&self, namespace: &str, peers: Vec<EndpointAddr>) -> Result<()> {
+        let namespace = NamespaceId::from_str(namespace).map_err(failed)?;
+        let inner = &self.inner;
+        let mut group = inner.group.lock().await;
+        let doc = inner.docs.import_namespace(Capability::Read(namespace)).await.map_err(failed)?;
+        let events = doc.subscribe().await.map_err(failed)?;
+        doc.start_sync(peers).await.map_err(failed)?;
+        group.events = Some(follow(events, inner.changes.clone(), inner.gate.clone(), doc.clone()));
+        group.doc = Some(doc);
+        Ok(())
+    }
+
+    /// This device's proof of the group's write key, for asking `member` at its door.
+    #[cfg(test)]
+    pub(crate) async fn admission_proof(&self, member: EndpointId) -> Result<AdmitRequest> {
+        let group = self.inner.group.lock().await;
+        let doc = group.doc.as_ref().ok_or(PeerSyncError::NoGroup)?;
+        let secret = write_secret(doc).await?.ok_or(PeerSyncError::NoGroup)?;
+        Ok(proof(&secret, member, self.inner.endpoint().id()))
+    }
+
+    /// Asks `member` at its door to admit this device with `request`.
+    #[cfg(test)]
+    pub(crate) async fn ask_admission(&self, member: EndpointAddr, request: &AdmitRequest) -> Result<()> {
+        ask(self.inner.endpoint(), member, request).await
+    }
 }
 
 impl Drop for PeerSync {
@@ -593,19 +702,31 @@ impl Inner {
         &self.blobs
     }
 
-    /// Opens the group `sync.json` names, rejoining it unless paused.
+    /// Opens the group `sync.json` names, rejoining it unless paused. A group from before MS-380
+    /// gets its devices admitted: every device it lists, once.
     async fn reopen(&self, group: &mut Group, namespace: NamespaceId) -> Result<()> {
         let Some(doc) = self.docs.open(namespace).await.map_err(failed)? else {
             return Ok(());
         };
         let events = doc.subscribe().await.map_err(failed)?;
-        group.events = Some(follow(events, self.changes.clone()));
+        group.events = Some(follow(events, self.changes.clone(), self.gate.clone(), doc.clone()));
         self.describe(&doc).await?;
+        if !group.file.admission && !self.legacy() {
+            let me = self.endpoint().id();
+            let admitted = listed(&doc, ADMITTED).await;
+            for id in listed(&doc, DEVICE).await.difference(&admitted) {
+                self.put(&doc, admit_key(*id), &Admission { by: me.to_string(), at: now_ms() }).await?;
+            }
+            group.file.admission = true;
+            group.file.write(&self.directory)?;
+        }
+        self.gate.load(&doc).await;
         if !group.file.paused {
             let peers = self.peers(&doc).await;
             doc.start_sync(peers).await.map_err(failed)?;
         }
         group.doc = Some(doc);
+        self.asked.notify_one();
         Ok(())
     }
 
@@ -623,10 +744,12 @@ impl Inner {
             previous.leave().await.ok();
             self.docs.drop_doc(previous.id()).await.map_err(failed)?;
         }
-        group.events = Some(follow(events, self.changes.clone()));
+        group.events = Some(follow(events, self.changes.clone(), self.gate.clone(), doc.clone()));
         self.describe(&doc).await?;
+        self.gate.load(&doc).await;
         group.file.namespace = Some(doc.id().to_string());
         group.doc = Some(doc);
+        group.candidates.clear();
         group.file.write(&self.directory)
     }
 
@@ -637,13 +760,20 @@ impl Inner {
     }
 
     async fn put(&self, doc: &Doc, key: String, value: &impl Serialize) -> Result<()> {
-        let data = serde_json::to_vec(value).map_err(failed)?;
-        doc.set_bytes(self.author, key, data).await.map_err(failed)?;
-        Ok(())
+        put(doc, self.author, key, value).await
+    }
+
+    /// Whether this is a device from before MS-380 ([`Network::BeforeAdmission`]).
+    fn legacy(&self) -> bool {
+        #[cfg(test)]
+        return self.legacy;
+        #[cfg(not(test))]
+        false
     }
 
     async fn realign(&self) {
         self.endpoint().network_change().await;
+        self.asked.notify_one();
         let group = self.group.lock().await;
         let Some(doc) = group.doc.as_ref().filter(|_| !group.file.paused) else { return };
         // Failures wait for the next change or wake.
@@ -653,21 +783,51 @@ impl Inner {
         }
     }
 
-    /// The other devices of the group, by the descriptions they wrote; iroh-docs adds the ones
-    /// it synced with itself.
+    /// Until a device of the group admits this one (MS-380), asks each device it knows of at its
+    /// door: the ones the ticket it joined with named and the ones the group lists. Syncs with
+    /// the ones that admitted it.
+    async fn seek(&self) {
+        let me = self.endpoint().id();
+        let (doc, members) = {
+            let group = self.group.lock().await;
+            let Some(doc) = group.doc.as_ref().filter(|_| !group.file.paused) else { return };
+            if self.gate.allows(&me) {
+                return;
+            }
+            let mut members: BTreeMap<EndpointId, EndpointAddr> =
+                group.candidates.iter().map(|member| (member.id, member.clone())).collect();
+            for id in listed(doc, DEVICE).await.into_iter().filter(|id| *id != me) {
+                members.entry(id).or_insert_with(|| EndpointAddr::new(id));
+            }
+            (doc.clone(), members)
+        };
+        let Ok(Some(secret)) = write_secret(&doc).await else { return };
+        let endpoint = self.endpoint();
+        let asks = members.into_values().map(|member| {
+            let request = proof(&secret, member.id, me);
+            async move {
+                let asked = tokio::time::timeout(ADMIT_WAIT, ask(endpoint, member.clone(), &request)).await;
+                matches!(asked, Ok(Ok(()))).then_some(member)
+            }
+        });
+        let admitted: Vec<EndpointAddr> = futures::future::join_all(asks).await.into_iter().flatten().collect();
+        let Some(by) = admitted.first() else { return };
+        for member in &admitted {
+            self.gate.vouch(doc.id(), member.id);
+        }
+        // Its own record, so it stops asking before the admitting device's arrives.
+        if self.put(&doc, admit_key(me), &Admission { by: by.id.to_string(), at: now_ms() }).await.is_ok() {
+            self.gate.add(doc.id(), me);
+        }
+        doc.start_sync(admitted).await.ok();
+    }
+
+    /// The other admitted devices of the group, by the descriptions they wrote; iroh-docs adds
+    /// the ones it synced with itself.
     async fn peers(&self, doc: &Doc) -> Vec<EndpointAddr> {
         let me = self.endpoint().id();
-        let mut peers = BTreeSet::new();
-        if let Ok(entries) = doc.get_many(Query::key_prefix(DEVICE).build()).await {
-            let mut entries = pin!(entries);
-            while let Some(Ok(entry)) = entries.next().await {
-                let id = std::str::from_utf8(entry.key()).ok().and_then(|key| key.strip_prefix(DEVICE));
-                if let Some(id) = id.and_then(|id| EndpointId::from_str(id).ok()).filter(|id| *id != me) {
-                    peers.insert(id);
-                }
-            }
-        }
-        peers.into_iter().map(EndpointAddr::new).collect()
+        let devices = listed(doc, DEVICE).await;
+        devices.into_iter().filter(|id| *id != me && self.gate.allows(id)).map(EndpointAddr::new).collect()
     }
 
     /// The entries of `query`. Values that aren't the JSON their key calls for are left out.
@@ -725,6 +885,9 @@ impl Inner {
                 Record::Device(device) => {
                     snapshot.devices.insert(key[DEVICE.len()..].to_string(), device);
                 }
+                Record::Admitted(admission) => {
+                    snapshot.admitted.insert(key[ADMITTED.len()..].to_string(), admission);
+                }
             }
         }
         Ok(snapshot)
@@ -743,6 +906,7 @@ enum Record {
     Trusted(TrustedValue),
     Setting(SettingValue),
     Device(Device),
+    Admitted(Admission),
 }
 
 impl Record {
@@ -754,6 +918,8 @@ impl Record {
             serde_json::from_slice(data).ok().map(Self::Setting)
         } else if key.starts_with(DEVICE) {
             serde_json::from_slice(data).ok().map(Self::Device)
+        } else if key.starts_with(ADMITTED) {
+            serde_json::from_slice(data).ok().map(Self::Admitted)
         } else {
             None
         }
@@ -765,18 +931,27 @@ impl Record {
             Self::Trusted(value) => value.at,
             Self::Setting(value) => value.at,
             Self::Device(device) => device.last_seen,
+            Self::Admitted(admission) => admission.at,
         }
     }
 }
 
-/// Counts the group's remote changes once readable.
+/// Counts the group's remote changes once readable, and lets in the devices `doc` admits as
+/// their admissions arrive.
 fn follow<E: Send + 'static>(
     events: impl Stream<Item = std::result::Result<LiveEvent, E>> + Send + 'static,
     changes: watch::Sender<u64>,
+    gate: Arc<Gate>,
+    doc: Doc,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut events = pin!(events);
         while let Some(event) = events.next().await {
+            if let Ok(LiveEvent::InsertLocal { entry } | LiveEvent::InsertRemote { entry, .. }) = &event
+                && entry.key().starts_with(ADMITTED.as_bytes())
+            {
+                gate.load(&doc).await;
+            }
             if let Ok(LiveEvent::InsertRemote { content_status: ContentStatus::Complete, .. } | LiveEvent::ContentReady { .. }) =
                 event
             {
@@ -786,7 +961,8 @@ fn follow<E: Send + 'static>(
     })
 }
 
-/// Realigns after each network change and wake while `inner` lives.
+/// Realigns after each network change and wake, and asks to be admitted until it is, while
+/// `inner` lives.
 fn watch_network(inner: &Arc<Inner>) -> Vec<JoinHandle<()>> {
     let weak: Weak<Inner> = Arc::downgrade(inner);
     let changes = tokio::spawn(async move {
@@ -804,7 +980,283 @@ fn watch_network(inner: &Arc<Inner>) -> Vec<JoinHandle<()>> {
             inner.realign().await;
         }
     });
-    vec![changes, wakes]
+    let weak = Arc::downgrade(inner);
+    let asked = inner.asked.clone();
+    let admission = tokio::spawn(async move {
+        loop {
+            let Some(inner) = weak.upgrade() else { return };
+            inner.seek().await;
+            drop(inner);
+            tokio::select! {
+                () = asked.notified() => {}
+                () = tokio::time::sleep(ADMIT_RETRY) => {}
+            }
+        }
+    });
+    vec![changes, wakes, admission]
+}
+
+/// Who may sync the group (MS-380): the devices it admitted. Every protocol the group rides on
+/// asks it before serving a connection ([`Gated`]).
+#[derive(Debug, Default)]
+struct Gate {
+    state: RwLock<GateState>,
+    /// Wakes connections waiting to be let in.
+    changed: Notify,
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    /// The group open now.
+    namespace: Option<NamespaceId>,
+    admitted: BTreeSet<EndpointId>,
+    /// The devices that admitted this one at their door ([`Inner::seek`]), let in before their
+    /// own admission arrives: each is one the ticket or the group names, and it dials this one
+    /// as soon as it admitted it.
+    vouched: BTreeSet<EndpointId>,
+    /// Lets every device in, as before MS-380 ([`Network::BeforeAdmission`]).
+    #[cfg(test)]
+    open: bool,
+}
+
+impl Gate {
+    fn allows(&self, id: &EndpointId) -> bool {
+        let state = self.state.read().expect("gate lock");
+        #[cfg(test)]
+        if state.open {
+            return true;
+        }
+        state.namespace.is_some() && (state.admitted.contains(id) || state.vouched.contains(id))
+    }
+
+    /// Whether `id` is let in now or within [`ADMIT_GRACE`]: a device that joins connects while
+    /// it asks to be admitted, and a device hears who else was admitted in the same
+    /// reconciliation after which they fetch values from it.
+    async fn admits(&self, id: &EndpointId) -> bool {
+        let admitted = async {
+            loop {
+                let mut changed = pin!(self.changed.notified());
+                changed.as_mut().enable();
+                if self.allows(id) {
+                    return;
+                }
+                changed.await;
+            }
+        };
+        tokio::time::timeout(ADMIT_GRACE, admitted).await.is_ok()
+    }
+
+    fn namespace(&self) -> Option<NamespaceId> {
+        self.state.read().expect("gate lock").namespace
+    }
+
+    /// Lets in the devices `doc` admits, and no others.
+    async fn load(&self, doc: &Doc) {
+        let admitted = listed(doc, ADMITTED).await;
+        let mut state = self.state.write().expect("gate lock");
+        if state.namespace != Some(doc.id()) {
+            state.vouched.clear();
+        }
+        state.namespace = Some(doc.id());
+        state.admitted = admitted;
+        drop(state);
+        self.changed.notify_waiters();
+    }
+
+    /// Lets in `id` before its admission is read back from the group.
+    fn add(&self, namespace: NamespaceId, id: EndpointId) {
+        let mut state = self.state.write().expect("gate lock");
+        if state.namespace == Some(namespace) {
+            state.admitted.insert(id);
+        }
+        drop(state);
+        self.changed.notify_waiters();
+    }
+
+    /// Lets in `id`, which admitted this device ([`GateState::vouched`]).
+    fn vouch(&self, namespace: NamespaceId, id: EndpointId) {
+        let mut state = self.state.write().expect("gate lock");
+        if state.namespace == Some(namespace) {
+            state.vouched.insert(id);
+        }
+        drop(state);
+        self.changed.notify_waiters();
+    }
+}
+
+/// A protocol of the group, served only to the devices the gate lets in. iroh-docs serves a
+/// group to whoever names its id, iroh-blobs a value to whoever names its hash, and gossip
+/// passes new entries on to its neighbours.
+#[derive(Debug)]
+struct Gated<P> {
+    gate: Arc<Gate>,
+    protocol: P,
+}
+
+impl<P: ProtocolHandler> ProtocolHandler for Gated<P> {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        if !self.gate.admits(&connection.remote_id()).await {
+            connection.close(VarInt::from_u32(403), b"not admitted to this sync group");
+            return Ok(());
+        }
+        self.protocol.accept(connection).await
+    }
+
+    async fn shutdown(&self) {
+        self.protocol.shutdown().await;
+    }
+}
+
+/// What a device asks the door ([`Door`]) for: to be admitted, with one variant per way in, so a
+/// way can be added or dropped on its own.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum AdmitRequest {
+    /// The asking device holds the group's write key (today's tickets carry it): its signature
+    /// with that key over [`proof_message`], hex.
+    Proof { namespace: String, signature: String },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum AdmitAnswer {
+    Admitted,
+    Refused(String),
+}
+
+/// The door (MS-380), ALPN `mailstream/admit/1`, outside the gate: a device that asks to be
+/// admitted and shows it may be is recorded under `v1/admit/` and let in.
+#[derive(Debug, Clone)]
+struct Door {
+    gate: Arc<Gate>,
+    docs: Docs,
+    author: AuthorId,
+    /// This device.
+    me: EndpointId,
+}
+
+impl ProtocolHandler for Door {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let (mut send, mut recv) = connection.accept_bi().await.map_err(AcceptError::from_err)?;
+        let request = recv.read_to_end(ADMIT_LIMIT).await.map_err(AcceptError::from_err)?;
+        let answer = self.answer(connection.remote_id(), &request).await;
+        send.write_all(&serde_json::to_vec(&answer).map_err(AcceptError::from_err)?).await.map_err(AcceptError::from_err)?;
+        send.finish().map_err(AcceptError::from_err)?;
+        // The asking device closes once it read the answer.
+        connection.closed().await;
+        Ok(())
+    }
+}
+
+impl Door {
+    async fn answer(&self, asking: EndpointId, request: &[u8]) -> AdmitAnswer {
+        let Some(namespace) = self.gate.namespace() else {
+            return AdmitAnswer::Refused(PeerSyncError::NoGroup.to_string());
+        };
+        let shown = match serde_json::from_slice(request) {
+            Ok(AdmitRequest::Proof { namespace: asked, signature }) => {
+                asked == namespace.to_string() && proves(namespace, self.me, asking, &signature)
+            }
+            Err(_) => false,
+        };
+        if !shown {
+            return AdmitAnswer::Refused("Not admitted: no proof of this sync group.".to_string());
+        }
+        if !self.gate.allows(&asking)
+            && let Err(error) = self.admit(namespace, asking).await
+        {
+            return AdmitAnswer::Refused(error.to_string());
+        }
+        AdmitAnswer::Admitted
+    }
+
+    async fn admit(&self, namespace: NamespaceId, id: EndpointId) -> Result<()> {
+        let doc = self.docs.open(namespace).await.map_err(failed)?.ok_or(PeerSyncError::NoGroup)?;
+        put(&doc, self.author, admit_key(id), &Admission { by: self.me.to_string(), at: now_ms() }).await?;
+        self.gate.add(namespace, id);
+        Ok(())
+    }
+}
+
+/// What a device signs with the group's write key to be admitted: the group, the device it asks
+/// and itself, so the signature serves that pair only.
+fn proof_message(namespace: NamespaceId, member: EndpointId, joiner: EndpointId) -> Vec<u8> {
+    [ADMIT_CONTEXT, namespace.as_bytes(), member.as_bytes(), joiner.as_bytes()].concat()
+}
+
+/// Asks `member` to admit device `joiner` with the group's write key.
+fn proof(secret: &NamespaceSecret, member: EndpointId, joiner: EndpointId) -> AdmitRequest {
+    let signature = secret.sign(&proof_message(secret.id(), member, joiner));
+    AdmitRequest::Proof { namespace: secret.id().to_string(), signature: hex(&signature.to_bytes()) }
+}
+
+/// Whether `signature` (hex) proves `joiner` holds the write key of `namespace`, asking `member`.
+fn proves(namespace: NamespaceId, member: EndpointId, joiner: EndpointId, signature: &str) -> bool {
+    let Some(bytes) = unhex(signature).and_then(|bytes| <[u8; Signature::LENGTH]>::try_from(bytes).ok()) else {
+        return false;
+    };
+    let Ok(key) = NamespacePublicKey::from_bytes(namespace.as_bytes()) else { return false };
+    key.verify(&proof_message(namespace, member, joiner), &Signature::from_bytes(&bytes)).is_ok()
+}
+
+/// Asks `member` at its door to admit this device; `Err` with the reason when it doesn't.
+async fn ask(endpoint: &Endpoint, member: EndpointAddr, request: &AdmitRequest) -> Result<()> {
+    let connection = endpoint.connect(member, ADMIT_ALPN).await.map_err(failed)?;
+    let (mut send, mut recv) = connection.open_bi().await.map_err(failed)?;
+    send.write_all(&serde_json::to_vec(request).map_err(failed)?).await.map_err(failed)?;
+    send.finish().map_err(failed)?;
+    let answer = recv.read_to_end(ADMIT_LIMIT).await.map_err(failed);
+    connection.close(VarInt::from_u32(0), b"");
+    match serde_json::from_slice(&answer?).map_err(failed)? {
+        AdmitAnswer::Admitted => Ok(()),
+        AdmitAnswer::Refused(reason) => Err(PeerSyncError::Failed(reason)),
+    }
+}
+
+/// `doc`'s write key; `None` for a group this device can only read.
+async fn write_secret(doc: &Doc) -> Result<Option<NamespaceSecret>> {
+    let ticket = doc.share(ShareMode::Write, AddrInfoOptions::Id).await.map_err(failed)?;
+    match ticket.capability {
+        Capability::Write(secret) => Ok(Some(secret)),
+        Capability::Read(_) => Ok(None),
+    }
+}
+
+/// The devices named by `doc`'s keys under `prefix`, whatever their values; every entry carries
+/// the group's signature.
+async fn listed(doc: &Doc, prefix: &str) -> BTreeSet<EndpointId> {
+    let mut ids = BTreeSet::new();
+    if let Ok(entries) = doc.get_many(Query::key_prefix(prefix).build()).await {
+        let mut entries = pin!(entries);
+        while let Some(Ok(entry)) = entries.next().await {
+            let id = std::str::from_utf8(entry.key()).ok().and_then(|key| key.strip_prefix(prefix));
+            if let Some(id) = id.and_then(|id| EndpointId::from_str(id).ok()) {
+                ids.insert(id);
+            }
+        }
+    }
+    ids
+}
+
+fn admit_key(id: EndpointId) -> String {
+    format!("{ADMITTED}{id}")
+}
+
+async fn put(doc: &Doc, author: AuthorId, key: String, value: &impl Serialize) -> Result<()> {
+    let data = serde_json::to_vec(value).map_err(failed)?;
+    doc.set_bytes(author, key, data).await.map_err(failed)?;
+    Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    (0..text.len()).step_by(2).map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok()).collect()
 }
 
 /// This device's iroh key, made the first time.
@@ -847,7 +1299,7 @@ async fn bind(secret: SecretKey, network: Network, relay_url: Option<&str>) -> R
             }
         }
         #[cfg(test)]
-        Network::Loopback(lookup) => Endpoint::builder(presets::Minimal)
+        Network::Loopback(lookup) | Network::BeforeAdmission(lookup) => Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .clear_ip_transports()
             .bind_addr("127.0.0.1:0")

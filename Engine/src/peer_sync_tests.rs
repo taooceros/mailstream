@@ -6,7 +6,7 @@ use iroh::address_lookup::MemoryLookup;
 use serde_json::json;
 
 use crate::OAuthConfig;
-use crate::peer_sync::{Network, PeerSync, PeerSyncError, Snapshot, Stamped};
+use crate::peer_sync::{AdmitRequest, Network, PeerSync, PeerSyncError, Snapshot, Stamped};
 use crate::testkit::{TestConfig, config};
 
 async fn open(config: &TestConfig, lookup: &MemoryLookup) -> PeerSync {
@@ -104,6 +104,113 @@ async fn paired_devices_converge_after_editing_offline() {
 
     a.shutdown().await;
     b.shutdown().await;
+}
+
+/// Waits `quiet` and checks `stranger` read none of the group's entries, not even their keys.
+async fn reads_nothing(stranger: &PeerSync, quiet: Duration) {
+    tokio::time::sleep(quiet).await;
+    let seen = stranger.snapshot().await.unwrap();
+    assert_eq!(seen, Snapshot::default(), "a device that knows only the group's id read the group");
+}
+
+/// MS-380: a device that knows only the group's id (settings and `sync status` show it) and
+/// reaches its devices reads nothing, before or after a live change; a ticket still pairs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_device_that_knows_only_the_group_id_reads_nothing() {
+    let (folder_a, folder_b, folder_c) =
+        (config(OAuthConfig::default()), config(OAuthConfig::default()), config(OAuthConfig::default()));
+    let lookup = MemoryLookup::new();
+    let (a, b, c) = (open(&folder_a, &lookup).await, open(&folder_b, &lookup).await, open(&folder_c, &lookup).await);
+    let namespace = a.create_group().await.unwrap();
+    assert!(a.set_trusted("alice@example.com", true, 1_000).await.unwrap());
+    assert!(a.set_setting("autoRead.days", json!(3), 1_000).await.unwrap());
+    b.join(&a.ticket().await.unwrap()).await.unwrap();
+    until("B to get A's entries", &b, |snapshot| trusted(snapshot, "alice@example.com").is_some()).await;
+    let (id_a, id_b) = (a.status().await.endpoint_id, b.status().await.endpoint_id);
+    let admitted = until("B to read both admissions", &b, |snapshot| {
+        snapshot.admitted.contains_key(&id_a) && snapshot.admitted.contains_key(&id_b)
+    })
+    .await;
+    assert_eq!(admitted.admitted[&id_a].by, id_a, "A admitted itself making the group");
+    let admitted = until("A to admit B", &a, |snapshot| snapshot.admitted.contains_key(&id_b)).await;
+    assert_eq!(admitted.admitted[&id_b].by, id_a, "A admitted B at its door");
+
+    c.watch(&namespace, vec![a.loopback_addr(), b.loopback_addr()]).await.unwrap();
+    reads_nothing(&c, Duration::from_secs(2)).await;
+    assert!(a.set_trusted("bob@example.com", true, 2_000).await.unwrap());
+    until("B to get A's live change", &b, |snapshot| trusted(snapshot, "bob@example.com").is_some()).await;
+    c.realign().await;
+    reads_nothing(&c, Duration::from_secs(2)).await;
+
+    a.shutdown().await;
+    b.shutdown().await;
+    c.shutdown().await;
+}
+
+/// MS-380: a group paired before admission keeps syncing once its devices run this version: each
+/// admits the devices the group lists the first time it opens it, and a stranger reads nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_group_from_before_admission_keeps_syncing_after_the_upgrade() {
+    let (folder_a, folder_b, folder_c) =
+        (config(OAuthConfig::default()), config(OAuthConfig::default()), config(OAuthConfig::default()));
+    let lookup = MemoryLookup::new();
+    let before = |folder: &TestConfig| {
+        let (directory, lookup) = (folder.support_directory.clone(), lookup.clone());
+        async move { PeerSync::open_on(&directory, Network::BeforeAdmission(lookup)).await.unwrap() }
+    };
+    let (a, b) = (before(&folder_a).await, before(&folder_b).await);
+    let namespace = a.create_group().await.unwrap();
+    assert!(a.set_trusted("alice@example.com", true, 1_000).await.unwrap());
+    b.join(&a.ticket().await.unwrap()).await.unwrap();
+    let (id_a, id_b) = (a.status().await.endpoint_id, b.status().await.endpoint_id);
+    until("B to get A's entries", &b, |snapshot| trusted(snapshot, "alice@example.com").is_some()).await;
+    let paired = until("A to see B", &a, |snapshot| snapshot.devices.contains_key(&id_b)).await;
+    assert!(paired.admitted.is_empty(), "devices from before MS-380 admit no one");
+    a.shutdown().await;
+    b.shutdown().await;
+
+    let (a, b) = (open(&folder_a, &lookup).await, open(&folder_b, &lookup).await);
+    let both = |snapshot: &Snapshot| snapshot.admitted.contains_key(&id_a) && snapshot.admitted.contains_key(&id_b);
+    until("A to admit both", &a, both).await;
+    until("B to admit both", &b, both).await;
+    assert!(a.set_trusted("bob@example.com", true, 2_000).await.unwrap());
+    until("B to get A's change after the upgrade", &b, |snapshot| trusted(snapshot, "bob@example.com").is_some()).await;
+    assert!(b.set_trusted("carol@example.com", true, 2_100).await.unwrap());
+    until("A to get B's change after the upgrade", &a, |snapshot| trusted(snapshot, "carol@example.com").is_some()).await;
+
+    let c = open(&folder_c, &lookup).await;
+    c.watch(&namespace, vec![a.loopback_addr(), b.loopback_addr()]).await.unwrap();
+    reads_nothing(&c, Duration::from_secs(2)).await;
+    a.shutdown().await;
+    b.shutdown().await;
+    c.shutdown().await;
+}
+
+/// MS-380: the door admits a device only for its own proof of the group's write key: not a
+/// forged one, and not another device's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_door_admits_only_a_device_that_holds_the_write_key() {
+    let (folder_a, folder_b, folder_c) =
+        (config(OAuthConfig::default()), config(OAuthConfig::default()), config(OAuthConfig::default()));
+    let lookup = MemoryLookup::new();
+    let (a, b, c) = (open(&folder_a, &lookup).await, open(&folder_b, &lookup).await, open(&folder_c, &lookup).await);
+    let namespace = a.create_group().await.unwrap();
+    b.join(&a.ticket().await.unwrap()).await.unwrap();
+    let (member, id_b, id_c) = (a.loopback_addr(), b.status().await.endpoint_id, c.status().await.endpoint_id);
+    until("A to admit B", &a, |snapshot| snapshot.admitted.contains_key(&id_b)).await;
+
+    let forged = AdmitRequest::Proof { namespace: namespace.clone(), signature: "00".repeat(64) };
+    assert!(c.ask_admission(member.clone(), &forged).await.is_err());
+    let borrowed = b.admission_proof(member.id).await.unwrap();
+    assert!(c.ask_admission(member.clone(), &borrowed).await.is_err(), "B's proof admits B only");
+    assert_eq!(b.ask_admission(member.clone(), &borrowed).await, Ok(()));
+    assert!(!a.snapshot().await.unwrap().admitted.contains_key(&id_c));
+    c.watch(&namespace, vec![member]).await.unwrap();
+    reads_nothing(&c, Duration::from_secs(2)).await;
+
+    a.shutdown().await;
+    b.shutdown().await;
+    c.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

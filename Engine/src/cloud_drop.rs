@@ -178,6 +178,8 @@ impl Contents {
                 .map(|(key, entry)| (key, Stamped { value: entry.value, at: entry.at }))
                 .collect(),
             devices: self.devices,
+            // Admissions cross only between admitted devices (MS-380), never through the drop.
+            admitted: Default::default(),
             pending: Default::default(),
         }
     }

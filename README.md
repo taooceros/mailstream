@@ -165,6 +165,8 @@ mailstream sync status --data-dir /var/lib/mailstream-sync
 mailstream sync pair-ticket --data-dir /var/lib/mailstream-sync
 ```
 
+Devices sync only with the devices the group admitted (MS-380), so knowing the group id that `sync status` shows reads nothing. A device that joins with a ticket is admitted by a device of the group it reaches (keep the device that made the ticket online for the first join); until then it keeps asking. Devices paired before this admit each other by themselves after updating.
+
 Example `systemd` unit (`/etc/systemd/system/mailstream-sync.service`):
 
 ```ini
