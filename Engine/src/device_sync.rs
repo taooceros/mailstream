@@ -1,6 +1,7 @@
 //! Bridges [`PeerSync`] (`peer-sync/`) to the whitelisted cross-device keys in `settings.json`
 //! without feedback loops (MS-360), runs the optional cloud drop (`cloud_drop.rs`, MS-374), and
-//! answers the `sync.*` commands.
+//! answers the `sync.*` commands. Sync is open only while this device syncs a group, or a command
+//! needs it: opening binds an iroh endpoint, which reaches number 0's relays (MS-370).
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -14,7 +15,7 @@ use tokio::task::JoinHandle;
 use crate::answers::{self, DeviceSyncStatus, SyncDevice, SyncTicket};
 use crate::cloud_drop::{self, CloudDrop};
 use crate::commands::Arguments;
-use crate::peer_sync::{Network, PeerSync, PeerSyncError};
+use crate::peer_sync::{Network, PeerSync, PeerSyncError, Stored};
 use crate::settings::{Setting, Settings, Values};
 use crate::signal::{ProcessSignal, next_wake};
 use crate::{EngineError, Events, files, model};
@@ -30,6 +31,8 @@ const WAKE_CHECK: Duration = Duration::from_secs(10);
 /// same key outweighs it whenever that value arrives, and a key only this device holds still
 /// reaches every device.
 const JOIN_AT: u64 = 1;
+/// How often closed sync looks whether another process put this device in a group.
+const IDLE_CHECK: Duration = Duration::from_secs(30);
 
 /// Scalar whitelisted settings synced under `v1/setting/<key>`.
 /// `remoteContent.trustedSenders` is synced per address under `v1/trusted/<email>`.
@@ -201,31 +204,37 @@ impl DeviceSync {
     async fn run_loop(self: Arc<Self>, mut wake_rx: mpsc::UnboundedReceiver<()>) {
         let mut changes: Option<watch::Receiver<u64>> = None;
         loop {
+            if changes.is_some() && self.sync.read().await.is_none() {
+                changes = None;
+            }
             if changes.is_none() {
-                match self.ensure_open().await {
-                    Ok(rx) => {
-                        changes = rx;
-                        let _ = self.reconcile_and_report().await;
-                        self.events.emit("deviceSync");
-                        self.cloud_wake.notify_one();
-                    }
-                    Err(error) => {
-                        let delay = match error {
-                            PeerSyncError::Busy => RETRY_BUSY,
-                            _ => RETRY_FAILED,
-                        };
-                        tokio::select! {
-                            _ = tokio::time::sleep(delay) => {}
-                            msg = wake_rx.recv() => {
-                                if msg.is_none() {
-                                    return;
-                                }
-                                while wake_rx.try_recv().is_ok() {}
-                            }
+                // Stays closed while this device syncs no group; the command that opens sync
+                // wakes this, and so does `IDLE_CHECK` once another process joined a group.
+                let delay = if self.sync.read().await.is_some() || self.syncing_on_disk() {
+                    match self.ensure_open().await {
+                        Ok(rx) => {
+                            changes = rx;
+                            let _ = self.reconcile_and_report().await;
+                            self.events.emit("deviceSync");
+                            self.cloud_wake.notify_one();
+                            continue;
                         }
-                        continue;
+                        Err(PeerSyncError::Busy) => RETRY_BUSY,
+                        Err(_) => RETRY_FAILED,
+                    }
+                } else {
+                    IDLE_CHECK
+                };
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    msg = wake_rx.recv() => {
+                        if msg.is_none() {
+                            return;
+                        }
+                        while wake_rx.try_recv().is_ok() {}
                     }
                 }
+                continue;
             }
             let rx = changes.as_mut().expect("opened above");
             tokio::select! {
@@ -296,6 +305,20 @@ impl DeviceSync {
         self.cloud.status().problem.is_none()
     }
 
+    /// Whether `peer-sync/` names a group this device syncs; a damaged `sync.json` counts, so
+    /// opening reports it.
+    fn syncing_on_disk(&self) -> bool {
+        PeerSync::stored(&self.support_directory).map_or(true, |stored| stored.syncing())
+    }
+
+    /// What `peer-sync/` holds while sync is closed; `None` while open.
+    async fn closed_stored(&self) -> Result<Option<Stored>, EngineError> {
+        if self.sync.read().await.is_some() {
+            return Ok(None);
+        }
+        PeerSync::stored(&self.support_directory).map(Some).map_err(map_error)
+    }
+
     async fn ensure_open(&self) -> Result<Option<watch::Receiver<u64>>, PeerSyncError> {
         let _gate = self.open_gate.lock().await;
         if let Some(existing) = self.sync.read().await.as_ref() {
@@ -306,6 +329,8 @@ impl DeviceSync {
                 let rx = opened.changes();
                 *self.sync.write().await = Some(opened);
                 self.meta.lock().expect("meta lock").problem = None;
+                // Opened for a command: the bridge follows it from now on.
+                let _ = self.wake_tx.send(());
                 Ok(Some(rx))
             }
             Err(error) => {
@@ -320,6 +345,21 @@ impl DeviceSync {
             return Ok(());
         }
         self.ensure_open().await.map(|_| ()).map_err(map_error)
+    }
+
+    /// Closes sync unless this device syncs a group, so a paused device holds no endpoint and
+    /// reaches no relay (MS-370).
+    async fn close_unless_syncing(&self) {
+        let _gate = self.open_gate.lock().await;
+        let mut slot = self.sync.write().await;
+        let Some(sync) = slot.as_ref() else { return };
+        if sync.status().await.syncing() {
+            return;
+        }
+        let sync = slot.take().expect("checked above");
+        drop(slot);
+        sync.shutdown().await;
+        let _ = self.wake_tx.send(());
     }
 
     async fn reconcile_and_report(&self) -> bool {
@@ -510,7 +550,7 @@ impl DeviceSync {
     pub(crate) async fn run(&self, command: &str, args: &Arguments) -> Result<Value, EngineError> {
         match command {
             "sync.status" => {
-                if self.sync.read().await.is_none() {
+                if self.sync.read().await.is_none() && self.syncing_on_disk() {
                     let _ = self.ensure_open().await;
                 }
                 Ok(answers::json(&self.status_answer().await))
@@ -533,16 +573,23 @@ impl DeviceSync {
                 Ok(answers::json(&self.status_answer().await))
             }
             "sync.disable" => {
-                self.open_or_err().await?;
-                {
-                    let guard = self.sync.read().await;
-                    let sync = guard.as_ref().expect("opened");
-                    sync.pause().await.map_err(map_error)?;
+                // Nothing to pause without a group, and nothing to open for one already paused.
+                if self.closed_stored().await?.is_none_or(|stored| stored.syncing()) {
+                    self.open_or_err().await?;
+                    {
+                        let guard = self.sync.read().await;
+                        let sync = guard.as_ref().expect("opened");
+                        sync.pause().await.map_err(map_error)?;
+                    }
+                    self.close_unless_syncing().await;
                 }
                 self.events.emit("deviceSync");
                 Ok(answers::json(&self.status_answer().await))
             }
             "sync.pair_ticket" => {
+                if self.closed_stored().await?.is_some_and(|stored| stored.namespace.is_none()) {
+                    return Err(map_error(PeerSyncError::NoGroup));
+                }
                 self.open_or_err().await?;
                 let ticket = {
                     let guard = self.sync.read().await;
@@ -586,10 +633,19 @@ impl DeviceSync {
                 }
                 self.reconcile().await?;
                 self.cloud_exchange().await;
+                self.close_unless_syncing().await;
                 self.events.emit("deviceSync");
                 Ok(answers::json(&self.status_answer().await))
             }
             "sync.now" => {
+                if let Some(stored) = self.closed_stored().await? {
+                    if stored.namespace.is_none() {
+                        return Err(map_error(PeerSyncError::NoGroup));
+                    }
+                    if stored.paused {
+                        return Err(paused_error());
+                    }
+                }
                 self.open_or_err().await?;
                 {
                     let guard = self.sync.read().await;
@@ -599,10 +655,7 @@ impl DeviceSync {
                         return Err(map_error(PeerSyncError::NoGroup));
                     }
                     if status.paused {
-                        return Err(EngineError::new(
-                            "paused",
-                            "Device sync is paused; enable it first (`mailstream sync enable`).",
-                        ));
+                        return Err(paused_error());
                     }
                     sync.realign().await;
                 }
@@ -629,21 +682,14 @@ impl DeviceSync {
     }
 
     async fn status_answer(&self) -> DeviceSyncStatus {
+        // The gate keeps an open in progress, which holds `peer-sync/lock`, from reading as
+        // another process's.
+        let gate = self.open_gate.lock().await;
         let guard = self.sync.read().await;
         let Some(sync) = guard.as_ref() else {
-            let meta = self.meta.lock().expect("meta lock");
-            return DeviceSyncStatus {
-                available: false,
-                enabled: false,
-                paused: false,
-                endpoint_id: None,
-                namespace: None,
-                devices: Vec::new(),
-                last_sync: None,
-                problem: meta.problem.clone(),
-                cloud: self.cloud.status(),
-            };
+            return self.closed_status();
         };
+        drop(gate);
         let status = sync.status().await;
         let snapshot = if status.namespace.is_some() { sync.snapshot().await.ok() } else { None };
         let mut devices = Vec::new();
@@ -674,6 +720,38 @@ impl DeviceSync {
             problem: meta.problem.clone(),
             cloud: self.cloud.status(),
         }
+    }
+
+    /// `sync.status` while sync is closed, from `peer-sync/` without opening it: available
+    /// unless another process has it open, or this device syncs a group that failed to open.
+    fn closed_status(&self) -> DeviceSyncStatus {
+        let mut answer = DeviceSyncStatus {
+            available: false,
+            enabled: false,
+            paused: false,
+            endpoint_id: None,
+            namespace: None,
+            devices: Vec::new(),
+            last_sync: None,
+            problem: None,
+            cloud: self.cloud.status(),
+        };
+        match PeerSync::stored(&self.support_directory) {
+            Err(error) => answer.problem = Some(error.to_string()),
+            Ok(stored) => {
+                if PeerSync::busy(&self.support_directory) {
+                    answer.problem = Some(PeerSyncError::Busy.to_string());
+                } else if stored.syncing() {
+                    answer.problem = self.meta.lock().expect("meta lock").problem.clone();
+                } else {
+                    answer.available = true;
+                }
+                answer.paused = stored.paused;
+                answer.endpoint_id = stored.endpoint_id;
+                answer.namespace = stored.namespace;
+            }
+        }
+        answer
     }
 }
 
@@ -724,6 +802,10 @@ fn invalid_problem(invalid: &BTreeMap<Setting, String>) -> Option<String> {
 fn is_valid_email(address: &str) -> bool {
     let trimmed = address.trim();
     !trimmed.is_empty() && trimmed.contains('@') && !trimmed.contains(char::is_whitespace)
+}
+
+fn paused_error() -> EngineError {
+    EngineError::new("paused", "Device sync is paused; enable it first (`mailstream sync enable`).")
 }
 
 fn map_error(error: PeerSyncError) -> EngineError {

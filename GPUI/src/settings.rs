@@ -1839,7 +1839,8 @@ impl Settings {
         let enabled = status.enabled;
 
         let status_line = if !available {
-            "Unavailable while another Mailstream process on this machine holds device sync.".to_owned()
+            // The engine's reason: another process holds sync, opening failed, or this mode has none.
+            status.problem.as_ref().map_or_else(|| "Unavailable.".to_owned(), |problem| format!("Unavailable · {problem}"))
         } else if enabled {
             match &status.last_sync {
                 Some(at) => format!("On · Last synced {}", mailstream::message_date(Some(at.clone()))),
@@ -1924,9 +1925,12 @@ impl Settings {
                 .gap(px(6.))
                 .child(div().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(p.muted).child("Paired devices"))
                 .when(peers.is_empty(), |d| {
-                    d.child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
-                        "No other devices paired yet. Create a pairing ticket below or paste one from another device.",
-                    ))
+                    // Paused sync is closed (MS-370), so the engine can't list the group's devices.
+                    d.child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(if status.paused {
+                        "Paired devices show again once you turn sync back on."
+                    } else {
+                        "No other devices paired yet. Create a pairing ticket below or paste one from another device."
+                    }))
                 })
                 .children(peers.into_iter().map(|peer| {
                     let seen = mailstream::message_date(Some(peer.last_seen.clone()));
@@ -2144,10 +2148,8 @@ impl Settings {
             rows.push(reset_row);
         }
 
-        let problem_notice = status.problem.as_ref().map(|problem| {
-            let tone = if available { Tone::Error } else { Tone::Action };
-            notice(tone, None, problem.clone(), false, p)
-        });
+        // Unavailable: the status line already gives the reason.
+        let problem_notice = status.problem.as_ref().filter(|_| available).map(|problem| notice(Tone::Error, None, problem.clone(), false, p));
 
         section
             .children(problem_notice)

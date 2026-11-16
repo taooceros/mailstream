@@ -8,7 +8,7 @@ use iroh::address_lookup::MemoryLookup;
 use serde_json::{Value, json};
 
 use crate::mail_tests::{GmailCounters, gmail_server};
-use crate::peer_sync::Network;
+use crate::peer_sync::{Network, PeerSync};
 use crate::testkit::{TestConfig, call, config, mail_account, sign_in_all};
 use crate::{Engine, OAuthConfig, run_settings_command};
 
@@ -184,9 +184,8 @@ fn second_engine_on_same_folder_reports_busy_and_recovers_after_first_drops() {
     let lookup = MemoryLookup::new();
     let cfg = sync_config(&lookup);
     let first = Engine::start(cfg.clone());
-    until("first engine opens device sync", || {
-        call(&first, "sync.status", json!({})).unwrap()["available"] == json!(true)
-    });
+    let enabled = call(&first, "sync.enable", json!({})).unwrap();
+    assert_eq!(enabled["enabled"], json!(true));
 
     let second = Engine::start(cfg.clone());
     let status = call(&second, "sync.status", json!({})).unwrap();
@@ -199,6 +198,52 @@ fn second_engine_on_same_folder_reports_busy_and_recovers_after_first_drops() {
     let recovered = call(&second, "sync.enable", json!({})).unwrap();
     assert_eq!((recovered["available"].clone(), recovered["enabled"].clone()), (json!(true), json!(true)));
     drop(second);
+}
+
+#[test]
+fn sync_stays_closed_without_a_group_and_while_paused() {
+    let lookup = MemoryLookup::new();
+    let cfg = sync_config(&lookup);
+    let folder = cfg.support_directory.join("peer-sync");
+
+    // Never enabled or paired: no endpoint is bound, so no relay is reached (MS-370).
+    let engine = Engine::start(cfg.clone());
+    std::thread::sleep(Duration::from_millis(300));
+    let idle = call(&engine, "sync.status", json!({})).unwrap();
+    assert_eq!(
+        (idle["available"].clone(), idle["enabled"].clone(), idle["endpointId"].clone()),
+        (json!(true), json!(false), Value::Null)
+    );
+    assert!(!folder.exists(), "sync.status must not open device sync");
+    assert_eq!(call(&engine, "sync.now", json!({})).unwrap_err().code, "no_group");
+    assert_eq!(call(&engine, "sync.pair_ticket", json!({})).unwrap_err().code, "no_group");
+    let disabled = call(&engine, "sync.disable", json!({})).unwrap();
+    assert_eq!((disabled["available"].clone(), disabled["enabled"].clone()), (json!(true), json!(false)));
+    assert!(!folder.exists(), "commands without a group must not open device sync");
+
+    // Enabling opens it; pausing closes it again and releases `peer-sync/lock`.
+    let enabled = call(&engine, "sync.enable", json!({})).unwrap();
+    assert_eq!(enabled["enabled"], json!(true));
+    assert!(PeerSync::busy(&cfg.support_directory));
+    let paused = call(&engine, "sync.disable", json!({})).unwrap();
+    assert_eq!(
+        (paused["available"].clone(), paused["paused"].clone(), paused["endpointId"].clone()),
+        (json!(true), json!(true), enabled["endpointId"].clone())
+    );
+    assert!(!PeerSync::busy(&cfg.support_directory), "pausing must close device sync");
+    drop(engine);
+
+    // A paused device stays closed across a restart until enabled.
+    let engine = Engine::start(cfg.clone());
+    std::thread::sleep(Duration::from_millis(300));
+    let status = call(&engine, "sync.status", json!({})).unwrap();
+    assert_eq!((status["available"].clone(), status["paused"].clone()), (json!(true), json!(true)));
+    assert_eq!(status["namespace"], enabled["namespace"]);
+    assert!(!PeerSync::busy(&cfg.support_directory), "a paused device must not open device sync");
+    assert_eq!(call(&engine, "sync.now", json!({})).unwrap_err().code, "paused");
+    let resumed = call(&engine, "sync.enable", json!({})).unwrap();
+    assert_eq!((resumed["enabled"].clone(), resumed["namespace"].clone()), (json!(true), enabled["namespace"].clone()));
+    drop(engine);
 }
 
 #[test]

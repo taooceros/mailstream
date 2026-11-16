@@ -115,13 +115,15 @@ pub struct SyncDevice {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSyncStatus {
-    /// False while another Mailstream process on this machine holds device sync, or in shots mode.
+    /// False while another Mailstream process on this machine holds device sync, while a group
+    /// this device syncs failed to open, or in shots mode; `problem` says which.
     pub available: bool,
     /// Paired in a sync group and not paused.
     pub enabled: bool,
     pub paused: bool,
     pub endpoint_id: Option<String>,
     pub namespace: Option<String>,
+    /// Empty while sync is closed: no group, or paused (MS-370).
     pub devices: Vec<SyncDevice>,
     /// ISO 8601 of the last sync activity.
     pub last_sync: Option<String>,

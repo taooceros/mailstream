@@ -149,6 +149,30 @@ pub struct Status {
     pub paused: bool,
 }
 
+impl Status {
+    /// Whether this device syncs a group: in one and not paused.
+    pub fn syncing(&self) -> bool {
+        self.namespace.is_some() && !self.paused
+    }
+}
+
+/// What `peer-sync/` holds while sync isn't open, read without binding an endpoint
+/// ([`PeerSync::stored`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Stored {
+    /// This device's endpoint id; `None` before sync first opened.
+    pub endpoint_id: Option<String>,
+    pub namespace: Option<String>,
+    pub paused: bool,
+}
+
+impl Stored {
+    /// Whether opening sync would rejoin a group: in one and not paused.
+    pub fn syncing(&self) -> bool {
+        self.namespace.is_some() && !self.paused
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TrustedValue {
     trusted: bool,
@@ -417,6 +441,25 @@ impl PeerSync {
         let ticket = DocTicket::from_str(ticket.trim())
             .map_err(|error| failed(format!("Not a device sync ticket: {error}")))?;
         Ok(ticket.capability.id().to_string())
+    }
+
+    /// Reads the group and endpoint id in `support_directory/peer-sync` without opening sync:
+    /// opening binds an iroh endpoint, which reaches number 0's relays and publishes this
+    /// device's address, so the engine opens sync only while it syncs a group (MS-370).
+    pub fn stored(support_directory: &Path) -> Result<Stored> {
+        let directory = support_directory.join(FOLDER);
+        let file = SyncFile::read(&directory)?;
+        let endpoint_id = read_secret_key(&directory)?.map(|key| key.public().to_string());
+        Ok(Stored { endpoint_id, namespace: file.namespace, paused: file.paused })
+    }
+
+    /// Whether another process has sync open on `support_directory`; asks the lock only, so
+    /// call it while this process hasn't opened sync there.
+    pub fn busy(support_directory: &Path) -> bool {
+        File::options()
+            .write(true)
+            .open(support_directory.join(FOLDER).join("lock"))
+            .is_ok_and(|lock| matches!(lock.try_lock(), Err(TryLockError::WouldBlock)))
     }
 
     /// Stops syncing until [`PeerSync::resume`], also after a restart. Writes still go to this
@@ -766,22 +809,27 @@ fn watch_network(inner: &Arc<Inner>) -> Vec<JoinHandle<()>> {
 
 /// This device's iroh key, made the first time.
 fn secret_key(directory: &Path) -> Result<SecretKey> {
-    let path = directory.join("endpoint.key");
-    match std::fs::read(&path) {
+    if let Some(key) = read_secret_key(directory)? {
+        return Ok(key);
+    }
+    let key = SecretKey::generate();
+    let mut options = File::options();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(directory.join("endpoint.key")).map_err(failed)?;
+    std::io::Write::write_all(&mut file, &key.to_bytes()).and_then(|()| file.sync_all()).map_err(failed)?;
+    Ok(key)
+}
+
+/// This device's iroh key, if made.
+fn read_secret_key(directory: &Path) -> Result<Option<SecretKey>> {
+    match std::fs::read(directory.join("endpoint.key")) {
         Ok(data) => {
             let bytes: [u8; 32] = data.try_into().map_err(|_| failed("peer-sync/endpoint.key is damaged."))?;
-            Ok(SecretKey::from_bytes(&bytes))
+            Ok(Some(SecretKey::from_bytes(&bytes)))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let key = SecretKey::generate();
-            let mut options = File::options();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-            let mut file = options.open(&path).map_err(failed)?;
-            std::io::Write::write_all(&mut file, &key.to_bytes()).and_then(|()| file.sync_all()).map_err(failed)?;
-            Ok(key)
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(failed(error)),
     }
 }
