@@ -1,8 +1,8 @@
 //! Message bodies and list previews, as the Swift engine's `ContentStore`
 //! (`Sources/MailstreamKit/Store/ContentStore.swift`): one shared load per message (mail.db
-//! first, then the group's other devices (`peer_mail`, MS-394), else the provider, whose answer
-//! is cached), the bodies recently read in memory, and the preview of every message loaded so
-//! far.
+//! first, then direct low-latency peer (`peer_mail`, MS-400), then Gmail IMAP body, then
+//! remaining peers (`peer_mail`, MS-394), else the provider REST API, whose answer is cached),
+//! the bodies recently read in memory, and the preview of every message loaded so far.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -198,14 +198,23 @@ impl Contents {
             return Ok(cached);
         }
         let Some(backend) = backend else { return Err("The account is no longer signed in.".into()) };
-        if let Some(mut taken) = peers.fetch(message, matches!(*backend, Backend::Gmail(_)), priority).await {
+        let gmail = matches!(*backend, Backend::Gmail(_));
+        let (direct, asked) = peers.fetch_direct(message, gmail, priority).await;
+        if let Some(mut taken) = direct {
             taken.snippet = text::snippet(taken.text.as_deref().unwrap_or(""));
             return Ok(taken);
         }
-        let content = backend
-            .content(&message.id, cache.message_directory(message), MailCache::part_url_base(message), priority)
-            .await
-            .map_err(|error| error.message)?;
+        let directory = cache.message_directory(message);
+        let url_base = MailCache::part_url_base(message);
+        if let Some(content) = backend.imap_content(&message.mailbox, &message.id, directory.clone(), url_base.clone(), priority).await {
+            cache.save_content(&content, message);
+            return Ok(content);
+        }
+        if let Some(mut taken) = peers.fetch_fallback(message, gmail, priority, &asked).await {
+            taken.snippet = text::snippet(taken.text.as_deref().unwrap_or(""));
+            return Ok(taken);
+        }
+        let content = backend.content(&message.id, directory, url_base, priority).await.map_err(|error| error.message)?;
         cache.save_content(&content, message);
         Ok(content)
     }

@@ -1,8 +1,7 @@
 //! A stand-in Gmail IMAP server on loopback for tests (`mail_tests`), parallel to `fake_server.rs`.
 //! Supports `XOAUTH2`, `ENABLE UTF8=ACCEPT`, `LIST` with `\All`, `EXAMINE`, `UID SEARCH X-GM-RAW`
 //! (also within `UID <set>`) and `UID SEARCH` of `OR`-ed `X-GM-MSGID`s, and `UID FETCH` with
-//! `X-GM-MSGID`, `X-GM-THRID`, `X-GM-LABELS`, `FLAGS`, `INTERNALDATE`, `RFC822.SIZE`,
-//! `BODYSTRUCTURE`, and `BODY[HEADER.FIELDS (...)]`.
+//! `BODYSTRUCTURE`, `BODY[HEADER.FIELDS (...)]`, and `BODY.PEEK[]`.
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,6 +24,8 @@ pub struct FakeImapMessage {
     pub size: u32,
     pub bodystructure: String,
     pub headers: Vec<(String, String)>,
+    /// Raw RFC 5322 message bytes returned for `UID FETCH ... BODY.PEEK[]`; `None` replies `BODY[] NIL`.
+    pub raw: Option<Vec<u8>>,
 }
 
 pub type ImapMatcher = Box<dyn Fn(&str, &FakeImapMessage) -> bool + Send + Sync>;
@@ -34,6 +35,7 @@ pub struct FakeImapConfig {
     pub reject_auth: bool,
     pub reject_first_token: Option<String>,
     pub fail_search: bool,
+    pub fail_body_fetch: bool,
     pub refuse_query: Option<String>,
     pub search_delay: Duration,
     /// Drops the connection once when a `UID SEARCH` arrives, then succeeds on reconnect.
@@ -49,6 +51,7 @@ impl Default for FakeImapConfig {
             reject_auth: false,
             reject_first_token: None,
             fail_search: false,
+            fail_body_fetch: false,
             refuse_query: None,
             search_delay: Duration::ZERO,
             drop_once_on_search: AtomicBool::new(false),
@@ -65,6 +68,7 @@ pub struct FakeImapServer {
     /// `UID SEARCH`es of a listing's header fetch: by `X-GM-MSGID`, or within a `UID` set.
     pub lookups: AtomicUsize,
     pub fetches: AtomicUsize,
+    pub body_fetches: AtomicUsize,
     pub noops: AtomicUsize,
     pub in_flight_searches: AtomicUsize,
     pub peak_in_flight_searches: AtomicUsize,
@@ -88,6 +92,7 @@ impl FakeImapServer {
             searches: AtomicUsize::new(0),
             lookups: AtomicUsize::new(0),
             fetches: AtomicUsize::new(0),
+            body_fetches: AtomicUsize::new(0),
             noops: AtomicUsize::new(0),
             in_flight_searches: AtomicUsize::new(0),
             peak_in_flight_searches: AtomicUsize::new(0),
@@ -256,9 +261,34 @@ impl FakeImapServer {
                 };
                 let _ = write.write_all(format!("{line}{tag} OK SEARCH completed (Success)\r\n").as_bytes()).await;
             } else if let Some(after) = strip_prefix_ignore_case(rest, "UID FETCH ") {
-                self.fetches.fetch_add(1, Ordering::SeqCst);
-                let uid_list = after.split_whitespace().next().unwrap_or("");
+                let (uid_list, items) = after.split_once(char::is_whitespace).unwrap_or((after, ""));
                 let wanted: HashSet<u32> = uid_list.split(',').filter_map(|part| part.parse::<u32>().ok()).collect();
+                let upper_items = items.to_ascii_uppercase();
+                if upper_items.contains("BODY.PEEK[]") || upper_items.contains("BODY[]") {
+                    self.body_fetches.fetch_add(1, Ordering::SeqCst);
+                    if self.config.fail_body_fetch {
+                        let _ = write.write_all(format!("{tag} NO [CANNOT] Body fetch failed\r\n").as_bytes()).await;
+                        continue;
+                    }
+                    let mut out = Vec::new();
+                    for (index, msg) in self.config.messages.iter().enumerate() {
+                        if !wanted.contains(&msg.uid) {
+                            continue;
+                        }
+                        if let Some(raw) = &msg.raw {
+                            let head = format!("* {} FETCH (UID {} BODY[] {{{}}}\r\n", index + 1, msg.uid, raw.len());
+                            out.extend_from_slice(head.as_bytes());
+                            out.extend_from_slice(raw);
+                            out.extend_from_slice(b")\r\n");
+                        } else {
+                            out.extend_from_slice(format!("* {} FETCH (UID {} BODY[] NIL)\r\n", index + 1, msg.uid).as_bytes());
+                        }
+                    }
+                    out.extend_from_slice(format!("{tag} OK Success\r\n").as_bytes());
+                    let _ = write.write_all(&out).await;
+                    continue;
+                }
+                self.fetches.fetch_add(1, Ordering::SeqCst);
                 let mut out = Vec::new();
                 for (index, msg) in self.config.messages.iter().enumerate() {
                     if !wanted.contains(&msg.uid) {

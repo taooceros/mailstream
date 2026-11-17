@@ -170,6 +170,39 @@ impl AttachedMessage {
     }
 }
 
+/// What a part shows. `primary` when `html` is a real HTML body; other HTML (an inline image)
+/// only joins when a sibling has one.
+pub(crate) struct Segment {
+    pub html: Option<String>,
+    pub text: Option<String>,
+    pub primary: bool,
+}
+
+/// Siblings shown one after another (multipart/mixed, related and the rest).
+pub(crate) fn combine(mut segments: Vec<Segment>) -> Option<Segment> {
+    if segments.len() <= 1 {
+        return segments.pop();
+    }
+    let primary = segments.iter().any(|segment| segment.primary);
+    let html = primary.then(|| {
+        segments
+            .iter()
+            .map(|segment| segment.html.clone().unwrap_or_else(|| text::plain_to_html(segment.text.as_deref().unwrap_or(""))))
+            .collect::<String>()
+    });
+    let has_text = segments.iter().any(|segment| segment.text.is_some());
+    let text = has_text.then(|| {
+        segments
+            .iter()
+            .filter_map(|segment| {
+                segment.text.clone().or_else(|| if segment.primary { segment.html.as_deref().map(text::strip_html) } else { None })
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    });
+    Some(Segment { html, text, primary })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,11 +17,12 @@
 //! another mailbox of the account is found by trying each. It serves [`SERVING`] bodies at once
 //! (more get `Busy`) and at most [`ANSWER_LIMIT`] bytes each.
 //!
-//! Asking: [`PeerMail::fetch`] sends `Have` to every device connected now (and, for background
-//! loads, dials the others), takes the body from the first that says it has it, then the next,
-//! and gives up for the provider when none does in time ([`Wait`]). Only messages the provider
-//! listed are asked for, and nothing is pushed: deletions, labels and read state still follow
-//! the provider alone. Background `Have`s within [`BATCH_WINDOW`] travel as one request.
+//! Asking: [`PeerMail::fetch_direct`] asks connected peers on a direct, low-latency IP path
+//! before IMAP runs, [`PeerMail::fetch_fallback`] asks the rest (relayed peers, or newly dialed
+//! ones in the background) when IMAP does not apply or misses, and gives up for the provider
+//! when none does in time ([`Wait`]). Only messages the provider listed are asked for, and nothing
+//! is pushed: deletions, labels and read state still follow the provider alone. Background
+//! `Have`s within [`BATCH_WINDOW`] travel as one request.
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -60,6 +61,9 @@ const BATCH_WINDOW: Duration = Duration::from_millis(20);
 /// Gmail's units for a message in full and for each attachment it would have fetched.
 const GMAIL_MESSAGE_UNITS: u64 = 60;
 const GMAIL_ATTACHMENT_UNITS: u64 = 20;
+/// Maximum round-trip time for a peer preferred before IMAP (direct) or for interactive relay
+/// fallback (MS-400).
+const LOW_LATENCY: Duration = Duration::from_millis(300);
 
 /// How long a load waits on the devices before the provider.
 struct Wait {
@@ -178,12 +182,93 @@ impl PeerMail {
         self.counts().await.lock().expect("peer mail counts").clone()
     }
 
+    #[cfg(test)]
+    pub fn direct_connected_count(&self) -> usize {
+        let client = self.client();
+        client
+            .peers
+            .values()
+            .filter(|peer| peer.connection.close_reason().is_none() && is_direct_peer(route_of(&peer.connection)))
+            .count()
+    }
+
     // MARK: Asking
 
-    /// `message`'s content from a device of the group that holds it, written to this device's
-    /// mail.db and parts folder as the provider's answer would be; `None` when none does in
-    /// time. `gmail`: the account is Gmail's, whose units it saves.
+    /// `message`'s content from a device of the group that holds it, trying direct low-latency
+    /// connected peers first and then remaining peers (MS-400); `None` when none does in time.
+    /// `gmail`: the account is Gmail's, whose units it saves.
     pub async fn fetch(&self, message: &MessageRef, gmail: bool, priority: Priority) -> Option<MessageContent> {
+        let (content, asked) = self.fetch_direct(message, gmail, priority).await;
+        if content.is_some() {
+            return content;
+        }
+        self.fetch_fallback(message, gmail, priority, &asked).await
+    }
+
+    /// Asks only already-connected peers on a direct, low-latency IP path (preferred before
+    /// IMAP, MS-400). Returns the ids already asked so [`Self::fetch_fallback`] need not ask them
+    /// again.
+    pub async fn fetch_direct(
+        &self,
+        message: &MessageRef,
+        gmail: bool,
+        priority: Priority,
+    ) -> (Option<MessageContent>, HashSet<EndpointId>) {
+        let mut peers = Vec::new();
+        let mut asked_ids = HashSet::new();
+        {
+            let mut client = self.client();
+            if client.link.is_none() {
+                return (None, asked_ids);
+            }
+            let ids: Vec<EndpointId> = client.peers.keys().copied().collect();
+            for id in ids {
+                let Some(peer) = client.peers.get(&id).cloned() else { continue };
+                if peer.connection.close_reason().is_some() {
+                    client.peers.remove(&id);
+                    continue;
+                }
+                if is_direct_peer(route_of(&peer.connection)) {
+                    asked_ids.insert(id);
+                    peers.push(peer);
+                }
+            }
+        }
+        if peers.is_empty() {
+            return (None, asked_ids);
+        }
+        let wait = Wait::of(priority);
+        let batch = priority == Priority::Background;
+        let wanted = Wanted::of(message);
+        let mut asked: FuturesUnordered<_> = peers
+            .into_iter()
+            .map(|peer| {
+                let wanted = wanted.clone();
+                async move { have(&peer, wanted, batch).await.then_some(peer) }
+            })
+            .collect();
+        let deadline = tokio::time::Instant::now() + wait.have;
+        while let Ok(Some(answer)) = tokio::time::timeout_at(deadline, asked.next()).await {
+            let Some(peer) = answer else { continue };
+            let got = tokio::time::timeout(wait.get, self.get(&peer.connection, &wanted, message)).await;
+            if let Ok(Some(content)) = got {
+                self.count(&content, gmail).await;
+                return (Some(content), asked_ids);
+            }
+        }
+        (None, asked_ids)
+    }
+
+    /// Asks remaining peers (relayed or newly dialed in the background), skipping `skip` already
+    /// asked by [`Self::fetch_direct`]. Interactive loads skip relayed peers whose RTT exceeds
+    /// [`LOW_LATENCY`] so the reader falls back to the provider REST API instead.
+    pub async fn fetch_fallback(
+        &self,
+        message: &MessageRef,
+        gmail: bool,
+        priority: Priority,
+        skip: &HashSet<EndpointId>,
+    ) -> Option<MessageContent> {
         let link = self.client().link.clone()?;
         let wait = Wait::of(priority);
         let (dial, batch) = (wait.dial, priority == Priority::Background);
@@ -191,10 +276,14 @@ impl PeerMail {
         let mut asked: FuturesUnordered<_> = link
             .members()
             .into_iter()
+            .filter(|id| !skip.contains(id))
             .map(|id| {
                 let (link, wanted) = (link.clone(), wanted.clone());
                 async move {
                     let peer = self.peer(&link, id, dial).await?;
+                    if !is_fallback_peer(route_of(&peer.connection), priority) {
+                        return None;
+                    }
                     have(&peer, wanted, batch).await.then_some(peer)
                 }
             })
@@ -551,4 +640,56 @@ fn is_key(key: &str) -> bool {
 /// A file name of a message's folder, which the asking device writes into its own.
 fn is_file_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    Direct(Duration),
+    Relay(Duration),
+    Unknown,
+}
+
+fn route_of(connection: &Connection) -> Route {
+    let paths = connection.paths();
+    let Some(path) = paths.iter().find(|path| path.is_selected()) else {
+        return Route::Unknown;
+    };
+    let rtt = path.rtt();
+    if path.is_ip() {
+        Route::Direct(rtt)
+    } else if path.is_relay() {
+        Route::Relay(rtt)
+    } else {
+        Route::Unknown
+    }
+}
+
+fn is_direct_peer(route: Route) -> bool {
+    matches!(route, Route::Direct(rtt) if rtt <= LOW_LATENCY)
+}
+
+fn is_fallback_peer(route: Route, priority: Priority) -> bool {
+    match priority {
+        Priority::Background => true,
+        Priority::Interactive => !matches!(route, Route::Relay(rtt) if rtt > LOW_LATENCY),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selects_direct_low_latency_before_imap_and_caps_interactive_relay_rtt() {
+        assert!(is_direct_peer(Route::Direct(Duration::from_millis(5))));
+        assert!(is_direct_peer(Route::Direct(LOW_LATENCY)));
+        assert!(!is_direct_peer(Route::Direct(LOW_LATENCY + Duration::from_millis(1))));
+        assert!(!is_direct_peer(Route::Relay(Duration::from_millis(10))));
+        assert!(!is_direct_peer(Route::Unknown));
+
+        assert!(is_fallback_peer(Route::Relay(Duration::from_millis(100)), Priority::Interactive));
+        assert!(!is_fallback_peer(Route::Relay(LOW_LATENCY + Duration::from_millis(1)), Priority::Interactive));
+        assert!(is_fallback_peer(Route::Relay(Duration::from_secs(2)), Priority::Background));
+        assert!(is_fallback_peer(Route::Direct(Duration::from_secs(1)), Priority::Interactive));
+    }
 }

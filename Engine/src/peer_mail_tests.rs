@@ -1,7 +1,7 @@
 //! Mail bodies between the user's devices (`peer_mail.rs`, MS-394): the protocol between two
 //! paired support folders on the loopback interface, and two paired engines that take bodies
 //! from each other before asking the fake Gmail and Graph.
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -350,6 +350,178 @@ fn paired_engines_take_outlook_bodies_from_each_other_first() {
     assert_eq!(std::fs::read(inline.join("0-photo.jpg")).unwrap(), b"jpg");
     // Outlook has no units to count.
     assert_eq!(received(&engine_b)["gmailUnits"], 0);
+    drop(engine_b);
+    drop(engine_a);
+}
+
+#[test]
+fn paired_engines_prefer_direct_peer_over_imap_and_imap_before_api() {
+    use crate::fake_imap::{FakeImapConfig, FakeImapMessage, FakeImapServer};
+    use crate::mail_tests::{BASE_MS, gmail_batch, header};
+    use crate::testkit::Reply;
+
+    let counters = Arc::new(GmailCounters { tokens: AtomicUsize::new(0), labels: AtomicUsize::new(0), listings: AtomicUsize::new(0) });
+    let full_requests = Arc::new(AtomicUsize::new(0));
+    let msg_a_id = 0x18b0_0000_0000_0001u64;
+    let msg_b_id = 0x18b0_0000_0000_0002u64;
+    let msg_c_id = 0x18b0_0000_0000_0003u64;
+    let (id_a, id_b, id_c) = (format!("{msg_a_id:x}"), format!("{msg_b_id:x}"), format!("{msg_c_id:x}"));
+
+    let mut metadata = std::collections::HashMap::new();
+    for (idx, (id, mid, subj)) in [(&id_a, "<m1@x>", "One"), (&id_b, "<m2@x>", "Two"), (&id_c, "<m3@x>", "Three")].into_iter().enumerate() {
+        metadata.insert(
+            id.clone(),
+            json!({
+                "id": id, "threadId": format!("t-{idx}"), "labelIds": ["INBOX"],
+                "internalDate": (BASE_MS - (idx as i64) * 60_000).to_string(), "sizeEstimate": 512,
+                "payload": { "mimeType": "text/plain", "headers": [
+                    header("From", "Ann <ann@x.com>"), header("To", "Me <me@gmail.com>"),
+                    header("Subject", subj), header("Message-ID", mid),
+                ]},
+            }),
+        );
+    }
+
+    let server = {
+        let (counters, metadata, full_requests, id_a, id_b, id_c) =
+            (counters.clone(), metadata.clone(), full_requests.clone(), id_a.clone(), id_b.clone(), id_c.clone());
+        FakeServer::start(move |request| {
+            if request.path == "/token" {
+                return token_reply(&counters.tokens);
+            }
+            if request.path == "/batch/gmail/v1" {
+                return gmail_batch(request, &metadata);
+            }
+            if request.path == "/gmail/v1/users/me/messages" {
+                let items: Vec<Value> = if request.param("q").is_some() {
+                    [&id_a, &id_b, &id_c].iter().map(|id| json!({ "id": id })).collect()
+                } else {
+                    Vec::new()
+                };
+                return Reply::json(json!({ "messages": items, "resultSizeEstimate": items.len() }));
+            }
+            if request.path.starts_with("/gmail/v1/users/me/messages/") && request.param("format") == Some("full") {
+                full_requests.fetch_add(1, Ordering::SeqCst);
+            }
+            gmail_reply(request, &counters, &metadata)
+        })
+    };
+
+    let raw_for = |subject: &str, body: &str, mid: &str| -> Vec<u8> {
+        format!(
+            "From: Ann <ann@x.com>\r\nTo: Me <me@gmail.com>\r\nSubject: {subject}\r\nMessage-ID: {mid}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}\r\n"
+        )
+        .into_bytes()
+    };
+    let imap = FakeImapServer::start(FakeImapConfig {
+        messages: vec![
+            FakeImapMessage {
+                uid: 1,
+                msg_id: msg_a_id,
+                thr_id: 1,
+                labels: vec![],
+                flags: vec!["\\Seen".into()],
+                internal_date: "14-Nov-2026 08:00:00 +0000".into(),
+                size: 256,
+                bodystructure: r#"("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 10 1 NIL NIL NIL)"#.into(),
+                headers: vec![
+                    ("From".into(), "Ann <ann@x.com>".into()),
+                    ("To".into(), "Me <me@gmail.com>".into()),
+                    ("Subject".into(), "One".into()),
+                    ("Message-ID".into(), "<m1@x>".into()),
+                ],
+                raw: Some(raw_for("One", "IMAP body one", "<m1@x>")),
+            },
+            FakeImapMessage {
+                uid: 2,
+                msg_id: msg_b_id,
+                thr_id: 2,
+                labels: vec![],
+                flags: vec!["\\Seen".into()],
+                internal_date: "14-Nov-2026 07:59:00 +0000".into(),
+                size: 256,
+                bodystructure: r#"("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 10 1 NIL NIL NIL)"#.into(),
+                headers: vec![
+                    ("From".into(), "Ann <ann@x.com>".into()),
+                    ("To".into(), "Me <me@gmail.com>".into()),
+                    ("Subject".into(), "Two".into()),
+                    ("Message-ID".into(), "<m2@x>".into()),
+                ],
+                raw: Some(raw_for("Two", "IMAP body two", "<m2@x>")),
+            },
+            FakeImapMessage {
+                uid: 3,
+                msg_id: msg_c_id,
+                thr_id: 3,
+                labels: vec![],
+                flags: vec!["\\Seen".into()],
+                internal_date: "14-Nov-2026 07:58:00 +0000".into(),
+                size: 256,
+                bodystructure: r#"("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 10 1 NIL NIL NIL)"#.into(),
+                headers: vec![
+                    ("From".into(), "Ann <ann@x.com>".into()),
+                    ("To".into(), "Me <me@gmail.com>".into()),
+                    ("Subject".into(), "Three".into()),
+                    ("Message-ID".into(), "<m3@x>".into()),
+                ],
+                raw: None,
+            },
+        ],
+        matches: Box::new(|query, msg| query == "all" || (query == "one" && msg.uid == 1)),
+        ..FakeImapConfig::default()
+    });
+
+    let lookup = MemoryLookup::new();
+    let mut cfg_a = server_config(&server);
+    cfg_a.endpoints.gmail.imap = Some(imap.endpoint.clone());
+    cfg_a.device_sync = Some(Network::Loopback(lookup.clone()));
+    sign_in_all(&cfg_a, &[mail_account("me@gmail.com", "google")]);
+    let keychain = Keychain::new(cfg_a.keychain_service.clone(), cfg_a.keychain_directory.clone());
+    let mut sign_ins = keychain.load().unwrap();
+    sign_ins.last_clients.insert("google".into(), OAuthClient { id: "client".into(), secret: Some("secret".into()) });
+    keychain.store(&sign_ins).unwrap();
+    let engine_a = Engine::start(cfg_a.clone());
+    call(&engine_a, "sync.enable", json!({})).unwrap();
+    until("A mailboxes", || call(&engine_a, "mailboxes", json!({})).unwrap()["me@gmail.com"].as_array().is_some_and(|boxes| !boxes.is_empty()));
+
+    call(&engine_a, "mail.search", json!({ "query": "one" })).unwrap();
+    // A reads m1 via IMAP (0 REST format=full).
+    let shown_a = call(&engine_a, "mail.show", json!({ "id": "me@gmail.com|m1@x" })).unwrap();
+    assert_eq!(shown_a["messages"][0]["text"], "IMAP body one");
+    assert_eq!(imap.body_fetches.load(Ordering::SeqCst), 1);
+    assert_eq!(full_requests.load(Ordering::SeqCst), 0);
+
+    // B joins with IMAP enabled too and establishes a direct connection to A.
+    let mut cfg_b = server_config(&server);
+    cfg_b.endpoints.gmail.imap = Some(imap.endpoint.clone());
+    cfg_b.device_sync = Some(Network::Loopback(lookup.clone()));
+    let engine_b = Engine::start(cfg_b.clone());
+    let ticket = call(&engine_a, "sync.pair_ticket", json!({})).unwrap()["ticket"].as_str().unwrap().to_string();
+    call(&engine_b, "sync.join", json!({ "ticket": ticket })).unwrap();
+    until("B mailboxes", || call(&engine_b, "mailboxes", json!({})).unwrap()["me@gmail.com"].as_array().is_some_and(|boxes| !boxes.is_empty()));
+    until("B connected directly to A", || engine_b.direct_peers() == 1);
+    call(&engine_b, "mail.search", json!({ "query": "all" })).unwrap();
+
+    // 1. Direct peer beats IMAP: B opens m1 (A holds it) -> served by A, no new IMAP fetch.
+    let shown_b1 = call(&engine_b, "mail.show", json!({ "id": "me@gmail.com|m1@x" })).unwrap();
+    assert_eq!(shown_b1["messages"][0]["text"], "IMAP body one");
+    assert_eq!(imap.body_fetches.load(Ordering::SeqCst), 1, "direct peer beats IMAP");
+    assert_eq!(full_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(received(&engine_b)["messages"], 1);
+
+    // 2. IMAP beats REST when direct peer lacks it: B opens m2 (A does not hold it) -> IMAP answers.
+    let shown_b2 = call(&engine_b, "mail.show", json!({ "id": "me@gmail.com|m2@x" })).unwrap();
+    assert_eq!(shown_b2["messages"][0]["text"], "IMAP body two");
+    assert_eq!(imap.body_fetches.load(Ordering::SeqCst), 2, "IMAP fetches when direct peer misses");
+    assert_eq!(full_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(received(&engine_b)["messages"], 1);
+
+    // 3. REST fallback when neither peer nor IMAP has it: B opens m3 (raw: None on IMAP) -> REST.
+    let shown_b3 = call(&engine_b, "mail.show", json!({ "id": "me@gmail.com|m3@x" })).unwrap();
+    assert_eq!(shown_b3["messages"][0]["text"], format!("Body of {id_c}"));
+    assert_eq!(imap.body_fetches.load(Ordering::SeqCst), 3);
+    assert_eq!(full_requests.load(Ordering::SeqCst), 1);
+
     drop(engine_b);
     drop(engine_a);
 }

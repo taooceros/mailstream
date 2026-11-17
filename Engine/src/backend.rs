@@ -136,6 +136,21 @@ impl Backend {
         }
     }
 
+    /// The full message over IMAP when available (Gmail only, MS-400), costing no REST quota.
+    pub async fn imap_content(
+        &self,
+        mailbox: &str,
+        id: &str,
+        directory: PathBuf,
+        url_base: String,
+        priority: Priority,
+    ) -> Option<MessageContent> {
+        match self {
+            Self::Gmail(gmail) => gmail.imap_content(mailbox, id, directory, url_base, priority).await,
+            Self::Graph(_) => None,
+        }
+    }
+
     pub async fn set_flag(&self, flag: Flag, on: bool, ids: &[String]) -> Result<(), ApiError> {
         match self {
             Self::Gmail(gmail) => gmail.set_flag(flag, on, ids).await,

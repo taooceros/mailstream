@@ -424,6 +424,7 @@ fn searches_gmail_over_imap_reuses_connection_and_reconnects_when_dropped() {
                     ("Subject".into(), "=?UTF-8?B?5Y+R56Wo?= #1".into()),
                     ("Message-ID".into(), "<inv1@x>".into()),
                 ],
+                raw: None,
             },
             FakeImapMessage {
                 uid: 102,
@@ -441,6 +442,7 @@ fn searches_gmail_over_imap_reuses_connection_and_reconnects_when_dropped() {
                     ("Message-ID".into(), "<inv2@x>".into()),
                     ("In-Reply-To".into(), "<inv1@x>".into()),
                 ],
+                raw: None,
             },
             FakeImapMessage {
                 uid: 103,
@@ -457,6 +459,7 @@ fn searches_gmail_over_imap_reuses_connection_and_reconnects_when_dropped() {
                     ("Subject".into(), "Unrelated".into()),
                     ("Message-ID".into(), "<bob@x>".into()),
                 ],
+                raw: None,
             },
         ],
         matches: Box::new(|query, msg| {
@@ -495,7 +498,9 @@ fn searches_gmail_over_imap_reuses_connection_and_reconnects_when_dropped() {
     let second = call(&engine, "mail.search", json!({ "query": "unrelated" })).unwrap();
     assert_eq!(ids(&second), ["me@gmail.com|bob@x"]);
     assert_eq!(second["conversations"][0]["hasAttachment"], false);
-    assert_eq!(imap.connections.load(Ordering::SeqCst), 2, "initial failed auth + 1 long-lived connection");
+    let before_second = imap.connections.load(Ordering::SeqCst);
+    assert!((2..=3).contains(&before_second), "failed auth + 1–2 pooled connections, got {before_second}");
+    assert_eq!(imap.connections.load(Ordering::SeqCst), before_second);
     assert_eq!(imap.searches.load(Ordering::SeqCst), 2);
     assert_eq!(imap.fetches.load(Ordering::SeqCst), 2);
 
@@ -503,7 +508,7 @@ fn searches_gmail_over_imap_reuses_connection_and_reconnects_when_dropped() {
     imap.config.drop_once_on_search.store(true, Ordering::SeqCst);
     let third = call(&engine, "mail.search", json!({ "query": "unrelated" })).unwrap();
     assert_eq!(ids(&third), ["me@gmail.com|bob@x"]);
-    assert_eq!(imap.connections.load(Ordering::SeqCst), 3);
+    assert_eq!(imap.connections.load(Ordering::SeqCst), before_second + 1);
 
     drop(engine);
     cleanup(&config);
@@ -592,6 +597,7 @@ fn imap_search_probes_dead_sessions_runs_concurrently_reuses_quick_and_keeps_abo
                 ("Subject".into(), format!("Report #{uid}")),
                 ("Message-ID".into(), format!("<r{uid}@x>")),
             ],
+                raw: None,
         })
         .collect();
 
@@ -983,5 +989,210 @@ fn the_cached_list_shows_before_any_provider_answers() {
     });
     let listed = answer.recv_timeout(Duration::from_secs(3)).expect("the held list answers at once");
     assert!(listed.contains(&"me@gmail.com|i00@x".to_string()) && listed.contains(&"me@outlook.com|g1@outlook".to_string()), "{listed:?}");
+    cleanup(&config);
+}
+
+#[test]
+fn fetches_gmail_body_over_imap_before_api_and_falls_back_when_missing() {
+    use crate::fake_imap::{FakeImapConfig, FakeImapMessage, FakeImapServer};
+    use crate::testkit::{mail_account, server_config, sign_in_all};
+
+    let counters = Arc::new(GmailCounters {
+        tokens: AtomicUsize::new(0),
+        labels: AtomicUsize::new(0),
+        listings: AtomicUsize::new(0),
+    });
+    let full_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+    let attachment_requests = Arc::new(AtomicUsize::new(0));
+    let mut metadata = gmail_metadata();
+    let msg_id_1 = 0x11be0a6e39d8e501u64;
+    let id_1 = format!("{msg_id_1:x}");
+    let msg_id_2 = 0x11be0a6e39d8e502u64;
+    let id_2 = format!("{msg_id_2:x}");
+    metadata.insert(
+        id_1.clone(),
+        json!({
+            "id": id_1, "threadId": "t-imap-1", "labelIds": ["INBOX"],
+            "internalDate": BASE_MS.to_string(), "sizeEstimate": 4096,
+            "payload": { "mimeType": "multipart/mixed", "headers": [
+                header("From", "Ann <ann@x.com>"), header("To", "Me <me@gmail.com>"),
+                header("Subject", "IMAP Body"), header("Message-ID", "<imap1@x>"),
+            ]},
+        }),
+    );
+    metadata.insert(
+        id_2.clone(),
+        json!({
+            "id": id_2, "threadId": "t-imap-2", "labelIds": ["INBOX"],
+            "internalDate": (BASE_MS - 60_000).to_string(), "sizeEstimate": 512,
+            "payload": { "mimeType": "text/plain", "headers": [
+                header("From", "Bob <bob@x.com>"), header("To", "Me <me@gmail.com>"),
+                header("Subject", "Nil Body"), header("Message-ID", "<imap2@x>"),
+            ]},
+        }),
+    );
+    metadata.insert(
+        "7a0".into(),
+        json!({
+            "id": "7a0", "threadId": "t-trash", "labelIds": ["TRASH"],
+            "internalDate": (BASE_MS - 120_000).to_string(), "sizeEstimate": 256,
+            "payload": { "mimeType": "text/plain", "headers": [
+                header("From", "Dee <dee@x.com>"), header("To", "Me <me@gmail.com>"),
+                header("Subject", "Trashed"), header("Message-ID", "<trash@x>"),
+            ]},
+        }),
+    );
+
+    let server = {
+        let (counters, metadata, full_ids, attachment_requests, id_1, id_2) = (
+            counters.clone(),
+            metadata.clone(),
+            full_ids.clone(),
+            attachment_requests.clone(),
+            id_1.clone(),
+            id_2.clone(),
+        );
+        FakeServer::start(move |request| {
+            if request.path == "/token" {
+                return token_reply(&counters.tokens);
+            }
+            if request.path == "/batch/gmail/v1" {
+                return gmail_batch(request, &metadata);
+            }
+            if request.path == "/gmail/v1/users/me/messages" {
+                let ids: Vec<String> = match (request.param("labelIds"), request.param("q")) {
+                    (Some("INBOX"), _) => vec![id_1.clone(), id_2.clone()],
+                    (Some("TRASH"), _) => vec!["7a0".into()],
+                    _ => vec![],
+                };
+                let items: Vec<Value> = ids.iter().map(|id| json!({ "id": id })).collect();
+                return Reply::json(json!({ "messages": items, "resultSizeEstimate": items.len() }));
+            }
+            if request.path.contains("/attachments/") {
+                attachment_requests.fetch_add(1, Ordering::SeqCst);
+            } else if let Some(id) = request.path.strip_prefix("/gmail/v1/users/me/messages/")
+                && request.param("format") == Some("full")
+            {
+                full_ids.lock().unwrap().push(id.to_string());
+            }
+            gmail_reply(request, &counters, &metadata)
+        })
+    };
+
+    let raw_1 = concat!(
+        "From: Ann <ann@x.com>\r\n",
+        "To: Me <me@gmail.com>\r\n",
+        "Cc: Cy <cy@x.com>\r\n",
+        "Reply-To: Ann Reply <ann-reply@x.com>\r\n",
+        "References: <ref0@x>\r\n",
+        "Subject: IMAP Body\r\n",
+        "Message-ID: <imap1@x>\r\n",
+        "Content-Type: multipart/mixed; boundary=\"mix\"\r\n\r\n",
+        "--mix\r\n",
+        "Content-Type: multipart/related; boundary=\"rel\"\r\n\r\n",
+        "--rel\r\n",
+        "Content-Type: multipart/alternative; boundary=\"alt\"\r\n\r\n",
+        "--alt\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n\r\n",
+        "Hello via IMAP\r\n",
+        "--alt\r\n",
+        "Content-Type: text/html; charset=utf-8\r\n\r\n",
+        "<p>Hello <img src=\"cid:logo@x\"></p>\r\n",
+        "--alt--\r\n",
+        "--rel\r\n",
+        "Content-Type: image/png; name=\"logo.png\"\r\n",
+        "Content-ID: <logo@x>\r\n",
+        "Content-Transfer-Encoding: base64\r\n\r\n",
+        "cG5n\r\n",
+        "--rel--\r\n",
+        "--mix\r\n",
+        "Content-Type: application/pdf\r\n",
+        "Content-Disposition: attachment; filename=\"menu.pdf\"\r\n",
+        "Content-Transfer-Encoding: base64\r\n\r\n",
+        "JVBERg==\r\n",
+        "--mix--\r\n"
+    );
+
+    let imap = FakeImapServer::start(FakeImapConfig {
+        messages: vec![
+            FakeImapMessage {
+                uid: 101,
+                msg_id: msg_id_1,
+                thr_id: 0x22be0a6e39d8e501,
+                labels: vec!["\\Inbox".into()],
+                flags: vec!["\\Seen".into()],
+                internal_date: "14-Nov-2026 08:00:00 +0000".into(),
+                size: raw_1.len() as u32,
+                bodystructure: r#"(("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 14 1 NIL NIL NIL)("APPLICATION" "PDF" ("NAME" "menu.pdf") NIL NIL "BASE64" 8 NIL ("ATTACHMENT" ("FILENAME" "menu.pdf")) NIL) "MIXED" ("BOUNDARY" "mix") NIL NIL)"#.into(),
+                headers: vec![
+                    ("From".into(), "Ann <ann@x.com>".into()),
+                    ("To".into(), "Me <me@gmail.com>".into()),
+                    ("Subject".into(), "IMAP Body".into()),
+                    ("Message-ID".into(), "<imap1@x>".into()),
+                ],
+                raw: Some(raw_1.as_bytes().to_vec()),
+            },
+            FakeImapMessage {
+                uid: 102,
+                msg_id: msg_id_2,
+                thr_id: 0x22be0a6e39d8e502,
+                labels: vec!["\\Inbox".into()],
+                flags: vec!["\\Seen".into()],
+                internal_date: "14-Nov-2026 07:59:00 +0000".into(),
+                size: 512,
+                bodystructure: r#"("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 10 1 NIL NIL NIL)"#.into(),
+                headers: vec![
+                    ("From".into(), "Bob <bob@x.com>".into()),
+                    ("To".into(), "Me <me@gmail.com>".into()),
+                    ("Subject".into(), "Nil Body".into()),
+                    ("Message-ID".into(), "<imap2@x>".into()),
+                ],
+                raw: None,
+            },
+        ],
+        ..FakeImapConfig::default()
+    });
+
+    let mut config = server_config(&server);
+    config.endpoints.gmail.imap = Some(imap.endpoint.clone());
+    sign_in_all(&config, &[mail_account("me@gmail.com", "google")]);
+    let engine = Engine::start(config.clone());
+    wait_until("mailboxes", || {
+        call(&engine, "mailboxes", json!({})).unwrap()["me@gmail.com"].as_array().is_some_and(|boxes| !boxes.is_empty())
+    });
+    call(&engine, "mail.list", json!({ "limit": 25 })).unwrap();
+
+    // 1. Message with raw MIME on IMAP loads without touching REST format=full or attachments.
+    let shown = call(&engine, "mail.show", json!({ "id": "me@gmail.com|imap1@x", "html": true })).unwrap();
+    assert!(!full_ids.lock().unwrap().contains(&id_1), "IMAP body must avoid REST format=full: {:?}", full_ids.lock().unwrap());
+    assert_eq!(attachment_requests.load(Ordering::SeqCst), 0, "IMAP body must avoid REST attachment fetch");
+    let fetches_after_1 = imap.body_fetches.load(Ordering::SeqCst);
+    assert!(fetches_after_1 >= 1);
+    let msg = &shown["messages"][0];
+    assert_eq!(msg["text"], "Hello via IMAP");
+    assert_eq!(msg["cc"][0], "Cy <cy@x.com>");
+    let html = msg["html"].as_str().unwrap();
+    assert!(html.starts_with("<p>Hello <img src=\"file://") && html.ends_with("/0-logo.png\"></p>"), "{html}");
+    let att_path = msg["attachments"][0]["path"].as_str().unwrap();
+    assert_eq!(std::fs::read(att_path).unwrap(), b"%PDF");
+
+    // 2. Message returning BODY[] NIL falls back to REST format=full without disabling IMAP.
+    let shown_2 = call(&engine, "mail.show", json!({ "id": "me@gmail.com|imap2@x" })).unwrap();
+    assert_eq!(shown_2["messages"][0]["text"], format!("Body of {id_2}"));
+    assert!(full_ids.lock().unwrap().contains(&id_2), "BODY[] NIL must fall back to REST format=full");
+
+    // Second show of imap1 hits cache without fetching over IMAP or REST again.
+    let fetches_before_repeat = imap.body_fetches.load(Ordering::SeqCst);
+    call(&engine, "mail.show", json!({ "id": "me@gmail.com|imap1@x" })).unwrap();
+    assert_eq!(imap.body_fetches.load(Ordering::SeqCst), fetches_before_repeat);
+
+    // 3. Message in Trash skips All Mail IMAP and falls back to REST format=full.
+    let trash = call(&engine, "mail.list", json!({ "mailbox": "trash" })).unwrap();
+    let trash_id = trash["conversations"][0]["id"].as_str().unwrap();
+    let shown_trash = call(&engine, "mail.show", json!({ "id": trash_id })).unwrap();
+    assert_eq!(shown_trash["messages"][0]["text"], "Body of 7a0");
+    assert!(full_ids.lock().unwrap().contains(&"7a0".to_string()));
+    assert_eq!(imap.body_fetches.load(Ordering::SeqCst), fetches_before_repeat);
+    drop(engine);
     cleanup(&config);
 }

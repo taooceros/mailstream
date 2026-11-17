@@ -667,6 +667,8 @@ impl PeerSync {
             let doc = group.doc.as_ref().expect("just set");
             doc.start_sync(Vec::new()).await.map_err(failed)?;
         }
+        drop(group);
+        inner.services_online();
         Ok(namespace.to_string())
     }
 
@@ -1121,7 +1123,10 @@ impl Inner {
             self.admit(&doc, me, by, false).await?;
             self.gate.add(doc.id(), me);
         }
-        doc.start_sync(nodes).await.map_err(failed)
+        doc.start_sync(nodes).await.map_err(failed)?;
+        drop(group);
+        self.services_online();
+        Ok(())
     }
 
     /// The other admitted devices of the group, by the descriptions they wrote; iroh-docs adds

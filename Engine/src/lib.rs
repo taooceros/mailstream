@@ -49,6 +49,7 @@ pub mod json;
 mod keychain;
 pub mod mail;
 mod mime;
+mod mime_parse;
 pub mod model;
 mod oauth;
 mod omp;
@@ -495,6 +496,11 @@ impl Engine {
                 Err(error) => Err(EngineError::failed(format!("The engine stopped the request: {error}"))),
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn direct_peers(&self) -> usize {
+        self.core.mail.peer_mail().direct_connected_count()
     }
 }
 

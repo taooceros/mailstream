@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::api::{self, Api, ApiError, GooglePage, Listing, Priority, Request};
-use crate::assembly::{AttachedMessage, MessageAssembly};
+use crate::assembly::{AttachedMessage, MessageAssembly, Segment, combine};
 use crate::backend::{EnvelopePage, SearchHit};
 use crate::model::{Address, DISTANT_PAST, Envelope, Mailbox, MailboxRole, MessageContent, ProviderCategory, date_from_unix};
 use crate::text;
@@ -366,6 +366,28 @@ impl Gmail {
             text::parse_address_list(payload.header("Reply-To").unwrap_or("")),
             text::parse_message_id_list(payload.header("References")),
         ))
+    }
+
+    /// The full message fetched from Gmail's `[Gmail]/All Mail` over IMAP (`BODY.PEEK[]`), costing
+    /// no REST quota (MS-400); `None` when IMAP is off/unavailable or All Mail lacks it (e.g.
+    /// Trash or Spam).
+    pub async fn imap_content(
+        &self,
+        mailbox: &str,
+        id: &str,
+        directory: PathBuf,
+        url_base: String,
+        priority: Priority,
+    ) -> Option<MessageContent> {
+        if matches!(mailbox, "TRASH" | "SPAM") {
+            return None;
+        }
+        let msg_id = u64::from_str_radix(id, 16).ok()?;
+        let raw = self.imap.body(msg_id, priority).await.ok().flatten()?;
+        tokio::task::spawn_blocking(move || crate::mime_parse::parse_message(&raw, directory, url_base).ok())
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Bodies Gmail left out of the message (`body.attachmentId`), by attachment id.
@@ -1013,7 +1035,7 @@ impl EnvelopeCache {
     /// when IMAP is unavailable. Gmail's message ids are its `X-GM-MSGID`s in hex.
     async fn imap_lookup(self: &Arc<Self>, ids: &[String], priority: Priority) -> Vec<Entry> {
         let numeric: Vec<u64> = ids.iter().filter_map(|id| u64::from_str_radix(id, 16).ok()).collect();
-        match self.imap.messages(&numeric).await {
+        match self.imap.messages(&numeric, priority).await {
             Ok(messages) if !messages.is_empty() => {
                 self.imap_entries(messages, priority).await.map(|(entries, _)| entries).unwrap_or_default()
             }
@@ -1121,13 +1143,6 @@ fn entry(message: &GmailMessage, has_attachment: Option<bool>) -> Entry {
 
 // MARK: - Content
 
-/// What a part shows. `primary` when `html` is a real HTML body; other HTML (an inline image)
-/// only joins when a sibling has one.
-struct Segment {
-    html: Option<String>,
-    text: Option<String>,
-    primary: bool,
-}
 
 /// Walks a `format=full` payload: picks the HTML and plain bodies, stores every other part
 /// through `MessageAssembly` in part order, and renders forwarded messages inline.
@@ -1223,30 +1238,6 @@ impl Renderer {
     }
 }
 
-/// Siblings shown one after another (multipart/mixed, related and the rest).
-fn combine(mut segments: Vec<Segment>) -> Option<Segment> {
-    if segments.len() <= 1 {
-        return segments.pop();
-    }
-    let primary = segments.iter().any(|segment| segment.primary);
-    let html = primary.then(|| {
-        segments
-            .iter()
-            .map(|segment| segment.html.clone().unwrap_or_else(|| text::plain_to_html(segment.text.as_deref().unwrap_or(""))))
-            .collect::<String>()
-    });
-    let has_text = segments.iter().any(|segment| segment.text.is_some());
-    let text = has_text.then(|| {
-        segments
-            .iter()
-            .filter_map(|segment| {
-                segment.text.clone().or_else(|| if segment.primary { segment.html.as_deref().map(text::strip_html) } else { None })
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    });
-    Some(Segment { html, text, primary })
-}
 
 #[cfg(test)]
 mod tests {
@@ -1346,6 +1337,7 @@ mod tests {
                     ("Subject".into(), "Receipt".into()),
                     ("Message-ID".into(), "<r42@x>".into()),
                 ],
+                raw: None,
             }],
             ..FakeImapConfig::default()
         });
@@ -1466,6 +1458,7 @@ mod tests {
                 size: 1000 + n,
                 bodystructure: bodystructure.into(),
                 headers: headers.into_iter().map(|(name, value)| (name.to_string(), value)).collect(),
+                raw: None,
             });
             inbox.push(id);
         }

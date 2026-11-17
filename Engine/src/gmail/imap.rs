@@ -13,7 +13,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_imap::error::Error as ImapError;
-use async_imap::imap_proto::{BodyContentCommon, BodyStructure, MailboxDatum, Response, Status};
+use async_imap::imap_proto::{AttributeValue, BodyContentCommon, BodyStructure, MailboxDatum, Response, Status};
 use async_imap::types::{Fetch, Flag, Name, NameAttribute};
 use async_imap::{Authenticator, Client, Session};
 use base64::Engine as _;
@@ -27,12 +27,13 @@ use tokio_rustls::rustls;
 use tokio_rustls::rustls::pki_types::ServerName;
 
 use super::{GmailEndpoints, ImapEndpoint};
-use crate::api::Api;
+use crate::api::{Api, Priority};
 use crate::model::{Address, Date, date_from_unix};
 use crate::text;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(20);
+const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 /// A connection unused this long must answer a `NOOP` within `PROBE_TIMEOUT` before it carries a
 /// search: one a sleep or a NAT dropped without a word would otherwise hold the search for all of
 /// `SEARCH_TIMEOUT` (MS-371).
@@ -41,6 +42,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(if cfg!(test) { 500 } else
 /// Connections an account's searches use at once. Gmail allows 15 per account across every
 /// client, so this leaves room for the user's other ones.
 const MAX_SESSIONS: usize = 4;
+/// Background prefetches share at most half the IMAP pool so interactive searches and message
+/// opens never queue behind a list's preview burst.
+const MAX_BACKGROUND_SESSIONS: usize = 2;
 /// UIDs one `UID FETCH` asks for, keeping each command line short when `limit` reaches 500.
 const FETCH_CHUNK: usize = 100;
 /// How long a quick search's matches wait for the full search of the same query that follows it.
@@ -210,6 +214,8 @@ pub(super) struct ImapClient {
     state: Mutex<ImapState>,
     /// One per connection a search may hold: searches beyond `MAX_SESSIONS` wait for one.
     slots: Semaphore,
+    /// Bounds background prefetches so interactive requests always find a session.
+    background_slots: Semaphore,
 }
 
 #[derive(Debug)]
@@ -221,7 +227,13 @@ pub(super) enum Fallback {
 
 impl ImapClient {
     pub(super) fn new(api: Arc<Api>, endpoints: Arc<GmailEndpoints>) -> Self {
-        Self { api, endpoints, state: Mutex::new(ImapState::default()), slots: Semaphore::new(MAX_SESSIONS) }
+        Self {
+            api,
+            endpoints,
+            state: Mutex::new(ImapState::default()),
+            slots: Semaphore::new(MAX_SESSIONS),
+            background_slots: Semaphore::new(MAX_BACKGROUND_SESSIONS),
+        }
     }
 
     /// The newest `limit` messages in All Mail matching `query`, newest first. A `quick` search
@@ -236,7 +248,7 @@ impl ImapClient {
         };
         let known = known.as_ref();
         let found = self
-            .run(|mut live| async move {
+            .run(Priority::Interactive, SEARCH_TIMEOUT, |mut live| async move {
                 let found = search_on_session(&mut live, query, limit, known).await;
                 (live, found)
             })
@@ -251,12 +263,23 @@ impl ImapClient {
     /// holds, in no particular order, each with the inbox category Gmail put it in among its
     /// labels (MS-395). Messages in Spam or Trash, which All Mail leaves out, and messages gone
     /// are missing from the answer.
-    pub(super) async fn messages(&self, ids: &[u64]) -> Result<Vec<ImapMessage>, Fallback> {
+    pub(super) async fn messages(&self, ids: &[u64], priority: Priority) -> Result<Vec<ImapMessage>, Fallback> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        self.run(|mut live| async move {
+        self.run(priority, SEARCH_TIMEOUT, |mut live| async move {
             let found = messages_on_session(&mut live, ids).await;
+            (live, found)
+        })
+        .await
+    }
+
+    /// The raw RFC 5322 bytes of `msg_id` (`X-GM-MSGID`) from All Mail (`BODY.PEEK[]`, leaving
+    /// `\Seen` untouched, MS-400). Returns `Ok(None)` when All Mail lacks the message (e.g.
+    /// Trash, Spam, or deleted) without disabling IMAP.
+    pub(super) async fn body(&self, msg_id: u64, priority: Priority) -> Result<Option<Vec<u8>>, Fallback> {
+        self.run(priority, BODY_TIMEOUT, |mut live| async move {
+            let found = body_on_session(&mut live, msg_id).await;
             (live, found)
         })
         .await
@@ -276,11 +299,16 @@ impl ImapClient {
     /// Runs `work` on the most recently used open connection, or on a new one when none is
     /// left or the idle one failed, holding one of the account's `MAX_SESSIONS` slots meanwhile.
     /// `work` takes the connection and hands it back with its answer.
-    async fn run<T, F>(&self, work: impl Fn(LiveSession) -> F) -> Result<T, Fallback>
+    async fn run<T, F>(&self, priority: Priority, timeout: Duration, work: impl Fn(LiveSession) -> F) -> Result<T, Fallback>
     where
         F: Future<Output = (LiveSession, Result<T, SearchError>)>,
     {
         let endpoint = self.ready()?;
+        let _bg = if priority == Priority::Background {
+            Some(self.background_slots.acquire().await.expect("IMAP background slots are never closed"))
+        } else {
+            None
+        };
         let _slot = self.slots.acquire().await.expect("IMAP slots are never closed");
         // Another search may have failed while this one waited for a slot.
         if self.disabled() {
@@ -288,7 +316,7 @@ impl ImapClient {
         }
 
         if let Some(live) = self.idle_session().await {
-            match tokio::time::timeout(SEARCH_TIMEOUT, work(live)).await {
+            match tokio::time::timeout(timeout, work(live)).await {
                 Ok((live, Ok(found))) => {
                     self.put_back(live);
                     return Ok(found);
@@ -311,7 +339,7 @@ impl ImapClient {
                 return Err(Fallback::Failed);
             }
         };
-        match tokio::time::timeout(SEARCH_TIMEOUT, work(live)).await {
+        match tokio::time::timeout(timeout, work(live)).await {
             Ok((live, Ok(found))) => {
                 self.put_back(live);
                 Ok(found)
@@ -525,6 +553,45 @@ async fn messages_on_session(live: &mut LiveSession, ids: &[u64]) -> Result<Vec<
         }
     }
     Ok(found.into_values().collect())
+}
+
+async fn body_on_session(live: &mut LiveSession, msg_id: u64) -> Result<Option<Vec<u8>>, SearchError> {
+    let uids = uid_search_checked(&mut live.session, &format!("X-GM-MSGID {msg_id}")).await?;
+    let Some(&uid) = uids.first() else {
+        return Ok(None);
+    };
+    uid_fetch_body_checked(&mut live.session, uid).await
+}
+
+async fn uid_fetch_body_checked(session: &mut Session<Transport>, uid: u32) -> Result<Option<Vec<u8>>, SearchError> {
+    let tag = session.run_command(&format!("UID FETCH {uid} BODY.PEEK[]")).await.map_err(|_| SearchError::Protocol)?;
+    let mut body = None;
+    let mut bye = false;
+    loop {
+        let Some(resp) = session.read_response().await.map_err(|_| SearchError::Protocol)? else {
+            return Err(SearchError::Protocol);
+        };
+        match resp.parsed() {
+            Response::Fetch(_, attrs) => {
+                for attr in attrs {
+                    if let AttributeValue::BodySection { section: None, data: Some(bytes), .. }
+                    | AttributeValue::Rfc822(Some(bytes)) = attr
+                    {
+                        body = Some(bytes.to_vec());
+                    }
+                }
+            }
+            Response::Data { status: Status::Bye, .. } => {
+                bye = true;
+            }
+            Response::Done { tag: done_tag, status, .. } if *done_tag == tag => match status {
+                Status::Ok if !bye => return Ok(body),
+                Status::No | Status::Bad if !bye => return Err(SearchError::Query),
+                _ => return Err(SearchError::Protocol),
+            },
+            _ => {}
+        }
+    }
 }
 
 /// The messages of `uids`, `FETCH_CHUNK` per `UID FETCH`, with the UID each came back under.
