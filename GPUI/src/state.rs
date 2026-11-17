@@ -23,6 +23,7 @@ use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::component::input::{Escape, InputEvent, InputState};
 use gpui::component::menu::PopupMenu;
+use gpui::component::notification::NotificationList;
 use gpui::{
     AnyWindowHandle, App, AppContext, Context, Entity, FocusHandle, Focusable, KeyBinding, ListAlignment, ListOffset,
     ListState, Modifiers, Pixels,
@@ -509,6 +510,8 @@ pub struct MailApp {
     drawn_rows: HashSet<String>,
     /// The window, for the toasts (`show_toast`) asked for from a task without one at hand.
     pub window: AnyWindowHandle,
+    /// Toasts over the window, painted in a deferred layer above any native Mac web view.
+    pub notifications: Entity<NotificationList>,
     /// The row under the pointer, which shows its actions.
     pub hovered_row: Option<String>,
     /// The list's and the open bundle's rows (rows and group titles differ in height).
@@ -592,6 +595,7 @@ impl MailApp {
         let chat = cx.new(|cx| ChatPane::new(window, cx));
         let calendar = cx.new(|cx| CalendarPane::new(window, cx));
         let compose = cx.new(|_| ComposeColumn::new());
+        let notifications = cx.new(|cx| NotificationList::new(window, cx));
         let subscriptions = vec![
             cx.subscribe_in(&search, window, Self::on_search_event),
             // The kit's components follow the appearance with the app (`design::sync_kit_theme`),
@@ -622,6 +626,7 @@ impl MailApp {
             // The column's placement and width lay the window out.
             cx.observe(&compose, |_, _, cx| cx.notify()),
             cx.subscribe_in(&compose, window, Self::on_compose_event),
+            cx.observe(&notifications, |_, _, cx| cx.notify()),
         ];
         let mut this = Self {
             focus: cx.focus_handle(),
@@ -683,6 +688,7 @@ impl MailApp {
             compose,
             forward_pending: None,
             bench: Bench::from_env(cx),
+            notifications,
             list_share: crate::split::shares(crate::split::LIST_WIDTH).default,
             calendar_share: crate::split::shares(crate::split::CALENDAR_WIDTH).default,
             split_left: 0.,

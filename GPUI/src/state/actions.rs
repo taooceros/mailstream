@@ -6,7 +6,6 @@ use super::*;
 use crate::compose::{ColumnEvent, ComposeColumn, ComposeMode, MovedReply, ReplyEvent};
 use crate::engine::{self, BatchResult};
 use crate::{controls, design};
-use gpui::component::WindowExt;
 use gpui::component::notification::Notification;
 use mailstream::{UndoAction, Undone};
 
@@ -635,11 +634,12 @@ impl MailApp {
     /// window can't be reached from inside it.
     fn push_toast(&mut self, cx: &mut Context<Self>, make: impl FnOnce(&'static design::Palette) -> Notification + 'static) {
         let window = self.window;
+        let notifications = self.notifications.clone();
         cx.defer(move |cx| {
             window
                 .update(cx, |_, window, cx| {
                     let p = design::palette(window.appearance());
-                    window.push_notification(make(p), cx);
+                    notifications.update(cx, |list, cx| list.push(make(p), window, cx));
                 })
                 .ok();
         });

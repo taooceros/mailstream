@@ -24,7 +24,7 @@ use std::rc::Rc;
 use std::sync::LazyLock;
 
 use block2::RcBlock;
-use gpui::{Bounds, Pixels, SharedString, Window};
+use gpui::{Bounds, Pixels, SharedString, Window, WindowCompositionSurface};
 use mailstream::{
     HtmlTheme, InlineParts, MAIL_WEB_COLOURS, MailWebView as WebPage, is_mail_link, mail_web_document, mail_web_recolour,
     mail_web_script, served_inline_part,
@@ -78,6 +78,7 @@ struct Measured {
 }
 
 struct Entry {
+    surface: WindowCompositionSurface,
     clip: Retained<NSView>,
     web: Retained<MailWebView>,
     _delegate: Retained<Delegate>,
@@ -96,7 +97,7 @@ struct Entry {
 
 impl Drop for Entry {
     fn drop(&mut self) {
-        self.clip.removeFromSuperview();
+        self.web.removeFromSuperview();
     }
 }
 
@@ -134,14 +135,38 @@ pub fn blocked(id: &str) -> bool {
     })
 }
 
-/// Starts a frame of the window: drops the views not painted last frame and hides the others
-/// until [`paint`] places them. `covered` keeps them all hidden (a GPUI overlay is open).
-pub fn begin_frame(covered: bool) {
+/// Starts a frame of the window: drops the views not painted last frame and resets `painted`
+/// for the frame ahead. `covered` keeps them all hidden (a GPUI overlay is open).
+pub fn begin_frame(covered: bool, window: &mut Window) {
+    let mut removed = Vec::new();
     VIEWS.with_borrow_mut(|views| {
         views.covered = covered;
-        views.entries.retain(|_, entry| std::mem::take(&mut entry.painted));
+        views.entries.retain(|_, entry| {
+            let keep = std::mem::take(&mut entry.painted);
+            if !keep {
+                removed.push(entry.surface.id());
+            }
+            keep
+        });
+    });
+    if !removed.is_empty()
+        && let Ok(composition) = window.enable_window_composition()
+    {
+        for id in removed {
+            let _ = composition.remove_surface(id);
+        }
+    }
+}
+
+/// Hides any web view that was not painted during this frame (e.g. scrolled out of view or closed).
+pub fn end_frame(_window: &mut Window) {
+    VIEWS.with_borrow(|views| {
         for entry in views.entries.values() {
-            entry.clip.setHidden(true);
+            if !entry.painted
+                && let Ok(platform) = entry.surface.platform_surface()
+            {
+                let _ = platform.set_visible(false);
+            }
         }
     });
 }
@@ -159,25 +184,46 @@ pub fn paint(
     window: &mut Window,
 ) {
     let Some(mtm) = MainThreadMarker::new() else { return };
-    let Some(host) = host_view(window) else { return };
+    if host_view(window).is_none() {
+        return;
+    }
+    let stale = VIEWS.with_borrow_mut(|views| {
+        if views.entries.get(key).is_some_and(|entry| entry.remote != remote || entry.theme != theme) {
+            return views.entries.remove(key).map(|entry| entry.surface.id());
+        }
+        None
+    });
+    if let Some(id) = stale
+        && let Ok(composition) = window.enable_window_composition()
+    {
+        let _ = composition.remove_surface(id);
+    }
+    let missing = VIEWS.with_borrow(|views| !views.entries.contains_key(key));
+    if missing {
+        let Some(entry) = Entry::new(html, remote, theme, window, mtm) else { return };
+        VIEWS.with_borrow_mut(|views| {
+            views.entries.entry(key.clone()).or_insert(entry);
+        });
+    }
     let pending = VIEWS.with_borrow_mut(|views| {
         let covered = views.covered;
-        if views.entries.get(key).is_some_and(|entry| entry.remote != remote || entry.theme != theme) {
-            views.entries.remove(key);
-        }
-        let entry = views.entries.entry(key.clone()).or_insert_with(|| Entry::new(html, remote, theme, &host, mtm));
+        let Some(entry) = views.entries.get_mut(key) else { return false };
         entry.painted = true;
         let clip = bounds.intersect(&window.content_mask().bounds);
-        if covered || !entry.coloured.get() || clip.size.width <= Pixels::ZERO || clip.size.height <= Pixels::ZERO {
-            return entry.update(f32::from(bounds.size.width), open);
+        let show = !covered && entry.coloured.get() && clip.size.width > Pixels::ZERO && clip.size.height > Pixels::ZERO;
+        if let Ok(platform) = entry.surface.platform_surface() {
+            if show {
+                let _ = platform.set_bounds(clip.to_device_pixels(window.scale_factor()));
+                let _ = platform.set_visible(true);
+                let h = entry.clip.bounds().size.height;
+                let (x, y) = (f64::from(clip.origin.x), f64::from(clip.origin.y));
+                let web_y = f64::from(bounds.origin.y) - y;
+                let web_h = f64::from(bounds.size.height);
+                entry.web.setFrame(rect(f64::from(bounds.origin.x) - x, h - web_y - web_h, f64::from(bounds.size.width), web_h));
+            } else {
+                let _ = platform.set_visible(false);
+            }
         }
-        let host_height = host.bounds().size.height;
-        let (x, y, w, h) = (f64::from(clip.origin.x), f64::from(clip.origin.y), f64::from(clip.size.width), f64::from(clip.size.height));
-        entry.clip.setFrame(rect(x, host_height - y - h, w, h));
-        let web_y = f64::from(bounds.origin.y) - y;
-        let web_h = f64::from(bounds.size.height);
-        entry.web.setFrame(rect(f64::from(bounds.origin.x) - x, h - web_y - web_h, f64::from(bounds.size.width), web_h));
-        entry.clip.setHidden(false);
         entry.update(f32::from(bounds.size.width), open)
     });
     if pending {
@@ -186,7 +232,26 @@ pub fn paint(
 }
 
 impl Entry {
-    fn new(html: &str, remote: bool, theme: HtmlTheme, host: &NSView, mtm: MainThreadMarker) -> Entry {
+    fn new(html: &str, remote: bool, theme: HtmlTheme, window: &Window, mtm: MainThreadMarker) -> Option<Entry> {
+        let composition = window.enable_window_composition().ok()?;
+        let surface = composition.create_native_surface().ok()?;
+        let Ok(platform) = surface.platform_surface() else {
+            let _ = composition.remove_surface(surface.id());
+            return None;
+        };
+        let _ = platform.set_visible(false);
+        let Ok(handle) = platform.platform_handle() else {
+            let _ = composition.remove_surface(surface.id());
+            return None;
+        };
+        let Ok(view_ptr) = handle.downcast::<usize>() else {
+            let _ = composition.remove_surface(surface.id());
+            return None;
+        };
+        let Some(clip) = (unsafe { Retained::retain(*view_ptr as *mut NSView) }) else {
+            let _ = composition.remove_surface(surface.id());
+            return None;
+        };
         let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
         unsafe {
             configuration.setWebsiteDataStore(&WKWebsiteDataStore::nonPersistentDataStore(mtm));
@@ -208,15 +273,12 @@ impl Entry {
             let name = if theme.dark { NSAppearanceNameDarkAqua } else { NSAppearanceNameAqua };
             web.setAppearance(NSAppearance::appearanceNamed(name).as_deref());
         }
-        let clip = NSView::initWithFrame(NSView::alloc(mtm), frame);
-        clip.setClipsToBounds(true);
-        clip.setHidden(true);
         clip.addSubview(&web);
-        host.addSubview(&clip);
         // No base URL: the page reads no file; its inline images come through `InlinePartHandler`.
         let page = NSString::from_str(&mail_web_document(html.to_owned(), InlineParts::Served, remote));
         unsafe { web.loadHTMLString_baseURL(&page, None) };
-        Entry {
+        Some(Entry {
+            surface,
             clip,
             web,
             _delegate: delegate,
@@ -227,7 +289,7 @@ impl Entry {
             measured: Rc::default(),
             measuring: Rc::default(),
             painted: true,
-        }
+        })
     }
 
     /// Once the page has loaded, moves its colours to the theme's surface, then measures it, again

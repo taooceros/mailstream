@@ -18,9 +18,9 @@ mod toolbar;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId, EmptyView,
-    Focusable,
-    FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, NavigationDirection, ParentElement, Render,
-    ScrollEvent, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, canvas, div, px, relative,
+    Focusable, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, NavigationDirection, ParentElement,
+    Render, ScrollEvent, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, canvas, deferred, div, px,
+    relative,
 };
 use mailstream::{Category, Conversation, MailboxRole};
 
@@ -195,7 +195,7 @@ impl Render for MailApp {
                 canvas(|_, _, _| {}, move |_, _, window, _| {
                     blitz_body::begin_frame(window);
                     #[cfg(target_os = "macos")]
-                    webview::begin_frame(covered);
+                    webview::begin_frame(covered, window);
                 })
                 .absolute()
                 .size_0()
@@ -243,6 +243,17 @@ impl Render for MailApp {
             // Over everything in the bottom leading corner, as in Flutter.
             .when_some(self.frame_meter.clone(), |d, meter| {
                 d.child(div().absolute().left(px(space::S16)).bottom(px(space::S16)).child(meter))
+            })
+            .child(deferred(div().absolute().inset_0().child(self.notifications.clone())).priority(1))
+            .when(cfg!(target_os = "macos"), |d| {
+                d.child(
+                    canvas(|_, _, _| {}, |_, _, window, _| {
+                        #[cfg(target_os = "macos")]
+                        webview::end_frame(window);
+                    })
+                    .absolute()
+                    .size_0(),
+                )
             })
             // Painted last: ends the frame a measurement times.
             .children(bench_end)

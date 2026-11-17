@@ -597,9 +597,14 @@ impl Run {
                 window.bounds_changed(cx);
             }),
             Command::Toast(text) => self.on_window(|window, cx| {
-                use gpui::component::WindowExt;
                 let p = crate::design::palette(window.appearance());
-                window.push_notification(crate::controls::toast(text.into(), p), cx);
+                if let Some(root) = window.root::<gpui::base::Root>().flatten()
+                    && let Ok(app) = root.read(cx).view().clone().downcast::<crate::state::MailApp>()
+                {
+                    app.update(cx, |app, cx| {
+                        app.notifications.update(cx, |list, cx| list.push(crate::controls::toast(text.into(), p), window, cx));
+                    });
+                }
             }),
             Command::Window(other) => {
                 let main = self.main;
