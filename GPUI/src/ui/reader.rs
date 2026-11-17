@@ -669,7 +669,7 @@ impl MailApp {
             // they are given), so it takes the column's: on the user's own side, which hugs its
             // pieces to the right, it would shrink to a sliver (MS-349).
             self.render_body(message, remote, p, cx)
-                .map(|body| own_presses(div()).when(message.body_html.is_some(), |d| d.w_full()).child(body).into_any_element()),
+                .map(|body| own_presses(div()).max_w_full().min_w_0().when(message.body_html.is_some(), |d| d.w_full()).child(body).into_any_element()),
             (!message.tiles.is_empty())
                 .then(|| div().pt(px(space::S8)).child(self.render_attachments(message, p, cx)).into_any_element()),
         ];
@@ -710,7 +710,7 @@ fn unread_mark(p: &Palette) -> Div {
 /// A text body's runs (`format::runs`): what was written, and its quotes in place behind a rule,
 /// muted; web and mail addresses in both highlight and open on click.
 fn text_runs(prefix: &str, runs: &[format::Run], p: &'static Palette) -> Div {
-    div().flex().flex_col().gap(px(space::S8)).children(runs.iter().enumerate().map(|(index, run)| match run {
+    div().max_w_full().min_w_0().flex().flex_col().gap(px(space::S8)).children(runs.iter().enumerate().map(|(index, run)| match run {
         format::Run::Text(text) => linked_text(ElementId::Name(format!("{prefix}:{index}").into()), text.clone(), p),
         format::Run::Quote(inner) => text_runs(&format!("{prefix}:{index}"), inner, p)
             .border_l(px(metrics_reader::QUOTE_RULE))

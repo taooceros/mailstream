@@ -802,6 +802,8 @@ fn write_chat(cache: &MailCache) {
         (1, 70., "Morning! Did the Q4 plan reach you?"),
         (0, 66., "Not yet, can you resend it?"),
         (1, 60., "Sent you the launch plan."),
+        (0, 58., "Got it, thanks!"),
+        (0, 57., "Here is the rollout summary for this week's release, including the checklist and mirror targets.\n\n| Component | Branch | Environment | Owners |\n|---|---|---|---|\n| `mailstream-engine` | `release/v2-sync-pipeline` | `staging-us-west` | `Sam, Jordan` |\n| `mailstream-gpui` | `release/v2-chat-layout` | `canary-desktop` | `Devon, Priya` |\n\n> Notes: verify **all** targets from `https://releases.example.com/builds/2026-11/very_long_unbroken_artifact_filename_without_spaces_for_wrapping_check.tar.gz`\n\n```\nfor target in engine-core gpui-desktop blitz-renderer sync-worker; do git clone -b release/v2-chat-layout https://git.example.com/org/$target.git; done\n```"),
     ];
     let dm_messages: Vec<Value> = dm_log.iter().enumerate().map(|(n, (sender, minutes, text))| message(dm, n, *sender, *minutes, text)).collect();
     let spaces = vec![

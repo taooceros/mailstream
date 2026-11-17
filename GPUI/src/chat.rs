@@ -429,18 +429,21 @@ impl Body {
 
     /// The blocks, `id` naming their links' elements.
     fn element(&self, id: &str, p: &Palette) -> Div {
-        div().flex().flex_col().children(self.pieces.iter().enumerate().map(|(index, piece)| {
+        div().max_w_full().min_w_0().flex().flex_col().children(self.pieces.iter().enumerate().map(|(index, piece)| {
             let element_id = ElementId::Name(format!("chat-text:{id}:{index}").into());
             let gap = if index == 0 { 0. } else if piece.tight { 2. } else { 6. };
             let content: AnyElement = match &piece.kind {
                 PieceKind::Text => piece.inline.element(element_id, p),
                 PieceKind::Heading(level) => div()
+                    .min_w_0()
                     .font_weight(FontWeight::BOLD)
                     .text_size(px(text::READING * match level { 1 => 1.3, 2 => 1.18, 3 => 1.08, _ => 1.0 }))
                     .child(piece.inline.element(element_id, p))
                     .into_any_element(),
                 PieceKind::Code => div()
                     .w_full()
+                    .min_w_0()
+                    .overflow_hidden()
                     .px(px(12.))
                     .py(px(8.))
                     .rounded(px(radius::CONTROL))
@@ -451,6 +454,9 @@ impl Body {
                     .into_any_element(),
                 PieceKind::Rule => div().w_full().my(px(4.)).h(px(1.)).bg(p.line).into_any_element(),
                 PieceKind::Table(rows) => div()
+                    .w_full()
+                    .max_w_full()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .rounded(px(radius::CONTROL))
@@ -458,12 +464,23 @@ impl Body {
                     .border_color(p.line)
                     .overflow_hidden()
                     .children(rows.iter().enumerate().map(|(r, row)| {
-                        div().flex().when(r == 0, |d| d.bg(p.chip).font_weight(FontWeight::SEMIBOLD)).when(r > 0, |d| d.border_t_1().border_color(p.line)).children(
-                            row.iter().enumerate().map(|(c, cell)| {
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .when(r == 0, |d| d.bg(p.chip).font_weight(FontWeight::SEMIBOLD))
+                            .when(r > 0, |d| d.border_t_1().border_color(p.line))
+                            .children(row.iter().enumerate().map(|(c, cell)| {
                                 let cell_id = ElementId::Name(format!("chat-text:{id}:{index}:{r}:{c}").into());
-                                div().flex_1().min_w_0().px(px(10.)).py(px(4.)).when(c > 0, |d| d.border_l_1().border_color(p.line)).child(cell.element(cell_id, p))
-                            }),
-                        )
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .px(px(10.))
+                                    .py(px(4.))
+                                    .when(c > 0, |d| d.border_l_1().border_color(p.line))
+                                    .child(cell.element(cell_id, p))
+                            }))
                     }))
                     .into_any_element(),
             };
@@ -2279,7 +2296,7 @@ impl ChatPane {
             .w_full()
             .flex()
             .justify_center()
-            .child(div().w_full().max_w(px(layout::READING_WIDTH)).px(px(margin)).child(child))
+            .child(div().w_full().max_w(px(layout::READING_WIDTH)).min_w_0().px(px(margin)).child(child))
     }
 
     /// Item `ix` of the space's log: its head (`ix` 0), else a shown message, under a "New" line
@@ -2385,6 +2402,8 @@ impl ChatPane {
         if !message.body.is_empty() {
             content.push(
                 div()
+                    .max_w_full()
+                    .min_w_0()
                     .text_size(px(text::READING))
                     .line_height(relative(text::READING_LEADING))
                     .when(matches!(message.status, Status::Failed(_)), |d| d.text_color(p.muted))
@@ -2395,6 +2414,8 @@ impl ChatPane {
         if !message.attachments.is_empty() {
             content.push(
                 div()
+                    .max_w_full()
+                    .min_w_0()
                     .flex()
                     .flex_wrap()
                     .when(message.mine, |d| d.justify_end())
@@ -2462,6 +2483,8 @@ impl ChatPane {
         Self::column(
             surface,
             div()
+                .w_full()
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .when(!run.divider.is_empty(), |d| d.child(message_log::day_divider(run.divider.clone().into(), p)))
@@ -3188,6 +3211,101 @@ mod tests {
         assert_eq!(view.entries, [0, 2, 3, 5, 6]);
         assert_eq!(log.shown.len(), 3);
         assert_eq!(log.replies(&log.messages[0]).unwrap().entries.len(), 4);
+    }
+
+    struct BodyLayoutHarness {
+        short: Body,
+        wide: Body,
+        col: Rc<std::cell::RefCell<Option<gpui::Bounds<gpui::Pixels>>>>,
+        short_bounds: Rc<std::cell::RefCell<Option<gpui::Bounds<gpui::Pixels>>>>,
+        wide_bounds: Rc<std::cell::RefCell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    }
+
+    impl Render for BodyLayoutHarness {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let p = design::palette(window.appearance());
+            let measure = |slot: Rc<std::cell::RefCell<Option<gpui::Bounds<gpui::Pixels>>>>| {
+                canvas(move |bounds, _, _| {
+                    *slot.borrow_mut() = Some(bounds);
+                }, |_, _, _, _| {})
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+            };
+            let row = |id: &'static str, body: &Body, slot: Rc<std::cell::RefCell<Option<gpui::Bounds<gpui::Pixels>>>>| {
+                let content = [div()
+                    .relative()
+                    .max_w_full()
+                    .min_w_0()
+                    .text_size(px(text::READING))
+                    .line_height(relative(text::READING_LEADING))
+                    .child(body.element(id, p))
+                    .child(measure(slot))
+                    .into_any_element()];
+                message_log::message(
+                    message_log::Row { id: ElementId::Name(id.into()), mine: true, continued: true, hovered: false },
+                    message_log::run_time("2:43 PM".into(), gpui::transparent_black(), false),
+                    None,
+                    content,
+                    None,
+                    p,
+                )
+            };
+            div()
+                .size_full()
+                .flex()
+                .justify_center()
+                .font_family(design::ui_font())
+                .child(
+                    div()
+                        .relative()
+                        .w_full()
+                        .max_w(px(layout::READING_WIDTH))
+                        .min_w_0()
+                        .px(px(32.))
+                        .flex()
+                        .flex_col()
+                        .child(row("short", &self.short, self.short_bounds.clone()))
+                        .child(row("wide", &self.wide, self.wide_bounds.clone()))
+                        .child(measure(self.col.clone())),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn mine_body_with_wide_table_and_code_stays_inside_column(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui::init(cx);
+            design::sync_kit_theme(gpui::WindowAppearance::Light, cx);
+        });
+        let short_blocks = mailstream::chat_draft_body("one sec".into(), Default::default());
+        let wide_markup = "Intro paragraph that should wrap within the right-aligned message column.\n\n\
+            | Col1 | Col2 | Col3 | Col4 |\n|---|---|---|---|\n\
+            | `long_identifier_one` | `long_identifier_two` | `long_identifier_three` | `long_identifier_four` |\n\n\
+            ```\nhttps://example.com/releases/very_long_unbroken_artifact_filename_without_spaces_for_wrapping_check.tar.gz\n```";
+        let wide_blocks = mailstream::chat_body(wide_markup.into(), Default::default());
+        let col_slot = Rc::new(std::cell::RefCell::new(None));
+        let short_slot = Rc::new(std::cell::RefCell::new(None));
+        let wide_slot = Rc::new(std::cell::RefCell::new(None));
+        let (c, s, w) = (col_slot.clone(), short_slot.clone(), wide_slot.clone());
+        let (_, cx) = cx.add_window_view(move |_, _| BodyLayoutHarness {
+            short: Body::new(&short_blocks, false),
+            wide: Body::new(&wide_blocks, false),
+            col: c,
+            short_bounds: s,
+            wide_bounds: w,
+        });
+        cx.run_until_parked();
+
+        let col = col_slot.borrow().expect("chat-col");
+        let short = short_slot.borrow().expect("body-short");
+        let wide = wide_slot.borrow().expect("body-wide");
+
+        assert!(wide.left() >= col.left(), "wide body overflowed left of column: {wide:?} vs {col:?}");
+        assert!(wide.size.width <= col.size.width * log_metrics::SHARE, "wide body exceeded column share: {wide:?} vs {col:?}");
+        assert!(short.size.width < px(200.), "short own message should hug content, not stretch: {short:?}");
+        assert!((short.right() - wide.right()).abs() < px(1.5), "own messages should align at right edge: {short:?} vs {wide:?}");
     }
 }
 
