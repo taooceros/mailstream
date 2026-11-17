@@ -80,6 +80,8 @@ pub fn set_outage(provider: Provider, outage: Outage) {
 
 /// The in-memory sign-ins under [`SERVICE`].
 pub(crate) static SIGN_INS: LazyLock<Mutex<SignIns>> = LazyLock::new(Default::default);
+/// The in-memory device-sync credential key under [`SERVICE`].
+pub(crate) static DEVICE_KEY: LazyLock<Mutex<Option<[u8; 32]>>> = LazyLock::new(Default::default);
 
 /// Starts the provider and signs in every account of the accounts.json in `support` (the
 /// engine's data folder). Call before the engine starts; a second call changes nothing.
@@ -93,6 +95,7 @@ pub fn start(support: &Path) {
         signed_in.clients.insert(record.id, OAuthClient { id: "shots".into(), secret: None });
     }
     *SIGN_INS.lock().expect("sign-ins lock") = signed_in;
+    *DEVICE_KEY.lock().expect("device-key lock") = None;
     SUPPORT.set(support.to_path_buf()).ok();
     PROVIDER.set(FakeServer::start(answer)).ok();
 }

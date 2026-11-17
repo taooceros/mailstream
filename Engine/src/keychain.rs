@@ -173,11 +173,20 @@ impl Keychain {
 
     /// This device's device-sync credential key, if made; a damaged item reads as none.
     pub fn device_key(&self) -> Result<Option<[u8; 32]>, KeychainError> {
+        #[cfg(feature = "shots")]
+        if self.service == crate::shots::SERVICE {
+            return Ok(*crate::shots::DEVICE_KEY.lock().expect("device-key lock"));
+        }
         Ok(self.read(Item::DeviceKey)?.and_then(|data| data.try_into().ok()))
     }
 
     /// Keeps `key` as this device's device-sync credential key.
     pub fn store_device_key(&self, key: &[u8; 32]) -> Result<(), KeychainError> {
+        #[cfg(feature = "shots")]
+        if self.service == crate::shots::SERVICE {
+            *crate::shots::DEVICE_KEY.lock().expect("device-key lock") = Some(*key);
+            return Ok(());
+        }
         self.write(Item::DeviceKey, Some(key))
     }
 
@@ -185,6 +194,11 @@ impl Keychain {
     /// macOS.
     #[cfg(test)]
     pub(crate) fn forget_device_key(&self) -> Result<(), KeychainError> {
+        #[cfg(feature = "shots")]
+        if self.service == crate::shots::SERVICE {
+            *crate::shots::DEVICE_KEY.lock().expect("device-key lock") = None;
+            return Ok(());
+        }
         self.write(Item::DeviceKey, None)
     }
 }
@@ -201,12 +215,15 @@ mod apple {
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::string::CFString;
     use core_foundation_sys::base::{CFTypeRef, OSStatus};
-    use security_framework_sys::base::{SecCopyErrorMessageString, errSecAuthFailed, errSecItemNotFound, errSecSuccess};
+    use security_framework_sys::base::{
+        SecCopyErrorMessageString, SecKeychainRef, errSecAuthFailed, errSecItemNotFound, errSecSuccess,
+    };
     use security_framework_sys::code_signing::{SecCodeCheckValidity, SecCodeCopySelf, SecRequirementCreateWithString};
     use security_framework_sys::item::{
         kSecAttrAccount, kSecAttrLabel, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecReturnData,
-        kSecValueData,
+        kSecUseKeychain, kSecValueData,
     };
+    use security_framework_sys::keychain::SecKeychainCopyDefault;
     use security_framework_sys::keychain_item::{SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate};
 
     use super::*;
@@ -216,7 +233,12 @@ mod apple {
     const APP_REQUIREMENT: &str = r#"identifier "dev.mailstream.Mailstream" and anchor apple generic"#;
     /// The person cancelled or denied the prompt (`errSecUserCanceled`).
     const errSecUserCanceled: OSStatus = -128;
+    /// No default keychain exists (`errSecNoDefaultKeychain`).
+    const errSecNoDefaultKeychain: OSStatus = -25307;
 
+    unsafe extern "C" {
+        fn SecKeychainGetStatus(keychain: SecKeychainRef, status: *mut u32) -> OSStatus;
+    }
     /// Services whose prompt the person refused, with Security's answer, for this process.
     static REFUSED: Mutex<BTreeMap<String, OSStatus>> = Mutex::new(BTreeMap::new());
 
@@ -272,7 +294,7 @@ mod apple {
     impl Keychain {
         /// The item's data; `None` when there is no item.
         pub(super) fn read(&self, item: Item) -> Result<Option<Vec<u8>>, KeychainError> {
-            self.may_ask()?;
+            let _keychain = self.may_ask()?;
             let mut query = self.base(item);
             unsafe {
                 query.push((CFString::wrap_under_get_rule(kSecReturnData), CFBoolean::true_value().into_CFType()));
@@ -295,7 +317,7 @@ mod apple {
 
         /// Replaces the item's data; `None` deletes the item.
         pub(super) fn write(&self, item: Item, data: Option<&[u8]>) -> Result<(), KeychainError> {
-            self.may_ask()?;
+            let keychain = self.may_ask()?;
             let base = CFDictionary::from_CFType_pairs(&self.base(item));
             let Some(data) = data else {
                 let deleted = unsafe { SecItemDelete(base.as_concrete_TypeRef()) };
@@ -316,6 +338,7 @@ mod apple {
                         unsafe { CFString::wrap_under_get_rule(kSecAttrLabel) },
                         CFString::new(item.label()).into_CFType(),
                     ));
+                    added.push((unsafe { CFString::wrap_under_get_rule(kSecUseKeychain) }, keychain));
                     let added = CFDictionary::from_CFType_pairs(&added);
                     match unsafe { SecItemAdd(added.as_concrete_TypeRef(), std::ptr::null_mut()) } {
                         errSecSuccess => Ok(()),
@@ -327,15 +350,16 @@ mod apple {
         }
 
         /// Refuses, before macOS gets to ask, what would only bring a prompt: the apps' item in a
-        /// build not signed as the app, and a service whose prompt the person already refused.
-        fn may_ask(&self) -> Result<(), KeychainError> {
+        /// build not signed as the app, a service whose prompt the person already refused, and any
+        /// run without an existing default keychain (which would show "Reset To Defaults", MS-391).
+        fn may_ask(&self) -> Result<CFType, KeychainError> {
             if self.service == SERVICE && !*SIGNED_AS_APP {
                 return Err(KeychainError::NotTheApp);
             }
-            match REFUSED.lock().expect("refused lock").get(&self.service) {
-                Some(status) => Err(KeychainError::Status(*status)),
-                None => Ok(()),
+            if let Some(status) = REFUSED.lock().expect("refused lock").get(&self.service) {
+                return Err(KeychainError::Status(*status));
             }
+            default_keychain()
         }
 
         /// The error for `status`, remembering a refused prompt.
@@ -345,7 +369,6 @@ mod apple {
             }
             KeychainError::Status(status)
         }
-
         fn base(&self, item: Item) -> Vec<(CFString, CFType)> {
             unsafe {
                 vec![
@@ -358,6 +381,23 @@ mod apple {
                 ]
             }
         }
+    }
+
+    /// The default (login) keychain when one exists on disk. Checked before every Security call so
+    /// macOS never pops up "A keychain cannot be found / Reset To Defaults" when `HOME` has none.
+    fn default_keychain() -> Result<CFType, KeychainError> {
+        let mut keychain = std::ptr::null_mut();
+        let status = unsafe { SecKeychainCopyDefault(&mut keychain) };
+        if status != errSecSuccess || keychain.is_null() {
+            return Err(KeychainError::Status(if status != errSecSuccess { status } else { errSecNoDefaultKeychain }));
+        }
+        let keychain = unsafe { CFType::wrap_under_create_rule(keychain as CFTypeRef) };
+        let mut keychain_status = 0u32;
+        let status = unsafe { SecKeychainGetStatus(keychain.as_CFTypeRef() as SecKeychainRef, &mut keychain_status) };
+        if status != errSecSuccess {
+            return Err(KeychainError::Status(status));
+        }
+        Ok(keychain)
     }
 
     #[cfg(test)]
@@ -381,6 +421,56 @@ mod apple {
             assert!(matches!(keychain.read(Item::SignIns), Err(KeychainError::Status(errSecUserCanceled))));
             assert!(matches!(keychain.write(Item::SignIns, None), Err(KeychainError::Status(errSecUserCanceled))));
             assert_eq!(other.read(Item::SignIns).unwrap(), None);
+        }
+
+        #[test]
+        fn missing_default_keychain_errors_without_prompting() {
+            if std::env::var_os("MAILSTREAM_TEST_MISSING_KEYCHAIN").is_some() {
+                let keychain = Keychain::new(
+                    format!("dev.mailstream.test.{}.{}", std::process::id(), crate::testkit::unique()),
+                    PathBuf::new(),
+                );
+                assert!(matches!(keychain.device_key(), Err(KeychainError::Status(errSecNoDefaultKeychain))));
+                assert!(matches!(keychain.store_device_key(&[7; 32]), Err(KeychainError::Status(errSecNoDefaultKeychain))));
+                assert!(matches!(keychain.load(), Err(KeychainError::Status(errSecNoDefaultKeychain))));
+                let mut sign_ins = SignIns::default();
+                sign_ins.refresh_tokens.insert("a@b.c".into(), "tok".into());
+                assert!(matches!(keychain.store(&sign_ins), Err(KeychainError::Status(errSecNoDefaultKeychain))));
+                assert!(matches!(keychain.forget_device_key(), Err(KeychainError::Status(errSecNoDefaultKeychain))));
+                let err = crate::account_sync::CredentialKey::load_or_create(&keychain).err().unwrap();
+                assert!(err.starts_with("Keychain:"), "{err}");
+                #[cfg(feature = "shots")]
+                {
+                    let shots = Keychain::new(crate::shots::SERVICE, PathBuf::new());
+                    assert_eq!(shots.device_key().unwrap(), None);
+                    shots.store_device_key(&[9; 32]).unwrap();
+                    assert_eq!(shots.device_key().unwrap(), Some([9; 32]));
+                    shots.forget_device_key().unwrap();
+                    assert_eq!(shots.device_key().unwrap(), None);
+                }
+                return;
+            }
+            let root = std::env::temp_dir().join(format!(
+                "mailstream-no-keychain-{}-{}",
+                std::process::id(),
+                crate::testkit::unique()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "keychain::apple::tests::missing_default_keychain_errors_without_prompting", "--nocapture"])
+                .env("MAILSTREAM_TEST_MISSING_KEYCHAIN", "1")
+                .env("HOME", &root)
+                .env("CFFIXED_USER_HOME", &root)
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&root);
+            assert!(
+                output.status.success(),
+                "child failed ({}):\nstdout: {}\nstderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 }
