@@ -56,7 +56,9 @@
 //! so existing groups keep syncing.
 //!
 //! The engine bridges this to settings.json (MS-360) and the signed-in accounts (MS-376); this
-//! module knows nothing of either.
+//! module knows nothing of either. It also serves the engine's own protocols between admitted
+//! devices behind the same gate ([`Service`], MS-394: mail bodies), without knowing what they
+//! carry.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{File, TryLockError};
@@ -66,6 +68,7 @@ use std::str::FromStr;
 use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use futures::future::BoxFuture;
 use futures::{Stream, StreamExt};
 use iroh::endpoint::{Connection, VarInt, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
@@ -338,6 +341,64 @@ pub enum Network {
     BeforeAdmission(iroh::address_lookup::MemoryLookup),
 }
 
+/// A protocol the engine serves to the group's admitted devices beside the group's own (MS-394),
+/// behind the same gate ([`Gated`]); what it carries is the engine's business.
+pub trait Service: Send + Sync + 'static {
+    fn alpn(&self) -> &'static [u8];
+    /// Serves `connection`, from a device the gate let in, until it ends. Connections last, so
+    /// it asks `link.allows` again before each request.
+    fn serve(&self, connection: Connection, link: Link) -> BoxFuture<'static, ()>;
+    /// Sync opened, the network changed or the machine woke (`Some`: dial the group's devices
+    /// now), or sync is closing (`None`: let go of every connection).
+    fn online(&self, link: Option<Link>);
+}
+
+/// What a [`Service`] reaches the group through while sync is open: the admitted devices, and
+/// connections to them. Holds sync weakly: once it closed, nobody is admitted and nothing dials.
+#[derive(Clone)]
+pub struct Link {
+    inner: Weak<Inner>,
+}
+
+impl Link {
+    /// The other devices the group admitted now.
+    pub fn members(&self) -> Vec<EndpointId> {
+        let Some(inner) = self.inner.upgrade() else { return Vec::new() };
+        let me = inner.endpoint().id();
+        inner.gate.members().into_iter().filter(|id| *id != me).collect()
+    }
+
+    /// Whether `id` is admitted now.
+    pub fn allows(&self, id: &EndpointId) -> bool {
+        self.inner.upgrade().is_some_and(|inner| inner.gate.allows(id))
+    }
+
+    /// Connects to admitted device `id` on `alpn`; any other device is refused here.
+    pub async fn connect(&self, id: EndpointId, alpn: &[u8]) -> Result<Connection> {
+        let endpoint = {
+            let inner = self.inner.upgrade().ok_or_else(|| failed("Device sync closed."))?;
+            if !inner.gate.allows(&id) {
+                return Err(failed("Not a device of this sync group."));
+            }
+            inner.endpoint().clone()
+        };
+        endpoint.connect(EndpointAddr::new(id), alpn).await.map_err(failed)
+    }
+
+    /// How many remote changes became readable so far ([`PeerSync::changes`]).
+    pub fn changes(&self) -> u64 {
+        self.inner.upgrade().map_or(0, |inner| *inner.changes.borrow())
+    }
+
+    /// The group's state ([`PeerSync::snapshot`]).
+    pub async fn snapshot(&self) -> Result<Snapshot> {
+        let inner = self.inner.upgrade().ok_or(PeerSyncError::NoGroup)?;
+        let group = inner.group.lock().await;
+        let doc = group.doc.as_ref().ok_or(PeerSyncError::NoGroup)?;
+        inner.read(doc).await
+    }
+}
+
 /// Sync open on one support folder. Call [`PeerSync::shutdown`] before opening it again.
 pub struct PeerSync {
     inner: Arc<Inner>,
@@ -363,6 +424,10 @@ struct Inner {
     legacy: bool,
     /// One-time pairing codes this device issued (MS-376), redeemed at the admission door.
     invites: Arc<Invites>,
+    /// The engine's protocols served beside the group's ([`Service`]).
+    services: Vec<Arc<dyn Service>>,
+    /// This, for the services' [`Link`]s.
+    this: Weak<Inner>,
 }
 
 /// The group this device is in, if any.
@@ -389,6 +454,11 @@ impl PeerSync {
     }
 
     pub(crate) async fn open_on(support_directory: &Path, network: Network) -> Result<Self> {
+        Self::open_with(support_directory, network, Vec::new()).await
+    }
+
+    /// [`PeerSync::open_on`], serving `services` to the group's admitted devices too.
+    pub(crate) async fn open_with(support_directory: &Path, network: Network, services: Vec<Arc<dyn Service>>) -> Result<Self> {
         let directory = support_directory.join(FOLDER);
         std::fs::create_dir_all(directory.join("docs")).map_err(failed)?;
         std::fs::create_dir_all(directory.join("blobs")).map_err(failed)?;
@@ -442,27 +512,33 @@ impl PeerSync {
         }
         let invites = Arc::new(Invites::default());
         let door = Door { gate: gate.clone(), docs: docs.clone(), author, me: endpoint.id(), invites: invites.clone() };
-        // Every protocol of the group passes the gate; the door stands outside it.
-        let router = Router::builder(endpoint)
-            .accept(iroh_blobs::ALPN, Gated { gate: gate.clone(), protocol: iroh_blobs::BlobsProtocol::new(&blobs, None) })
-            .accept(iroh_gossip::ALPN, Gated { gate: gate.clone(), protocol: gossip })
-            .accept(iroh_docs::ALPN, Gated { gate: gate.clone(), protocol: docs.clone() })
-            .accept(ADMIT_ALPN, door)
-            .spawn();
-
-        let inner = Arc::new(Inner {
-            directory,
-            _lock: lock,
-            router,
-            blobs,
-            docs,
-            author,
-            group: tokio::sync::Mutex::new(Group { file, doc: None, events: None }),
-            gate,
-            changes: watch::channel(0).0,
-            #[cfg(test)]
-            legacy,
-            invites,
+        // Every protocol of the group, and the engine's, passes the gate; the door stands outside it.
+        let inner = Arc::new_cyclic(|this: &Weak<Inner>| {
+            let mut router = Router::builder(endpoint)
+                .accept(iroh_blobs::ALPN, Gated { gate: gate.clone(), protocol: iroh_blobs::BlobsProtocol::new(&blobs, None) })
+                .accept(iroh_gossip::ALPN, Gated { gate: gate.clone(), protocol: gossip })
+                .accept(iroh_docs::ALPN, Gated { gate: gate.clone(), protocol: docs.clone() })
+                .accept(ADMIT_ALPN, door);
+            for service in &services {
+                let served = Served { service: service.clone(), link: Link { inner: this.clone() } };
+                router = router.accept(service.alpn(), Gated { gate: gate.clone(), protocol: served });
+            }
+            Inner {
+                directory,
+                _lock: lock,
+                router: router.spawn(),
+                blobs,
+                docs,
+                author,
+                group: tokio::sync::Mutex::new(Group { file, doc: None, events: None }),
+                gate,
+                changes: watch::channel(0).0,
+                #[cfg(test)]
+                legacy,
+                invites,
+                services,
+                this: this.clone(),
+            }
         });
         let sync = Self { watchers: watch_network(&inner), inner };
         #[cfg(test)]
@@ -481,6 +557,7 @@ impl PeerSync {
             sync.shutdown().await;
             return Err(error);
         }
+        sync.inner.services_online();
         Ok(sync)
     }
 
@@ -490,6 +567,9 @@ impl PeerSync {
             watcher.abort();
         }
         let inner = &self.inner;
+        for service in &inner.services {
+            service.online(None);
+        }
         if let Some(events) = inner.group.lock().await.events.take() {
             events.abort();
         }
@@ -805,6 +885,12 @@ impl PeerSync {
         endpoint.bound_sockets().into_iter().fold(EndpointAddr::new(endpoint.id()), EndpointAddr::with_ip_addr)
     }
 
+    /// The endpoint, for the tests' devices that dial whatever they like.
+    #[cfg(test)]
+    pub(crate) fn endpoint(&self) -> Endpoint {
+        self.inner.endpoint().clone()
+    }
+
     /// Syncs group `namespace` read-only with `peers`, as a device that knows only the group's
     /// id would (shown in settings and `sync status`): the tests' stranger.
     #[cfg(test)]
@@ -910,10 +996,18 @@ impl Inner {
         self.endpoint().network_change().await;
         let group = self.group.lock().await;
         let Some(doc) = group.doc.as_ref().filter(|_| !group.file.paused) else { return };
+        self.services_online();
         // Failures wait for the next change or wake.
         let peers = self.peers(doc).await;
         if doc.start_sync(peers).await.is_ok() {
             self.describe(doc).await.ok();
+        }
+    }
+
+    /// Tells the services sync is open, now on the current network.
+    fn services_online(&self) {
+        for service in &self.services {
+            service.online(Some(Link { inner: self.this.clone() }));
         }
     }
 
@@ -1180,6 +1274,15 @@ impl Gate {
         self.state.read().expect("gate lock").namespace
     }
 
+    /// The devices let in now: those the group admitted, and the one that admitted this device.
+    fn members(&self) -> BTreeSet<EndpointId> {
+        let state = self.state.read().expect("gate lock");
+        if state.namespace.is_none() {
+            return BTreeSet::new();
+        }
+        state.admitted.union(&state.vouched).copied().collect()
+    }
+
     /// Lets in the devices `doc` admits, and no others.
     async fn load(&self, doc: &Doc) {
         let admitted = listed(doc, ADMITTED).await;
@@ -1234,6 +1337,25 @@ impl<P: ProtocolHandler> ProtocolHandler for Gated<P> {
 
     async fn shutdown(&self) {
         self.protocol.shutdown().await;
+    }
+}
+
+/// A [`Service`] as a protocol of the router, behind the gate ([`Gated`]).
+struct Served {
+    service: Arc<dyn Service>,
+    link: Link,
+}
+
+impl fmt::Debug for Served {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Served").field("alpn", &String::from_utf8_lossy(self.service.alpn())).finish()
+    }
+}
+
+impl ProtocolHandler for Served {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        self.service.serve(connection, self.link.clone()).await;
+        Ok(())
     }
 }
 

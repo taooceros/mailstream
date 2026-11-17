@@ -17,7 +17,8 @@ use crate::account_sync::{self, AccountHost};
 use crate::answers::{self, DeviceSyncStatus, SyncDevice, SyncTicket};
 use crate::cloud_drop::{self, CloudDrop};
 use crate::commands::Arguments;
-use crate::peer_sync::{Network, PeerSync, PeerSyncError, Stored};
+use crate::peer_mail::PeerMail;
+use crate::peer_sync::{Network, PeerSync, PeerSyncError, Service, Stored};
 use crate::settings::{Setting, Settings, Values};
 use crate::signal::{ProcessSignal, next_wake};
 use crate::{EngineError, Events, files, model};
@@ -160,16 +161,20 @@ pub struct DeviceSync {
     tasks: Mutex<Vec<JoinHandle<()>>>,
     /// The accounts and sign-ins to bridge, once attached.
     accounts: OnceLock<Weak<dyn AccountHost>>,
+    /// Mail bodies served to and asked of the group's devices (MS-394); `None` on a sync node,
+    /// which holds no mail.
+    mail: Option<Arc<PeerMail>>,
 }
 
 impl DeviceSync {
     /// Starts opening `PeerSync` and bridging `settings.json` in the background on the current
     /// tokio runtime. Never blocks `Engine::start`.
-    pub fn start(
+    pub(crate) fn start(
         support_directory: PathBuf,
         network: Network,
         settings: Arc<Settings>,
         events: Arc<Events>,
+        mail: Option<Arc<PeerMail>>,
     ) -> Arc<Self> {
         let (wake_tx, wake_rx) = mpsc::unbounded_channel();
         let this = Arc::new(Self {
@@ -186,6 +191,7 @@ impl DeviceSync {
             cloud_wake: Notify::new(),
             tasks: Mutex::new(Vec::new()),
             accounts: OnceLock::new(),
+            mail,
         });
         let bridge = tokio::spawn(this.clone().run_loop(wake_rx));
         let cloud = tokio::spawn(this.clone().cloud_loop());
@@ -377,7 +383,8 @@ impl DeviceSync {
         if let Some(existing) = self.sync.read().await.as_ref() {
             return Ok(Some(existing.changes()));
         }
-        match PeerSync::open_on(&self.support_directory, self.network.clone()).await {
+        let services: Vec<Arc<dyn Service>> = self.mail.iter().map(|mail| mail.clone() as Arc<dyn Service>).collect();
+        match PeerSync::open_with(&self.support_directory, self.network.clone(), services).await {
             Ok(opened) => {
                 let rx = opened.changes();
                 *self.sync.write().await = Some(opened);
@@ -756,6 +763,14 @@ impl DeviceSync {
     }
 
     async fn status_answer(&self) -> DeviceSyncStatus {
+        let mut answer = self.group_status().await;
+        if let Some(mail) = &self.mail {
+            answer.mail = mail.received().await;
+        }
+        answer
+    }
+
+    async fn group_status(&self) -> DeviceSyncStatus {
         // The gate keeps an open in progress, which holds `peer-sync/lock`, from reading as
         // another process's.
         let gate = self.open_gate.lock().await;
@@ -794,6 +809,7 @@ impl DeviceSync {
             last_sync,
             problem: meta.problem.clone(),
             cloud: self.cloud.status(),
+            mail: Default::default(),
         }
     }
 
@@ -810,6 +826,7 @@ impl DeviceSync {
             last_sync: None,
             problem: None,
             cloud: self.cloud.status(),
+            mail: Default::default(),
         };
         match PeerSync::stored(&self.support_directory) {
             Err(error) => answer.problem = Some(error.to_string()),

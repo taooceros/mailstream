@@ -188,6 +188,8 @@ mailstream sync pair-ticket --data-dir /var/lib/mailstream-sync
 
 Devices sync only with the devices the group admitted (MS-380), so knowing the group id that `sync status` shows reads nothing. A device that joins with a ticket is admitted by a device of the group it reaches (keep the device that made the ticket online for the first join); until then it keeps asking. Devices paired before this admit each other by themselves after updating.
 
+Mail bodies between devices (MS-394): before asking Gmail or Outlook for a message's body and attachments, a device asks the group's devices online now (ALPN `mailstream/mail/1`, admitted devices only) whether they stored it already, and takes it from the first that did, costing no provider quota. Opening a message asks only devices already connected and waits half a second; loading list previews may dial them and wait a few seconds. It asks only for messages the provider just listed, and labels, read state and deletions still come from the provider alone; mail never enters the group's document or the Cloudflare fallback. A `mailstream daemon` that stays online serves the most; the light `mailstream sync daemon` holds no mail. `sync status` counts the bodies taken this way (`mail.messages`) and about how many Gmail quota units they saved (`mail.gmailUnits`).
+
 Example `systemd` unit (`/etc/systemd/system/mailstream-sync.service`):
 
 ```ini

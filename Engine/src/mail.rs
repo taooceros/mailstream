@@ -218,7 +218,8 @@ impl Mail {
     ) -> Self {
         let cache = Arc::new(MailCache::new(database, cache_root));
         let previews = events.clone();
-        let contents = Arc::new(Contents::new(cache.clone(), move || previews.emit_soon("previews")));
+        let peers = crate::peer_mail::PeerMail::new(cache.clone(), accounts.clone());
+        let contents = Arc::new(Contents::new(cache.clone(), peers, move || previews.emit_soon("previews")));
         let tagging =
             Tagging::new(cache.clone(), contents.clone(), settings.clone(), events.clone(), tool_environment, apple_tagger);
         Self {
@@ -240,6 +241,12 @@ impl Mail {
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().expect("mail lock")
+    }
+
+    /// Mail bodies between this engine and the group's other devices (MS-394), served through
+    /// device sync.
+    pub(crate) fn peer_mail(&self) -> Arc<crate::peer_mail::PeerMail> {
+        self.contents.peers()
     }
 
     pub async fn flush(&self) {

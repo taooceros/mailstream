@@ -537,6 +537,7 @@ impl DeviceSyncMock {
                     .then(|| model::iso8601(model::date_from_unix(now - 600.0))),
                 problem: None,
             },
+            mail: Default::default(),
         }
     }
 }

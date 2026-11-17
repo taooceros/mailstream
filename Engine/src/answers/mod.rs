@@ -133,6 +133,19 @@ pub struct DeviceSyncStatus {
     /// Why device sync could not open or last failed, if any.
     pub problem: Option<String>,
     pub cloud: SyncCloud,
+    /// What this device took from the group's other devices instead of the provider (MS-394).
+    #[serde(default)]
+    pub mail: SyncMail,
+}
+
+/// Mail bodies this device took from the group's other devices (`DeviceSyncStatus::mail`,
+/// MS-394), since it started counting.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncMail {
+    pub messages: u64,
+    /// About how many Gmail quota units that saved: 60 a message, 20 an attachment.
+    pub gmail_units: u64,
 }
 
 /// Device sync's Cloudflare drop (`DeviceSyncStatus::cloud`, MS-374): encrypted copies of the

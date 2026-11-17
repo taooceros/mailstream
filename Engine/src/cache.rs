@@ -355,6 +355,18 @@ impl MailCache {
         self.write(value, Table::State, "autoRead".into());
     }
 
+    // MARK: Mail from other devices
+
+    /// What this device took from the group's other devices instead of the provider
+    /// (`peer_mail`, MS-394).
+    pub async fn load_peer_mail<T: DeserializeOwned>(&self) -> Option<T> {
+        self.read(Table::State, "peerMail").await
+    }
+
+    pub fn save_peer_mail<T: Serialize>(&self, value: &T) {
+        self.write(value, Table::State, "peerMail".into());
+    }
+
     // MARK: Conversations the user started
 
     /// What the inbox knows of the conversations the user started (`mail::started`).
@@ -462,7 +474,12 @@ impl MailCache {
 
     /// Where the reader's scheme handler serves `message`'s inline parts from.
     pub fn part_url_base(message: &MessageRef) -> String {
-        format!("{SCHEME}://{}/", Self::message_key(message))
+        Self::key_url_base(&Self::message_key(message))
+    }
+
+    /// [`Self::part_url_base`] of the message stored under `key` ([`Self::message_key`]).
+    pub fn key_url_base(key: &str) -> String {
+        format!("{SCHEME}://{key}/")
     }
 
     /// The message's directory as a `file:` URL with a trailing slash ([`Self::folder_url`]).
@@ -486,6 +503,32 @@ impl MailCache {
 
     pub fn save_content(&self, content: &MessageContent, message: &MessageRef) {
         self.write(content, Table::Contents, Self::content_key(message));
+    }
+
+    /// Which of `messages` have content stored, as their [`Self::message_key`]s.
+    pub async fn stored_contents(&self, messages: &[MessageRef]) -> std::collections::HashSet<String> {
+        let mut stored = std::collections::HashSet::new();
+        for chunk in messages.chunks(500) {
+            let keys: Vec<SqlValue> = chunk.iter().map(|message| SqlValue::Text(Self::content_key(message))).collect();
+            let sql = format!("SELECT key FROM contents WHERE key IN ({})", vec!["?"; keys.len()].join(","));
+            let found = self
+                .database
+                .read(async move |db| {
+                    let mut rows = db.query(&sql, keys).await?;
+                    let mut found = Vec::new();
+                    while let Some(row) = rows.next().await? {
+                        if let Some(key) = text(row.get_value(0)?) {
+                            found.push(key);
+                        }
+                    }
+                    Ok(found)
+                })
+                .await
+                .unwrap_or_default();
+            let prefix = format!("v{CONTENT_VERSION}:");
+            stored.extend(found.into_iter().filter_map(|key| key.strip_prefix(&prefix).map(str::to_string)));
+        }
+        stored
     }
 
     pub fn attachment_path(&self, stored_name: &str, message: &MessageRef) -> PathBuf {

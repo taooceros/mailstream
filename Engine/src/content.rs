@@ -1,7 +1,8 @@
 //! Message bodies and list previews, as the Swift engine's `ContentStore`
 //! (`Sources/MailstreamKit/Store/ContentStore.swift`): one shared load per message (mail.db
-//! first, else the provider, whose answer is cached), the bodies recently read in memory, and
-//! the preview of every message loaded so far.
+//! first, then the group's other devices (`peer_mail`, MS-394), else the provider, whose answer
+//! is cached), the bodies recently read in memory, and the preview of every message loaded so
+//! far.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -12,6 +13,7 @@ use crate::api::Priority;
 use crate::backend::Backend;
 use crate::cache::MailCache;
 use crate::model::{MessageContent, MessageRef};
+use crate::peer_mail::PeerMail;
 use crate::text;
 
 /// Bodies kept in memory. Prefetched bodies only fill free room, as the coldest, so they never
@@ -51,14 +53,19 @@ struct State {
 
 pub struct Contents {
     cache: Arc<MailCache>,
+    peers: Arc<PeerMail>,
     state: Mutex<State>,
     /// Called when a preview arrives or changes.
     on_previews: Box<dyn Fn() + Send + Sync>,
 }
 
 impl Contents {
-    pub fn new(cache: Arc<MailCache>, on_previews: impl Fn() + Send + Sync + 'static) -> Self {
-        Self { cache, state: Mutex::new(State::default()), on_previews: Box::new(on_previews) }
+    pub fn new(cache: Arc<MailCache>, peers: Arc<PeerMail>, on_previews: impl Fn() + Send + Sync + 'static) -> Self {
+        Self { cache, peers, state: Mutex::new(State::default()), on_previews: Box::new(on_previews) }
+    }
+
+    pub(crate) fn peers(&self) -> Arc<PeerMail> {
+        self.peers.clone()
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -143,7 +150,7 @@ impl Contents {
         let id = state.next_task;
         let (contents, target) = (self.clone(), message.clone());
         let handle = tokio::spawn(async move {
-            let result = Self::fetch(&contents.cache, &target, backend, priority).await.map(Arc::new);
+            let result = Self::fetch(&contents.cache, &contents.peers, &target, backend, priority).await.map(Arc::new);
             let mut state = contents.state();
             if state.tasks.get(&target).is_none_or(|task| task.id != id) {
                 // Replaced or forgotten meanwhile.
@@ -180,6 +187,7 @@ impl Contents {
 
     async fn fetch(
         cache: &MailCache,
+        peers: &PeerMail,
         message: &MessageRef,
         backend: Option<Arc<Backend>>,
         priority: Priority,
@@ -190,6 +198,10 @@ impl Contents {
             return Ok(cached);
         }
         let Some(backend) = backend else { return Err("The account is no longer signed in.".into()) };
+        if let Some(mut taken) = peers.fetch(message, matches!(*backend, Backend::Gmail(_)), priority).await {
+            taken.snippet = text::snippet(taken.text.as_deref().unwrap_or(""));
+            return Ok(taken);
+        }
         let content = backend
             .content(&message.id, cache.message_directory(message), MailCache::part_url_base(message), priority)
             .await

@@ -152,7 +152,7 @@ impl SyncNode {
         let settings = Arc::new(Settings::new(&config.data_directory));
         let events = Arc::new(Events::default());
         let device_sync =
-            DeviceSync::start(config.data_directory.clone(), config.network, settings.clone(), events.clone());
+            DeviceSync::start(config.data_directory.clone(), config.network, settings.clone(), events.clone(), None);
         let accounts: Arc<dyn AccountHost> = Arc::new(NodeAccounts {
             accounts: Accounts::new(&config.data_directory),
             keychain: Keychain::new(config.keychain_service, config.keychain_directory),

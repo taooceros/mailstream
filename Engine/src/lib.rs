@@ -53,6 +53,7 @@ pub mod model;
 mod oauth;
 mod omp;
 mod polling;
+mod peer_mail;
 pub mod peer_sync;
 pub mod push;
 pub mod settings;
@@ -74,6 +75,8 @@ mod mail_tests;
 mod push_tests;
 #[cfg(test)]
 mod chat_tests;
+#[cfg(test)]
+mod peer_mail_tests;
 #[cfg(test)]
 mod peer_sync_tests;
 #[cfg(test)]
@@ -393,6 +396,7 @@ impl Engine {
                 network,
                 settings.clone(),
                 events.clone(),
+                Some(mail.peer_mail()),
             )
         });
         let bridge_sync = device_sync.as_ref().map(Arc::downgrade);
@@ -577,6 +581,7 @@ impl Core {
                             last_sync: None,
                             problem: Some("Device sync is disabled in this mode.".into()),
                             cloud: Default::default(),
+                            mail: Default::default(),
                         })),
                         _ => Err(EngineError::new("unavailable", "Device sync is disabled in this mode.")),
                     }

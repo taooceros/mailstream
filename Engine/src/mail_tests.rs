@@ -706,7 +706,7 @@ pub(crate) fn graph_server(tokens: Arc<AtomicUsize>) -> FakeServer {
 }
 
 /// What the fake Graph answers `request` with; the token endpoint aside.
-fn graph_reply(request: &FakeRequest) -> Reply {
+pub(crate) fn graph_reply(request: &FakeRequest) -> Reply {
     let path = request.path.as_str();
     assert!(request.header("Prefer").is_some_and(|prefer| prefer.contains("IdType=\"ImmutableId\"")), "{path}");
     assert_eq!(request.method, "GET", "receiving mail only reads: {path}");
