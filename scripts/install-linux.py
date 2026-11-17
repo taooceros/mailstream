@@ -9,9 +9,11 @@ installed.
 Installed front end, a folder under ~/.local/opt:
 - gpui: ~/.local/opt/mailstream-gpui/ holds the release binary `mailstream-gpui`, the
   `mailstream` command line beside it and the launcher `mailstream-gpui.sh`, which sets
-  LD_LIBRARY_PATH to the devenv shell's (GPUI dlopens Vulkan, Wayland and fontconfig; NixOS has no
-  global library path) and starts it; ~/.local/bin/mailstream links to the command line. The desktop
-  entry ~/.local/share/applications/dev.mailstream.MailstreamGPUI.desktop starts the launcher.
+  LD_LIBRARY_PATH to the devenv shell's (GPUI dlopens Vulkan, Wayland and fontconfig and links
+  GStreamer; NixOS has no global library path) and GST_PLUGIN_SYSTEM_PATH_1_0 to its GStreamer
+  plugins (Chat's videos, MS-221), and starts it; ~/.local/bin/mailstream links to the command
+  line. The desktop entry ~/.local/share/applications/dev.mailstream.MailstreamGPUI.desktop starts
+  the launcher.
 The folder keeps its config.json (OAuth clients; the engine reads it beside the executable) and
 AppIcon.png, gets the built commit in `revision`, and a `nix-env` profile holding the devenv shell
 the build used, so a nix garbage collection keeps the libraries the binaries load.
@@ -105,7 +107,7 @@ def stop(executable):
             fail(f"installed process {pid} has not exited; not forcing termination")
 
 
-def install(frontend, built, revision, ld_library_path, shell):
+def install(frontend, built, revision, ld_library_path, gst_plugin_path, shell):
     spec = FRONTENDS[frontend]
     folder = spec["folder"]
     staging = folder.with_name(f".{folder.name}-install-{os.getpid()}")
@@ -123,8 +125,9 @@ def install(frontend, built, revision, ld_library_path, shell):
         launcher.write_text(
             "#!/bin/sh\n"
             f"# Mailstream GPUI, built from main {revision} (scripts/install-linux.py).\n"
-            "# NixOS has no global library path: GPUI dlopens Vulkan, Wayland and fontconfig from the\n"
-            "# devenv shell, kept from garbage collection by the nix-env profile beside this script.\n"
+            "# NixOS has no global library path: GPUI dlopens Vulkan, Wayland and fontconfig and loads\n"
+            "# GStreamer and its plugins from the devenv shell, kept from garbage collection by the\n"
+            "# nix-env profile beside this script.\n"
             "# --help/--version only print what is installed: probing the launcher must never open the\n"
             "# app on the person's screen (two install agents did on 11-12).\n"
             'case "${1:-}" in -h|--help|--version|-V)\n'
@@ -132,6 +135,7 @@ def install(frontend, built, revision, ld_library_path, shell):
             "  exit 0;;\n"
             "esac\n"
             f'export LD_LIBRARY_PATH="{ld_library_path}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"\n'
+            f'export GST_PLUGIN_SYSTEM_PATH_1_0="{gst_plugin_path}"\n'
             f'exec "{executable}" "$@"\n')
         launcher.chmod(0o755)
     stop(executable)
@@ -193,19 +197,21 @@ def main():
         for frontend in dict.fromkeys(targets):
             for relative in FRONTENDS[frontend]["outside"]:
                 move_outside(relative)
-        ld_library_path = devenv('printf %s "$LD_LIBRARY_PATH"', capture=True).strip()
+        ld_library_path, _, gst_plugin_path = devenv(
+            'printf "%s\\n%s" "$LD_LIBRARY_PATH" "$GST_PLUGIN_SYSTEM_PATH_1_0"', capture=True).strip().partition("\n")
         shell = os.path.realpath(ROOT / ".devenv/gc/shell")
-        if not ld_library_path or not shell.startswith("/nix/store/"):
-            fail("devenv shell gave no LD_LIBRARY_PATH or .devenv/gc/shell")
+        if not ld_library_path or not gst_plugin_path or not shell.startswith("/nix/store/"):
+            fail("devenv shell gave no LD_LIBRARY_PATH, GST_PLUGIN_SYSTEM_PATH_1_0 or .devenv/gc/shell")
         closure = run("nix-store", "--query", "--requisites", shell, capture=True).split()
-        missing = [p for p in ld_library_path.split(":") if p.rsplit("/lib", 1)[0] not in closure]
+        paths = ld_library_path.split(":") + gst_plugin_path.split(":")
+        missing = [p for p in paths if p.rsplit("/lib", 1)[0] not in closure]
         if missing:
             fail(f"devenv shell's closure misses {missing}")
         for frontend in dict.fromkeys(targets):
             built = build(frontend)
             if main_revision() != revision:
                 fail("main advanced during build; rebuild at current main before installing")
-            install(frontend, built, revision, ld_library_path, shell)
+            install(frontend, built, revision, ld_library_path, gst_plugin_path, shell)
     finally:
         LOCK.rmdir()
     print("Check each install: revision equals main, launch in a vhypr desktop (AGENTS.md).")

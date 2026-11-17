@@ -59,3 +59,9 @@ fontique = { version = "0.12", default-features = false, features = ["fontconfig
 [target.'cfg(target_os = "linux")'.dependencies]
 wayland-client = "0.31.11"
 wayland-protocols = { version = "0.32.9", features = ["client", "staging", "unstable"] }
+# Chat's videos (MS-221, `src/video.rs`): GstPlay plays them, its frames come out of an app sink
+# and GPUI draws them. The libraries and plugins come from `devenv shell` (devenv.nix).
+gstreamer = "0.24"
+gstreamer-app = "0.24"
+gstreamer-video = "0.24"
+gstreamer-play = "0.24"

@@ -42,6 +42,9 @@ mod state;
 mod swipe;
 mod text_checking;
 mod ui;
+// Chat's videos, played in the log (MS-221): GStreamer on Linux; the Mac's player is MS-398.
+#[cfg(target_os = "linux")]
+mod video;
 #[cfg(target_os = "macos")]
 mod updater;
 // Screenshots of the window drawn headless over synthetic mail (MS-243, `--shots`).

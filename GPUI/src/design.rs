@@ -708,7 +708,8 @@ pub mod chat {
     pub const FORM_WIDTH: f32 = 520.0;
     /// A message still being sent.
     pub const PENDING_OPACITY: f32 = 0.55;
-    /// The largest a picture takes in the log; one still downloading holds a `MEDIA_LOADING` box.
+    /// The largest a picture or a playing video takes in the log; a picture still downloading
+    /// holds a `MEDIA_LOADING` box.
     pub const MEDIA_WIDTH: f32 = 360.0;
     pub const MEDIA_HEIGHT: f32 = 300.0;
     pub const MEDIA_LOADING: (f32, f32) = (240.0, 160.0);
@@ -868,6 +869,47 @@ pub fn category_color(category: mailstream::Category, p: &Palette) -> Hsla {
 /// The inbox's Chat bundle's color (MS-330), Google Chat's green.
 pub fn chat_color() -> Hsla {
     argb(0xFF34A853)
+}
+
+/// Chat's videos (MS-221): the box a video takes in the log, the round play button over it and
+/// its glyph, the controls along its bottom, and their colors. The box is the log's media width at
+/// 16:9 before and while it plays, the picture letterboxed in it, so the log doesn't move when a
+/// video starts (and a row that changes height while shown leaves its sender's name cut to "…",
+/// MS-399). Only Linux plays videos until the Mac's player (MS-398).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub mod video {
+    use gpui::Hsla;
+
+    use super::argb;
+
+    pub const SIZE: (f32, f32) = (super::chat::MEDIA_WIDTH, super::chat::MEDIA_WIDTH * 9. / 16.);
+    pub const BADGE: f32 = 48.0;
+    pub const BADGE_GLYPH: f32 = 28.0;
+    pub const BAR: f32 = 36.0;
+
+    /// A video sits on a dark frame in both appearances, as players do.
+    pub struct Ink {
+        /// The frame around and behind the picture, and the poster.
+        pub frame: Hsla,
+        /// Text and glyphs over it.
+        pub text: Hsla,
+        /// Why a video can't play, over the poster.
+        pub failure: Hsla,
+        /// The play button's disc.
+        pub badge: Hsla,
+        /// The shade under the controls, from clear at its top to its bottom.
+        pub scrim: [Hsla; 2],
+    }
+
+    pub fn ink() -> Ink {
+        Ink {
+            frame: argb(0xFF202124),
+            text: argb(0xDDFFFFFF),
+            failure: argb(0xFFFF8A80),
+            badge: argb(0x8C000000),
+            scrim: [argb(0x00000000), argb(0x99000000)],
+        }
+    }
 }
 
 /// What a file is, for the color of its glyph.

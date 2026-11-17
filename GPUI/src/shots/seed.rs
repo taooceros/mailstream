@@ -22,9 +22,11 @@
 //!   tagged during a run.
 //! - Conversations Sam started that nobody answered yet, which list in the inbox from Sent alone:
 //!   the newest of all in Gmail, and one in Outlook.
-//! - Chat: a direct message, two groups and a space; the Design team's recent messages, the
-//!   Release crew's with replies in threads (MS-329), and the direct message with Jordan, whose
-//!   mail its toolbar searches (MS-331; the screenshot mode searches what mail.db lists).
+//! - Chat: a direct message, two groups and a space; the Design team's recent messages, one with
+//!   a screen recording that plays in the log (MS-221, already downloaded: a synthetic test
+//!   pattern, `clip.mp4`), the Release crew's with replies in threads (MS-329) and a video the
+//!   provider won't hand over, and the direct message with Jordan, whose mail its toolbar
+//!   searches (MS-331; the screenshot mode searches what mail.db lists).
 //! - The calendars: this week's meetings around today, the design review among them; it and
 //!   Sprint planning (which Sam organizes, so it can be edited) carry a place, notes with links,
 //!   a link to the provider's page and guests with every kind of answer. Jordan's calendar,
@@ -762,7 +764,15 @@ fn write_chat(cache: &MailCache) {
         (1, 12., "Updated. Review at 3?"),
         (2, 10., "👍"),
     ];
-    let messages: Vec<Value> = log.iter().enumerate().map(|(n, (sender, minutes, text))| message(group, n, *sender, *minutes, text)).collect();
+    let mut messages: Vec<Value> =
+        log.iter().enumerate().map(|(n, (sender, minutes, text))| message(group, n, *sender, *minutes, text)).collect();
+    // A screen recording with "Updated.", already in the engine's cache of Chat's files
+    // (`chat.attachment` downloads to the same place), so it plays without the provider.
+    let (clip, resource) = ("reader-walkthrough.mp4", "spaces/design-team/attachments/walkthrough");
+    messages[4]["attachments"] = json!([{ "name": clip, "contentType": "video/mp4", "resource": resource }]);
+    let folder = cache.root.join("chat-media").join(mailstream_engine::cache::hash(&[GMAIL, resource]));
+    std::fs::create_dir_all(&folder).expect("the chat files' folder");
+    std::fs::write(folder.join(clip), include_bytes!("clip.mp4")).expect("the chat video");
     // A group whose replies go in threads (MS-329): two threads under their first messages, one
     // reply to a message older than the history loaded.
     let release = "spaces/release-crew";
@@ -778,11 +788,14 @@ fn write_chat(cache: &MailCache) {
         (1, 120., "Thanks, that settles it.", Some(99)),
         (3, 95., "Changelog is merged.", None),
     ];
-    let release_messages: Vec<Value> = release_log
+    let mut release_messages: Vec<Value> = release_log
         .iter()
         .enumerate()
         .map(|(n, (sender, minutes, text, thread))| threaded(release, n, *sender, *minutes, text, *thread))
         .collect();
+    // A video the stand-in provider won't hand over: its poster says it couldn't download.
+    release_messages[9]["attachments"] =
+        json!([{ "name": "changelog-demo.mov", "contentType": "video/quicktime", "resource": "spaces/release-crew/attachments/demo" }]);
     // The direct message with Jordan, whose toolbar offers the mail with them (MS-331).
     let dm = "spaces/jordan";
     let dm_log = [

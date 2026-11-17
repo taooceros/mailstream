@@ -47,6 +47,8 @@ use crate::engine::{MailError, engine};
 use crate::input::{self, wrap_selection};
 use crate::markup_highlight::{MarkupFlavor, markup_highlighter_factory};
 use crate::split;
+#[cfg(target_os = "linux")]
+use crate::video::{self, ChatVideo};
 use crate::state::ReaderTop;
 
 actions!(chat, [Back, Next, Previous, Open, NewChat, Refresh, FormatBold, FormatItalic, FormatStrike, FormatCode]);
@@ -232,7 +234,8 @@ impl From<mailstream::ChatAttachment> for Attachment {
 }
 
 impl Attachment {
-    /// An uploaded picture shows in the log; everything else (videos too) is a tile.
+    /// An uploaded picture shows in the log; everything else is a tile, except an uploaded video,
+    /// which plays in the log where the platform has a player (`video.rs`, Linux).
     fn inline(&self) -> bool {
         self.kind == AttachmentKind::Image && self.resource.is_some()
     }
@@ -939,6 +942,9 @@ pub struct ChatPane {
     files: HashMap<FileKey, FileState>,
     /// Files to open in the system's default app once downloaded.
     open_when_ready: HashSet<FileKey>,
+    /// Videos waiting for their file, which they play once downloaded (MS-221).
+    #[cfg(target_os = "linux")]
+    video_waiting: HashMap<FileKey, gpui::WeakEntity<ChatVideo>>,
     form: NewChatForm,
     pending_serial: u64,
     _subscriptions: Vec<Subscription>,
@@ -1002,6 +1008,8 @@ impl ChatPane {
             hovered_message: None,
             files: HashMap::new(),
             open_when_ready: HashSet::new(),
+            #[cfg(target_os = "linux")]
+            video_waiting: HashMap::new(),
             form: NewChatForm::default(),
             pending_serial: 0,
             _subscriptions: subscriptions,
@@ -1525,10 +1533,40 @@ impl ChatPane {
                 if let (true, FileState::Ready(path)) = (this.open_when_ready.remove(&key), &file) {
                     cx.open_with_system(path);
                 }
+                #[cfg(target_os = "linux")]
+                if let Some(video) = this.video_waiting.remove(&key).and_then(|video| video.upgrade()) {
+                    let answer = match &file {
+                        FileState::Ready(path) => Ok(path.clone()),
+                        FileState::Failed(reason) => Err(reason.clone()),
+                        FileState::Loading => unreachable!("a download that finished"),
+                    };
+                    video.update(cx, |video, cx| video.load(answer, cx));
+                }
                 this.files.insert(key, file);
                 cx.notify();
             },
         );
+    }
+
+    /// A video's poster was clicked: hands it its file, downloading it first unless it is here;
+    /// a download that failed is tried again.
+    #[cfg(target_os = "linux")]
+    fn fetch_video(&mut self, account: &SharedString, attachment: &Attachment, video: Entity<ChatVideo>, cx: &mut Context<Self>) {
+        let Some(resource) = attachment.resource.clone() else { return };
+        let key: FileKey = (account.clone(), resource);
+        match self.files.get(&key) {
+            Some(FileState::Ready(path)) => {
+                let path = path.clone();
+                video.update(cx, |video, cx| video.load(Ok(path), cx));
+                return;
+            }
+            Some(FileState::Failed(_)) => {
+                self.files.remove(&key);
+            }
+            Some(FileState::Loading) | None => {}
+        }
+        self.video_waiting.insert(key, video.downgrade());
+        self.fetch_file(account, attachment, false, cx);
     }
 
     // MARK: - Sending
@@ -2533,7 +2571,8 @@ impl ChatPane {
     }
 
     /// An attachment in the log: an uploaded picture as itself once downloaded (Flutter's
-    /// `_ChatImage`); anything else, or a picture that can't be shown, as a tile.
+    /// `_ChatImage`), an uploaded video as its player on Linux (`_ChatVideo`); anything else, or a
+    /// picture that can't be shown, as a tile.
     fn render_attachment(
         &self,
         account: &SharedString,
@@ -2554,6 +2593,10 @@ impl ChatPane {
                 },
                 Some(FileState::Failed(_)) => {}
             }
+        }
+        #[cfg(target_os = "linux")]
+        if attachment.kind == AttachmentKind::Video && attachment.resource.is_some() {
+            return self.render_video(account, id, attachment, window, cx);
         }
         self.render_tile(account, id, attachment, file, p, cx)
     }
@@ -2606,6 +2649,30 @@ impl ChatPane {
                     .child(div().truncate().font_weight(FontWeight::MEDIUM).child(attachment.name.clone()))
                     .child(div().truncate().text_size(px(text::FOOTNOTE)).text_color(detail_color).child(detail)),
             )
+            .into_any_element()
+    }
+
+    /// An uploaded video's player, kept while its row shows: scrolled away, it stops and shows its
+    /// poster again when back (the file stays downloaded).
+    #[cfg(target_os = "linux")]
+    fn render_video(
+        &self,
+        account: &SharedString,
+        id: ElementId,
+        attachment: &Attachment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pane = cx.entity().downgrade();
+        let (account, chosen) = (account.clone(), attachment.clone());
+        window
+            .use_keyed_state(id, cx, move |window, cx| {
+                let name = chosen.name.clone();
+                let fetch: video::Fetch = Rc::new(move |video, cx| {
+                    pane.update(cx, |pane, cx| pane.fetch_video(&account, &chosen, video, cx)).ok();
+                });
+                ChatVideo::new(name, fetch, window, cx)
+            })
             .into_any_element()
     }
 

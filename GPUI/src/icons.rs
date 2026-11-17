@@ -55,6 +55,7 @@ icons! {
     MarkRead => "mark_email_read",
     MarkUnread => "mark_email_unread",
     Person => "person",
+    Play => "play_arrow_fill",
     Refresh => "refresh",
     Reply => "reply",
     ReplyAll => "reply_all",
