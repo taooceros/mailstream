@@ -257,6 +257,7 @@ enum SyncBusy {
     Pair,
     Join,
     Reset,
+    Remove,
     Now,
     Cloud,
 }
@@ -313,6 +314,8 @@ struct Settings {
     sync_ticket: Option<PairCode>,
     ticket_copied: bool,
     sync_confirm_reset: bool,
+    /// The paired device whose removal waits for confirmation (MS-396), by endpoint id.
+    sync_confirm_remove: Option<String>,
     sync_busy: Option<SyncBusy>,
     sync_error: Option<SharedString>,
     renaming: Option<Rename>,
@@ -346,6 +349,7 @@ impl Settings {
             sync_ticket: None,
             ticket_copied: false,
             sync_confirm_reset: false,
+            sync_confirm_remove: None,
             sync_busy: None,
             sync_error: None,
             renaming: None,
@@ -676,6 +680,7 @@ impl Settings {
             return;
         }
         self.sync_confirm_reset = false;
+        self.sync_confirm_remove = None;
         if !enable {
             self.sync_ticket = None;
             self.ticket_copied = false;
@@ -697,6 +702,7 @@ impl Settings {
         let needs_enable = self.device_sync.as_ref().is_none_or(|status| !status.enabled);
         self.sync_busy = Some(SyncBusy::Pair);
         self.sync_confirm_reset = false;
+        self.sync_confirm_remove = None;
         self.sync_error = None;
         self.ticket_copied = false;
         cx.notify();
@@ -746,6 +752,7 @@ impl Settings {
         }
         self.sync_busy = Some(SyncBusy::Join);
         self.sync_confirm_reset = false;
+        self.sync_confirm_remove = None;
         self.sync_error = None;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
@@ -790,6 +797,19 @@ impl Settings {
                 this.sync_ticket = None;
                 this.ticket_copied = false;
             },
+            cx,
+        );
+    }
+
+    /// Removes the paired device `id` from the sync group (MS-396).
+    fn remove_sync_device(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.sync_busy.is_some() {
+            return;
+        }
+        self.run_sync(
+            SyncBusy::Remove,
+            async move { engine().sync_remove(id).await },
+            |this| this.sync_confirm_remove = None,
             cx,
         );
     }
@@ -1971,12 +1991,84 @@ impl Settings {
                     if peer.accounts {
                         meta.push_str(" · Has your accounts");
                     }
-                    div()
+                    let id = peer.id.clone();
+                    let device = div()
                         .flex()
-                        .flex_col()
-                        .gap(px(2.))
-                        .child(div().font_weight(FontWeight::MEDIUM).truncate().child(peer.name.clone()))
-                        .child(div().text_size(px(text::CAPTION)).text_color(p.muted).truncate().child(meta))
+                        .items_center()
+                        .gap(px(12.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(div().font_weight(FontWeight::MEDIUM).truncate().child(peer.name.clone()))
+                                .child(div().text_size(px(text::CAPTION)).text_color(p.muted).truncate().child(meta)),
+                        )
+                        .child(
+                            button(
+                                ElementId::Name(format!("remove-sync-{id}").into()),
+                                "Remove…",
+                                ButtonKind::Plain(p.danger),
+                                ControlSize::Small,
+                                interactive,
+                                p,
+                            )
+                            .when(interactive, |b| {
+                                b.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.sync_confirm_remove = Some(id.clone());
+                                    this.sync_confirm_reset = false;
+                                    cx.notify();
+                                }))
+                            }),
+                        );
+                    let confirming = self.sync_confirm_remove.as_ref() == Some(&peer.id);
+                    div().flex().flex_col().gap(px(8.)).child(device).when(confirming, |d| {
+                        let id = peer.id.clone();
+                        d.child(
+                            div()
+                                .p(px(12.))
+                                .rounded(px(radius::CONTROL))
+                                .bg(design::tint(p.danger, design::notice::TINT))
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.))
+                                .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Remove {}?", peer.name)))
+                                .child(div().text_size(px(text::CAPTION)).text_color(p.muted).child(
+                                    "It stops syncing with your other devices, can't get mail from them and gets no \
+                                     new sign-ins; your other devices keep syncing. It keeps the sign-ins it already \
+                                     has: to cut it off, remove Mailstream's access in your Google or Microsoft \
+                                     account settings. You can pair it again later.",
+                                ))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .justify_end()
+                                        .gap(px(6.))
+                                        .child(
+                                            button("remove-sync-cancel", "Cancel", ButtonKind::Secondary, ControlSize::Regular, true, p)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.sync_confirm_remove = None;
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            button(
+                                                "remove-sync-confirm",
+                                                if self.sync_busy == Some(SyncBusy::Remove) { "Removing…" } else { "Remove Device" },
+                                                ButtonKind::Destructive,
+                                                ControlSize::Regular,
+                                                interactive,
+                                                p,
+                                            )
+                                            .when(interactive, |b| {
+                                                b.on_click(cx.listener(move |this, _, _, cx| this.remove_sync_device(id.clone(), cx)))
+                                            }),
+                                        ),
+                                ),
+                        )
+                    })
                 }))
                 .into_any_element();
             rows.push(devices_row);
@@ -2141,10 +2233,8 @@ impl Settings {
                     .gap(px(8.))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("Reset sync group?"))
                     .child(div().text_size(px(text::CAPTION)).text_color(p.muted).child(
-                        "Starts a new sync group carrying over your synced settings and accounts; pair your other \
-                         devices again. A lost device stops receiving changes, but keeps the sign-ins it already \
-                         has: to cut it off, remove Mailstream's access in your Google or Microsoft account \
-                         settings, then sign in again here.",
+                        "Starts a new sync group carrying over your synced settings and accounts; pair every other \
+                         device again. To drop just one device, remove it under Paired devices instead.",
                     ))
                     .child(
                         div()
@@ -2187,7 +2277,7 @@ impl Settings {
                             .gap(px(2.))
                             .child(div().font_weight(FontWeight::MEDIUM).child("Reset sync group"))
                             .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
-                                "If a paired device is lost, reset the group so it can no longer receive future updates.",
+                                "Start over with a new group that every device must pair with again.",
                             )),
                     )
                     .child(
@@ -2195,6 +2285,7 @@ impl Settings {
                             .when(interactive, |b| {
                                 b.on_click(cx.listener(|this, _, _, cx| {
                                     this.sync_confirm_reset = true;
+                                    this.sync_confirm_remove = None;
                                     cx.notify();
                                 }))
                             }),
