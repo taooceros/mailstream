@@ -62,6 +62,13 @@ resolver = "3"
 # it) hands its connection actors a weak sender to the pool's actor (`Context::notify` in
 # `src/connection_pool.rs`, marked "Mailstream patch"): the actor owned a strong one, so its inbox
 # never closed and it kept the iroh endpoint, with its UDP sockets, alive after closing.
+# `GPUI/vendor/taffy` is taffy 0.15.0 with `compute_size_depth` in `src/tree/taffy_tree.rs`
+# (marked "Mailstream patch", MS-399): flexbox's `calculate_children_base_lines` calls children with
+# `RunMode::PerformLayout` even while the flex container itself is being measured under
+# `RunMode::ComputeSize`, which overwrote children's `unrounded_layout` and `final_layout_entry`
+# with narrow probe dimensions (e.g. 0px) while the container's own `final_layout_entry` cache
+# answered the final `PerformLayout` pass, leaving retained GPUI text truncated to "…" at 0px.
+
 [patch.crates-io]
 stylo_derive = { path = "GPUI/vendor/stylo_derive" }
 gpui-fast = { path = "GPUI/vendor/gpui-fast" }
@@ -72,6 +79,7 @@ gpui-fast-wgpu = { path = "GPUI/vendor/gpui-fast-wgpu" }
 async-imap = { path = "Engine/vendor/async-imap" }
 iroh-blobs = { path = "Engine/vendor/iroh-blobs" }
 iroh-util = { path = "Engine/vendor/iroh-util" }
+taffy = { path = "GPUI/vendor/taffy" }
 
 # Debug builds with optimized dependencies, as GPUI had them on its own; one profile for every
 # member, so a debug build of GPUI and the engine's tests share their dependencies.

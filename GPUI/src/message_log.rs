@@ -126,3 +126,167 @@ pub fn message(
             d.child(place.child(actions))
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::design::{self, layout};
+    use gpui::{Entity, ListAlignment, ListState, Render, Window, WindowAppearance, list, px, relative};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct MediaBox {
+        w: f32,
+        h: f32,
+        tick: u32,
+    }
+
+    impl Render for MediaBox {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            div().id("video-box").flex_none().w(px(self.w)).h(px(self.h)).child(format!("{}", self.tick))
+        }
+    }
+
+    struct LogHarness {
+        list: ListState,
+        media: Option<Entity<MediaBox>>,
+        inline_box: bool,
+        w: f32,
+        h: f32,
+        mine: bool,
+        sender_layout: Rc<RefCell<Option<gpui::TextLayout>>>,
+    }
+
+    impl Render for LogHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            let p = design::palette(WindowAppearance::Light);
+            let inline_box = self.inline_box;
+            let w = self.w;
+            let h = self.h;
+            let mine = self.mine;
+            let sender_layout = self.sender_layout.clone();
+            div().size_full().flex().child(div().w(px(240.)).h_full()).child(
+                div().flex_1().min_w_0().h_full().flex().flex_col().child(
+                    div().relative().flex_1().min_h_0().child(
+                        list(
+                            self.list.clone(),
+                            cx.processor(move |this, ix: usize, window, cx| {
+                                if ix == 0 {
+                                    return div().h(px(200.)).into_any_element();
+                                }
+                                let text = gpui::StyledText::new("Jordan Park");
+                                *sender_layout.borrow_mut() = Some(text.layout().clone());
+                                let head = div()
+                                    .pb(px(space::S4))
+                                    .flex()
+                                    .when(mine, |d| d.flex_row_reverse())
+                                    .items_baseline()
+                                    .gap(px(space::S8))
+                                    .min_w_0()
+                                    .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(text))
+                                    .child(div().flex_shrink_0().text_size(px(text::FOOTNOTE)).text_color(p.muted).child("9:41 AM"));
+                                let body = div()
+                                    .text_size(px(text::READING))
+                                    .line_height(relative(text::READING_LEADING))
+                                    .child(div().flex().flex_col().child(div().w_full().min_w_0().child("Updated.")))
+                                    .into_any_element();
+                                let media = window.use_keyed_state("chat-file:1:0", cx, |_, _| MediaBox { w: 320., h: 180., tick: 0 });
+                                this.media = Some(media.clone());
+                                let box_el = if inline_box {
+                                    div().flex_shrink_0().w(px(w)).h(px(h)).into_any_element()
+                                } else {
+                                    media.into_any_element()
+                                };
+                                let attachments = div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .when(mine, |d| d.justify_end())
+                                    .items_start()
+                                    .gap(px(space::S8))
+                                    .pt(px(space::S6))
+                                    .child(box_el)
+                                    .into_any_element();
+                                let row = message(
+                                    Row { id: ElementId::Name("chat-msg:1".into()), mine, continued: false, hovered: false },
+                                    div().size(px(metrics::AVATAR)),
+                                    Some(head),
+                                    [body, attachments],
+                                    None,
+                                    p,
+                                );
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .justify_center()
+                                    .child(div().w_full().max_w(px(layout::READING_WIDTH)).px(px(32.)).child(div().flex().flex_col().child(row)))
+                                    .into_any_element()
+                            }),
+                        )
+                        .size_full(),
+                    ),
+                ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn sender_name_not_truncated_when_message_height_changes(cx: &mut gpui::TestAppContext) {
+        let sender_layout: Rc<RefCell<Option<gpui::TextLayout>>> = Default::default();
+        let (view, cx) = cx.add_window_view({
+            let sender_layout = sender_layout.clone();
+            move |_, _| LogHarness {
+                list: ListState::new(2, ListAlignment::Bottom, px(300.)),
+                media: None,
+                inline_box: false,
+                w: 320.,
+                h: 180.,
+                mine: false,
+                sender_layout,
+            }
+        });
+        cx.run_until_parked();
+        let check = |stage: &str| {
+            let layout = sender_layout.borrow().as_ref().unwrap().clone();
+            let text = layout.wrapped_text().to_string();
+            let bounds = layout.bounds();
+            assert_eq!(text, "Jordan Park", "{stage}: sender name truncated to {text:?} (bounds={bounds:?})");
+            assert!(bounds.size.width > px(40.), "{stage}: sender name width collapsed to {bounds:?}");
+        };
+        check("initial");
+
+        // Video box grows from poster 320x180 to 360x202.5, then updates a frame at the new height.
+        let media = view.read_with(cx, |v, _| v.media.clone().unwrap());
+        media.update(cx, |m, cx| {
+            m.w = 360.;
+            m.h = 202.5;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        check("after media resize");
+
+        media.update(cx, |m, cx| {
+            m.tick += 1;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        check("after media tick at new height");
+
+        // Pane re-render (e.g. picture placeholder 240x160 -> loaded picture 360x240).
+        view.update(cx, |v, cx| {
+            v.inline_box = true;
+            v.w = 240.;
+            v.h = 160.;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        check("picture loading placeholder");
+
+        view.update(cx, |v, cx| {
+            v.w = 360.;
+            v.h = 240.;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        check("picture loaded size");
+    }
+}
