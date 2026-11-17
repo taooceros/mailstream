@@ -163,8 +163,9 @@ async fn admitted_devices_take_stored_bodies_from_each_other() {
     let answer = ask(&endpoint, id_a, get).await.unwrap();
     assert_eq!(&answer[4..], br#"{"answer":"missing"}"#);
 
-    // A device that isn't admitted is refused.
+    // A device that isn't admitted is refused, also one that dials past its own gate.
     let stranger = Device::open(&lookup, std::slice::from_ref(&account)).await;
+    stranger.sync.dial_anyone();
     assert!(ask(&stranger.sync.endpoint(), id_a, have(CONTENT_VERSION)).await.is_err());
 
     // Once the group removed the account, A no longer gives its mail.
@@ -173,6 +174,11 @@ async fn admitted_devices_take_stored_bodies_from_each_other() {
         (ask(&endpoint, id_a, have(CONTENT_VERSION)).await.ok()? == b"[false,false]").then_some(())
     })
     .await;
+
+    // Once A removed B (MS-396), B gets nothing more, whatever it dials.
+    a.sync.remove_device(&id_b.to_string()).await.unwrap();
+    b.sync.dial_anyone();
+    assert!(ask(&endpoint, id_a, have(CONTENT_VERSION)).await.is_err(), "A served a removed device");
 
     for device in [stranger, b, a] {
         device.sync.shutdown().await;

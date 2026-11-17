@@ -751,6 +751,12 @@ pub const COMMANDS: &[Spec] = &[
     )
     .confirmed(),
     Spec::new(
+        "sync.remove",
+        Handler::Sync,
+        "Removes one device from the sync group: it can no longer sync with the group's devices or get mail from them, gets no more sign-ins, and the cloud drop moves where it can't read it. Sign-ins it already has stay valid until revoked at Google or Microsoft. Pair it again to bring it back.",
+        &[Argument::new("device", Kind::String, "The device's id, as `mailstream sync status` lists it.").positional()],
+    ),
+    Spec::new(
         "sync.now",
         Handler::Sync,
         "Reconciles with paired devices now.",

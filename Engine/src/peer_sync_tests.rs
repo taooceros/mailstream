@@ -223,6 +223,65 @@ async fn a_pairing_code_admits_one_device_once() {
     }
 }
 
+/// MS-396: removing a device shuts it out of every device that heard of the removal, its open
+/// connections both ways included: it gets none of the group's new entries, its own reach
+/// nobody, and the others keep syncing. Pairing it again brings it back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removed_device_is_shut_out_until_paired_again() {
+    let folders = [(); 3].map(|()| config(OAuthConfig::default()));
+    let lookup = MemoryLookup::new();
+    let (a, b, c) = (open(&folders[0], &lookup).await, open(&folders[1], &lookup).await, open(&folders[2], &lookup).await);
+    a.create_group().await.unwrap();
+    assert!(a.set_trusted("alice@example.com", true, 1_000).await.unwrap());
+    b.join(&a.invite().await.unwrap().0).await.unwrap();
+    c.join(&a.invite().await.unwrap().0).await.unwrap();
+    let (id_a, id_b, id_c) = (a.status().await.endpoint_id, b.status().await.endpoint_id, c.status().await.endpoint_id);
+    let all = |snapshot: &Snapshot| [&id_a, &id_b, &id_c].iter().all(|id| snapshot.admitted.contains_key(*id));
+    for sync in [&a, &b, &c] {
+        until("every device to admit all three", sync, all).await;
+    }
+    // Connected, live entries reach C.
+    assert!(b.set_trusted("bob@example.com", true, 2_000).await.unwrap());
+    until("C to get B's live change", &c, |snapshot| trusted(snapshot, "bob@example.com").is_some()).await;
+
+    // Neither an unknown device nor this one can be removed.
+    assert!(a.remove_device("not-a-device").await.is_err());
+    assert!(a.remove_device(&id_a).await.is_err());
+
+    a.remove_device(&id_c).await.unwrap();
+    let removed = a.snapshot().await.unwrap();
+    assert!(!removed.admitted.contains_key(&id_c));
+    assert_eq!(removed.removed[&id_c].by, id_a);
+    until("B to hear of the removal", &b, |snapshot| {
+        snapshot.removed.contains_key(&id_c) && !snapshot.admitted.contains_key(&id_c)
+    })
+    .await;
+
+    // A and B keep syncing; C, still connected to both a moment ago and now dialing past its own
+    // gate, gets nothing new, and what it writes with the group's key it still holds reaches
+    // neither.
+    c.dial_anyone();
+    assert!(a.set_trusted("carol@example.com", true, 3_000).await.unwrap());
+    until("B to get A's change after the removal", &b, |snapshot| trusted(snapshot, "carol@example.com").is_some()).await;
+    assert!(c.set_trusted("mallory@example.com", true, 3_100).await.unwrap());
+    c.realign().await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let on_c = c.snapshot().await.unwrap();
+    assert_eq!(trusted(&on_c, "carol@example.com"), None, "C got an entry written after its removal");
+    for sync in [&a, &b] {
+        assert_eq!(trusted(&sync.snapshot().await.unwrap(), "mallory@example.com"), None, "C's entry reached the group");
+    }
+
+    // Paired again with a code of B's, C is admitted anew and catches up.
+    c.join(&b.invite().await.unwrap().0).await.unwrap();
+    until("C to catch up once paired again", &c, |snapshot| trusted(snapshot, "carol@example.com").is_some()).await;
+    until("A to admit C again", &a, |snapshot| snapshot.admitted.contains_key(&id_c) && !snapshot.removed.contains_key(&id_c))
+        .await;
+    for sync in [a, b, c] {
+        sync.shutdown().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_process_holds_a_folder_and_reopens_it_as_it_was() {
     let folder = config(OAuthConfig::default());

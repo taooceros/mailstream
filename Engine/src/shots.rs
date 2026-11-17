@@ -602,6 +602,15 @@ pub(crate) fn device_sync(command: &str, args: &Arguments, events: &Events) -> R
             events.emit("deviceSync");
             Ok(answers::json(&mock.status()))
         }
+        "sync.remove" => {
+            let device = args.required("device")?;
+            if !mock.joined_peer || device != "shot9b8c7d6e5f4a3b2c1d0e" {
+                return Err(EngineError::failed(format!("No device {device} in this sync group.")));
+            }
+            mock.joined_peer = false;
+            events.emit("deviceSync");
+            Ok(answers::json(&mock.status()))
+        }
         "sync.now" => {
             if !mock.grouped {
                 return Err(EngineError::new("no_group", "Device sync is not enabled yet."));

@@ -655,6 +655,11 @@ commands! {
     /// devices. `confirm` is the person's go-ahead.
     fn sync_reset(confirm: bool) -> DeviceSyncStatus = "sync.reset" { "yes": confirm };
 
+    /// Removes `device` (an endpoint id from [`Mailstream::sync_status`]) from the sync group
+    /// (MS-396): it can no longer sync with the group or get mail from its devices, gets no more
+    /// sign-ins, and the cloud drop moves where it can't read it.
+    fn sync_remove(device: String) -> DeviceSyncStatus = "sync.remove" { "device": device };
+
     /// Triggers reconciliation with paired devices immediately.
     fn sync_now() -> DeviceSyncStatus = "sync.now" {};
 

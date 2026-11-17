@@ -554,3 +554,56 @@ fn joining_device_gets_accounts_with_tokens_sealed_to_it() {
     drop(engine_b);
     drop(engine_a);
 }
+
+/// MS-396: `sync.remove` takes a device out of the status, withdraws the sign-ins sealed to it
+/// and seals it no new ones, and the group's changes stop reaching it while the other devices
+/// keep syncing.
+#[test]
+fn removing_a_device_withdraws_its_sign_ins_and_stops_its_sync() {
+    let lookup = MemoryLookup::new();
+    let (cfg_a, cfg_b, cfg_c) = (sync_config(&lookup), sync_config(&lookup), sync_config(&lookup));
+    sign_in_all(&cfg_a, &[mail_account("me@gmail.com", "google")]);
+    let engine_a = Engine::start(cfg_a.clone());
+    let engine_b = Engine::start(cfg_b.clone());
+    let engine_c = Engine::start(cfg_c.clone());
+    call(&engine_a, "sync.enable", json!({})).unwrap();
+    for engine in [&engine_b, &engine_c] {
+        let ticket = call(&engine_a, "sync.pair_ticket", json!({})).unwrap()["ticket"].as_str().unwrap().to_string();
+        call(engine, "sync.join", json!({ "ticket": ticket })).unwrap();
+        until("the device to get A's account", || account_ids(engine) == ["me@gmail.com"]);
+    }
+    let id = |engine: &Engine| call(engine, "sync.status", json!({})).unwrap()["endpointId"].as_str().unwrap().to_string();
+    let (id_b, id_c) = (id(&engine_b), id(&engine_c));
+    let listed = |engine: &Engine| -> Vec<String> {
+        let status = call(engine, "sync.status", json!({})).unwrap();
+        status["devices"].as_array().unwrap().iter().map(|device| device["id"].as_str().unwrap().to_string()).collect()
+    };
+    until("A to list all three devices", || listed(&engine_a).len() == 3);
+
+    let unknown = call(&engine_a, "sync.remove", json!({ "device": "nobody" })).unwrap_err();
+    assert!(unknown.message.contains("No device"), "{}", unknown.message);
+    let status = call(&engine_a, "sync.remove", json!({ "device": id_c })).unwrap();
+    let devices: Vec<&str> = status["devices"].as_array().unwrap().iter().map(|device| device["id"].as_str().unwrap()).collect();
+    assert!(devices.contains(&id_b.as_str()) && !devices.contains(&id_c.as_str()), "{devices:?}");
+    until("B to stop listing C", || !listed(&engine_b).contains(&id_c));
+
+    // A's next change reaches B, not C.
+    call(&engine_a, "config.set", json!({ "key": "autoRead.days", "value": "9" })).unwrap();
+    until("B to take A's change", || setting_value(&engine_b, "autoRead.days") == json!(9));
+    call(&engine_c, "sync.now", json!({})).unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert_ne!(setting_value(&engine_c, "autoRead.days"), json!(9), "C got a change made after its removal");
+
+    // In A's replica, the sign-in sealed to C is withdrawn; B's stays.
+    drop(engine_c);
+    drop(engine_b);
+    drop(engine_a);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let sync = PeerSync::open_on(&cfg_a.support_directory, Network::Loopback(lookup.clone())).await.unwrap();
+        let snapshot = sync.snapshot().await.unwrap();
+        assert_eq!(snapshot.credentials[&format!("{id_c}/me@gmail.com")].sealed, None, "C's sign-in wasn't withdrawn");
+        assert!(snapshot.credentials[&format!("{id_b}/me@gmail.com")].sealed.is_some());
+        sync.shutdown().await;
+    });
+}

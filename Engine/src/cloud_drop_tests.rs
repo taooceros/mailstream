@@ -156,6 +156,55 @@ fn devices_never_online_together_sync_through_the_drop() {
     drop(engine_a);
 }
 
+/// MS-396: removing a device moves the group's copies to a place derived from a key the removed
+/// device never gets, and deletes them from the old one, where the removed device's writes stay.
+#[test]
+fn removing_a_device_moves_the_drop_where_it_cannot_follow() {
+    let (server, groups) = worker();
+    let lookup = MemoryLookup::new();
+    let paired = || {
+        let mut cfg = config(OAuthConfig::default());
+        cfg.device_sync = Some(Network::Loopback(lookup.clone()));
+        cfg
+    };
+    let configs = [paired(), paired(), paired()];
+    let engines = configs.each_ref().map(|cfg| Engine::start((**cfg).clone()));
+    let [engine_a, engine_b, engine_c] = &engines;
+    call(engine_a, "sync.enable", json!({})).unwrap();
+    for engine in [engine_b, engine_c] {
+        let code = call(engine_a, "sync.pair_ticket", json!({})).unwrap()["ticket"].as_str().unwrap().to_string();
+        call(engine, "sync.join", json!({ "ticket": code })).unwrap();
+    }
+    for engine in &engines {
+        let status = call(engine, "sync.cloud_enable", json!({ "url": server.base })).unwrap();
+        assert_eq!(status["cloud"]["problem"], Value::Null, "{status}");
+    }
+    let group_slots = || groups.lock().unwrap().slots.iter().map(|(group, slots)| (group.clone(), slots.len())).collect::<Vec<_>>();
+    until("the three copies in one group", || group_slots().iter().any(|(_, slots)| *slots == 3));
+    let old_group = group_slots().into_iter().find(|(_, slots)| *slots == 3).unwrap().0;
+
+    let id_c = call(engine_c, "sync.status", json!({})).unwrap()["endpointId"].as_str().unwrap().to_string();
+    let status = call(engine_a, "sync.remove", json!({ "device": id_c })).unwrap();
+    assert_eq!(status["cloud"]["problem"], Value::Null, "{status}");
+    call(engine_b, "sync.now", json!({})).unwrap();
+    until("A's and B's copies to move, and leave the old place", || {
+        let held = group_slots();
+        held.iter().any(|(group, slots)| *group != old_group && *slots == 2)
+            && held.iter().all(|(group, slots)| *group != old_group || *slots <= 1)
+    });
+
+    // What C writes now goes only to the old place, which no device of the group reads.
+    call(engine_c, "config.add", json!({ "key": "remoteContent.trustedSenders", "values": ["mallory@x.com"] })).unwrap();
+    call(engine_c, "sync.now", json!({})).unwrap();
+    call(engine_a, "sync.now", json!({})).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(trusted(engine_a), json!([]), "C's write reached A");
+    let held = groups.lock().unwrap();
+    assert_eq!(held.slots.get(&old_group).map(BTreeMap::len), Some(1), "only C's copy stays at the old place");
+    drop(held);
+    drop(engines);
+}
+
 #[test]
 fn the_drop_refuses_plain_http_and_reports_an_unreachable_worker() {
     let cfg = device();

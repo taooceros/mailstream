@@ -6,7 +6,9 @@
 //! the usual rule (the latest `at` wins, tombstones included) decides as if the devices had met.
 //!
 //! Everything the Worker sees is derived from the group's write secret, which only the group's
-//! devices hold (`PeerSync::group_secret`):
+//! devices hold, and once a device was removed, from the drop key only the devices still in the
+//! group get (`PeerSync::drop_secret`, MS-396), so the drop then moves where the removed device
+//! can't follow and each device deletes its copy at the old place:
 //! - the group's address (64 hex), and per device an opaque slot (32 hex, keyed by the device's
 //!   endpoint id);
 //! - the bearer token whose SHA-256 the group's first write registers, so nobody else can read
@@ -199,8 +201,12 @@ impl Contents {
                 .map(|(key, entry)| (key, Stamped { value: entry.value, at: entry.at }))
                 .collect(),
             devices: self.devices,
-            // Admissions cross only between admitted devices (MS-380), never through the drop.
+            // Admissions and removals cross only between admitted devices (MS-380), never
+            // through the drop.
             admitted: Default::default(),
+            removed: Default::default(),
+            // Sealed to each device's key for the drop's own keys: never in the drop (MS-396).
+            drop_keys: Default::default(),
             accounts: self
                 .accounts
                 .into_iter()
@@ -338,8 +344,9 @@ impl CloudDrop {
     }
 
     /// Lists the group's copies, merges the other devices' into `sync`, and uploads this
-    /// device's when it changed. Does nothing while the drop is off or sync isn't running.
-    pub(crate) async fn exchange(&self, sync: &PeerSync) -> Exchange {
+    /// device's when it changed, under keys derived with `drop_key` once a device was removed
+    /// (MS-396). Does nothing while the drop is off or sync isn't running.
+    pub(crate) async fn exchange(&self, sync: &PeerSync, drop_key: Option<&[u8; 32]>) -> Exchange {
         let _exchanging = self.exchanging.lock().await;
         let url = {
             let file = self.file.lock().expect("cloud file lock");
@@ -348,7 +355,7 @@ impl CloudDrop {
                 _ => return Exchange::default(),
             }
         };
-        let result = match sync.group_secret().await {
+        let result = match sync.drop_secret(drop_key).await {
             Ok(Some(secret)) => {
                 let endpoint_id = sync.status().await.endpoint_id;
                 self.exchange_with(sync, &url, &Keys::derive(&secret), &endpoint_id).await

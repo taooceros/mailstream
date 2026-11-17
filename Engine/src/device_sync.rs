@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock, mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::account_sync::{self, AccountHost};
+use crate::account_sync::{self, AccountHost, DropKey};
 use crate::answers::{self, DeviceSyncStatus, SyncDevice, SyncTicket};
 use crate::cloud_drop::{self, CloudDrop};
 use crate::commands::Arguments;
@@ -164,6 +164,8 @@ pub struct DeviceSync {
     /// Mail bodies served to and asked of the group's devices (MS-394); `None` on a sync node,
     /// which holds no mail.
     mail: Option<Arc<PeerMail>>,
+    /// The cloud drop's key as the last reconcile left it, with the group it belongs to (MS-396).
+    drop_key: Mutex<Option<(String, DropKey)>>,
 }
 
 impl DeviceSync {
@@ -192,6 +194,7 @@ impl DeviceSync {
             tasks: Mutex::new(Vec::new()),
             accounts: OnceLock::new(),
             mail,
+            drop_key: Mutex::new(None),
         });
         let bridge = tokio::spawn(this.clone().run_loop(wake_rx));
         let cloud = tokio::spawn(this.clone().cloud_loop());
@@ -349,10 +352,30 @@ impl DeviceSync {
     /// One exchange with the cloud drop, bridging what it brought into `settings.json`; false
     /// when it failed.
     async fn cloud_exchange(&self) -> bool {
+        let namespace = {
+            let guard = self.sync.read().await;
+            let Some(sync) = guard.as_ref() else { return true };
+            sync.status().await.namespace
+        };
+        let drop_key = || {
+            let held = self.drop_key.lock().expect("drop key lock").clone();
+            held.filter(|(group, _)| Some(group) == namespace.as_ref()).map(|(_, drop_key)| drop_key)
+        };
+        // A reconcile of this group tells which key the drop takes (MS-396).
+        if drop_key().is_none() {
+            self.reconcile_and_report().await;
+        }
         let exchange = {
             let guard = self.sync.read().await;
             let Some(sync) = guard.as_ref() else { return true };
-            self.cloud.exchange(sync).await
+            // While the key of the latest removal is on its way, the drop waits: never where a
+            // removed device reads.
+            let drop_key = match drop_key() {
+                Some(DropKey::Original) => None,
+                Some(DropKey::Rotated(key)) => Some(key),
+                Some(DropKey::Waiting) | None => return true,
+            };
+            self.cloud.exchange(sync, drop_key.as_ref()).await
         };
         if exchange.merged {
             self.meta.lock().expect("meta lock").last_sync_ms = Some(now_ms());
@@ -590,6 +613,7 @@ impl DeviceSync {
             }
 
             let mut accounts_problem = None;
+            let mut drop_key = DropKey::without_key(&snapshot);
             next_bridged.accounts = prev_bridged.accounts.clone();
             if let Some(host) = self.accounts.get().and_then(Weak::upgrade) {
                 let pass = account_sync::Pass {
@@ -602,10 +626,14 @@ impl DeviceSync {
                     join_at: JOIN_AT,
                 };
                 match account_sync::reconcile(pass, &mut |min_at| bridge.next_at(min_at)).await {
-                    Ok(done) => next_bridged.accounts = done.bridged,
+                    Ok(done) => {
+                        next_bridged.accounts = done.bridged;
+                        drop_key = done.drop_key;
+                    }
                     Err(error) => accounts_problem = Some(format!("Accounts: {}", error.message)),
                 }
             }
+            *self.drop_key.lock().expect("drop key lock") = Some((namespace.clone(), drop_key));
 
             if !pending_updates.is_empty() {
                 for (setting, value) in &pending_updates {
@@ -715,6 +743,24 @@ impl DeviceSync {
                 self.events.emit("deviceSync");
                 Ok(answers::json(&self.status_answer().await))
             }
+            "sync.remove" => {
+                let device = args.required("device")?;
+                if self.closed_stored().await?.is_some_and(|stored| stored.namespace.is_none()) {
+                    return Err(map_error(PeerSyncError::NoGroup));
+                }
+                self.open_or_err().await?;
+                {
+                    let guard = self.sync.read().await;
+                    let sync = guard.as_ref().expect("opened");
+                    sync.remove_device(&device).await.map_err(map_error)?;
+                }
+                // Withdraws the credentials sealed to it, and moves the cloud drop.
+                self.reconcile().await?;
+                self.cloud_exchange().await;
+                self.close_unless_syncing().await;
+                self.events.emit("deviceSync");
+                Ok(answers::json(&self.status_answer().await))
+            }
             "sync.now" => {
                 if let Some(stored) = self.closed_stored().await? {
                     if stored.namespace.is_none() {
@@ -783,8 +829,15 @@ impl DeviceSync {
         let snapshot = if status.namespace.is_some() { sync.snapshot().await.ok() } else { None };
         let mut devices = Vec::new();
         let mut latest_other_seen = None;
+        let mut removed_here = None;
         if let Some(snapshot) = snapshot {
-            for (id, device) in &snapshot.devices {
+            removed_here = snapshot.removed.get(&status.endpoint_id).map(|removal| {
+                let by = snapshot.devices.get(&removal.by).map_or(removal.by.as_str(), |device| device.name.as_str());
+                format!(
+                    "{by} removed this device from the sync group; pair it again with a code from a device in the group to rejoin."
+                )
+            });
+            for (id, device) in snapshot.devices.iter().filter(|(id, _)| !snapshot.removed.contains_key(*id)) {
                 if *id != status.endpoint_id {
                     latest_other_seen = Some(latest_other_seen.unwrap_or(0).max(device.last_seen));
                 }
@@ -807,7 +860,7 @@ impl DeviceSync {
             namespace: status.namespace,
             devices,
             last_sync,
-            problem: meta.problem.clone(),
+            problem: removed_here.or_else(|| meta.problem.clone()),
             cloud: self.cloud.status(),
             mail: Default::default(),
         }

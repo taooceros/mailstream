@@ -16,6 +16,10 @@
 //! Refresh tokens rotate on each device on their own (Google's don't rotate; Microsoft's older
 //! ones stay valid until they expire); a credential is sent again only when it was issued anew
 //! (a sign-in or connecting a service), which `credentials.json` records per account.
+//!
+//! Removing a device (MS-396) withdraws what was sealed to it, and the device that removed it
+//! makes the cloud drop a new key, which every device seals on to the others the same way
+//! (`v1/drop/<recipient>`), so the drop moves where the removed device can't read it.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -24,13 +28,14 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine as _;
 use curve25519_dalek::montgomery::MontgomeryPoint;
 use futures::future::BoxFuture;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::accounts::AccountRecord;
 use crate::keychain::{Keychain, SignIns};
 use crate::oauth::{OAuthClient, Provider};
-use crate::peer_sync::{PeerSync, SealedCredential, Snapshot, hex};
+use crate::peer_sync::{PeerSync, SealedCredential, SealedDropKey, Snapshot, hex, unhex};
 use crate::{EngineError, files};
 
 const MAGIC: &[u8; 4] = b"msc1";
@@ -96,9 +101,9 @@ impl CredentialKey {
         self.public
     }
 
-    /// The credential `sealed` holds for `recipient` (this device's endpoint id) and `account`;
-    /// `None` for anything not sealed to this key for them.
-    pub fn open(&self, recipient: &str, account: &str, sealed: &str) -> Option<Credential> {
+    /// What `sealed` holds for `recipient` (this device's endpoint id) and `account`; `None` for
+    /// anything not sealed to this key for them.
+    pub fn open<T: DeserializeOwned>(&self, recipient: &str, account: &str, sealed: &str) -> Option<T> {
         let data = base64::engine::general_purpose::STANDARD.decode(sealed).ok()?;
         let rest = data.strip_prefix(MAGIC.as_slice())?;
         if rest.len() < 32 + NONCE {
@@ -115,8 +120,8 @@ impl CredentialKey {
     }
 }
 
-/// `credential` sealed to the device `recipient` whose credential key is `to`, for `account`.
-pub(crate) fn seal(to: &[u8; 32], recipient: &str, account: &str, credential: &Credential) -> Result<String, String> {
+/// `value` sealed to the device `recipient` whose credential key is `to`, for `account`.
+pub(crate) fn seal(to: &[u8; 32], recipient: &str, account: &str, value: &impl Serialize) -> Result<String, String> {
     let mut ephemeral_secret = [0u8; 32];
     getrandom::fill(&mut ephemeral_secret).map_err(|error| error.to_string())?;
     let ephemeral = MontgomeryPoint::mul_base_clamped(ephemeral_secret).to_bytes();
@@ -124,7 +129,7 @@ pub(crate) fn seal(to: &[u8; 32], recipient: &str, account: &str, credential: &C
     let cipher = cipher(&shared, &ephemeral, to).ok_or("That device's credential key is not usable.")?;
     let mut nonce = [0u8; NONCE];
     getrandom::fill(&mut nonce).map_err(|error| error.to_string())?;
-    let plain = serde_json::to_vec(credential).map_err(|error| error.to_string())?;
+    let plain = serde_json::to_vec(value).map_err(|error| error.to_string())?;
     let aad = aad(recipient, account);
     let ciphertext = cipher
         .encrypt(Nonce::from_slice(&nonce), Payload { msg: &plain, aad: aad.as_bytes() })
@@ -200,6 +205,27 @@ pub(crate) struct Pass<'a> {
 pub(crate) struct Reconciled {
     /// The records to bridge from now on.
     pub bridged: BTreeMap<String, Option<Value>>,
+    /// The cloud drop's key as this device has it now.
+    pub drop_key: DropKey,
+}
+
+/// The cloud drop's key as a device has it (MS-396).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum DropKey {
+    /// No device was removed: the drop's keys come from the group's write key alone.
+    Original,
+    /// The key made after the latest removal.
+    Rotated([u8; 32]),
+    /// A device was removed and this one hasn't got the key made after it yet: the drop waits
+    /// rather than going where the removed device reads.
+    Waiting,
+}
+
+impl DropKey {
+    /// Before this device holds the key: [`DropKey::Original`] while no device was removed.
+    pub fn without_key(snapshot: &Snapshot) -> Self {
+        if snapshot.removed.is_empty() && snapshot.drop_keys.is_empty() { Self::Original } else { Self::Waiting }
+    }
 }
 
 /// Brings this device's accounts and the group's together: announces this device's credential
@@ -282,7 +308,7 @@ pub(crate) async fn reconcile(
                     .get(&slot)
                     .filter(|sealed| sealed.to == hex(&key.public()))
                     .filter(|sealed| issued.issued.get(id).is_none_or(|have| sealed.issued > *have))
-                    .and_then(|sealed| Some((sealed.issued, key.open(pass.me, id, sealed.sealed.as_deref()?)?)));
+                    .and_then(|sealed| Some((sealed.issued, key.open::<Credential>(pass.me, id, sealed.sealed.as_deref()?)?)));
                 if mine == Some(value) && credential.is_none() {
                     bridged.insert(id.clone(), Some(value.clone()));
                     continue;
@@ -306,7 +332,7 @@ pub(crate) async fn reconcile(
     }
 
     // This device's credentials, sealed to each device that may have them; withdrawn for
-    // accounts removed.
+    // accounts removed and from devices removed from the group (MS-396).
     let sign_ins = pass.host.keychain().load().map_err(|error| EngineError::failed(error.to_string()))?;
     let recipients = recipients(&snapshot, pass.me);
     for record in pass.host.accounts() {
@@ -349,7 +375,8 @@ pub(crate) async fn reconcile(
         if existing.sealed.is_none() || snapshot.pending.contains(&format!("v1/cred/{slot}")) {
             continue;
         }
-        let removed = snapshot.accounts.get(account).is_some_and(|stamped| stamped.value.is_none());
+        let removed = snapshot.accounts.get(account).is_some_and(|stamped| stamped.value.is_none())
+            || snapshot.removed.contains_key(recipient);
         if removed {
             let withdrawn = SealedCredential {
                 to: existing.to.clone(),
@@ -360,7 +387,65 @@ pub(crate) async fn reconcile(
             sync.set_credential(recipient, account, &withdrawn).await.map_err(map_error)?;
         }
     }
-    Ok(Reconciled { bridged })
+    let drop_key = seal_drop_key(sync, &snapshot, &key, pass.me, next_at).await?;
+    Ok(Reconciled { bridged, drop_key })
+}
+
+/// What the account a drop key is sealed for is named in its associated data.
+fn drop_account(epoch: u64) -> String {
+    format!("#drop/{epoch}")
+}
+
+/// The cloud drop key of the latest removal (MS-396), sealed on to every device that gets the
+/// accounts and to this one: opened from this device's slot, or made here when this device made
+/// that removal and has none yet. A removal re-admitted since doesn't bring an older key back.
+async fn seal_drop_key(
+    sync: &PeerSync,
+    snapshot: &Snapshot,
+    key: &CredentialKey,
+    me: &str,
+    next_at: &mut (dyn FnMut(u64) -> u64 + Send),
+) -> Result<DropKey, EngineError> {
+    let removal = snapshot.removed.values().max_by_key(|removal| removal.at);
+    let sealed_epoch = snapshot.drop_keys.values().map(|sealed| sealed.epoch).max();
+    let Some(epoch) = removal.map(|removal| removal.at).max(sealed_epoch) else { return Ok(DropKey::Original) };
+    if snapshot.pending.contains(&format!("v1/drop/{me}")) {
+        return Ok(DropKey::Waiting);
+    }
+    let opened = snapshot
+        .drop_keys
+        .get(me)
+        .filter(|sealed| sealed.epoch == epoch && sealed.to == hex(&key.public()))
+        .and_then(|sealed| key.open::<String>(me, &drop_account(epoch), &sealed.sealed))
+        .and_then(|secret| <[u8; 32]>::try_from(unhex(&secret)?).ok());
+    let drop_key = match opened {
+        Some(drop_key) => drop_key,
+        None if removal.is_some_and(|removal| removal.at == epoch && removal.by == me) => {
+            let mut drop_key = [0u8; 32];
+            getrandom::fill(&mut drop_key).map_err(|error| EngineError::failed(error.to_string()))?;
+            drop_key
+        }
+        None => return Ok(DropKey::Waiting),
+    };
+    let mut holders = recipients(snapshot, me);
+    holders.push((me.to_string(), key.public()));
+    for (recipient, to) in holders {
+        if snapshot.pending.contains(&format!("v1/drop/{recipient}")) {
+            continue;
+        }
+        let existing = snapshot.drop_keys.get(&recipient);
+        if existing.is_some_and(|existing| existing.epoch == epoch && existing.to == hex(&to)) {
+            continue;
+        }
+        let sealed = SealedDropKey {
+            to: hex(&to),
+            sealed: seal(&to, &recipient, &drop_account(epoch), &hex(&drop_key)).map_err(EngineError::failed)?,
+            epoch,
+            at: next_at(existing.map_or(0, |existing| existing.at)),
+        };
+        sync.set_drop_key(&recipient, &sealed).await.map_err(map_error)?;
+    }
+    Ok(DropKey::Rotated(drop_key))
 }
 
 /// The devices this device seals its credentials to, with their verified credential keys.
@@ -374,8 +459,8 @@ fn recipients(snapshot: &Snapshot, me: &str) -> Vec<(String, [u8; 32])> {
 }
 
 /// Whether the device `id` gets the group's accounts (MS-376, the user's choice 1D): a device of
-/// the group admitted it (MS-380), which takes a one-time pairing code, and it announced a
-/// credential key.
+/// the group admitted it (MS-380), which takes a one-time pairing code, none removed it since
+/// (MS-396), and it announced a credential key.
 pub(crate) fn receives(snapshot: &Snapshot, id: &str) -> bool {
     snapshot.admitted.contains_key(id)
         && snapshot.device_keys.get(id).is_some_and(|announced| announced.verified(id).is_some())
@@ -440,14 +525,14 @@ mod tests {
         assert!(!raw.windows(7).any(|window| window == b"refresh" || window == b"secret\""));
         assert_eq!(recipient.open("device-b", "me@x.com", &sealed), Some(credential()));
         // Another device's key, another slot or another account opens nothing.
-        assert_eq!(other.open("device-b", "me@x.com", &sealed), None);
-        assert_eq!(recipient.open("device-c", "me@x.com", &sealed), None);
-        assert_eq!(recipient.open("device-b", "you@x.com", &sealed), None);
+        assert_eq!(other.open::<Credential>("device-b", "me@x.com", &sealed), None);
+        assert_eq!(recipient.open::<Credential>("device-c", "me@x.com", &sealed), None);
+        assert_eq!(recipient.open::<Credential>("device-b", "you@x.com", &sealed), None);
         // A damaged one neither.
         let mut damaged = raw.clone();
         *damaged.last_mut().unwrap() ^= 1;
         let damaged = base64::engine::general_purpose::STANDARD.encode(damaged);
-        assert_eq!(recipient.open("device-b", "me@x.com", &damaged), None);
+        assert_eq!(recipient.open::<Credential>("device-b", "me@x.com", &damaged), None);
         // A key of low order is refused rather than sealed to.
         assert!(seal(&[0; 32], "device-b", "me@x.com", &credential()).is_err());
     }
