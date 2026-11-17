@@ -1,7 +1,8 @@
 //! A stand-in Gmail IMAP server on loopback for tests (`mail_tests`), parallel to `fake_server.rs`.
-//! Supports `XOAUTH2`, `ENABLE UTF8=ACCEPT`, `LIST` with `\All`, `EXAMINE`, `UID SEARCH X-GM-RAW`,
-//! and `UID FETCH` with `X-GM-MSGID`, `X-GM-THRID`, `X-GM-LABELS`, `FLAGS`, `INTERNALDATE`,
-//! `RFC822.SIZE`, `BODYSTRUCTURE`, and `BODY[HEADER.FIELDS (...)]`.
+//! Supports `XOAUTH2`, `ENABLE UTF8=ACCEPT`, `LIST` with `\All`, `EXAMINE`, `UID SEARCH X-GM-RAW`
+//! (also within `UID <set>`) and `UID SEARCH` of `OR`-ed `X-GM-MSGID`s, and `UID FETCH` with
+//! `X-GM-MSGID`, `X-GM-THRID`, `X-GM-LABELS`, `FLAGS`, `INTERNALDATE`, `RFC822.SIZE`,
+//! `BODYSTRUCTURE`, and `BODY[HEADER.FIELDS (...)]`.
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -61,6 +62,8 @@ pub struct FakeImapServer {
     pub endpoint: ImapEndpoint,
     pub connections: AtomicUsize,
     pub searches: AtomicUsize,
+    /// `UID SEARCH`es of a listing's header fetch: by `X-GM-MSGID`, or within a `UID` set.
+    pub lookups: AtomicUsize,
     pub fetches: AtomicUsize,
     pub noops: AtomicUsize,
     pub in_flight_searches: AtomicUsize,
@@ -83,6 +86,7 @@ impl FakeImapServer {
             endpoint: ImapEndpoint { host: "127.0.0.1".into(), port, tls: false },
             connections: AtomicUsize::new(0),
             searches: AtomicUsize::new(0),
+            lookups: AtomicUsize::new(0),
             fetches: AtomicUsize::new(0),
             noops: AtomicUsize::new(0),
             in_flight_searches: AtomicUsize::new(0),
@@ -219,14 +223,37 @@ impl FakeImapServer {
                     let _ = write.write_all(format!("{tag} BAD [CLIENTBUG] Unsupported search query\r\n").as_bytes()).await;
                     continue;
                 }
-                let matched: Vec<String> = self
-                    .config
-                    .messages
-                    .iter()
-                    .filter(|msg| (self.config.matches)(&query, msg))
-                    .map(|msg| msg.uid.to_string())
-                    .collect();
-                let line = if matched.is_empty() { "* SEARCH\r\n".into() } else { format!("* SEARCH {}\r\n", matched.join(" ")) };
+                let line = search_reply(self.config.messages.iter().filter(|msg| (self.config.matches)(&query, msg)));
+                let _ = write.write_all(format!("{line}{tag} OK SEARCH completed (Success)\r\n").as_bytes()).await;
+            } else if let Some(criteria) = strip_prefix_ignore_case(rest, "UID SEARCH ") {
+                // A listing's header fetch (MS-395): `OR`-ed `X-GM-MSGID`s, or `UID <set>
+                // X-GM-RAW "<query>"` for the inbox categories among the messages found.
+                self.lookups.fetch_add(1, Ordering::SeqCst);
+                if self.config.fail_search {
+                    let _ = write.write_all(format!("{tag} NO [CANNOT] Search failed\r\n").as_bytes()).await;
+                    continue;
+                }
+                let scoped = strip_prefix_ignore_case(criteria, "UID ").and_then(|after| after.split_once(' '));
+                let line = if let Some((set, query)) = scoped
+                    && let Some(query) = strip_prefix_ignore_case(query, "X-GM-RAW ")
+                {
+                    let within: HashSet<u32> = set.split(',').filter_map(|uid| uid.parse().ok()).collect();
+                    let query = unquote_imap(query);
+                    search_reply(
+                        self.config.messages.iter().filter(|msg| within.contains(&msg.uid) && (self.config.matches)(&query, msg)),
+                    )
+                } else {
+                    let mut words = criteria.split_whitespace();
+                    let mut ids = HashSet::new();
+                    while let Some(word) = words.next() {
+                        if word.eq_ignore_ascii_case("X-GM-MSGID")
+                            && let Some(id) = words.next().and_then(|id| id.parse::<u64>().ok())
+                        {
+                            ids.insert(id);
+                        }
+                    }
+                    search_reply(self.config.messages.iter().filter(|msg| ids.contains(&msg.msg_id)))
+                };
                 let _ = write.write_all(format!("{line}{tag} OK SEARCH completed (Success)\r\n").as_bytes()).await;
             } else if let Some(after) = strip_prefix_ignore_case(rest, "UID FETCH ") {
                 self.fetches.fetch_add(1, Ordering::SeqCst);
@@ -286,6 +313,12 @@ impl FakeImapServer {
 
 fn strip_prefix_ignore_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     (s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix)).then(|| &s[prefix.len()..])
+}
+
+/// The untagged `SEARCH` line naming `found`'s UIDs.
+fn search_reply<'a>(found: impl Iterator<Item = &'a FakeImapMessage>) -> String {
+    let uids: Vec<String> = found.map(|msg| msg.uid.to_string()).collect();
+    if uids.is_empty() { "* SEARCH\r\n".into() } else { format!("* SEARCH {}\r\n", uids.join(" ")) }
 }
 
 fn quote_imap(s: &str) -> String {

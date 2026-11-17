@@ -111,8 +111,12 @@ pub(crate) fn gmail_batch(request: &FakeRequest, metadata: &HashMap<String, Valu
         let body = if path.contains("/labels/") {
             Some(json!({ "messagesTotal": 10, "messagesUnread": if id == "INBOX" { 3 } else { 0 } }))
         } else if query.contains("format=full") {
-            metadata.get(id).map(|_| {
-                let files = if id == "i00" || id == "a0" { json!([{ "filename": "menu.pdf" }]) } else { json!([]) };
+            metadata.get(id).map(|message| {
+                let files = match &message["payload"]["parts"] {
+                    Value::Array(parts) => json!(parts),
+                    _ if id == "i00" || id == "a0" => json!([{ "filename": "menu.pdf" }]),
+                    _ => json!([]),
+                };
                 json!({ "id": id, "payload": { "parts": files } })
             })
         } else {

@@ -2,9 +2,11 @@
 //! charges per-minute quota units for `messages.list` + batched `messages.get`, whereas IMAP is
 //! covered by the existing `https://mail.google.com/` scope and avoids those quota units. Each
 //! account keeps up to `MAX_SESSIONS` long-lived connections open on `[Gmail]/All Mail` (found via
-//! `\All` in `LIST`), so its searches run side by side (MS-371); dropped connections are replaced,
-//! and the REST API answers when IMAP is disabled, unavailable or refuses a query.
+//! `\All` in `LIST`), so its searches and the listings' header fetches (MS-395) run side by side
+//! (MS-371); dropped connections are replaced, and the REST API answers when IMAP is disabled,
+//! unavailable or refuses a query.
 use std::collections::{BTreeSet, HashMap};
+use std::fmt::Write as _;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::task::{Context, Poll};
@@ -226,51 +228,99 @@ impl ImapClient {
     /// keeps its matches for the full search of the same query that follows it (MS-371), which
     /// then fetches only the messages the quick one left out instead of searching again.
     pub(super) async fn search(&self, query: &str, limit: usize, quick: bool) -> Result<Vec<ImapMessage>, Fallback> {
+        self.ready()?;
+        let known = if quick { None } else { self.take_held(query) };
+        let known = match known {
+            Some(known) if known.covers(limit) => return Ok(known.into_first(limit)),
+            other => other,
+        };
+        let known = known.as_ref();
+        let found = self
+            .run(|mut live| async move {
+                let found = search_on_session(&mut live, query, limit, known).await;
+                (live, found)
+            })
+            .await?;
+        if quick {
+            self.hold(query, found.clone());
+        }
+        Ok(found.into_first(limit))
+    }
+
+    /// The messages among `ids` (Gmail message ids, which IMAP calls `X-GM-MSGID`) that All Mail
+    /// holds, in no particular order, each with the inbox category Gmail put it in among its
+    /// labels (MS-395). Messages in Spam or Trash, which All Mail leaves out, and messages gone
+    /// are missing from the answer.
+    pub(super) async fn messages(&self, ids: &[u64]) -> Result<Vec<ImapMessage>, Fallback> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.run(|mut live| async move {
+            let found = messages_on_session(&mut live, ids).await;
+            (live, found)
+        })
+        .await
+    }
+
+    /// The endpoint, unless IMAP is off for this setup or stepping aside after a failure.
+    fn ready(&self) -> Result<&ImapEndpoint, Fallback> {
         let Some(endpoint) = self.endpoints.imap.as_ref() else {
             return Err(Fallback::Unconfigured);
         };
         if self.disabled() {
             return Err(Fallback::Disabled);
         }
-        let known = if quick { None } else { self.take_held(query) };
-        let known = match known {
-            Some(known) if known.covers(limit) => return Ok(known.into_first(limit)),
-            other => other,
-        };
+        Ok(endpoint)
+    }
+
+    /// Runs `work` on the most recently used open connection, or on a new one when none is
+    /// left or the idle one failed, holding one of the account's `MAX_SESSIONS` slots meanwhile.
+    /// `work` takes the connection and hands it back with its answer.
+    async fn run<T, F>(&self, work: impl Fn(LiveSession) -> F) -> Result<T, Fallback>
+    where
+        F: Future<Output = (LiveSession, Result<T, SearchError>)>,
+    {
+        let endpoint = self.ready()?;
         let _slot = self.slots.acquire().await.expect("IMAP slots are never closed");
         // Another search may have failed while this one waited for a slot.
         if self.disabled() {
             return Err(Fallback::Disabled);
         }
 
-        if let Some(mut live) = self.idle_session().await {
-            match tokio::time::timeout(SEARCH_TIMEOUT, search_on_session(&mut live, query, limit, known.as_ref())).await {
-                Ok(Ok(found)) => return Ok(self.finish(live, query, quick, found, limit)),
-                Ok(Err(SearchError::Query)) => {
+        if let Some(live) = self.idle_session().await {
+            match tokio::time::timeout(SEARCH_TIMEOUT, work(live)).await {
+                Ok((live, Ok(found))) => {
+                    self.put_back(live);
+                    return Ok(found);
+                }
+                Ok((live, Err(SearchError::Query))) => {
                     self.put_back(live);
                     return Err(Fallback::Failed);
                 }
-                Ok(Err(SearchError::Protocol)) => {}
+                Ok((_, Err(SearchError::Protocol))) => {}
                 // It answered a moment ago, so the server is slow rather than gone: a new
                 // connection would only make the fallback wait longer.
                 Err(_) => return Err(Fallback::Failed),
             }
         }
 
-        let mut live = match tokio::time::timeout(CONNECT_TIMEOUT, connect_and_examine(endpoint, &self.api)).await {
+        let live = match tokio::time::timeout(CONNECT_TIMEOUT, connect_and_examine(endpoint, &self.api)).await {
             Ok(Ok(live)) => live,
             Ok(Err(_)) | Err(_) => {
                 self.disable();
                 return Err(Fallback::Failed);
             }
         };
-        match tokio::time::timeout(SEARCH_TIMEOUT, search_on_session(&mut live, query, limit, known.as_ref())).await {
-            Ok(Ok(found)) => Ok(self.finish(live, query, quick, found, limit)),
-            Ok(Err(SearchError::Query)) => {
+        match tokio::time::timeout(SEARCH_TIMEOUT, work(live)).await {
+            Ok((live, Ok(found))) => {
+                self.put_back(live);
+                Ok(found)
+            }
+            Ok((live, Err(SearchError::Query))) => {
                 self.put_back(live);
                 Err(Fallback::Failed)
             }
-            Ok(Err(SearchError::Protocol)) | Err(_) => {
+            Ok((_, Err(SearchError::Protocol))) | Err(_) => {
                 self.disable();
                 Err(Fallback::Failed)
             }
@@ -316,18 +366,14 @@ impl ImapClient {
         self.state.lock().expect("IMAP state").idle.push(live);
     }
 
-    /// Puts `live` back and answers with `found`'s first `limit`, holding them when `quick`.
-    fn finish(&self, live: LiveSession, query: &str, quick: bool, found: Matches, limit: usize) -> Vec<ImapMessage> {
-        self.put_back(live);
-        if quick {
-            let mut state = self.state.lock().expect("IMAP state");
-            state.held.retain(|entry| entry.at.elapsed() < HELD_FOR && entry.query != query);
-            if state.held.len() >= MAX_SESSIONS {
-                state.held.remove(0);
-            }
-            state.held.push(HeldSearch { query: query.to_string(), at: Instant::now(), matches: found.clone() });
+    /// Holds a quick search's matches for the full search of the same query that follows it.
+    fn hold(&self, query: &str, found: Matches) {
+        let mut state = self.state.lock().expect("IMAP state");
+        state.held.retain(|entry| entry.at.elapsed() < HELD_FOR && entry.query != query);
+        if state.held.len() >= MAX_SESSIONS {
+            state.held.remove(0);
         }
-        found.into_first(limit)
+        state.held.push(HeldSearch { query: query.to_string(), at: Instant::now(), matches: found });
     }
 }
 
@@ -442,30 +488,66 @@ async fn search_on_session(
 
     let target = limit.min(matches.uids.len());
     if target > matches.fetched {
-        for chunk in matches.uids[matches.fetched..target].chunks(FETCH_CHUNK) {
-            let uid_set = chunk.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-            let fetches: Vec<Fetch> = {
-                let stream = live.session.uid_fetch(&uid_set, FETCH_ITEMS).await.map_err(|_| SearchError::Protocol)?;
-                stream.try_collect().await.map_err(|_| SearchError::Protocol)?
-            };
-            if fetches.is_empty() {
-                return Err(SearchError::Protocol);
-            }
-            for fetch in fetches {
-                let uid = fetch.uid;
-                let Some(message) = fetch_to_message(&fetch, live.utf8) else {
-                    return Err(SearchError::Protocol);
-                };
-                if let Some(uid) = uid {
-                    matches.messages.insert(uid, message);
-                } else {
-                    matches.unkeyed.push(message);
-                }
+        for (uid, message) in fetch_uids(live, &matches.uids[matches.fetched..target]).await? {
+            if let Some(uid) = uid {
+                matches.messages.insert(uid, message);
+            } else {
+                matches.unkeyed.push(message);
             }
         }
         matches.fetched = target;
     }
     Ok(matches)
+}
+
+/// `ImapClient::messages` on one connection: the UIDs of `ids` in one `UID SEARCH` of `OR`-ed
+/// `X-GM-MSGID`s, their messages, then one search per inbox category among those UIDs, since
+/// `X-GM-LABELS` leaves the categories out.
+async fn messages_on_session(live: &mut LiveSession, ids: &[u64]) -> Result<Vec<ImapMessage>, SearchError> {
+    let mut criteria = "OR ".repeat(ids.len().saturating_sub(1));
+    for id in ids {
+        let _ = write!(criteria, "X-GM-MSGID {id} ");
+    }
+    let uids = uid_search_checked(&mut live.session, criteria.trim_end()).await?;
+    if uids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut found = HashMap::with_capacity(uids.len());
+    for (uid, message) in fetch_uids(live, &uids).await? {
+        found.insert(uid.ok_or(SearchError::Protocol)?, message);
+    }
+    let uids = uid_set(&uids);
+    for (label, _, search) in super::CATEGORIES {
+        for uid in uid_search_checked(&mut live.session, &format!("UID {uids} X-GM-RAW \"{search}\"")).await? {
+            if let Some(message) = found.get_mut(&uid) {
+                message.system_labels.insert(label.into());
+            }
+        }
+    }
+    Ok(found.into_values().collect())
+}
+
+/// The messages of `uids`, `FETCH_CHUNK` per `UID FETCH`, with the UID each came back under.
+async fn fetch_uids(live: &mut LiveSession, uids: &[u32]) -> Result<Vec<(Option<u32>, ImapMessage)>, SearchError> {
+    let mut messages = Vec::with_capacity(uids.len());
+    for chunk in uids.chunks(FETCH_CHUNK) {
+        let fetches: Vec<Fetch> = {
+            let stream = live.session.uid_fetch(uid_set(chunk), FETCH_ITEMS).await.map_err(|_| SearchError::Protocol)?;
+            stream.try_collect().await.map_err(|_| SearchError::Protocol)?
+        };
+        if fetches.is_empty() {
+            return Err(SearchError::Protocol);
+        }
+        for fetch in fetches {
+            let message = fetch_to_message(&fetch, live.utf8).ok_or(SearchError::Protocol)?;
+            messages.push((fetch.uid, message));
+        }
+    }
+    Ok(messages)
+}
+
+fn uid_set(uids: &[u32]) -> String {
+    uids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
 }
 
 /// Runs `UID SEARCH <criteria>` and checks the tagged `OK`/`NO`/`BAD` completion rather than
