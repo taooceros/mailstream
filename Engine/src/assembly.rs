@@ -131,6 +131,7 @@ impl MessageAssembly {
             text,
             cc,
             reply_to,
+            delivered_to: Vec::new(),
             references,
             attachments,
             snippet: text::snippet(&snippet_source),

@@ -35,8 +35,8 @@ mod swift;
 pub use html_page::{HtmlPage, HtmlPart, HtmlSize, HtmlTile};
 pub use display::{
     ChatRunEntry, Recipients, SubjectParts, avatar, chat_body, chat_draft_body, chat_runs, day_divider, forward_body,
-    forward_subject, full_date, list_date, list_section, message_date, message_time, parse_recipients, reply_subject,
-    split_recipients, split_subject,
+    forward_subject, full_date, list_date, list_section, message_date, message_time, parse_recipients, reply_from,
+    reply_subject, split_recipients, split_subject,
 };
 pub use mail_html::{
     HtmlTheme, InlineParts, MAIL_WEB_COLOURS, MailWebColours, MailWebView, QUOTES, inline_parts_folder, is_mail_link,
@@ -134,6 +134,9 @@ pub struct Draft {
 /// Optional edits to the engine's reply plan. `None` keeps the default; an empty value clears it.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ReplyOverrides {
+    /// Override the sending account or alias (its address).
+    #[uniffi(default = None)]
+    pub from: Option<String>,
     pub to: Option<Vec<String>>,
     pub cc: Option<Vec<String>>,
     pub bcc: Option<Vec<String>>,
@@ -270,6 +273,7 @@ impl Mailstream {
     ) -> Result<Sent, MailError> {
         let mut args = json!({ "id": id, "body": body, "all": all, "yes": confirm });
         if let Some(edits) = overrides {
+            args["from"] = json!(edits.from);
             args["to"] = json!(edits.to);
             args["cc"] = json!(edits.cc);
             args["bcc"] = json!(edits.bcc);

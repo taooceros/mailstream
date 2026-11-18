@@ -609,7 +609,17 @@ impl Core {
                 Ok(self.mail.search_contacts(args, people).await)
             }
             "accounts.list" => {
-                Ok(answers::json(&self.accounts.list().iter().map(AccountRecord::answer).collect::<Vec<_>>()))
+                let accounts: Vec<answers::Account> = self
+                    .accounts
+                    .list()
+                    .iter()
+                    .map(|record| {
+                        let mut answer = record.answer();
+                        answer.identities = self.mail.account_identities(&record.id);
+                        answer
+                    })
+                    .collect();
+                Ok(answers::json(&accounts))
             }
             "accounts.rename" => {
                 let record = self.record(args)?;

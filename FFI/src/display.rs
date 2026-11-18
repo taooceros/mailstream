@@ -158,3 +158,16 @@ pub fn chat_body(markup: String, names: HashMap<String, String>) -> Vec<ChatBloc
 pub fn chat_draft_body(text: String, names: HashMap<String, String>) -> Vec<ChatBlock> {
     chat_markup::parse_input(&text, &|id| names.get(id).cloned())
 }
+
+/// Picks the `From` email address for a reply to `target_message` (or the latest non-draft
+/// message) in `conversation_account`, matching `To`, `Cc`, `Delivered-To`, or `From` against
+/// `accounts` and their send-as aliases.
+#[uniffi::export]
+pub fn reply_from(
+    accounts: Vec<mailstream_engine::answers::Account>,
+    conversation_account: String,
+    messages: Vec<mailstream_engine::answers::Message>,
+    target_message: Option<String>,
+) -> String {
+    mailstream_engine::mail::pick_reply_from(&accounts, &conversation_account, &messages, target_message.as_deref())
+}

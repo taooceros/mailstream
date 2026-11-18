@@ -250,11 +250,26 @@ pub struct Account {
     /// The address and name the account sends as.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<Address>,
+    /// Verified send-as addresses besides `identity`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<Address>,
 }
 
 impl Account {
     pub fn email(&self) -> &str {
         self.identity.as_ref().map_or(&self.name, |identity| &identity.email)
+    }
+
+    /// All sending identities of this account (its primary identity or address first, then aliases).
+    pub fn identities(&self) -> Vec<Address> {
+        let primary = self.identity.clone().unwrap_or_else(|| Address::new(None, &self.name));
+        let mut out = vec![primary];
+        for alias in &self.aliases {
+            if !out.iter().any(|existing| existing.email.eq_ignore_ascii_case(&alias.email)) {
+                out.push(alias.clone());
+            }
+        }
+        out
     }
 }
 
@@ -517,6 +532,8 @@ pub struct MessageContent {
     pub cc: Vec<Address>,
     #[serde(rename = "replyTo")]
     pub reply_to: Vec<Address>,
+    #[serde(rename = "deliveredTo", default, skip_serializing_if = "Vec::is_empty")]
+    pub delivered_to: Vec<Address>,
     pub references: Vec<String>,
     pub attachments: Vec<Attachment>,
     pub snippet: String,

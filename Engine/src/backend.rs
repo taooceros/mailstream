@@ -59,6 +59,13 @@ pub struct SentCopy {
     pub thread: Option<String>,
 }
 
+/// An account's primary sending identity and any verified send-as aliases.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    pub primary: Address,
+    pub aliases: Vec<Address>,
+}
+
 /// The flags a change sets or clears.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flag {
@@ -72,8 +79,8 @@ pub enum Backend {
 }
 
 impl Backend {
-    /// The account's address and the name it sends as.
-    pub async fn identity(&self) -> Result<Address, ApiError> {
+    /// The account's primary sending address and any verified send-as aliases.
+    pub async fn identity(&self) -> Result<Identity, ApiError> {
         match self {
             Self::Gmail(gmail) => gmail.identity().await,
             Self::Graph(graph) => graph.identity().await,

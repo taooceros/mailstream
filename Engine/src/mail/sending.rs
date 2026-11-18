@@ -17,7 +17,7 @@ use crate::answers::{self, Sent};
 use crate::cache::SCHEME;
 use crate::commands::Arguments;
 use crate::mime::OutgoingMessage;
-use crate::model::{Address, Date, MailMessage, MailboxRole, MessageContent};
+use crate::model::{Account, Address, Conversation, Date, MailMessage, MailboxRole, MessageContent};
 use crate::text;
 use crate::EngineError;
 
@@ -72,6 +72,222 @@ pub(crate) fn reply_recipients(
         to = vec![cc.remove(0)];
     }
     (to, cc)
+}
+
+/// One account's known sending identities (primary first, then verified aliases).
+struct SenderAccount<'a> {
+    id: &'a str,
+    identities: Vec<Address>,
+}
+
+impl<'a> SenderAccount<'a> {
+    fn primary(&self) -> Address {
+        self.identities.first().cloned().unwrap_or_else(|| Address::new(None, self.id))
+    }
+}
+
+struct ReplyMessage<'a> {
+    from_user: bool,
+    from: &'a [Address],
+    to: &'a [Address],
+    cc: &'a [Address],
+    delivered_to: &'a [Address],
+}
+
+fn match_account(account: &SenderAccount<'_>, email: &str) -> Option<Address> {
+    if let Some(matched) = account.identities.iter().find(|address| address.email.eq_ignore_ascii_case(email)) {
+        return Some(matched.clone());
+    }
+    account.id.eq_ignore_ascii_case(email).then(|| account.primary())
+}
+
+fn find_sender(
+    list: &[Address],
+    source_account: &str,
+    accounts: &[SenderAccount<'_>],
+    skip_source_default: bool,
+) -> Option<(String, Address)> {
+    if let Some(source) = accounts.iter().find(|account| account.id == source_account) {
+        let primary_email = source.primary().email;
+        for address in list {
+            if let Some(matched) = match_account(source, &address.email) {
+                if skip_source_default
+                    && (matched.email.eq_ignore_ascii_case(&primary_email) || matched.email.eq_ignore_ascii_case(source.id))
+                {
+                    continue;
+                }
+                return Some((source.id.to_owned(), matched));
+            }
+        }
+    }
+    for account in accounts {
+        if account.id == source_account {
+            continue;
+        }
+        for address in list {
+            if let Some(matched) = match_account(account, &address.email) {
+                return Some((account.id.to_owned(), matched));
+            }
+        }
+    }
+    None
+}
+
+fn match_message(msg: &ReplyMessage<'_>, source_account: &str, accounts: &[SenderAccount<'_>]) -> Option<(String, Address)> {
+    if msg.from_user
+        && let Some(found) = find_sender(msg.from, source_account, accounts, false)
+    {
+        return Some(found);
+    }
+    if let Some(found) = find_sender(msg.to, source_account, accounts, false) {
+        return Some(found);
+    }
+    if let Some(found) = find_sender(msg.cc, source_account, accounts, false) {
+        return Some(found);
+    }
+    find_sender(msg.delivered_to, source_account, accounts, true)
+}
+
+fn choose_reply_sender(
+    accounts: &[SenderAccount<'_>],
+    source_account: &str,
+    messages: &[ReplyMessage<'_>],
+    source_index: usize,
+) -> (String, Address) {
+    if let Some(source) = messages.get(source_index)
+        && let Some(found) = match_message(source, source_account, accounts)
+    {
+        return found;
+    }
+    for (index, message) in messages.iter().enumerate().rev() {
+        if index == source_index {
+            continue;
+        }
+        if let Some(found) = match_message(message, source_account, accounts) {
+            return found;
+        }
+    }
+    let primary = accounts
+        .iter()
+        .find(|account| account.id == source_account)
+        .map(SenderAccount::primary)
+        .unwrap_or_else(|| Address::new(None, source_account));
+    (source_account.to_owned(), primary)
+}
+
+/// Resolves a requested sender address (`mail.send --from` or `mail.reply --from`) against all
+/// signed-in accounts and their verified aliases.
+fn resolve_sender(accounts: &[Account], requested: &str) -> Option<(String, Address)> {
+    let email = Address::parse(requested)
+        .map(|address| address.normalized_email())
+        .unwrap_or_else(|| requested.trim().to_lowercase());
+    for account in accounts {
+        if account.name.eq_ignore_ascii_case(&email) {
+            return Some((account.name.clone(), account.identities().into_iter().next().unwrap_or_else(|| Address::new(None, &account.name))));
+        }
+        for identity in account.identities() {
+            if identity.email.eq_ignore_ascii_case(&email) {
+                return Some((account.name.clone(), identity));
+            }
+        }
+    }
+    None
+}
+
+/// Picks the sending account and `From` address for a reply to `source` in `conversation`.
+fn resolve_reply_sender(
+    accounts: &[Account],
+    conversation: &Conversation,
+    source: &MailMessage,
+    content: Option<&MessageContent>,
+) -> (String, Address) {
+    let own: std::collections::HashSet<String> = accounts
+        .iter()
+        .flat_map(|account| {
+            [account.name.clone(), account.email().to_lowercase()]
+                .into_iter()
+                .chain(account.aliases.iter().map(Address::normalized_email))
+        })
+        .collect();
+    let sender_accounts: Vec<SenderAccount<'_>> =
+        accounts.iter().map(|account| SenderAccount { id: &account.name, identities: account.identities() }).collect();
+    let empty: &[Address] = &[];
+    let source_cc = content.map(|c| c.cc.as_slice()).unwrap_or(empty);
+    let source_delivered = content.map(|c| c.delivered_to.as_slice()).unwrap_or(empty);
+    let mut messages = Vec::with_capacity(conversation.messages.len().max(1));
+    let mut source_index = None;
+    for message in &conversation.messages {
+        let is_source = message.envelope.id == source.envelope.id && message.account() == source.account();
+        if is_source {
+            source_index = Some(messages.len());
+        }
+        messages.push(ReplyMessage {
+            from_user: message.is_from_user(&own),
+            from: &message.envelope.from,
+            to: &message.envelope.to,
+            cc: if is_source { source_cc } else { empty },
+            delivered_to: if is_source { source_delivered } else { empty },
+        });
+    }
+    let source_index = match source_index {
+        Some(index) => index,
+        None => {
+            messages.push(ReplyMessage {
+                from_user: source.is_from_user(&own),
+                from: &source.envelope.from,
+                to: &source.envelope.to,
+                cc: source_cc,
+                delivered_to: source_delivered,
+            });
+            messages.len() - 1
+        }
+    };
+    choose_reply_sender(&sender_accounts, source.account(), &messages, source_index)
+}
+
+/// Picks the `From` email address for a reply in GPUI (`answers` types), using the same rules as
+/// [`resolve_reply_sender`].
+pub fn pick_reply_from(
+    accounts: &[answers::Account],
+    conversation_account: &str,
+    messages: &[answers::Message],
+    target_message: Option<&str>,
+) -> String {
+    let sender_accounts: Vec<SenderAccount<'_>> = accounts
+        .iter()
+        .map(|account| SenderAccount {
+            id: &account.id,
+            identities: if account.identities.is_empty() {
+                vec![Address::new(account.name.clone(), &account.id)]
+            } else {
+                account.identities.clone()
+            },
+        })
+        .collect();
+    let own: std::collections::HashSet<String> = accounts
+        .iter()
+        .flat_map(|account| {
+            std::iter::once(account.id.to_lowercase()).chain(account.identities.iter().map(Address::normalized_email))
+        })
+        .collect();
+    let source_index = target_message
+        .and_then(|id| messages.iter().position(|message| message.id == id))
+        .or_else(|| messages.iter().rposition(|message| message.role != MailboxRole::Drafts))
+        .unwrap_or_else(|| messages.len().saturating_sub(1));
+    let reply_messages: Vec<ReplyMessage<'_>> = messages
+        .iter()
+        .map(|message| ReplyMessage {
+            from_user: message.role == MailboxRole::Drafts
+                || message.role == MailboxRole::Sent
+                || message.from.iter().any(|address| own.contains(&address.normalized_email())),
+            from: &message.from,
+            to: &message.to,
+            cc: &message.cc,
+            delivered_to: &message.delivered_to,
+        })
+        .collect();
+    let (_, address) = choose_reply_sender(&sender_accounts, conversation_account, &reply_messages, source_index);
+    address.normalized_email()
 }
 
 /// "On Mon, Nov 2, 2026 at 11:41 AM, Josh Patrick wrote:", the date in the local time zone as
@@ -529,10 +745,12 @@ fn confirm(message: String) -> EngineError {
 
 impl Mail {
     pub(super) async fn send_command(self: &Arc<Self>, args: &Arguments) -> Result<Value, EngineError> {
-        let from = args.required("from")?.to_lowercase();
-        if !self.state().accounts.iter().any(|account| account.name == from) {
-            return Err(Self::unknown_account(&from));
-        }
+        let requested_from = args.required("from")?;
+        let (account, from_address) = {
+            let state = self.state();
+            resolve_sender(&state.accounts, &requested_from).ok_or_else(|| Self::unknown_account(&requested_from.to_lowercase()))?
+        };
+        let from_email = from_address.normalized_email();
         let (to, cc, bcc) = (addresses(args, "to")?, addresses(args, "cc")?, addresses(args, "bcc")?);
         if to.is_empty() {
             return Err(EngineError::usage("--to needs at least one address."));
@@ -571,7 +789,7 @@ impl Mail {
         if !args.bool("yes") {
             let everyone: Vec<Address> = to.iter().chain(&cc).chain(&bcc).cloned().collect();
             return Err(confirm(format!(
-                "Would send \"{subject}\" ({} characters{attached}) from {from} to {}. Re-run with --yes.",
+                "Would send \"{subject}\" ({} characters{attached}) from {from_email} to {}. Re-run with --yes.",
                 body.graphemes(true).count(),
                 emails(&everyone)
             )));
@@ -584,9 +802,11 @@ impl Mail {
             }
             None => (body.clone(), markdown_document(&body, None)),
         };
-        let message = self.outgoing(&from, None, to.clone(), cc, bcc, subject.clone(), text, Some(html), attachments).await;
-        self.deliver(&message, &from).await?;
-        Ok(sent(Sent { from, to: texts(&to), subject }))
+        let message = self
+            .outgoing(&account, Some(from_address), None, to.clone(), cc, bcc, subject.clone(), text, Some(html), attachments)
+            .await;
+        self.deliver(&message, &account).await?;
+        Ok(sent(Sent { from: from_email, to: texts(&to), subject }))
     }
 
     pub(super) async fn reply_command(self: &Arc<Self>, args: &Arguments) -> Result<Value, EngineError> {
@@ -605,7 +825,26 @@ impl Mail {
                 .unwrap_or_else(|| conversation.latest()),
         }
         .clone();
-        let mut plan = self.reply_plan(&source, args.bool("all")).await?;
+        let content =
+            self.contents.load(&source.message_ref(), self.backend(source.account())).await.map_err(EngineError::failed)?;
+        let (mut plan, (account, from_address)) = {
+            let state = self.state();
+            let own = Self::own_addresses(&state);
+            let (to, cc) = reply_recipients(&source, Some(&content), &own, args.bool("all"));
+            let plan = ReplyPlan {
+                to,
+                cc,
+                subject: reply_subject(&source.envelope.subject),
+                quoted_text: quote(content.text.as_deref().unwrap_or("")),
+                attribution: attribution(&source),
+            };
+            let sender = match args.string("from") {
+                Some(requested) => resolve_sender(&state.accounts, &requested)
+                    .ok_or_else(|| Self::unknown_account(&requested.to_lowercase()))?,
+                None => resolve_reply_sender(&state.accounts, &conversation, &source, Some(&content)),
+            };
+            (plan, sender)
+        };
         if args.list("to").is_some() {
             plan.to = addresses(args, "to")?;
         }
@@ -622,20 +861,20 @@ impl Mail {
         }
         let attachments = files(&args.list("attachments").unwrap_or_default(), "attachments")?;
         let body = args.required("body")?;
-        let account = source.account().to_string();
+        let from_email = from_address.normalized_email();
         if !args.bool("yes") {
             return Err(confirm(format!(
-                "Would send \"{}\" from {account} to {}, {} attachments. Re-run with --yes.",
+                "Would send \"{}\" from {from_email} to {}, {} attachments. Re-run with --yes.",
                 plan.subject,
                 emails(&recipients),
                 attachments.len()
             )));
         }
-        let content = self.contents.load(&source.message_ref(), self.backend(&account)).await.ok();
-        let html = reply_markdown_html(&body, &plan.attribution, content.as_deref());
+        let html = reply_markdown_html(&body, &plan.attribution, Some(&content));
         let message = self
             .outgoing(
                 &account,
+                Some(from_address),
                 Some(&source),
                 plan.to.clone(),
                 plan.cc.clone(),
@@ -647,28 +886,16 @@ impl Mail {
             )
             .await;
         self.deliver(&message, &account).await?;
-        Ok(sent(Sent { from: account, to: texts(&recipients), subject: plan.subject }))
+        Ok(sent(Sent { from: from_email, to: texts(&recipients), subject: plan.subject }))
     }
 
-    async fn reply_plan(self: &Arc<Self>, source: &MailMessage, all: bool) -> Result<ReplyPlan, EngineError> {
-        let content =
-            self.contents.load(&source.message_ref(), self.backend(source.account())).await.map_err(EngineError::failed)?;
-        let own = Self::own_addresses(&self.state());
-        let (to, cc) = reply_recipients(source, Some(&content), &own, all);
-        Ok(ReplyPlan {
-            to,
-            cc,
-            subject: reply_subject(&source.envelope.subject),
-            quoted_text: quote(content.text.as_deref().unwrap_or("")),
-            attribution: attribution(source),
-        })
-    }
-
-    /// The message `account` sends, from its identity; a reply to `source` is threaded under it.
+    /// The message `account` sends, from `from_override` else its identity; a reply to `source`
+    /// is threaded under it (and uses the provider thread only within the same account).
     #[allow(clippy::too_many_arguments)]
     async fn outgoing(
         self: &Arc<Self>,
         account: &str,
+        from_override: Option<Address>,
         source: Option<&MailMessage>,
         to: Vec<Address>,
         cc: Vec<Address>,
@@ -678,13 +905,14 @@ impl Mail {
         html: Option<String>,
         attachments: Vec<PathBuf>,
     ) -> OutgoingMessage {
-        let from = self
-            .state()
-            .accounts
-            .iter()
-            .find(|known| known.name == account)
-            .and_then(|known| known.identity.clone())
-            .unwrap_or_else(|| Address::new(None, account));
+        let from = from_override.unwrap_or_else(|| {
+            self.state()
+                .accounts
+                .iter()
+                .find(|known| known.name == account)
+                .and_then(|known| known.identity.clone())
+                .unwrap_or_else(|| Address::new(None, account))
+        });
         let mut message = OutgoingMessage {
             message_id: crate::mime::message_id(),
             from,
@@ -698,11 +926,11 @@ impl Mail {
             ..OutgoingMessage::default()
         };
         let Some(source) = source else { return message };
-        let references = match self.contents.load(&source.message_ref(), self.backend(account)).await {
+        let references = match self.contents.load(&source.message_ref(), self.backend(source.account())).await {
             Ok(content) => content.references.clone(),
             Err(_) => Vec::new(),
         };
-        message.thread = source.envelope.thread.clone();
+        message.thread = (account == source.account()).then(|| source.envelope.thread.clone()).flatten();
         match &source.envelope.message_id {
             Some(id) => {
                 message.in_reply_to = Some(id.clone());
@@ -712,7 +940,6 @@ impl Mail {
         }
         message
     }
-
     /// Sends from `account`, the message listing in its conversation from the start (`pending`),
     /// then picks up the sent copy a moment later. A failed send leaves the lists again.
     async fn deliver(self: &Arc<Self>, message: &OutgoingMessage, account: &str) -> Result<(), EngineError> {
@@ -830,6 +1057,7 @@ mod tests {
             text: Some("Hello Sam".into()),
             cc: Vec::new(),
             reply_to: Vec::new(),
+            delivered_to: Vec::new(),
             references: Vec::new(),
             attachments: Vec::new(),
             snippet: String::new(),
@@ -887,6 +1115,7 @@ mod tests {
             text: Some("See www.example.org".into()),
             cc: Vec::new(),
             reply_to: Vec::new(),
+            delivered_to: Vec::new(),
             references: Vec::new(),
             attachments: Vec::new(),
             snippet: String::new(),
@@ -917,5 +1146,81 @@ mod tests {
         let unsafe_html = markdown_to_html(unsafe_md);
         assert!(!unsafe_html.contains("javascript:"), "{unsafe_html}");
         assert!(unsafe_html.contains("click &lt;script&gt;bad&lt;/script&gt;"), "{unsafe_html}");
+    }
+
+    #[test]
+    fn picks_reply_from_by_to_cc_delivered_to_aliases_and_thread_history() {
+        let accounts = vec![
+            crate::answers::Account {
+                id: "me@gmail.com".into(),
+                label: "Personal".into(),
+                provider: crate::Provider::Google,
+                name: Some("Me".into()),
+                services: vec!["mail".into()],
+                connectable: vec![],
+                identities: vec![
+                    Address::new(Some("Me".into()), "me@gmail.com"),
+                    Address::new(Some("Team".into()), "team@custom.org"),
+                ],
+            },
+            crate::answers::Account {
+                id: "work@outlook.com".into(),
+                label: "Work".into(),
+                provider: crate::Provider::Microsoft,
+                name: Some("Work Me".into()),
+                services: vec!["mail".into()],
+                connectable: vec![],
+                identities: vec![Address::new(Some("Work Me".into()), "work@outlook.com")],
+            },
+        ];
+        let msg = |id: &str, role: MailboxRole, from: &[&str], to: &[&str], cc: &[&str], delivered_to: &[&str]| crate::answers::Message {
+            id: id.into(),
+            mailbox: if role == MailboxRole::Sent { "SENT" } else { "INBOX" }.into(),
+            role,
+            from: from.iter().map(|s| Address::new(None, *s)).collect(),
+            to: to.iter().map(|s| Address::new(None, *s)).collect(),
+            cc: cc.iter().map(|s| Address::new(None, *s)).collect(),
+            delivered_to: delivered_to.iter().map(|s| Address::new(None, *s)).collect(),
+            date: None,
+            subject: "Hi".into(),
+            unread: false,
+            starred: false,
+            text: None,
+            truncated: false,
+            attachments: vec![],
+            html: None,
+            error: None,
+            invitation: None,
+            when: String::new(),
+            time: String::new(),
+            avatar: Default::default(),
+            divider: String::new(),
+            continued: false,
+        };
+
+        // Alias in To beats account primary.
+        let m1 = msg("m1", MailboxRole::Inbox, &["bob@x.com"], &["team@custom.org"], &[], &["me@gmail.com"]);
+        assert_eq!(pick_reply_from(&accounts, "me@gmail.com", &[m1], None), "team@custom.org");
+
+        // Forwarded mail in Gmail addressed to another signed-in account uses that account.
+        let m2 = msg("m2", MailboxRole::Inbox, &["bob@x.com"], &["work@outlook.com"], &[], &["me@gmail.com"]);
+        assert_eq!(pick_reply_from(&accounts, "me@gmail.com", &[m2], None), "work@outlook.com");
+
+        // When both source account and another account are in To, source account stays selected.
+        let m3 = msg("m3", MailboxRole::Inbox, &["bob@x.com"], &["work@outlook.com", "me@gmail.com"], &[], &[]);
+        assert_eq!(pick_reply_from(&accounts, "me@gmail.com", &[m3], None), "me@gmail.com");
+
+        // BCC / mailing list with Delivered-To matching alias uses the alias.
+        let m4 = msg("m4", MailboxRole::Inbox, &["bob@x.com"], &["list@org.test"], &[], &["team@custom.org", "me@gmail.com"]);
+        assert_eq!(pick_reply_from(&accounts, "me@gmail.com", &[m4], None), "team@custom.org");
+
+        // Earlier message in thread informs reply sender when latest message is to a list.
+        let m5a = msg("m5a", MailboxRole::Inbox, &["bob@x.com"], &["work@outlook.com"], &[], &[]);
+        let m5b = msg("m5b", MailboxRole::Inbox, &["bob@x.com"], &["list@org.test"], &[], &["me@gmail.com"]);
+        assert_eq!(pick_reply_from(&accounts, "me@gmail.com", &[m5a, m5b], None), "work@outlook.com");
+
+        // Replying to user's own sent alias message preserves that alias.
+        let m6 = msg("m6", MailboxRole::Sent, &["team@custom.org"], &["bob@x.com"], &[], &[]);
+        assert_eq!(pick_reply_from(&accounts, "me@gmail.com", &[m6], None), "team@custom.org");
     }
 }

@@ -254,6 +254,28 @@ pub fn parse_address_list(header: &str) -> Vec<Address> {
     addresses
 }
 
+/// Parses `X-Original-To` (top-to-bottom) followed by `Delivered-To` (bottom-to-top, so an
+/// earlier forwarded target precedes the final mailbox), deduplicated case-insensitively.
+pub fn delivery_addresses<'a>(x_original_to: impl IntoIterator<Item = &'a str>, delivered_to: impl IntoIterator<Item = &'a str>) -> Vec<Address> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push = |header: &str| {
+        for address in parse_address_list(header) {
+            if seen.insert(address.normalized_email()) {
+                out.push(address);
+            }
+        }
+    };
+    for header in x_original_to {
+        push(header);
+    }
+    let delivered: Vec<&str> = delivered_to.into_iter().collect();
+    for header in delivered.into_iter().rev() {
+        push(header);
+    }
+    out
+}
+
 fn collapse(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }

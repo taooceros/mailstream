@@ -65,6 +65,7 @@ fn store(cache: &MailCache, message: &MessageRef) {
         text: Some("Hi".into()),
         cc: Vec::new(),
         reply_to: Vec::new(),
+        delivered_to: Vec::new(),
         references: Vec::new(),
         attachments: vec![Attachment {
             part: 1,

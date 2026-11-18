@@ -114,6 +114,7 @@ impl Mail {
                 text: Some(message.text.clone()),
                 cc: message.cc.clone(),
                 reply_to: Vec::new(),
+                delivered_to: Vec::new(),
                 references: message.references.clone(),
                 attachments: Vec::new(),
                 snippet: text::snippet(&message.text),

@@ -46,6 +46,7 @@ impl AccountRecord {
             name: self.display_name.clone(),
             services: mail.then_some("mail").into_iter().chain(services).map(String::from).collect(),
             connectable,
+            identities: Vec::new(),
         }
     }
 

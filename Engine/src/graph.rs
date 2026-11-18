@@ -247,7 +247,7 @@ impl Graph {
         self.api.decode(Self::request(url, prefer), priority, 0).await
     }
 
-    pub async fn identity(&self) -> Result<Address, ApiError> {
+    pub async fn identity(&self) -> Result<crate::backend::Identity, ApiError> {
         #[derive(Deserialize)]
         struct User {
             #[serde(rename = "displayName")]
@@ -263,7 +263,7 @@ impl Graph {
             .flatten()
             .find(|email| !email.is_empty())
             .ok_or_else(|| ApiError::malformed("Microsoft Graph returned no address for this account"))?;
-        Ok(Address::new(user.display_name, email))
+        Ok(crate::backend::Identity { primary: Address::new(user.display_name, email), aliases: Vec::new() })
     }
 
     /// Every folder. `counts` (with their counts) is the background refresh: it asks at
@@ -515,6 +515,15 @@ impl Graph {
                 .map(|header| header.value.as_str()),
         );
         let mut content = assembly.finish(html, text, addresses(full.cc_recipients), addresses(full.reply_to), references);
+        let header_values = |name: &str| -> Vec<&str> {
+            full.internet_message_headers
+                .iter()
+                .flatten()
+                .filter(|header| header.name.eq_ignore_ascii_case(name))
+                .map(|header| header.value.as_str())
+                .collect()
+        };
+        content.delivered_to = text::delivery_addresses(header_values("X-Original-To"), header_values("Delivered-To"));
         // Outlook's meeting requests carry no `.ics`: the event they name, read with the message
         // (without immutable ids, so the id is the one the calendar lists).
         let meeting = full.kind.as_deref().is_some_and(|kind| kind.contains("eventMessage") && !kind.contains("Response"));

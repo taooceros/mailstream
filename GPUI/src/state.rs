@@ -828,6 +828,7 @@ impl MailApp {
                 if let Ok((accounts, mailboxes)) = result {
                     this.accounts = accounts;
                     this.mailboxes = mailboxes;
+                    this.refresh_reply_plan(cx);
                     cx.notify();
                 }
             },
@@ -1307,6 +1308,9 @@ impl MailApp {
                 if let Some(messages) = loaded {
                     this.read_invitations(&id, &messages, cx);
                     this.pin_opening(&id);
+                    if this.reply.as_ref().is_some_and(|reply| reply.conversation == id) {
+                        this.refresh_reply_plan(cx);
+                    }
                 }
                 if this.forward_pending.as_ref() == Some(&id) {
                     this.forward_pending = None;

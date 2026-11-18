@@ -162,6 +162,16 @@ impl Part {
         self.headers.as_ref()?.iter().find(|header| header.name.eq_ignore_ascii_case(name)).map(|header| header.value.as_str())
     }
 
+    fn headers(&self, name: &str) -> Vec<&str> {
+        self.headers
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter(|header| header.name.eq_ignore_ascii_case(name))
+            .map(|header| header.value.as_str())
+            .collect()
+    }
+
     /// Whether some part below this one is a named file.
     fn has_file(&self) -> bool {
         self.parts.iter().flatten().any(|part| part.filename.as_deref().is_some_and(|name| !name.is_empty()) || part.has_file())
@@ -189,7 +199,7 @@ impl Gmail {
         Self { api, endpoints, cache, imap }
     }
 
-    pub async fn identity(&self) -> Result<Address, ApiError> {
+    pub async fn identity(&self) -> Result<crate::backend::Identity, ApiError> {
         #[derive(Deserialize)]
         struct Profile {
             #[serde(rename = "emailAddress")]
@@ -208,6 +218,10 @@ impl Gmail {
             display_name: Option<String>,
             #[serde(rename = "isPrimary")]
             is_primary: Option<bool>,
+            #[serde(rename = "isDefault")]
+            is_default: Option<bool>,
+            #[serde(rename = "verificationStatus")]
+            verification_status: Option<String>,
         }
         let profile_url = self.endpoints.url("profile", &[]);
         let send_as_url = self.endpoints.url("settings/sendAs", &[]);
@@ -217,12 +231,36 @@ impl Gmail {
         );
         let email = profile?.email_address;
         let entries = send_as?.send_as.unwrap_or_default();
-        let primary = entries
+        let usable: Vec<&SendAs> = entries
             .iter()
-            .find(|entry| entry.is_primary == Some(true))
-            .or_else(|| entries.iter().find(|entry| entry.send_as_email.eq_ignore_ascii_case(&email)));
-        let name = primary.and_then(|entry| entry.display_name.as_deref()).unwrap_or("").trim_matches(' ').to_string();
-        Ok(Address::new((!name.is_empty()).then_some(name), email))
+            .filter(|entry| {
+                !entry.send_as_email.is_empty()
+                    && entry.verification_status.as_deref().is_none_or(|status| status.eq_ignore_ascii_case("accepted"))
+            })
+            .collect();
+        let as_address = |entry: &SendAs| {
+            let name = entry.display_name.as_deref().unwrap_or("").trim_matches(' ').to_string();
+            Address::new((!name.is_empty()).then_some(name), entry.send_as_email.clone())
+        };
+        let primary_entry = usable
+            .iter()
+            .copied()
+            .find(|entry| entry.is_default == Some(true))
+            .or_else(|| usable.iter().copied().find(|entry| entry.is_primary == Some(true)))
+            .or_else(|| usable.iter().copied().find(|entry| entry.send_as_email.eq_ignore_ascii_case(&email)));
+        let primary = primary_entry.map(as_address).unwrap_or_else(|| Address::new(None, email.clone()));
+        let mut aliases: Vec<Address> = Vec::new();
+        let mut seen: HashSet<String> = [primary.normalized_email()].into_iter().collect();
+        for entry in usable {
+            let address = as_address(entry);
+            if seen.insert(address.normalized_email()) {
+                aliases.push(address);
+            }
+        }
+        if seen.insert(email.to_lowercase()) {
+            aliases.push(Address::new(None, email));
+        }
+        Ok(crate::backend::Identity { primary, aliases })
     }
 
     pub async fn mailboxes(&self, counts: bool) -> Result<Vec<Mailbox>, ApiError> {
@@ -359,13 +397,15 @@ impl Gmail {
         let body = renderer.render(&payload, false);
         let html = body.as_ref().filter(|body| body.primary).and_then(|body| body.html.clone());
         let text = body.and_then(|body| body.text);
-        Ok(renderer.assembly.finish(
+        let mut content = renderer.assembly.finish(
             html,
             text,
             text::parse_address_list(payload.header("Cc").unwrap_or("")),
             text::parse_address_list(payload.header("Reply-To").unwrap_or("")),
             text::parse_message_id_list(payload.header("References")),
-        ))
+        );
+        content.delivered_to = text::delivery_addresses(payload.headers("X-Original-To"), payload.headers("Delivered-To"));
+        Ok(content)
     }
 
     /// The full message fetched from Gmail's `[Gmail]/All Mail` over IMAP (`BODY.PEEK[]`), costing

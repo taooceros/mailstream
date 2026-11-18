@@ -53,6 +53,10 @@ pub struct Account {
     /// Services the provider offers that the sign-in does not fully grant, in the same order:
     /// `accounts.connect` asks for them.
     pub connectable: Vec<String>,
+    /// Verified sending identities for this account (default first, then any send-as aliases).
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "address_text::list")]
+    #[uniffi(default)]
+    pub identities: Vec<Address>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]

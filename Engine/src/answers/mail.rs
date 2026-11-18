@@ -143,6 +143,9 @@ pub struct Message {
     pub to: Vec<Address>,
     #[serde(default, with = "address_text::list")]
     pub cc: Vec<Address>,
+    #[serde(rename = "deliveredTo", default, skip_serializing_if = "Vec::is_empty", with = "address_text::list")]
+    #[uniffi(default)]
+    pub delivered_to: Vec<Address>,
     pub date: Option<String>,
     pub subject: String,
     pub unread: bool,

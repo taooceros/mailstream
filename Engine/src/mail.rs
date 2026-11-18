@@ -38,6 +38,7 @@ pub use autoread::AutoReadReason;
 mod contacts;
 mod pending;
 mod sending;
+pub use sending::pick_reply_from;
 mod started;
 mod tagsync;
 mod undo;
@@ -419,26 +420,30 @@ impl Mail {
     /// The signed-in accounts in sidebar order, with the identities `known` has, else the name
     /// and address the sign-in reported.
     fn signed_in_accounts(&self, known: &[Account]) -> Vec<Account> {
-        let identities: HashMap<&str, &Address> = known
-            .iter()
-            .rev()
-            .filter_map(|account| account.identity.as_ref().map(|identity| (account.name.as_str(), identity)))
-            .collect();
+        let known_by_name: HashMap<&str, &Account> = known.iter().rev().map(|account| (account.name.as_str(), account)).collect();
         self.accounts
             .list()
             .into_iter()
-            .map(|record| Account {
-                identity: Some(
-                    identities
-                        .get(record.id.as_str())
-                        .map(|identity| (*identity).clone())
-                        .unwrap_or_else(|| Address::new(record.display_name.clone(), &record.id)),
-                ),
-                name: record.id,
-                label: record.label,
-                provider: record.provider,
+            .map(|record| {
+                let prior = known_by_name.get(record.id.as_str()).copied();
+                Account {
+                    identity: Some(
+                        prior
+                            .and_then(|account| account.identity.clone())
+                            .unwrap_or_else(|| Address::new(record.display_name.clone(), &record.id)),
+                    ),
+                    aliases: prior.map(|account| account.aliases.clone()).unwrap_or_default(),
+                    name: record.id,
+                    label: record.label,
+                    provider: record.provider,
+                }
             })
             .collect()
+    }
+
+    /// Sending identities for `id` (primary first, then any verified send-as aliases).
+    pub(crate) fn account_identities(&self, id: &str) -> Vec<Address> {
+        self.state().accounts.iter().find(|account| account.name == id).map(Account::identities).unwrap_or_default()
     }
 
     /// Follows sign-ins, removals and renames: added accounts load, removed ones drop their
@@ -575,9 +580,10 @@ impl Mail {
         if let Ok(identity) = identity {
             let mut state = self.state();
             if let Some(account) = state.accounts.iter_mut().find(|account| account.name == name)
-                && account.identity.as_ref() != Some(&identity)
+                && (account.identity.as_ref() != Some(&identity.primary) || account.aliases != identity.aliases)
             {
-                account.identity = Some(identity);
+                account.identity = Some(identity.primary);
+                account.aliases = identity.aliases;
                 drop(state);
                 // Conversations say "me" for the user's own addresses.
                 self.events.emit_soon("accounts");
@@ -672,7 +678,15 @@ impl Mail {
 
     /// Lowercased addresses of every account, to say "me".
     fn own_addresses(state: &State) -> HashSet<String> {
-        state.accounts.iter().flat_map(|account| [account.name.clone(), account.email().to_lowercase()]).collect()
+        state
+            .accounts
+            .iter()
+            .flat_map(|account| {
+                [account.name.clone(), account.email().to_lowercase()]
+                    .into_iter()
+                    .chain(account.aliases.iter().map(Address::normalized_email))
+            })
+            .collect()
     }
 
     /// The mailboxes the default list shows (every inbox) and those that thread into it (sent).
@@ -1564,6 +1578,7 @@ impl Mail {
             from: envelope.from.clone(),
             to: envelope.to.clone(),
             cc: Vec::new(),
+            delivered_to: Vec::new(),
             date: envelope.date.map(iso8601),
             subject: envelope.subject.clone(),
             unread: !envelope.is_seen(),
@@ -1591,6 +1606,7 @@ impl Mail {
                 let (shown, truncated) = crate::text::prefix_characters(&text, max_chars);
                 let reference = message.message_ref();
                 item.cc = content.cc.clone();
+                item.delivered_to = content.delivered_to.clone();
                 item.text = Some(shown.into());
                 item.truncated = truncated;
                 if html && let Some(body) = &content.html {

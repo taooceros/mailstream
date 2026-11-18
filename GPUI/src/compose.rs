@@ -112,11 +112,46 @@ pub struct MovedReply {
     pub message: Option<String>,
     pub all: bool,
     pub from: String,
+    pub from_chosen: bool,
+    pub from_resolved: bool,
     pub to: Vec<Address>,
     pub cc: Vec<Address>,
     pub subject: SharedString,
     pub body: String,
     pub attachments: Vec<PathBuf>,
+}
+
+#[derive(Clone)]
+struct FromOption {
+    account_index: usize,
+    account_title: SharedString,
+    name: Option<String>,
+    email: String,
+}
+
+fn from_options(accounts: &[Account]) -> Vec<FromOption> {
+    let mut options = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (account_index, account) in accounts.iter().enumerate() {
+        let account_title = account.title();
+        for identity in account.send_identities() {
+            let key = identity.normalized_email();
+            if seen.insert(key) {
+                options.push(FromOption {
+                    account_index,
+                    account_title: account_title.clone(),
+                    name: identity.name.clone().filter(|name| !name.is_empty()),
+                    email: identity.email,
+                });
+            }
+        }
+    }
+    options
+}
+
+fn selected_from_option<'a>(options: &'a [FromOption], from: Option<&str>) -> Option<&'a FromOption> {
+    let from = from?;
+    options.iter().find(|option| option.email.eq_ignore_ascii_case(from))
 }
 
 /// One person `contacts.search` offers.
@@ -212,8 +247,10 @@ struct Compose {
     glyph: Icon,
     accounts: Vec<Account>,
     from: Option<String>,
-    /// A forward and a reply keep the account it came to.
+    /// Only forwards keep the account it came to locked.
     from_locked: bool,
+    from_chosen: bool,
+    from_resolved: bool,
     /// The conversation a moved reply answers, the message in it (else its latest), and whether
     /// it answers everyone: sent with `mail.reply`, which keeps the thread and quotes the original.
     reply: Option<(String, Option<String>, bool)>,
@@ -276,14 +313,18 @@ impl Compose {
         let mut attachments = Attachments::default();
         let (mut reply, mut forward) = (None, None);
         let (mut initial_to, mut initial_cc, mut text) = (String::new(), String::new(), String::new());
-        let (from, from_locked, initial_subject, initial_body) = match mode {
+        let (from, from_locked, from_chosen, from_resolved, initial_subject, initial_body) = match mode {
             ComposeMode::New { from } => {
-                let from = from.or_else(|| accounts.first().map(|account| account.id.clone()));
-                (from, false, SharedString::default(), SharedString::default())
+                let from = from
+                    .and_then(|id| {
+                        accounts.iter().find(|account| account.id.eq_ignore_ascii_case(&id)).map(|a| a.primary_email().to_owned())
+                    })
+                    .or_else(|| accounts.first().map(|account| account.primary_email().to_owned()));
+                (from, false, true, true, SharedString::default(), SharedString::default())
             }
             ComposeMode::Forward { from, conversation, message, subject, quoted } => {
                 forward = Some((conversation, message));
-                (Some(from), true, mailstream::forward_subject(subject.to_string()).into(), format!("\n\n{quoted}").into())
+                (Some(from), true, true, true, mailstream::forward_subject(subject.to_string()).into(), format!("\n\n{quoted}").into())
             }
             ComposeMode::Reply(moved) => {
                 let list = |addresses: &[Address]| addresses.iter().map(Address::text).collect::<Vec<_>>().join(", ");
@@ -293,7 +334,7 @@ impl Compose {
                 // Files that went missing since are left out.
                 let _ = attachments.add(moved.attachments);
                 reply = Some((moved.conversation, moved.message, moved.all));
-                (Some(moved.from), true, moved.subject, SharedString::default())
+                (Some(moved.from), false, moved.from_chosen, moved.from_resolved, moved.subject, SharedString::default())
             }
         };
         for (input, value) in [(&to, initial_to.as_str()), (&cc, initial_cc.as_str()), (&subject, initial_subject.as_ref())] {
@@ -343,6 +384,8 @@ impl Compose {
             accounts,
             from,
             from_locked,
+            from_chosen,
+            from_resolved,
             reply,
             forward,
             picking_from: false,
@@ -685,6 +728,7 @@ impl Compose {
             Some((conversation, message, all)) => {
                 let changed = |input: &Entity<InputState>, initial: &str| input.read(cx).value().trim() != initial;
                 let overrides = mailstream::ReplyOverrides {
+                    from: (self.from_chosen || self.from_resolved).then_some(from),
                     to: changed(&self.to, &self.initial_to).then_some(to),
                     cc: changed(&self.cc, &self.initial_cc).then_some(cc),
                     bcc: (!bcc.is_empty()).then_some(bcc),
@@ -769,19 +813,31 @@ impl Compose {
     }
 
     fn render_from(&self, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let account = self.from.as_ref().and_then(|from| self.accounts.iter().find(|account| &account.id == from));
-        let (title, address) = match (account, &self.from) {
-            (Some(account), _) if !account.label.is_empty() => (account.label.clone(), Some(account.id.clone())),
-            (_, Some(from)) => (from.clone(), None),
+        let options = from_options(&self.accounts);
+        let selected = selected_from_option(&options, self.from.as_deref());
+        let (title, address): (SharedString, Option<SharedString>) = match (selected, &self.from) {
+            (Some(option), _) => {
+                let label = option.name.as_deref().unwrap_or(option.account_title.as_ref());
+                if !label.is_empty() && !label.eq_ignore_ascii_case(&option.email) {
+                    (label.to_owned().into(), Some(option.email.clone().into()))
+                } else {
+                    (option.email.clone().into(), None)
+                }
+            }
+            (_, Some(from)) => (from.clone().into(), None),
             _ => ("No account".into(), None),
         };
-        let pickable = !self.from_locked && self.accounts.len() > 1;
+        let pickable = !self.from_locked && options.len() > 1;
         let picker = div()
             .id("from")
+            .debug_selector(|| "from".into())
             .min_w_0()
             .flex()
             .items_center()
             .gap(px(6.))
+            .when_some(selected, |d, option| {
+                d.child(div().flex_shrink_0().size(px(7.)).rounded_full().bg(design::account_color(option.account_index)))
+            })
             .child(div().truncate().child(title))
             .when_some(address, |d, address| d.child(div().truncate().text_color(p.muted).child(address)))
             .when(pickable, |d| {
@@ -794,11 +850,19 @@ impl Compose {
                     }))
             });
         let menu = self.picking_from.then(|| {
-            let rows = self.accounts.iter().enumerate().map(|(index, account)| {
-                let id = account.id.clone();
-                let selected = self.from.as_ref() == Some(&account.id);
+            let rows = options.into_iter().map(|option| {
+                let email = option.email.clone();
+                let is_selected = self.from.as_deref().is_some_and(|from| from.eq_ignore_ascii_case(&email));
+                let title: SharedString = match option.name.as_deref() {
+                    Some(name) if !name.eq_ignore_ascii_case(&email) => name.to_owned().into(),
+                    _ if !option.account_title.eq_ignore_ascii_case(&email) => option.account_title.clone(),
+                    _ => email.clone().into(),
+                };
+                let has_subtitle = !title.eq_ignore_ascii_case(&email);
+                let row_sel = format!("from:{email}");
                 div()
-                    .id(ElementId::Name(format!("from:{}", account.id).into()))
+                    .id(ElementId::Name(row_sel.clone().into()))
+                    .debug_selector(move || row_sel.clone())
                     .h(px(metrics::MENU_ROW))
                     .px(px(10.))
                     .flex()
@@ -806,15 +870,16 @@ impl Compose {
                     .gap(px(8.))
                     .rounded(px(radius::SMALL))
                     .cursor_pointer()
-                    .when(selected, |d| d.bg(p.selection))
+                    .when(is_selected, |d| d.bg(p.selection))
                     .hover(|s| s.bg(p.hover))
-                    .child(div().flex_shrink_0().size(px(7.)).rounded_full().bg(design::account_color(index)))
-                    .child(div().flex_1().min_w_0().truncate().child(account.title()))
-                    .when(!account.label.is_empty(), |d| {
-                        d.child(div().flex_shrink_0().text_color(p.muted).text_size(px(text::FOOTNOTE)).child(account.id.clone()))
+                    .child(div().flex_shrink_0().size(px(7.)).rounded_full().bg(design::account_color(option.account_index)))
+                    .child(div().flex_1().min_w_0().truncate().child(title))
+                    .when(has_subtitle, |d| {
+                        d.child(div().flex_shrink_0().text_color(p.muted).text_size(px(text::FOOTNOTE)).child(email.clone()))
                     })
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.from = Some(id.clone());
+                        this.from = Some(email.clone());
+                        this.from_chosen = true;
                         this.picking_from = false;
                         cx.notify();
                     }))
@@ -822,6 +887,7 @@ impl Compose {
             deferred(
                 menu(p)
                     .id("from-menu")
+                    .debug_selector(|| "from-menu".into())
                     .top(px(metrics::ROW_HEIGHT))
                     .left(px(metrics::LABEL_WIDTH + 8.))
                     .children(rows)
@@ -1054,7 +1120,7 @@ pub enum ReplyEvent {
     Sent,
     Discarded,
     /// Moved to the compose column to change its recipients or subject, with what it holds.
-    Moved { body: String, attachments: Vec<PathBuf> },
+    Moved { from: String, from_chosen: bool, from_resolved: bool, body: String, attachments: Vec<PathBuf> },
 }
 
 /// The reader's reply card: a mail reply (or reply all) to a conversation's latest message, or
@@ -1064,6 +1130,11 @@ pub struct ReplyBox {
     message: Option<String>,
     all: bool,
     recipients: SharedString,
+    accounts: Vec<Account>,
+    from: String,
+    from_chosen: bool,
+    from_resolved: bool,
+    picking_from: bool,
     text: Entity<EditorState>,
     focus: FocusHandle,
     attachments: Attachments,
@@ -1075,11 +1146,15 @@ impl EventEmitter<ReplyEvent> for ReplyBox {}
 
 impl ReplyBox {
     /// `recipients_preview` is who the reply goes to, as the reader shows it.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         conversation_id: String,
         message: Option<String>,
         all: bool,
         recipients_preview: SharedString,
+        accounts: Vec<Account>,
+        from: String,
+        from_resolved: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -1117,12 +1192,34 @@ impl ReplyBox {
             message,
             all,
             recipients: recipients_preview,
+            accounts,
+            from,
+            from_chosen: false,
+            from_resolved,
+            picking_from: false,
             text,
             focus,
             attachments: Attachments::default(),
             status: Status::Idle,
             _subscriptions: subscriptions,
         }
+    }
+
+    pub fn update_plan(
+        &mut self,
+        accounts: Vec<Account>,
+        from: String,
+        from_resolved: bool,
+        recipients: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        self.accounts = accounts;
+        self.recipients = recipients;
+        if !self.from_chosen {
+            self.from = from;
+            self.from_resolved = from_resolved;
+        }
+        cx.notify();
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -1140,13 +1237,17 @@ impl ReplyBox {
             return;
         }
         let (id, all) = (self.conversation_id.clone(), self.all);
-        let overrides = (!self.attachments.is_empty() || self.message.is_some()).then(|| mailstream::ReplyOverrides {
-            to: None,
-            cc: None,
-            bcc: None,
-            subject: None,
-            attachments: (!self.attachments.is_empty()).then(|| self.attachments.paths()),
-            message: self.message.as_ref().map(ToString::to_string),
+        let from = (self.from_chosen || self.from_resolved).then(|| self.from.clone());
+        let overrides = (from.is_some() || !self.attachments.is_empty() || self.message.is_some()).then(|| {
+            mailstream::ReplyOverrides {
+                from,
+                to: None,
+                cc: None,
+                bcc: None,
+                subject: None,
+                attachments: (!self.attachments.is_empty()).then(|| self.attachments.paths()),
+                message: self.message.as_ref().map(ToString::to_string),
+            }
         });
         self.status = Status::Sending;
         cx.notify();
@@ -1173,6 +1274,11 @@ impl ReplyBox {
     /// Escape (here or in the text, as the kit's `Escape`) leaves an empty reply; written text and
     /// files stay until Send or Discard.
     fn cancel(&mut self, cx: &mut Context<Self>) {
+        if self.picking_from {
+            self.picking_from = false;
+            cx.notify();
+            return;
+        }
         if self.text.read(cx).value().trim().is_empty()
             && self.attachments.is_empty()
             && !matches!(self.status, Status::Sending)
@@ -1187,9 +1293,14 @@ impl ReplyBox {
             return;
         }
         let body = self.text.read(cx).value().to_string();
-        cx.emit(ReplyEvent::Moved { body, attachments: self.attachments.take() });
+        cx.emit(ReplyEvent::Moved {
+            from: self.from.clone(),
+            from_chosen: self.from_chosen,
+            from_resolved: self.from_resolved,
+            body,
+            attachments: self.attachments.take(),
+        });
     }
-
     fn attach(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         if matches!(self.status, Status::Sending) {
             return;
@@ -1245,6 +1356,86 @@ impl Render for ReplyBox {
         let mut ring = p.accent;
         ring.a = metrics::FOCUS_RING_ALPHA;
         let attached = self.attachments.render("reply-attachment", !sending, &Self::remover(cx), p);
+        let options = from_options(&self.accounts);
+        let selected = selected_from_option(&options, Some(&self.from));
+        let pickable = !sending && options.len() > 1;
+        let from_picker = (!self.from.is_empty()).then(|| {
+            div()
+                .id("reply-from")
+                .debug_selector(|| "reply-from".into())
+                .flex_shrink_0()
+                .max_w(px(240.))
+                .px(px(6.))
+                .py(px(2.))
+                .rounded(px(radius::SMALL))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .when_some(selected, |d, option| {
+                    d.child(div().flex_shrink_0().size(px(6.)).rounded_full().bg(design::account_color(option.account_index)))
+                })
+                .child(div().min_w_0().truncate().text_color(p.muted).child(self.from.clone()))
+                .when(pickable, |d| {
+                    d.cursor_pointer()
+                        .hover(|s| s.bg(p.hover))
+                        .child(div().flex_shrink_0().text_color(p.faint).child("▾"))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.picking_from = !this.picking_from;
+                            cx.notify();
+                        }))
+                })
+        });
+        let from_menu = self.picking_from.then(|| {
+            let rows = options.into_iter().map(|option| {
+                let email = option.email.clone();
+                let is_selected = self.from.eq_ignore_ascii_case(&email);
+                let title: SharedString = match option.name.as_deref() {
+                    Some(name) if !name.eq_ignore_ascii_case(&email) => name.to_owned().into(),
+                    _ if !option.account_title.eq_ignore_ascii_case(&email) => option.account_title.clone(),
+                    _ => email.clone().into(),
+                };
+                let has_subtitle = !title.eq_ignore_ascii_case(&email);
+                let row_sel = format!("reply-from:{email}");
+                div()
+                    .id(ElementId::Name(row_sel.clone().into()))
+                    .debug_selector(move || row_sel.clone())
+                    .h(px(metrics::MENU_ROW))
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(radius::SMALL))
+                    .cursor_pointer()
+                    .when(is_selected, |d| d.bg(p.selection))
+                    .hover(|s| s.bg(p.hover))
+                    .child(div().flex_shrink_0().size(px(7.)).rounded_full().bg(design::account_color(option.account_index)))
+                    .child(div().flex_1().min_w_0().truncate().child(title))
+                    .when(has_subtitle, |d| {
+                        d.child(div().flex_shrink_0().text_color(p.muted).text_size(px(text::FOOTNOTE)).child(email.clone()))
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.from = email.clone();
+                        this.from_chosen = true;
+                        this.picking_from = false;
+                        window.focus(&this.focus, cx);
+                        cx.notify();
+                    }))
+            });
+            deferred(
+                menu(p)
+                    .id("reply-from-menu")
+                    .debug_selector(|| "reply-from-menu".into())
+                    .top(px(metrics::ROW_HEIGHT))
+                    .right(px(metrics::REPLY_PADDING))
+                    .children(rows)
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.picking_from = false;
+                        cx.notify();
+                    })),
+            )
+            .with_priority(1)
+        });
         div()
             .key_context(REPLY_CONTEXT)
             .on_action(cx.listener(|this, _: &Cancel, _, cx| this.cancel(cx)))
@@ -1297,8 +1488,10 @@ impl Render for ReplyBox {
                             .child(if self.all { "↩ Reply All" } else { "↩ Reply" }),
                     )
                     .child(div().flex_shrink_0().text_color(p.faint).child("To"))
-                    .child(div().flex_1().min_w_0().truncate().child(self.recipients.clone())),
+                    .child(div().flex_1().min_w_0().truncate().child(self.recipients.clone()))
+                    .children(from_picker),
             )
+            .children(from_menu)
             .child(
                 div()
                     .debug_selector(|| "reply-editor-frame".into())
@@ -1488,7 +1681,7 @@ mod tests {
             design::sync_kit_theme(WindowAppearance::Light, cx);
         });
         let (reply, cx) = cx.add_window_view(|window, cx| {
-            ReplyBox::new("conversation".into(), None, false, "someone@example.com".into(), window, cx)
+            ReplyBox::new("conversation".into(), None, false, "someone@example.com".into(), Vec::new(), "me@example.com".into(), false, window, cx)
         });
         let parsed_in = Rc::new(RefCell::new(Vec::new()));
         let probe = parsed_in.clone();
@@ -1520,7 +1713,7 @@ mod tests {
             design::sync_kit_theme(WindowAppearance::Light, cx);
         });
         let (reply, cx) = cx.add_window_view(|window, cx| {
-            ReplyBox::new("conversation".into(), None, false, "someone@example.com".into(), window, cx)
+            ReplyBox::new("conversation".into(), None, false, "someone@example.com".into(), Vec::new(), "me@example.com".into(), false, window, cx)
         });
         cx.run_until_parked();
         let text = reply.read_with(cx, |r, _| r.text.clone());
@@ -1558,5 +1751,134 @@ mod tests {
         text.update_in(cx, |state, window, cx| state.set_value(&longer, window, cx));
         cx.run_until_parked();
         assert_eq!(cx.debug_bounds("reply-editor-frame").unwrap().size.height, capped_height);
+    }
+
+    fn test_accounts() -> Vec<Account> {
+        vec![
+            Account {
+                id: "me@gmail.com".into(),
+                label: "Personal".into(),
+                provider: mailstream::Provider::Google,
+                name: Some("Me".into()),
+                services: vec!["mail".into()],
+                connectable: vec![],
+                identities: vec![
+                    Address::new(Some("Me".into()), "me@gmail.com"),
+                    Address::new(Some("Team".into()), "team@custom.org"),
+                ],
+            },
+            Account {
+                id: "work@outlook.com".into(),
+                label: "Work".into(),
+                provider: mailstream::Provider::Microsoft,
+                name: Some("Work Me".into()),
+                services: vec!["mail".into()],
+                connectable: vec![],
+                identities: vec![Address::new(Some("Work Me".into()), "work@outlook.com")],
+            },
+        ]
+    }
+
+    /// ReplyBox displays the resolved From address, lets the user pick another account or alias,
+    /// closes its From menu on Escape before discarding, and keeps manual choices across updates.
+    #[gpui::test]
+    fn reply_box_shows_and_switches_from_address(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui::component::init(cx);
+            design::sync_kit_theme(WindowAppearance::Light, cx);
+            bind_keys(cx);
+        });
+        let accounts = test_accounts();
+        let (reply, cx) = cx.add_window_view(|window, cx| {
+            ReplyBox::new(
+                "conv".into(),
+                None,
+                false,
+                "Bob".into(),
+                accounts.clone(),
+                "me@gmail.com".into(),
+                false,
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("reply-from").is_some());
+        assert!(cx.debug_bounds("reply-from-menu").is_none());
+
+        // Thread headers arrive with a more specific alias -> updates From while unchosen.
+        reply.update(cx, |r, cx| {
+            r.update_plan(accounts.clone(), "team@custom.org".into(), true, "Bob".into(), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(reply.read_with(cx, |r, _| r.from.clone()), "team@custom.org");
+
+        // Open the From menu and pick the second account.
+        let bounds = cx.debug_bounds("reply-from").unwrap();
+        cx.simulate_mouse_down(bounds.center(), MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(bounds.center(), MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("reply-from-menu").is_some());
+
+        // Escape closes the menu without discarding.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("reply-from-menu").is_none());
+
+        // Re-open and select work@outlook.com.
+        let bounds = cx.debug_bounds("reply-from").unwrap();
+        cx.simulate_mouse_down(bounds.center(), MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(bounds.center(), MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        let item = cx.debug_bounds("reply-from:work@outlook.com").unwrap();
+        cx.simulate_mouse_down(item.center(), MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(item.center(), MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(reply.read_with(cx, |r, _| (r.from.clone(), r.from_chosen)), ("work@outlook.com".into(), true));
+        assert!(cx.debug_bounds("reply-from-menu").is_none());
+
+        // Subsequent plan refreshes preserve the user's explicit choice.
+        reply.update(cx, |r, cx| {
+            r.update_plan(accounts, "me@gmail.com".into(), true, "Bob".into(), cx);
+        });
+        assert_eq!(reply.read_with(cx, |r, _| r.from.clone()), "work@outlook.com");
+    }
+
+    /// Moving a reply to Compose keeps From unlocked and lets the user switch between accounts
+    /// and send-as aliases.
+    #[gpui::test]
+    fn moved_reply_in_compose_unlocks_and_switches_from(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui::component::init(cx);
+            design::sync_kit_theme(WindowAppearance::Light, cx);
+            bind_keys(cx);
+        });
+        let accounts = test_accounts();
+        let moved = MovedReply {
+            conversation: "conv".into(),
+            message: None,
+            all: false,
+            from: "team@custom.org".into(),
+            from_chosen: false,
+            from_resolved: true,
+            to: vec![Address::new(Some("Bob".into()), "bob@x.com")],
+            cc: vec![],
+            subject: "Re: Hi".into(),
+            body: "Hello".into(),
+            attachments: vec![],
+        };
+        let (compose, cx) = cx.add_window_view(|window, cx| Compose::new(ComposeMode::Reply(moved), accounts, window, cx));
+        cx.run_until_parked();
+        assert_eq!(compose.read_with(cx, |c, _| (c.from.clone(), c.from_locked)), (Some("team@custom.org".into()), false));
+
+        let bounds = cx.debug_bounds("from").unwrap();
+        cx.simulate_mouse_down(bounds.center(), MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(bounds.center(), MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        let item = cx.debug_bounds("from:work@outlook.com").unwrap();
+        cx.simulate_mouse_down(item.center(), MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(item.center(), MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(compose.read_with(cx, |c, _| (c.from.clone(), c.from_chosen)), (Some("work@outlook.com".into()), true));
     }
 }

@@ -26,13 +26,15 @@ pub fn parse_message(raw: &[u8], directory: PathBuf, url_base: String) -> std::i
     let body = renderer.render(&entity, false);
     let html = body.as_ref().filter(|segment| segment.primary).and_then(|segment| segment.html.clone());
     let text = body.and_then(|segment| segment.text);
-    Ok(renderer.assembly.finish(
+    let mut content = renderer.assembly.finish(
         html,
         text,
         text::parse_address_list(&entity.headers_joined("cc", ", ")),
         text::parse_address_list(&entity.headers_joined("reply-to", ", ")),
         text::parse_message_id_list(entity.header("references")),
-    ))
+    );
+    content.delivered_to = text::delivery_addresses(entity.header_values("x-original-to"), entity.header_values("delivered-to"));
+    Ok(content)
 }
 
 struct Entity<'a> {
@@ -62,6 +64,10 @@ impl<'a> Entity<'a> {
     fn headers_joined(&self, name: &str, separator: &str) -> String {
         let values: Vec<&str> = self.headers.iter().filter(|(key, _)| key == name).map(|(_, value)| value.as_str()).collect();
         values.join(separator)
+    }
+
+    fn header_values(&self, name: &str) -> Vec<&str> {
+        self.headers.iter().filter(|(key, _)| key == name).map(|(_, value)| value.as_str()).collect()
     }
 }
 

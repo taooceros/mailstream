@@ -5,9 +5,10 @@
 use super::*;
 use crate::compose::{ColumnEvent, ComposeColumn, ComposeMode, MovedReply, ReplyEvent};
 use crate::engine::{self, BatchResult};
+use crate::model::AccountExt;
 use crate::{controls, design};
 use gpui::component::notification::Notification;
-use mailstream::{UndoAction, Undone};
+use mailstream::{Address, UndoAction, Undone};
 
 /// What takes a conversation out of the list.
 #[derive(Clone, Copy)]
@@ -101,17 +102,72 @@ impl MailApp {
         self.list()?.conversations.iter().find(|c| c.id == id).cloned()
     }
 
-    /// The user's addresses, lowercased: the accounts'.
+    /// The user's addresses, lowercased: the accounts' and their verified send-as aliases.
     pub fn own_addresses(&self) -> HashSet<String> {
-        self.accounts.iter().map(|account| account.id.to_lowercase()).collect()
+        self.accounts
+            .iter()
+            .flat_map(|account| {
+                std::iter::once(account.id.to_lowercase())
+                    .chain(account.identities.iter().map(Address::normalized_email))
+            })
+            .collect()
     }
 
-    /// Message `id` of the loaded thread `conversation`.
-    fn loaded_message(&self, conversation: &str, id: &str) -> Option<&ShownMessage> {
+    /// Message `id` of the loaded thread `conversation`, or the latest non-draft message when `id`
+    /// is `None`.
+    fn target_reply_message(&self, conversation: &str, id: Option<&str>) -> Option<&ShownMessage> {
         match self.threads.get(conversation).map(|t| &t.state) {
-            Some(ThreadState::Loaded(messages)) => messages.iter().find(|message| message.id == id),
+            Some(ThreadState::Loaded(messages)) => match id {
+                Some(id) => messages.iter().find(|message| message.id == id),
+                None => messages.iter().rev().find(|message| message.role != MailboxRole::Drafts).or_else(|| messages.last()),
+            },
             _ => None,
         }
+    }
+
+    /// The default `From` email for replying to `conversation` (targeting `message`), and whether
+    /// the thread's headers were already loaded to resolve it.
+    fn reply_from(&self, conversation: &Conversation, message: Option<&str>) -> (String, bool) {
+        if let Some(ThreadState::Loaded(messages)) = self.threads.get(&conversation.id).map(|t| &t.state) {
+            let raw: Vec<mailstream::Message> = messages.iter().map(|shown| shown.message.clone()).collect();
+            return (
+                mailstream::reply_from(self.accounts.clone(), conversation.account.clone(), raw, message.map(str::to_owned)),
+                true,
+            );
+        }
+        let fallback = self
+            .accounts
+            .iter()
+            .find(|account| account.id == conversation.account)
+            .map(|account| account.primary_email().to_owned())
+            .unwrap_or_else(|| conversation.account.clone());
+        (fallback, false)
+    }
+
+    fn reply_preview(&self, conversation: &Conversation, all: bool, message: Option<&str>) -> SharedString {
+        if let Some(chosen) = self.target_reply_message(&conversation.id, message) {
+            let (to, cc) = chosen.reply_recipients(&self.own_addresses(), all);
+            return to.iter().chain(&cc).map(|address| address.display_name()).collect::<Vec<_>>().join(", ").into();
+        }
+        if conversation.from_me && !conversation.peers.is_empty() {
+            conversation.sender_name()
+        } else if all || conversation.from_me {
+            let people: Vec<&str> = conversation.participants.iter().map(String::as_str).filter(|p| *p != "me").collect();
+            if people.is_empty() { conversation.sender_name() } else { people.join(", ").into() }
+        } else {
+            conversation.sender_name()
+        }
+    }
+
+    pub(super) fn refresh_reply_plan(&mut self, cx: &mut Context<Self>) {
+        let Some(reply) = self.reply.as_ref() else { return };
+        let Some(conversation) = self.conversation(&reply.conversation).or_else(|| self.reader().filter(|c| c.id == reply.conversation).cloned()) else {
+            return;
+        };
+        let (from, resolved) = self.reply_from(&conversation, reply.message.as_deref());
+        let preview = self.reply_preview(&conversation, reply.all, reply.message.as_deref());
+        let accounts = self.accounts.clone();
+        reply.view.update(cx, |view, cx| view.update_plan(accounts, from, resolved, preview, cx));
     }
 
     pub fn reply(&mut self, _: &Reply, window: &mut Window, cx: &mut Context<Self>) {
@@ -145,23 +201,12 @@ impl MailApp {
             draft.view.update(cx, |reply, cx| reply.focus(window, cx));
             return;
         }
-        // Who it goes to is the app's to decide; the box names them for the user.
-        let chosen = message.as_ref().and_then(|message| self.loaded_message(&conversation.id, message));
-        let preview: SharedString = if let Some(chosen) = chosen {
-            let (to, cc) = chosen.reply_recipients(&self.own_addresses(), all);
-            to.iter().chain(&cc).map(|address| address.display_name()).collect::<Vec<_>>().join(", ").into()
-        } else if conversation.from_me && !conversation.peers.is_empty() {
-            conversation.sender_name()
-        } else if all || conversation.from_me {
-            // Answering their own latest message goes to its recipients, not to them.
-            let people: Vec<&str> =
-                conversation.participants.iter().map(String::as_str).filter(|p| *p != "me").collect();
-            if people.is_empty() { conversation.sender_name() } else { people.join(", ").into() }
-        } else {
-            conversation.sender_name()
-        };
+        // Who it goes to and from is the app's to decide; the box names them for the user.
+        let preview = self.reply_preview(&conversation, all, message.as_deref());
+        let (from, from_resolved) = self.reply_from(&conversation, message.as_deref());
+        let accounts = self.accounts.clone();
         let id = conversation.id.clone();
-        let view = cx.new(|cx| ReplyBox::new(id.clone(), message.clone(), all, preview, window, cx));
+        let view = cx.new(|cx| ReplyBox::new(id.clone(), message.clone(), all, preview, accounts, from, from_resolved, window, cx));
         let target = message.clone();
         let replied = id.clone();
         let subscription = cx.subscribe_in(&view, window, move |this, _, event: &ReplyEvent, window, cx| {
@@ -173,8 +218,19 @@ impl MailApp {
                     this.reload_replied(&replied, cx);
                 }
                 ReplyEvent::Discarded => {}
-                ReplyEvent::Moved { body, attachments } => {
-                    this.move_reply(&replied, target.clone(), all, body.clone(), attachments.clone(), window, cx);
+                ReplyEvent::Moved { from, from_chosen, from_resolved, body, attachments } => {
+                    this.move_reply(
+                        &replied,
+                        target.clone(),
+                        all,
+                        from.clone(),
+                        *from_chosen,
+                        *from_resolved,
+                        body.clone(),
+                        attachments.clone(),
+                        window,
+                        cx,
+                    );
                 }
             }
             cx.notify();
@@ -203,6 +259,9 @@ impl MailApp {
         id: &str,
         message: Option<String>,
         all: bool,
+        from: String,
+        from_chosen: bool,
+        from_resolved: bool,
         body: String,
         attachments: Vec<std::path::PathBuf>,
         window: &mut Window,
@@ -211,21 +270,18 @@ impl MailApp {
         let conversation = self.conversation(id).or_else(|| self.reader().filter(|c| c.id == id).cloned());
         let Some(conversation) = conversation else { return };
         let own = self.own_addresses();
-        let (to, cc) = match self.threads.get(id).map(|t| &t.state) {
-            Some(ThreadState::Loaded(messages)) => messages
-                .iter()
-                .find(|m| Some(&m.id) == message.as_ref())
-                .or(messages.last())
-                .map(|source| source.reply_recipients(&own, all))
-                .unwrap_or_default(),
-            _ => Default::default(),
-        };
+        let (to, cc) = self
+            .target_reply_message(id, message.as_deref())
+            .map(|source| source.reply_recipients(&own, all))
+            .unwrap_or_default();
         let subject = mailstream::reply_subject(conversation.subject.to_string());
         let moved = MovedReply {
             conversation: id.to_owned(),
             message,
             all,
-            from: conversation.account.clone(),
+            from,
+            from_chosen,
+            from_resolved,
             to,
             cc,
             subject: subject.into(),

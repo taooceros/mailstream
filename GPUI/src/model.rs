@@ -63,6 +63,10 @@ impl CategoryExt for Category {
 pub trait AccountExt {
     /// Its label, else its address.
     fn title(&self) -> SharedString;
+    /// The default email address this account sends from.
+    fn primary_email(&self) -> &str;
+    /// Every verified sending identity (default first, then any send-as aliases).
+    fn send_identities(&self) -> Vec<Address>;
     /// Gmail calls its user folders labels.
     fn folders_title(&self) -> &'static str;
 }
@@ -70,6 +74,18 @@ pub trait AccountExt {
 impl AccountExt for Account {
     fn title(&self) -> SharedString {
         if self.label.is_empty() { self.id.clone().into() } else { self.label.clone().into() }
+    }
+
+    fn primary_email(&self) -> &str {
+        self.identities.first().map_or(self.id.as_str(), |identity| identity.email.as_str())
+    }
+
+    fn send_identities(&self) -> Vec<Address> {
+        if self.identities.is_empty() {
+            vec![Address::new(self.name.clone(), &self.id)]
+        } else {
+            self.identities.clone()
+        }
     }
 
     fn folders_title(&self) -> &'static str {

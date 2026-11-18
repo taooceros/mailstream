@@ -521,6 +521,7 @@ pub const COMMANDS: &[Spec] = &[
             Argument::new("body", Kind::String, "Plain-text reply; `-` reads standard input.").required(),
             Argument::new("all", Kind::Bool, "Reply to everyone."),
             Argument::new("message", Kind::String, "Reply to this message of the conversation rather than its latest."),
+            Argument::new("from", Kind::String, "Override the sending account or alias (its address)."),
             Argument::new("to", Kind::List, "Override reply recipients; omitted uses the reply plan."),
             Argument::new("cc", Kind::List, "Override Cc; an empty list clears it."),
             Argument::new("bcc", Kind::List, "Bcc recipients; an empty list clears it."),

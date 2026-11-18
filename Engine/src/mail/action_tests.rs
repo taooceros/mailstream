@@ -623,3 +623,171 @@ fn sends_markdown_as_html_and_preserves_plain_text_for_new_mail_and_reply() {
     drop(engine);
     cleanup(&config);
 }
+
+#[test]
+fn replies_use_matching_alias_delivered_to_forwarded_account_or_from_override() {
+    let changed: Changes = Arc::default();
+    let tokens = AtomicUsize::new(0);
+    let mut metadata = std::collections::HashMap::new();
+    let msgs = [
+        ("m_alias", "t-alias", vec![header("From", "Bob <bob@x.com>"), header("To", "Team <team@custom.org>, Carol <carol@x.com>"), header("Delivered-To", "me@gmail.com"), header("Subject", "Alias"), header("Message-ID", "<m_alias@x>")]),
+        ("m_deliv", "t-deliv", vec![header("From", "Dave <dave@x.com>"), header("To", "list@org.test"), header("X-Original-To", "team@custom.org"), header("Delivered-To", "me@gmail.com"), header("Subject", "List"), header("Message-ID", "<m_deliv@x>")]),
+        ("m_fwd", "t-fwd", vec![header("From", "Eve <eve@x.com>"), header("To", "work@outlook.com"), header("Delivered-To", "me@gmail.com"), header("Subject", "Fwd target"), header("Message-ID", "<m_fwd@x>")]),
+        ("m_both", "t-both", vec![header("From", "Frank <frank@x.com>"), header("To", "work@outlook.com, me@gmail.com"), header("Subject", "Both"), header("Message-ID", "<m_both@x>")]),
+    ];
+    for (idx, (id, thread, mut headers)) in msgs.into_iter().enumerate() {
+        let _ = &mut headers;
+        metadata.insert(
+            id.to_string(),
+            json!({
+                "id": id,
+                "threadId": thread,
+                "labelIds": ["INBOX", "UNREAD"],
+                "internalDate": (BASE_MS - (idx as i64) * 60_000).to_string(),
+                "payload": { "mimeType": "text/plain", "headers": headers },
+            }),
+        );
+    }
+    let full_for = |id: &str| {
+        let meta = metadata.get(id).unwrap();
+        json!({
+            "id": id,
+            "threadId": meta["threadId"],
+            "labelIds": meta["labelIds"],
+            "internalDate": meta["internalDate"],
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": meta["payload"]["headers"],
+                "body": { "data": encode(&format!("Body of {id}")) },
+            },
+        })
+    };
+    let metadata_clone = metadata.clone();
+    let changed_clone = changed.clone();
+    let server = FakeServer::start(move |request| {
+        let path = request.path.as_str();
+        if path == "/token" {
+            return token_reply(&tokens);
+        }
+        if path == "/batch/gmail/v1" {
+            return gmail_batch(request, &metadata_clone);
+        }
+        if request.method == "POST" {
+            changed_clone.lock().unwrap().push(request.clone());
+            if path == "/v1.0/me/sendMail" {
+                return Reply::bytes(202, Vec::new());
+            }
+            if path.starts_with("/upload/gmail/") {
+                return Reply::json(json!({ "id": "sent1" }));
+            }
+            return Reply::json(json!({}));
+        }
+        if path == "/v1.0/me" {
+            return Reply::json(json!({ "displayName": "Work Me", "mail": "work@outlook.com" }));
+        }
+        if path == "/v1.0/me/mailFolders" {
+            return Reply::json(json!({ "value": [
+                { "id": "inbox", "displayName": "Inbox", "childFolderCount": 0, "unreadItemCount": 0, "totalItemCount": 0 },
+                { "id": "sentitems", "displayName": "Sent Items", "childFolderCount": 0, "unreadItemCount": 0, "totalItemCount": 0 },
+            ]}));
+        }
+        if let Some(folder) = path.strip_prefix("/v1.0/me/mailFolders/").and_then(|rest| rest.split('/').next()) {
+            if path.ends_with("/messages") {
+                return Reply::json(json!({ "value": [] }));
+            }
+            let id = folder;
+            return Reply::json(json!({ "id": id, "displayName": id, "childFolderCount": 0, "unreadItemCount": 0, "totalItemCount": 0 }));
+        }
+        let Some(resource) = path.strip_prefix("/gmail/v1/users/me/") else {
+            return Reply::status(404, json!({ "error": { "message": "No such path" } }));
+        };
+        match resource {
+            "profile" => Reply::json(json!({ "emailAddress": "me@gmail.com", "historyId": "100" })),
+            "settings/sendAs" => Reply::json(json!({ "sendAs": [
+                { "sendAsEmail": "me@gmail.com", "displayName": "Me Gmail", "isPrimary": true, "verificationStatus": "accepted" },
+                { "sendAsEmail": "team@custom.org", "displayName": "Team", "verificationStatus": "accepted" },
+                { "sendAsEmail": "pending@custom.org", "displayName": "Pending", "verificationStatus": "pending" },
+            ]})),
+            "labels" => Reply::json(json!({ "labels": [
+                { "id": "INBOX", "name": "INBOX", "type": "system" },
+                { "id": "SENT", "name": "SENT", "type": "system" },
+            ]})),
+            "history" => Reply::json(json!({ "historyId": "101" })),
+            "messages" => {
+                let ids: Vec<&str> = if request.param("labelIds") == Some("INBOX") {
+                    vec!["m_alias", "m_deliv", "m_fwd", "m_both"]
+                } else {
+                    vec![]
+                };
+                let items: Vec<Value> = ids.into_iter().map(|id| json!({ "id": id })).collect();
+                Reply::json(json!({ "messages": items, "resultSizeEstimate": items.len() }))
+            }
+            "labels/INBOX" | "labels/SENT" => Reply::json(json!({ "messagesTotal": 4, "messagesUnread": 4 })),
+            other => match other.strip_prefix("messages/") {
+                Some(id) if request.param("format") == Some("full") => {
+                    let mut full = metadata_clone.get(id).unwrap().clone();
+                    full["payload"]["body"] = json!({ "data": encode(&format!("Body of {id}")) });
+                    Reply::json(full)
+                }
+                _ => Reply::status(404, json!({ "error": { "message": "Not Found" } })),
+            },
+        }
+    });
+    let _ = full_for;
+    let (engine, config) = engine_for(&server, &[("me@gmail.com", "google"), ("work@outlook.com", "microsoft")]);
+    wait_until("accounts identities", || {
+        let list = call(&engine, "accounts.list", json!({})).unwrap();
+        list[0]["identities"].as_array().is_some_and(|ids| ids.len() == 2)
+    });
+    let accounts = call(&engine, "accounts.list", json!({})).unwrap();
+    assert_eq!(accounts[0]["identities"], json!(["Me Gmail <me@gmail.com>", "Team <team@custom.org>"]));
+    wait_until("inbox", || {
+        call(&engine, "mail.list", json!({})).is_ok_and(|v| v["conversations"].as_array().is_some_and(|c| c.len() == 4))
+    });
+    changes(&changed);
+
+    // 1. Reply All to a message addressed to the sendAs alias uses the alias and excludes it from Cc.
+    let ans = call(&engine, "mail.reply", json!({ "id": "me@gmail.com|m_alias@x", "body": "Hi Bob", "all": true, "yes": true })).unwrap();
+    assert_eq!(ans["from"], json!("team@custom.org"));
+    let req = changes(&changed).pop().unwrap();
+    assert_eq!(req.path, "/upload/gmail/v1/users/me/messages/send");
+    let raw = req.text();
+    assert!(raw.contains("From: Team <team@custom.org>\r\n"), "{raw}");
+    assert!(raw.contains("To: Bob <bob@x.com>\r\nCc: Carol <carol@x.com>\r\n"), "{raw}");
+    assert!(raw.contains("{\"threadId\":\"t-alias\"}"), "{raw}");
+
+    // 2. Mailing-list message with X-Original-To matching alias uses that alias.
+    let ans = call(&engine, "mail.reply", json!({ "id": "me@gmail.com|m_deliv@x", "body": "Got it", "yes": true })).unwrap();
+    assert_eq!(ans["from"], json!("team@custom.org"));
+    let raw = changes(&changed).pop().unwrap().text();
+    assert!(raw.contains("From: Team <team@custom.org>\r\n"), "{raw}");
+
+    // 3. Message forwarded from another signed-in account sends through that account (no foreign threadId).
+    let ans = call(&engine, "mail.reply", json!({ "id": "me@gmail.com|m_fwd@x", "body": "From work", "yes": true })).unwrap();
+    assert_eq!(ans["from"], json!("work@outlook.com"));
+    let req = changes(&changed).pop().unwrap();
+    assert_eq!(req.path, "/v1.0/me/sendMail");
+    let mime = String::from_utf8(STANDARD.decode(&req.body).unwrap()).unwrap();
+    assert!(mime.contains("From: Work Me <work@outlook.com>\r\n"), "{mime}");
+    assert!(mime.contains("In-Reply-To: <m_fwd@x>\r\n"), "{mime}");
+
+    // 4. Message addressed to both accounts stays on the receiving account.
+    let ans = call(&engine, "mail.reply", json!({ "id": "me@gmail.com|m_both@x", "body": "Staying", "yes": true })).unwrap();
+    assert_eq!(ans["from"], json!("me@gmail.com"));
+    changes(&changed);
+
+    // 5. Explicit --from overrides the reply account.
+    let ans = call(&engine, "mail.reply", json!({ "id": "me@gmail.com|m_alias@x", "from": "work@outlook.com", "body": "Override", "yes": true })).unwrap();
+    assert_eq!(ans["from"], json!("work@outlook.com"));
+    assert_eq!(changes(&changed).pop().unwrap().path, "/v1.0/me/sendMail");
+
+    // 6. mail.send --from also accepts a verified sendAs alias.
+    let ans = call(&engine, "mail.send", json!({ "from": "team@custom.org", "to": ["bob@x.com"], "subject": "New", "body": "Hi", "yes": true })).unwrap();
+    assert_eq!(ans["from"], json!("team@custom.org"));
+    let req = changes(&changed).pop().unwrap();
+    assert_eq!(req.path, "/upload/gmail/v1/users/me/messages/send");
+    assert!(req.text().contains("From: Team <team@custom.org>\r\n"), "{}", req.text());
+
+    drop(engine);
+    cleanup(&config);
+}
