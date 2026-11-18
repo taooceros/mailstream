@@ -429,6 +429,16 @@ impl Run {
             if start.elapsed() >= time {
                 break;
             }
+            #[cfg(target_os = "macos")]
+            {
+                let deadline = Instant::now() + FRAME;
+                let limit = objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(FRAME.as_secs_f64());
+                objc2_foundation::NSRunLoop::mainRunLoop().runUntilDate(&limit);
+                if let Some(left) = deadline.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(left);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
             std::thread::sleep(FRAME);
             let now = Instant::now();
             self.cx.advance_clock(now - moved);

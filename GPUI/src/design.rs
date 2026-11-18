@@ -875,8 +875,8 @@ pub fn chat_color() -> Hsla {
 /// its glyph, the controls along its bottom, and their colors. The box is the log's media width at
 /// 16:9 before and while it plays, the picture letterboxed in it, so the log doesn't move when a
 /// video starts (and a row that changes height while shown leaves its sender's name cut to "…",
-/// MS-399). Only Linux plays videos until the Mac's player (MS-398).
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// MS-399).
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 pub mod video {
     use gpui::Hsla;
 

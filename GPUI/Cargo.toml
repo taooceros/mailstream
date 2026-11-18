@@ -45,9 +45,13 @@ gpui = { package = "gpui-kit", version = "0.9.1", features = ["gpui-fast", "prof
 raw-window-handle = "0.6"
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL", "NSURLRequest", "NSValue", "NSGeometry", "NSError", "NSObject", "NSObjCRuntime", "NSData", "NSBundle", "NSSet", "NSDictionary", "NSUserDefaults", "NSURLResponse", "NSArray", "NSRange", "NSProcessInfo", "NSOrthography", "NSTextCheckingResult", "NSDate", "NSRunLoop"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL", "NSURLRequest", "NSValue", "NSGeometry", "NSError", "NSObject", "NSObjCRuntime", "NSData", "NSBundle", "NSSet", "NSDictionary", "NSUserDefaults", "NSURLResponse", "NSArray", "NSRange", "NSProcessInfo", "NSOrthography", "NSTextCheckingResult", "NSDate", "NSRunLoop", "NSNotification", "NSOperation", "NSTimer", "block2"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView", "NSResponder", "NSWorkspace", "NSEvent", "NSApplication", "NSImage", "NSMenu", "NSMenuItem", "NSGlassEffectView", "NSGraphics", "NSColor", "objc2-core-foundation", "NSAppearance", "NSSpellChecker", "block2"] }
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "objc2-core-foundation", "block2", "WKWebView", "WKWebViewConfiguration", "WKPreferences", "WKWebpagePreferences", "WKNavigationDelegate", "WKNavigationAction", "WKNavigation", "WKWebsiteDataStore", "WKUIDelegate", "WKWindowFeatures", "WKFrameInfo", "WKURLSchemeHandler", "WKURLSchemeTask"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFString"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "objc2-core-media", "objc2-core-video", "block2"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 # Blitz's font lookup (fontique) and GPUI's font-kit share fontconfig-sys; with `dlopen` its

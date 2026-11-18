@@ -42,8 +42,8 @@ mod state;
 mod swipe;
 mod text_checking;
 mod ui;
-// Chat's videos, played in the log (MS-221): GStreamer on Linux; the Mac's player is MS-398.
-#[cfg(target_os = "linux")]
+// Chat's videos, played in the log (MS-221, MS-398): GStreamer on Linux, AVPlayer on the Mac.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod video;
 #[cfg(target_os = "macos")]
 mod updater;

@@ -5,11 +5,14 @@
 //!
 //! The picture is GPUI's own: each frame the player hands over becomes an image GPUI draws, so the
 //! log clips and scrolls it like anything else (Zed shows video the same way on Linux). The
-//! platform's player does the rest: GStreamer's GstPlay on Linux (`video/linux.rs`). The Mac's
-//! player (AVPlayer) is MS-398; until then the Mac shows videos as tiles.
+//! platform's player does the rest: GStreamer's GstPlay on Linux (`video/linux.rs`), and AVPlayer
+//! on the Mac (`video/mac.rs`, MS-398).
 
 #[cfg(target_os = "linux")]
 #[path = "video/linux.rs"]
+mod player;
+#[cfg(target_os = "macos")]
+#[path = "video/mac.rs"]
 mod player;
 
 use std::path::Path;

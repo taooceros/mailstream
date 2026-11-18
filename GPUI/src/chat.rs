@@ -47,7 +47,7 @@ use crate::engine::{MailError, engine};
 use crate::input::{self, wrap_selection};
 use crate::markup_highlight::{MarkupFlavor, markup_highlighter_factory};
 use crate::split;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::video::{self, ChatVideo};
 use crate::state::ReaderTop;
 
@@ -235,7 +235,7 @@ impl From<mailstream::ChatAttachment> for Attachment {
 
 impl Attachment {
     /// An uploaded picture shows in the log; everything else is a tile, except an uploaded video,
-    /// which plays in the log where the platform has a player (`video.rs`, Linux).
+    /// which plays in the log where the platform has a player (`video.rs`, Linux and macOS).
     fn inline(&self) -> bool {
         self.kind == AttachmentKind::Image && self.resource.is_some()
     }
@@ -960,7 +960,7 @@ pub struct ChatPane {
     /// Files to open in the system's default app once downloaded.
     open_when_ready: HashSet<FileKey>,
     /// Videos waiting for their file, which they play once downloaded (MS-221).
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     video_waiting: HashMap<FileKey, gpui::WeakEntity<ChatVideo>>,
     form: NewChatForm,
     pending_serial: u64,
@@ -1025,7 +1025,7 @@ impl ChatPane {
             hovered_message: None,
             files: HashMap::new(),
             open_when_ready: HashSet::new(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             video_waiting: HashMap::new(),
             form: NewChatForm::default(),
             pending_serial: 0,
@@ -1550,7 +1550,7 @@ impl ChatPane {
                 if let (true, FileState::Ready(path)) = (this.open_when_ready.remove(&key), &file) {
                     cx.open_with_system(path);
                 }
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 if let Some(video) = this.video_waiting.remove(&key).and_then(|video| video.upgrade()) {
                     let answer = match &file {
                         FileState::Ready(path) => Ok(path.clone()),
@@ -1567,7 +1567,7 @@ impl ChatPane {
 
     /// A video's poster was clicked: hands it its file, downloading it first unless it is here;
     /// a download that failed is tried again.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn fetch_video(&mut self, account: &SharedString, attachment: &Attachment, video: Entity<ChatVideo>, cx: &mut Context<Self>) {
         let Some(resource) = attachment.resource.clone() else { return };
         let key: FileKey = (account.clone(), resource);
@@ -2617,7 +2617,7 @@ impl ChatPane {
                 Some(FileState::Failed(_)) => {}
             }
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if attachment.kind == AttachmentKind::Video && attachment.resource.is_some() {
             return self.render_video(account, id, attachment, window, cx);
         }
@@ -2677,7 +2677,7 @@ impl ChatPane {
 
     /// An uploaded video's player, kept while its row shows: scrolled away, it stops and shows its
     /// poster again when back (the file stays downloaded).
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn render_video(
         &self,
         account: &SharedString,
