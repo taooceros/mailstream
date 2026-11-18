@@ -886,6 +886,8 @@ pub mod video {
     pub const BADGE: f32 = 48.0;
     pub const BADGE_GLYPH: f32 = 28.0;
     pub const BAR: f32 = 36.0;
+    pub const LIGHTBOX_INSET: f32 = 36.0;
+    pub const LIGHTBOX_BAR: f32 = 44.0;
 
     /// A video sits on a dark frame in both appearances, as players do.
     pub struct Ink {
@@ -899,6 +901,10 @@ pub mod video {
         pub badge: Hsla,
         /// The shade under the controls, from clear at its top to its bottom.
         pub scrim: [Hsla; 2],
+        /// The dim backdrop behind the zoomed player.
+        pub backdrop: Hsla,
+        /// Fullscreen background behind the letterboxed video.
+        pub fullscreen: Hsla,
     }
 
     pub fn ink() -> Ink {
@@ -908,6 +914,8 @@ pub mod video {
             failure: argb(0xFFFF8A80),
             badge: argb(0x8C000000),
             scrim: [argb(0x00000000), argb(0x99000000)],
+            backdrop: argb(0xD9000000),
+            fullscreen: argb(0xFF000000),
         }
     }
 }

@@ -48,7 +48,7 @@ use crate::input::{self, wrap_selection};
 use crate::markup_highlight::{MarkupFlavor, markup_highlighter_factory};
 use crate::split;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use crate::video::{self, ChatVideo};
+use crate::video::{self, ChatVideo, VideoLightbox};
 use crate::state::ReaderTop;
 
 actions!(chat, [Back, Next, Previous, Open, NewChat, Refresh, FormatBold, FormatItalic, FormatStrike, FormatCode]);
@@ -962,6 +962,8 @@ pub struct ChatPane {
     /// Videos waiting for their file, which they play once downloaded (MS-221).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     video_waiting: HashMap<FileKey, gpui::WeakEntity<ChatVideo>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    video_lightbox: Option<Entity<VideoLightbox>>,
     form: NewChatForm,
     pending_serial: u64,
     _subscriptions: Vec<Subscription>,
@@ -1027,6 +1029,8 @@ impl ChatPane {
             open_when_ready: HashSet::new(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             video_waiting: HashMap::new(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            video_lightbox: None,
             form: NewChatForm::default(),
             pending_serial: 0,
             _subscriptions: subscriptions,
@@ -1059,6 +1063,7 @@ impl ChatPane {
 
     /// Shows the space list of every chat account (None) or of one.
     pub fn show(&mut self, account: Option<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_video_lightbox(window, cx);
         self.leave_space(cx);
         self.filter = account;
         self.view = View::Spaces;
@@ -1372,6 +1377,7 @@ impl ChatPane {
     }
 
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_video_lightbox(window, cx);
         self.leave_space(cx);
         self.view = View::Spaces;
         window.focus(&self.focus, cx);
@@ -1411,6 +1417,10 @@ impl ChatPane {
     fn leave_space(&mut self, cx: &mut Context<Self>) {
         if matches!(self.view, View::Space(_)) {
             self.background(cx, async { engine().chat_close().await.ok() }, |_, _, _| {});
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.video_lightbox = None;
         }
     }
 
@@ -1907,9 +1917,62 @@ impl ChatPane {
     /// Closes the open space or the new-chat form (⌘W, which the window binds); nothing on the
     /// space list.
     pub fn close_space(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_video_lightbox(window, cx) {
+            return;
+        }
         if !matches!(self.view, View::Spaces) {
             self.close(window, cx);
         }
+    }
+
+    /// The open video lightbox over the window, if any.
+    pub fn video_lightbox(&self) -> Option<AnyElement> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            return self.video_lightbox.as_ref().map(|lightbox| lightbox.clone().into_any_element());
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        None
+    }
+
+    pub fn has_video_lightbox(&self) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            return self.video_lightbox.is_some();
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        false
+    }
+
+    /// Closes the video lightbox (exiting fullscreen if active) and returns `true` if one was open.
+    pub fn close_video_lightbox(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(lightbox) = self.video_lightbox.take() {
+            lightbox.update(cx, |lightbox, cx| lightbox.finish(window, cx));
+            cx.notify();
+            return true;
+        }
+        let _ = (window, cx);
+        false
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn open_video_lightbox(&mut self, video: Entity<ChatVideo>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.video_lightbox.as_ref().is_some_and(|open| open.read(cx).video() == &video) {
+            return;
+        }
+        let previous_focus = window.focused(cx).or_else(|| Some(self.focus.clone()));
+        let pane = cx.entity().downgrade();
+        let on_close: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |_, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.video_lightbox = None;
+                cx.notify();
+            })
+            .ok();
+        });
+        let lightbox = cx.new(|cx| VideoLightbox::new(video, previous_focus, on_close, window, cx));
+        self.video_lightbox = Some(lightbox);
+        cx.notify();
     }
 
     /// Esc on the list: the open space or form closes, else the search ends, else the window
@@ -2687,6 +2750,7 @@ impl ChatPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let pane = cx.entity().downgrade();
+        let zoom_pane = pane.clone();
         let (account, chosen) = (account.clone(), attachment.clone());
         window
             .use_keyed_state(id, cx, move |window, cx| {
@@ -2694,7 +2758,10 @@ impl ChatPane {
                 let fetch: video::Fetch = Rc::new(move |video, cx| {
                     pane.update(cx, |pane, cx| pane.fetch_video(&account, &chosen, video, cx)).ok();
                 });
-                ChatVideo::new(name, fetch, window, cx)
+                let on_zoom: video::Zoom = Rc::new(move |video, window, cx| {
+                    zoom_pane.update(cx, |pane, cx| pane.open_video_lightbox(video, window, cx)).ok();
+                });
+                ChatVideo::new(name, fetch, on_zoom, window, cx)
             })
             .into_any_element()
     }

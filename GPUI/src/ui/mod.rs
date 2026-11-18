@@ -130,6 +130,9 @@ impl Render for MailApp {
         };
         // The calendar's open event over the whole window, sidebar and all (MS-184).
         let page = if self.calendar_view { self.calendar.update(cx, |pane, cx| pane.render_page(window, cx)) } else { None };
+        let video_lightbox = if self.chat_view.is_some() { self.chat.read(cx).video_lightbox() } else { None };
+        #[cfg(target_os = "macos")]
+        let has_video_lightbox = video_lightbox.is_some();
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -191,7 +194,7 @@ impl Render for MailApp {
             // last frame are hidden until painted again (the Mac's WebView).
             .child({
                 #[cfg(target_os = "macos")]
-                let covered = self.context_menu.is_some() || self.tag_editor.is_some();
+                let covered = self.context_menu.is_some() || self.tag_editor.is_some() || has_video_lightbox;
                 canvas(|_, _, _| {}, move |_, _, window, _| {
                     blitz_body::begin_frame(window);
                     #[cfg(target_os = "macos")]
@@ -240,6 +243,7 @@ impl Render for MailApp {
             })
             .children(self.render_context_menu())
             .children(self.render_tag_editor(p, window, cx))
+            .children(video_lightbox)
             // Over everything in the bottom leading corner, as in Flutter.
             .when_some(self.frame_meter.clone(), |d, meter| {
                 d.child(div().absolute().left(px(space::S16)).bottom(px(space::S16)).child(meter))

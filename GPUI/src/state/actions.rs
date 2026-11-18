@@ -275,6 +275,9 @@ impl MailApp {
 
     /// A new message, from the account whose mailbox is shown.
     pub fn new_message(&mut self, _: &NewMessage, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat_view.is_some() && self.chat.read(cx).has_video_lightbox() {
+            return;
+        }
         let from = match &self.source {
             Source::Mailbox { account, .. } => Some(account.clone()),
             Source::Unified(_) => None,
@@ -304,6 +307,9 @@ impl MailApp {
 
     /// Shows Chat and its New Chat form.
     pub fn new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat_view.is_some() && self.chat.read(cx).has_video_lightbox() {
+            return;
+        }
         self.select_chat(None, window, cx);
         self.chat.update(cx, |chat, cx| chat.new_chat(&crate::chat::NewChat, window, cx));
     }

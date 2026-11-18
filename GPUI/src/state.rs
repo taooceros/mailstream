@@ -78,7 +78,7 @@ pub const CONTEXT: &str = "Mail";
 pub fn bind_keys(cx: &mut App) {
     // Single keys act on the list, never while a text field has focus, in Chat or the calendar
     // (which have their own), or in a draft.
-    let list = Some("Mail && !Input && !Chat && !Calendar && !Compose && !Expander");
+    let list = Some("Mail && !Input && !Chat && !Calendar && !Compose && !Expander && !VideoLightbox");
     let window = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("j", Next, list),

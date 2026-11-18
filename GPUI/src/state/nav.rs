@@ -19,6 +19,9 @@ impl MailApp {
     }
 
     pub fn select(&mut self, source: Source, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cx| {
+            chat.close_video_lightbox(window, cx);
+        });
         let same = self.source == source && self.query.is_none() && self.mail_in_view();
         self.leave_panes(cx);
         self.context_menu = None;
@@ -51,6 +54,9 @@ impl MailApp {
 
     /// Shows the calendar.
     pub fn select_calendar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cx| {
+            chat.close_video_lightbox(window, cx);
+        });
         self.chat_view = None;
         self.calendar_view = true;
         self.context_menu = None;
@@ -166,6 +172,9 @@ impl MailApp {
     }
 
     pub fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat_view.is_some() && self.chat.read(cx).has_video_lightbox() {
+            return;
+        }
         let focus = self.search.focus_handle(cx);
         window.focus(&focus, cx);
         self.search.update(cx, |search, cx| search.select_all(window, cx));
@@ -420,6 +429,9 @@ impl MailApp {
 
     /// Opened while the docked compose column folds it, the sidebar stays beside the column.
     pub fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        if self.chat_view.is_some() && self.chat.read(cx).has_video_lightbox() {
+            return;
+        }
         if self.sidebar_shown() {
             self.sidebar_open = false;
             self.sidebar_beside_compose = false;
@@ -579,6 +591,11 @@ impl MailApp {
 
     /// Esc: ends a selection (MS-305), else the top layer goes, else the search.
     pub fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat_view.is_some()
+            && self.chat.update(cx, |chat, cx| chat.close_video_lightbox(window, cx))
+        {
+            return;
+        }
         if self.clear_selection(cx) {
             return;
         }

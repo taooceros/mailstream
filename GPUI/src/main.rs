@@ -139,6 +139,8 @@ fn init(cx: &mut App) {
     compose::bind_keys(cx);
     state::bind_keys(cx);
     blitz_body::bind_keys(cx);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    video::bind_keys(cx);
     // Last: its Tab and Esc in fields come before the views' own (`text_checking::init`).
     text_checking::init(cx, |cx| cx.set_menus(menus()));
     cx.on_action(|_: &Quit, cx| cx.quit());
