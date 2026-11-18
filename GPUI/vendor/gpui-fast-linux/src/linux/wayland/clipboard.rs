@@ -11,16 +11,45 @@ use wayland_client::{Connection, protocol::wl_data_offer::WlDataOffer};
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1;
 
 use crate::linux::platform::{PIPE_READ_TIMEOUT, read_fd_with_timeout};
-use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat, hash};
+use gpui::{ClipboardEntry, ClipboardItem, ClipboardString, Image, ImageFormat, hash};
 
 /// Text mime types that we'll offer to other programs.
 pub(crate) const TEXT_MIME_TYPES: [&str; 3] =
     ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
+pub(crate) const HTML_MIME_TYPE: &str = "text/html";
 pub(crate) const FILE_LIST_MIME_TYPE: &str = "text/uri-list";
 
 /// Text mime types that we'll accept from other programs.
-pub(crate) const ALLOWED_TEXT_MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "UTF8_STRING"];
+pub(crate) const ALLOWED_TEXT_MIME_TYPES: [&str; 3] =
+    ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
+pub(crate) const ALLOWED_HTML_MIME_TYPES: [&str; 2] = ["text/html", "text/html;charset=utf-8"];
 
+fn is_html_mime(mime_type: &str) -> bool {
+    mime_type.eq_ignore_ascii_case("text/html")
+        || mime_type
+            .split(';')
+            .next()
+            .is_some_and(|head| head.trim().eq_ignore_ascii_case("text/html"))
+}
+
+fn decode_text_bytes(bytes: &[u8]) -> Option<String> {
+    if bytes.starts_with(&[0xFF, 0xFE]) && bytes.len() % 2 == 0 {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        return String::from_utf16(&units).ok();
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) && bytes.len() % 2 == 0 {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        return String::from_utf16(&units).ok();
+    }
+    let content = std::str::from_utf8(bytes).ok()?;
+    Some(content.strip_prefix('\u{FEFF}').unwrap_or(content).to_string())
+}
 pub(crate) struct Clipboard {
     connection: Connection,
     loop_handle: LoopHandle<'static, ()>,
@@ -96,25 +125,48 @@ impl<T: ReceiveData> DataOffer<T> {
     }
 
     fn read_text(&self, connection: &Connection) -> Option<ClipboardItem> {
-        let mime_type = self.mime_types.iter().find(|&mime_type| {
-            ALLOWED_TEXT_MIME_TYPES
-                .iter()
-                .any(|&allowed| allowed == mime_type)
-        })?;
-        let bytes = self.read_bytes(connection, mime_type)?;
-        let text_content = match String::from_utf8(bytes) {
-            Ok(content) => content,
-            Err(e) => {
-                log::error!("Failed to convert clipboard content to UTF-8: {}", e);
-                return None;
-            }
-        };
+        let text_mime = ALLOWED_TEXT_MIME_TYPES
+            .iter()
+            .find(|&&allowed| self.has_mime_type(allowed))
+            .copied();
+        let html_mime = ALLOWED_HTML_MIME_TYPES
+            .iter()
+            .find(|&&allowed| self.has_mime_type(allowed))
+            .copied()
+            .or_else(|| {
+                self.mime_types
+                    .iter()
+                    .find(|mime| is_html_mime(mime))
+                    .map(String::as_str)
+            });
 
-        // Normalize the text to unix line endings, otherwise
-        // copying from eg: firefox inserts a lot of blank
-        // lines, and that is super annoying.
-        let result = text_content.replace("\r\n", "\n");
-        Some(ClipboardItem::new_string(result))
+        let text = text_mime.and_then(|mime_type| {
+            let bytes = self.read_bytes(connection, mime_type)?;
+            match decode_text_bytes(&bytes) {
+                Some(content) => Some(content.replace("\r\n", "\n")),
+                None => {
+                    log::error!("Failed to convert clipboard content to UTF-8");
+                    None
+                }
+            }
+        });
+        let html = html_mime.and_then(|mime_type| {
+            let bytes = self.read_bytes(connection, mime_type)?;
+            decode_text_bytes(&bytes)
+                .map(|content| content.replace("\r\n", "\n"))
+                .filter(|content| !content.is_empty())
+        });
+
+        if text.is_none() && html.is_none() {
+            return None;
+        }
+        let mut entry = ClipboardString::new(text.unwrap_or_default());
+        if let Some(html) = html {
+            entry = entry.with_html(html);
+        }
+        Some(ClipboardItem {
+            entries: vec![ClipboardEntry::String(entry)],
+        })
     }
 
     fn read_image(&self, connection: &Connection) -> Option<ClipboardItem> {
@@ -174,13 +226,29 @@ impl Clipboard {
         self.self_mime.clone()
     }
 
-    pub fn send(&self, _mime_type: String, fd: OwnedFd) {
+    pub fn send(&self, mime_type: String, fd: OwnedFd) {
+        if is_html_mime(&mime_type) {
+            if let Some(html) = self.contents.as_ref().and_then(|contents| contents.html()) {
+                self.send_bytes(fd, html.as_bytes().to_owned());
+            }
+            return;
+        }
         if let Some(text) = self.contents.as_ref().and_then(|contents| contents.text()) {
             self.send_bytes(fd, text.as_bytes().to_owned());
         }
     }
 
-    pub fn send_primary(&self, _mime_type: String, fd: OwnedFd) {
+    pub fn send_primary(&self, mime_type: String, fd: OwnedFd) {
+        if is_html_mime(&mime_type) {
+            if let Some(html) = self
+                .primary_contents
+                .as_ref()
+                .and_then(|contents| contents.html())
+            {
+                self.send_bytes(fd, html.as_bytes().to_owned());
+            }
+            return;
+        }
         if let Some(text) = self
             .primary_contents
             .as_ref()

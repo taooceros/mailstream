@@ -128,29 +128,47 @@ impl Pasteboard {
     fn read_string_from_pasteboard(&self) -> Option<ClipboardEntry> {
         let pasteboard_types = self.inner.types()?;
         let string_type = NSString::from_str("public.utf8-plain-text");
+        let html_type = NSString::from_str("public.html");
 
-        if !pasteboard_types.containsObject(&string_type) {
+        let has_text = pasteboard_types.containsObject(&string_type);
+        let has_html = pasteboard_types.containsObject(&html_type);
+        if !has_text && !has_html {
             return None;
         }
 
-        let text_bytes = self.data_for_type(&string_type)?;
+        let text = if has_text {
+            let text_bytes = self.data_for_type(&string_type)?;
+            String::from_utf8_lossy(&text_bytes).replace("\r\n", "\n")
+        } else {
+            String::new()
+        };
+        let html = has_html
+            .then(|| self.data_for_type(&html_type))
+            .flatten()
+            .map(|bytes| String::from_utf8_lossy(&bytes).replace("\r\n", "\n"))
+            .filter(|html| !html.is_empty());
+        let metadata = has_text
+            .then(|| {
+                self.data_for_type(&self.text_hash_type)
+                    .and_then(|hash_bytes| {
+                        let hash_bytes = hash_bytes.as_slice().try_into().ok()?;
+                        let hash = u64::from_be_bytes(hash_bytes);
+                        let metadata = self.data_for_type(&self.metadata_type)?;
 
-        let text = String::from_utf8_lossy(&text_bytes).to_string();
-        let metadata = self
-            .data_for_type(&self.text_hash_type)
-            .and_then(|hash_bytes| {
-                let hash_bytes = hash_bytes.as_slice().try_into().ok()?;
-                let hash = u64::from_be_bytes(hash_bytes);
-                let metadata = self.data_for_type(&self.metadata_type)?;
+                        if hash == ClipboardString::text_hash(&text) {
+                            String::from_utf8(metadata).ok()
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .flatten();
 
-                if hash == ClipboardString::text_hash(&text) {
-                    String::from_utf8(metadata).ok()
-                } else {
-                    None
-                }
-            });
-
-        Some(ClipboardEntry::String(ClipboardString { text, metadata }))
+        Some(ClipboardEntry::String(ClipboardString {
+            text,
+            metadata,
+            html,
+        }))
     }
 
     fn data_for_type(&self, kind: &NSString) -> Option<Vec<u8>> {
@@ -181,6 +199,7 @@ impl Pasteboard {
                 let mut combined = ClipboardString {
                     text: String::new(),
                     metadata: None,
+                    html: None,
                 };
 
                 for entry in item.entries {
@@ -189,6 +208,9 @@ impl Pasteboard {
                             combined.text.push_str(&text.text());
                             if combined.metadata.is_none() {
                                 combined.metadata = text.metadata;
+                            }
+                            if combined.html.is_none() {
+                                combined.html = text.html;
                             }
                         }
                         _ => {}
@@ -208,6 +230,11 @@ impl Pasteboard {
             self.inner
                 .setData_forType(Some(&text_bytes), NSPasteboardTypeString);
 
+            if let Some(html) = string.html.as_ref().filter(|html| !html.is_empty()) {
+                let html_bytes = NSData::with_bytes(html.as_bytes());
+                let html_type = NSString::from_str("public.html");
+                self.inner.setData_forType(Some(&html_bytes), &html_type);
+            }
             if let Some(metadata) = string.metadata.as_ref() {
                 let hash_bytes = ClipboardString::text_hash(&string.text).to_be_bytes();
                 let hash_bytes = NSData::with_bytes(&hash_bytes);

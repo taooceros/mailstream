@@ -77,7 +77,7 @@ x11rb::atom_manager! {
         TEXT,
         TEXT_MIME_UNKNOWN: b"text/plain",
 
-        // HTML: b"text/html",
+        HTML: b"text/html",
         // URI_LIST: b"text/uri-list",
 
         PNG__MIME: ImageFormat::mime_type(ImageFormat::Png ).as_bytes(),
@@ -364,6 +364,35 @@ impl Inner {
         }
         log::trace!("All conversions to supported formats failed.");
         Err(Error::ContentNotAvailable)
+    }
+
+    fn read_html_if_advertised(&self, selection: ClipboardKind) -> Option<String> {
+        if self.is_owner(selection).ok()? {
+            let data = self.selection_of(selection).data.read();
+            return data.as_ref().and_then(|list| {
+                list.iter()
+                    .find(|d| d.format == self.atoms.HTML)
+                    .and_then(|d| String::from_utf8(d.bytes.clone()).ok())
+                    .filter(|s| !s.is_empty())
+            });
+        }
+        let reader = XContext::new(&self.display).ok()?;
+        let targets = self.read_single(&reader, selection, self.atoms.TARGETS).ok()?;
+        if targets.format != self.atoms.ATOM {
+            return None;
+        }
+        let available = Self::parse_formats(&targets.bytes);
+        if !available.contains(&self.atoms.HTML) {
+            return None;
+        }
+        let data = self.read_single(&reader, selection, self.atoms.HTML).ok()?;
+        if data.format != self.atoms.HTML {
+            return None;
+        }
+        String::from_utf8(data.bytes)
+            .ok()
+            .map(|s| s.replace("\r\n", "\n"))
+            .filter(|s| !s.is_empty())
     }
 
     fn parse_formats(bytes: &[u8]) -> Vec<Atom> {
@@ -981,16 +1010,33 @@ impl Clipboard {
         Ok(Self { inner: ctx })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_text(
         &self,
         message: Cow<'_, str>,
         selection: ClipboardKind,
         wait: WaitConfig,
     ) -> Result<()> {
-        let data = vec![ClipboardData {
+        self.set_text_with_html(message, None, selection, wait)
+    }
+
+    pub(crate) fn set_text_with_html(
+        &self,
+        message: Cow<'_, str>,
+        html: Option<Cow<'_, str>>,
+        selection: ClipboardKind,
+        wait: WaitConfig,
+    ) -> Result<()> {
+        let mut data = vec![ClipboardData {
             bytes: message.into_owned().into_bytes(),
             format: self.inner.atoms.UTF8_STRING,
         }];
+        if let Some(html) = html.filter(|h| !h.is_empty()) {
+            data.push(ClipboardData {
+                bytes: html.into_owned().into_bytes(),
+                format: self.inner.atoms.HTML,
+            });
+        }
         self.inner.write(data, selection, wait)
     }
 
@@ -1069,7 +1115,12 @@ impl Clipboard {
         } else {
             String::from_utf8(result.bytes).map_err(|_| Error::ConversionFailure)?
         };
-        Ok(ClipboardItem::new_string(text))
+        let text = text.replace("\r\n", "\n");
+        if let Some(html) = self.inner.read_html_if_advertised(selection) {
+            Ok(ClipboardItem::new_string_with_html(text, html))
+        } else {
+            Ok(ClipboardItem::new_string(text))
+        }
     }
 
     pub fn is_owner(&self, selection: ClipboardKind) -> bool {

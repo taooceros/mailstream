@@ -581,15 +581,21 @@ fn run_selection(key: &SharedString, page: &Arc<HtmlPage>, window: &Window, cx: 
         .detach();
 }
 
-/// Copies the selected text of the body that has a selection, if any.
+/// Copies the selected content (both clean plain text and semantic HTML) of the body that has a
+/// selection, if any.
 fn copy_selection(cx: &mut App) {
     let page = PAGES.with_borrow(|pages| {
         pages.entries.values().find(|entry| entry.selected).and_then(|entry| entry.page.clone())
     });
     let Some(page) = page else { return };
     cx.spawn(async move |cx| {
-        if let Some(text) = page.selected_text().await {
-            cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(text)));
+        let selected = if cfg!(any(test, feature = "shots")) {
+            futures::executor::block_on(page.selected_content())
+        } else {
+            page.selected_content().await
+        };
+        if let Some(selected) = selected {
+            cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string_with_html(selected.text, selected.html)));
         }
     })
     .detach();
@@ -630,5 +636,56 @@ mod tests {
         cx.simulate_keystrokes(secondary!("c"));
         cx.run_until_parked();
         assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("in the field"));
+    }
+
+    #[gpui::test]
+    fn copy_body_writes_html_and_plain_text_to_clipboard(cx: &mut TestAppContext) {
+        struct BodyHost(gpui::FocusHandle);
+        impl Render for BodyHost {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().key_context(crate::state::CONTEXT).track_focus(&self.0).size_full()
+            }
+        }
+        cx.update(|cx| {
+            gpui::init(cx);
+            crate::design::sync_kit_theme(gpui::WindowAppearance::Light, cx);
+            super::bind_keys(cx);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| BodyHost(cx.focus_handle()));
+        host.update_in(cx, |host, window, cx| window.focus(&host.0, cx));
+        cx.run_until_parked();
+
+        let page = mailstream::HtmlPage::new(
+            r#"<h2 style="margin:0">Update</h2><p style="margin:0">Hello <strong>Alice</strong></p>"#.to_string(),
+        );
+        let size = futures::executor::block_on(page.layout(400.0, 1.0)).expect("layout");
+        assert!(futures::executor::block_on(page.select(6.0, 10.0, 390.0, size.height - 6.0)));
+        let key: gpui::SharedString = "test-copy-body".into();
+        let mut entry = super::Entry::default();
+        entry.page = Some(page);
+        entry.selected = true;
+        entry.painted = true;
+        super::PAGES.with_borrow_mut(|pages| {
+            pages.entries.insert(key.clone(), entry);
+        });
+
+        cx.simulate_keystrokes(secondary!("c"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let copied = loop {
+            cx.run_until_parked();
+            if let Some(item) = cx.read_from_clipboard() {
+                break item;
+            }
+            assert!(std::time::Instant::now() < deadline, "clipboard populated");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(copied.text().as_deref(), Some("Update\n\nHello Alice"));
+        let html = copied.html().expect("html on clipboard");
+        assert!(html.contains("<h2>Update</h2>"), "got: {html}");
+        assert!(html.contains("<strong>Alice</strong>"), "got: {html}");
+
+        super::PAGES.with_borrow_mut(|pages| {
+            pages.entries.remove(&key);
+        });
     }
 }

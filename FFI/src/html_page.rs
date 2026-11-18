@@ -130,6 +130,13 @@ pub struct HtmlTile {
     pub pixels: Vec<u8>,
 }
 
+/// The active selection of a page as clean plain text and semantic HTML.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct HtmlSelection {
+    pub text: String,
+    pub html: String,
+}
+
 /// Which part of a mail a page shows. Quoted history (where [`mail_html::QUOTES`] says it starts)
 /// folds behind a toggle in the readers: a `Main` page leaves the quotes out, and a `Quoted` page
 /// of the same HTML shows only them when the toggle opens. Mail that is nothing but quotes stays
@@ -240,6 +247,13 @@ impl HtmlPage {
         answer.await.ok().flatten()
     }
 
+    /// The active selection as clean plain text and semantic HTML, if any.
+    pub async fn selected_content(&self) -> Option<HtmlSelection> {
+        let (reply, answer) = oneshot::channel();
+        send(Job::SelectedContent { id: self.id, reply });
+        answer.await.ok().flatten()
+    }
+
     /// The page's text, for screen readers.
     pub async fn text(&self) -> Option<String> {
         let (reply, answer) = oneshot::channel();
@@ -287,6 +301,7 @@ enum Job {
     Select { id: u64, from: (f64, f64), to: (f64, f64), reply: oneshot::Sender<bool> },
     ClearSelection { id: u64, reply: oneshot::Sender<bool> },
     SelectedText { id: u64, reply: oneshot::Sender<Option<String>> },
+    SelectedContent { id: u64, reply: oneshot::Sender<Option<HtmlSelection>> },
     Text { id: u64, reply: oneshot::Sender<Option<String>> },
     Quoted { id: u64, reply: oneshot::Sender<Option<bool>> },
     Paper { id: u64, reply: oneshot::Sender<Option<bool>> },
@@ -308,6 +323,7 @@ impl Job {
             | Job::Select { id, .. }
             | Job::ClearSelection { id, .. }
             | Job::SelectedText { id, .. }
+            | Job::SelectedContent { id, .. }
             | Job::Text { id, .. }
             | Job::Quoted { id, .. }
             | Job::Paper { id, .. }
@@ -476,8 +492,19 @@ impl Pages {
                 let _ = reply.send(had);
             }
             Job::SelectedText { id, reply } => {
-                let text = self.pages.get(&id).and_then(|page| page.doc.get_selected_text());
+                let text = self.pages.get(&id).and_then(|page| {
+                    crate::html_selection::extract_selection(&page.doc)
+                        .map(|s| s.text)
+                        .or_else(|| page.doc.get_selected_text())
+                });
                 let _ = reply.send(text.filter(|text| !text.is_empty()));
+            }
+            Job::SelectedContent { id, reply } => {
+                let selected = self
+                    .pages
+                    .get(&id)
+                    .and_then(|page| crate::html_selection::extract_selection(&page.doc));
+                let _ = reply.send(selected);
             }
             Job::Text { id, reply } => {
                 let _ = reply.send(self.pages.get(&id).map(|page| page.text()));
@@ -2487,6 +2514,62 @@ mod tests {
         page.recolour();
         page.fit();
         assert!(near(computed(&page, "p").0, DARK.text));
+    }
+
+    #[test]
+    fn selected_content_preserves_formatting_blocks_and_clean_plain_text() {
+        let html = concat!(
+            r#"<div style="padding:4px">"#,
+            r#"<h2 style="margin:0">Project Update</h2>"#,
+            r#"<p style="margin:0">Hello <strong>Alice</strong>, see <a href="https://example.com">the <em>spec</em></a> and <span style="font-weight:700">now</span>.</p>"#,
+            r#"<ul style="margin:0"><li>First item</li><li>Second <code>foo()</code></li></ul>"#,
+            r#"<blockquote style="margin:0"><p style="margin:0">Quoted line</p></blockquote>"#,
+            r#"</div>"#,
+        );
+        let mut page = page(html);
+        page.lay_out(400.0, 1.0);
+        let h = page.height;
+        assert!(page.select((10.0, 14.0), (390.0, h - 8.0)));
+        let selected = crate::html_selection::extract_selection(&page.doc).expect("selection extracted");
+        assert!(selected.html.contains("<h2>Project Update</h2>"), "got: {}", selected.html);
+        assert!(selected.html.contains("<strong>Alice</strong>"), "got: {}", selected.html);
+        assert!(selected.html.contains(r#"<a href="https://example.com">"#), "got: {}", selected.html);
+        assert!(selected.html.contains("<em>spec</em>"), "got: {}", selected.html);
+        assert!(selected.html.contains("<strong>now</strong>"), "got: {}", selected.html);
+        assert!(selected.html.contains("<ul><li>First item</li><li>Second <code>foo()</code></li></ul>"), "got: {}", selected.html);
+        assert!(selected.html.contains("<blockquote><p>Quoted line</p></blockquote>"), "got: {}", selected.html);
+
+        assert!(selected.text.contains("Project Update\n\nHello Alice"), "got: {:?}", selected.text);
+        assert!(selected.text.contains("• First item\n• Second foo()"), "got: {:?}", selected.text);
+        assert!(selected.text.contains("> Quoted line"), "got: {:?}", selected.text);
+
+        let md = crate::html_to_markdown(&selected.html);
+        assert!(md.contains("## Project Update"), "got: {md}");
+        assert!(md.contains("Hello **Alice**, see [the *spec*](https://example.com) and **now**."), "got: {md}");
+        assert!(md.contains("- First item\n- Second `foo()`"), "got: {md}");
+        assert!(md.contains("> Quoted line"), "got: {md}");
+    }
+
+    #[test]
+    fn partial_inline_selection_omits_paragraph_wrapper() {
+        let mut page = page("<p style='margin:0'>Hello <strong>bold</strong> world</p>");
+        page.lay_out(400.0, 1.0);
+        assert!(page.select((42.0, 8.0), (88.0, 8.0)));
+        let selected = crate::html_selection::extract_selection(&page.doc).expect("selection");
+        assert!(!selected.html.contains("<p>"), "partial inline selection should stay inline: {}", selected.html);
+        assert!(selected.html.contains("<strong>"), "got: {}", selected.html);
+    }
+
+    #[test]
+    fn plain_mail_pre_wrap_preserves_line_breaks_in_html_and_text() {
+        let mut page = page(r#"<div class="ms-plain" style="white-space:pre-wrap">Line one&#10;Line two</div>"#);
+        page.lay_out(400.0, 1.0);
+        let h = page.height;
+        assert!(page.select((2.0, 4.0), (390.0, h - 2.0)));
+        let selected = crate::html_selection::extract_selection(&page.doc).expect("selection");
+        assert_eq!(selected.text, "Line one\nLine two");
+        assert!(selected.html.contains("Line one<br>Line two"), "got: {}", selected.html);
+        assert_eq!(crate::html_to_markdown(&selected.html), "Line one\nLine two");
     }
 
     /// A 2×2 red PNG.

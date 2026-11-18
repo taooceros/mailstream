@@ -46,7 +46,8 @@ actions!(
         FormatItalic,
         FormatLink,
         FormatStrike,
-        FormatCode
+        FormatCode,
+        PastePlainText
     ]
 );
 
@@ -59,6 +60,11 @@ const COMPOSE_DROP: &str = "compose-drop";
 const REPLY_DROP: &str = "reply-drop";
 const ATTACH_TIP: &str = "Attach Files (⇧⌘A), or drop or paste them here";
 const MOVE_TIP: &str = "Move to the Compose Column to Change Recipients or Subject (⇧⌘O)";
+
+#[cfg(target_os = "macos")]
+const PASTE_PLAIN_KEY: &str = "cmd-alt-shift-v";
+#[cfg(not(target_os = "macos"))]
+const PASTE_PLAIN_KEY: &str = "ctrl-shift-v";
 
 pub fn bind_keys(cx: &mut App) {
     let window = Some(CONTEXT);
@@ -88,12 +94,37 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(secondary!("k"), FormatLink, body_field),
         KeyBinding::new(secondary!("shift-x"), FormatStrike, body_field),
         KeyBinding::new(secondary!("e"), FormatCode, body_field),
+        KeyBinding::new(PASTE_PLAIN_KEY, PastePlainText, body_field),
         KeyBinding::new(secondary!("b"), FormatBold, reply_field),
         KeyBinding::new(secondary!("i"), FormatItalic, reply_field),
         KeyBinding::new(secondary!("k"), FormatLink, reply_field),
         KeyBinding::new(secondary!("shift-x"), FormatStrike, reply_field),
         KeyBinding::new(secondary!("e"), FormatCode, reply_field),
+        KeyBinding::new(PASTE_PLAIN_KEY, PastePlainText, reply_field),
     ]);
+}
+
+/// Pastes clipboard HTML as Markdown into `editor` when present and non-empty; returns whether
+/// the paste was handled.
+fn paste_rich_into_editor(editor: &Entity<EditorState>, window: &mut Window, cx: &mut App) -> bool {
+    let Some(item) = cx.read_from_clipboard() else { return false };
+    let Some(html) = item.html() else { return false };
+    let markdown = mailstream::html_to_markdown(html);
+    if markdown.trim().is_empty() {
+        return false;
+    }
+    editor.update(cx, |input, cx| input.replace(markdown, window, cx));
+    true
+}
+
+/// Pastes clipboard plain text directly into `editor`, bypassing HTML-to-Markdown conversion.
+fn paste_plain_into_editor(editor: &Entity<EditorState>, window: &mut Window, cx: &mut App) -> bool {
+    let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return false };
+    if text.is_empty() {
+        return false;
+    }
+    editor.update(cx, |input, cx| input.replace(text, window, cx));
+    true
 }
 
 /// What a draft starts as. A forward's `subject` is the original's; `quoted` is the original as
@@ -516,14 +547,25 @@ impl Compose {
         });
     }
 
-    /// Ctrl+V (⌘V) with files or an image on the clipboard attaches them; text goes on to the
-    /// field.
-    fn paste(&mut self, cx: &mut Context<Self>) {
-        let Some(pasted) = attachments::pasted(cx) else { return };
-        cx.stop_propagation();
-        match pasted {
-            Ok(paths) => self.attach(paths, cx),
-            Err(message) => self.fail(message, cx),
+    /// Ctrl+V (⌘V) with files or an image attaches them; rich HTML in the body converts to
+    /// Markdown, while plain text (and header fields) go on to the field.
+    fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pasted) = attachments::pasted(cx) {
+            cx.stop_propagation();
+            match pasted {
+                Ok(paths) => self.attach(paths, cx),
+                Err(message) => self.fail(message, cx),
+            }
+            return;
+        }
+        if !self.sending() && self.body.focus_handle(cx).is_focused(window) && paste_rich_into_editor(&self.body, window, cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    fn paste_plain_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.sending() && self.body.focus_handle(cx).is_focused(window) && paste_plain_into_editor(&self.body, window, cx) {
+            cx.stop_propagation();
         }
     }
 
@@ -1022,7 +1064,8 @@ impl Render for Compose {
             .on_action(cx.listener(Self::suggestion_previous))
             .on_action(cx.listener(Self::pick_files))
             .on_action(cx.listener(|this, _: &Escape, window, cx| this.escape(window, cx)))
-            .capture_action(cx.listener(|this, _: &Paste, _, cx| this.paste(cx)))
+            .capture_action(cx.listener(|this, _: &Paste, window, cx| this.paste(window, cx)))
+            .on_action(cx.listener(|this, _: &PastePlainText, window, cx| this.paste_plain_text(window, cx)))
             .group(COMPOSE_DROP)
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
             .relative()
@@ -1325,15 +1368,32 @@ impl ReplyBox {
         });
     }
 
-    fn paste(&mut self, cx: &mut Context<Self>) {
-        let Some(pasted) = attachments::pasted(cx) else { return };
-        cx.stop_propagation();
-        match pasted {
-            Ok(paths) => self.attach(paths, cx),
-            Err(message) => {
-                self.status = Status::Failed(message.into());
-                cx.notify();
+    fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pasted) = attachments::pasted(cx) {
+            cx.stop_propagation();
+            match pasted {
+                Ok(paths) => self.attach(paths, cx),
+                Err(message) => {
+                    self.status = Status::Failed(message.into());
+                    cx.notify();
+                }
             }
+            return;
+        }
+        if !matches!(self.status, Status::Sending)
+            && self.text.focus_handle(cx).is_focused(window)
+            && paste_rich_into_editor(&self.text, window, cx)
+        {
+            cx.stop_propagation();
+        }
+    }
+
+    fn paste_plain_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.status, Status::Sending)
+            && self.text.focus_handle(cx).is_focused(window)
+            && paste_plain_into_editor(&self.text, window, cx)
+        {
+            cx.stop_propagation();
         }
     }
 
@@ -1458,7 +1518,8 @@ impl Render for ReplyBox {
             .on_action(cx.listener(|this, _: &FormatCode, window, cx| {
                 this.text.update(cx, |input, cx| wrap_selection(input, "`", window, cx));
             }))
-            .capture_action(cx.listener(|this, _: &Paste, _, cx| this.paste(cx)))
+            .capture_action(cx.listener(|this, _: &Paste, window, cx| this.paste(window, cx)))
+            .on_action(cx.listener(|this, _: &PastePlainText, window, cx| this.paste_plain_text(window, cx)))
             .group(REPLY_DROP)
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
             .relative()
@@ -1880,5 +1941,71 @@ mod tests {
         cx.simulate_mouse_up(item.center(), MouseButton::Left, gpui::Modifiers::default());
         cx.run_until_parked();
         assert_eq!(compose.read_with(cx, |c, _| (c.from.clone(), c.from_chosen)), (Some("work@outlook.com".into()), true));
+    }
+
+    #[gpui::test]
+    fn pasting_rich_html_into_body_and_reply_converts_to_markdown(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui::component::init(cx);
+            design::sync_kit_theme(WindowAppearance::Light, cx);
+            bind_keys(cx);
+        });
+        let (compose, cx) = cx.add_window_view(|window, cx| {
+            Compose::new(ComposeMode::New { from: Some("me@example.com".into()) }, vec![], window, cx)
+        });
+        cx.run_until_parked();
+
+        let rich = gpui::ClipboardItem::new_string_with_html(
+            "Hello Alice\n\n• One\n• Two".to_string(),
+            r#"<p>Hello <strong>Alice</strong>, see <a href="https://example.com">link</a></p><ul><li>One</li><li>Two</li></ul>"#.to_string(),
+        );
+        cx.update(|_, cx| cx.write_to_clipboard(rich));
+
+        // Body focused: Cmd/Ctrl+V converts HTML to Markdown.
+        let body = compose.read_with(cx, |c, _| c.body.clone());
+        body.update_in(cx, |input, window, cx| input.focus(window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes(secondary!("v"));
+        cx.run_until_parked();
+        assert_eq!(
+            body.read_with(cx, |input, _| input.value().to_string()),
+            "Hello **Alice**, see [link](https://example.com)\n\n- One\n- Two"
+        );
+
+        // Undo reverts the paste atomically.
+        cx.simulate_keystrokes(secondary!("z"));
+        cx.run_until_parked();
+        assert_eq!(body.read_with(cx, |input, _| input.value().to_string()), "");
+
+        // PastePlainText inserts plain text without Markdown syntax.
+        cx.simulate_keystrokes(PASTE_PLAIN_KEY);
+        cx.run_until_parked();
+        assert_eq!(
+            body.read_with(cx, |input, _| input.value().to_string()),
+            "Hello Alice\n\n• One\n• Two"
+        );
+
+        // Subject focused: keeps plain text (no Markdown conversion).
+        let subject = compose.read_with(cx, |c, _| c.subject.clone());
+        subject.update_in(cx, |input, window, cx| input.focus(window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes(secondary!("v"));
+        cx.run_until_parked();
+        assert_eq!(subject.read_with(cx, |input, _| input.value().to_string()), "Hello Alice• One• Two");
+
+        // ReplyBox also converts clipboard HTML to Markdown.
+        let (reply, cx) = cx.add_window_view(|window, cx| {
+            ReplyBox::new("conv".into(), None, false, "alice@example.com".into(), vec![], "me@example.com".into(), false, window, cx)
+        });
+        cx.run_until_parked();
+        let reply_text = reply.read_with(cx, |r, _| r.text.clone());
+        reply_text.update_in(cx, |input, window, cx| input.focus(window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes(secondary!("v"));
+        cx.run_until_parked();
+        assert_eq!(
+            reply_text.read_with(cx, |input, _| input.value().to_string()),
+            "Hello **Alice**, see [link](https://example.com)\n\n- One\n- Two"
+        );
     }
 }

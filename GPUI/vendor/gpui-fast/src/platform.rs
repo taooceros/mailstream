@@ -3175,12 +3175,23 @@ impl ClipboardItem {
         }
     }
 
+    /// Create a new ClipboardItem::String with the given text and HTML representation.
+    /// Mailstream patch (MS-407).
+    pub fn new_string_with_html(text: String, html: String) -> Self {
+        Self {
+            entries: vec![ClipboardEntry::String(
+                ClipboardString::new(text).with_html(html),
+            )],
+        }
+    }
+
     /// Create a new ClipboardItem::String with the given text and associated metadata
     pub fn new_string_with_metadata(text: String, metadata: String) -> Self {
         Self {
             entries: vec![ClipboardEntry::String(ClipboardString {
                 text,
                 metadata: Some(metadata),
+                html: None,
             })],
         }
     }
@@ -3207,7 +3218,7 @@ impl ClipboardItem {
         let mut answer = String::new();
 
         for entry in self.entries.iter() {
-            if let ClipboardEntry::String(ClipboardString { text, metadata: _ }) = entry {
+            if let ClipboardEntry::String(ClipboardString { text, .. }) = entry {
                 answer.push_str(text);
             }
         }
@@ -3228,6 +3239,15 @@ impl ClipboardItem {
         } else {
             None
         }
+    }
+
+    /// Returns the HTML representation of the clipboard string entries, if any.
+    /// Mailstream patch (MS-407).
+    pub fn html(&self) -> Option<&str> {
+        self.entries.iter().find_map(|entry| match entry {
+            ClipboardEntry::String(clipboard_string) => clipboard_string.html.as_deref(),
+            _ => None,
+        })
     }
 
     /// If this item is one ClipboardEntry::String, returns its metadata.
@@ -3548,6 +3568,9 @@ pub struct ClipboardString {
     pub text: String,
     /// Optional metadata associated with this clipboard string.
     pub metadata: Option<String>,
+    /// Optional HTML representation (`text/html` / `public.html`).
+    /// Mailstream patch (MS-407).
+    pub html: Option<String>,
 }
 
 impl ClipboardString {
@@ -3556,7 +3579,18 @@ impl ClipboardString {
         Self {
             text,
             metadata: None,
+            html: None,
         }
+    }
+
+    /// Attach an HTML representation to this clipboard string.
+    /// Mailstream patch (MS-407).
+    pub fn with_html(mut self, html: impl Into<String>) -> Self {
+        let html = html.into();
+        if !html.is_empty() {
+            self.html = Some(html);
+        }
+        self
     }
 
     /// Return a new clipboard item with the metadata replaced by the given metadata,
@@ -3569,6 +3603,12 @@ impl ClipboardString {
     /// Get the text of the clipboard string
     pub fn text(&self) -> &String {
         &self.text
+    }
+
+    /// Get the HTML representation of the clipboard string, if any.
+    /// Mailstream patch (MS-407).
+    pub fn html(&self) -> Option<&str> {
+        self.html.as_deref()
     }
 
     /// Get the owned text of the clipboard string
@@ -3600,6 +3640,7 @@ impl From<String> for ClipboardString {
         Self {
             text: value,
             metadata: None,
+            html: None,
         }
     }
 }

@@ -23,7 +23,11 @@ use serde_json::{Value, json};
 uniffi::setup_scaffolding!();
 
 #[cfg(feature = "blitz")]
+mod html_markdown;
+#[cfg(feature = "blitz")]
 mod html_page;
+#[cfg(feature = "blitz")]
+mod html_selection;
 mod display;
 mod mail_html;
 mod main_thread;
@@ -32,7 +36,9 @@ mod people;
 mod swift;
 
 #[cfg(feature = "blitz")]
-pub use html_page::{HtmlPage, HtmlPart, HtmlSize, HtmlTile};
+pub use html_markdown::html_to_markdown;
+#[cfg(feature = "blitz")]
+pub use html_page::{HtmlPage, HtmlPart, HtmlSelection, HtmlSize, HtmlTile};
 pub use display::{
     ChatRunEntry, Recipients, SubjectParts, avatar, chat_body, chat_draft_body, chat_runs, day_divider, forward_body,
     forward_subject, full_date, list_date, list_section, message_date, message_time, parse_recipients, reply_from,
