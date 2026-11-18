@@ -14,7 +14,7 @@ use crate::cache::MailCache;
 use crate::mail_tests::{GmailCounters, gmail_server};
 use crate::omp::tests::script;
 use crate::tagging::{Category, ConversationTag};
-use crate::testkit::{call, cleanup, engine_for, wait_until};
+use crate::testkit::{call, cleanup, engine_for, mail_account, server_config, sign_in_all, wait_until};
 
 /// A fake omp answering every batch: its first conversation is people waiting on the user, the
 /// second people whose ask lapsed long ago, the third it skips, the rest are notifications.
@@ -281,7 +281,10 @@ fn tags_synthetic_mail_on_device() {
     let counters =
         Arc::new(GmailCounters { tokens: AtomicUsize::new(0), labels: AtomicUsize::new(0), listings: AtomicUsize::new(0) });
     let server = gmail_server(counters);
-    let (engine, config) = engine_for(&server, &[("me@gmail.com", "google")]);
+    let mut config = server_config(&server);
+    config.tool_environment = None;
+    sign_in_all(&config, &[mail_account("me@gmail.com", "google")]);
+    let engine = Engine::start(config.clone());
     call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
     let backend = match (std::env::var("MAILSTREAM_APPLE_TAGGER"), std::env::var("MAILSTREAM_OMP")) {
         (Ok(helper), _) => {

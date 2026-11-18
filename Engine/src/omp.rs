@@ -179,13 +179,44 @@ impl Tagger {
     }
 }
 
-/// A failed run's last stderr line, else its exit status.
+/// A failed run's stderr summary, else its exit status. When a runtime prints a JS/Bun stack
+/// trace, skips the trailing `at …` frames and prefers the error line above them so an internal
+/// frame never hides the cause.
 fn failure(output: &Output, name: &str) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    match stderr.lines().rev().map(str::trim).find(|line| !line.is_empty()) {
+    let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let without_stack = lines.iter().rposition(|line| !is_stack_frame(line)).map_or(&[][..], |end| &lines[..=end]);
+    let line = if without_stack.len() < lines.len() && !without_stack.is_empty() {
+        without_stack
+            .iter()
+            .rev()
+            .copied()
+            .find(|line| is_error_line(line))
+            .map(|line| line.strip_prefix("error: ").unwrap_or(line))
+            .or_else(|| without_stack.last().copied())
+    } else {
+        lines.last().copied()
+    };
+    match line {
         Some(line) => line.chars().take(160).collect(),
         None => format!("{name} exited with status {}", output.status),
     }
+}
+
+fn is_stack_frame(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("at ") else { return false };
+    (rest.contains('(') && rest.ends_with(')'))
+        || rest.contains("://")
+        || rest.contains("/$bunfs/")
+        || rest.rsplit_once(':').is_some_and(|(_, col)| !col.is_empty() && col.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn is_error_line(line: &str) -> bool {
+    line.starts_with("error:")
+        || line.starts_with("Error:")
+        || line
+            .split_once(':')
+            .is_some_and(|(kind, _)| kind.ends_with("Error") && !kind.is_empty() && kind.chars().all(|c| c.is_ascii_alphabetic()))
 }
 
 /// The PATH candidate reporting the highest `--version`; ties and unversioned candidates keep
@@ -563,11 +594,16 @@ async fn recover() -> HashMap<String, String> {
 
 #[cfg(unix)]
 async fn recover() -> HashMap<String, String> {
-    let mut environment: HashMap<String, String> = std::env::vars().collect();
+    recover_from(std::env::vars().collect()).await
+}
+
+#[cfg(unix)]
+async fn recover_from(mut environment: HashMap<String, String>) -> HashMap<String, String> {
     let home = dirs::home_dir().unwrap_or_default().display().to_string();
+    let mut login = login_shell_environment(&environment).await;
     let mut directories: Vec<String> = Vec::new();
-    if let Some(login) = login_shell_path(&environment).await {
-        directories.extend(login.split(':').map(String::from));
+    if let Some(path) = login.remove("PATH") {
+        directories.extend(path.split(':').map(String::from));
     }
     directories.extend(
         [format!("{home}/.local/bin")]
@@ -578,22 +614,78 @@ async fn recover() -> HashMap<String, String> {
     let mut seen = std::collections::HashSet::new();
     directories.retain(|directory| !directory.is_empty() && seen.insert(directory.clone()));
     environment.insert("PATH".into(), directories.join(":"));
+    for (key, value) in login {
+        if matches!(key.as_str(), "PWD" | "OLDPWD" | "SHLVL" | "_" | "PS1" | "PROMPT") {
+            continue;
+        }
+        environment.entry(key).or_insert(value);
+    }
     environment.insert("NO_COLOR".into(), "1".into());
     environment
 }
 
 #[cfg(unix)]
-async fn login_shell_path(environment: &HashMap<String, String>) -> Option<String> {
-    let shell = environment.get("SHELL").cloned().unwrap_or_else(|| "/bin/zsh".into());
-    let text = run_quickly(
-        Path::new(&shell),
-        &["-l", "-c", "printf '__MS_PATH__%s__MS_PATH__' \"$PATH\""],
-        environment,
-    )
-    .await
-    .unwrap_or_default();
-    let parts: Vec<&str> = text.split("__MS_PATH__").collect();
-    (parts.len() >= 3).then(|| parts[1].to_string())
+async fn login_shell_environment(environment: &HashMap<String, String>) -> HashMap<String, String> {
+    let shell = environment
+        .get("SHELL")
+        .filter(|shell| !shell.is_empty())
+        .cloned()
+        .or_else(passwd_shell)
+        .unwrap_or_else(|| "/bin/zsh".into());
+    let arguments = [
+        "-l".to_string(),
+        "-c".to_string(),
+        "printf '__MS_ENV__'; env -0; printf '__MS_ENV__'".to_string(),
+    ];
+    let Ok(output) = run(Path::new(&shell), &arguments, environment, None, false, Duration::from_secs(3)).await else {
+        return HashMap::new();
+    };
+    parse_nul_environment(&output.stdout)
+}
+
+#[cfg(unix)]
+fn parse_nul_environment(stdout: &[u8]) -> HashMap<String, String> {
+    const MARKER: &[u8] = b"__MS_ENV__";
+    let Some(start) = stdout.windows(MARKER.len()).position(|window| window == MARKER) else {
+        return HashMap::new();
+    };
+    let body_start = start + MARKER.len();
+    let Some(rel_end) = stdout[body_start..].windows(MARKER.len()).rposition(|window| window == MARKER) else {
+        return HashMap::new();
+    };
+    let mut result = HashMap::new();
+    for entry in stdout[body_start..body_start + rel_end].split(|&byte| byte == b'\0') {
+        if entry.is_empty() {
+            continue;
+        }
+        if let Some(eq) = entry.iter().position(|&byte| byte == b'=') {
+            let key = String::from_utf8_lossy(&entry[..eq]).into_owned();
+            let value = String::from_utf8_lossy(&entry[eq + 1..]).into_owned();
+            if !key.is_empty() {
+                result.insert(key, value);
+            }
+        }
+    }
+    result
+}
+
+#[cfg(unix)]
+fn passwd_shell() -> Option<String> {
+    // SAFETY: `getuid` returns the real user id; `getpwuid_r` writes into caller-owned storage.
+    unsafe {
+        let uid = libc::getuid();
+        let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut buffer = vec![0_u8; 4096];
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        if libc::getpwuid_r(uid, pwd.as_mut_ptr(), buffer.as_mut_ptr().cast(), buffer.len(), &mut result) != 0 || result.is_null() {
+            return None;
+        }
+        let shell = (*result).pw_shell;
+        if shell.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(shell).to_str().ok().filter(|shell| !shell.is_empty()).map(String::from)
+    }
 }
 
 /// Runs a short-lived command for its output, giving up after three seconds.
@@ -905,6 +997,49 @@ pub(crate) mod tests {
         script(&helper, "echo 'Hello' ; exit 0");
         assert_eq!(tagger.tag(&items, &options).await.err().unwrap(), "unexpected Apple Intelligence output: Hello");
         assert!(!dir.join("omp-ran").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovers_login_shell_environment_and_parses_stack_failures() {
+        let bun_stderr = b"Working...\n\
+            25650 | throw new ru(`No API key found for ${v.provider}.`);\n\
+                          ^\n\
+            error: No API key found for google-vertex.\n\n\
+            Use /login, set an API key environment variable, or create /tmp/agent.db\n\
+                  at #os (/$bunfs/root/chunks/cli-c7n65pje.js:25650:15)\n\
+                  at async #qs (/$bunfs/root/chunks/cli-c7n65pje.js:21802:28)\n";
+        assert_eq!(
+            failure(&Output { status: 1, stdout: Vec::new(), stderr: bun_stderr.to_vec() }, "omp"),
+            "No API key found for google-vertex."
+        );
+        let type_err = b"TypeError: bad response\n    at parse (/$bunfs/root/chunks/cli.js:10:2)\n";
+        assert_eq!(
+            failure(&Output { status: 1, stdout: Vec::new(), stderr: type_err.to_vec() }, "omp"),
+            "TypeError: bad response"
+        );
+
+        let dir = std::env::temp_dir().join(format!("mailstream-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shell = dir.join("fake-shell");
+        script(
+            &shell,
+            "printf 'motd\\n__MS_ENV__PATH=/custom/bin:/usr/bin\\0GOOGLE_CLOUD_PROJECT=proj-1\\0GOOGLE_CLOUD_LOCATION=global\\0PWD=/elsewhere\\0SHLVL=9\\0__MS_ENV__trailing\\n'",
+        );
+        let base: HashMap<String, String> = [
+            ("SHELL".into(), shell.display().to_string()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("PWD".into(), "/keep-me".into()),
+        ]
+        .into_iter()
+        .collect();
+        let recovered = recover_from(base).await;
+        assert_eq!(recovered.get("GOOGLE_CLOUD_PROJECT").map(String::as_str), Some("proj-1"));
+        assert_eq!(recovered.get("GOOGLE_CLOUD_LOCATION").map(String::as_str), Some("global"));
+        assert_eq!(recovered.get("PWD").map(String::as_str), Some("/keep-me"));
+        assert!(!recovered.contains_key("SHLVL"));
+        assert_eq!(recovered.get("NO_COLOR").map(String::as_str), Some("1"));
+        assert!(recovered["PATH"].starts_with("/custom/bin:"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
