@@ -649,7 +649,7 @@ mod tests {
         let background_clicks = Rc::new(Cell::new(0));
         let accounts = test_accounts();
         let (host, cx) = cx.add_window_view(|window, cx| {
-            let compose = cx.new(|_| ComposeColumn::new());
+            let compose = cx.new(ComposeColumn::new);
             compose.update(cx, |column, cx| {
                 column.floating = true;
                 column.open(ComposeMode::New { from: Some("me@gmail.com".into()) }, accounts, window, cx);
