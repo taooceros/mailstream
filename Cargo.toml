@@ -33,6 +33,10 @@ resolver = "3"
 # (`simulate_window_appearance_change`, MS-347, `src/app/test_context.rs`, marked "Mailstream
 # patch"), for the views that redo their colors when the system does.
 # With MS-407: `ClipboardString` and `ClipboardItem` carry optional `html` (`new_string_with_html`, `html`).
+# With MS-411: `composition::reuse_input` assigns the active non-base composition scope to reused
+# hitboxes that had no recorded owner before a native surface existed (`src/fast/composition.rs`,
+# `src/window.rs`, `src/fast/splice.rs`), so retained deferred overlays stay interactive above
+# native Mac web views that appear after them.
 # `GPUI/vendor/gpui-fast-macos` is GPUI Fast's Mac platform 0.1.14 spreading each mouse-wheel step
 # over a short ease-out instead of applying it in one frame (MS-225, `src/wheel_motion.rs` and its
 # use in `window.rs`, marked "Mailstream patch"); touchpads and Magic Mice keep AppKit's own deltas

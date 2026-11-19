@@ -4333,6 +4333,8 @@ impl Window {
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
         crate::fast::a11y::reuse_prepaint(self, &range);
+        // Mailstream patch (MS-411): keep reused overlay hitboxes owned by the active surface.
+        crate::fast::composition::reuse_input(self, &range);
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()

@@ -221,8 +221,10 @@ impl Render for MailApp {
             .when_some(design::window_rim(p), |d, (radius, rim)| {
                 d.child(div().absolute().inset_0().rounded(px(radius)).shadow(rim))
             })
+            // Painted in the deferred overlay layer so floating and minimized drafts composite
+            // above native Mac web views (`webview.rs`, MS-411) instead of underneath them.
             .when_some(floating, |d, bounds| {
-                d.child(
+                d.child(deferred(
                     div()
                         .absolute()
                         .left(bounds.origin.x)
@@ -230,25 +232,25 @@ impl Render for MailApp {
                         .w(bounds.size.width)
                         .h(bounds.size.height)
                         .child(self.compose.clone()),
-                )
+                ))
             })
             .when(minimized, |d| {
-                d.child(
+                d.child(deferred(
                     div()
                         .absolute()
                         .right(px(compose_metrics::FLOAT_MARGIN))
                         .bottom(px(compose_metrics::FLOAT_MARGIN))
                         .child(self.compose.clone()),
-                )
+                ))
             })
             .children(self.render_context_menu())
             .children(self.render_tag_editor(p, window, cx))
-            .children(video_lightbox)
+            .children(video_lightbox.map(|lightbox| deferred(lightbox).priority(2)))
             // Over everything in the bottom leading corner, as in Flutter.
             .when_some(self.frame_meter.clone(), |d, meter| {
-                d.child(div().absolute().left(px(space::S16)).bottom(px(space::S16)).child(meter))
+                d.child(deferred(div().absolute().left(px(space::S16)).bottom(px(space::S16)).child(meter)).priority(2))
             })
-            .child(deferred(div().absolute().inset_0().child(self.notifications.clone())).priority(1))
+            .child(deferred(div().absolute().inset_0().child(self.notifications.clone())).priority(2))
             .when(cfg!(target_os = "macos"), |d| {
                 d.child(
                     canvas(|_, _, _| {}, |_, _, window, _| {

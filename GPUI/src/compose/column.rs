@@ -533,3 +533,169 @@ impl Render for ComposeColumn {
             .into_any_element()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui::{Modifiers, TestAppContext, WindowAppearance, deferred};
+    use mailstream::{Address, Provider};
+
+    use super::*;
+    use crate::compose;
+
+    struct FloatingHost {
+        compose: Entity<ComposeColumn>,
+        background_clicks: Rc<Cell<usize>>,
+    }
+
+    impl Render for FloatingHost {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let viewport = window.viewport_size();
+            let (floating, minimized) = {
+                let column = self.compose.read(cx);
+                (column.floats().then(|| column.float_bounds(viewport)), column.minimized())
+            };
+            let clicks = self.background_clicks.clone();
+            div()
+                .relative()
+                .size_full()
+                .child(
+                    div()
+                        .id("underneath")
+                        .size_full()
+                        .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                            clicks.set(clicks.get() + 1);
+                        }),
+                )
+                .when_some(floating, |d, bounds| {
+                    d.child(deferred(
+                        div()
+                            .debug_selector(|| "floating-compose".into())
+                            .absolute()
+                            .left(bounds.origin.x)
+                            .top(bounds.origin.y)
+                            .w(bounds.size.width)
+                            .h(bounds.size.height)
+                            .child(self.compose.clone()),
+                    ))
+                })
+                .when(minimized, |d| {
+                    d.child(deferred(
+                        div()
+                            .debug_selector(|| "minimized-compose".into())
+                            .absolute()
+                            .right(px(metrics::FLOAT_MARGIN))
+                            .bottom(px(metrics::FLOAT_MARGIN))
+                            .child(self.compose.clone()),
+                    ))
+                })
+        }
+    }
+
+    fn test_accounts() -> Vec<Account> {
+        vec![
+            Account {
+                id: "me@gmail.com".into(),
+                label: "Personal".into(),
+                provider: Provider::Google,
+                name: Some("Me".into()),
+                services: vec!["mail".into()],
+                connectable: vec![],
+                identities: vec![Address::new(Some("Me".into()), "me@gmail.com")],
+            },
+            Account {
+                id: "work@outlook.com".into(),
+                label: "Work".into(),
+                provider: Provider::Microsoft,
+                name: Some("Work Me".into()),
+                services: vec!["mail".into()],
+                connectable: vec![],
+                identities: vec![Address::new(Some("Work Me".into()), "work@outlook.com")],
+            },
+        ]
+    }
+
+    /// Floating and minimized compose rendered in the deferred overlay layer (MS-411) sit at their
+    /// expected bounds, occlude clicks over underlying content, host the nested deferred From menu,
+    /// drag cleanly by their title bar, and restore from the minimized capsule.
+    #[gpui::test]
+    fn deferred_floating_and_minimized_compose_occlude_drag_and_host_from_menu(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui::component::init(cx);
+            design::sync_kit_theme(WindowAppearance::Light, cx);
+            compose::bind_keys(cx);
+        });
+        let background_clicks = Rc::new(Cell::new(0));
+        let accounts = test_accounts();
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            let compose = cx.new(|_| ComposeColumn::new());
+            compose.update(cx, |column, cx| {
+                column.floating = true;
+                column.open(ComposeMode::New { from: Some("me@gmail.com".into()) }, accounts, window, cx);
+            });
+            cx.observe(&compose, |_, _, cx| cx.notify()).detach();
+            FloatingHost { compose, background_clicks: background_clicks.clone() }
+        });
+        cx.run_until_parked();
+
+        let bounds = cx.debug_bounds("floating-compose").expect("floating compose rendered");
+        // Clicking inside the floating compose body must not reach the layer underneath.
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        assert_eq!(background_clicks.get(), 0, "floating compose occludes clicks underneath");
+
+        // Clicking outside the floating compose still reaches the layer underneath.
+        cx.simulate_click(point(px(10.), px(10.)), Modifiers::none());
+        assert_eq!(background_clicks.get(), 1);
+
+        // Clicking the From row opens the nested deferred From menu above the floating compose.
+        let from_point = point(bounds.origin.x + px(140.), bounds.origin.y + px(layout::HEADER_HEIGHT + 18.));
+        cx.simulate_click(from_point, Modifiers::none());
+        assert!(cx.debug_bounds("from-menu").is_some(), "nested deferred From menu opens");
+
+        // Dismiss From menu, then drag the title bar to move the float.
+        let title_start = point(bounds.origin.x + px(180.), bounds.origin.y + px(layout::HEADER_HEIGHT / 2.));
+        cx.simulate_click(title_start, Modifiers::none());
+        assert!(cx.debug_bounds("from-menu").is_none(), "clicking outside closes From menu");
+
+        let title_start_drag = point(title_start.x - px(10.), title_start.y - px(10.));
+        let title_grab = point(title_start.x - px(20.), title_start.y - px(20.));
+        let title_end = point(title_start.x - px(80.), title_start.y - px(60.));
+        cx.simulate_mouse_down(title_start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(title_start_drag, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(title_grab, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(title_end, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(title_end, MouseButton::Left, Modifiers::none());
+        let moved = cx.debug_bounds("floating-compose").expect("floating compose after drag");
+        assert!(
+            moved.origin.x < bounds.origin.x && moved.origin.y < bounds.origin.y,
+            "drag moved floating compose: before={bounds:?} after={moved:?}"
+        );
+
+        // Dragging the top-left resize handle grows the deferred floating compose.
+        let corner = point(moved.origin.x + px(4.), moved.origin.y + px(4.));
+        let corner_drag = point(corner.x - px(10.), corner.y - px(10.));
+        let corner_end = point(corner.x - px(60.), corner.y - px(40.));
+        cx.simulate_mouse_down(corner, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(corner_drag, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(corner_end, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(corner_end, MouseButton::Left, Modifiers::none());
+        let resized = cx.debug_bounds("floating-compose").expect("floating compose after resize");
+        assert!(
+            resized.size.width > moved.size.width && resized.size.height > moved.size.height,
+            "resize handle grew floating compose: before={moved:?} after={resized:?}"
+        );
+        // Minimize renders the deferred capsule at the bottom-right corner; clicking restores it.
+        host.update(cx, |host, cx| {
+            host.compose.update(cx, |column, cx| column.minimize(cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("floating-compose").is_none());
+        let capsule = cx.debug_bounds("minimized-compose").expect("minimized capsule rendered");
+        let before = background_clicks.get();
+        cx.simulate_click(point(capsule.origin.x + px(24.), capsule.center().y), Modifiers::none());
+        assert_eq!(background_clicks.get(), before, "minimized capsule occludes clicks underneath");
+        assert!(cx.debug_bounds("floating-compose").is_some(), "clicking capsule restored floating compose");
+    }
+}

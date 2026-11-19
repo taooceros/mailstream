@@ -143,6 +143,6 @@ impl MailApp {
             let width = f32::from(window.viewport_size().width);
             point(px(((width - WIDTH) / 2.).max(0.)), px(TOP))
         });
-        Some(deferred(anchored().position(position).snap_to_window_with_margin(px(8.)).child(panel)).into_any_element())
+        Some(deferred(anchored().position(position).snap_to_window_with_margin(px(8.)).child(panel)).priority(1).into_any_element())
     }
 }

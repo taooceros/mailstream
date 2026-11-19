@@ -37,7 +37,7 @@
 //! view is prepainted, it moves back below it. Overlays drawn over a native
 //! surface hosted on the overlay surface are then covered by it.
 
-use crate::window::PaintIndex;
+use crate::window::{PaintIndex, PrepaintStateIndex};
 use crate::{
     Bounds, DevicePixels, DispatchEventResult, Hitbox, HitboxBehavior, HitboxId, MouseButton,
     MouseExitEvent, MouseMoveEvent, Pixels, PlatformInput, PlatformWindow, Point, Scene, Window,
@@ -617,6 +617,25 @@ pub(crate) fn record_input(window: &mut Window, id: HitboxId) {
     if let (Some(base), Some(surface)) = (input.base, input.scope) {
         if surface != base {
             input.owners.insert(id, surface);
+        }
+    }
+}
+
+// Mailstream patch (MS-411): retained deferred overlays mounted before a native
+// surface existed had no recorded composition owner on their hitboxes; assign
+// the current non-base scope when their prepaint is reused once composition is
+// active so clicks over the overlay still block the native surface below.
+pub(crate) fn reuse_input(window: &mut Window, range: &Range<PrepaintStateIndex>) {
+    let input = &mut window.next_frame.fast_composition_input;
+    let (Some(base), Some(surface)) = (input.base, input.scope) else {
+        return;
+    };
+    if surface == base {
+        return;
+    }
+    for hitbox in &window.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index] {
+        if !window.rendered_frame.fast_composition_input.owners.contains_key(&hitbox.id) {
+            input.owners.entry(hitbox.id).or_insert(surface);
         }
     }
 }
@@ -2375,5 +2394,107 @@ mod tests {
             assert_eq!(ids, [base]);
         }
         assert_eq!(builds.get(), 1, "the badge is drawn again from last frame");
+    }
+
+    /// A retained deferred overlay mounted before any native surface exists still owns its reused
+    /// hitboxes on the overlay surface once a native surface appears, blocking input to the native
+    /// surface below (Mailstream patch, MS-411).
+    #[crate::test]
+    fn reused_deferred_overlay_owns_hitboxes_when_native_surface_appears(cx: &mut TestAppContext) {
+        use crate::{InteractiveElement as _, point};
+        struct Overlay {
+            builds: Rc<Cell<usize>>,
+        }
+        impl Render for Overlay {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.builds.set(self.builds.get() + 1);
+                div()
+                    .size(px(100.))
+                    .bg(crate::white())
+                    .occlude()
+            }
+        }
+        struct Host {
+            overlay: Entity<Overlay>,
+        }
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size(px(300.)).child(crate::deferred(
+                    div()
+                        .absolute()
+                        .left(px(50.))
+                        .top(px(50.))
+                        .size(px(100.))
+                        .child(self.overlay.clone()),
+                ))
+            }
+        }
+
+        let builds = Rc::new(Cell::new(0));
+        let window = cx.add_window({
+            let builds = builds.clone();
+            move |window, cx| {
+                window.fast_composition.0.borrow_mut().enabled = true;
+                Host {
+                    overlay: cx.new(|_| Overlay { builds }),
+                }
+            }
+        });
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+        };
+
+        // First frame: no native surface yet.
+        draw(cx);
+        assert_eq!(builds.get(), 1);
+
+        // Native surface appears underneath the already-mounted deferred overlay.
+        cx.update_window(window.into(), |_, window, _| {
+            let mut state = window.fast_composition.0.borrow_mut();
+            let overlay = state.overlay_surface;
+            let id = state
+                .tree
+                .insert(CompositionSurfaceKind::Native, None)
+                .unwrap();
+            state.tree.place_below(id, overlay).unwrap();
+            let platform = test_platform_surface();
+            platform
+                .set_bounds(Bounds::new(
+                    Point::default(),
+                    crate::size(DevicePixels(300), DevicePixels(300)),
+                ))
+                .unwrap();
+            let surface = Rc::new(ManagedPlatformSurface::new(platform, &state));
+            state.platform_surfaces.insert(id, surface);
+            state.input_order = vec![state.base_surface, id, overlay];
+        })
+        .unwrap();
+
+        // Only the host redraws; the deferred overlay is reused from the previous frame.
+        window.update(cx, |_, _, cx| cx.notify()).unwrap();
+        draw(cx);
+        assert_eq!(builds.get(), 1, "overlay was reused from the previous frame");
+
+        let overlay_hitboxes = cx
+            .update_window(window.into(), |_, window, _| {
+                let overlay = window.fast_composition.0.borrow().overlay_surface;
+                window
+                    .rendered_frame
+                    .fast_composition_input
+                    .hitboxes
+                    .get(&overlay)
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .unwrap();
+        assert!(
+            overlay_hitboxes
+                .iter()
+                .any(|hitbox| hitbox.bounds.contains(&point(px(100.), px(100.)))),
+            "reused deferred overlay hitboxes must belong to the overlay surface"
+        );
     }
 }

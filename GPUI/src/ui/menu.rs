@@ -115,6 +115,7 @@ impl MailApp {
         let menu = self.context_menu.as_ref()?;
         Some(
             deferred(anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(menu.menu.clone()))
+                .priority(1)
                 .into_any_element(),
         )
     }
