@@ -56,6 +56,7 @@ icons! {
     Minimize => "minimize",
     MarkRead => "mark_email_read",
     MarkUnread => "mark_email_unread",
+    Menu => "menu",
     Pause => "pause_fill",
     Person => "person",
     Play => "play_arrow_fill",

@@ -190,6 +190,11 @@ pub struct MailWith(pub SharedString);
 
 impl EventEmitter<MailWith> for ChatPane {}
 
+/// Chat asks the window to open the slide-over navigation drawer in compact mode (MS-408).
+pub struct ChatOpenDrawer;
+
+impl EventEmitter<ChatOpenDrawer> for ChatPane {}
+
 #[derive(Clone, PartialEq)]
 struct User {
     /// `users/<id>`.
@@ -1125,6 +1130,16 @@ impl ChatPane {
             self.two_pane = two_pane;
             cx.notify();
         }
+    }
+
+    /// Whether a space or the new-chat form is open over the list (hides the compact bottom bar).
+    pub fn has_open_page(&self) -> bool {
+        !matches!(self.view, View::Spaces)
+    }
+
+    /// Opens the new-chat form from outside the pane (the compact FAB).
+    pub fn start_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_form(window, cx);
     }
 
     /// Runs `work` on the background executor, then `done` with its result on the main thread.
@@ -2088,6 +2103,7 @@ impl ChatPane {
     /// The list's island, as mail's (MS-328): its title row (the account or "Chat", how many
     /// conversations are unread, refresh and New Chat on a capsule), the search field, the rows.
     fn render_list_island(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
         let title = self.filter.as_ref().map_or_else(|| SharedString::from("Chat"), |a| self.account_label(a));
         let unread = self.unread(self.filter.as_deref());
         let subtitle: Option<SharedString> = if !self.loaded && self.failure.is_none() {
@@ -2100,22 +2116,66 @@ impl ChatPane {
         } else {
             (unread > 0).then(|| format!("{unread} unread").into())
         };
-        let actions = capsule(p)
-            .child(
-                icon_button("chat-refresh", Icon::Refresh, "Refresh", true, p.glyph)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
-            )
-            .child(
-                icon_button("chat-new", Icon::Compose, "New Chat", !self.accounts.is_empty(), p.glyph)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.start_form(window, cx))),
-            );
+        let actions = if compact {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S2))
+                .child(
+                    icon_button("chat-refresh", Icon::Refresh, "Refresh", true, p.glyph)
+                        .size(px(design::compact::TOUCH_BUTTON))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
+                )
+        } else {
+            capsule(p)
+                .child(
+                    icon_button("chat-refresh", Icon::Refresh, "Refresh", true, p.glyph)
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
+                )
+                .child(
+                    icon_button("chat-new", Icon::Compose, "New Chat", !self.accounts.is_empty(), p.glyph)
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.start_form(window, cx))),
+                )
+        };
+        let leading = compact.then(|| {
+            icon_button("chat-drawer", Icon::Menu, "Mailboxes", true, p.glyph)
+                .size(px(design::compact::TOUCH_BUTTON))
+                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(ChatOpenDrawer)))
+        });
         let search_focused = self.search.focus_handle(cx).is_focused(window);
-        island(p.tray, p).occlude().child(
+        let surface = if compact { div().relative().overflow_hidden().bg(p.tray) } else { island(p.tray, p) };
+        let header = if compact {
+            div()
+                .flex_shrink_0()
+                .h(px(design::compact::TOP_BAR_HEIGHT))
+                .px(px(space::S8))
+                .flex()
+                .items_center()
+                .gap(px(space::S8))
+                .children(leading)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(space::S8))
+                        .child(div().truncate().text_size(px(18.)).font_weight(FontWeight::BOLD).child(title))
+                        .when_some(subtitle, |d, subtitle| {
+                            d.child(div().flex_shrink_0().text_size(px(text::CAPTION)).text_color(p.muted).child(subtitle))
+                        }),
+                )
+                .child(actions)
+                .into_any_element()
+        } else {
+            list_header("chat-list-header", None, title, subtitle, actions, p, window, cx).into_any_element()
+        };
+        surface.occlude().child(
             div()
                 .size_full()
                 .flex()
                 .flex_col()
-                .child(list_header("chat-list-header", None, title, subtitle, actions, p, window, cx))
+                .child(header)
                 .child(search_field("chat-search", search_focused, input::field(&self.search), cx.listener(Self::cancel_search), p))
                 .child(hairline(p))
                 .child(div().flex_1().min_h_0().child(self.render_spaces(p, cx))),
@@ -2254,7 +2314,8 @@ impl ChatPane {
         let close = icon_button("chat-close", glyph, tip, true, p.glyph)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx)));
         let toolbar_title = (self.log_top == ReaderTop::PastTitle).then(|| title.clone());
-        let space = island(p.background, p)
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+        let space = (if compact { div().relative().overflow_hidden().bg(p.background) } else { island(p.background, p) })
             .occlude()
             .size_full()
             .flex()

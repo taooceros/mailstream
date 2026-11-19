@@ -11,6 +11,51 @@ mod android_entry {
     use gpui::{App, Application};
     use gpui_mobile::android::{host, jni};
     use mailstream_engine::Config;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static INSET_TOP: AtomicU32 = AtomicU32::new(0);
+    static INSET_BOTTOM: AtomicU32 = AtomicU32::new(0);
+    static INSET_LEFT: AtomicU32 = AtomicU32::new(0);
+    static INSET_RIGHT: AtomicU32 = AtomicU32::new(0);
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeInsets(
+        _env: *mut std::ffi::c_void,
+        _class: *mut std::ffi::c_void,
+        top: i32,
+        bottom: i32,
+        left: i32,
+        right: i32,
+        density: f32,
+    ) {
+        let scale = if density > 0.0 { density } else { 1.0 };
+        INSET_TOP.store((top.max(0) as f32 / scale).to_bits(), Ordering::Relaxed);
+        INSET_BOTTOM.store((bottom.max(0) as f32 / scale).to_bits(), Ordering::Relaxed);
+        INSET_LEFT.store((left.max(0) as f32 / scale).to_bits(), Ordering::Relaxed);
+        INSET_RIGHT.store((right.max(0) as f32 / scale).to_bits(), Ordering::Relaxed);
+        log::info!(
+            "mailstream-android-poc: safe area insets logical top={:.1} bottom={:.1} left={:.1} right={:.1}",
+            top.max(0) as f32 / scale,
+            bottom.max(0) as f32 / scale,
+            left.max(0) as f32 / scale,
+            right.max(0) as f32 / scale,
+        );
+        if let Some(win) = jni::shared_platform().and_then(|p| p.0.primary_window()) {
+            win.request_frame();
+        }
+    }
+
+    fn android_safe_area_insets() -> (f32, f32, f32, f32) {
+        let top = f32::from_bits(INSET_TOP.load(Ordering::Relaxed));
+        let bottom = f32::from_bits(INSET_BOTTOM.load(Ordering::Relaxed));
+        let left = f32::from_bits(INSET_LEFT.load(Ordering::Relaxed));
+        let right = f32::from_bits(INSET_RIGHT.load(Ordering::Relaxed));
+        if top > 0.0 || bottom > 0.0 || left > 0.0 || right > 0.0 {
+            (top, bottom, left, right)
+        } else {
+            gpui_mobile::safe_area_insets()
+        }
+    }
 
     fn configure_android_engine(support_dir: PathBuf) {
         let mut config = Config::for_this_app().in_directory(support_dir);
@@ -24,6 +69,7 @@ mod android_entry {
     }
 
     fn launch_mailstream_ui(cx: &mut App) {
+        mailstream_gpui::design::compact::set_safe_area_provider(android_safe_area_insets);
         mailstream_gpui::init(cx);
         let (window, app) = mailstream_gpui::open_window(mailstream_gpui::mobile_window_options(), cx);
         window

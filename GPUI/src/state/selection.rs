@@ -156,6 +156,18 @@ impl MailApp {
         cx.notify();
     }
 
+    /// Tapping a row's avatar in compact mode toggles its selection without needing a modifier key.
+    pub fn toggle_row_selection(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if opens_only(id) {
+            return;
+        }
+        window.focus(&self.focus, cx);
+        let selection = self.selection_here();
+        selection.toggle(id, None);
+        self.set_current(id.to_owned());
+        cx.notify();
+    }
+
     /// ⇧↓ and ⇧↑: the highlight moves and the run from the anchor follows it.
     fn extend_step(&mut self, delta: isize, cx: &mut Context<Self>) {
         let (lines, in_bundle) = self.active_lines();

@@ -526,6 +526,10 @@ pub struct MailApp {
     pub sidebar_folded: bool,
     /// The user opened the sidebar while the column folded it.
     pub sidebar_beside_compose: bool,
+    /// Whether the slide-over navigation drawer is open in compact (small-screen) mode.
+    pub drawer_open: bool,
+    /// Whether the inline search bar is expanded in compact (small-screen) mode.
+    pub compact_search: bool,
     pub swipe: BackSwipe,
     /// A mouse drag on a layer (MS-266).
     pub drag: MouseDrag,
@@ -621,7 +625,9 @@ impl MailApp {
             cx.subscribe_in(&chat, window, |this, _, MailWith(address): &MailWith, window, cx| {
                 this.search_mail_with(address.clone(), window, cx)
             }),
+            cx.subscribe(&chat, |this, _, _: &crate::chat::ChatOpenDrawer, cx| this.open_drawer(cx)),
             cx.subscribe(&calendar, |this, _, toast: &CalendarToast, cx| this.show_toast(toast.0.clone(), cx)),
+            cx.subscribe(&calendar, |this, _, _: &crate::calendar::CalendarOpenDrawer, cx| this.open_drawer(cx)),
             cx.observe(&calendar, |_, _, cx| cx.notify()),
             // The column's placement and width lay the window out.
             cx.observe(&compose, |_, _, cx| cx.notify()),
@@ -668,6 +674,8 @@ impl MailApp {
             sidebar_open: !cfg!(target_os = "android"),
             sidebar_folded: false,
             sidebar_beside_compose: false,
+            drawer_open: false,
+            compact_search: false,
             swipe: BackSwipe::default(),
             drag: MouseDrag::default(),
             slide: Slide::Rest,

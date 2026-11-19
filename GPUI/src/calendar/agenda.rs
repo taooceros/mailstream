@@ -21,7 +21,7 @@ use mailstream::{CalendarInfo, CalendarPerson, Provider};
 
 use super::grid::day_header;
 use super::model::{self, ReplyState};
-use super::{CalendarPane, Entry, Refresh, Today, View};
+use super::{CalendarOpenDrawer, CalendarPane, Entry, Refresh, Today, View};
 use crate::avatars;
 use crate::controls::{
     ButtonKind, ControlSize, Tone, button, capsule, capsule_button, color_dots, expander, field_frame, hairline,
@@ -47,13 +47,16 @@ impl CalendarPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
         let now = Local::now();
-        let header = self.render_header(now, p, window, cx);
-        let island = island(p.tray, p).occlude().flex().flex_col().child(header);
+        let view = if compact && self.view == View::Week { View::Agenda } else { self.view };
+        let header = self.render_header(now, compact, view, p, window, cx);
+        let surface = if compact { div().relative().overflow_hidden().bg(p.tray) } else { island(p.tray, p) };
+        let island = surface.occlude().flex().flex_col().child(header);
         if !self.listed {
             return island.child(div().flex_1().min_h_0().child(crate::controls::centered_note("Loading…", p)));
         }
-        match self.view {
+        match view {
             View::Agenda => island
                 .child(self.render_week_strip(today, p, cx))
                 .children(self.render_up_next(now, p, cx))
@@ -76,32 +79,51 @@ impl CalendarPane {
 
     /// The title row (Calendar, what the view shows, Refresh) over the views' bar: Agenda, Day
     /// and Week, then the previous page, Today and the next page.
-    fn render_header(&self, now: DateTime<Local>, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let subtitle = match self.view {
+    fn render_header(
+        &self,
+        now: DateTime<Local>,
+        compact: bool,
+        view: View,
+        p: &'static Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let subtitle = match view {
             View::Agenda => now.format("%A, %B %-d").to_string(),
             View::Day => model::day_title(self.focus_day),
             View::Week => model::week_title(model::week_of(self.focus_day)),
         };
-        let paged = self.view != View::Agenda;
-        let unit = if self.view == View::Week { "week" } else { "day" };
-        let views = [(View::Agenda, "Agenda", "A"), (View::Day, "Day", "D"), (View::Week, "Week", "W")];
+        let paged = view != View::Agenda;
+        let unit = if view == View::Week { "week" } else { "day" };
+        let views: &[(View, &str, &str)] = if compact {
+            &[(View::Agenda, "Agenda", "A"), (View::Day, "Day", "D")]
+        } else {
+            &[(View::Agenda, "Agenda", "A"), (View::Day, "Day", "D"), (View::Week, "Week", "W")]
+        };
         title_bar("calendar-header", window, cx)
             .flex_shrink_0()
-            .px(px(space::S10))
+            .px(px(if compact { space::S8 } else { space::S10 }))
             .pb(px(space::S8))
             .flex()
             .flex_col()
             .child(
                 div()
-                    .h(px(layout::HEADER_HEIGHT))
+                    .h(px(if compact { design::compact::TOP_BAR_HEIGHT } else { layout::HEADER_HEIGHT }))
                     .flex()
                     .items_center()
-                    .gap(px(space::S10))
+                    .gap(px(if compact { space::S8 } else { space::S10 }))
+                    .when(compact, |d| {
+                        d.child(
+                            icon_button("calendar-drawer", Icon::Menu, "Mailboxes", true, p.glyph)
+                                .size(px(design::compact::TOUCH_BUTTON))
+                                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(CalendarOpenDrawer))),
+                        )
+                    })
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .pl(px(space::S6))
+                            .when(!compact, |d| d.pl(px(space::S6)))
                             .flex()
                             .flex_col()
                             .child(
@@ -109,7 +131,12 @@ impl CalendarPane {
                                     .flex()
                                     .items_baseline()
                                     .gap(px(space::S8))
-                                    .child(div().text_size(px(text::PANE_TITLE)).font_weight(FontWeight::BOLD).child("Calendar"))
+                                    .child(
+                                        div()
+                                            .text_size(px(if compact { 18. } else { text::PANE_TITLE }))
+                                            .font_weight(FontWeight::BOLD)
+                                            .child("Calendar"),
+                                    )
                                     .when(self.loading, |d| {
                                         d.child(div().text_size(px(text::CAPTION)).text_color(p.muted).child("Updating…"))
                                     }),
@@ -119,11 +146,13 @@ impl CalendarPane {
                     .child(
                         capsule(p)
                             .child(self.calendar_list_button(p, window, cx))
-                            .child(div().w(px(stroke::HAIRLINE)).h(px(16.)).mx(px(space::S2)).bg(p.line))
-                            .child(
-                                icon_button("calendar-new", Icon::AddDraft, "New event", self.can_offer_create(), p.glyph)
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.create_event(None, window, cx))),
-                            )
+                            .when(!compact, |d| {
+                                d.child(div().w(px(stroke::HAIRLINE)).h(px(16.)).mx(px(space::S2)).bg(p.line))
+                                    .child(
+                                        icon_button("calendar-new", Icon::AddDraft, "New event", self.can_offer_create(), p.glyph)
+                                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.create_event(None, window, cx))),
+                                    )
+                            })
                             .child(
                                 icon_button("calendar-refresh", Icon::Refresh, "Refresh", self.has_calendars(), p.glyph)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
@@ -132,16 +161,16 @@ impl CalendarPane {
             )
             .child(
                 div()
-                    .pl(px(space::S6))
+                    .when(!compact, |d| d.pl(px(space::S6)))
                     .flex()
                     .items_center()
                     .gap(px(space::S8))
-                    .child(segmented("calendar-views", views.iter().position(|(view, ..)| *view == self.view), p).children(
-                        views.map(|(view, label, key)| {
+                    .child(segmented("calendar-views", views.iter().position(|(v, ..)| *v == view), p).children(
+                        views.iter().copied().map(|(v, label, key)| {
                             let tip: SharedString = format!("{label} ({key})").into();
                             segment(label, None, None)
                                 .tooltip(tooltip(tip))
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_view(view, cx)))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_view(v, cx)))
                         }),
                     ))
                     .child(div().flex_1())

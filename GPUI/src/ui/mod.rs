@@ -77,20 +77,35 @@ impl Render for MailApp {
         }
         let viewport = window.viewport_size();
         let width = f32::from(viewport.width);
+        let compact = width < layout::COMPACT_WIDTH;
+        let (safe_top, safe_bottom, _, _) = if compact { design::compact::safe_area_insets() } else { (0., 0., 0., 0.) };
         let (docked, swapped, floating, minimized) = {
             let column = self.compose.read(cx);
             (column.docked(), column.swapped, column.floats().then(|| column.float_bounds(viewport)), column.minimized())
         };
-        self.sidebar_folded = docked && width < compose_metrics::SIDEBAR_WIDTH;
-        let sidebar = self.sidebar_shown();
-        let navigation = if sidebar { layout::SIDEBAR_WIDTH } else { layout::RAIL_WIDTH };
+        let compose_fullscreen = compact && (docked || floating.is_some());
+        self.sidebar_folded = !compact && docked && width < compose_metrics::SIDEBAR_WIDTH;
+        let sidebar = !compact && self.sidebar_shown();
+        let navigation = if compact {
+            0.
+        } else if sidebar {
+            layout::SIDEBAR_WIDTH
+        } else {
+            layout::RAIL_WIDTH
+        };
         // The room beside the navigation, inside the gaps around the islands.
-        let room = (width - navigation - layout::GAP).max(if width < layout::TWO_PANE_WIDTH { 0. } else { layout::MIN_LIST });
+        let room = if compact { width } else { (width - navigation - layout::GAP).max(layout::MIN_LIST) };
         // The docked column's width, and the room it leaves the list and the conversation, which
         // stay side by side while they have `TWO_PANE_MAIL`.
-        let column_width = docked.then(|| self.compose.read(cx).width(room));
+        let column_width = (!compact && docked).then(|| self.compose.read(cx).width(room));
         let mail = column_width.map_or(room, |column| (room - column - layout::GAP).max(0.));
-        let two_pane = if docked { mail >= compose_metrics::TWO_PANE_MAIL } else { width >= layout::TWO_PANE_WIDTH };
+        let two_pane = if compact {
+            false
+        } else if docked {
+            mail >= compose_metrics::TWO_PANE_MAIL
+        } else {
+            width >= layout::TWO_PANE_WIDTH
+        };
         // Swapped beside an open conversation, the column sits between it and the list.
         let between = column_width.filter(|_| {
             swapped && two_pane && self.mail_in_view() && self.layers.iter().any(|layer| matches!(layer, Layer::Reader(_)))
@@ -107,14 +122,14 @@ impl Render for MailApp {
         };
         let content = if self.chat_view.is_some() {
             // Chat lays out its own islands, the list as wide as mail's (MS-328).
-            let list = split::list_width(self.list_share * room, mail);
+            let list = if compact { mail } else { split::list_width(self.list_share * room, mail) };
             self.chat.update(cx, |chat, cx| chat.set_split(mail, list, two_pane, cx));
             div().size_full().child(self.chat.clone()).into_any_element()
         } else if self.calendar_view {
             // The calendar lays out its own islands.
             div().size_full().child(self.calendar.clone()).into_any_element()
         } else {
-            self.render_content(room, mail, two_pane, between.map(|column| (column, navigation)), p, window, cx)
+            self.render_content(room, mail, two_pane, compact, between.map(|column| (column, navigation)), p, window, cx)
         };
         let content = match column_width {
             Some(column) if between.is_none() => {
@@ -128,7 +143,16 @@ impl Render for MailApp {
             }
             _ => content,
         };
-        // The calendar's open event over the whole window, sidebar and all (MS-184).
+        let show_bottom_bar = compact
+            && !compose_fullscreen
+            && if self.chat_view.is_some() {
+                !self.chat.read(cx).has_open_page()
+            } else if self.calendar_view {
+                !self.calendar.read(cx).has_open_page()
+            } else {
+                self.reader().is_none() && self.selection().is_none() && !self.compact_search && self.query.is_none()
+            };
+        let show_fab = show_bottom_bar && !self.drawer_open && self.open_bundle().is_none();
         let page = if self.calendar_view { self.calendar.update(cx, |pane, cx| pane.render_page(window, cx)) } else { None };
         let video_lightbox = if self.chat_view.is_some() { self.chat.read(cx).video_lightbox() } else { None };
         #[cfg(target_os = "macos")]
@@ -184,12 +208,13 @@ impl Render for MailApp {
             .relative()
             .size_full()
             .flex()
+            .when(compact, |d| d.flex_col().pt(px(safe_top)).when(!show_bottom_bar, |d| d.pb(px(safe_bottom))))
             .font_family(design::ui_font())
             .text_size(px(text::BODY))
             .text_color(p.text)
             // The window behind the islands: over a blur (an older Mac, a Linux desktop that blurs)
             // a wash, nothing over the Mac's glass, elsewhere opaque.
-            .bg(design::window_fill(p))
+            .bg(if compact { p.tray.into() } else { design::window_fill(p) })
             // Painted first: pages no longer painted are closed (Blitz); native web views placed
             // last frame are hidden until painted again (the Mac's WebView).
             .child({
@@ -204,9 +229,19 @@ impl Render for MailApp {
                 .size_0()
             })
             // The window between the islands moves it, as a title bar does.
-            .child(title_bar("window", window, cx).absolute().size_full())
-            .child(if sidebar { self.render_sidebar(p, window, cx).into_any_element() } else { self.render_rail(p, window, cx) })
-            .child(
+            .when(!compact, |d| d.child(title_bar("window", window, cx).absolute().size_full()))
+            .when(!compact, |d| {
+                d.child(if sidebar { self.render_sidebar(p, window, cx).into_any_element() } else { self.render_rail(p, window, cx) })
+            })
+            .child(if compact {
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(content)
+                    .when(show_fab, |d| d.child(self.render_fab(p, cx)))
+            } else {
                 div()
                     .flex_1()
                     .min_w_0()
@@ -214,33 +249,47 @@ impl Render for MailApp {
                     .pt(px(layout::GAP))
                     .pr(px(layout::GAP))
                     .pb(px(layout::GAP))
-                    .child(content),
-            )
+                    .child(content)
+            })
+            .when(show_bottom_bar, |d| d.child(self.render_bottom_bar(p, cx)))
             .children(page)
             // The frosted window's edge (MS-249), over the islands and pages; takes no pointer.
-            .when_some(design::window_rim(p), |d, (radius, rim)| {
-                d.child(div().absolute().inset_0().rounded(px(radius)).shadow(rim))
+            .when(!compact, |d| {
+                d.when_some(design::window_rim(p), |d, (radius, rim)| {
+                    d.child(div().absolute().inset_0().rounded(px(radius)).shadow(rim))
+                })
             })
-            .when_some(floating, |d, bounds| {
-                d.child(
-                    div()
-                        .absolute()
-                        .left(bounds.origin.x)
-                        .top(bounds.origin.y)
-                        .w(bounds.size.width)
-                        .h(bounds.size.height)
-                        .child(self.compose.clone()),
-                )
+            .when(compose_fullscreen, |d| {
+                d.child(div().absolute().inset_0().pt(px(safe_top)).pb(px(safe_bottom)).bg(p.background).child(self.compose.clone()))
+            })
+            .when(!compact, |d| {
+                d.when_some(floating, |d, bounds| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .left(bounds.origin.x)
+                            .top(bounds.origin.y)
+                            .w(bounds.size.width)
+                            .h(bounds.size.height)
+                            .child(self.compose.clone()),
+                    )
+                })
             })
             .when(minimized, |d| {
+                let bottom = if show_bottom_bar {
+                    design::compact::BOTTOM_BAR_HEIGHT + space::S12
+                } else {
+                    compose_metrics::FLOAT_MARGIN
+                };
                 d.child(
                     div()
                         .absolute()
                         .right(px(compose_metrics::FLOAT_MARGIN))
-                        .bottom(px(compose_metrics::FLOAT_MARGIN))
+                        .bottom(px(bottom))
                         .child(self.compose.clone()),
                 )
             })
+            .when(compact && self.drawer_open, |d| d.child(self.render_drawer(width, p, window, cx)))
             .children(self.render_context_menu())
             .children(self.render_tag_editor(p, window, cx))
             .children(video_lightbox)
@@ -248,7 +297,7 @@ impl Render for MailApp {
             .when_some(self.frame_meter.clone(), |d, meter| {
                 d.child(div().absolute().left(px(space::S16)).bottom(px(space::S16)).child(meter))
             })
-            .child(deferred(div().absolute().inset_0().child(self.notifications.clone())).priority(1))
+            .child(deferred(div().absolute().inset_0().when(compact, |d| d.pb(px(design::compact::BOTTOM_BAR_HEIGHT))).child(self.notifications.clone())).priority(1))
             .when(cfg!(target_os = "macos"), |d| {
                 d.child(
                     canvas(|_, _, _| {}, |_, _, window, _| {
@@ -277,6 +326,7 @@ impl MailApp {
         room: f32,
         mail: f32,
         two_pane: bool,
+        compact: bool,
         between: Option<(f32, f32)>,
         p: &'static Palette,
         window: &mut Window,
@@ -352,7 +402,7 @@ impl MailApp {
                             .occlude()
                             .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer.id(), cx))
                             .child(match *kind {
-                                BundleKind::Mail(category) => self.render_bundle(category, p, cx),
+                                BundleKind::Mail(category) => self.render_bundle(category, compact, p, cx),
                                 BundleKind::Chat => self.render_chat_bundle(p, cx),
                             })
                             .into_any_element(),
@@ -375,12 +425,12 @@ impl MailApp {
                             .shadow(p.page_shadow.clone())
                             .occlude()
                             .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer.id(), cx))
-                            .child(self.render_list(false, p, cx))
+                            .child(self.render_list(false, compact, p, cx))
                             .into_any_element(),
                     )
                 }
                 Layer::Reader(conversation) => {
-                    reader = Some((self.render_detail(conversation, layer.id(), two_pane, p, window, cx), shift));
+                    reader = Some((self.render_detail(conversation, layer.id(), two_pane, compact, p, window, cx), shift));
                 }
             }
         }
@@ -401,7 +451,7 @@ impl MailApp {
         // width while it slides off) and the island's edge moves over it, clipping it: its rows
         // lay out and shape their text once as the slide starts, not every frame (MS-292).
         let laid_out = (two_pane && reader.is_some()).then(|| if self.closing_reader() { mail } else { split_list });
-        let list = self.render_list_island(bundles, rows_shift, laid_out, p, window, cx);
+        let list = self.render_list_island(bundles, rows_shift, laid_out, compact, p, window, cx);
         let content = div().relative().size_full().child(drag_under.absolute().size_0());
         let content = match reader {
             // Beside the list, which narrows as the conversation slides in from the window's edge;
@@ -483,6 +533,7 @@ impl MailApp {
         bundles: Vec<AnyElement>,
         rows_shift: f32,
         laid_out: Option<f32>,
+        compact: bool,
         p: &'static Palette,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -494,8 +545,10 @@ impl MailApp {
             None => column.w_full(),
         };
         let column = column
-            .child(self.render_list_header(p, window, cx))
-            .child(search_field("search", search_focused, input::field(&self.search), cx.listener(Self::cancel_search), p))
+            .child(self.render_list_header(compact, p, window, cx))
+            .when(!compact, |d| {
+                d.child(search_field("search", search_focused, input::field(&self.search), cx.listener(Self::cancel_search), p))
+            })
             .children(self.render_account_notice(p, cx))
             .child(hairline(p))
             .child(
@@ -511,11 +564,52 @@ impl MailApp {
                             .bottom_0()
                             .w_full()
                             .left(px(rows_shift))
-                            .child(self.render_list(self.beneath.is_some(), p, cx)),
+                            .child(self.render_list(self.beneath.is_some(), compact, p, cx)),
                     )
                     .children(bundles),
             );
-        island(p.tray, p).occlude().child(column)
+        let surface = if compact { div().relative().overflow_hidden().bg(p.tray) } else { island(p.tray, p) };
+        surface.occlude().child(column)
+    }
+
+    /// Thumb-zone Floating Action Button in compact mode (MS-408): New Message in Mail, New Chat
+    /// in Chat, New Event in Calendar.
+    fn render_fab(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let (id, glyph) = if self.chat_view.is_some() {
+            ("fab-new-chat", Icon::Compose)
+        } else if self.calendar_view {
+            ("fab-new-event", Icon::AddDraft)
+        } else {
+            ("fab-compose", Icon::Compose)
+        };
+        let in_chat = self.chat_view.is_some();
+        let in_calendar = self.calendar_view;
+        div()
+            .id(id)
+            .absolute()
+            .right(px(space::S16))
+            .bottom(px(space::S16))
+            .size(px(design::compact::FAB_SIZE))
+            .rounded(px(design::compact::FAB_RADIUS))
+            .bg(p.accent)
+            .shadow(p.popover_shadow.clone())
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .active(|s| s.opacity(0.85))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                if in_chat {
+                    this.chat.update(cx, |chat, cx| chat.start_new_chat(window, cx));
+                } else if in_calendar {
+                    this.calendar.update(cx, |calendar, cx| calendar.start_new_event(window, cx));
+                } else {
+                    this.new_message(&NewMessage, window, cx);
+                }
+            }))
+            .child(icon(glyph, 22., p.on_accent))
+            .into_any_element()
     }
 }
 

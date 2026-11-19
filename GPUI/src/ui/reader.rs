@@ -19,11 +19,13 @@ impl MailApp {
     pub(super) fn render_reader(
         &self,
         conversation: &Conversation,
+        compact: bool,
         p: &'static Palette,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let column = || div().w_full().max_w(px(layout::READING_WIDTH)).px(px(space::S32));
+        let pad = if compact { design::compact::READER_PADDING } else { space::S32 };
+        let column = move || div().w_full().max_w(px(layout::READING_WIDTH)).px(px(pad));
         let account = self.accounts.iter().position(|a| a.id == conversation.account).map(|index| {
             let title = self.accounts[index].title();
             pill(title, Some(mark_dot(design::account_color(index)).into_any_element()), p)
@@ -33,14 +35,14 @@ impl MailApp {
             .flex_col()
             .child(
                 div()
-                    .text_size(px(text::DISPLAY))
-                    .line_height(relative(1.2))
+                    .text_size(px(if compact { design::compact::TITLE_SIZE } else { text::DISPLAY }))
+                    .line_height(relative(1.22))
                     .font_weight(FontWeight::BOLD)
                     .child(conversation.title.clone()),
             )
             .child(
                 div()
-                    .mt(px(space::S12))
+                    .mt(px(if compact { space::S8 } else { space::S12 }))
                     .flex()
                     .flex_wrap()
                     .items_center()
@@ -122,8 +124,8 @@ impl MailApp {
                         target = Some(rows.len());
                     }
                     let open = index == last || message.unread || self.unfolded.contains(&message.id);
-                    let gap = if index == 0 { space::S24 } else { space::S12 };
-                    rows.push(column().mt(px(gap)).child(self.render_message(message, open, index == last, remote, p, cx)).into_any_element());
+                    let gap = if index == 0 { if compact { space::S16 } else { space::S24 } } else { space::S10 };
+                    rows.push(column().mt(px(gap)).child(self.render_message(message, open, index == last, remote, compact, p, cx)).into_any_element());
                 }
             }
         }
@@ -162,8 +164,8 @@ impl MailApp {
             .flex()
             .flex_col()
             .items_center()
-            .pt(px(layout::HEADER_HEIGHT + space::S16))
-            .pb(px(64.))
+            .pt(px(if compact { design::compact::TOP_BAR_HEIGHT + space::S10 } else { layout::HEADER_HEIGHT + space::S16 }))
+            .pb(px(if compact { space::S24 } else { 64. }))
             .children(rows)
             .into_any_element()
     }
@@ -279,21 +281,23 @@ impl MailApp {
         open: bool,
         last: bool,
         remote: bool,
+        compact: bool,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let sender = message.sender();
         let id = message.id.clone();
-        let photo = avatars::avatar(&sender.email, &message.avatar, metrics::AVATAR, p, cx);
+        let avatar_size = if compact { 32. } else { metrics::AVATAR };
+        let photo = avatars::avatar(&sender.email, &message.avatar, avatar_size, p, cx);
         let header = div()
             .id(ElementId::Name(format!("message:{id}").into()))
-            .pl(px(space::S16))
-            .pr(px(space::S8))
-            .py(px(space::S12))
+            .pl(px(if compact { space::S12 } else { space::S16 }))
+            .pr(px(if compact { space::S12 } else { space::S8 }))
+            .py(px(if compact { space::S10 } else { space::S12 }))
             .flex()
             // Full headers open run down from the avatar.
             .map(|d| if open && self.headers_open.contains(&message.id) { d.items_start() } else { d.items_center() })
-            .gap(px(space::S16))
+            .gap(px(if compact { space::S10 } else { space::S16 }))
             .when(!last, |d| {
                 d.cursor_pointer()
                     .hover(|s| s.bg(p.hover))
@@ -310,11 +314,11 @@ impl MailApp {
                     .child(
                         div()
                             .flex()
-                            .gap(px(space::S8))
+                            .gap(px(space::S6))
                             .items_baseline()
-                            .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).child(sender.display_name()))
+                            .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(sender.display_name()))
                             .children(message.unread.then(|| unread_mark(p)))
-                            .when(open && sender.name.is_some(), |d| {
+                            .when(open && !compact && sender.name.is_some(), |d| {
                                 d.child(
                                     div()
                                         .min_w_0()
@@ -332,7 +336,6 @@ impl MailApp {
             )
             .child(
                 div()
-                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .gap(px(space::S6))
@@ -351,9 +354,10 @@ impl MailApp {
         if !open {
             return card.into_any_element();
         }
-        let inset = || div().px(px(space::S16)).pb(px(space::S16));
+        let card_pad = if compact { space::S12 } else { space::S16 };
+        let inset = move || div().px(px(card_pad)).pb(px(card_pad));
         let invitation = message.invitation.as_ref().map(|invitation| {
-            div().px(px(space::S16)).pb(px(space::S12)).child(self.render_invitation(message, invitation, p, cx))
+            div().px(px(card_pad)).pb(px(space::S12)).child(self.render_invitation(message, invitation, p, cx))
         });
         card.children(invitation)
             // The body's presses are its own (text selection, links): no drag of the reader there.

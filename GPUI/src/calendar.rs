@@ -121,6 +121,9 @@ enum Pan {
 /// A message for the window's toast.
 pub struct CalendarToast(pub SharedString);
 
+/// Calendar asks the window to open the slide-over navigation drawer in compact mode (MS-408).
+pub struct CalendarOpenDrawer;
+
 /// One line of the agenda.
 enum Entry {
     /// An account whose calendar cannot show (an index into `accounts`): its calendar is not
@@ -239,6 +242,7 @@ pub struct CalendarPane {
 }
 
 impl EventEmitter<CalendarToast> for CalendarPane {}
+impl EventEmitter<CalendarOpenDrawer> for CalendarPane {}
 
 impl Focusable for CalendarPane {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -1062,6 +1066,16 @@ impl CalendarPane {
 
     /// ⌘N: a new event from the next full hour.
     fn new_event(&mut self, _: &NewEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.create_event(None, window, cx);
+    }
+
+    /// Whether an event detail pane or full-window page is open (hides the compact bottom bar).
+    pub fn has_open_page(&self) -> bool {
+        self.opened.is_some() || self.page
+    }
+
+    /// Opens the new-event editor from outside the pane (the compact FAB).
+    pub fn start_new_event(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.create_event(None, window, cx);
     }
 }
