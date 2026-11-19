@@ -118,7 +118,10 @@ pub fn elapsed(start: &mut Instant, window: &Window, cx: &App) -> f32 {
     if let Some(now) = crate::shots::film_clock() {
         return now.saturating_duration_since(*start).as_secs_f32();
     }
+    #[cfg(feature = "gpui-fast")]
     let signal = window.frame_signal_at();
+    #[cfg(not(feature = "gpui-fast"))]
+    let signal = None;
     let raw = signal.unwrap_or_else(Instant::now);
     let refresh = window.refresh_interval(cx);
     CLOCKS.with_borrow_mut(|clocks| {

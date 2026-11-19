@@ -1,0 +1,42 @@
+[workspace]
+members = ["."]
+exclude = ["vendor"]
+resolver = "3"
+
+[package]
+name = "mailstream-android-poc"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "mailstream_android_poc"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+gpui = { package = "gpui-kit", version = "0.9.1", default-features = false, features = ["component", "assets", "profiler"] }
+gpui-mobile = { path = "vendor/gpui-mobile", default-features = false, features = ["url_launcher", "clipboard"] }
+mailstream-gpui = { path = "../GPUI", default-features = false }
+mailstream = { path = "../FFI", default-features = false, features = ["blitz"] }
+mailstream-engine = { path = "../Engine" }
+log = "0.4"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.15"
+ndk = { version = "0.9", features = ["nativewindow"] }
+
+[patch.crates-io]
+stylo_derive = { path = "../GPUI/vendor/stylo_derive" }
+h2 = { path = "../Engine/vendor/h2" }
+async-imap = { path = "../Engine/vendor/async-imap" }
+iroh-blobs = { path = "../Engine/vendor/iroh-blobs" }
+iroh-util = { path = "../Engine/vendor/iroh-util" }
+taffy = { path = "../GPUI/vendor/taffy" }
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

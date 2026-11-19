@@ -7,7 +7,7 @@ members = ["Engine", "FFI", "FFI/bindgen", "GPUI"]
 # Not members: the patched copies of crates.io crates ([patch.crates-io] below) in GPUI/vendor and
 # Engine/vendor, and Flutter's Linux runner, which only Flutter's CMake build compiles, with a
 # target folder of its own in Flutter/build (Flutter/linux/runner/CMakeLists.txt).
-exclude = ["GPUI/vendor", "Engine/vendor", "Flutter/linux/runner"]
+exclude = ["GPUI/vendor", "Engine/vendor", "Flutter/linux/runner", "AndroidPoc"]
 resolver = "3"
 
 # Stylo (Blitz's CSS engine) 0.22's derives leave an error type to inference that GPUI's build

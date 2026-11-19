@@ -770,7 +770,7 @@ impl MailApp {
             bundle_scroll: Self::new_list_scroll(PagedView::Bundle, cx),
             reader_scroll: ScrollHandle::new(),
             expanded: ["unified:inbox", "chat", "section:accounts"].into_iter().map(SharedString::from).collect(),
-            sidebar_open: true,
+            sidebar_open: !cfg!(target_os = "android"),
             sidebar_folded: false,
             sidebar_beside_compose: false,
             swipe: BackSwipe::default(),

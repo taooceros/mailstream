@@ -43,7 +43,7 @@ mod imp {
     }
 }
 
-#[cfg(all(unix, not(target_vendor = "apple")))]
+#[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
 mod imp {
     use glib_sys::{G_PRIORITY_DEFAULT, G_SOURCE_REMOVE, gboolean, gpointer};
 
@@ -73,6 +73,40 @@ mod imp {
             glib_sys::g_main_loop_run(main);
         }
         unreachable!("the main loop never quits")
+    }
+}
+
+#[cfg(target_os = "android")]
+mod imp {
+    use std::collections::VecDeque;
+    use std::sync::{Condvar, Mutex};
+
+    type Work = Box<dyn FnOnce() + Send>;
+    static QUEUE: Mutex<VecDeque<Work>> = Mutex::new(VecDeque::new());
+    static WAKE: Condvar = Condvar::new();
+
+    /// GPUI on Android delivers events through `subscribe_any_thread`; this queue only serves
+    /// `run_main_loop` callers without a native looper.
+    pub fn adopt_current_thread() {}
+
+    pub fn run(work: impl FnOnce() + Send + 'static) {
+        QUEUE.lock().expect("android main_thread queue").push_back(Box::new(work));
+        WAKE.notify_one();
+    }
+
+    pub fn run_loop() -> ! {
+        loop {
+            let work = {
+                let mut queue = QUEUE.lock().expect("android main_thread queue");
+                while queue.is_empty() {
+                    queue = WAKE.wait(queue).expect("android main_thread condvar");
+                }
+                queue.pop_front()
+            };
+            if let Some(work) = work {
+                work();
+            }
+        }
     }
 }
 

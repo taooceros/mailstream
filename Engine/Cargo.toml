@@ -73,6 +73,14 @@ shots = []
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 mime_guess = "2"
 
+# Android: `openssl-probe` only checks `/etc/ssl/certs` and Termux, leaving `rustls-native-certs`
+# empty on stock devices. Bundle Mozilla's root store via `webpki-roots` so HTTPS, WebSocket and
+# IMAP TLS work out of the box on Android.
+[target.'cfg(target_os = "android")'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "http2", "gzip"] }
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+webpki-roots = "1"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework-sys = "2.17"
 core-foundation = "0.10"

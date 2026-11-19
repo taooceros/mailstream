@@ -415,7 +415,9 @@ pub fn tint(color: Hsla, alpha: f32) -> Hsla {
 pub fn ui_font() -> &'static str {
     #[cfg(target_os = "macos")]
     return ".SystemUIFont";
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "android")]
+    return "Roboto";
+    #[cfg(not(any(target_os = "macos", target_os = "android")))]
     {
         static FAMILY: LazyLock<String> = LazyLock::new(|| {
             let mut fonts =
@@ -432,7 +434,9 @@ pub fn ui_font() -> &'static str {
 pub fn mono_font() -> &'static str {
     #[cfg(target_os = "macos")]
     return "Menlo";
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "android")]
+    return "monospace";
+    #[cfg(not(any(target_os = "macos", target_os = "android")))]
     {
         static FAMILY: LazyLock<String> = LazyLock::new(|| {
             let mut fonts =

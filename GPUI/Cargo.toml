@@ -8,7 +8,7 @@ publish = false
 # GPUI through gpui-kit (MS-226): its `gpui-fast` feature builds on GPUI Fast, longbridge's retained-mode
 # gpui that follows Zed's. The crate is named `gpui` here so GPUI's macros (`gpui::…` paths) and
 # `use gpui::…` resolve through the kit, which re-exports all of GPUI.
-gpui = { package = "gpui-kit", version = "0.9.1", features = ["gpui-fast", "profiler"] }
+gpui = { package = "gpui-kit", version = "0.9.1", default-features = false, features = ["component", "assets", "profiler"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # HTML bodies are drawn by the engine's Blitz pages (`blitz_body.rs`) on every platform.
@@ -32,6 +32,8 @@ serde = { version = "1", optional = true }
 # drawn by GPUI's offscreen renderer (Metal on the Mac, wgpu on Linux) in a headless app, over
 # synthetic mail. Installed builds leave it out.
 [features]
+default = ["gpui-fast"]
+gpui-fast = ["gpui/gpui-fast"]
 shots = ["gpui/test-support", "image/png", "dep:mailstream-engine", "mailstream-engine/shots", "dep:tokio", "dep:sha2", "dep:serde"]
 
 # Tests that draw views in a test window and feed them input as the platform would (the
@@ -53,7 +55,7 @@ objc2-core-media = { version = "0.3", default-features = false, features = ["std
 objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "objc2-core-media", "objc2-core-video", "block2"] }
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+[target.'cfg(all(not(target_os = "macos"), not(target_os = "android")))'.dependencies]
 # Blitz's font lookup (fontique) and GPUI's font-kit share fontconfig-sys; with `dlopen` its
 # functions become a loaded table, which both then read.
 fontique = { version = "0.12", default-features = false, features = ["fontconfig-dlopen"] }
