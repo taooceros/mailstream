@@ -44,8 +44,9 @@ use crate::split::{self, ResizeList};
 use crate::swipe;
 use crate::model::{AccountExt, CategoryExt, ConversationExt, MailboxExt, RoleExt, ShownMessage, UNIFIED};
 use crate::state::{
-    Archive, Back, Beside, BundleKind, CONTEXT, EditTags, Forward, Item, Layer, List, MailApp, NewMessage, PagedView, Refresh,
-    Removal, Reply, ReplyAll, Restore, Source, Star, ThreadState, ToggleRead, ToggleSidebar, ToggleWaiting, Trash,
+    Archive, BROWSE_CONTEXT, Back, Beside, BundleKind, CONTEXT, CloseTagEditor, EditTags, Forward, Item, Layer, List,
+    MailApp, NewMessage, PagedView, Refresh, Removal, Reply, ReplyAll, Restore, SEARCH_CONTEXT, Source, Star,
+    TAG_EDITOR_CONTEXT, ThreadState, ToggleRead, ToggleSidebar, ToggleWaiting, Trash, in_text_or_reply_context,
 };
 #[cfg(target_os = "macos")]
 use crate::state::Renderer;
@@ -135,35 +136,15 @@ impl Render for MailApp {
         let has_video_lightbox = video_lightbox.is_some();
         div()
             .key_context(CONTEXT)
-            .track_focus(&self.focus)
-            .on_action(cx.listener(Self::next))
-            .on_action(cx.listener(Self::previous))
-            .on_action(cx.listener(Self::extend_next))
-            .on_action(cx.listener(Self::extend_previous))
-            .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::open))
-            .on_action(cx.listener(Self::back))
             .on_action(cx.listener(Self::close))
-            .on_action(cx.listener(Self::archive))
-            .on_action(cx.listener(Self::trash))
-            .on_action(cx.listener(Self::restore))
-            .on_action(cx.listener(Self::star))
-            .on_action(cx.listener(Self::toggle_read))
-            .on_action(cx.listener(Self::toggle_waiting))
-            .on_action(cx.listener(Self::edit_tags))
-            .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::refresh))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::retag))
-            .on_action(cx.listener(Self::reply))
-            .on_action(cx.listener(Self::reply_all))
-            .on_action(cx.listener(Self::forward))
             .on_action(cx.listener(Self::new_message))
             .on_action(cx.listener(Self::new_chat))
             .on_action(cx.listener(Self::reset_list_width))
             .on_action(cx.listener(Self::toggle_frame_rate))
-            // The gap beside the docked compose column moves its free edge.
             .on_drag_move(cx.listener(|this, event: &DragMoveEvent<ResizeColumn>, _, cx| {
                 let width = event.drag(cx).width(f32::from(event.event.position.x));
                 this.compose.update(cx, |column, cx| column.set_width(width, cx));
@@ -404,59 +385,165 @@ impl MailApp {
         // lay out and shape their text once as the slide starts, not every frame (MS-292).
         let laid_out = (two_pane && reader.is_some()).then(|| if self.closing_reader() { mail } else { split_list });
         let list = self.render_list_island(bundles, rows_shift, laid_out, p, window, cx);
-        let content = div().relative().size_full().child(drag_under.absolute().size_0());
-        let content = match reader {
+        let browse = div()
+            .key_context(BROWSE_CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.next(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.previous(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.extend_next(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.extend_previous(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.select_all(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.open(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.back(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.archive(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.trash(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.restore(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.star(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.toggle_read(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.toggle_waiting(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.edit_tags(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.undo(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.reply(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.reply_all(action, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action, window, cx| {
+                if !in_text_or_reply_context(window) {
+                    this.forward(action, window, cx);
+                }
+            }))
+            .relative()
+            .size_full();
+        let mut between_column: Option<AnyElement> = None;
+        let browse = match reader {
             // Beside the list, which narrows as the conversation slides in from the window's edge;
             // the conversation keeps its width, so its text does not reflow as it moves, and so
             // does the list's content (`laid_out`).
             Some((detail, shift)) if two_pane => {
                 let split = (1. - shift / (mail - split_list).max(1.)).clamp(0., 1.);
                 let list_width = mail + (split_list - mail) * split;
-                let content = content
+                let browse = browse
                     .child(list.absolute().left_0().top_0().bottom_0().w(px(list_width)))
                     // The gap after the list moves its edge, once the conversation has slid in.
                     .when(shift == 0., |content| {
                         content.child(split::list_handle("list-split").left(px(list_width + layout::GAP / 2.)))
                     });
                 // The column follows the list's edge, its gap dragged against that edge; it never
-                // widens so far that the conversation would get less than `MIN_DETAIL`.
-                let (content, inset) = match between {
+                // widens so far that the conversation would get less than `MIN_DETAIL`. Kept as a
+                // sibling of `MailBrowse` so compose focus never inherits mail-browse actions.
+                let inset = match between {
                     Some((column, navigation, widest)) => {
                         let widest = widest.min(ComposeColumn::widest(room));
                         let anchor = navigation + list_width + layout::GAP;
                         let gap = resize_gap(ResizeColumn { anchor, leading: true, widest }, p);
-                        let placed = div()
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .left(px(list_width + layout::GAP))
-                            .flex()
-                            .child(self.render_docked_column(column))
-                            .child(gap);
-                        (content.child(placed), column + layout::GAP)
+                        between_column = Some(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left(px(list_width + layout::GAP))
+                                .flex()
+                                .child(self.render_docked_column(column))
+                                .child(gap)
+                                .into_any_element(),
+                        );
+                        column + layout::GAP
                     }
-                    None => (content, 0.),
+                    None => 0.,
                 };
-                content
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .left(px(list_width + layout::GAP + inset))
-                            .w(px(mail - split_list - layout::GAP))
-                            .child(detail),
-                    )
+                browse.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(list_width + layout::GAP + inset))
+                        .w(px(mail - split_list - layout::GAP))
+                        .child(detail),
+                )
             }
             // Over the list's island, which sits back under it.
-            Some((detail, shift)) => content
+            Some((detail, shift)) => browse
                 .when(beneath != 0., |content| content.overflow_hidden())
                 .child(div().absolute().top_0().bottom_0().w_full().left(px(beneath)).child(list.size_full()))
                 .when(dim > 0., |content| content.child(scrim(dim, radius::PANE)))
                 .child(div().absolute().top_0().bottom_0().w_full().left(px(shift)).child(detail)),
-            None => content.child(list.size_full()),
+            None => browse.child(list.size_full()),
         };
-        content.child(swipe).child(drag_over.absolute().size_0()).into_any_element()
+        div()
+            .relative()
+            .size_full()
+            .child(drag_under.absolute().size_0())
+            .child(browse)
+            .children(between_column)
+            .child(swipe)
+            .child(drag_over.absolute().size_0())
+            .into_any_element()
     }
 
     /// A single left press on layer `layer`, from which a sideways drag may close it (MS-266).
@@ -497,7 +584,13 @@ impl MailApp {
         };
         let column = column
             .child(self.render_list_header(p, window, cx))
-            .child(search_field("search", search_focused, input::field(&self.search), cx.listener(Self::cancel_search), p))
+            .child(div().key_context(SEARCH_CONTEXT).child(search_field(
+                "search",
+                search_focused,
+                input::field(&self.search),
+                cx.listener(Self::cancel_search),
+                p,
+            )))
             .children(self.render_account_notice(p, cx))
             .child(hairline(p))
             .child(

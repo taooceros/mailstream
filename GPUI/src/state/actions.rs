@@ -356,7 +356,7 @@ impl MailApp {
                     self.reload_replied(id, cx);
                 }
             }
-            ColumnEvent::Unfocus => window.focus(&self.focus, cx),
+            ColumnEvent::Unfocus => self.focus_active_pane(window, cx),
             ColumnEvent::NewDraft => self.new_message(&NewMessage, window, cx),
         }
     }

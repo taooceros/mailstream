@@ -12,6 +12,8 @@ pub struct TagEditor {
     pub ids: Vec<String>,
     /// The point it opened at (a context menu's, a pill's); None: centered under the window's top.
     pub position: Option<Point<Pixels>>,
+    /// Keeps keyboard focus inside the popover even when no category is picked yet (MS-412).
+    pub focus: FocusHandle,
     /// Where a new topic label is written; it also filters the labels offered.
     pub input: Entity<InputState>,
     _subscription: Subscription,
@@ -38,11 +40,14 @@ impl MailApp {
         if ids.is_empty() || !self.mail_in_view() {
             return;
         }
+        let focus = cx.focus_handle();
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Add a label"));
         let subscription = cx.subscribe_in(&input, window, Self::on_label_input);
-        self.tag_editor = Some(TagEditor { ids, position, input: input.clone(), _subscription: subscription });
+        self.tag_editor = Some(TagEditor { ids, position, focus: focus.clone(), input: input.clone(), _subscription: subscription });
         if self.tag_targets().iter().any(|conversation| conversation.category.is_some()) {
             window.focus(&input.focus_handle(cx), cx);
+        } else {
+            window.focus(&focus, cx);
         }
         cx.notify();
     }

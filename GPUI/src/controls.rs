@@ -1166,7 +1166,7 @@ mod tests {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let p = design::palette(WindowAppearance::Light);
             div()
-                .key_context(state::CONTEXT)
+                .key_context(state::BROWSE_CONTEXT)
                 .size_full()
                 .on_action(cx.listener(|this, _: &state::Next, _, _| this.moved += 1))
                 .child(

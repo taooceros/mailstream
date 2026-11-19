@@ -106,9 +106,16 @@ impl MailApp {
                             },
                         )))
                     })
-                    .child(icon_button("selection-trash", Icon::Delete, "Move to Trash (⌫)", true, p.glyph).on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.trash(&Trash, window, cx)),
-                    ))
+                    .child(
+                        icon_button(
+                            "selection-trash",
+                            Icon::Delete,
+                            if cfg!(target_os = "macos") { "Move to Trash (⌘⌫)" } else { "Move to Trash (Ctrl+Backspace)" },
+                            true,
+                            p.glyph,
+                        )
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.trash(&Trash, window, cx))),
+                    )
                     .child(icon_button("selection-read", read_icon, read_tip, true, p.glyph).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_read(&ToggleRead, window, cx)),
                     ))

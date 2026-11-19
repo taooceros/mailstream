@@ -70,7 +70,7 @@ fn notice_key(account: &CalendarAccount) -> String {
 pub fn bind_keys(cx: &mut App) {
     // Google Calendar's keys, as mail takes Gmail's; never while a field has focus. The window's
     // own keys (mail's) give way to these inside it.
-    let list = Some("Calendar && !Input && !Expander");
+    let list = Some("Calendar && !Input && !EventEditor && !Expander");
     let pane = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("down", Next, list),
@@ -90,7 +90,7 @@ pub fn bind_keys(cx: &mut App) {
         // leaves Return in it to its controls unless bound there.
         KeyBinding::new("enter", ExpandEvent, list),
         KeyBinding::new("enter", ExpandEvent, Some("Calendar > PopoverContent && !Expander")),
-        KeyBinding::new(secondary!("["), Back, pane),
+        KeyBinding::new(secondary!("["), Back, list),
         KeyBinding::new(secondary!("r"), Refresh, pane),
         // Over the window's New Message while the calendar has focus.
         KeyBinding::new(secondary!("n"), NewEvent, pane),

@@ -8,11 +8,11 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AppContext, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, EmptyView, Entity, EntityId,
-    EventEmitter, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, Render,
-    Size, StatefulInteractiveElement, Styled, Subscription, Window, div, point, px, size,
+    EventEmitter, FocusHandle, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point,
+    Render, Size, StatefulInteractiveElement, Styled, Subscription, Window, div, point, px, size,
 };
 
-use super::{ATTACH_TIP, Attach, Compose, ComposeMode, DraftEvent, send_button};
+use super::{ATTACH_TIP, Attach, CONTEXT, Cancel, Close, Compose, ComposeMode, DraftEvent, Send, send_button};
 use crate::controls::{capsule, hairline, icon_button, island, pill, raised_capsule, title_bar};
 use crate::design::{self, Palette, compose as metrics, layout, radius, space, text};
 use crate::icons::{Icon, icon};
@@ -55,9 +55,9 @@ struct Tab {
 }
 
 pub struct ComposeColumn {
+    pub(super) focus: FocusHandle,
     tabs: Vec<Tab>,
     active: usize,
-    /// Drafts asked for with no window at hand (a forward whose messages just arrived), opened
     /// as the window draws next.
     pending: Vec<(ComposeMode, Vec<Account>)>,
     pub stashed: bool,
@@ -76,8 +76,9 @@ pub struct ComposeColumn {
 impl EventEmitter<ColumnEvent> for ComposeColumn {}
 
 impl ComposeColumn {
-    pub fn new() -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
+            focus: cx.focus_handle(),
             tabs: Vec::new(),
             active: 0,
             pending: Vec::new(),
@@ -503,7 +504,25 @@ impl Render for ComposeColumn {
         if self.stashed {
             return self.render_capsule(&draft, p, cx).into_any_element();
         }
+        let send_action = draft.clone();
+        let cancel_action = draft.clone();
+        let close_action = draft.clone();
+        let attach_action = draft.clone();
         island(p.background, p)
+            .key_context(CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(move |action: &Send, window, cx| {
+                send_action.update(cx, |draft, cx| draft.send_action(action, window, cx));
+            })
+            .on_action(move |action: &Cancel, window, cx| {
+                cancel_action.update(cx, |draft, cx| draft.cancel(action, window, cx));
+            })
+            .on_action(move |action: &Close, window, cx| {
+                close_action.update(cx, |draft, cx| draft.close(action, window, cx));
+            })
+            .on_action(move |action: &Attach, window, cx| {
+                attach_action.update(cx, |draft, cx| draft.pick_files(action, window, cx));
+            })
             .occlude()
             .size_full()
             .flex()

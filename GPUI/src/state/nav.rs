@@ -171,8 +171,24 @@ impl MailApp {
         }
     }
 
+    /// Returns keyboard focus to whichever top-level pane is shown (Mail, Chat, or Calendar).
+    pub fn focus_active_pane(&self, window: &mut Window, cx: &mut App) {
+        if self.chat_view.is_some() {
+            window.focus(&self.chat.focus_handle(cx), cx);
+        } else if self.calendar_view {
+            window.focus(&self.calendar.focus_handle(cx), cx);
+        } else {
+            window.focus(&self.focus, cx);
+        }
+    }
+
     pub fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
-        if self.chat_view.is_some() && self.chat.read(cx).has_video_lightbox() {
+        if !self.mail_in_view()
+            || window
+                .context_stack()
+                .iter()
+                .any(|ctx| ctx.contains("Compose") || ctx.contains("ReplyBox") || ctx.contains(TAG_EDITOR_CONTEXT))
+        {
             return;
         }
         let focus = self.search.focus_handle(cx);
@@ -664,6 +680,16 @@ impl MailApp {
     /// Closes the open conversation, Chat's open space or new-chat form, or the calendar's open
     /// event (⌘W, MS-69); nothing else.
     pub fn close(&mut self, _: &Close, window: &mut Window, cx: &mut Context<Self>) {
+        if window.context_stack().iter().any(|ctx| {
+            ctx.contains("Input")
+                || ctx.contains("Compose")
+                || ctx.contains("ReplyBox")
+                || ctx.contains("ChatComposer")
+                || ctx.contains("EventEditor")
+                || ctx.contains(TAG_EDITOR_CONTEXT)
+        }) {
+            return;
+        }
         if self.chat_view.is_some() {
             self.chat.update(cx, |chat, cx| chat.close_space(window, cx));
         } else if self.calendar_view {

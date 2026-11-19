@@ -58,6 +58,7 @@ actions!(
         ToggleRead,
         ToggleWaiting,
         EditTags,
+        CloseTagEditor,
         Undo,
         Reply,
         ReplyAll,
@@ -74,47 +75,70 @@ actions!(
 );
 
 pub const CONTEXT: &str = "Mail";
+/// Key context of the mail list and reader (sibling of Compose, Chat, Calendar, and popovers).
+/// Mail navigation and conversation shortcuts live here so they never fire while composing mail,
+/// chatting, using the calendar, or editing tags (MS-412).
+pub const BROWSE_CONTEXT: &str = "MailBrowse";
+pub const SEARCH_CONTEXT: &str = "SearchField";
+pub const TAG_EDITOR_CONTEXT: &str = "TagEditor";
+
+/// Whether keyboard focus is currently inside a text field, inline reply, compose draft, search
+/// field, or tag editor. Used as a defense-in-depth guard on `MailBrowse` action handlers so
+/// menu-bar or programmatic dispatches cannot mutate mail while the user is typing (MS-412).
+pub fn in_text_or_reply_context(window: &Window) -> bool {
+    window.context_stack().iter().any(|ctx| {
+        ctx.contains("Input")
+            || ctx.contains("ReplyBox")
+            || ctx.contains(SEARCH_CONTEXT)
+            || ctx.contains("Compose")
+            || ctx.contains(TAG_EDITOR_CONTEXT)
+    })
+}
 
 pub fn bind_keys(cx: &mut App) {
-    // Single keys act on the list, never while a text field has focus, in Chat or the calendar
-    // (which have their own), or in a draft.
-    let list = Some("Mail && !Input && !Chat && !Calendar && !Compose && !Expander && !VideoLightbox");
+    // Mail list and reader shortcuts require `MailBrowse` and stay out of any text field, inline
+    // reply, search field, or focused sidebar expander.
+    let browse = Some("MailBrowse && !Input && !ReplyBox && !SearchField && !Expander");
+    let search = Some("MailBrowse && !ReplyBox");
+    let close_chat = Some("Chat && !Input && !ChatComposer && !VideoLightbox");
+    let close_calendar = Some("Calendar && !Input && !EventEditor");
     let window = Some(CONTEXT);
     cx.bind_keys([
-        KeyBinding::new("j", Next, list),
-        KeyBinding::new("down", Next, list),
-        KeyBinding::new("k", Previous, list),
-        KeyBinding::new("up", Previous, list),
-        KeyBinding::new("shift-down", ExtendNext, list),
-        KeyBinding::new("shift-up", ExtendPrevious, list),
-        KeyBinding::new(secondary!("a"), SelectAll, list),
-        KeyBinding::new("enter", Open, list),
-        KeyBinding::new("space", Open, list),
-        KeyBinding::new("escape", Back, list),
-        KeyBinding::new(secondary!("["), Back, window),
-        KeyBinding::new(secondary!("w"), Close, window),
-        KeyBinding::new("e", Archive, list),
-        KeyBinding::new("ctrl-cmd-a", Archive, window),
-        KeyBinding::new("backspace", Trash, list),
-        KeyBinding::new("delete", Trash, list),
-        KeyBinding::new(secondary!("backspace"), Trash, list),
-        KeyBinding::new("s", Star, list),
-        KeyBinding::new(secondary!("shift-l"), Star, window),
-        KeyBinding::new("u", ToggleRead, list),
-        KeyBinding::new(secondary!("shift-u"), ToggleRead, window),
-        KeyBinding::new("d", ToggleWaiting, list),
-        KeyBinding::new(secondary!("shift-d"), ToggleWaiting, window),
-        KeyBinding::new("l", EditTags, list),
-        KeyBinding::new(secondary!("z"), Undo, list),
-        KeyBinding::new("r", Reply, list),
-        KeyBinding::new(secondary!("r"), Reply, window),
-        KeyBinding::new("a", ReplyAll, list),
-        KeyBinding::new(secondary!("shift-r"), ReplyAll, window),
-        KeyBinding::new("f", Forward, list),
-        KeyBinding::new(secondary!("shift-f"), Forward, window),
+        KeyBinding::new("j", Next, browse),
+        KeyBinding::new("down", Next, browse),
+        KeyBinding::new("k", Previous, browse),
+        KeyBinding::new("up", Previous, browse),
+        KeyBinding::new("shift-down", ExtendNext, browse),
+        KeyBinding::new("shift-up", ExtendPrevious, browse),
+        KeyBinding::new(secondary!("a"), SelectAll, browse),
+        KeyBinding::new("enter", Open, browse),
+        KeyBinding::new("space", Open, browse),
+        KeyBinding::new("escape", Back, browse),
+        KeyBinding::new(secondary!("["), Back, browse),
+        KeyBinding::new(secondary!("w"), Close, browse),
+        KeyBinding::new(secondary!("w"), Close, close_chat),
+        KeyBinding::new(secondary!("w"), Close, close_calendar),
+        KeyBinding::new("e", Archive, browse),
+        KeyBinding::new("ctrl-cmd-a", Archive, browse),
+        KeyBinding::new(secondary!("backspace"), Trash, browse),
+        KeyBinding::new("s", Star, browse),
+        KeyBinding::new(secondary!("shift-l"), Star, browse),
+        KeyBinding::new("u", ToggleRead, browse),
+        KeyBinding::new(secondary!("shift-u"), ToggleRead, browse),
+        KeyBinding::new("d", ToggleWaiting, browse),
+        KeyBinding::new(secondary!("shift-d"), ToggleWaiting, browse),
+        KeyBinding::new("l", EditTags, browse),
+        KeyBinding::new("escape", CloseTagEditor, Some(TAG_EDITOR_CONTEXT)),
+        KeyBinding::new(secondary!("z"), Undo, browse),
+        KeyBinding::new("r", Reply, browse),
+        KeyBinding::new(secondary!("r"), Reply, browse),
+        KeyBinding::new("a", ReplyAll, browse),
+        KeyBinding::new(secondary!("shift-r"), ReplyAll, browse),
+        KeyBinding::new("f", Forward, browse),
+        KeyBinding::new(secondary!("shift-f"), Forward, browse),
         KeyBinding::new(secondary!("n"), NewMessage, window),
-        KeyBinding::new("/", FocusSearch, list),
-        KeyBinding::new(secondary!("f"), FocusSearch, window),
+        KeyBinding::new("/", FocusSearch, browse),
+        KeyBinding::new(secondary!("f"), FocusSearch, search),
         KeyBinding::new(secondary!("shift-n"), Refresh, window),
         KeyBinding::new("ctrl-cmd-s", ToggleSidebar, window),
         KeyBinding::new(secondary!("alt-p"), ToggleFrameRate, window),
@@ -594,7 +618,7 @@ impl MailApp {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let chat = cx.new(|cx| ChatPane::new(window, cx));
         let calendar = cx.new(|cx| CalendarPane::new(window, cx));
-        let compose = cx.new(|_| ComposeColumn::new());
+        let compose = cx.new(ComposeColumn::new);
         let notifications = cx.new(|cx| NotificationList::new(window, cx));
         let subscriptions = vec![
             cx.subscribe_in(&search, window, Self::on_search_event),

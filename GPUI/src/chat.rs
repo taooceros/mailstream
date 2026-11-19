@@ -62,13 +62,13 @@ const SUGGESTIONS: u32 = 8;
 const OVERDRAW: f32 = 800.0;
 
 pub fn bind_keys(cx: &mut App) {
-    // Single keys act on the list, never while a field has focus; a field's Escape closes it.
-    let list = Some("Chat && !Input");
-    let pane = Some(CONTEXT);
+    // Single keys and Back act on the list/space, never while typing in a field or composer.
+    let list = Some("Chat && !Input && !ChatComposer && !Expander && !VideoLightbox");
+    let pane = Some("Chat && !VideoLightbox");
     let composer = Some("ChatComposer > Input");
     cx.bind_keys([
         KeyBinding::new("escape", Back, list),
-        KeyBinding::new(secondary!("["), Back, pane),
+        KeyBinding::new(secondary!("["), Back, list),
         KeyBinding::new("j", Next, list),
         KeyBinding::new("down", Next, list),
         KeyBinding::new("k", Previous, list),

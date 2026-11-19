@@ -10,10 +10,10 @@
 
 use gpui::base::input::{InputBaseState, MultiLineMode};
 use gpui::component::Sizable;
-use gpui::component::input::{Editor, EditorState, Input, InputState};
+use gpui::component::input::{Backspace, Editor, EditorState, Indent, Input, InputState, MoveLeft, MoveRight, Outdent};
 use gpui::{
-    App, Context, DefiniteLength, Entity, EntityInputHandler, IntoElement, ParentElement, RenderOnce, Styled, Window,
-    div, relative,
+    App, Context, DefiniteLength, Div, Entity, EntityInputHandler, InteractiveElement, IntoElement, ParentElement,
+    RenderOnce, Styled, Window, div, relative,
 };
 
 use crate::{design, text_checking};
@@ -36,10 +36,11 @@ impl RenderOnce for Field {
         // The kit sizes the field's text and height by its own scale; take the surrounding text's.
         let input = Styled::h(self.input.text_size(style.font_size).line_height(style.line_height).p_0().gap_0(), line_height);
         let Some(checker) = text_checking::checker(&self.state, window, cx) else {
-            return input.into_any_element();
+            return contain_editing_keys(div().w_full().h(line_height).child(input)).into_any_element();
         };
         let input = input.context_menu(text_checking::context_menu(&checker));
-        text_checking::checked(input, &checker, style.font(), window).w_full().h(line_height).into_any_element()
+        contain_editing_keys(text_checking::checked(input, &checker, style.font(), window).w_full().h(line_height))
+            .into_any_element()
     }
 }
 
@@ -97,20 +98,35 @@ impl RenderOnce for MarkupEditor {
             .line_height(style.line_height);
         let Some(checker) = text_checking::checker(&self.state, window, cx) else {
             return match height {
-                Some(h) => div().w_full().h(h).overflow_hidden().child(editor.h(h)).into_any_element(),
-                None => editor.into_any_element(),
+                Some(h) => contain_editing_keys(div().w_full().h(h).overflow_hidden().child(editor.h(h))).into_any_element(),
+                None => contain_editing_keys(div().w_full().child(editor)).into_any_element(),
             };
         };
         let editor = editor.context_menu(text_checking::context_menu(&checker));
         match height {
-            Some(h) => text_checking::checked(editor.h(h), &checker, style.font(), window)
-                .w_full()
-                .h(h)
-                .overflow_hidden()
+            Some(h) => contain_editing_keys(
+                text_checking::checked(editor.h(h), &checker, style.font(), window)
+                    .w_full()
+                    .h(h)
+                    .overflow_hidden(),
+            )
+            .into_any_element(),
+            None => contain_editing_keys(text_checking::checked(editor, &checker, style.font(), window).w_full())
                 .into_any_element(),
-            None => text_checking::checked(editor, &checker, style.font(), window).w_full().into_any_element(),
         }
     }
+}
+
+/// Stops editing keys that gpui-kit propagates at boundaries (`Backspace` and `←` at offset 0,
+/// `→` at the end, `⌘[`/`⌘]` in non-indentable or single-line fields) from escaping the field into
+/// surrounding view shortcuts or macOS `NSMenu` key equivalents (MS-412).
+fn contain_editing_keys(container: Div) -> Div {
+    container
+        .on_action(|_: &Backspace, _, _| {})
+        .on_action(|_: &MoveLeft, _, _| {})
+        .on_action(|_: &MoveRight, _, _| {})
+        .on_action(|_: &Indent, _, _| {})
+        .on_action(|_: &Outdent, _, _| {})
 }
 
 /// Wraps (or unwraps) the active selection in `marker` (`**`, `*`, `_`, `~~`, `~`, `` ` ``).

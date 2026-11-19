@@ -45,7 +45,7 @@ actions!(mail_body, [CopyBody]);
 /// would outrank the field's: GPUI ranks a context-free binding at the focus's own depth, and this
 /// one is bound after gpui-kit's, so Ctrl+C in a field copied nothing (MS-231).
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([gpui::KeyBinding::new(secondary!("c"), CopyBody, Some("Mail && !Input"))]);
+    cx.bind_keys([gpui::KeyBinding::new(secondary!("c"), CopyBody, Some("MailBrowse && !Input && !ReplyBox && !SearchField"))]);
     cx.on_action(|_: &CopyBody, cx| copy_selection(cx));
 }
 
@@ -614,7 +614,7 @@ mod tests {
 
     impl Render for Host {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().key_context(crate::state::CONTEXT).size_full().child(Input::new(&self.0))
+            div().key_context(crate::state::BROWSE_CONTEXT).size_full().child(Input::new(&self.0))
         }
     }
 
@@ -643,7 +643,7 @@ mod tests {
         struct BodyHost(gpui::FocusHandle);
         impl Render for BodyHost {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div().key_context(crate::state::CONTEXT).track_focus(&self.0).size_full()
+                div().key_context(crate::state::BROWSE_CONTEXT).track_focus(&self.0).size_full()
             }
         }
         cx.update(|cx| {

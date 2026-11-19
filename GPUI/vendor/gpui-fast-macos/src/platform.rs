@@ -51,7 +51,7 @@ use std::{
     rc::Rc,
     slice, str,
     sync::{
-        Arc, OnceLock,
+        Arc, LazyLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -328,8 +328,6 @@ impl MacPlatform {
         actions: &mut Vec<Box<dyn Action>>,
         keymap: &Keymap,
     ) -> Retained<NSMenuItem> {
-        static DEFAULT_CONTEXT: OnceLock<Vec<KeyContext>> = OnceLock::new();
-
         unsafe {
             match item {
                 MenuItem::Separator => NSMenuItem::separatorItem(self.1),
@@ -340,32 +338,8 @@ impl MacPlatform {
                     checked,
                     disabled,
                 } => {
-                    // Note that this is intentionally using earlier bindings, whereas typically
-                    // later ones take display precedence. See the discussion on
-                    // https://github.com/zed-industries/zed/issues/23621
-                    let keystrokes = keymap
-                        .bindings_for_action(action.as_ref())
-                        .find_or_first(|binding| {
-                            binding.predicate().is_none_or(|predicate| {
-                                predicate.eval(DEFAULT_CONTEXT.get_or_init(|| {
-                                    let mut workspace_context =
-                                        KeyContext::new_with_defaults(gpui::OperatingSystem::Mac);
-                                    workspace_context.add("Workspace");
-                                    let mut pane_context =
-                                        KeyContext::new_with_defaults(gpui::OperatingSystem::Mac);
-                                    pane_context.add("Pane");
-                                    let mut editor_context =
-                                        KeyContext::new_with_defaults(gpui::OperatingSystem::Mac);
-                                    editor_context.add("Editor");
-
-                                    pane_context.extend(&editor_context);
-                                    workspace_context.extend(&pane_context);
-                                    vec![workspace_context]
-                                }))
-                            })
-                        })
+                    let keystrokes = menu_keybinding(keymap, action.as_ref())
                         .map(|binding| binding.keystrokes());
-
                     let selector = match os_action {
                         Some(gpui::OsAction::Cut) => sel!(cut:),
                         Some(gpui::OsAction::Copy) => sel!(copy:),
@@ -1629,4 +1603,73 @@ unsafe extern "C" {
     pub(super) static kTISPropertyInputSourceIsASCIICapable: CFStringRef;
     pub(super) static kTISPropertyInputSourceType: CFStringRef;
     pub(super) static kTISTypeKeyboardInputMode: CFStringRef;
+}
+
+/// Mailstream patch (MS-412): picks the keybinding shown and bound on a macOS `NSMenuItem`.
+///
+/// AppKit treats `NSMenuItem` key equivalents as window-wide shortcuts that bypass GPUI's keymap
+/// context predicates (`!Input`, `!Compose`, `!ReplyBox`) whenever the focused view propagates a
+/// keystroke (such as `Backspace` at offset 0 of an empty text field). Unmodified single keys
+/// (`backspace`, `e`, `r`, `l`, `/`, `escape`, …) therefore must never become menu key
+/// equivalents; only single-keystroke bindings with Command, Control, or Option qualify.
+fn menu_keybinding<'a>(keymap: &'a Keymap, action: &'a dyn Action) -> Option<&'a gpui::KeyBinding> {
+    static DEFAULT_CONTEXT: LazyLock<Vec<KeyContext>> = LazyLock::new(|| {
+        let mut workspace_context = KeyContext::new_with_defaults(gpui::OperatingSystem::Mac);
+        workspace_context.add("Workspace");
+        let mut pane_context = KeyContext::new_with_defaults(gpui::OperatingSystem::Mac);
+        pane_context.add("Pane");
+        let mut editor_context = KeyContext::new_with_defaults(gpui::OperatingSystem::Mac);
+        editor_context.add("Editor");
+
+        pane_context.extend(&editor_context);
+        workspace_context.extend(&pane_context);
+        vec![workspace_context]
+    });
+
+    // Note that this is intentionally using earlier bindings, whereas typically
+    // later ones take display precedence. See the discussion on
+    // https://github.com/zed-industries/zed/issues/23621
+    keymap
+        .bindings_for_action(action)
+        .filter(|binding| {
+            let [keystroke] = binding.keystrokes() else {
+                return false;
+            };
+            let modifiers = keystroke.modifiers();
+            modifiers.platform || modifiers.control || modifiers.alt
+        })
+        .find_or_first(|binding| {
+            binding
+                .predicate()
+                .is_none_or(|predicate| predicate.eval(&DEFAULT_CONTEXT))
+        })
+}
+
+#[cfg(test)]
+mod menu_keybinding_tests {
+    use super::*;
+    use gpui::{KeyBinding, Keymap, actions};
+
+    actions!(menu_keybinding_test, [Trash, Archive, Tag]);
+
+    #[test]
+    fn menu_keybinding_ignores_unmodified_single_keys() {
+        let keymap = Keymap::new(vec![
+            KeyBinding::new("backspace", Trash, Some("MailBrowse && !Input")),
+            KeyBinding::new("cmd-backspace", Trash, Some("MailBrowse && !Input")),
+            KeyBinding::new("e", Archive, Some("MailBrowse && !Input")),
+            KeyBinding::new("ctrl-cmd-a", Archive, Some("MailBrowse && !Input")),
+            KeyBinding::new("l", Tag, Some("MailBrowse && !Input")),
+        ]);
+        let trash = menu_keybinding(&keymap, &Trash).expect("cmd-backspace selected");
+        assert_eq!(trash.keystrokes()[0].key(), "backspace");
+        assert!(trash.keystrokes()[0].modifiers().platform);
+
+        let archive = menu_keybinding(&keymap, &Archive).expect("ctrl-cmd-a selected");
+        assert_eq!(archive.keystrokes()[0].key(), "a");
+        assert!(archive.keystrokes()[0].modifiers().control);
+        assert!(archive.keystrokes()[0].modifiers().platform);
+
+        assert!(menu_keybinding(&keymap, &Tag).is_none(), "bare letter is not bound to NSMenu");
+    }
 }

@@ -119,6 +119,8 @@ impl MailApp {
 
         let panel = popover(p)
             .id("tag-editor")
+            .key_context(TAG_EDITOR_CONTEXT)
+            .track_focus(&editor.focus)
             .w(px(WIDTH))
             .p(px(space::S12))
             .flex()
@@ -129,6 +131,7 @@ impl MailApp {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_tag_editor(window, cx)))
             .on_action(cx.listener(|this, _: &Escape, window, cx| this.close_tag_editor(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseTagEditor, window, cx| this.close_tag_editor(window, cx)))
             .child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(title))
             .child(
                 div()

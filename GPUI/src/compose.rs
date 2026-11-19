@@ -86,6 +86,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", SuggestionNext, Some("Recipients > Input")),
         KeyBinding::new("up", SuggestionPrevious, Some("Recipients > Input")),
         KeyBinding::new("escape", Cancel, Some(REPLY_CONTEXT)),
+        KeyBinding::new(secondary!("w"), Cancel, Some(REPLY_CONTEXT)),
         KeyBinding::new(secondary!("enter"), Send, reply_field),
         KeyBinding::new(secondary!("shift-a"), Attach, Some(REPLY_CONTEXT)),
         KeyBinding::new(secondary!("shift-o"), MoveToColumn, Some(REPLY_CONTEXT)),
@@ -919,10 +920,11 @@ impl Compose {
                     .when(has_subtitle, |d| {
                         d.child(div().flex_shrink_0().text_color(p.muted).text_size(px(text::FOOTNOTE)).child(email.clone()))
                     })
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.from = Some(email.clone());
                         this.from_chosen = true;
                         this.picking_from = false;
+                        this.focus_first(window, cx);
                         cx.notify();
                     }))
             });
@@ -1180,6 +1182,7 @@ pub struct ReplyBox {
     picking_from: bool,
     text: Entity<EditorState>,
     focus: FocusHandle,
+    container_focus: FocusHandle,
     attachments: Attachments,
     status: Status,
     _subscriptions: [Subscription; 2],
@@ -1242,6 +1245,7 @@ impl ReplyBox {
             picking_from: false,
             text,
             focus,
+            container_focus: cx.focus_handle(),
             attachments: Attachments::default(),
             status: Status::Idle,
             _subscriptions: subscriptions,
@@ -1498,6 +1502,7 @@ impl Render for ReplyBox {
         });
         div()
             .key_context(REPLY_CONTEXT)
+            .track_focus(&self.container_focus)
             .on_action(cx.listener(|this, _: &Cancel, _, cx| this.cancel(cx)))
             .on_action(cx.listener(|this, _: &Escape, _, cx| this.cancel(cx)))
             .on_action(cx.listener(|this, _: &Send, window, cx| this.send(window, cx)))
@@ -1528,7 +1533,7 @@ impl Render for ReplyBox {
             .flex_col()
             .rounded(px(radius::CARD))
             .border_1()
-            .border_color(if self.focus.is_focused(window) { ring } else { p.line })
+            .border_color(if self.focus.is_focused(window) || self.container_focus.contains_focused(window, cx) { ring } else { p.line })
             .bg(p.background)
             .shadow(p.popover_shadow.clone())
             .child(
@@ -2006,6 +2011,287 @@ mod tests {
         assert_eq!(
             reply_text.read_with(cx, |input, _| input.value().to_string()),
             "Hello **Alice**, see [link](https://example.com)\n\n- One\n- Two"
+        );
+    }
+
+    /// Mirrors `MailApp`'s `Mail` root + `MailBrowse` child (holding `ReplyBox`) + sibling
+    /// `ComposeColumn` layout to verify keyboard and menu-bar shortcut isolation (MS-412).
+    struct ShortcutIsolationHost {
+        browse_focus: FocusHandle,
+        reply: Entity<ReplyBox>,
+        column: Entity<ComposeColumn>,
+        fired: Vec<&'static str>,
+    }
+
+    impl Render for ShortcutIsolationHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            use crate::state;
+            div()
+                .key_context(state::CONTEXT)
+                .on_action(cx.listener(|this, _: &state::Close, window, _| {
+                    if !window.context_stack().iter().any(|c| {
+                        c.contains("Input") || c.contains("Compose") || c.contains("ReplyBox")
+                    }) {
+                        this.fired.push("close");
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &state::FocusSearch, window, _| {
+                    if !window.context_stack().iter().any(|c| c.contains("Compose") || c.contains("ReplyBox")) {
+                        this.fired.push("focus_search");
+                    }
+                }))
+                .size_full()
+                .flex()
+                .child(
+                    div()
+                        .key_context(state::BROWSE_CONTEXT)
+                        .track_focus(&self.browse_focus)
+                        .on_action(cx.listener(|this, _: &state::Trash, window, _| {
+                            if !state::in_text_or_reply_context(window) {
+                                this.fired.push("trash");
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &state::Archive, window, _| {
+                            if !state::in_text_or_reply_context(window) {
+                                this.fired.push("archive");
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &state::Reply, window, _| {
+                            if !state::in_text_or_reply_context(window) {
+                                this.fired.push("reply");
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &state::ReplyAll, window, _| {
+                            if !state::in_text_or_reply_context(window) {
+                                this.fired.push("reply_all");
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &state::Forward, window, _| {
+                            if !state::in_text_or_reply_context(window) {
+                                this.fired.push("forward");
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &state::Star, window, _| {
+                            if !state::in_text_or_reply_context(window) {
+                                this.fired.push("star");
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &state::ToggleRead, window, _| {
+                            if !state::in_text_or_reply_context(window) {
+                                this.fired.push("toggle_read");
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &state::ToggleWaiting, window, _| {
+                            if !state::in_text_or_reply_context(window) {
+                                this.fired.push("toggle_waiting");
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &state::EditTags, window, _| {
+                            if !state::in_text_or_reply_context(window) {
+                                this.fired.push("edit_tags");
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &state::Next, window, _| {
+                            if !state::in_text_or_reply_context(window) {
+                                this.fired.push("next");
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &state::Previous, window, _| {
+                            if !state::in_text_or_reply_context(window) {
+                                this.fired.push("previous");
+                            }
+                        }))
+                        .on_action(cx.listener(|this, _: &state::Back, window, _| {
+                            if !state::in_text_or_reply_context(window) {
+                                this.fired.push("back");
+                            }
+                        }))
+                        .flex_1()
+                        .h_full()
+                        .child(self.reply.clone()),
+                )
+                .child(div().w(px(360.)).h_full().child(self.column.clone()))
+        }
+    }
+
+    fn setup_shortcut_host(cx: &mut TestAppContext) -> (Entity<ShortcutIsolationHost>, &mut gpui::VisualTestContext) {
+        cx.update(|cx| {
+            gpui::init(cx);
+            design::sync_kit_theme(WindowAppearance::Light, cx);
+            bind_keys(cx);
+            crate::state::bind_keys(cx);
+        });
+        cx.add_window_view(|window, cx| {
+            let reply = cx.new(|cx| {
+                ReplyBox::new(
+                    "conv".into(),
+                    None,
+                    false,
+                    "alice@example.com".into(),
+                    vec![],
+                    "me@example.com".into(),
+                    true,
+                    window,
+                    cx,
+                )
+            });
+            let column = cx.new(ComposeColumn::new);
+            ShortcutIsolationHost { browse_focus: cx.focus_handle(), reply, column, fired: Vec::new() }
+        })
+    }
+
+    #[gpui::test]
+    fn reply_box_absorbs_extra_backspaces_and_blocks_mail_shortcuts(cx: &mut TestAppContext) {
+        let (host, cx) = setup_shortcut_host(cx);
+        cx.run_until_parked();
+
+        let (reply, reply_text, reply_container) = host.read_with(cx, |h, app| {
+            let r = h.reply.read(app);
+            (h.reply.clone(), r.text.clone(), r.container_focus.clone())
+        });
+        reply_text.update_in(cx, |input, window, cx| input.focus(window, cx));
+        cx.run_until_parked();
+
+        // Typing letters bound to mail shortcuts and hitting Backspace repeatedly past offset 0
+        // must never trigger Trash or any other mail-browse action, and Backspace at offset 0
+        // must be consumed (propagate == false) so macOS NSMenu never sees it.
+        cx.simulate_input("ab");
+        cx.run_until_parked();
+        for _ in 0..5 {
+            let result = cx.update(|window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                        keystroke: gpui::Keystroke::parse("backspace").unwrap(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    }),
+                    cx,
+                )
+            });
+            assert!(!result.propagate, "backspace at offset 0 must not propagate out of ReplyBox");
+        }
+        cx.run_until_parked();
+        assert_eq!(reply_text.read_with(cx, |i, _| i.value().to_string()), "");
+        assert!(host.read_with(cx, |h, _| h.fired.is_empty()), "no mail action fired on backspace");
+
+        // Single-key and Cmd-modified mail shortcuts while typing in ReplyBox editor.
+        cx.simulate_input("erasudlrfjk/");
+        for key in [
+            secondary!("backspace"),
+            "ctrl-cmd-a",
+            secondary!("r"),
+            secondary!("shift-r"),
+            secondary!("shift-f"),
+            secondary!("shift-l"),
+            secondary!("shift-u"),
+            secondary!("shift-d"),
+            secondary!("["),
+            secondary!("w"),
+            secondary!("f"),
+        ] {
+            cx.simulate_keystrokes(key);
+        }
+        cx.run_until_parked();
+        assert!(host.read_with(cx, |h, _| h.fired.is_empty()), "no mail action fired in reply editor");
+
+        // Even when focus sits on ReplyBox's container (outside the text editor), mail shortcuts
+        // and menu-bar Trash dispatch are blocked.
+        cx.update(|window, cx| window.focus(&reply_container, cx));
+        cx.run_until_parked();
+        for key in ["e", "r", "a", "f", "s", "u", "d", "l", "j", "k", "/", "backspace", secondary!("backspace"), secondary!("["), secondary!("w")] {
+            cx.simulate_keystrokes(key);
+        }
+        cx.update(|window, cx| window.dispatch_action(Box::new(crate::state::Trash), cx));
+        cx.run_until_parked();
+        assert!(host.read_with(cx, |h, _| h.fired.is_empty()), "no mail action fired on ReplyBox container");
+        drop(reply);
+    }
+
+    #[gpui::test]
+    fn compose_column_isolates_drafts_from_mail_browse_and_menu_actions(cx: &mut TestAppContext) {
+        let (host, cx) = setup_shortcut_host(cx);
+        let column = host.read_with(cx, |h, _| h.column.clone());
+        column.update_in(cx, |col, window, cx| {
+            col.open(ComposeMode::New { from: Some("me@example.com".into()) }, vec![], window, cx);
+        });
+        cx.run_until_parked();
+
+        // Because ComposeColumn is a sibling of MailBrowse, macOS NSMenu validation reports
+        // mail-conversation actions as unavailable while composing.
+        let available = cx.update(|window, cx| {
+            (
+                window.is_action_available(&crate::state::Trash, cx),
+                window.is_action_available(&crate::state::Archive, cx),
+                window.is_action_available(&crate::state::Reply, cx),
+            )
+        });
+        assert_eq!(available, (false, false, false));
+
+        // Extra Backspaces in To field and modifier shortcuts never fire mail actions.
+        for _ in 0..3 {
+            let result = cx.update(|window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                        keystroke: gpui::Keystroke::parse("backspace").unwrap(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    }),
+                    cx,
+                )
+            });
+            assert!(!result.propagate, "backspace at offset 0 must not propagate out of Compose field");
+        }
+        for key in [
+            secondary!("backspace"),
+            "ctrl-cmd-a",
+            secondary!("r"),
+            secondary!("shift-r"),
+            secondary!("shift-f"),
+            secondary!("["),
+            secondary!("f"),
+        ] {
+            cx.simulate_keystrokes(key);
+        }
+        cx.run_until_parked();
+        assert!(host.read_with(cx, |h, _| h.fired.is_empty()));
+
+        // Focus on ComposeColumn chrome (outside inputs) still blocks all mail shortcuts.
+        let col_focus = column.read_with(cx, |col, _| col.focus.clone());
+        cx.update(|window, cx| window.focus(&col_focus, cx));
+        cx.run_until_parked();
+        for key in ["e", "r", "a", "f", "s", "u", "d", "l", "j", "k", "/", "backspace", secondary!("backspace"), secondary!("[")] {
+            cx.simulate_keystrokes(key);
+        }
+        cx.run_until_parked();
+        assert!(host.read_with(cx, |h, _| h.fired.is_empty()));
+    }
+
+    #[gpui::test]
+    fn mail_browse_shortcuts_work_and_trash_requires_secondary_backspace(cx: &mut TestAppContext) {
+        let (host, cx) = setup_shortcut_host(cx);
+        let browse = host.read_with(cx, |h, _| h.browse_focus.clone());
+        cx.update(|window, cx| window.focus(&browse, cx));
+        cx.run_until_parked();
+
+        assert!(cx.update(|window, cx| window.is_action_available(&crate::state::Trash, cx)));
+
+        // Bare backspace and delete no longer trash mail.
+        cx.simulate_keystrokes("backspace");
+        cx.simulate_keystrokes("delete");
+        cx.run_until_parked();
+        assert!(host.read_with(cx, |h, _| h.fired.is_empty()), "bare backspace/delete must not trash mail");
+
+        // Secondary+Backspace trashes, and normal browse shortcuts still work.
+        cx.simulate_keystrokes(secondary!("backspace"));
+        cx.simulate_keystrokes("e");
+        cx.simulate_keystrokes("j");
+        cx.simulate_keystrokes("k");
+        cx.simulate_keystrokes("r");
+        cx.simulate_keystrokes("s");
+        cx.run_until_parked();
+        assert_eq!(
+            host.read_with(cx, |h, _| h.fired.clone()),
+            vec!["trash", "archive", "next", "previous", "reply", "star"]
         );
     }
 }
